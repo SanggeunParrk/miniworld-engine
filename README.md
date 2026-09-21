@@ -333,8 +333,9 @@ skip, K3 three consumer warpgroups, templated mask element type, programmatic
 dependent launch): engine-path TriMul op −12.8 % at L384 and −10.0 % at L768,
 bit-identical outputs across the last two rounds. It is served through
 `TRIMUL_NATIVE_BUILD_DIR`, not by default dispatch. The same overlay serves the **bidirectional** shape (`c_hidden = 256`, one shared
-output LayerNorm): there it is 2.47x (L384) and 2.09x (L768) the engine's own CuTe path, with the 192-token K1 tile as the measured
-default; the two structural K3 changes that carried the 128/128 result are over the shared-memory limit at that width.
+output LayerNorm): there it is 2.51x (L384) and 2.12x (L768) the engine's own CuTe path, with the 192-token K1 tile and an
+8-slot K3 ring as the measured defaults — that ring exists only because K3's slots are now sized per kind, which frees the 16 KB the
+uniform layout wasted on gate slots wherever the projection is the wider one.
 
 ## Toolchain
 

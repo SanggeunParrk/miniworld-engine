@@ -45,9 +45,9 @@ TILE_TABLE = {
     ("sm_90a", 64, 256, "f"): dict(k1=(2, 64, 16, 1), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 16, 1)], k3_variants=[(2, 64, 4, 1)]),
     ("sm_90a", 128, 64, "b"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 8, 2)]),
     ("sm_90a", 128, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 8, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 8, 1)]),
-    ("sm_90a", 128, 256, "b"): dict(k1=(3, 64, 8, 2), k3=(2, 64, 4, 1),   # measured (bidirectional shared-LN composition, L384/768, interleaved): 192-token K1 tile -18.7 % K1 vs (2,64,8,2)
-                                     k1_variants=[(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)],   # K3: every candidate that fits ties or loses; (2,64,8,1) and (3,64,4,1) are over the shared-memory limit at c_hidden 256
-                                     k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1)]),
+    ("sm_90a", 128, 256, "b"): dict(k1=(3, 64, 8, 2), k3=(2, 64, 8, 1),   # measured (bidirectional shared-LN composition, L384/768, interleaved): 192-token K1 tile -18.7 % K1 vs (2,64,8,2);
+                                     k1_variants=[(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)],   # K3 8-slot ring (only reachable with the packed ring) -6.2 / -4.0 % K3 vs the 4-slot one, 6 slots less;
+                                     k3_variants=[(2, 64, 8, 1), (2, 64, 6, 1), (2, 64, 4, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1), (3, 64, 4, 1)]),   # (3,64,4,1) fits now but loses by 11 %: 512 threads cap it at 128 registers and its epilogue spills 444/408
     ("sm_90a", 128, 256, "f"): dict(k1=(2, 64, 8, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(1, 64, 4, 1)]),
     ("sm_90a", 256, 64, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1)]),
     ("sm_90a", 256, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(1, 64, 4, 1)]),
@@ -83,6 +83,9 @@ def k1_smem(cz, ch, zf32, bi, bj, nslot, skch):
     return nkca * bi * bj * 128 + nslot * skch * 8192 + ncwg * 8192 + 2 * cz * 4 + ((nbar * 8 + 127) // 128) * 128
 
 
+PACKED_RING = True         # == TMN_K3_PACKED_RING of the payload this package ships with (build_payload.py sets it); False for an upstream build
+
+
 def k3_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
     """== K3Cfg::SMEM (mode 'b' | 'f' | 'p'; bool accepted: True = 'f')."""
     if isinstance(mode, bool):
@@ -90,11 +93,13 @@ def k3_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
     esz = 4 if mode in ("f", "g") else 2          # g: fp32 tile (staging is sized in the tile dtype), bf16 update out
     bmt = bi * bj
     nkcz = cz // (128 // esz)
-    slot = max(cz, ch) * 64
+    # == K3Cfg::SMEM_W: the packed ring (TMN_K3_PACKED_RING, built into this payload) sizes a slot by its kind -- even = projection (c_h x 64),
+    # odd = gate (c_z x 64) -- instead of giving both the larger extent; identical where c_z == c_h.
+    smem_w = (nslot // 2) * (cz + ch) * 64 if PACKED_RING and cz != ch and nslot % 2 == 0 else nslot * max(cz, ch) * 64
     ob = 16 * 64 * esz
     nbar = 2 * nkcz + 2 + 2 * nslot
     ncwg = 2 if bmt == 64 else bmt // 64                                       # consumer warpgroups (== K3Cfg::NCWG)
-    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + nslot * slot + 4 * ncwg * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
+    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + smem_w + 4 * ncwg * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
 
 
 def k3w_smem(cz, ch, mode, bi, bj, nslot, nacc=1):

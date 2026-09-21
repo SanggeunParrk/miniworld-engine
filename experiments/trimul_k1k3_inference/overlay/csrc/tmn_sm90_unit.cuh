@@ -134,14 +134,14 @@ TMN_K1_SET_BF16(128, 256, 6, 32, 8, 2)          // 192-token tiles (three consum
 TMN_K1_SET_BF16(128, 256, 3, 64, 8, 2)
 TMN_K1_SET_BF16(128, 256, 1, 128, 8, 2)
 TMN_K1_SET_BF16(128, 256, 2, 64, 4, 2)          // shorter ring (4 x 32 KB k-chunks)
-TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring (6 x 16 KB; 8 slots would be 249 KB of shared memory, over the 227 KB limit)
+TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring
 TMN_K3_SET_BF16(128, 256, 2, 64, 4, 2)          // two accumulator sets
 TMN_K3_SET_BF16(128, 256, 1, 128, 4, 1)
 TMN_K3_SET_BF16(128, 256, 1, 64, 4, 1)          // split-N
-// NOT instantiable at this shape (K3Cfg::SMEM against the 227 KB limit, measured by the static_assert):
-//   (2,64,8,1) 249 KB -- the 8-slot ring the 128/128 unit uses;  (3,64,4,1) 241 KB -- the 192-token three-warpgroup K3 that won at 128/128
-//   (X alone is NSUB * C_H * 128 = 98 KB at 192 tokens).  Doubling c_hidden doubles both the X tile and the projection ring slot, so the two
-//   K3 changes that carried the 128/128 result cannot exist here; the K3 gain at 256 is the arithmetic (tanh gate, bf16x2 residual) only.
+// The two K3 tiles that carried the 128/128 result need TMN_K3_PACKED_RING to exist here at all: with uniform ring slots (both sized at the
+// projection's C_H x 64 = 16 KB) they are 249 KB and 241 KB against the 227 KB limit, and the packed ring gives back (NSLOT/2) x 8 KB.
+TMN_K3_SET_BF16(128, 256, 2, 64, 8, 1)          // 8-slot ring: 249 -> 216 KB packed (the ring the 128/128 unit uses)
+TMN_K3_SET_BF16(128, 256, 3, 64, 4, 1)          // 192-token tile, three consumer warpgroups: 241 -> 224 KB packed
 #if TMN_MASK_TEMPLATE
 // mask element type variants (m2 = bf16, m3 = uint8/bool) of the candidate bf16 K1 tiles, l2 names (the served LN class under TMN_K1_FORCE_LNM)
 TMN_K1(128, 256, false, b, 2, 64, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 3, 2, 0)

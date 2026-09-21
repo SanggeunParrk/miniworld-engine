@@ -31,7 +31,7 @@ diff -ru a/csrc/common/tmn_math.cuh b/csrc/common/tmn_math.cuh
 diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
 --- a/csrc/tmn_kernels.cuh
 +++ b/csrc/tmn_kernels.cuh
-@@ -27,6 +27,33 @@
+@@ -27,6 +27,36 @@
  #define TMN_K3_BULK_STORE 1     // K3 output, bf16 pair tensor in / bf16 out: 1 = residual added in registers (the pair's z re-read from the operand tile by
  #endif                          //   ldmatrix in the accumulator layout), stmatrix staging, one cp.async.bulk.tensor store per warp slice; 0 = the staged vector
                                  //   pass (lds128 (+ residual) + st.global), which the fp32-z / fp32-out / pre-normalised operand modes always use
@@ -49,6 +49,9 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
 +#ifndef TMN_MASK_TEMPLATE
 +#define TMN_MASK_TEMPLATE 0     // 1 = K1 mask element type is a template parameter (MT: 0 fp32 | 1 bf16 | 2 uint8/bool), instantiated under name fields m2 / m3
 +#endif
++#ifndef TMN_K3_PACKED_RING
++#define TMN_K3_PACKED_RING 0    // 1 = K3 weight ring slots are sized per kind (even slot = projection C_H x 64, odd = gate C_Z x 64) instead of uniformly at
++#endif                          //   the larger of the two; identical at C_Z == C_H, and frees (NSLOT/2)(C_H - C_Z)64 B where the projection is the wider one
 +#ifndef TMN_PDL
 +#define TMN_PDL 0               // 1 = programmatic dependent launch: griddepcontrol.wait before the first dependent global access, launch_dependents at the last tile
 +#endif
@@ -65,7 +68,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  #ifndef TMN_K3_REGS_24_240
  #define TMN_K3_REGS_24_240 1    // K3 producer / consumer register split: 1 = 24 / 240, 0 = 40 / 232 (K1's split); both balance 384 threads x 168 registers
  #endif
-@@ -68,6 +95,7 @@
+@@ -68,6 +98,7 @@
    const void* zres;      // z [N][N][C_Z] (z dtype): residual source (read from global / L2)
    void* out;             // [N][N][C_Z], z's dtype
    unsigned long long* prof;   // dev instrumentation (TMN_DEV_PROF builds): per-phase cycle sums, else unused (may be null)
@@ -73,7 +76,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
    int N, Np, tiles_j, num_tiles, residual, pad0;
    float eps; int pad1;
  };
-@@ -103,7 +131,11 @@
+@@ -103,7 +134,11 @@
    static constexpr int SPB = NKC / SKCH;                // ring slots per weight block
    static constexpr int NBLK = CH / 16;                  // n64 weight blocks = 4 C_H / 64 (each: 32 gate rows | 32 proj rows -> 32 plane channels)
    static constexpr bool W_RESIDENT = NSLOT >= NBLK * SPB;   // the whole weight stream fits the ring: loaded once per CTA, never released
@@ -85,7 +88,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
    static_assert(SCHED == 0 || SCHED == 1, "K1 schedules: 0 (two blocks in flight) | 1 (one block, per-slot waits)");
    static constexpr int SMEM_A = NKCA * CHUNK_BYTES;
    static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
-@@ -141,6 +173,10 @@
+@@ -141,6 +176,10 @@
    static constexpr int BMT = BI * BJ;                   // tokens per CTA tile step: 128 = the two consumer warpgroups split the tokens (64 each, all output
    static constexpr bool SPLITN = BMT == 64;             // blocks); 64 = both warpgroups serve the same 64 tokens and alternate output blocks (halves the tile smem)
    static constexpr int NSUB = BMT / 64;                 // 64-token X sub-tiles per tile
@@ -96,9 +99,15 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
    static constexpr int ESZ = ZF32 ? 4 : 2;
    static constexpr int CHUNK_CH = 128 / ESZ;
    static constexpr int CHUNK_BYTES = BMT * 128;         // z chunk = [BMT tok][128 B], 128B-swizzled rows
-@@ -153,19 +189,20 @@
+@@ -152,24 +191,31 @@
+   static constexpr int NKG = CZ / 64, NKP = CH / 64;    // 4 KB k-chunks ([32 n][64 k]) per gate | projection weight block
    static constexpr int SLOTG = CZ * 64, SLOTP = CH * 64;
    static constexpr int SLOT_BYTES = SLOTG > SLOTP ? SLOTG : SLOTP;   // one ring slot holds one output block's gate OR projection weight rows
++  // The producer walks seq = 2 b (projection rows of block b) then 2 b + 1 (gate rows), so with an even NSLOT a slot's parity IS its kind and the
++  // ring can pair one of each instead of giving both the larger extent.  slot_off() is the only place that knows the layout.
++  static constexpr int SLOT_PAIR = SLOTP + SLOTG;
++  static constexpr bool PACKED_RING = TMN_K3_PACKED_RING != 0 && SLOTG != SLOTP;
++  TMN_DEVI static int slot_off(int s) { return PACKED_RING ? (s >> 1) * SLOT_PAIR + ((s & 1) ? SLOTP : 0) : s * SLOT_BYTES; }
    static constexpr bool W_RESIDENT = NSLOT >= 2 * NB;   // the whole W_og | W_o fits the ring: loaded once per CTA, never released
 -  static constexpr int W_CONSUMERS = 8;                 // every consumer warp arrives on every slot use (split-N: the warpgroup that does not multiply a
 +  static constexpr int W_CONSUMERS = 4 * NCWG;          // every consumer warp arrives on every slot use (split-N: the warpgroup that does not multiply a
@@ -107,8 +116,9 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
    static constexpr int OB = 16 * 2 * BN * ESZ;          // per-warp output staging slice [16 tok][64 ch = a block pair] in z's dtype (2 KB bf16 | 4 KB fp32)
    static constexpr int SMEM_X = NSUB * CH * 128;
    static constexpr int SMEM_Z = NKCZ * CHUNK_BYTES;
-   static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
+-  static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
 -  static constexpr int SMEM_OUT = 8 * OB;
++  static constexpr int SMEM_W = PACKED_RING ? (NSLOT / 2) * SLOT_PAIR : NSLOT * SLOT_BYTES;
 +  static constexpr int SMEM_OUT = 4 * NCWG * OB;
    static constexpr int SMEM_GB = (2 * CZ + 2 * CH) * 4;
    static constexpr int NBAR = 2 * NKCZ + 2 + 2 * NSLOT;
@@ -120,7 +130,12 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
    static_assert(CZ % 64 == 0 && CH % 64 == 0, "C_Z, C_H multiples of 64");
    static_assert(NACC == 1 || (NACC == 2 && !SPLITN), "one or two accumulator sets (two: full-width tiles only)");
    static_assert(NBW % 2 == 0, "output blocks are finished in pairs (128-byte row segments)");
-@@ -264,6 +301,26 @@
+   static_assert(W_RESIDENT || NSLOT >= 4, "streamed ring: two blocks (gate + projection each) in flight");
++  static_assert(!PACKED_RING || NSLOT % 2 == 0, "the packed ring pairs a projection slot with a gate slot, so a slot's parity is its kind");
+   static_assert(SMEM <= SMEM_LIMIT, "shared memory over the sm_90 limit");
+ };
+ 
+@@ -264,6 +310,26 @@
    return LnStats{meanA, rA, meanB, rB};
  }
  
@@ -147,7 +162,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  // The same LayerNorm for an fp32-resident tile in shared memory (chunks of [BM rows][32 ch] fp32, 128-B swizzled rows, 16 KB apart): statistics and
  // normalisation read the fp32 values (three passes over smem), only the LayerNorm OUTPUT is rounded to bf16 into the A fragment.
  template <int KS, int CHUNK_BYTES = 16384>
-@@ -444,7 +501,21 @@
+@@ -444,7 +510,21 @@
  // LNM: 1 = the shared statement, own summation order (default class); 2 = the reference library's summation order (bitwise class; bf16 z only);
  //      4 = trimul_tx 1.2's arithmetic (comparison only).
  // SAVE: the dormant save-intermediates path (LN_in statistics per pair row); when false no instruction of it exists.
@@ -170,7 +185,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  TMN_DEVI void k1_body(const K1Params& p) {
    constexpr int CZ = G::CZ, KS = G::KS, NSLOT = G::NSLOT, SPB = G::SPB, NBLK = G::NBLK, SKCH = G::SKCH, SLOT_BYTES = G::SLOT_BYTES, BI = G::BI, BJ = G::BJ;
    static_assert(!(G::ZF32 && LNM == 2), "the reference-order LayerNorm is defined on bf16 inputs");
-@@ -480,11 +551,13 @@
+@@ -480,11 +560,13 @@
      if (TMN_K1_BULK_STORE) tma_prefetch_desc(&p.tm_ab);
    }
    __syncthreads();
@@ -184,7 +199,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
        for (int it = 0; it < n_iter; ++it) {
          const int tile = (int)blockIdx.x + it * (int)gridDim.x;
          if (it > 0) mbar_wait(barA_empty, (it - 1) & 1);
-@@ -521,31 +594,47 @@
+@@ -521,31 +603,47 @@
    // stmatrix role: lane -> (matrix idx, row rr): channel ch = 16 hq + 8 (idx>>1) + rr; token granule tg = 2 wiw + (idx&1) (8 tokens each), stored at tg ^ (ch & 7)
    const int idx = lane >> 3, rr = lane & 7;
    const int chq = 8 * (idx >> 1) + rr;
@@ -238,7 +253,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
      }
      const int rho_g = 64 * cw + 8 * st_g;                                  // first token of this lane's store granule
      const int is_ = i0 + rho_g / BJ, js_ = j0 + rho_g % BJ;
-@@ -554,9 +643,18 @@
+@@ -554,9 +652,18 @@
      __nv_bfloat16* gp0 = p.ab + (size_t)st_ch0 * plane + (size_t)is_ * p.Np + js_;   // + 32 b * plane per block; + 4 * plane for e = 1
      const size_t blk_stride = 32 * plane, e_stride = 4 * plane;
      const int iw = i0 + (64 * cw) / BJ, jw = j0 + (64 * cw) % BJ;              // this warpgroup's plane row / first token (TMA store coordinates)
@@ -257,7 +272,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
      uint32_t fa[KS][4];
      LnStats st;
      if (G::ZF32) {
-@@ -602,7 +700,7 @@
+@@ -602,7 +709,7 @@
  #pragma unroll
        for (int j = 0; j < SPB; ++j) {
          const int s = slot_of(wi + j);
@@ -266,7 +281,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
          const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
          dlo[j] = (uint32_t)d; dhi[j] = (uint32_t)(d >> 32);
        }
-@@ -628,8 +726,10 @@
+@@ -628,8 +735,10 @@
        for (int q = 0; q < 4; ++q) {
          float vA0 = math::gate(ac[4 * q + 0], ac[4 * (q + 4) + 0], mA), vA1 = math::gate(ac[4 * q + 1], ac[4 * (q + 4) + 1], mA);   // sigmoid(g) p m, fp32
          float vB0 = math::gate(ac[4 * q + 2], ac[4 * (q + 4) + 2], mB), vB1 = math::gate(ac[4 * q + 3], ac[4 * (q + 4) + 3], mB);
@@ -279,7 +294,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
          pk[q][0] = pack_bf16(vA0, vA1); pk[q][1] = pack_bf16(vB0, vB1);
        }
        const uint32_t sbuf = stage_u + (uint32_t)((b & 1) * 4096);            // double-buffered: one warpgroup barrier per block
-@@ -640,6 +740,13 @@
+@@ -640,6 +749,13 @@
          if (st_elect) tma_store_wait_read<0>();                              // the store issued from the other buffer's twin a block ago has read it
          named_bar_sync(bar_id, 128);
          if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * 8192 + (b & 1) * 4096, jw, iw, 32 * b); tma_store_commit(); }
@@ -293,7 +308,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
        } else {
          named_bar_sync(bar_id, 128);
          const uint4 v0 = lds128(sbuf + ld_off0), v1 = lds128(sbuf + ld_off1);
-@@ -659,7 +766,7 @@
+@@ -659,7 +775,7 @@
          static_for<SPB>([&](auto Jc) {
            constexpr int J = decltype(Jc)::value;
            const int s = slot_of(w_iter + J);
@@ -302,7 +317,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
            const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
            if (J == 0) {
  #pragma unroll
-@@ -694,6 +801,7 @@
+@@ -694,6 +810,7 @@
      for (int ks = 0; ks < KS; ++ks) fence_regs(fa[ks]);
    }
    if (TMAST && st_elect) tma_store_wait_all();           // every bulk store of this CTA complete before its shared memory is released
@@ -310,7 +325,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  }
  
  
-@@ -731,25 +839,27 @@
+@@ -731,25 +848,27 @@
                                                              // are per warp, and the allocator budgets each side of the branch by its setmaxnreg value
    if (tid == 0 && dyn_smem_size() < (uint32_t)G::SMEM) __trap();
    const int n_iter = (p.num_tiles - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x;
@@ -343,7 +358,21 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
        for (int t_local = 0; t_local < n_iter; ++t_local) {
          const int tile = (int)blockIdx.x + t_local * (int)gridDim.x;
          const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
-@@ -791,7 +901,7 @@
+@@ -778,11 +897,11 @@
+         if (which == 0) {
+           mbar_arrive_expect_tx(barW_full + s, G::SLOTP);
+ #pragma unroll
+-          for (int kc = 0; kc < NKP; ++kc) tma_load_2d(sW + s * SLOT_BYTES + kc * 4096, &p.tm_wo, barW_full + s, kc * 64, BN * b);
++          for (int kc = 0; kc < NKP; ++kc) tma_load_2d(sW + G::slot_off(s) + kc * 4096, &p.tm_wo, barW_full + s, kc * 64, BN * b);
+         } else {
+           mbar_arrive_expect_tx(barW_full + s, G::SLOTG);
+ #pragma unroll
+-          for (int kc = 0; kc < NKG; ++kc) tma_load_2d(sW + s * SLOT_BYTES + kc * 4096, &p.tm_wg, barW_full + s, kc * 64, BN * b);
++          for (int kc = 0; kc < NKG; ++kc) tma_load_2d(sW + G::slot_off(s) + kc * 4096, &p.tm_wg, barW_full + s, kc * 64, BN * b);
+         }
+       }
+     }
+@@ -791,7 +910,7 @@
    }
  
    // ================================================================== consumers
@@ -352,7 +381,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  #ifdef TMN_DEV_PROF
    unsigned long long pf[12] = {0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull};
    long long pt0 = clock64();
-@@ -816,17 +926,26 @@
+@@ -816,17 +935,26 @@
    // for a 16-column slab is the A-fragment layout) before staging, and each warp's staged [16 tok][64 ch] slice leaves with one bulk-tensor store;
    // the slice is reused by the next pair once that store has READ it (waited for at the next pair's start, behind two blocks of MMAs).
    constexpr bool K3ST = (TMN_K3_BULK_STORE != 0) && !ZF32 && !OUT32 && !RESG && !PRENORM;
@@ -379,7 +408,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
      PF(1);                                               // 1: X wait
      {
        const int tokc = 16 * wiw + ((mat & 1) ? 8 : 0);
-@@ -845,7 +964,7 @@
+@@ -845,7 +973,7 @@
      PF(2);                                               // 2: X ldmatrix + release
  #ifndef TMN_DEV_NOLN
      if (LNM == 2) ln_stock<1>(fx, sGout, sBout, lane, p.eps); else if (LNM == 3) ln_stock<2>(fx, sGout, sBout, lane, p.eps);
@@ -388,7 +417,7 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  #endif
      PF(3);                                               // 3: LN_out
      // ---- gate operand: z rows -> release the z stage -> LN_in
-@@ -872,7 +991,11 @@
+@@ -872,7 +1000,11 @@
      }
      PF(5);                                               // 5: z load + release
  #ifndef TMN_DEV_NOLN
@@ -401,25 +430,31 @@ diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  #endif
      PF(6);                                               // 6: LN_in
  
-@@ -884,7 +1007,7 @@
+@@ -884,9 +1016,9 @@
      auto issue = [&](float (&accP)[16], float (&accG)[16], int qb) {
        const uint32_t seqP = ((uint32_t)t_local * NB + (uint32_t)blk_of(qb)) * 2u, seqG = seqP + 1u;
        {
 -        const int s = slot_of(seqP); mbar_wait(barW_full + s, phase_of(seqP));
 +        const int s = slot_of(seqP); if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(seqP));
          PF(7);                                           // 7: W(P) wait
-         const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+-        const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
++        const uint64_t d = smem_desc(sW_u + (uint32_t)G::slot_off(s), 16, 1024, 1);
  #pragma unroll
-@@ -896,7 +1019,7 @@
+         for (int i = 0; i < 16; ++i) accP[i] = 0.f;
+         fence_regs(accP);
+@@ -896,9 +1028,9 @@
        }
        {
          PF(8);                                           // 8: P issue
 -        const int s = slot_of(seqG); mbar_wait(barW_full + s, phase_of(seqG));
 +        const int s = slot_of(seqG); if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(seqG));
          PF(7);                                           // 7: W(G) wait
-         const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+-        const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
++        const uint64_t d = smem_desc(sW_u + (uint32_t)G::slot_off(s), 16, 1024, 1);
  #pragma unroll
-@@ -1075,6 +1198,7 @@
+         for (int i = 0; i < 16; ++i) accG[i] = 0.f;
+         fence_regs(accG);
+@@ -1075,6 +1207,7 @@
      }
    }
    if (K3ST && lane == 0) tma_store_wait_all();          // every bulk store of this warp complete before the CTA's shared memory is released
@@ -499,14 +534,14 @@ diff -ru a/csrc/tmn_sm90_unit.cuh b/csrc/tmn_sm90_unit.cuh
 +TMN_K1_SET_BF16(128, 256, 3, 64, 8, 2)
 +TMN_K1_SET_BF16(128, 256, 1, 128, 8, 2)
 +TMN_K1_SET_BF16(128, 256, 2, 64, 4, 2)          // shorter ring (4 x 32 KB k-chunks)
-+TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring (6 x 16 KB; 8 slots would be 249 KB of shared memory, over the 227 KB limit)
++TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring
 +TMN_K3_SET_BF16(128, 256, 2, 64, 4, 2)          // two accumulator sets
 +TMN_K3_SET_BF16(128, 256, 1, 128, 4, 1)
 +TMN_K3_SET_BF16(128, 256, 1, 64, 4, 1)          // split-N
-+// NOT instantiable at this shape (K3Cfg::SMEM against the 227 KB limit, measured by the static_assert):
-+//   (2,64,8,1) 249 KB -- the 8-slot ring the 128/128 unit uses;  (3,64,4,1) 241 KB -- the 192-token three-warpgroup K3 that won at 128/128
-+//   (X alone is NSUB * C_H * 128 = 98 KB at 192 tokens).  Doubling c_hidden doubles both the X tile and the projection ring slot, so the two
-+//   K3 changes that carried the 128/128 result cannot exist here; the K3 gain at 256 is the arithmetic (tanh gate, bf16x2 residual) only.
++// The two K3 tiles that carried the 128/128 result need TMN_K3_PACKED_RING to exist here at all: with uniform ring slots (both sized at the
++// projection's C_H x 64 = 16 KB) they are 249 KB and 241 KB against the 227 KB limit, and the packed ring gives back (NSLOT/2) x 8 KB.
++TMN_K3_SET_BF16(128, 256, 2, 64, 8, 1)          // 8-slot ring: 249 -> 216 KB packed (the ring the 128/128 unit uses)
++TMN_K3_SET_BF16(128, 256, 3, 64, 4, 1)          // 192-token tile, three consumer warpgroups: 241 -> 224 KB packed
 +#if TMN_MASK_TEMPLATE
 +// mask element type variants (m2 = bf16, m3 = uint8/bool) of the candidate bf16 K1 tiles, l2 names (the served LN class under TMN_K1_FORCE_LNM)
 +TMN_K1(128, 256, false, b, 2, 64, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 3, 2, 0)
@@ -640,23 +675,39 @@ diff -ru a/python/trimul_native/kernel.py b/python/trimul_native/kernel.py
      ("sm_90a", 128, 64, "b"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 8, 2)]),
      ("sm_90a", 128, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 8, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 8, 1)]),
 -    ("sm_90a", 128, 256, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1)]),
-+    ("sm_90a", 128, 256, "b"): dict(k1=(3, 64, 8, 2), k3=(2, 64, 4, 1),   # measured (bidirectional shared-LN composition, L384/768, interleaved): 192-token K1 tile -18.7 % K1 vs (2,64,8,2)
-+                                     k1_variants=[(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)],   # K3: every candidate that fits ties or loses; (2,64,8,1) and (3,64,4,1) are over the shared-memory limit at c_hidden 256
-+                                     k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1)]),
++    ("sm_90a", 128, 256, "b"): dict(k1=(3, 64, 8, 2), k3=(2, 64, 8, 1),   # measured (bidirectional shared-LN composition, L384/768, interleaved): 192-token K1 tile -18.7 % K1 vs (2,64,8,2);
++                                     k1_variants=[(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)],   # K3 8-slot ring (only reachable with the packed ring) -6.2 / -4.0 % K3 vs the 4-slot one, 6 slots less;
++                                     k3_variants=[(2, 64, 8, 1), (2, 64, 6, 1), (2, 64, 4, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1), (3, 64, 4, 1)]),   # (3,64,4,1) fits now but loses by 11 %: 512 threads cap it at 128 registers and its epilogue spills 444/408
      ("sm_90a", 128, 256, "f"): dict(k1=(2, 64, 8, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(1, 64, 4, 1)]),
      ("sm_90a", 256, 64, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1)]),
      ("sm_90a", 256, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(1, 64, 4, 1)]),
-@@ -89,7 +93,8 @@
-     slot = max(cz, ch) * 64
+@@ -79,6 +83,9 @@
+     return nkca * bi * bj * 128 + nslot * skch * 8192 + ncwg * 8192 + 2 * cz * 4 + ((nbar * 8 + 127) // 128) * 128
+ 
+ 
++PACKED_RING = True         # == TMN_K3_PACKED_RING of the payload this package ships with (build_payload.py sets it); False for an upstream build
++
++
+ def k3_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
+     """== K3Cfg::SMEM (mode 'b' | 'f' | 'p'; bool accepted: True = 'f')."""
+     if isinstance(mode, bool):
+@@ -86,10 +93,13 @@
+     esz = 4 if mode in ("f", "g") else 2          # g: fp32 tile (staging is sized in the tile dtype), bf16 update out
+     bmt = bi * bj
+     nkcz = cz // (128 // esz)
+-    slot = max(cz, ch) * 64
++    # == K3Cfg::SMEM_W: the packed ring (TMN_K3_PACKED_RING, built into this payload) sizes a slot by its kind -- even = projection (c_h x 64),
++    # odd = gate (c_z x 64) -- instead of giving both the larger extent; identical where c_z == c_h.
++    smem_w = (nslot // 2) * (cz + ch) * 64 if PACKED_RING and cz != ch and nslot % 2 == 0 else nslot * max(cz, ch) * 64
      ob = 16 * 64 * esz
      nbar = 2 * nkcz + 2 + 2 * nslot
 -    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + nslot * slot + 8 * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
 +    ncwg = 2 if bmt == 64 else bmt // 64                                       # consumer warpgroups (== K3Cfg::NCWG)
-+    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + nslot * slot + 4 * ncwg * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
++    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + smem_w + 4 * ncwg * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
  
  
  def k3w_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
-@@ -281,6 +286,11 @@
+@@ -281,6 +291,11 @@
              self._kern[name] = k
          return k
  
@@ -668,7 +719,7 @@ diff -ru a/python/trimul_native/kernel.py b/python/trimul_native/kernel.py
      def attrs(self, cz, ch, name, smem):
          return self.kernel(cz, ch, name, smem).attrs()
  
-@@ -312,7 +322,12 @@
+@@ -312,7 +327,12 @@
          zf32 = z.dtype == torch.float32
          esz = 4 if zf32 else 2
          bi, bj, nslot, skch = cfg or TILE_TABLE[(self.arch, cz, ch, "f" if zf32 else "b")]["k1"]
@@ -682,7 +733,7 @@ diff -ru a/python/trimul_native/kernel.py b/python/trimul_native/kernel.py
          ent = cache.get(("tmn.k1", name, N, Np, transpose, float(eps)))     # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps);
                                                                                  # pointers / maps / the weight set are re-patched per call below
          if ent is None:
-@@ -348,18 +363,20 @@
+@@ -348,18 +368,20 @@
          if ent[5] != mp:
              pack.set_ptr(0, mp, field=3); ent[5] = mp
          if ent[6] != abp:                        # planes pointer + the planes store descriptor (dims [Np (j)][Np (i)][2 ch], box [64][1][32]: one channel row of a 64-token run)
@@ -706,7 +757,7 @@ diff -ru a/python/trimul_native/kernel.py b/python/trimul_native/kernel.py
          """x = contraction planes [ch, Np, Np] bf16 contiguous (Np % 8 == 0); z = the gate operand rows [N, N, cz] contiguous: the bf16 or fp32 pair
          tensor itself (modes b / f: LN_in applied here; out has z's dtype), or bf16(LN_in(z)) rows from K1's _x1 kernel with zres = the fp32 pair
          tensor (mode p: fp32 residual + fp32 out; prenorm=False = mode c: z holds a bf16 cast of zres and LN_in is applied here)."""
-@@ -392,8 +409,8 @@
+@@ -392,8 +414,8 @@
              tm_wg = self.tmap(cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B")
              tm_wo = self.tmap(cache, ("wo", cz, ch), w["wo"], [64, 32], [ch, cz], [ch * 2], "128B", "256B")
              zero_tm = L.TensorMap(b"\0" * 128)
@@ -717,7 +768,7 @@ diff -ru a/python/trimul_native/kernel.py b/python/trimul_native/kernel.py
              pack = L.ArgPack([st])
              assert pack.sizes[0] == K3_PARAMS_SIZE, pack.sizes[0]
              grid = (min(num_tiles, self.sms) if not grid_limit else min(num_tiles, self.sms, grid_limit), 1, 1)
-@@ -418,6 +435,7 @@
+@@ -418,6 +440,7 @@
          if ent[5] is not tm_x:
              pack.set_tensor_map(0, tm_x, field=1); ent[5] = tm_x
          pack.set_ptr(0, out, field=10)
@@ -725,7 +776,7 @@ diff -ru a/python/trimul_native/kernel.py b/python/trimul_native/kernel.py
          if mode == "b" and not k3_is_wide(cfg):   # bf16 output store descriptor: dims [cz (c)][N (j)][N (i)], box [64][16][1] = one warp's 16-token x 64-channel slice
              tm_o = self.tmap(cache, ("o3", N, cz), out, [64, 16, 1], [cz, N, N], [cz * 2, N * cz * 2], "128B", "128B")
              if ent[9] is not tm_o:
-@@ -428,6 +446,7 @@
+@@ -428,6 +451,7 @@
          if ent[7] != pp:
              pack.set_ptr(0, pp, field=11); ent[7] = pp
          if ent[6] != rf:

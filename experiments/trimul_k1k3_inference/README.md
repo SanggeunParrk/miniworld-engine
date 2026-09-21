@@ -77,26 +77,44 @@ channel half (outgoing NT on the first 128 planes, incoming TN on the second), K
 and `bench_engine_bidir.py` (the engine's own path on the same inputs), node02 H100, bf16, B1, C128, pair mask, residual fused in K3,
 one-call CUDA graph, three interleaved rounds of separate processes per row:
 
-| L | engine CuTe (the engine's default today) | v5 `z128_h256`, pristine | + this overlay | + K1 `(3,64,8,2)` |
-|---:|---:|---:|---:|---:|
-| 384 | 600.5 µs | 270.6 | 253.5 (−6.3 %) | **243.2 (−10.1 %)** — 2.47x the CuTe path |
-| 768 | 2126.9 µs | 1112.3 | 1043.8 (−6.2 %) | **1017.6 (−8.5 %)** — 2.09x the CuTe path |
+| L | engine CuTe (the engine's default today) | v5 `z128_h256`, pristine | **this payload's defaults** | per kernel, pristine → ours |
+|---:|---:|---:|---:|---|
+| 384 | 600.9 µs | 270.2 | **239.1 (−11.5 %)** — 2.51x the CuTe path | K1 107.6 → 87.3, K3 75.4 → 68.6, cuBLAS 84.0 → 84.3 |
+| 768 | 2125.0 µs | 1112.3 | **1000.1 (−10.1 %)** — 2.12x the CuTe path | K1 392.6 → 319.3, K3 253.8 → 231.9, cuBLAS 367.6 → 368.8 |
 
-Round-to-round spread was 0.3–5.4 µs; every row matches the fp32 module reference at rel-RMS 2.585e-3 (the CuTe path at 2.539e-3, its
-own rounding). The engine figures agree with the engine's own recorded bidirectional inference benchmark (0.586 / 2.106 ms) to 2.5 %.
+The defaults are K1 `(3,64,8,2)` and K3 `(2,64,8,1)`, both selected by the tile table with no config override (the measured rows are in
+`records/bidirectional/`). Round-to-round spread was 0.6–1.3 µs; every row matches the fp32 module reference at rel-RMS 2.585e-3 (the CuTe
+path at 2.539e-3, its own rounding). The engine figures agree with the engine's own recorded bidirectional inference benchmark
+(0.586 / 2.106 ms) to 2.5 %.
 
 **What transfers from the 128/128 result and what does not.** The arithmetic switches (tanh gate, K1 LayerNorm class, bf16x2 residual)
-and the host-side ones (mask element type, PDL) apply unchanged — K1's input LayerNorm is over `c_z`, which is still 128. The two
-*structural* K3 changes cannot exist at this width: `K3Cfg::SMEM` puts the 8-slot ring at 249 KB and the 192-token three-warpgroup tile
-at 241 KB, both over the 227 KB limit, because doubling `c_hidden` doubles both the X tile and the projection ring slot. K1's weight
-stream is 256 KB, so no ring makes it resident either and `TMN_WSKIP` is inert here. That is the whole story of the split result:
-**K1 −18.7 % at both lengths, K3 −3.3 / −4.2 % (arithmetic only)**, contraction unchanged.
+and the host-side ones (mask element type, PDL) apply unchanged — K1's input LayerNorm is over `c_z`, which is still 128. K1's weight
+stream is 256 KB, so no ring makes it resident and `TMN_WSKIP` is inert here. The unit is instantiated with the tile candidates the
+128/128 unit carries, and the K1 default becomes the measured winner `(3,64,8,2)`, a 192-token tile with three consumer warpgroups:
+**K1 −18.7 % at both lengths**.
 
-The unit is therefore instantiated with the tile candidates the 128/128 unit already carries, and the tile table's default for this
-shape becomes the measured winner, K1 `(3,64,8,2)` — a 192-token tile with three consumer warpgroups (K1 107.4 → 87.3 µs at L384,
-392.8 → 319.3 at L768). Of the K3 tiles that do fit, `(2,64,6,1)`, `(2,64,4,2)`, `(1,128,4,1)` and `(1,64,4,1)` all tie or lose to the
-tabled `(2,64,4,1)`. The bf16 (m2) and bool (m3) mask instantiations cost the same as fp32 here, so their value is only that the caller
-no longer pays the per-call fp32 cast (4.7 µs).
+**The K3 ring was wasting a third of its shared memory.** A K3 ring slot holds one output block's gate *or* projection rows, and
+`SLOT_BYTES` sized every slot at the larger of the two. At `c_z = c_hidden` they are equal and nothing is lost, which is why this never
+showed at 128/128; at `c_z 128 / c_hidden 256` a gate slot needs 8 KB and occupies 16 KB. The producer walks `seq = 2b` (projection)
+then `2b + 1` (gate), so for an even `NSLOT` a slot's parity *is* its kind and the ring can pair one of each: `TMN_K3_PACKED_RING`,
+which changes one address expression (`K3Cfg::slot_off`) and its host mirror, and is compiled out where `c_z == c_hidden`. It frees
+`(NSLOT/2) x 8 KB` and with it the two K3 tiles that were over the 227 KB limit — the 8-slot ring (249 → 216 KB) and the 192-token
+three-warpgroup tile (241 → 224 KB). Measured, both now built (interleaved, K1 fixed at its default, `records/bidirectional/k3-ring/`):
+
+| K3 tile | L384 op | L768 op | K3 kernel |
+|---|---:|---:|---|
+| `(2,64,4,1)` the tabled 4-slot ring | 243.8 µs | 1014.7 | 73.0 / 242.6 |
+| **`(2,64,8,1)` 8-slot ring** | **239.4 (−1.8 %)** | **1001.1 (−1.3 %)** | **68.5 / 233.0 (−6.2 / −4.0 %)** |
+| `(2,64,6,1)` 6-slot ring | 240.3 | 1012.7 | 70.2 / 238.2 |
+| `(3,64,4,1)` 192-token, three warpgroups | 271.0 (+11.1 %) | 1123.8 (+10.8 %) | 100.8 / 379.5 |
+
+So the 8-slot ring becomes the K3 default, and the tile that carried the 128/128 K3 result loses here by 11 % — for a reason the
+shared-memory limit had been hiding: at 512 threads the launch bound caps it at **128 registers** and its 256-channel epilogue spills
+444 loads / 408 stores against the served tile's 64 / 44 at 168 registers. Shared memory was never the real wall for that tile at this
+width; registers are.
+
+Of the other K3 tiles, `(2,64,4,2)`, `(1,128,4,1)` and `(1,64,4,1)` all lose. The bf16 (m2) and bool (m3) mask instantiations cost the
+same as fp32 here, so their value is only that the caller no longer pays the per-call fp32 cast (4.7 µs).
 
 **Which of the 128/128 changes actually act at this width.** Not all of them, and the build flags do not say which:
 
@@ -107,9 +125,10 @@ no longer pays the per-call fp32 cast (4.7 µs).
 | bf16x2 residual | acts | K3's residual is over `c_z` |
 | K1 `(3,64,8,2)` tile | acts (new here) | K1 107.4 → 87.3 µs (L384), 392.8 → 319.3 (L768) |
 | mask element type (m2/m3) | compiled, ties | bf16 and bool cost the same as fp32 here; the gain is only the caller's dropped 4.7 µs cast |
-| `TMN_WSKIP` | compiled, **inert** | `W_RESIDENT` is false at this width: K1 `NSLOT 8 < NBLK·SPB 16`, K3 `NSLOT 4 < 2·NB 8`, so the wait is never skipped |
+| `TMN_K3_PACKED_RING` | acts (new here) | frees 16 KB, which is what makes the K3 8-slot ring exist: K3 −6.2 / −4.0 % |
+| `TMN_WSKIP` | K1 **inert**, K3 acts (new) | K1's `W_RESIDENT` needs `NSLOT >= NBLK·SPB = 16` and has 8. K3's needs `NSLOT >= 2·NB = 8`: the 4-slot ring missed it, the packed ring's 8-slot one reaches it, so the K3 weights are resident and the skip applies — part of why 8 slots beat 6 |
 | PDL | compiled, **below the noise** | see below |
-| K3 three consumer warpgroups | **impossible** | 241 KB of shared memory |
+| K3 three consumer warpgroups | instantiable now, **loses by 11 %** | 128 registers at 512 threads; epilogue spills 444/408 |
 
 PDL was measured with `bench_bidir_pdl.py` (on/off alternating in one process, one op and a two-op chain, outputs bitwise equal in every
 case). At L384 it is zero to within 1.4 µs in both 8-round and 20-round runs. At L768 the two runs disagree in sign — 8 rounds gave
@@ -117,14 +136,15 @@ case). At L384 it is zero to within 1.4 µs in both 8-round and 20-round runs. A
 resolve. That is consistent with what PDL does: it overlaps a fixed prologue with the previous kernel's tail, and here each kernel is
 about three times longer than at 128/128, where the chain gain was 1.9 µs.
 
-**Register spills.** Every K3 instantiation at this width spills (the served `t2x64_s4a1_l1`: 168 registers, 64 spill loads, 44 stores,
-48 B stack; `t2x64_s4a2_l1` far worse at 204/184), while the served K1 `t3x64` is at 128 registers with none. The K3 launch bound
-(384 threads, 1 CTA/SM) caps the budget at 168 and the 256-channel epilogue does not fit it. This is a lead, but a bounded one: K3 is
-already at 87 % of its streaming floor, above K1's 83 %.
+**Register spills.** Every K3 instantiation at this width spills (the served `t2x64_s8a1_l1`: 168 registers, 64 spill loads, 44 stores,
+48 B stack; `t2x64_s4a2_l1` at 204/184 and the 192-token tile at 444/408), while the served K1 `t3x64` is at 128 registers with none.
+The K3 launch bound (384 threads, 1 CTA/SM) caps the budget at 168 and the 256-channel epilogue does not fit it. The spill count does
+not order the tiles by speed — `t1x64` spills 24/4 and is the slowest of them — and after the ring change K3 runs at 91 % of its
+streaming floor, above K1's 83 %, so what is left there is bounded by 9 %.
 
 **Where the remaining time is.** Against the same 2.85 TB/s pattern floor, at L768 the essential bytes are K1 756 MB, contraction
 906 MB, K3 604 MB: K1 is at 83 %, the contraction at 86 % (629 TFLOP/s bf16 at the same time — the balance point the 128/128 audit
-found), K3 at 87 %, the whole op at 78 % of the sum. The contraction is now 36 % of the op. Fusing its two GEMMs into one — which a
+found), K3 at 91 %, the whole op at 79 % of the sum. The contraction is now 37 % of the op. Fusing its two GEMMs into one — which a
 per-half transposed K1 store would allow, the way upstream's `INCOMING_MODE="kt"` transposes the unidirectional incoming direction —
 was measured as an upper bound on the same buffers (`bench_contract_forms.py`): **5.8 µs at L384 and nothing outside the noise at
 L768**, so it is not worth the kernel change.

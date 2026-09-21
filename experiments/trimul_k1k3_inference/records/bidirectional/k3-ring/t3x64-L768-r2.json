@@ -1,0 +1,61 @@
+{
+ "length": 768,
+ "width": 128,
+ "hidden_per_direction": 128,
+ "c_hidden": 256,
+ "mask_dtype": "bool",
+ "iters": 40,
+ "build": "/home/psk6950/MiniWorld/runs/trimul_bidir_20260921/ring256/build",
+ "results": [
+  {
+   "config": {
+    "k3_cfg": [
+     3,
+     64,
+     4,
+     1
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 321.63980000000055
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 1.8007999999995774
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 369.0727750000006
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 380.1729749999994
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t3x64_s8k2_m3_l2_v0",
+    "tmn_k3_z128_h256_b_t3x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1100.1030731201172,
+     1127.3158264160156,
+     1126.0787200927734
+    ],
+    "median": 1126.0787200927734
+   }
+  }
+ ]
+}

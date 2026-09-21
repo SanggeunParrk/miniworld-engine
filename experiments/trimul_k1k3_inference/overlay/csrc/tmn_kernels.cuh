@@ -41,6 +41,9 @@
 #ifndef TMN_MASK_TEMPLATE
 #define TMN_MASK_TEMPLATE 0     // 1 = K1 mask element type is a template parameter (MT: 0 fp32 | 1 bf16 | 2 uint8/bool), instantiated under name fields m2 / m3
 #endif
+#ifndef TMN_K3_PACKED_RING
+#define TMN_K3_PACKED_RING 0    // 1 = K3 weight ring slots are sized per kind (even slot = projection C_H x 64, odd = gate C_Z x 64) instead of uniformly at
+#endif                          //   the larger of the two; identical at C_Z == C_H, and frees (NSLOT/2)(C_H - C_Z)64 B where the projection is the wider one
 #ifndef TMN_PDL
 #define TMN_PDL 0               // 1 = programmatic dependent launch: griddepcontrol.wait before the first dependent global access, launch_dependents at the last tile
 #endif
@@ -188,6 +191,11 @@ struct K3Cfg {
   static constexpr int NKG = CZ / 64, NKP = CH / 64;    // 4 KB k-chunks ([32 n][64 k]) per gate | projection weight block
   static constexpr int SLOTG = CZ * 64, SLOTP = CH * 64;
   static constexpr int SLOT_BYTES = SLOTG > SLOTP ? SLOTG : SLOTP;   // one ring slot holds one output block's gate OR projection weight rows
+  // The producer walks seq = 2 b (projection rows of block b) then 2 b + 1 (gate rows), so with an even NSLOT a slot's parity IS its kind and the
+  // ring can pair one of each instead of giving both the larger extent.  slot_off() is the only place that knows the layout.
+  static constexpr int SLOT_PAIR = SLOTP + SLOTG;
+  static constexpr bool PACKED_RING = TMN_K3_PACKED_RING != 0 && SLOTG != SLOTP;
+  TMN_DEVI static int slot_off(int s) { return PACKED_RING ? (s >> 1) * SLOT_PAIR + ((s & 1) ? SLOTP : 0) : s * SLOT_BYTES; }
   static constexpr bool W_RESIDENT = NSLOT >= 2 * NB;   // the whole W_og | W_o fits the ring: loaded once per CTA, never released
   static constexpr int W_CONSUMERS = 4 * NCWG;          // every consumer warp arrives on every slot use (split-N: the warpgroup that does not multiply a
                                                         // block still waits its arrival and releases it, so each warp observes every phase of a slot in order)
@@ -195,7 +203,7 @@ struct K3Cfg {
   static constexpr int OB = 16 * 2 * BN * ESZ;          // per-warp output staging slice [16 tok][64 ch = a block pair] in z's dtype (2 KB bf16 | 4 KB fp32)
   static constexpr int SMEM_X = NSUB * CH * 128;
   static constexpr int SMEM_Z = NKCZ * CHUNK_BYTES;
-  static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
+  static constexpr int SMEM_W = PACKED_RING ? (NSLOT / 2) * SLOT_PAIR : NSLOT * SLOT_BYTES;
   static constexpr int SMEM_OUT = 4 * NCWG * OB;
   static constexpr int SMEM_GB = (2 * CZ + 2 * CH) * 4;
   static constexpr int NBAR = 2 * NKCZ + 2 + 2 * NSLOT;
@@ -207,6 +215,7 @@ struct K3Cfg {
   static_assert(NACC == 1 || (NACC == 2 && !SPLITN), "one or two accumulator sets (two: full-width tiles only)");
   static_assert(NBW % 2 == 0, "output blocks are finished in pairs (128-byte row segments)");
   static_assert(W_RESIDENT || NSLOT >= 4, "streamed ring: two blocks (gate + projection each) in flight");
+  static_assert(!PACKED_RING || NSLOT % 2 == 0, "the packed ring pairs a projection slot with a gate slot, so a slot's parity is its kind");
   static_assert(SMEM <= SMEM_LIMIT, "shared memory over the sm_90 limit");
 };
 
@@ -888,11 +897,11 @@ TMN_DEVI void k3_body(const K3Params& p) {
         if (which == 0) {
           mbar_arrive_expect_tx(barW_full + s, G::SLOTP);
 #pragma unroll
-          for (int kc = 0; kc < NKP; ++kc) tma_load_2d(sW + s * SLOT_BYTES + kc * 4096, &p.tm_wo, barW_full + s, kc * 64, BN * b);
+          for (int kc = 0; kc < NKP; ++kc) tma_load_2d(sW + G::slot_off(s) + kc * 4096, &p.tm_wo, barW_full + s, kc * 64, BN * b);
         } else {
           mbar_arrive_expect_tx(barW_full + s, G::SLOTG);
 #pragma unroll
-          for (int kc = 0; kc < NKG; ++kc) tma_load_2d(sW + s * SLOT_BYTES + kc * 4096, &p.tm_wg, barW_full + s, kc * 64, BN * b);
+          for (int kc = 0; kc < NKG; ++kc) tma_load_2d(sW + G::slot_off(s) + kc * 4096, &p.tm_wg, barW_full + s, kc * 64, BN * b);
         }
       }
     }
@@ -1009,7 +1018,7 @@ TMN_DEVI void k3_body(const K3Params& p) {
       {
         const int s = slot_of(seqP); if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(seqP));
         PF(7);                                           // 7: W(P) wait
-        const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+        const uint64_t d = smem_desc(sW_u + (uint32_t)G::slot_off(s), 16, 1024, 1);
 #pragma unroll
         for (int i = 0; i < 16; ++i) accP[i] = 0.f;
         fence_regs(accP);
@@ -1021,7 +1030,7 @@ TMN_DEVI void k3_body(const K3Params& p) {
         PF(8);                                           // 8: P issue
         const int s = slot_of(seqG); if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(seqG));
         PF(7);                                           // 7: W(G) wait
-        const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+        const uint64_t d = smem_desc(sW_u + (uint32_t)G::slot_off(s), 16, 1024, 1);
 #pragma unroll
         for (int i = 0; i < 16; ++i) accG[i] = 0.f;
         fence_regs(accG);

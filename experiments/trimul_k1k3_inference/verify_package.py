@@ -44,6 +44,8 @@ man = json.loads((root / "records" / "payload-manifest.json").read_text())["unit
 for k in ("tmn_k1_z128_h128_b_t6x32_s8k2_m1_l2_v0", "tmn_k1_z128_h128_b_t6x32_s8k2_m2_l2_v0", "tmn_k1_z128_h128_b_t6x32_s8k2_m3_l2_v0"):
     assert man["kernels"][k]["spill_stores"] == 0 and man["kernels"][k]["spill_loads"] == 0, k
 for d in ov["defines"]:
+    if d in ov.get("defines_after_record", []):
+        continue                                                      # switch added after the recorded payload was built and measured
     assert any(fl == "-D%s=%s" % (d, ov["defines"][d]) for fl in man["flags"]), d
 # the bidirectional round: the c_hidden 256 unit, its interleaved rows and the tile the table now defaults to
 bd = root / "records" / "bidirectional"
@@ -63,6 +65,21 @@ for r in (8, 20):                                                     # PDL: rec
     for L in (384, 768):
         pdl = json.loads((bd / "pdl" / ("rounds%d-L%d.json" % (r, L))).read_text())["res"]
         assert pdl["single"]["same_output"] and pdl["chain"]["same_output"], (r, L)
+for L in (384, 768):                                                  # the K3 ring sweep: the 8-slot ring the packed ring unlocked is the fastest row
+    ring = {}
+    for tag in ("tab", "s8", "t3x64", "s6"):
+        ring[tag] = [json.loads((bd / "k3-ring" / ("%s-L%d-r%d.json" % (tag, L, r))).read_text())["results"][0]["op_us"]["median"] for r in (1, 2, 3)]
+    assert min(ring["s8"]) < min(ring["tab"]) and min(ring["s8"]) < min(ring["s6"]), (L, ring)
+    assert min(ring["t3x64"]) > max(ring["tab"]), (L, ring)           # and the 128/128 winner loses here, recorded rather than assumed
+    fin = {}
+    for tag in ("base", "ours"):
+        rows = [json.loads((bd / "final" / ("%s-L%d-r%d.json" % (tag, L, r))).read_text())["results"][0] for r in (1, 2, 3)]
+        for one in rows:
+            assert one["error"]["finite"] and abs(one["error"]["rel_rms"] - 0.002586) < 2e-5, (tag, L, one["error"])
+        fin[tag] = [o["op_us"]["median"] for o in rows]
+    assert max(fin["ours"]) < min(fin["base"]), (L, fin)
+    names = json.loads((bd / "final" / ("ours-L%d-r1.json" % L)).read_text())["results"][0]["kernel_names"]
+    assert any("_t3x64_" in n for n in names) and any("_s8a1_" in n for n in names), names   # the table's defaults, no config override
 h256 = json.loads((bd / "payload-manifest-h256.json").read_text())["units"]["tmn90_z128_h256/sm_90a"]
 assert any("_t3x64_" in k and k.startswith("tmn_k1_z128_h256") for k in h256["kernels"]), "the tabled K1 tile is not in the unit"
 for d in json.loads((root / "OVERLAY.json").read_text())["defines"]:

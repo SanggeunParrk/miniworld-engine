@@ -19,11 +19,11 @@
  },
  "overlay_files": {
   "csrc/common/tmn_math.cuh": "21567cfa0181dbb1004d08db851175f781dd5e3730fd9805c8ddc72f79be107e",
-  "csrc/tmn_kernels.cuh": "8660b5f8d16be4c1908b4067aee1fd7604381962d8a28ff7ba34d77d80c2c9aa",
-  "csrc/tmn_sm90_unit.cuh": "8a5728e7eec932e502cae02353c9ec9944297b665a6f4f80e0db15cb74efcf85",
+  "csrc/tmn_kernels.cuh": "137fdd389d290918466f0089858cf9db54e007cd3d2e1e61eb0e61ffbd9db7f2",
+  "csrc/tmn_sm90_unit.cuh": "e18cc3052a95fce22992b5e607244d85c4f81070a2e9ee3b18055ad8c386dcc6",
   "python/trimul_native/_driver.py": "9add7c99274b1d421db262506696a4cda9e094154dcf008168ce29b764450f1a",
   "python/trimul_native/face.py": "5c5262e8df5f8b32edfaf243449b03a76f52cc9e65b9155e6378d02a92169b9c",
-  "python/trimul_native/kernel.py": "5594452fef74f32c0a6b81d88c2085f25b5f34963b971055c43b65d9776556a1",
+  "python/trimul_native/kernel.py": "056a37ff59beb5facb5b7661fd878efb4bf77ed3bfb34e804bd058d415164ce9",
   "python/trimul_native/launch.py": "9c818a2eb46c2a5075b237ab766befce858d3e8a478806943029e9b945f316fd",
   "python/trimul_native/ops.py": "76376fb4a9ef7c3fdc35be3e732b3786e3f178e937ebb09a28c4171a689c8844"
  },
@@ -37,7 +37,8 @@
   "TMN_RESIDUAL_BF16X2_NATIVE": 1,
   "TMN_WSKIP": 1,
   "TMN_MASK_TEMPLATE": 1,
-  "TMN_PDL": 1
+  "TMN_PDL": 1,
+  "TMN_K3_PACKED_RING": "1"
  },
  "probe_define": {
   "TMN_CTA_TS": 1
@@ -46,7 +47,8 @@
   "K3Params gains a trailing `stats` pointer (host packing shifted: residual flag field 17, stats field 12)",
   "K3Cfg generalised to NCWG consumer warpgroups; TMN_K3_SET_BF16(128,128,3,64,8,1) instantiated and tabled as the K3 default for N <= 1536",
   "K1 mask element type is a template parameter MT; m2 (bf16) / m3 (bool,uint8) instantiations of the five tabled bf16 K1 configurations",
-  "host: MASK_CODE dtype -> kernel name with fp32-cast fallback, cuLaunchKernelEx path with the programmatic-stream-serialisation attribute (TRIMUL_NATIVE_PDL, default on)"
+  "host: MASK_CODE dtype -> kernel name with fp32-cast fallback, cuLaunchKernelEx path with the programmatic-stream-serialisation attribute (TRIMUL_NATIVE_PDL, default on)",
+  "K3 weight ring slots sized per kind behind TMN_K3_PACKED_RING (even slot = projection, odd = gate; a no-op where c_z == c_hidden), which is what makes the 8-slot ring and the 192-token three-warpgroup K3 fit at c_hidden 256"
  ],
  "recorded_payload_build": {
   "nvcc_flags": [
@@ -105,5 +107,8 @@
    }
   },
   "note": "manifest of the payload measured in records/ (built from the same overlay before the TMN_CTA_TS probe hooks, default off, were added; cubin digests of a rebuild differ through -lineinfo)"
- }
+ },
+ "defines_after_record": [
+  "TMN_K3_PACKED_RING"
+ ]
 }
