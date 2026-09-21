@@ -1,0 +1,72 @@
+{
+ "D": 128,
+ "H": 512,
+ "M": 147456,
+ "ctas": 132,
+ "cubin": "transition_bwd_r6.cubin",
+ "dw_repl": 6,
+ "fused_vs_fp32": {
+  "dWa": {
+   "finite": true,
+   "frac_diff": 1.0,
+   "max_abs": 3.0439453125,
+   "rel_rms": 0.0038791592232882977
+  },
+  "dWb": {
+   "finite": true,
+   "frac_diff": 1.0,
+   "max_abs": 2.735870361328125,
+   "rel_rms": 0.0037719183601439
+  },
+  "dWs": {
+   "finite": true,
+   "frac_diff": 0.9999847412109375,
+   "max_abs": 4.09881591796875,
+   "rel_rms": 0.003414600156247616
+  },
+  "dbeta": {
+   "finite": true,
+   "frac_diff": 1.0,
+   "max_abs": 2.83392333984375,
+   "rel_rms": 0.0030702748335897923
+  },
+  "dgamma": {
+   "finite": true,
+   "frac_diff": 1.0,
+   "max_abs": 3.449798583984375,
+   "rel_rms": 0.0036793251056224108
+  },
+  "dx": {
+   "finite": true,
+   "frac_diff": 0.9999884366989136,
+   "max_abs": 0.048163414001464844,
+   "rel_rms": 0.003066861303523183
+  }
+ },
+ "length": 384,
+ "lmem": 0,
+ "ndw": 48,
+ "ndx": 84,
+ "regs": 255,
+ "reproducible": {
+  "dWa": true,
+  "dWb": true,
+  "dWs": true,
+  "dbeta": true,
+  "dgamma": true,
+  "dx": true
+ },
+ "smem": 231424,
+ "tensor_floor_us": 162.94887334887335,
+ "time_us": {
+  "fused": {
+   "median": 555.132007598877,
+   "min": 554.8975944519043,
+   "samples": [
+    555.3664207458496,
+    554.8975944519043
+   ],
+   "spread": 0.4688262939453125
+  }
+ }
+}
