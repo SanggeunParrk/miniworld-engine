@@ -53,5 +53,23 @@ this change for a run right now" number, but it is NOT a tuned-kernel comparison
 against it the payload is 1.64–1.86x. That the gap between the two engine backends is much wider for the bidirectional module
 (CuTe +33 %) than for one direction (+7 %) is a dispatch/cache question this page does not settle.
 
+### Against the release itself
+
+The same modules on the same clock, served by a payload built from the pinned upstream with no overlay and no switches, and by ours
+(three interleaved rounds of separate processes per row, `records/bidirectional/vs-upstream/`; both payloads reproduce the fp32
+reference at the same rel-RMS, so this is a like-for-like timing):
+
+| case | L | upstream v5 | ours | |
+|---|---:|---:|---:|---:|
+| outgoing | 384 | 166.8 µs | **143.6** | −13.9 % (1.16x) |
+| outgoing | 768 | 625.3 | **554.9** | −11.3 % (1.13x) |
+| incoming | 384 | 165.0 | **145.0** | −12.1 % (1.14x) |
+| incoming | 768 | 634.3 | **569.4** | −10.2 % (1.11x) |
+| bidirectional | 384 | 280.2 | **245.6** | −12.3 % (1.14x) |
+| bidirectional | 768 | 1118.3 | **1003.2** | −10.3 % (1.12x) |
+
+Round spread 0.1–4.0 µs. The ceiling is the contraction: it is a third of the op, already at its DRAM/tensor balance point, and
+untouched by any of this — K1 is 19 % faster and K3 9 %, and that is what 10–14 % of the whole op looks like.
+
 `experiments/trimul_k1k3_inference/README.md` has the per-kernel breakdown, the tile choices and the rejected candidates;
 `records/bidirectional/` has the raw rows.

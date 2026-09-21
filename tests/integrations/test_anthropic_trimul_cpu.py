@@ -67,6 +67,22 @@ def test_the_module_still_builds_its_own_primitives_under_the_option(cls):
     assert m.ln_pair.implementation is not ImplementationType.ANTHROPIC   # the payload is a TriMul one, not a LayerNorm one
 
 
+def test_the_mask_element_type_follows_the_payload():
+    """A payload without the templated mask has only the fp32 kernel, and it reads whatever buffer it is given AS fp32:
+    handing that one a bool mask is a four-times-too-long read (wrong numbers at L384, an illegal access at L768)."""
+    class Templated:
+        MASK_NATIVE_DTYPES = (torch.float32, torch.bfloat16, torch.bool, torch.uint8)
+
+    class Upstream:
+        pass
+
+    mask = torch.ones(1, 8, dtype=torch.bool)
+    mask[:, ::3] = False
+    assert native._pair_mask(PAIR, mask, Templated()).dtype is torch.bool
+    assert native._pair_mask(PAIR, mask, Upstream()).dtype is torch.float32
+    assert native._pair_mask(PAIR, None, Upstream()) is None
+
+
 def test_the_auto_option_falls_back_when_nothing_is_named():
     out = TriangleMultiplication(128, implementation="pytorch")(PAIR)
     assert out.shape == PAIR.shape

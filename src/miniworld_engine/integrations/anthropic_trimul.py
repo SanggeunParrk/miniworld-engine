@@ -144,12 +144,19 @@ def _prepared(module: torch.nn.Module) -> tuple[dict, dict]:
     return module._native_weights, module._native_cache
 
 
-def _pair_mask(pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor | None:
-    """K1 reads the pair mask in its own element type; bool is the cheapest of them and what a module already holds."""
+def _pair_mask(pair: torch.Tensor, mask: torch.Tensor | None, ops) -> torch.Tensor | None:
+    """The pair mask in an element type THIS payload's K1 can read.
+
+    A payload built with the templated mask declares the types it instantiates (`ops.MASK_NATIVE_DTYPES`) and takes the module's own
+    bool mask as-is; the upstream package has only the fp32 kernel and reads whatever buffer it is handed AS fp32 — handing it a bool
+    tensor is a four-times-too-long read, which at L384 returned wrong numbers and at L768 was an illegal access. So: bool when the
+    payload says it can, fp32 otherwise.
+    """
     if mask is None:
         return None
-    m = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-    return m.reshape(pair.shape[1], pair.shape[2]).contiguous()
+    m = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).reshape(pair.shape[1], pair.shape[2])
+    native = getattr(ops, "MASK_NATIVE_DTYPES", ())
+    return m.contiguous() if torch.bool in native else m.to(torch.float32).contiguous()
 
 
 def update_unidirectional(module: torch.nn.Module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
@@ -158,7 +165,7 @@ def update_unidirectional(module: torch.nn.Module, pair: torch.Tensor, mask: tor
         raise PayloadUnavailable("the native TriMul normalises input and output with one epsilon")
     p = _checked(pair.device)
     weights, cache = _prepared(module)
-    out = p["face"].serve(pair, _pair_mask(pair, mask), direction="outgoing" if module.outgoing else "incoming",
+    out = p["face"].serve(pair, _pair_mask(pair, mask, p["ops"]), direction="outgoing" if module.outgoing else "incoming",
                           weights=weights, residual=True, cache=cache, eps=module.ln_pair.eps)
     module.native_selection = {k: v for k, v in cache.items() if isinstance(k, tuple) and k and k[0] == "_sel"}
     return out
@@ -178,7 +185,7 @@ def update_bidirectional(module: torch.nn.Module, pair: torch.Tensor, mask: torc
     ops._check(z3, packed)
     ch, h = packed["ch"], module.d_hidden
     Np = ops.ceil16(z3.shape[0])
-    ab = ops.planes(z3, _pair_mask(pair, mask), packed, transpose=False, lnm=2, Np=Np, cache=cache, eps=module.ln_pair.eps)
+    ab = ops.planes(z3, _pair_mask(pair, mask, ops), packed, transpose=False, lnm=2, Np=Np, cache=cache, eps=module.ln_pair.eps)
     tri = ops._buf(cache, ("tri", Np, ch), (ch, Np, Np), torch.bfloat16, z3.device)
     a, b = ab[:ch], ab[ch:]
     torch.bmm(a[:h], b[:h].transpose(1, 2), out=tri[:h])                 # outgoing half: sum_k a[i,k] b[j,k]
