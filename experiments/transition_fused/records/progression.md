@@ -75,6 +75,38 @@ The forward saves `xn` (37.7 MB at L384, 151 MB at L768) for the backward. Dropp
 So it is a net loss for speed. It is still the right trade if activation memory is the constraint rather than time: 37.7 MB per
 Transition layer at L384 and 151 MB at L768 is not nothing when the trunk has many blocks.
 
+## Tuning the forward
+
+Ablations at L384 against the 145 µs first version (timing-only variants, `src/transition_fwd_p*.cu`). **Read these with
+care**: a probe that stops consuming `acc` lets the compiler delete the whole GEMM chain, and `p4` (drop the output stores)
+measured 85 µs for exactly that reason — the real cost of those stores turned out to be about 6 µs.
+
+| probe | µs | |
+|---|---:|---|
+| baseline | 144.8 | |
+| `p1` no LayerNorm reductions | 111.2 | the two five-deep shuffle chains a row needs, done one row at a time |
+| `p2` no SwiGLU arithmetic | 129.2 | |
+| `p3` tanh.approx sigmoid | 144.1 | the transcendental is not the cost, so the tolerance-class change buys nothing |
+| `p5` ring always fetches chunk 0 | 145.3 | the weight stream is free: not L2-bound |
+| `p6` one TMA box instead of six | 138.9 | |
+| `p7` no ring mbarrier handshake | 132.5 | |
+| `p8` `p7` without the squeeze chain | 100.6 | |
+
+Two changes came out of it, both keeping the numerics bit-identical:
+
+| | L384 (training build) |
+|---|---:|
+| first working version | 155 µs |
+| output staged in the x tile and handed to a TMA store, instead of 4-byte global stores from the fragment layout | 155 µs (and 145.9 → 140.4 on the inference build) |
+| **LayerNorm reductions restructured to eight rows at a time** | **129.5 µs** |
+
+The LayerNorm was the real one. Each row needs two five-deep shuffle chains, and doing one row at a time left that latency
+fully exposed; eight independent chains per step hide it, and since the reduction order *within* a row is unchanged the
+statistics are bit-identical. After it the kernel is at 47-51 % of its tensor floor, up from 39-43 %.
+
+One side effect: `-DFWD_SAVE=0`, which drops the `xn` / `rstd` / `c1` stores for inference, is now *slower* than the full
+build (138.8 vs 129.5 µs at L384) — a scheduling artefact, not a traffic one. The same build serves both cases.
+
 ## Traps worth remembering
 
 - The effective dynamic shared-memory ceiling on sm_90 is **231424 B**, not the 232448 opt-in: 1 KB per block is reserved.
@@ -85,4 +117,6 @@ Transition layer at L384 and 151 MB at L768 is not nothing when the trunk has ma
   mbarrier hand-off.
 - A launcher that packs arguments individually cannot take a single `__grid_constant__` struct parameter; pass each
   `CUtensorMap` as its own parameter and keep only addresses in the struct.
+- A timing probe that stops consuming an accumulator lets the compiler delete the GEMM chain that fills it; the number it
+  prints then measures nothing. Check that the probe still stores something derived from the accumulator.
 - Keeping dgamma / dbeta in registers for the whole kernel (64 of them) spills 652 B. Reduce them per tile.

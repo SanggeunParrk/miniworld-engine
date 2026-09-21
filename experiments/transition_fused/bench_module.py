@@ -77,11 +77,12 @@ def _fused_forward(flat, gamma, beta, wa, wb, ws, eps):
         tm = lambda t, dims, stride, box: drv.TensorMap(t, dims=dims, stride_bytes=stride, box=box)
         wst = ws.t().contiguous()
         st = dict(m=m, wst=wst,
-                  maps=(tm(flat, [D, m], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
-                        tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64])),
                   out=torch.empty_like(flat), xn=torch.empty_like(flat),
                   rstd=torch.empty(m, device=flat.device, dtype=torch.float32),
                   c1=torch.empty(m, device=flat.device, dtype=torch.float32))
+        st["maps"] = (tm(flat, [D, m], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
+                      tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64]),
+                      tm(st["out"], [D, m], D * 2, [64, 64]))
         _fw["st"] = st
     kfwd((a.ctas, 1, 1), (256, 1, 1), *st["maps"], gamma.float().contiguous(), beta.float().contiguous(),
          st["xn"], st["out"], st["rstd"], st["c1"], int(m), int(m // 128), float(eps))

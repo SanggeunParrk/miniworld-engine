@@ -17,7 +17,7 @@ import drv
 
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=384)
-p.add_argument("--cubin", default=str(Path(__file__).resolve().parent / "build" / "transition_fwd_infer.cubin"))
+p.add_argument("--cubin", default=str(Path(__file__).resolve().parent / "build" / "transition_fwd.cubin"))
 p.add_argument("--rows", nargs="+", default=["v2", "v1", "pf", "af3_fused"])
 a = p.parse_args()
 D, H, L, NCTA = 128, 512, a.length, 132
@@ -93,9 +93,9 @@ wst = ws.t().contiguous()
 gam = base.ln_in.weight.float().contiguous(); bet = base.ln_in.bias.float().contiguous()
 k = drv.Kernel(a.cubin, "transition_fwd_fused", 231424)
 tm = lambda t, dims, stride, box: drv.TensorMap(t, dims=dims, stride_bytes=stride, box=box)
-maps = (tm(flat, [D, M], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
-        tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64]))
 outk = torch.empty_like(flat); xnk = torch.empty_like(flat)
+maps = (tm(flat, [D, M], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
+        tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64]), tm(outk, [D, M], D * 2, [64, 64]))
 rk = torch.empty(M, device=dev, dtype=torch.float32); ck = torch.empty(M, device=dev, dtype=torch.float32)
 def fused():
     k((NCTA, 1, 1), (256, 1, 1), *maps, gam, bet, xnk, outk, rk, ck, int(M), int(M // 128), 1e-5)

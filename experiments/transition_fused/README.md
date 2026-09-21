@@ -33,8 +33,8 @@ The forward, same session (`bench_fwd.py`, `records/fwd-L{384,768}.json`):
 | | L384 | L768 |
 |---|---:|---:|
 | engine forward (3 launches) | 272 µs | 1031 µs |
-| **this kernel** | **157 µs** | **563 µs** |
-| speed-up | **1.74×** | **1.83×** |
+| **this kernel** | **130 µs** | **482 µs** |
+| speed-up | **2.10×** | **2.14×** |
 | tensor floor (6·M·D·H) | 61 µs | 244 µs |
 
 Inference and training take the *same* forward on this branch: with the default
@@ -45,13 +45,16 @@ with `-DFWD_SAVE=0` it drops the `xn` / `rstd` / `c1` stores that only the backw
 
 | forward | L384 | L768 |
 |---|---:|---:|
-| training (saves `xn`, `rstd`, `c1`) | 155 µs | 563 µs |
-| inference (`-DFWD_SAVE=0`) | **146 µs** | **532 µs** |
+| training (saves `xn`, `rstd`, `c1`) | **130 µs** | **482 µs** |
+| inference (`-DFWD_SAVE=0`) | 139 µs | 521 µs |
+
+`-DFWD_SAVE=0` used to be the faster of the two and no longer is: after the LayerNorm restructure the build that writes
+`xn` schedules better than the one that does not. One build serves both cases.
 
 Against Anthropic's own kernels at this width (`records/vs-anthropic.md`, one process, same timing, forward only): their
-best row is Triton `v2` at 158.7 µs (L384) / 597.4 µs (L768) — they ship **no CUDA Transition kernel at c = 128**, and no
-Transition backward at all — and the engine's fastest path on the parity checkout is 157.9 / 569.5 µs. This kernel is
-145.9 / 536.3 µs and the most accurate of the six. The larger multiples quoted above are against `main`, whose default
+best row is Triton `v2` at 157.9 µs (L384) / 596.9 µs (L768) — they ship **no CUDA Transition kernel at c = 128**, and no
+Transition backward at all — and the engine's fastest path on the parity checkout is 156.8 / 563.0 µs. This kernel is
+129.4 / 494.4 µs, 1.22× and 1.21× their best, and the most accurate of the six. The larger multiples quoted above are against `main`, whose default
 routes both inference and training to the three-kernel path; part of that win is recovering the difference between branches.
 
 And the two together at the module level — `miniworld_engine.modules.Transition(128, 4)` in bf16 training, forward + backward
@@ -59,9 +62,9 @@ And the two together at the module level — `miniworld_engine.modules.Transitio
 
 | | L384 | L768 |
 |---|---:|---:|
-| engine module fwd + bwd | 1108 µs | 4107 µs |
-| with this backward only | 737 µs (1.50×) | 2792 µs (1.47×) |
-| **with both** | **606 µs (1.83×)** | **2422 µs (1.70×)** |
+| engine module fwd + bwd | 1105 µs | 4107 µs |
+| with this backward only | 742 µs (1.49×) | 2736 µs (1.50×) |
+| **with both** | **592 µs (1.87×)** | **2240 µs (1.83×)** |
 
 Gradients through the real module agree with the engine path to 4.2e-5 (`dgamma`) … 5.9e-4 (`dW*`), against an engine
 run-to-run noise of 0 … 1.3e-6. Note that the module zero-initialises the squeeze weight, which makes the backward
@@ -152,8 +155,11 @@ and saves the backward nothing — removing the `xn` read outright measures insi
 557 GB/s against a ~3 TB/s peak — while adding a LayerNorm-apply pass to the weight role, which is the binding one.
 `records/progression.md` has the numbers. It remains the right trade if activation memory, not time, is the constraint.
 
-The forward is at 39-43 % of its tensor floor and has not been tuned at all beyond getting it right — it is the newer of the
-two and the obvious next target. The backward is the one that has been pushed.
+The forward is at 47-51 % of its tensor floor after one round of tuning (`records/progression.md`): the LayerNorm's
+reductions and the output stores are fixed, the weight stream and the transcendental measured free, and what is left is the
+ring handshake (12 µs by ablation) and the wgmma drain between the two chains in a chunk. Software-pipelining that drain
+needs a second `[a|b]` accumulator (64 registers on top of 183) and a three-deep ring for the squeeze operand, which the
+freed shared memory would now allow.
 
 The backward's tensor pipe is 58.1 % active (NCU `--set full`, L384). Since this design must execute 22·M·D·H FLOP, that *is* 406 µs;
 330 µs would need 70 %. The stall profile is flat — the largest single SASS line is 4.5 % — so there is no hotspot left, and

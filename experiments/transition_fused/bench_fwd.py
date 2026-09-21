@@ -44,9 +44,9 @@ SMEM = 231424
 k = drv.Kernel(str(cubin), "transition_fwd_fused", SMEM)
 print(f"{cubin.name}: regs {k.regs} lmem {k.lmem} smem {SMEM} | grid {NCTA}x256 | M {M} = {tiles} tiles", flush=True)
 tm = lambda t, dims, stride, box: drv.TensorMap(t, dims=dims, stride_bytes=stride, box=box)
-maps = (tm(x, [D, M], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
-        tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64]))
 out_k = torch.empty_like(x)
+maps = (tm(x, [D, M], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
+        tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64]), tm(out_k, [D, M], D * 2, [64, 64]))
 xn_k = torch.empty_like(x)
 rstd_k = torch.empty(M, device=dev, dtype=torch.float32)
 c1_k = torch.empty(M, device=dev, dtype=torch.float32)
