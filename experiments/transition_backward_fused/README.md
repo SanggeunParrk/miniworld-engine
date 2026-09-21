@@ -1,4 +1,4 @@
-# Fused Transition backward on H100
+# Fused Transition forward and backward on H100
 
 The pair Transition backward (`y = x + W_s(silu(W_a·LN(x)) · (W_b·LN(x)))`, D = 128, H = 4D = 512, bf16) runs today as five
 launches: a cuBLAS `dh`, a Triton gate backward, two cuBLAS weight-gradient GEMMs, a cuBLAS `d_xn` and a LayerNorm backward.
@@ -6,7 +6,11 @@ Two thirds of that time is intermediate tensors going to HBM and coming back —
 essential inputs and outputs are 120 MB. This experiment replaces the whole thing with **one CUDA kernel** (plus a small
 partial-sum reduction) that keeps `dh`, `h`, `dA` and `dB` in registers and shared memory and never writes them out.
 
-It is an experiment, not a dispatch change: nothing in `miniworld_engine` calls it. See "Wiring it up" for what that needs.
+The forward has the same problem and the same fix: it runs as three kernels (LayerNorm, expand-SwiGLU, squeeze-residual) and
+puts the `[M][512]` SwiGLU activation through HBM twice — 151 MB each way at L384. `src/transition_fwd.cu` fuses it into one
+kernel that keeps that activation in registers and still emits what the backward needs (`xn`, `rstd`, `c1`).
+
+Both are experiments, not a dispatch change: nothing in `miniworld_engine` calls them. See "Wiring it up" for what that needs.
 
 ![The two CTA roles and where each gradient is produced](wiring.svg)
 
@@ -24,14 +28,23 @@ node02 H100 80 GB, CUDA 12.9, PyTorch 2.10 cu128, same session, CUDA-graph repla
 
 132 CTAs × 256 threads, 231 KB shared memory, 255 registers, no spill, no cooperative launch and no cluster.
 
-At the module level — `miniworld_engine.modules.Transition(128, 4)` in bf16 training, forward + backward, with only the
-backward swapped (`bench_module.py`, `records/module-L{384,768}.json`) — the forward is unchanged, so the op's 2.0× becomes:
+The forward, same session (`bench_fwd.py`, `records/fwd-L{384,768}.json`):
 
 | | L384 | L768 |
 |---|---:|---:|
-| engine module fwd + bwd | 1107 µs | 4118 µs |
-| **with this backward** | **743 µs** | **2759 µs** |
-| | **1.49×** | **1.49×** |
+| engine forward (3 launches) | 272 µs | 1031 µs |
+| **this kernel** | **157 µs** | **563 µs** |
+| speed-up | **1.74×** | **1.83×** |
+| tensor floor (6·M·D·H) | 61 µs | 244 µs |
+
+And the two together at the module level — `miniworld_engine.modules.Transition(128, 4)` in bf16 training, forward + backward
+(`bench_module.py`, `records/module-L{384,768}.json`):
+
+| | L384 | L768 |
+|---|---:|---:|
+| engine module fwd + bwd | 1108 µs | 4107 µs |
+| with this backward only | 737 µs (1.50×) | 2792 µs (1.47×) |
+| **with both** | **606 µs (1.83×)** | **2422 µs (1.70×)** |
 
 Gradients through the real module agree with the engine path to 4.2e-5 (`dgamma`) … 5.9e-4 (`dW*`), against an engine
 run-to-run noise of 0 … 1.3e-6. Note that the module zero-initialises the squeeze weight, which makes the backward
@@ -65,6 +78,12 @@ recomputation by splitting the hidden axis over a cluster and reduce-scattering 
 shared memory, and was 2.5× slower because the two cluster barriers and the remote stores a tile needs cost 572 µs of its
 1017 (`records/progression.md`).
 
+The forward kernel is the same skeleton without the two roles: a persistent CTA per 128-row tile, the same two-slot TMA ring
+over the eight hidden chunks, LayerNorm computed in registers and written to shared memory (and straight to global for the
+backward, one fully coalesced 256-byte row per warp), `[a|b]` as one m64n128 chain over the packed `[W_a; W_b]` tile, the
+SwiGLU result formed as bf16 in the m64k64 A-fragment registers, and `acc += h_j · W_s^T_j` as an RS m64n128 accumulating in
+registers across all eight chunks. `W_s` is passed transposed so the squeeze operand is `[K = hs][N = d]`.
+
 `DW_REPL` is the only tuning knob and it is compiled in. At 8 the two roles are within 5 % of each other and 1152 tiles divide
 exactly; the sweep is in `records/ratio-r*-L384.json`.
 
@@ -72,9 +91,10 @@ exactly; the sweep is in `records/ratio-r*-L384.json`.
 
 | | |
 |---|---|
-| `src/transition_bwd.cu` | the kernel and the partial-sum reduction; the only include is the Anthropic v5 device header set |
-| `build.sh` | `[OUT=<name>] ./build.sh [-DDW_REPL=<R>]` → `build/<OUT>.cubin` (nvcc, sm_90a, compute node only) |
-| `bench.py` | correctness against an fp32 autograd reference, bit-reproducibility, CUDA-graph timing, `--engine` for the baseline, `--save` for a record |
+| `src/transition_bwd.cu` | the backward kernel and the partial-sum reduction; the only include is the Anthropic v5 device header set |
+| `src/transition_fwd.cu` | the forward kernel: LayerNorm + expand + SwiGLU + squeeze + residual, emitting `xn` / `rstd` / `c1` |
+| `build.sh`, `build_fwd.sh` | `[OUT=<name>] ./build.sh [-DDW_REPL=<R>]` → `build/<OUT>.cubin` (nvcc, sm_90a, compute node only) |
+| `bench.py`, `bench_fwd.py` | correctness against an fp32 reference, bit-reproducibility, CUDA-graph timing, `--engine` for the baseline, `--save` for a record |
 | `drv.py` | minimal `cuda.bindings` launcher: TMA descriptors, cubin load, by-value argument packing |
 | `bench_module.py` | the same, at the module level: times `modules.Transition` fwd + bwd with and without this backward, and checks the gradients agree |
 | `verify_package.py` | CPU-only integrity checks (vendored-header hashes, portable paths, recorded measurements) |
@@ -85,8 +105,9 @@ The Anthropic v5 device primitives (`tmn_ptx.cuh`, `tmn_kernels.cuh`, `common/tm
 `../trimul_b7b12/vendor/anthropic_v5/csrc`, and `verify_package.py` pins their hashes.
 
 ```
-OUT=transition_bwd_r8 ./build.sh -DDW_REPL=8
-python bench.py --length 384 --dw-repl 8 --engine
+OUT=transition_bwd_r8 ./build.sh -DDW_REPL=8   &&  python bench.py       --length 384 --dw-repl 8 --engine
+./build_fwd.sh                                 &&  python bench_fwd.py   --length 384 --engine
+python bench_module.py --length 384                       # both, through the real module
 ```
 
 Needs a compute node (nvcc and the GPU), torch with CUDA and `cuda.bindings`.
@@ -108,7 +129,10 @@ is confined to the backward of the Transition autograd function. Three things ar
 
 ## Headroom
 
-The tensor pipe is 58.1 % active (NCU `--set full`, L384). Since this design must execute 22·M·D·H FLOP, that *is* 406 µs;
+The forward is at 39-43 % of its tensor floor and has not been tuned at all beyond getting it right — it is the newer of the
+two and the obvious next target. The backward is the one that has been pushed.
+
+The backward's tensor pipe is 58.1 % active (NCU `--set full`, L384). Since this design must execute 22·M·D·H FLOP, that *is* 406 µs;
 330 µs would need 70 %. The stall profile is flat — the largest single SASS line is 4.5 % — so there is no hotspot left, and
 five structural attempts in a row were neutral or worse. The two remaining levers are both blocked by a hard limit (registers
 at 255, shared memory at the effective 231424-byte ceiling); `records/progression.md` has the details and the traps.

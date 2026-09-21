@@ -31,6 +31,7 @@ p.add_argument("--rounds", type=int, default=3)
 p.add_argument("--dw-repl", type=int, default=8)
 p.add_argument("--ctas", type=int, default=132)
 p.add_argument("--cubin", default="")
+p.add_argument("--cubin-fwd", default="")
 p.add_argument("--save", default="")
 a = p.parse_args()
 
@@ -62,7 +63,29 @@ cubin = Path(a.cubin) if a.cubin else HERE / "build" / f"transition_bwd_r{a.dw_r
 SMEM = 231424
 kern = drv.Kernel(str(cubin), "transition_bwd_fused", SMEM)
 kred = drv.Kernel(str(cubin), "reduce_partials", 0)
+cubin_f = Path(a.cubin_fwd) if a.cubin_fwd else HERE / "build" / "transition_fwd.cubin"
+kfwd = drv.Kernel(str(cubin_f), "transition_fwd_fused", SMEM) if cubin_f.is_file() else None
 _ws = {}
+_fw = {}
+
+
+def _fused_forward(flat, gamma, beta, wa, wb, ws, eps):
+    """The fused forward: one kernel for LayerNorm + expand + SwiGLU + squeeze + residual, emitting xn / rstd / c1 too."""
+    m = flat.shape[0]
+    st = _fw.get("st")
+    if st is None or st["m"] != m:
+        tm = lambda t, dims, stride, box: drv.TensorMap(t, dims=dims, stride_bytes=stride, box=box)
+        wst = ws.t().contiguous()
+        st = dict(m=m, wst=wst,
+                  maps=(tm(flat, [D, m], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
+                        tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64])),
+                  out=torch.empty_like(flat), xn=torch.empty_like(flat),
+                  rstd=torch.empty(m, device=flat.device, dtype=torch.float32),
+                  c1=torch.empty(m, device=flat.device, dtype=torch.float32))
+        _fw["st"] = st
+    kfwd((a.ctas, 1, 1), (256, 1, 1), *st["maps"], gamma.float().contiguous(), beta.float().contiguous(),
+         st["xn"], st["out"], st["rstd"], st["c1"], int(m), int(m // 128), float(eps))
+    return st["out"], st["xn"], st["rstd"], st["c1"]
 
 
 def _fused_backward(x, xn, rstd, c1, gamma, wa, wb, ws, dy_flat):
@@ -87,6 +110,9 @@ def _fused_backward(x, xn, rstd, c1, gamma, wa, wb, ws, dy_flat):
     return dx, dg, db, dWa, dWb, dWs
 
 
+FUSE_FWD = [False]
+
+
 class _FusedTransition(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, gamma, beta, wa, wb, ws, eps):
@@ -95,19 +121,23 @@ class _FusedTransition(torch.autograd.Function):
         from miniworld_engine.kernels.transition.triton.main import _expand_swiglu
         shape = x.shape
         flat = x.reshape(-1, shape[-1]).contiguous()
-        key = both_key(rows_of(shape))
-        xn, mean, rstd = _ln_fwd(flat, gamma, beta, None, eps, False, key)     # the engine's own LayerNorm forward
-        h = _expand_swiglu(xn, wa, wb, key)                                    # ... its expand + SwiGLU
-        out = resmod.squeeze_residual(h, ws, flat, key)                        # ... its squeeze + residual
-        ctx.save_for_backward(flat, xn, rstd, mean, gamma, wa, wb, ws)
+        if FUSE_FWD[0]:
+            out, xn, rstd, c1 = _fused_forward(flat, gamma, beta, wa, wb, ws, eps)
+        else:
+            key = both_key(rows_of(shape))
+            xn, mean, rstd = _ln_fwd(flat, gamma, beta, None, eps, False, key)  # the engine's own LayerNorm forward
+            h = _expand_swiglu(xn, wa, wb, key)                                 # ... its expand + SwiGLU
+            out = resmod.squeeze_residual(h, ws, flat, key)                     # ... its squeeze + residual
+            c1 = (mean * rstd).contiguous()
+        ctx.save_for_backward(flat, xn, rstd, c1, gamma, wa, wb, ws)
         ctx.shape = shape
         return out.reshape(shape)
 
     @staticmethod
     def backward(ctx, dy_in):
-        flat, xn, rstd, mean, gamma, wa, wb, ws = ctx.saved_tensors
+        flat, xn, rstd, c1, gamma, wa, wb, ws = ctx.saved_tensors
         dyf = dy_in.reshape(-1, dy_in.shape[-1]).contiguous()
-        dx, dg, db, dWa, dWb, dWs = _fused_backward(flat, xn, rstd, (mean * rstd).contiguous(),
+        dx, dg, db, dWa, dWb, dWs = _fused_backward(flat, xn, rstd, c1,
                                                     gamma.float().contiguous(), wa, wb, ws, dyf)
         return dx.reshape(ctx.shape), dg, db, dWa, dWb, dWs, None
 
@@ -134,6 +164,11 @@ g_base = [t.detach().clone() for t in step()]
 g_ctrl = [t.detach().clone() for t in step()]        # control: the engine path against itself, so its own run-to-run noise is visible
 resmod.transition_residual = patched
 g_new = [t.detach().clone() for t in step()]
+g_both = None
+if kfwd is not None:
+    FUSE_FWD[0] = True
+    g_both = [t.detach().clone() for t in step()]
+    FUSE_FWD[0] = False
 resmod.transition_residual = base_name
 rec = {"length": a.length, "d_hidden": D, "M": M, "agreement": {}, "engine_self": {}, "patched_calls": None}
 print("  patched forward invoked", CALLS[0], "time(s) during the agreement check", flush=True)
@@ -141,7 +176,10 @@ rel = lambda u, v: float((u.float() - v.float()).abs().norm() / v.float().norm()
 for n, u, c, v in zip(names, g_base, g_ctrl, g_new):
     rec["agreement"][n] = dict(rel_rms=rel(u, v), max_abs=float((u.float() - v.float()).abs().max()))
     rec["engine_self"][n] = rel(u, c)
-    print(f"  {n:>18s}: fused vs engine {rec['agreement'][n]['rel_rms']:.3e}   (engine vs itself {rec['engine_self'][n]:.3e})", flush=True)
+    if g_both is not None:
+        rec.setdefault("agreement_both", {})[n] = rel(dict(zip(names, g_both))[n], v)
+    extra = "" if g_both is None else f"   both-fused vs fused-bwd {rec['agreement_both'][n]:.3e}"
+    print(f"  {n:>18s}: fused vs engine {rec['agreement'][n]['rel_rms']:.3e}   (engine vs itself {rec['engine_self'][n]:.3e}){extra}", flush=True)
 
 
 def time_ms(iters):
@@ -157,19 +195,21 @@ def time_ms(iters):
     return st.elapsed_time(en) / iters
 
 
-runs = {"engine": [], "fused-backward": []}
+tags = ["engine", "fused-backward"] + (["fused-both"] if kfwd is not None else [])
+runs = {t: [] for t in tags}
 for r in range(a.rounds):
-    order = ["engine", "fused-backward"] if r % 2 == 0 else ["fused-backward", "engine"]
-    for tag in order:
+    for tag in (tags if r % 2 == 0 else tags[::-1]):
         resmod.transition_residual = base_name if tag == "engine" else patched
+        FUSE_FWD[0] = tag == "fused-both"
         runs[tag].append(time_ms(a.iters))
 resmod.transition_residual = base_name
+FUSE_FWD[0] = False
 rec["ms"] = {k: dict(median=statistics.median(v), min=min(v), samples=v) for k, v in runs.items()}
-b, f = rec["ms"]["engine"]["median"], rec["ms"]["fused-backward"]["median"]
-rec["speedup"] = b / f
+b = rec["ms"]["engine"]["median"]
+rec["speedup"] = {k: b / v["median"] for k, v in rec["ms"].items() if k != "engine"}
 for k, v in rec["ms"].items():
     print(f"RESULT {k:>16s}: {v['median'] * 1000:8.1f} us per fwd+bwd (min {v['min'] * 1000:.1f})", flush=True)
-print(f"module speed-up {b / f:.2f}x", flush=True)
+print("module speed-up " + "  ".join(f"{k} {v:.2f}x" for k, v in rec["speedup"].items()), flush=True)
 if a.save:
     out = Path(a.save)
     out.parent.mkdir(parents=True, exist_ok=True)

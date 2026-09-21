@@ -23,7 +23,9 @@ assert 'csrc="$here/../trimul_b7b12/vendor/anthropic_v5/csrc"' in (root / "build
 
 # 2. the kernel pulls in nothing else, and its entry points are the ones the harness loads
 src = (root / "src" / "transition_bwd.cu").read_text()
-assert re.findall(r'^\s*#include\s+"([^"]+)"', src, re.M) == ["tmn_kernels.cuh"], "unexpected include"
+fsrc = (root / "src" / "transition_fwd.cu").read_text()
+for t in (src, fsrc):
+    assert re.findall(r'^\s*#include\s+"([^"]+)"', t, re.M) == ["tmn_kernels.cuh"], "unexpected include"
 assert not re.findall(r"^\s*#include\s+<(?!cu)", src, re.M), "unexpected system include"
 for entry in ("transition_bwd_fused", "reduce_partials"):
     assert f'extern "C" __global__ void' in src and entry in src, entry
@@ -53,10 +55,18 @@ for L, r in rec.items():
     assert engine / fused > 1.9, (L, fused, engine)
 assert rec[384]["time_us"]["fused"]["median"] < 430 and rec[768]["time_us"]["fused"]["median"] < 1600
 
+# 4b. the forward records
+for L in (384, 768):
+    fr = json.loads((root / "records" / f"fwd-L{L}.json").read_text())
+    assert all(fr["reproducible"].values()), (L, fr["reproducible"])
+    fo = fr["cmp"]["fused_vs_fp32"]["out"]["rel_rms"]
+    assert fo <= fr["cmp"]["engine_vs_fp32"]["out"]["rel_rms"] + 1e-5, (L, fo)   # no looser than the three-kernel path
+    assert fr["time_us"]["engine"]["median"] / fr["time_us"]["fused"]["median"] > 1.6, L
+
 # 5. the module-level records agree with the op-level ones and with the README
 for L in (384, 768):
     mr = json.loads((root / "records" / f"module-L{L}.json").read_text())
-    assert mr["speedup"] > 1.4, (L, mr["speedup"])
+    assert mr["speedup"]["fused-backward"] > 1.4 and mr["speedup"]["fused-both"] > 1.65, (L, mr["speedup"])
     for name, e in mr["agreement"].items():
         assert e["rel_rms"] < 1e-3, (L, name, e["rel_rms"])
         assert mr["engine_self"][name] < 1e-5, (L, name)          # the engine path's own run-to-run noise
