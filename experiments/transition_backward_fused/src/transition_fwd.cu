@@ -19,6 +19,9 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef NCTA
 #define NCTA 132
 #endif
+#ifndef FWD_SAVE
+#define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only.
+#endif
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 
 // ---- shared memory: a two-slot weight ring plus double-buffered x and xn tiles
@@ -143,8 +146,10 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
       o.x = pack_bf16((x0 - mean) * rs * g4[0] + b4[0], (x1 - mean) * rs * g4[1] + b4[1]);
       o.y = pack_bf16((x2 - mean) * rs * g4[2] + b4[2], (x3 - mean) * rs * g4[3] + b4[3]);
       asm volatile("st.shared.v2.b32 [%0], {%1,%2};" :: "r"(xnu + xcol + off), "r"(o.x), "r"(o.y) : "memory");
+#if FWD_SAVE
       stg64u(p.xn + (size_t)(trow + r) * D_ + c0, o.x, o.y);   // the backward's saved xn: 32 lanes x 8 B = one whole row
       if (lane == 0) { const int gr = trow + r; p.rstd[gr] = rs; p.c1[gr] = mean * rs; }
+#endif
     }
     fence_proxy_async();                                  // the generic stores of xn -> visible to the wgmma operand reads
     named_bar_sync(1 + wg, 128);

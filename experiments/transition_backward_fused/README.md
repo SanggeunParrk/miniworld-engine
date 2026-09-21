@@ -37,6 +37,17 @@ The forward, same session (`bench_fwd.py`, `records/fwd-L{384,768}.json`):
 | speed-up | **1.74×** | **1.83×** |
 | tensor floor (6·M·D·H) | 61 µs | 244 µs |
 
+Inference and training take the *same* forward on this branch: with the default
+`transition_residual_fusion` both `_inference_forward` and `_training_forward` route to `transition_residual`, and the two
+measure 278 and 280 µs at L384. (Turning residual fusion off does split them — 199 µs inference, 231 µs training through
+the hand-CUDA b2b — and is faster on the forward alone, which is worth a look on its own.) This kernel serves both; built
+with `-DFWD_SAVE=0` it drops the `xn` / `rstd` / `c1` stores that only the backward needs:
+
+| forward | L384 | L768 |
+|---|---:|---:|
+| training (saves `xn`, `rstd`, `c1`) | 155 µs | 563 µs |
+| inference (`-DFWD_SAVE=0`) | **146 µs** | **532 µs** |
+
 And the two together at the module level — `miniworld_engine.modules.Transition(128, 4)` in bf16 training, forward + backward
 (`bench_module.py`, `records/module-L{384,768}.json`):
 
