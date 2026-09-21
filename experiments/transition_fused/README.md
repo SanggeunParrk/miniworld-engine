@@ -62,9 +62,12 @@ And the two together at the module level — `miniworld_engine.modules.Transitio
 
 | | L384 | L768 |
 |---|---:|---:|
-| engine module fwd + bwd | 1105 µs | 4107 µs |
-| with this backward only | 742 µs (1.49×) | 2736 µs (1.50×) |
-| **with both** | **592 µs (1.87×)** | **2240 µs (1.83×)** |
+| engine module fwd + bwd | 1109 µs | 4106 µs |
+| with this backward only | 738 µs (1.50×) | 2747 µs (1.49×) |
+| **with both** | **583 µs (1.90×)** | **2307 µs (1.78×)** |
+
+The two ops sum to 536 µs at L384 and the module measures 583: the remaining ~47 µs is the autograd boundary, the reshapes
+and the launch gaps, and it does not shrink. That is why two ~2.1× ops make a 1.9× module.
 
 Gradients through the real module agree with the engine path to 4.2e-5 (`dgamma`) … 5.9e-4 (`dW*`), against an engine
 run-to-run noise of 0 … 1.3e-6. Note that the module zero-initialises the squeeze weight, which makes the backward

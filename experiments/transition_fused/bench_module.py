@@ -84,9 +84,22 @@ def _fused_forward(flat, gamma, beta, wa, wb, ws, eps):
                       tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64]),
                       tm(st["out"], [D, m], D * 2, [64, 64]))
         _fw["st"] = st
-    kfwd((a.ctas, 1, 1), (256, 1, 1), *st["maps"], gamma.float().contiguous(), beta.float().contiguous(),
+    kfwd((a.ctas, 1, 1), (256, 1, 1), *st["maps"], _f32(gamma), _f32(beta),
          st["xn"], st["out"], st["rstd"], st["c1"], int(m), int(m // 128), float(eps))
     return st["out"], st["xn"], st["rstd"], st["c1"]
+
+
+_cast = {}
+
+
+def _f32(t):
+    """gamma as fp32, cached: a per-call cast is an allocation and a launch a real wiring would not repeat."""
+    k = t.data_ptr()
+    v = _cast.get(k)
+    if v is None:
+        v = t.float().contiguous()
+        _cast[k] = v
+    return v
 
 
 def _fused_backward(x, xn, rstd, c1, gamma, wa, wb, ws, dy_flat):
@@ -121,7 +134,9 @@ class _FusedTransition(torch.autograd.Function):
         from miniworld_engine.kernels.layernorm.triton.main import _ln_fwd
         from miniworld_engine.kernels.transition.triton.main import _expand_swiglu
         shape = x.shape
-        flat = x.reshape(-1, shape[-1]).contiguous()
+        flat = x.reshape(-1, shape[-1])
+        if not flat.is_contiguous():
+            flat = flat.contiguous()
         if FUSE_FWD[0]:
             out, xn, rstd, c1 = _fused_forward(flat, gamma, beta, wa, wb, ws, eps)
         else:
@@ -137,9 +152,10 @@ class _FusedTransition(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy_in):
         flat, xn, rstd, c1, gamma, wa, wb, ws = ctx.saved_tensors
-        dyf = dy_in.reshape(-1, dy_in.shape[-1]).contiguous()
-        dx, dg, db, dWa, dWb, dWs = _fused_backward(flat, xn, rstd, c1,
-                                                    gamma.float().contiguous(), wa, wb, ws, dyf)
+        dyf = dy_in.reshape(-1, dy_in.shape[-1])
+        if not dyf.is_contiguous():
+            dyf = dyf.contiguous()
+        dx, dg, db, dWa, dWb, dWs = _fused_backward(flat, xn, rstd, c1, _f32(gamma), wa, wb, ws, dyf)
         return dx.reshape(ctx.shape), dg, db, dWa, dWb, dWs, None
 
 
