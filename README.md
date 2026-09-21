@@ -337,13 +337,15 @@ output LayerNorm): there it is 2.51x (L384) and 2.12x (L768) the engine's own Cu
 8-slot K3 ring as the measured defaults — that ring exists only because K3's slots are now sized per kind, which frees the 16 KB the
 uniform layout wasted on gate slots wherever the projection is the wider one.
 
-The [fused Transition backward](experiments/transition_backward_fused/README.md)
-replaces the five-launch Transition backward (cuBLAS `dh`, Triton gate backward,
-two weight-gradient GEMMs, `d_xn`, LayerNorm backward) with one CUDA kernel that
-keeps `dh`, `h`, `dA` and `dB` in registers and shared memory: 2.02x at L384 and
-2.03x at L768, the same relative error against an fp32 reference as the path it
-replaces, and bit-reproducible outputs. It is an experiment; nothing in
-`miniworld_engine` calls it yet, and its README lists what wiring it up needs.
+The [fused Transition](experiments/transition_fused/README.md) replaces both halves
+of the D=128 pair Transition with one CUDA kernel each, keeping the intermediates
+(`h`, `dh`, `dA`, `dB`) in registers instead of HBM: the backward's five launches
+become one (2.02x at L384, 2.03x at L768) and the forward's three become one
+(1.74x / 1.83x). Through the real module, forward plus backward is 1108 -> 606 us
+at L384 (1.83x) and 4107 -> 2422 us at L768 (1.70x), at the same relative error
+against an fp32 reference as the paths they replace and with bit-reproducible
+outputs. It is an experiment; nothing in `miniworld_engine` calls it yet, and its
+README lists what wiring it up needs.
 
 ## Toolchain
 
