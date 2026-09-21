@@ -7,6 +7,8 @@ accepts is a wrong answer rather than a slow one. And the numbers have to agree 
 that is in use today, not just with a reference, because switching it on changes what every
 existing training run computes.
 """
+import copy
+
 import pytest
 import torch
 
@@ -53,41 +55,81 @@ def test_env_switch_turns_the_gate_off(monkeypatch):
     assert not fused_sm90a.supported(x, wa, ws)
 
 
-def _module_run(shape, *, fused, seed=72):
-    from miniworld_engine import settings
+def _build(shape, seed=72):
     from miniworld_engine.modules import Transition
 
-    settings.configure(engine_backend="triton", transition_residual_fusion=True,
-                       transition_fused_sm90a=fused)
     torch.manual_seed(seed)
     module = Transition(shape[-1], n=4, implementation="triton").cuda().bfloat16()
     with torch.no_grad():
         for param in module.parameters():
             if param.ndim == 2:
+                # The squeeze weight is zero-init, which makes W_s = 0, dh = 0 and four of the
+                # five parameter gradients exactly zero in every backend -- a comparison that
+                # agrees perfectly while proving nothing.
                 param.normal_(std=shape[-1] ** -0.5)
-    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    y = module(x)
-    y.backward(torch.randn_like(y))
-    grads = {name: p.grad.detach().float() for name, p in module.named_parameters()}
-    return y.detach().float(), x.grad.detach().float(), grads
+    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    return module, x, dy
+
+
+def _run(module, x, dy, *, fused, fp32=False):
+    from miniworld_engine import settings
+
+    # deepcopy: nn.Module.float() is in place, so converting the shared module would corrupt
+    # the bf16 run that comes after it.
+    mod = copy.deepcopy(module)
+    if fp32:
+        mod = mod.float()
+        x, dy = x.float(), dy.float()
+    settings.configure(engine_backend="triton", transition_residual_fusion=True,
+                       transition_fused_sm90a=fused)
+    xx = x.clone().requires_grad_()
+    y = mod(xx)
+    y.backward(dy)
+    return {"out": y.detach().float(), "dx": xx.grad.detach().float(),
+            **{name: p.grad.detach().float() for name, p in mod.named_parameters()}}
+
+
+def _rel(got, want):
+    return float((got - want).norm() / want.norm().clamp_min(1e-20))
 
 
 @needs_hopper
 @pytest.mark.parametrize("shape", [(1, 32, 32, 128), (2, 16, 16, 128)])
-def test_matches_the_triton_residual_path(shape, monkeypatch):
+def test_is_no_less_accurate_than_the_triton_path(shape, monkeypatch):
+    """Both paths round to bf16 at the same places but not in the same order, so they differ
+    from each other by about as much as either differs from fp32 -- 2.5e-3 on the output, which
+    says nothing on its own. The claim that matters is that the fused path is no further from
+    an fp32 run than the path it replaces."""
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    fused_y, fused_dx, fused_grads = _module_run(shape, fused=True)
-    triton_y, triton_dx, triton_grads = _module_run(shape, fused=False)
+    module, x, dy = _build(shape)
+    reference = _run(module, x, dy, fused=False, fp32=True)
+    fused = _run(module, x, dy, fused=True)
+    triton = _run(module, x, dy, fused=False)
 
-    def close(a, b, tol):
-        return float((a - b).norm() / b.norm().clamp_min(1e-20)) < tol
+    for name in reference:
+        got, base = _rel(fused[name], reference[name]), _rel(triton[name], reference[name])
+        assert got <= max(base * 1.5, 1e-6), f"{name}: fused {got:.3e} vs triton {base:.3e}"
 
-    assert close(fused_y, triton_y, 2e-3), "forward"
-    assert close(fused_dx, triton_dx, 2e-3), "input gradient"
-    for name in triton_grads:
-        assert close(fused_grads[name], triton_grads[name], 5e-3), name
+
+@needs_hopper
+@pytest.mark.parametrize("shape", [(1, 32, 32, 128), (2, 16, 16, 128)])
+def test_agrees_with_the_triton_path_to_bf16(shape, monkeypatch):
+    """Switching this on changes what every existing run computes, so bound how much. The
+    tolerances are one bf16 rounding on the activations and a little more on the parameter
+    gradients, which accumulate over all M rows in a different CTA order."""
+    from miniworld_engine import settings
+
+    monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    module, x, dy = _build(shape)
+    fused = _run(module, x, dy, fused=True)
+    triton = _run(module, x, dy, fused=False)
+
+    tolerances = {"out": 4e-3, "dx": 5e-4}
+    for name in triton:
+        assert _rel(fused[name], triton[name]) < tolerances.get(name, 2e-3), name
 
 
 @needs_hopper
@@ -101,7 +143,8 @@ def test_the_module_actually_dispatches_to_it(monkeypatch):
     original = fused_sm90a.transition_fused_sm90a
     monkeypatch.setattr(fused_sm90a, "transition_fused_sm90a",
                         lambda *a, **k: (calls.append(1), original(*a, **k))[1])
-    _module_run((1, 32, 32, 128), fused=True)
+    module, x, dy = _build((1, 32, 32, 128))
+    _run(module, x, dy, fused=True)
     assert calls, "the fused path was never entered"
 
 

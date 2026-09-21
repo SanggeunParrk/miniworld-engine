@@ -174,14 +174,42 @@ Four things the wiring had to settle, beyond copying the sources across.
 
 What the wiring does **not** do, and should be looked at before this is relied on for a long run:
 
-- **The parity tests are not re-baselined.** `dgamma` and `dbeta` are summed in a different CTA order than the current path,
-  about 4e-5 relative. That is far inside the op's existing bf16 tolerance, but it is a change to recorded outputs and
-  deserves a deliberate re-baseline rather than an accidental one.
+- **The engine's own parity tests are not re-baselined.** Nothing outside `test_transition_fused_sm90a_gpu.py` has been
+  re-recorded, and switching this on changes recorded outputs by the amounts in the table above. That deserves a deliberate
+  re-baseline rather than an accidental one.
 - **Nobody has run a training-convergence check.** Two launches computing the same function to the same tolerance is not the
   same claim as a run that converges the same way.
 
-`bench_wired.py` times the dispatch as a training run gets it: the same module, the same settings object, the only
-difference being `transition_fused_sm90a`.
+### What the wired path measures
+
+`bench_wired.py` times the dispatch as a training run gets it: the same `modules.Transition`, the same settings object, the
+only difference being `transition_fused_sm90a`. node01 H100 80 GB, forward plus backward, `records/wired-L{384,768}.json`:
+
+| | L384 | L768 |
+|---|---:|---:|
+| Triton residual path (`transition_fused_sm90a=False`) | 1074 µs | 4025 µs |
+| **fused sm_90a (default)** | **559 µs** | **2073 µs** |
+| speed-up | **1.92×** | **1.94×** |
+
+That is the whole module, so it is bounded by how much of it these two kernels are; the op-level numbers above are larger.
+Several Triton ops on the baseline side fall back to heuristic configs because this worktree has no tuned autotune cache for
+this card, which if anything flatters the baseline's *variance*, not its median -- the same run on node02 before the wiring
+measured 1109 µs for the same path.
+
+### Accuracy
+
+Against the Triton path directly the output differs by 2.5e-3 relative, which looks alarming and is not: both paths round to
+bf16 in the same places but not in the same order, so they sit about that far apart while each sits about that far from
+fp32. `tests/numerics/test_transition_fused_sm90a_gpu.py` asserts the claim that means something -- the fused path is no
+further from an fp32 run of the same module than the Triton path is, for the output, `dx` and all five parameter gradients.
+Direct agreement, L384/L768:
+
+| | out | dx | dgamma | dbeta | dWa | dWb | dWs |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| rel_rms vs Triton | 2.5e-3 | 9.9e-5 | 7.7e-5 | 8.2e-5 | 3.5e-4 | 3.6e-4 | 4.0e-4 |
+
+Eight tests cover the gate (what it rejects and why), the env switch, both accuracy claims, that the module really
+dispatches to it, and that a replay is bit-identical.
 
 ## Headroom
 

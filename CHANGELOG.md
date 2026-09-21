@@ -14,9 +14,9 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - Fused sm_90a Transition, forward and backward, for the AF3 pair width (`d_hidden`
   128, `n` 4, bf16, whole 128-row tiles). Two launches replace five: LayerNorm,
   expand-SwiGLU and squeeze-with-residual on the way forward, and the squeeze,
-  SwiGLU and LayerNorm backward chain on the way back. Measured on an H100 SXM
-  against the Triton residual path it replaces, `modules.Transition` forward plus
-  backward goes from 1109 to 583 us at L=384 and from 4106 to 2307 us at L=768.
+  SwiGLU and LayerNorm backward chain on the way back. Measured through the wired
+  dispatch on an H100 SXM, `modules.Transition` forward plus backward goes from
+  1074 to 559 us at L=384 (1.92x) and from 4025 to 2073 us at L=768 (1.94x).
   On by default where it applies, off with `transition_fused_sm90a=False` or
   `MINIWORLD_TRANSITION_FUSED_SM90A=0`; every other shape, dtype and architecture
   keeps the existing path. Development record in
