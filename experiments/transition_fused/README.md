@@ -17,6 +17,10 @@ for what the dispatch looks like and what it deliberately does not take.
 
 ## Result
 
+What a training run gets is in [What the wired path measures](#what-the-wired-path-measures): 1.9x the Triton residual path,
+2.2x `torch.compile`, 3.2x eager PyTorch, through the real dispatch. The rest of this section is the two ops on their own,
+which is where the design decisions were made and where the numbers are larger.
+
 node02 H100 80 GB, CUDA 12.9, PyTorch 2.10 cu128, same session, CUDA-graph replay median (`records/bench-L{384,768}.json`):
 
 | | L384 (M = 147 456) | L768 (M = 589 824) |
@@ -122,17 +126,21 @@ exactly; the sweep is in `records/ratio-r*-L384.json`.
 | `bench.py`, `bench_fwd.py` | correctness against an fp32 reference, bit-reproducibility, CUDA-graph timing, `--engine` for the baseline, `--save` for a record |
 | `drv.py` | minimal `cuda.bindings` launcher: TMA descriptors, cubin load, by-value argument packing |
 | `bench_module.py` | the same, at the module level: times `modules.Transition` fwd + bwd with and without this backward, and checks the gradients agree |
+| `bench_wired.py` | the shipped dispatch: `modules.Transition` with `transition_fused_sm90a` on and off, plus PyTorch eager and `torch.compile` over the same weights |
 | `verify_package.py` | CPU-only integrity checks (vendored-header hashes, portable paths, recorded measurements) |
 | `records/` | the measurements above, the ratio sweep, and `progression.md` — how it got here and the eleven things that did not work |
 
 The Anthropic v5 device primitives (`tmn_ptx.cuh`, `tmn_kernels.cuh`, `common/tmn_math.cuh`, Apache-2.0, upstream revision
-`f4f62fa`) are not duplicated here: the build includes the copy vendored for the sibling experiment at
-`../trimul_b7b12/vendor/anthropic_v5/csrc`, and `verify_package.py` pins their hashes.
+`f4f62fa`) are not duplicated *here*: this experiment's build includes the copy vendored for the sibling experiment at
+`../trimul_b7b12/vendor/anthropic_v5/csrc`, and `verify_package.py` pins their hashes. The wired copy in
+`src/miniworld_engine/kernels/transition/cuda/anthropic_v5/` is the same three files, inside the package so the shipped
+kernel builds from an installed engine rather than only from a checkout.
 
 ```
 OUT=transition_bwd_r8 ./build.sh -DDW_REPL=8   &&  python bench.py       --length 384 --dw-repl 8 --engine
 ./build_fwd.sh                                 &&  python bench_fwd.py   --length 384 --engine
 python bench_module.py --length 384                       # both, through the real module
+python bench_wired.py  --length 384                       # the shipped dispatch, vs Triton and PyTorch
 ```
 
 Needs a compute node (nvcc and the GPU), torch with CUDA and `cuda.bindings`.

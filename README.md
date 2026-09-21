@@ -340,12 +340,15 @@ uniform layout wasted on gate slots wherever the projection is the wider one.
 The [fused Transition](experiments/transition_fused/README.md) replaces both halves
 of the D=128 pair Transition with one CUDA kernel each, keeping the intermediates
 (`h`, `dh`, `dA`, `dB`) in registers instead of HBM: the backward's five launches
-become one (2.02x at L384, 2.03x at L768) and the forward's three become one
-(1.74x / 1.83x). Through the real module, forward plus backward is 1108 -> 606 us
-at L384 (1.83x) and 4107 -> 2422 us at L768 (1.70x), at the same relative error
-against an fp32 reference as the paths they replace and with bit-reproducible
-outputs. It is an experiment; nothing in `miniworld_engine` calls it yet, and its
-README lists what wiring it up needs.
+become one and the forward's three become one. It is **wired in and on by
+default** wherever the shape fits (sm_90, bf16, `d_hidden` 128 with `n` 4, whole
+128-row tiles); `modules.Transition` dispatches to it and everything else keeps
+the Triton path. Through the real module, forward plus backward is 1074 -> 562 us
+at L384 and 4022 -> 2092 us at L768, which is 1.9x the Triton residual path, 2.2x
+`torch.compile` and 3.2x eager PyTorch, at the same distance from an fp32
+reference as the path it replaces and with bit-reproducible outputs. Turn it off
+with `transition_fused_sm90a=False`. The development record, the designs that
+lost, and what is still open are in its README.
 
 ## Toolchain
 
