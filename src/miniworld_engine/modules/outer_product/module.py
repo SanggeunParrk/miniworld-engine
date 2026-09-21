@@ -5,6 +5,7 @@ from einops import rearrange
 from jaxtyping import Bool, Float, Int
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import anthropic_msa as _anthropic
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 
@@ -86,6 +87,11 @@ class OuterProductMean(nn.Module):
         super().__init__()
 
         self.mask_interchain = mask_interchain
+        self.implementation = ImplementationType(implementation)
+        # "anthropic" names an MSA payload, not a LayerNorm one: the primitives below are plumbing for
+        # the fallback path and take the engine's own auto choice in that case (integrations.anthropic_msa).
+        implementation = (ImplementationType.MINIWORLD if self.implementation == ImplementationType.ANTHROPIC
+                          else self.implementation)
         self.normalize_before_proj = normalize_before_proj
         # LN over the MSA feature dim — route to the fused miniworld_engine LN (bf16) under
         # MINIWORLD_ENGINE; a raw nn.LayerNorm runs fp32-native under autocast and,
@@ -109,6 +115,18 @@ class OuterProductMean(nn.Module):
         explicitly by the block (``pair = opm(msa, ..., residual=pair)``) rather than being the
         module's own input; the add is unconditional when ``residual`` is provided (no dropout on
         the OPM branch). ``residual=None`` returns the raw OPM output (standalone / benchmarking)."""
+        # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused path where it
+        # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
+        if _anthropic.wanted(self.implementation):
+            _fused = dict(grad=torch.is_grad_enabled(),
+                          interchain=bool(self.mask_interchain and token_asym_id is not None))
+            _dims = (self.to_left.weight.shape[0], self.to_out.weight.shape[0])
+            if self.implementation == ImplementationType.ANTHROPIC:
+                _anthropic.require_opm(msa, *_dims, **_fused)      # explicit: the reason, never a reroute
+            if _anthropic.serves_opm(msa, *_dims, **_fused):
+                _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+                _pair = _anthropic.outer_product_mean(self, msa, _m)
+                return residual + _pair if residual is not None else _pair
         msa = self.ln_msa(msa)
         left = self.to_left(msa)
         right = self.to_right(msa)

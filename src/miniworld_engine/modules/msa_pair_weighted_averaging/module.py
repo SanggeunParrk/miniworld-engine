@@ -5,6 +5,7 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import anthropic_msa as _anthropic
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear
@@ -38,6 +39,11 @@ class MSAPairWeightedAveraging(nn.Module):
     ) -> None:
         super().__init__()
         self.n_head = n_head
+        self.implementation = ImplementationType(implementation)
+        # "anthropic" names an MSA payload, not a LayerNorm one: the primitives below are plumbing for
+        # the fallback path and take the engine's own auto choice in that case (integrations.anthropic_msa).
+        implementation = (ImplementationType.MINIWORLD if self.implementation == ImplementationType.ANTHROPIC
+                          else self.implementation)
         # This layer ALWAYS applies the residual: msa + drop_msa(pwa(msa, pair)). The residual is
         # UNCONDITIONAL (domain standard); the row-broadcast dropout (drop_msa, broadcast_dim=1) is
         # OPTIONAL via p_drop and active only in training. Applied EXPLICITLY (team-gm layer, not
@@ -69,6 +75,16 @@ class MSAPairWeightedAveraging(nn.Module):
         """Forward pass. ALWAYS returns the residual output msa + drop_msa(pwa(msa, pair)) — the
         residual is UNCONDITIONAL (domain standard, explicit add) and drop_msa is optional (p_drop,
         training only). The residual is unconditional and has no flag."""
+        # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused cell where it
+        # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
+        if _anthropic.wanted(self.implementation):
+            _dims = (self.to_value.weight.shape[1], self.to_bias.weight.shape[1], self.n_head,
+                     self.to_value.weight.shape[0] // self.n_head)
+            _fused = dict(grad=torch.is_grad_enabled(), dropout=bool(self.training and self.drop_msa.p_drop))
+            if self.implementation == ImplementationType.ANTHROPIC:
+                _anthropic.require_pwa(msa, *_dims, **_fused)      # explicit: the reason, never a reroute
+            if _anthropic.serves_pwa(msa, *_dims, **_fused):
+                return msa + _anthropic.pair_weighted_averaging(self, msa, pair, mask)
         msa_res = msa  # residual == the ORIGINAL input (before ln_msa rebinds `msa`)
         msa = self.ln_msa(msa)
         value = self.to_value(msa)
