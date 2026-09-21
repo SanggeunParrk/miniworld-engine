@@ -183,13 +183,15 @@ What the wiring does **not** do, and should be looked at before this is relied o
 ### What the wired path measures
 
 `bench_wired.py` times the dispatch as a training run gets it: the same `modules.Transition`, the same settings object, the
-only difference being `transition_fused_sm90a`. node01 H100 80 GB, forward plus backward, `records/wired-L{384,768}.json`:
+only difference being `transition_fused_sm90a`. Next to it, the same op in plain PyTorch over the same weights, through the
+engine's own `transition_pytorch` reference. node01 H100 80 GB, forward plus backward, `records/wired-L{384,768}.json`:
 
-| | L384 | L768 |
-|---|---:|---:|
-| Triton residual path (`transition_fused_sm90a=False`) | 1074 µs | 4025 µs |
-| **fused sm_90a (default)** | **559 µs** | **2073 µs** |
-| speed-up | **1.92×** | **1.94×** |
+| | L384 | ×  | L768 | × |
+|---|---:|---:|---:|---:|
+| PyTorch eager | 1822 µs | 3.24 | 6853 µs | 3.28 |
+| PyTorch, `torch.compile` | 1211 µs | 2.15 | 4523 µs | 2.16 |
+| Triton residual path (`transition_fused_sm90a=False`) | 1074 µs | 1.91 | 4022 µs | 1.92 |
+| **fused sm_90a (default)** | **562 µs** | — | **2092 µs** | — |
 
 That is the whole module, so it is bounded by how much of it these two kernels are; the op-level numbers above are larger.
 Several Triton ops on the baseline side fall back to heuristic configs because this worktree has no tuned autotune cache for
@@ -202,11 +204,15 @@ Against the Triton path directly the output differs by 2.5e-3 relative, which lo
 bf16 in the same places but not in the same order, so they sit about that far apart while each sits about that far from
 fp32. `tests/numerics/test_transition_fused_sm90a_gpu.py` asserts the claim that means something -- the fused path is no
 further from an fp32 run of the same module than the Triton path is, for the output, `dx` and all five parameter gradients.
-Direct agreement, L384/L768:
+Direct agreement, L384:
 
 | | out | dx | dgamma | dbeta | dWa | dWb | dWs |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | rel_rms vs Triton | 2.5e-3 | 9.9e-5 | 7.7e-5 | 8.2e-5 | 3.5e-4 | 3.6e-4 | 4.0e-4 |
+| rel_rms vs PyTorch eager | 4.0e-3 | 4.5e-3 | 5.1e-3 | 6.0e-3 | 4.0e-3 | 4.2e-3 | 4.5e-3 |
+
+The PyTorch row is larger for the same reason and more of it: eager bf16 materialises every intermediate at bf16, so it is
+the furthest of the three from fp32, not a yardstick to be close to.
 
 Eight tests cover the gate (what it rejects and why), the env switch, both accuracy claims, that the module really
 dispatches to it, and that a replay is bit-identical.
