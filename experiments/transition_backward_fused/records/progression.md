@@ -61,6 +61,20 @@ slice, which fits the registers only with transposed accumulators and triples th
 the hidden chunk in half relieves both at once — 24 KB ring slots and half-size accumulators — at the cost of doubling the
 wgmma instruction count for `dh` and `a|b`, which is exactly the trade the packing step above won 18 µs on.
 
+## Recomputing xn in the backward instead of saving it: measured, and it loses
+
+The forward saves `xn` (37.7 MB at L384, 151 MB at L768) for the backward. Dropping that and recomputing
+`xn = (x·rstd − c1)·gamma + beta` in the backward looks attractive on paper, and it is not:
+
+| | |
+|---|---|
+| what it saves in the forward | 9 µs at L384, 31 µs at L768 — the measured cost of the `xn` store (`-DFWD_SAVE=0`) |
+| what it saves in the backward | **nothing.** Removing the `xn` read outright (timing-only probes) measured 414 µs for the input role and 415 µs for the weight role against a 409 µs baseline — inside the noise, i.e. zero. The backward moves ~226 MB in 406 µs = 557 GB/s against a ~3 TB/s peak and is nowhere near bandwidth-bound; the same probe on the 442 MB weight stream also measured nothing |
+| what it costs | both roles would have to read `x` instead (the same bytes: no read is saved) and then run a LayerNorm-apply pass over 128 × 128 elements into shared memory before the GEMMs. In the weight role that is roughly 500 of its 5100 cycles a tile, and that role is the binding one at R = 8 — about 40 µs over its 144 tiles |
+
+So it is a net loss for speed. It is still the right trade if activation memory is the constraint rather than time: 37.7 MB per
+Transition layer at L384 and 151 MB at L768 is not nothing when the trunk has many blocks.
+
 ## Traps worth remembering
 
 - The effective dynamic shared-memory ceiling on sm_90 is **231424 B**, not the 232448 opt-in: 1 KB per block is reserved.

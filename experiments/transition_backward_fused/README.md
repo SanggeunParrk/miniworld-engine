@@ -140,6 +140,11 @@ is confined to the backward of the Transition autograd function. Three things ar
 
 ## Headroom
 
+Not a lever: recomputing `xn` in the backward instead of saving it. It saves the forward's 9 µs (L384) / 31 µs (L768) store
+and saves the backward nothing — removing the `xn` read outright measures inside the noise, because the backward runs at
+557 GB/s against a ~3 TB/s peak — while adding a LayerNorm-apply pass to the weight role, which is the binding one.
+`records/progression.md` has the numbers. It remains the right trade if activation memory, not time, is the constraint.
+
 The forward is at 39-43 % of its tensor floor and has not been tuned at all beyond getting it right — it is the newer of the
 two and the obvious next target. The backward is the one that has been pushed.
 
