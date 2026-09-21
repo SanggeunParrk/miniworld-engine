@@ -11,6 +11,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import anthropic_trimul as _anthropic
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -270,6 +271,17 @@ class TriangleMultiplication(nn.Module):
                 if _ds is not None:
                     out = out * _ds
                 return out + _pair_in
+
+            # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
+            # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
+            # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls
+            # back to the backends below where it does not.  See integrations.anthropic_trimul.
+            if _anthropic.wanted(self.implementation):
+                _native = {"grad": torch.is_grad_enabled(), "dropout": _ds is not None}
+                if self.implementation == ImplementationType.ANTHROPIC:
+                    _anthropic.require(pair, pair.shape[-1], self.d_hidden, **_native)   # explicit: the reason, never a reroute
+                if _anthropic.serves(pair, pair.shape[-1], self.d_hidden, **_native):
+                    return _anthropic.update_unidirectional(self, pair, mask)
 
             if backend == KernelBackend.CUEQUIVARIANCE:
                 return _r(self._forward_cuequivariance(pair, mask))

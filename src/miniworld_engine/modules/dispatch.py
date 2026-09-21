@@ -72,6 +72,7 @@ class KernelBackend(_StrEnum):
     CUDA = "cuda"
     CUTE = "cute"
     CUEQUIVARIANCE = "cuequivariance"
+    ANTHROPIC = "anthropic"
 
 
 # --------------------------------------------------------------------------- #
@@ -176,6 +177,7 @@ _CONCRETE = {
     ImplementationType.CUDA: KernelBackend.CUDA,
     ImplementationType.CUTE: KernelBackend.CUTE,
     ImplementationType.CUEQUIVARIANCE: KernelBackend.CUEQUIVARIANCE,
+    ImplementationType.ANTHROPIC: KernelBackend.ANTHROPIC,
 }
 
 
@@ -271,7 +273,7 @@ def resolve(
     impl = _coerce(impl)
     from miniworld_engine import settings
     if settings.current().engine_backend == "triton":
-        if impl in {ImplementationType.CUTE, ImplementationType.CUDA}:
+        if impl in {ImplementationType.CUTE, ImplementationType.CUDA, ImplementationType.ANTHROPIC}:
             raise ValueError(f"{op}: {impl.value} conflicts with engine_backend=triton")
         if impl == ImplementationType.MINIWORLD:
             return KernelBackend.TRITON
@@ -279,6 +281,10 @@ def resolve(
     # _CUEQ_OPS) falls back to the PYTORCH reference, never the Triton fused path.
     if impl == ImplementationType.CUEQUIVARIANCE and op not in _CUEQ_OPS:
         return KernelBackend.PYTORCH
+    # The Anthropic payload carries TriMul units only; naming it for another op is a mistake, not a fallback
+    # (integrations.anthropic_trimul states what it serves and refuses the rest at forward time).
+    if impl == ImplementationType.ANTHROPIC and op != "triangle_multiplication":
+        raise ValueError(f"{op}: the anthropic payload serves triangle_multiplication only")
     if impl != ImplementationType.MINIWORLD:
         return to_kernel_backend(impl)
     best = _MINIWORLD_KNOWN_BEST.get(op, _DEFAULT_BACKEND)

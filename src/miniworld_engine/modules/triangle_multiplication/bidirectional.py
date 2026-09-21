@@ -21,6 +21,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import settings
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import anthropic_trimul as _anthropic
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -88,14 +89,18 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
         d2 = 2 * self.d_hidden
 
-        self.ln_pair = LayerNorm(d_pair, implementation=implementation)
+        # The LayerNorm primitives are plumbing for the non-native paths; "anthropic" names a TriMul payload,
+        # not a LayerNorm one, so they take the engine's own auto choice in that case.
+        ln_impl = (ImplementationType.MINIWORLD if self.implementation == ImplementationType.ANTHROPIC
+                   else self.implementation)
+        self.ln_pair = LayerNorm(d_pair, implementation=ln_impl)
         # Doubled-width left/right projections: [outgoing | incoming] channels.
         self.to_left = Linear(d_pair, d2, bias=False, init="default")
         self.to_left_gate = Linear(d_pair, d2, bias=False, init="zero")
         self.to_right = Linear(d_pair, d2, bias=False, init="default")
         self.to_right_gate = Linear(d_pair, d2, bias=False, init="zero")
 
-        self.ln_out = LayerNorm(d2, implementation=implementation)
+        self.ln_out = LayerNorm(d2, implementation=ln_impl)
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d2, d_pair, bias=False, init="zero")
 
@@ -133,6 +138,17 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # Explicit kernel-level overrides preserve the Triton algorithm;
             # never enter the legacy CuTe projection-aware backward here.
             return self._forward_triton(pair, mask, _ds)
+        # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
+        # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
+        # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls
+        # back to the backends below where it does not.  See integrations.anthropic_trimul.
+        if _anthropic.wanted(self.implementation):
+            _native = {"grad": torch.is_grad_enabled(), "dropout": _ds is not None}
+            if self.implementation == ImplementationType.ANTHROPIC:
+                _anthropic.require(pair, pair.shape[-1], 2 * self.d_hidden, **_native)   # explicit: the reason, never a reroute
+            if _anthropic.serves(pair, pair.shape[-1], 2 * self.d_hidden, **_native):
+                return _anthropic.update_bidirectional(self, pair, mask)
+
         if self._backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
         if self._backend == KernelBackend.CUTE:

@@ -30,6 +30,9 @@ def test_kernelbackend_has_only_concrete_backends():
         "cuda",
         "cute",
         "cuequivariance",
+        # A vendored payload, like a vendor library, is a concrete thing a module can execute:
+        # integrations.anthropic_trimul runs the TriMul kernels of Anthropic's release.
+        "anthropic",
     }
     # MINIWORLD is public-only; it is deliberately NOT a KernelBackend.
     assert "miniworld" not in {b.value for b in KernelBackend}

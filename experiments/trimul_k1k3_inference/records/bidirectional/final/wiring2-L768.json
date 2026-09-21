@@ -1,0 +1,102 @@
+{
+ "length": 768,
+ "width": 128,
+ "res": {
+  "outgoing": {
+   "anthropic": {
+    "err": {
+     "rel_rms": 0.0025899054016917944,
+     "max_abs": 0.033174991607666016,
+     "finite": true
+    },
+    "us": 561.9046401977539,
+    "selection": {}
+   },
+   "miniworld": {
+    "err": {
+     "rel_rms": 0.0025899054016917944,
+     "max_abs": 0.033174991607666016,
+     "finite": true
+    },
+    "us": 559.9142456054688,
+    "selection": {}
+   },
+   "auto_matches_explicit": true,
+   "fallback": {
+    "err": {
+     "rel_rms": 0.0024362157564610243,
+     "max_abs": 0.030410051345825195,
+     "finite": true
+    },
+    "us": 1038.1123352050781
+   },
+   "grad_falls_back": true
+  },
+  "incoming": {
+   "anthropic": {
+    "err": {
+     "rel_rms": 0.002583875320851803,
+     "max_abs": 0.03202056884765625,
+     "finite": true
+    },
+    "us": 571.923828125,
+    "selection": {}
+   },
+   "miniworld": {
+    "err": {
+     "rel_rms": 0.002583875320851803,
+     "max_abs": 0.03202056884765625,
+     "finite": true
+    },
+    "us": 573.3456039428711,
+    "selection": {}
+   },
+   "auto_matches_explicit": true,
+   "fallback": {
+    "err": {
+     "rel_rms": 0.0024310441222041845,
+     "max_abs": 0.02624034881591797,
+     "finite": true
+    },
+    "us": 1051.1980438232422
+   },
+   "grad_falls_back": true
+  },
+  "bidirectional": {
+   "anthropic": {
+    "err": {
+     "rel_rms": 0.002578312298282981,
+     "max_abs": 0.03142547607421875,
+     "finite": true
+    },
+    "us": 1012.8060913085938,
+    "selection": {
+     "unit": "z128_h256",
+     "composed": "K1 + 2 contractions + K3"
+    }
+   },
+   "miniworld": {
+    "err": {
+     "rel_rms": 0.002578312298282981,
+     "max_abs": 0.03142547607421875,
+     "finite": true
+    },
+    "us": 1014.5452880859375,
+    "selection": {
+     "unit": "z128_h256",
+     "composed": "K1 + 2 contractions + K3"
+    }
+   },
+   "auto_matches_explicit": true,
+   "fallback": {
+    "err": {
+     "rel_rms": 0.0025325529277324677,
+     "max_abs": 0.03361701965332031,
+     "finite": true
+    },
+    "us": 2107.7737426757812
+   },
+   "grad_falls_back": true
+  }
+ }
+}
