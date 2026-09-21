@@ -10,7 +10,8 @@ The forward has the same problem and the same fix: it runs as three kernels (Lay
 puts the `[M][512]` SwiGLU activation through HBM twice — 151 MB each way at L384. `src/transition_fwd.cu` fuses it into one
 kernel that keeps that activation in registers and still emits what the backward needs (`xn`, `rstd`, `c1`).
 
-Both are experiments, not a dispatch change: nothing in `miniworld_engine` calls them. See "Wiring it up" for what that needs.
+Both are now **wired into the engine**: `modules.Transition` routes to them wherever the shape fits. See "Wiring it up"
+for what the dispatch looks like and what it deliberately does not take.
 
 ![The two CTA roles and where each gradient is produced](wiring.svg)
 
@@ -138,18 +139,49 @@ Needs a compute node (nvcc and the GPU), torch with CUDA and `cuda.bindings`.
 
 ## Wiring it up
 
-`bench.py` shows the op-level call and `bench_module.py` a working module-level substitution (a local autograd Function that
-calls the engine's own LayerNorm, expand-SwiGLU and squeeze-residual forward kernels and this kernel for the backward): the kernel consumes exactly what the forward already saves (`x`, `xn`, `dy`, `rstd`,
-`c1 = mean·rstd`, `gamma`, and the three weights) and produces the six gradients the autograd function returns, so the change
-is confined to the backward of the Transition autograd function. Three things are needed first.
+Both kernels live in the engine as of this branch, at
+`src/miniworld_engine/kernels/transition/cuda/`:
 
-1. **Shape coverage.** The kernel is compiled for D = 128, H = 512 and needs M to be a multiple of 128. Other widths need
-   their own instantiation; the dispatch has to keep the current path for everything else.
-2. **A build path.** It is loaded here as a raw cubin through `drv.py`. In the engine it should go through the same
-   mechanism the other hand-CUDA kernels use, with `DW_REPL` fixed at 8.
-3. **A numerics decision.** `dgamma` and `dbeta` are summed in a different order than the current path, so they differ by
-   about 4e-5 relative. That is far inside the bf16 tolerance the op already has, but it is a change to recorded outputs and
-   the parity tests should be re-baselined deliberately rather than by accident.
+| file | what it is |
+|---|---|
+| `transition_fused_fwd_sm90a_kernel.cu` | this experiment's `src/transition_fwd.cu`, plus a host launcher |
+| `transition_fused_bwd_sm90a_kernel.cu` | this experiment's `src/transition_bwd.cu`, plus host launchers |
+| `transition_fused_sm90a.cu` | torch bindings: TMA descriptors, output allocation, stream |
+| `fused_sm90a.py` | the JIT build, the shape gate, the two opaque ops and the autograd Function |
+| `anthropic_v5/` | the three vendored Anthropic device headers the kernels are written against |
+
+`modules.Transition._residual_forward` is the single dispatch point. It asks `fused_sm90a.available`, and takes the fused
+path only when every one of the kernel's own requirements holds: sm_90, bf16, `d_hidden == 128`, hidden 512 (`n == 4`), and a
+row count that is a whole number of 128-row tiles. Everything else keeps the Triton residual path, unchanged. Turning it off
+is `transition_fused_sm90a=False` or `MINIWORLD_TRANSITION_FUSED_SM90A=0`.
+
+Four things the wiring had to settle, beyond copying the sources across.
+
+1. **The persistent grid is compiled, not chosen.** `NCTA` is one CTA per SM and it is a build-time constant, so the
+   extension is built per SM count (`_ext(ctas, dw_repl, save)`) and the module name carries it. A second card with a
+   different multiprocessor count gets its own build instead of a grid that silently does not cover the device.
+2. **Inference gets its own build.** Writing `xn`, `rstd` and `c1` sits inside the LayerNorm epilogue, so it cannot be a
+   runtime flag. `FWD_SAVE` selects the variant and the autograd Function picks it from `ctx.needs_input_grad`; the binding
+   asserts that the flag it was passed matches the build, which is what stops an inference build writing through the
+   1-element placeholders.
+3. **Both launches are opaque ops.** The launch is split out of the autograd Function and registered through `opaque`, the
+   same way every other engine kernel is, so Dynamo traces through the Function and stops only at the launch. Without that
+   the residual path would graph-break and inductor's cudagraph trees would bail on the whole region.
+4. **TMA descriptors are cached, not rebuilt.** A descriptor is 128 opaque bytes tied to one base pointer, so it is keyed on
+   (pointer, dims, box). Weights hit the cache after the first step; activations re-encode, which is a host-side memcpy and
+   does not touch the GPU. `cuTensorMapEncodeTiled` is resolved through `cudaGetDriverEntryPoint` so the extension does not
+   have to link `libcuda`.
+
+What the wiring does **not** do, and should be looked at before this is relied on for a long run:
+
+- **The parity tests are not re-baselined.** `dgamma` and `dbeta` are summed in a different CTA order than the current path,
+  about 4e-5 relative. That is far inside the op's existing bf16 tolerance, but it is a change to recorded outputs and
+  deserves a deliberate re-baseline rather than an accidental one.
+- **Nobody has run a training-convergence check.** Two launches computing the same function to the same tolerance is not the
+  same claim as a run that converges the same way.
+
+`bench_wired.py` times the dispatch as a training run gets it: the same module, the same settings object, the only
+difference being `transition_fused_sm90a`.
 
 ## Headroom
 

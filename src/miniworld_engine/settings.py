@@ -211,6 +211,11 @@ class Settings:
     #: Route d=128/n=4 inference through the hand-CUDA fused b2b kernel (~1.29x the Triton b2b).
     #: Formerly MINIWORLD_TRANSITION_CUDA_B2B.
     transition_cuda_b2b: bool = True
+    #: Route d=128/n=4 bf16 Transition on sm_90 through the fused hand-CUDA forward and
+    #: backward (two launches instead of five; ~1.9x the Triton residual path at L=384, both
+    #: training and inference). Falls back on any other shape, dtype or architecture.
+    #: MINIWORLD_TRANSITION_FUSED_SM90A=0 also turns it off.
+    transition_fused_sm90a: bool = True
     #: Large-d training backend: None = torch fallback, "triton" = cute+triton hybrid, "cute" =
     #: all-cute. Formerly MINIWORLD_TRANSITION_LARGE_D_TRAINING.
     transition_large_d_training: Literal["triton", "cute"] | None = None

@@ -38,6 +38,15 @@ def _cuda_b2b_inference_enabled() -> bool:
     return settings.current().transition_cuda_b2b
 
 
+def _fused_sm90a_enabled() -> bool:
+    """Whether to route the d=128/n=4 bf16 residual path on sm_90 through the fused hand-CUDA
+    forward and backward (two launches instead of five, ~1.9x the Triton residual path on both
+    sides). Default on; set MINIWORLD_TRANSITION_FUSED_SM90A=0 to A/B against Triton."""
+    from miniworld_engine import settings
+
+    return settings.current().transition_fused_sm90a
+
+
 def _large_d_training_backend_from_env() -> str | None:
     from miniworld_engine import settings
 
@@ -173,7 +182,7 @@ class Transition(nn.Module):
             return out + x
 
         if settings.current().transition_residual_fusion:
-            return self._residual_triton_forward(x)
+            return self._residual_forward(x)
         if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): the fused triton path uses the
@@ -262,7 +271,7 @@ class Transition(nn.Module):
             return out + x
 
         if settings.current().transition_residual_fusion:
-            return self._residual_triton_forward(x)
+            return self._residual_forward(x)
         if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
@@ -312,13 +321,29 @@ class Transition(nn.Module):
             save_xn=False,
         )
 
-    def _residual_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Residual-fused Transition: LN, expand-SwiGLU, squeeze with the residual folded into
+        its epilogue, and the matching backward.
+
+        On sm_90 at the AF3 pair width (d=128, n=4, bf16, whole 128-row tiles) this runs the
+        fused hand-CUDA kernels -- one launch each way instead of three and two. Every other
+        shape, dtype and architecture keeps the Triton path, which is shape-general. The gate is
+        ``fused_sm90a.available``; it is the kernel's own requirements, not a policy.
+        """
+        wa = self.expand_a.weight.to(x.dtype)
+        wb = self.expand_b.weight.to(x.dtype)
+        ws = self.squeeze.weight.to(x.dtype)
+        if _fused_sm90a_enabled():
+            from miniworld_engine.kernels.transition.cuda import fused_sm90a
+
+            if fused_sm90a.available(x, wa, ws):
+                return fused_sm90a.transition_fused_sm90a(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+
         from miniworld_engine.kernels.transition.triton.residual import transition_residual
 
         return transition_residual(
-            x, self.ln_in.weight, self.ln_in.bias,
-            self.expand_a.weight.to(x.dtype), self.expand_b.weight.to(x.dtype),
-            self.squeeze.weight.to(x.dtype), self.ln_in.eps,
+            x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps,
         )
 
     def _old_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
