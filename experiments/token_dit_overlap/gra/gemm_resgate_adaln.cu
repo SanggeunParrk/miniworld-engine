@@ -6,33 +6,26 @@
 //   xa  = LN(x) * sigmoid(ms[tok]) + mb[tok]        bf16, only when ADALN (every half-block but the last)
 //
 // It replaces torch.mm (y bf16 out) + resgate_adaln_rows (y in, x in/out, xa out): y never exists, and the row pass's
-// launch is gone. The one thing the epilogue cannot see alone is a whole row, so a row's 768 columns are split over a
-// cluster of 4 CTAs (192 each). Each CTA reduces its 192 columns to (mean, M2), publishes them in shared memory, and
-// after one cluster barrier every CTA reads the other three over DSMEM and merges (Chan, equal counts).
+// launch is gone. A row's 768 columns are split over a cluster of 4 CTAs (192 each). Each CTA reduces its columns to
+// (mean, M2) and pushes them into all four CTAs' shared memory with st.async (mbarrier complete_tx); every CTA then merges
+// the four partials from its own shared memory (Chan, equal counts).
 //
-// CTA: NWG consumer warpgroups (64 rows each) + 1 producer warpgroup. The grid is one wave, so nothing overlaps an
-// epilogue but the CTA's own mainloop: the producer therefore TMA-loads the x and gl tiles first, and they land while
-// the GEMM runs. The mainloop is an ST-stage TMA ring of A [BM x 64] and W [192 x 64] tiles, 128-B swizzled; each
-// consumer issues 3 x m64n64k16 per k-step. x goes back and xa goes out by TMA store from the same shared tiles.
+// CTA: NWG consumer warpgroups (64 rows each) + 1 producer warpgroup. Mainloop: an ST-stage TMA ring of A [BM x 64] and
+// W [192 x 64] tiles, 128-B swizzled, A multicast over the cluster (each CTA loads a quarter of the rows); each consumer
+// issues 3 x m64n64k16 per k-step. The gl tile is loaded before the mainloop into its own region; the x tile aliases the
+// ring and is loaded slot by slot as the last chunks free it. x goes back box by box and xa goes out by TMA store.
 //
-// v1 (26057bda) read x and the AdaLN operands with plain loads after the mainloop: 28.0 vs 20.1 us for mm + row pass.
+// History (README): v1 26057bda plain loads after the mainloop; v3 b3b56d37 ring aliasing + multicast (mainloop at cuBLAS
+// parity). v4: no cluster barrier.release in the epilogue (it waited for outstanding memory operations, 2 us), ms/mb
+// loads issued before the x store stream starts, shared-memory loads batched so they do not serialize on aliasing.
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
-#ifndef MC
-#define MC 1            // A multicast over the cluster
-#endif
-#ifndef REL
-#define REL 1           // cluster-wide slot release (required by MC)
-#endif
 #ifndef STAGES
 #define STAGES 4
 #endif
-#ifndef EPI
-#define EPI 1           // diagnostics: 0 mainloop only; 2 epilogue without TMA stores; 3 TMA stores without epilogue math
-#endif
 #ifdef GRA_TIMES
-__device__ unsigned long long g_times[1024][8];
+__device__ unsigned long long g_times[1024][16];
 TMN_DEVI unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
 #define TSTAMP(k) do { if (threadIdx.x == 0) g_times[blockIdx.x][k] = gtimer(); } while (0)
 #else
@@ -53,19 +46,13 @@ TMN_DEVI void mma64(float (&d)[32], uint64_t a, uint64_t b, int accumulate) {
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b), "r"(accumulate));
 }
 TMN_DEVI void cluster_arrive() { asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory"); }
+TMN_DEVI void cluster_arrive_relaxed() { asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory"); }
 TMN_DEVI void cluster_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory"); }
 TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r)); return r; }
-TMN_DEVI float2 ld_dsmem_f2(uint32_t local_addr, uint32_t rank) {
-  uint32_t ra; float2 v;
-  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;\n" : "=r"(ra) : "r"(local_addr), "r"(rank));
-  asm volatile("ld.shared::cluster.v2.f32 {%0,%1}, [%2];\n" : "=f"(v.x), "=f"(v.y) : "r"(ra) : "memory");
-  return v;
+TMN_DEVI uint32_t mapa(uint32_t local_addr, uint32_t rank) {
+  uint32_t ra; asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(ra) : "r"(local_addr), "r"(rank)); return ra;
 }
 TMN_DEVI float2 bf2f(uint32_t u) { return make_float2(__uint_as_float(u << 16), __uint_as_float(u & 0xffff0000u)); }
-TMN_DEVI float2 lds2f(uint32_t a) { float2 v; asm volatile("ld.shared.v2.f32 {%0,%1}, [%2];" : "=f"(v.x), "=f"(v.y) : "r"(a)); return v; }
-TMN_DEVI void sts2f(uint32_t a, float x, float y) { asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(a), "f"(x), "f"(y) : "memory"); }
-TMN_DEVI uint32_t lds1(uint32_t a) { uint32_t v; asm volatile("ld.shared.b32 %0, [%1];" : "=r"(v) : "r"(a)); return v; }
-TMN_DEVI void sts1(uint32_t a, uint32_t v) { asm volatile("st.shared.b32 [%0], %1;" :: "r"(a), "r"(v) : "memory"); }
 TMN_DEVI uint32_t ldg_nc(const void* p) { uint32_t v; asm volatile("ld.global.nc.b32 %0, [%1];" : "=r"(v) : "l"(p)); return v; }
 TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int c1) {
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%2, %3}], [%1];"
@@ -75,10 +62,15 @@ TMN_DEVI void tma_load_2d_mc(void* dst, const CUtensorMap* map, uint64_t* bar, i
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
                :: "r"(smem_u32(dst)), "l"(map), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask) : "memory");
 }
+// Plain remote arrive. mbarrier.arrive.release.cluster made the mainloop 4x slower: the release waits for the
+// in-flight wgmma's shared-memory reads.
 TMN_DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
-  uint32_t ra;
-  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(ra) : "r"(smem_u32(bar)), "r"(rank));
-  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(ra) : "memory");
+  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(mapa(smem_u32(bar), rank)) : "memory");
+}
+// 8 bytes into CTA `rank`'s shared memory at the same offset, counted on its mbarrier at the same offset (complete_tx)
+TMN_DEVI void st_async_f2(const void* local_dst, uint64_t* local_bar, uint32_t rank, float a, float b) {
+  asm volatile("st.async.shared::cluster.mbarrier::complete_tx::bytes.v2.f32 [%0], {%1, %2}, [%3];"
+               :: "r"(mapa(smem_u32(local_dst), rank)), "f"(a), "f"(b), "r"(mapa(smem_u32(local_bar), rank)) : "memory");
 }
 // byte offset of (row, col) in a [64][128 B] tile with the 128-B swizzle (16-B granule ^= row % 8)
 TMN_DEVI uint32_t sw128(int row, int byte) { return row * 128 + ((((byte >> 4) ^ (row & 7))) << 4) + (byte & 15); }
@@ -86,11 +78,11 @@ TMN_DEVI uint32_t sw128(int row, int byte) { return row * 128 + ((((byte >> 4) ^
 template <int NWG> struct Cfg {
   static constexpr int BM = 64 * NWG, ST = STAGES;
   static constexpr int SA = BM * 128, SB = BN * 128, SS = SA + SB;
-  // the epilogue tiles (x, then gl / xa) alias the stage ring: the producer loads them as the last chunks free it
   // x tiles alias the stage ring (the producer loads them as the last chunks free it); gl, then xa, has its own region
   static constexpr int NT = NWG * XB, OX = 0, OG = ST * SS, OBAR = OG + NWG * GB * TILE;
+  // stats [CL source CTAs][BM] (mean, M2), then the merged [BM] (mean, rstd)
+  static constexpr int OST = OBAR + 128, OMR = OST + CL * BM * 8, SMEM = OMR + BM * 8 + 1024;
   static_assert(SS % TILE == 0 && NT * TILE <= (ST - 1) * SS, "x tiles must fit the ring's first ST-1 slots");
-  static constexpr int OST = OBAR + 128, SMEM = OST + BM * 8 + 1024;
 };
 
 template <int NWG, bool ADALN>
@@ -100,21 +92,25 @@ gra_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUten
            const __grid_constant__ CUtensorMap mxa, const __nv_bfloat16* __restrict__ MS,
            const __nv_bfloat16* __restrict__ MB, int L, int K, int sms, int smb, float eps) {
   using C = Cfg<NWG>;
-  constexpr int ST = C::ST, SA = C::SA, SS = C::SS;
+  constexpr int ST = C::ST, SA = C::SA, SS = C::SS, BM = C::BM;
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + C::OBAR);
   uint64_t* empty = full + ST;
   uint64_t* xbar = empty + ST;
-  float2* stats = reinterpret_cast<float2*>(sm + C::OST);          // [BM] local (mean, M2) of this CTA's 192 columns
+  uint64_t* sbar = xbar + 1;                                        // the four CTAs' row statistics have landed
+  float2* stats = reinterpret_cast<float2*>(sm + C::OST);
+  float2* mrs = reinterpret_cast<float2*>(sm + C::OMR);
 
   const int tid = threadIdx.x, wg = tid >> 7;
   const uint32_t rank = cluster_rank();
-  const int n0 = rank * BN, m0 = (blockIdx.x / CL) * C::BM, nk = K / KC, t0 = m0 % L;
+  const int n0 = rank * BN, m0 = (blockIdx.x / CL) * BM, nk = K / KC, t0 = m0 % L;
 
   if (tid == 0) {
     for (int s = 0; s < ST; ++s) { mbar_init(&full[s], 1); mbar_init(&empty[s], CL * 4 * NWG); }   // every consumer warp of the cluster frees a slot
     mbar_init(xbar, 1);
+    mbar_init(sbar, 1);
+    if (ADALN) mbar_arrive_expect_tx(sbar, CL * BM * 8);
     fence_barrier_init();
   }
   __syncthreads();
@@ -131,25 +127,19 @@ gra_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUten
         mbar_wait(&empty[s], ((c / ST) & 1) ^ 1);
         mbar_arrive_expect_tx(&full[s], SS);
         // A is the same for the whole cluster: each CTA loads a quarter of the rows and multicasts it to all four
-#if MC
-        tma_load_2d_mc(sm + s * SS + rank * (SA / CL), &ma, &full[s], c * KC, m0 + rank * (C::BM / CL), (1u << CL) - 1);
-#else
-        for (int k = 0; k < CL; ++k) tma_load_2d(sm + s * SS + k * (SA / CL), &ma, &full[s], c * KC, m0 + k * (C::BM / CL));
-#endif
+        tma_load_2d_mc(sm + s * SS + rank * (SA / CL), &ma, &full[s], c * KC, m0 + rank * (BM / CL), (1u << CL) - 1);
         tma_load_2d(sm + s * SS + SA, &mw, &full[s], c * KC, n0);
       }
-      // epilogue tiles into the ring, slot by slot as the last ST chunks free it (tile t at byte t * TILE)
+      // x tiles into the ring, slot by slot as the last chunks free it (tile t at byte t * TILE)
       for (int e = 0; e < ST - 1; ++e) {
         const int cc = nk - ST + e, s = cc % ST;
         mbar_wait(&empty[s], (((cc + ST) / ST) & 1) ^ 1);
-        for (int t = s * (SS / TILE); t < (s + 1) * (SS / TILE) && t < C::NT; ++t) {
+        for (int t = s * (SS / TILE); t < (s + 1) * (SS / TILE) && t < C::NT; ++t)
           tma_load_2d(sm + t * TILE, &mx, xbar, n0 + 32 * (t % XB), m0 + 64 * (t / XB));
-        }
       }
     }
     __syncwarp();
-    cluster_arrive(); cluster_wait();
-    if (ADALN) { cluster_arrive(); cluster_wait(); }
+    cluster_arrive_relaxed(); cluster_wait();
     return;
   }
 
@@ -167,67 +157,73 @@ gra_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUten
     wgmma_commit();
     wgmma_wait<1>();
     if (c > 0 && (tid & 31) == 0)
-#if REL
 #pragma unroll
       for (int k = 0; k < CL; ++k) mbar_arrive_remote(&empty[(c - 1) % ST], k);
-#else
-      for (int k = 0; k < CL; ++k) mbar_arrive(&empty[(c - 1) % ST]);   // local only (diagnostic)
-#endif
   }
   wgmma_wait<0>();
-  if ((tid & 31) == 0)                                              // the last chunk's slot too: the epilogue tiles go there
+  if ((tid & 31) == 0)                                              // the last chunk's slot too
 #pragma unroll
     for (int k = 0; k < CL; ++k) mbar_arrive_remote(&empty[(nk - 1) % ST], k);
-  TSTAMP(2);
 #pragma unroll
   for (int j = 0; j < 3; ++j) fence_regs(acc[j]);
-  if (EPI == 0) {
-    mbar_wait(xbar, 0);
-    if (acc[0][0] + acc[1][17] + acc[2][31] == 123.25f) *reinterpret_cast<volatile float*>(sm + C::OST) = 1.f;  // keep the MMAs
-    cluster_arrive(); cluster_wait();
-    if (ADALN) { cluster_arrive(); cluster_wait(); }
-    return;
-  }
+  // Teardown barrier, arrived now and waited at the very end: peers may still arrive on our empty barriers. Relaxed:
+  // it orders nothing, and a release here would wait for outstanding memory operations.
+  cluster_arrive_relaxed();
+  TSTAMP(2);
 
   // ---- epilogue. Fragment of m64nN: warp w, lane l owns rows 16w + l/4 (+8), columns 8q + 2(l%4) + {0,1}.
   const int lane = tid & 31, warp = (tid >> 5) & 3;
   const int rr0 = warp * 16 + (lane >> 2);                          // row within this warpgroup's 64
+  const int rl0 = wg * 64 + rr0;                                    // row within the CTA tile
   const int cb = 2 * (lane & 3);
   uint8_t* smx = sm + C::OX + wg * XB * TILE;
   uint8_t* smg = sm + C::OG + wg * GB * TILE;
   mbar_wait(xbar, 0);
   TSTAMP(3);
+
+  // x += sigmoid(gl) acc, one 64-column block at a time: loads batched ahead of the stores (the compiler cannot prove
+  // they do not alias), then the block's two x boxes go out while the next block computes.
   float sum[2] = {0.f, 0.f};
 #pragma unroll
-  for (int h = 0; h < 2 && EPI != 3; ++h) {
-    const int rr = rr0 + 8 * h;
+  for (int j = 0; j < 3; ++j) {
 #pragma unroll
-    for (int j = 0; j < 3; ++j)
+    for (int h = 0; h < 2; ++h) {
+      const int rr = rr0 + 8 * h;
+      float2 xv[8]; uint32_t gv[8];
 #pragma unroll
       for (int q = 0; q < 8; ++q) {
         const int col = j * 64 + q * 8 + cb;
-        float2* px = reinterpret_cast<float2*>(smx + (col >> 5) * TILE + sw128(rr, (col & 31) * 4));
-        const float2 xv = *px;
-        const float2 g = bf2f(*reinterpret_cast<const uint32_t*>(smg + j * TILE + sw128(rr, (col & 63) * 2)));
+        xv[q] = *reinterpret_cast<const float2*>(smx + (col >> 5) * TILE + sw128(rr, (col & 31) * 4));
+        gv[q] = *reinterpret_cast<const uint32_t*>(smg + j * TILE + sw128(rr, (col & 63) * 2));
+      }
+#pragma unroll
+      for (int q = 0; q < 8; ++q) {
+        const float2 g = bf2f(gv[q]);
         float& e0 = acc[j][4 * q + 2 * h];
         float& e1 = acc[j][4 * q + 2 * h + 1];
-        e0 = xv.x + sigmoid_t(g.x) * e0;
-        e1 = xv.y + sigmoid_t(g.y) * e1;
+        e0 = xv[q].x + sigmoid_t(g.x) * e0;
+        e1 = xv[q].y + sigmoid_t(g.y) * e1;
         sum[h] += e0 + e1;
-        *px = make_float2(e0, e1);
       }
-  }
-  fence_proxy_async();
-  named_bar_sync(1 + wg, 128);
-  if (EPI != 2 && (tid & 127) == 0) {
-    for (int b = 0; b < XB; ++b) tma_store_2d(&mx, sm + C::OX + (wg * XB + b) * TILE, n0 + 32 * b, m0 + 64 * wg);
-    tma_store_commit();
+#pragma unroll
+      for (int q = 0; q < 8; ++q) {
+        const int col = j * 64 + q * 8 + cb;
+        *reinterpret_cast<float2*>(smx + (col >> 5) * TILE + sw128(rr, (col & 31) * 4)) =
+            make_float2(acc[j][4 * q + 2 * h], acc[j][4 * q + 2 * h + 1]);
+      }
+    }
+    fence_proxy_async();
+    named_bar_sync(1 + wg, 128);
+    if ((tid & 127) == 0) {
+      for (int b = 2 * j; b < 2 * j + 2; ++b) tma_store_2d(&mx, smx + b * TILE, n0 + 32 * b, m0 + 64 * wg);
+      tma_store_commit();
+    }
   }
   TSTAMP(4);
   if (!ADALN) {
     if ((tid & 127) == 0) tma_store_wait_read<0>();
     __syncwarp();
-    cluster_arrive(); cluster_wait();                               // peers may still arrive on our empty barriers
+    cluster_wait();
     return;
   }
 
@@ -247,68 +243,80 @@ gra_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUten
     m2[h] += __shfl_xor_sync(0xffffffffu, m2[h], 1);
     m2[h] += __shfl_xor_sync(0xffffffffu, m2[h], 2);
   }
-  const int rl0 = wg * 64 + rr0;
-  if ((lane & 3) == 0) { stats[rl0] = make_float2(mean[0], m2[0]); stats[rl0 + 8] = make_float2(mean[1], m2[1]); }
+  if ((lane & 3) == 0)                                              // stats[rank][row] in every CTA of the cluster
+#pragma unroll
+    for (int k = 0; k < CL; ++k) {
+      st_async_f2(&stats[rank * BM + rl0], sbar, k, mean[0], m2[0]);
+      st_async_f2(&stats[rank * BM + rl0 + 8], sbar, k, mean[1], m2[1]);
+    }
+  TSTAMP(7);
 
-  // the AdaLN operands do not depend on the stats: load them while the cluster barrier completes. (Before the arrive,
-  // its release would first wait for all of them.)
-  cluster_arrive();
-  uint32_t msv[2][24], mbv[2][24];
+  // The AdaLN phase reads xn back from shared memory, so its thread <-> column map is free: each thread takes 8-column
+  // chunks (16-B loads of ms / mb, coalesced along the row) instead of the wgmma fragment's 2-column pairs spread over
+  // 8 rows (4-B loads, 8 sectors per instruction: issuing them took 3 us). Chunk c of this warpgroup: row c / 24, col 8 (c % 24).
+  constexpr int NCH = 64 * (BN / 8) / 128;                          // 12 chunks per thread
+  const int ti = tid & 127;
+  uint4 msv[NCH], mbv[NCH];
 #pragma unroll
-  for (int h = 0; h < 2; ++h) {
-    const int tok = t0 + rl0 + 8 * h;
-    const __nv_bfloat16* sr = MS + (size_t)tok * sms + n0 + cb;
-    const __nv_bfloat16* br = MB + (size_t)tok * smb + n0 + cb;
-#pragma unroll
-    for (int i = 0; i < 24; ++i) { msv[h][i] = ldg_nc(sr + (i >> 3) * 64 + (i & 7) * 8); mbv[h][i] = ldg_nc(br + (i >> 3) * 64 + (i & 7) * 8); }
+  for (int i = 0; i < NCH; ++i) {
+    const int c = ti + 128 * i, r = c / 24, col = 8 * (c % 24);
+    const size_t tok = t0 + wg * 64 + r;
+    msv[i] = __ldg(reinterpret_cast<const uint4*>(MS + tok * sms + n0 + col));
+    mbv[i] = __ldg(reinterpret_cast<const uint4*>(MB + tok * smb + n0 + col));
   }
-  cluster_wait();
+  TSTAMP(9);
+  mbar_wait(sbar, 0);
   TSTAMP(5);
 
-  float rstd[2];
+  if ((lane & 3) == 0)
 #pragma unroll
-  for (int h = 0; h < 2; ++h) {
-    const uint32_t la = smem_u32(&stats[rl0 + 8 * h]);
-    float2 p[CL];
+    for (int h = 0; h < 2; ++h) {
+      float2 p[CL];
 #pragma unroll
-    for (int k = 0; k < CL; ++k) p[k] = ld_dsmem_f2(la, k);
-    float mu = 0.f;
+      for (int k = 0; k < CL; ++k) p[k] = stats[k * BM + rl0 + 8 * h];
+      float mu = 0.f;
 #pragma unroll
-    for (int k = 0; k < CL; ++k) mu += p[k].x;
-    mu *= 1.f / CL;
-    float M2 = 0.f;
+      for (int k = 0; k < CL; ++k) mu += p[k].x;
+      mu *= 1.f / CL;
+      float M2 = 0.f;
 #pragma unroll
-    for (int k = 0; k < CL; ++k) { const float dm = p[k].x - mu; M2 += p[k].y + float(BN) * dm * dm; }
-    mean[h] = mu;
-    rstd[h] = rsqrtf(M2 * (1.f / D_) + eps);
-  }
-  cluster_arrive();                                                 // our DSMEM reads are done; peers may exit after the wait
+      for (int k = 0; k < CL; ++k) { const float dm = p[k].x - mu; M2 += p[k].y + float(BN) * dm * dm; }
+      mrs[rl0 + 8 * h] = make_float2(mu, rsqrtf(M2 * (1.f / D_) + eps));
+    }
+  named_bar_sync(1 + wg, 128);
+  TSTAMP(10);
 
-  // xa over the gl tiles (each thread overwrites exactly the gl words it read), from xn kept in the x tiles
+  // xa over the gl tiles (gl is fully consumed: the last resgate block ended on this warpgroup's barrier)
 #pragma unroll
-  for (int h = 0; h < 2; ++h) {
-    const int rr = rr0 + 8 * h;
+  for (int i = 0; i < NCH; ++i) {
+    const int c = ti + 128 * i, r = c / 24, col = 8 * (c % 24);
+    const float2 mr = mrs[wg * 64 + r];
+    const int g = (col & 31) >> 2;                                  // first 16-B granule of the chunk in its fp32 box
+    const uint8_t* xrow = smx + (col >> 5) * TILE + r * 128;
+    const float4 x0 = *reinterpret_cast<const float4*>(xrow + ((g ^ (r & 7)) << 4));
+    const float4 x1 = *reinterpret_cast<const float4*>(xrow + (((g + 1) ^ (r & 7)) << 4));
+    const float xs[8] = {x0.x, x0.y, x0.z, x0.w, x1.x, x1.y, x1.z, x1.w};
+    const uint32_t sw[4] = {msv[i].x, msv[i].y, msv[i].z, msv[i].w}, bw[4] = {mbv[i].x, mbv[i].y, mbv[i].z, mbv[i].w};
+    uint32_t o[4];
 #pragma unroll
-    for (int j = 0; j < 3; ++j)
-#pragma unroll
-      for (int q = 0; q < 8; ++q) {
-        const int col = j * 64 + q * 8 + cb;
-        const float2 xv = *reinterpret_cast<const float2*>(smx + (col >> 5) * TILE + sw128(rr, (col & 31) * 4));
-        const float2 s = bf2f(msv[h][j * 8 + q]);
-        const float2 b = bf2f(mbv[h][j * 8 + q]);
-        const float o0 = (xv.x - mean[h]) * rstd[h] * sigmoid_t(s.x) + b.x;
-        const float o1 = (xv.y - mean[h]) * rstd[h] * sigmoid_t(s.y) + b.y;
-        __nv_bfloat162 o = __floats2bfloat162_rn(o0, o1);
-        *reinterpret_cast<__nv_bfloat162*>(smg + j * TILE + sw128(rr, (col & 63) * 2)) = o;
-      }
+    for (int e = 0; e < 4; ++e) {
+      const float2 sc = bf2f(sw[e]), sh = bf2f(bw[e]);
+      const float o0 = (xs[2 * e] - mr.x) * mr.y * sigmoid_t(sc.x) + sh.x;
+      const float o1 = (xs[2 * e + 1] - mr.x) * mr.y * sigmoid_t(sc.y) + sh.y;
+      __nv_bfloat162 v = __floats2bfloat162_rn(o0, o1);
+      o[e] = *reinterpret_cast<uint32_t*>(&v);
+    }
+    *reinterpret_cast<uint4*>(smg + (col >> 6) * TILE + r * 128 + ((((col & 63) >> 3) ^ (r & 7)) << 4)) = make_uint4(o[0], o[1], o[2], o[3]);
   }
+  TSTAMP(11);
   fence_proxy_async();
   named_bar_sync(1 + wg, 128);
-  if (EPI != 2 && (tid & 127) == 0) {
-    for (int b = 0; b < GB; ++b) tma_store_2d(&mxa, sm + C::OG + (wg * GB + b) * TILE, n0 + 64 * b, m0 + 64 * wg);
+  if ((tid & 127) == 0) {
+    for (int b = 0; b < GB; ++b) tma_store_2d(&mxa, smg + b * TILE, n0 + 64 * b, m0 + 64 * wg);
     tma_store_commit();
     tma_store_wait_read<0>();
   }
+  TSTAMP(13);
   __syncwarp();
   cluster_wait();
   TSTAMP(6);
@@ -400,7 +408,7 @@ void gemm_resgate_adaln(torch::Tensor a, torch::Tensor w, torch::Tensor x, torch
 }
 
 torch::Tensor debug_times() {
-  auto t = torch::zeros({1024, 8}, torch::kInt64);
+  auto t = torch::zeros({1024, 16}, torch::kInt64);
 #ifdef GRA_TIMES
   cudaMemcpyFromSymbol(t.data_ptr(), g_times, sizeof(g_times));
 #endif

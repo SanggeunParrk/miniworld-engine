@@ -144,7 +144,7 @@ with torch.no_grad():
     print(f"L={L} S={S} {NB} blocks bf16, per block")
     print(f"  FusedTokenDiT.step (v6)        {t_pkg / NB:7.1f} us")
     for name, kw in (("base", {}), ("base", dict(gra=True)), ("base", dict(rows=False)), ("base", dict(core=False)),
-                     ("streams 3+2", {}), ("streams 2+2+1", {}), ("streams 1x5", {})):
+                     ):
         out = step(name, **kw).clone().float()
         tag = name + ("  -rows (upper bound)" if kw.get("rows") is False else "") + ("  -core" if kw.get("core") is False else "") + ("  +gemm_resgate_adaln" if kw.get("gra") else "")
         d = float((out - ref).norm() / ref.norm())

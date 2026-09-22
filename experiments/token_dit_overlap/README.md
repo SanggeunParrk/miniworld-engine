@@ -41,6 +41,7 @@ Kernel latency, H100, CUDA graph (`gra/bench_gra.py`):
 | mm + resgate_adaln_rows | **20.1** | **25.7** | **11.9** | **15.0** |
 | gra v1 (plain loads after the mainloop) | 28.0 | 37.8 | 20.1 | 28.3 |
 | gra v3 (b3b56d37), best of 1/2 warpgroups | 25.4 | 33.1 | 17.4 | 21.9 |
+| gra v4 (st.async stats, 16-B AdaLN chunks) | 22.3 | 31.0 | 14.1 | 18.3 |
 
 Per-CTA `%globaltimer` stamps (`gra/times.py`, build with `GRA_DEFS=GRA_TIMES`) show where v3's time goes. At L768 Wo:
 mainloop 9.5 us (cuBLAS parity), x in smem +1 us, resgate + x store 3.1, row stats + cluster barrier 5.3, AdaLN + xa
@@ -71,3 +72,26 @@ Accuracy is measured against the IEEE fp32 PyTorch reference, with bench.py's se
 | bf16 | 170.0 us | 87.8 us | 1.1e-2 (the engine bf16 path's error) |
 
 It gains 3-5 % and gives back the 2.5x accuracy margin over the engine that the fp32 residual buys.
+
+### v4: every in-kernel stall removed, still behind
+
+Fine stamps (`gra/times2.py`) found three more stalls, all fixed in v4:
+- The `barrier.cluster.arrive.release` for the row stats took 2 us: a release waits for the thread's outstanding
+  memory operations. The stats are now pushed into the four CTAs with `st.async ... mbarrier::complete_tx`, and the merge
+  reads local shared memory. The only cluster barrier left is a relaxed teardown barrier.
+- Issuing the ms / mb loads in the wgmma fragment's layout took 3 us: 4-B loads over 8 rows, 8 sectors per instruction,
+  L1-wavefront bound. The AdaLN phase reads xn from shared memory, so its thread <-> column map is free; it now takes
+  8-column chunks with 16-B loads (1.5 us, issued before the x store stream).
+- Shared-memory loads serialized behind stores the compiler could not prove disjoint. They are now batched per 64-column block.
+
+In-kernel timeline, L768 Wo: mainloop 8.7, x ready 10.0, resgate 12.5, stats 13.1, ms/mb issued 14.6, AdaLN 16.9,
+end 17.9 us. The op still measures 22.3 against 20.1 for mm + rows. The rest is the tail: launch, plus the
+17.7 MB of x + xa stores draining after the last CTA. In the 24-block step (`probe.py`) it is 185.2 vs 178.9 us per
+block at L768, and 101.6 vs 89.4 at L384.
+
+**Verdict.** In a one-wave kernel, memory time and compute time add. The mainloop is ~9 us of tensor work that touches
+no HBM. The ~30 MB of epilogue traffic (x read + write, xa write) needs ~9 us at HBM speed, so the floor is ~18 us
+against the baseline's 20. The baseline's two kernels have the same total traffic, less y, which is L2-resident. Only
+overlapping one tile's epilogue with another's mainloop can beat that: a persistent ping-pong over 64-row tiles. It
+re-reads W per tile, and L384 has one tile per CTA, so the estimate is ~3-4 % per block at L768 and nothing at L384.
+Not pursued.
