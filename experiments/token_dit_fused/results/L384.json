@@ -1,0 +1,28 @@
+{
+ "length": 384,
+ "samples": 5,
+ "blocks": 24,
+ "device": "NVIDIA H100 80GB HBM3",
+ "step_us": {
+  "engine MINIWORLD": 6565.586853027344,
+  "fused v4 (v3 + pre-scaled logits)": 2287.5904083251953,
+  "fused v3, logits not pre-scaled": 2311.5903854370117,
+  "fused v2, engine attention core": 2410.6624603271484,
+  "fused v1 (AdaLN in Triton GEMM)": 4258.6944580078125,
+  "Anthropic composed": 3788.390350341797,
+  "Anthropic composed, hoisted": 3180.8128356933594
+ },
+ "rel_rms": {
+  "engine MINIWORLD": 0.011319911107420921,
+  "fused v4 (v3 + pre-scaled logits)": 0.004651269409805536,
+  "fused v3, logits not pre-scaled": 0.004649309441447258,
+  "fused v2, engine attention core": 0.0046493797563016415,
+  "fused v1 (AdaLN in Triton GEMM)": 0.004465475678443909,
+  "Anthropic composed": 0.0041944244876503944,
+  "Anthropic composed, hoisted": 0.0041944244876503944
+ },
+ "once_per_sample_us": {
+  "fused hoist (all blocks' pair bias)": 75.01440048217773,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 513.4975910186768
+ }
+}
