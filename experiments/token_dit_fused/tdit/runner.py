@@ -45,7 +45,11 @@ def attention_in_place(q, k, v, bias, mask, m, key):
 
 
 class FusedTokenDiT:
-    def __init__(self, blocks, dtype=torch.bfloat16, core="gated", prescale=True):
+    def __init__(self, blocks, dtype=torch.bfloat16, core="gated", prescale=True, core_precision="tf32"):
+        """``dtype`` is the activation / weight dtype of the whole path: bf16, or fp32 (MiniWorld's v1 diffusion recipe).
+        The residual stream is fp32 either way. fp32 GEMMs follow ``torch.backends.cuda.matmul.allow_tf32`` -- the caller's
+        policy, as for any torch matmul -- and ``core_precision`` sets the attention core's MMA precision for fp32."""
+        self.core_precision = core_precision
         self.prescale = prescale     # fold sm_scale*log2(e) into Wq,bq and log2(e) into the pair-bias weights (gated core only)
         self.core = core            # "gated": tdit.attn (sample-fastest grid, gate epilogue); "engine": the engine kernel + gate pass
         blocks = list(blocks)
@@ -132,6 +136,7 @@ class FusedTokenDiT:
     # ------------------------------------------------------------------ once per solver step
     def step_v1(self, single, cond, bias, out_dtype=None):
         """v1: AdaLN in the GEMM prologue (Triton). Kept as the measured negative result; see kernels.py v2 note."""
+        assert self.dtype == torch.bfloat16, "v1 kernels are bf16-only"
         S, B, L, D = single.shape
         assert B == 1
         M = S * L
@@ -183,7 +188,7 @@ class FusedTokenDiT:
         for b, p in enumerate(self.per):
             torch.addmm(p["bqkvg"], xa, p["wqkvg"].t(), out=qkvg)
             if self.core == "gated":
-                attention_gated_in_place(q4, k4, v4, g4, bias[b * H:(b + 1) * H], keep2, self.prescale)   # sigmoid(g)*o over q
+                attention_gated_in_place(q4, k4, v4, g4, bias[b * H:(b + 1) * H], keep2, self.prescale, self.core_precision)   # sigmoid(g)*o over q
                 torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
             else:
                 attention_in_place(q, k, v, bias[b * H:(b + 1) * H].unsqueeze(0), buf["keep"], buf["lse"], key)

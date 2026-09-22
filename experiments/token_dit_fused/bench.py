@@ -30,9 +30,12 @@ p.add_argument("--samples", type=int, default=5)
 p.add_argument("--rounds", type=int, default=5)
 p.add_argument("--reps", type=int, default=5)
 p.add_argument("--no-anthropic", action="store_true")
+p.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16",
+               help="activation / weight dtype of every fast path; fp32 runs its GEMMs in TF32, MiniWorld's v1 diffusion recipe")
 p.add_argument("--save", default="")
 a = p.parse_args()
-L, S, NB, dev, bf = a.length, a.samples, a.blocks, "cuda", torch.bfloat16
+L, S, NB, dev = a.length, a.samples, a.blocks, "cuda"
+bf = torch.float32 if a.dtype == "fp32" else torch.bfloat16      # the path dtype (named bf for history: it is fp32 with --dtype fp32)
 DS, DC, DP, H, D = 768, 384, 128, 16, 48
 torch.backends.cuda.matmul.allow_tf32 = False
 
@@ -112,8 +115,10 @@ with torch.no_grad():
     for blk in ref_blocks:
         x = blk(x, cond, pair)
     ref = x
-rec = {"length": L, "samples": S, "blocks": NB, "device": torch.cuda.get_device_name(), "step_us": {}, "rel_rms": {},
-       "once_per_sample_us": {}}
+if a.dtype == "fp32":
+    torch.backends.cuda.matmul.allow_tf32 = True                   # the reference above is IEEE fp32; the fast paths run TF32
+rec = {"length": L, "samples": S, "blocks": NB, "dtype": a.dtype, "device": torch.cuda.get_device_name(), "step_us": {},
+       "rel_rms": {}, "once_per_sample_us": {}}
 
 
 def report(name, us, out=None):
@@ -124,7 +129,7 @@ def report(name, us, out=None):
     print(f"  {name:<34s} {us:10.1f} us/step  {us / NB:7.1f} us/block{e}", flush=True)
 
 
-print(f"\n[token DiT] {NB} blocks, S={S}, L={L}, bf16, one sampling step", flush=True)
+print(f"\n[token DiT] {NB} blocks, S={S}, L={L}, {a.dtype}{' (TF32 GEMMs, IEEE reference)' if a.dtype == 'fp32' else ''}, one sampling step", flush=True)
 
 with torch.no_grad():
     def engine():
@@ -135,10 +140,12 @@ with torch.no_grad():
     out = engine().clone()
     report("engine MINIWORLD", time_us(engine), out)
 
-    fused = FusedTokenDiT(bf_blocks)
+    fused = FusedTokenDiT(bf_blocks, dtype=bf)
     bias = fused.hoist(z_bf)
     out = fused.step(s_bf, c_bf, bias).clone()
     report("fused v4 (v3 + pre-scaled logits)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)
+if a.dtype == "bf16":
+  with torch.no_grad():
     unscaled = FusedTokenDiT(bf_blocks, prescale=False)
     bias_u = unscaled.hoist(z_bf)
     out = unscaled.step(s_bf, c_bf, bias_u).clone()
@@ -147,12 +154,12 @@ with torch.no_grad():
     out = unscaled.step(s_bf, c_bf, bias_u).clone()
     report("fused v2, engine attention core", time_us(lambda: unscaled.step(s_bf, c_bf, bias_u)), out)
     del unscaled, bias_u
-    out = unscaled_v1 = None
     v1 = FusedTokenDiT(bf_blocks, prescale=False)
     bias_v1 = v1.hoist(z_bf)
     out = v1.step_v1(s_bf, c_bf, bias_v1).clone()
     report("fused v1 (AdaLN in Triton GEMM)", time_us(lambda: v1.step_v1(s_bf, c_bf, bias_v1)), out)
     del v1, bias_v1
+with torch.no_grad():
     rec["once_per_sample_us"]["fused hoist (all blocks' pair bias)"] = time_us(lambda: fused.hoist(z_bf))
 
 # ------------------------------------------------------------------ Anthropic composition over the same bf16 weights
@@ -180,7 +187,7 @@ if not a.no_anthropic:
     c = cond1.reshape(-1, DC).to(bf)
 
     def anth_hoist():
-        return [ln_proj.pair_bias(z_bf, pk["packed"], out_layout="bhij")[0] for pk in packs]
+        return [ln_proj.pair_bias(z_bf, pk["packed"], out_layout="bhij", out_dtype=bf)[0] for pk in packs]
 
     def anthropic(biases=None):
         res.copy_(s_bf.reshape(M, DS))
@@ -189,7 +196,7 @@ if not a.no_anthropic:
             xa = dk.adaln(res, F.linear(cn, pk["ws_a"], pk["bs_a"]), F.linear(cn, pk["wb_a"]), bf)
             qkvg = F.linear(xa, pk["wqkvg"], pk["bqkvg"]).view(S, L, 4 * DS)
             q, k, v, g = (qkvg[:, :, i * DS:(i + 1) * DS].unflatten(2, (H, D)) for i in range(4))
-            bias_b = biases[b] if biases is not None else ln_proj.pair_bias(z_bf, pk["packed"], out_layout="bhij")[0]
+            bias_b = biases[b] if biases is not None else ln_proj.pair_bias(z_bf, pk["packed"], out_layout="bhij", out_dtype=bf)[0]
             o = apb_views(q, k, v, bias_b, g, scale=D ** -0.5)
             o2 = F.linear(o.reshape(M, DS), pk["wo"])
             gl_a = F.linear(c, pk["wsc_a"], pk["bsc_a"])

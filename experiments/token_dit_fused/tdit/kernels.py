@@ -202,13 +202,13 @@ def _pair_bias_all_kernel(Z, WT, OUT, L, sz, eps, C: tl.constexpr, NB: tl.conste
     z = tl.load(Z + rowz[:, None] * sz + cs[None, :], mask=jm[:, None], other=0.0).to(tl.float32)
     mean = tl.sum(z, 1) / C
     d = z - mean[:, None]
-    zh = (d * (1.0 / tl.sqrt(tl.sum(d * d, 1) / C + eps))[:, None]).to(tl.bfloat16)
+    zh = (d * (1.0 / tl.sqrt(tl.sum(d * d, 1) / C + eps))[:, None]).to(WT.dtype.element_ty)
     LL = L.to(tl.int64) * L
     for n0 in tl.static_range(0, NB, BN):
         ns = n0 + tl.arange(0, BN)
         nm = ns < NB                                   # a short stack (NB < BN) or NB not a multiple of BN
         acc = tl.dot(zh, tl.load(WT + cs[:, None] * NB + ns[None, :], mask=nm[None, :], other=0.0))
-        tl.store(OUT + ns[None, :].to(tl.int64) * LL + i * L + js[:, None], acc.to(tl.bfloat16),
+        tl.store(OUT + ns[None, :].to(tl.int64) * LL + i * L + js[:, None], acc.to(OUT.dtype.element_ty),
                  mask=jm[:, None] & nm[None, :])
 
 
@@ -246,7 +246,7 @@ def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, D: tl.constexpr,
     rstd = 1.0 / tl.sqrt(tl.sum(d * d, 1) / D + eps)
     ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
     mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
-    tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(tl.bfloat16), mask=mk)
+    tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
 
 
 def adaln_rows(x, ms, mb, out, L, eps=1e-5):
@@ -278,7 +278,7 @@ def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, sm
         rstd = 1.0 / tl.sqrt(tl.sum(d * d, 1) / D + eps)
         ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
         mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
-        tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(tl.bfloat16), mask=mk)
+        tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
 
 
 def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5):
@@ -299,7 +299,7 @@ def _gate_rows_kernel(O, G, OUT, M, so, sg, D: tl.constexpr, DP: tl.constexpr, B
     r64 = rows[:, None].to(tl.int64)
     o = tl.load(O + r64 * so + cs[None, :], mask=mk, other=0.0).to(tl.float32)
     g = tl.load(G + r64 * sg + cs[None, :], mask=mk, other=0.0).to(tl.float32)
-    tl.store(OUT + r64 * D + cs[None, :], (o * tl.sigmoid(g)).to(tl.bfloat16), mask=mk)
+    tl.store(OUT + r64 * D + cs[None, :], (o * tl.sigmoid(g)).to(OUT.dtype.element_ty), mask=mk)
 
 
 def gate_rows(o, g, out):
@@ -317,7 +317,7 @@ def _swiglu_rows_kernel(AB, OUT, M, sab, N: tl.constexpr, NP: tl.constexpr, BR: 
     r64 = rows[:, None].to(tl.int64)
     a = tl.load(AB + r64 * sab + cs[None, :], mask=mk, other=0.0).to(tl.float32)
     b = tl.load(AB + r64 * sab + N + cs[None, :], mask=mk, other=0.0).to(tl.float32)
-    tl.store(OUT + r64 * N + cs[None, :], (a * tl.sigmoid(a) * b).to(tl.bfloat16), mask=mk)
+    tl.store(OUT + r64 * N + cs[None, :], (a * tl.sigmoid(a) * b).to(OUT.dtype.element_ty), mask=mk)
 
 
 def swiglu_rows(ab, out):

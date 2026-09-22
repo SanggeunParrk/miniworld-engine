@@ -1,0 +1,23 @@
+{
+ "length": 384,
+ "samples": 5,
+ "blocks": 24,
+ "dtype": "fp32",
+ "device": "NVIDIA H100 80GB HBM3",
+ "step_us": {
+  "engine MINIWORLD": 9845.721435546875,
+  "fused v4 (v3 + pre-scaled logits)": 4335.6353759765625,
+  "Anthropic composed": 6706.015777587891,
+  "Anthropic composed, hoisted": 5349.785614013672
+ },
+ "rel_rms": {
+  "engine MINIWORLD": 0.0019046204397454858,
+  "fused v4 (v3 + pre-scaled logits)": 0.00036095926770940423,
+  "Anthropic composed": 0.00037996776518411934,
+  "Anthropic composed, hoisted": 0.00037996776518411934
+ },
+ "once_per_sample_us": {
+  "fused hoist (all blocks' pair bias)": 186.76480054855347,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 1285.433578491211
+ }
+}

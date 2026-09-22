@@ -23,13 +23,13 @@ def _cfgs():
 
 
 # restore_value: the output overwrites q, and autotuning runs the kernel once per config.
-@triton.autotune(configs=_cfgs(), key=["N_CTX", "H", "HEAD_DIM"], restore_value=["Q"])
+@triton.autotune(configs=_cfgs(), key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"])
 @triton.jit
 def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
                     stride_qz, stride_qm, stride_qh, stride_qk,
                     stride_bh, stride_bm, stride_bn, stride_mz,
                     H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
-                    D1: tl.constexpr, D2: tl.constexpr, PRESCALED: tl.constexpr,
+                    D1: tl.constexpr, D2: tl.constexpr, PRESCALED: tl.constexpr, PREC: tl.constexpr,
                     BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr):
     off_z = tl.program_id(0).to(tl.int64)          # sample: fastest, so the S readers of one bias tile are adjacent
     start_m = tl.program_id(1).to(tl.int64)
@@ -64,15 +64,15 @@ def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
         kk2 = tl.load(kb + k2[:, None] * stride_qk, mask=nk, other=0.0)
         v1 = tl.load(vb + k1[None, :] * stride_qk, mask=nv, other=0.0)
         v2 = tl.load(vb + k2[None, :] * stride_qk, mask=nv, other=0.0)
-        qk = tl.dot(q1, kk1)
+        qk = tl.dot(q1, kk1, input_precision=PREC)
         if PRESCALED:
             # q carries sm_scale*log2(e) and the bias carries log2(e), both folded into weights when they were
             # packed: the logits are already in the exp2 domain, no per-element scale or bias division
-            qk = tl.dot(q2, kk2, qk) + bias_val
+            qk = tl.dot(q2, kk2, qk, input_precision=PREC) + bias_val
             m_ij = tl.maximum(tl.maximum(m_i, tl.max(qk, 1)), -1e38)
             qk = qk - m_ij[:, None]
         else:
-            qk = tl.dot(q2, kk2, qk) + bias_val / (qk_scale / 1.44269504)
+            qk = tl.dot(q2, kk2, qk, input_precision=PREC) + bias_val / (qk_scale / 1.44269504)
             m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
             m_ij = tl.maximum(m_ij, -1e38)
             qk = qk * qk_scale - m_ij[:, None]
@@ -80,8 +80,8 @@ def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
         alpha = tl.math.exp2(m_i - m_ij)
         l_i = l_i * alpha + tl.sum(p, 1)
         pb = p.to(v1.dtype)
-        acc1 = tl.dot(pb, v1, acc1 * alpha[:, None])
-        acc2 = tl.dot(pb, v2, acc2 * alpha[:, None])
+        acc1 = tl.dot(pb, v1, acc1 * alpha[:, None], input_precision=PREC)
+        acc2 = tl.dot(pb, v2, acc2 * alpha[:, None], input_precision=PREC)
         m_i = m_ij
         b_ptr += BLOCK_M2 * stride_bn
         kb += BLOCK_M2 * stride_qm
@@ -93,8 +93,11 @@ def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
     tl.store(qrow + k2[None, :] * stride_qk, (acc2 * inv[:, None] * tl.sigmoid(g2)).to(Q.dtype.element_ty), mask=mrow)
 
 
-def attention_gated_in_place(q, k, v, g, bias, mask, prescaled=False):
-    """q, k, v, g: [S, L, H, D] views with identical strides; bias [H, L, L]; mask [S, L] bool. Writes sigmoid(g)*o over q."""
+def attention_gated_in_place(q, k, v, g, bias, mask, prescaled=False, precision="tf32"):
+    """q, k, v, g: [S, L, H, D] views with identical strides; bias [H, L, L]; mask [S, L] bool. Writes sigmoid(g)*o over q.
+
+    ``precision`` is the MMA precision for fp32 operands ("tf32" -- MiniWorld's fp32 recipe runs TF32 --, "tf32x3" or
+    "ieee"); bf16 operands ignore it."""
     S, L, H, D = q.shape
     assert k.stride() == q.stride() and v.stride() == q.stride() and g.stride() == q.stride()
     d1 = 1 << (D.bit_length() - 1)                    # largest power of two <= D
@@ -104,5 +107,5 @@ def attention_gated_in_place(q, k, v, g, bias, mask, prescaled=False):
     grid = lambda c: (S, triton.cdiv(L, c["BLOCK_M1"]), H)
     _attn_fwd_gated[grid](q, k, v, g, bias, mask, D ** -0.5, *q.stride(), *bias.stride(), mask.stride(0),
                           H=H, N_CTX=L, HEAD_DIM=D, HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)), D1=d1, D2=d2,
-                          PRESCALED=prescaled)
+                          PRESCALED=prescaled, PREC=precision)
     return q
