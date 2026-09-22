@@ -127,6 +127,20 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return True
 
 
+def _is_fake(*tensors) -> bool:
+    """True under FakeTensorMode, where the launch must not be entered.
+
+    `dev derive` runs every module under FakeTensorMode with ``compile_wrap="disable"``, so an
+    opaque op's BODY runs on fake tensors. It intercepts Triton launches and records them; it
+    cannot intercept a native extension, which then reads a data pointer that does not exist
+    ("the tensor has a non-zero number of elements, but its data is not allocated yet"). That
+    failed all 504 Transition units and 234 Pairformer units of the sm90 plan. This path has no
+    autotuned Triton kernel, so recording nothing for it is the correct derivation.
+    """
+    from torch._subclasses.fake_tensor import FakeTensor
+    return any(isinstance(t, FakeTensor) for t in tensors)
+
+
 def _fwd_launch_fake(x, gamma, beta, wa, wb, wst, eps, save):
     """Output structure only. It may branch on ``save`` -- a compile-time argument -- and on
     nothing the GPU decides."""
@@ -143,6 +157,8 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The launch, split out of the autograd Function so Dynamo can trace up to it and past it.
     Returns (out, xn, rstd, c1), all freshly allocated."""
+    if _is_fake(x, wa):
+        return _fwd_launch_fake(x, gamma, beta, wa, wb, wst, eps, save)
     return tuple(_ext_for(x, save).transition_fused_fwd(x, gamma, beta, wa, wb, wst, eps, save))
 
 
@@ -159,6 +175,8 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                            torch.Tensor]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
+    if _is_fake(dy, x):
+        return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
     return tuple(_ext_for(x).transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws))
 
 
