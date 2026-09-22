@@ -176,3 +176,20 @@ Measured and dropped:
   against 17.3 / 51.0 for `tdit.attn` v2 (and 16.9 / 54.0 for Anthropic's apb). The v2 core is the fastest available.
 - **FA4 via torch flex_attention (FLASH backend)**: does not run -- inductor's generated score_mod lacks the `seqlen_info`
   argument FA4 4.0.0b19 passes.
+
+## Attention core: how much is left
+
+The bound a hand-written core would chase is FA4's own sm90 kernel (FA3-class: warp-specialised, softmax / wgmma
+ping-pong) at the same shape. It has no plain bias input, so the comparison splits the core's cost into structure and
+bias (`bench_fa4.py`, bf16, S=5, 16 x 48):
+
+| | L384 | L768 |
+|---|---:|---:|
+| `tdit.attn` v2, bias + gate | 17.2 us | 48.7 us |
+| `tdit.attn` v2, bias load removed (ablation `_has_bias=False`) | 15.3 us | 40.6 us |
+| FA4 sm90, no bias | 15.9 us | 34.9 us |
+
+Without the bias the Triton core ties FA4 at L384 and trails it by 5.7 us at L768; the bias costs it 1.9 / 8.1 us. A CUDA
+core could therefore save at most the structural 5.7 us plus part of the bias cost -- about 8-9 us a block at L768 (5 %)
+and 1-2 us at L384. Not pursued: the core is at the practical floor for its cost.
+

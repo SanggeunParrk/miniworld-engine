@@ -131,7 +131,8 @@ def _cfgs2():
 def _attn_fwd_gated2(Q, K, V, G, Bdesc, brow0,
                      stride_qz, stride_qm, stride_qh, stride_qk,
                      H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr, D1: tl.constexpr, D2: tl.constexpr,
-                     EVEN: tl.constexpr, PREC: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr):
+                     EVEN: tl.constexpr, PREC: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr,
+                     HAS_BIAS: tl.constexpr = True):
     off_z = tl.program_id(0).to(tl.int64)
     start_m = tl.program_id(1)
     off_h = tl.program_id(2)
@@ -166,7 +167,10 @@ def _attn_fwd_gated2(Q, K, V, G, Bdesc, brow0,
         qk = tl.dot(q1, tl.trans(kk1), input_precision=PREC)
         qk = tl.dot(q2, tl.trans(kk2), qk, input_precision=PREC)
         # logits already in the exp2 domain: sm_scale*log2(e) is folded into q, log2(e) into the bias
-        sc = qk + Bdesc.load([brow, start_n]).to(tl.float32)
+        if HAS_BIAS:
+            sc = qk + Bdesc.load([brow, start_n]).to(tl.float32)
+        else:                                      # ablation only: what the bias costs this kernel
+            sc = qk
         if not EVEN:
             sc = tl.where(((start_n + offset_n) < N_CTX)[None, :], sc, -float("inf"))
         m_new = tl.maximum(tl.maximum(m_i, tl.max(sc, 1)), -1e38)
@@ -204,7 +208,7 @@ def bias_descriptor(bias_all):
     return TensorDescriptor(bias_all, [NBH * L, L], [L, 1], [64, 64])
 
 
-def attention_gated_in_place2(q, k, v, g, bdesc, block, precision="tf32"):
+def attention_gated_in_place2(q, k, v, g, bdesc, block, precision="tf32", _has_bias=True):
     """As ``attention_gated_in_place`` with pre-scaled logits, the key mask already folded into the bias, and the bias
     read through ``bdesc`` (``bias_descriptor``) at block ``block``'s head rows."""
     S, L, H, D = q.shape
@@ -214,5 +218,5 @@ def attention_gated_in_place2(q, k, v, g, bdesc, block, precision="tf32"):
     assert d2 >= 16 and d2 & (d2 - 1) == 0, f"head dim {D} is not a power of two plus a power of two >= 16"
     grid = lambda c: (S, triton.cdiv(L, c["BLOCK_M1"]), H)
     _attn_fwd_gated2[grid](q, k, v, g, bdesc, block * H * L, *q.stride(), H=H, N_CTX=L, HEAD_DIM=D, D1=d1, D2=d2,
-                           EVEN=(L % 128 == 0), PREC=precision)
+                           EVEN=(L % 128 == 0), PREC=precision, HAS_BIAS=_has_bias)
     return q
