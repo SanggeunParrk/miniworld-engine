@@ -372,12 +372,16 @@ def trimul_parity_f567_sm90():
 
 
 def trimul_parity_dual_bwd_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import input_dual_bwd_sm90
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import (
+        input_dual_bwd_sm90,
+    )
     input_dual_bwd_sm90(*_dual_operands())
 
 
 def trimul_parity_front_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_front import bidir_front_sm90
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_front import (
+        bidir_front_sm90,
+    )
     args = (_x(), _w(2 * D), _w(2 * D), _w(2 * D), _w(2 * D))
     mask = (torch.rand(M, device=dev()) > .2).to(BF16)
     for save in (False, True):

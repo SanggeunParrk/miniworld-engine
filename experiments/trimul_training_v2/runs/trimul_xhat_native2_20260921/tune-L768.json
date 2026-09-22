@@ -1,0 +1,1570 @@
+[
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      2,
+      1,
+      0,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      2,
+      1,
+      0,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      2,
+      1,
+      1,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      2,
+      1,
+      1,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      4,
+      1,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.3119995594025,
+      "candidate": 564.8639798164368
+    },
+    "ratio": 1.0245813264863903
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      4,
+      1,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 553.600013256073,
+      "candidate": 564.6879971027374
+    },
+    "ratio": 1.0200288720757953
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      4,
+      1,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 552.6880025863647,
+      "candidate": 563.3279979228973
+    },
+    "ratio": 1.0192513593324652
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      4,
+      1,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 552.2720217704773,
+      "candidate": 566.3839876651764
+    },
+    "ratio": 1.0255525634803278
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      6,
+      1,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.8480072021484,
+      "candidate": 567.328006029129
+    },
+    "ratio": 1.0299175064836583
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      6,
+      1,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 552.8479814529419,
+      "candidate": 572.8319883346558
+    },
+    "ratio": 1.0361473814721975
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      6,
+      1,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.9039888381958,
+      "candidate": 567.8719878196716
+    },
+    "ratio": 1.032674792956926
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      6,
+      1,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 552.8640151023865,
+      "candidate": 574.2399990558624
+    },
+    "ratio": 1.0386640898476949
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      8,
+      1,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 552.5279939174652,
+      "candidate": 584.3520164489746
+    },
+    "ratio": 1.0575971224659129
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      8,
+      1,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.6080090999603,
+      "candidate": 587.2800052165985
+    },
+    "ratio": 1.066602729184022
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      8,
+      1,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.9919822216034,
+      "candidate": 584.1279923915863
+    },
+    "ratio": 1.0601388245912007
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      64,
+      8,
+      1,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 552.4320006370544,
+      "candidate": 585.3280127048492
+    },
+    "ratio": 1.059547622204832
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      1,
+      0,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      1,
+      0,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      1,
+      1,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      1,
+      1,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      2,
+      0,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      2,
+      0,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      2,
+      1,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      2,
+      2,
+      1,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=2, BJ_=64, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      1,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.3119955062866,
+      "candidate": 548.6399829387665
+    },
+    "ratio": 0.9987766286317837
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      1,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.4880080223083,
+      "candidate": 550.1120090484619
+    },
+    "ratio": 1.0011356044482198
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      1,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.9999821186066,
+      "candidate": 557.6799809932709
+    },
+    "ratio": 1.013963634771552
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      1,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.8400073051453,
+      "candidate": 550.7679879665375
+    },
+    "ratio": 0.9980573729261804
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      2,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.7040023803711,
+      "candidate": 572.2079873085022
+    },
+    "ratio": 1.0390481725848768
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      2,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.391988992691,
+      "candidate": 549.2640137672424
+    },
+    "ratio": 0.9961407215412468
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      2,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.6320128440857,
+      "candidate": 574.7359991073608
+    },
+    "ratio": 1.045674170493407
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      4,
+      2,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.2479841709137,
+      "candidate": 553.4879863262177
+    },
+    "ratio": 1.0040635108329203
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      1,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.5839755535126,
+      "candidate": 572.4639892578125
+    },
+    "ratio": 1.03785464159532
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      1,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.8720109462738,
+      "candidate": 570.8160102367401
+    },
+    "ratio": 1.0380888622689193
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      1,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 548.7200021743774,
+      "candidate": 571.2000131607056
+    },
+    "ratio": 1.040968091006794
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      1,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.2640137672424,
+      "candidate": 569.3760216236115
+    },
+    "ratio": 1.0366162853423195
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      2,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.456000328064,
+      "candidate": 609.5840036869049
+    },
+    "ratio": 1.1094318804834968
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      2,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.9999821186066,
+      "candidate": 566.5279924869537
+    },
+    "ratio": 1.030050928919454
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      2,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 552.6240170001984,
+      "candidate": 611.2639904022217
+    },
+    "ratio": 1.106111880045203
+  },
+  {
+    "scope": "k3",
+    "config": [
+      2,
+      64,
+      6,
+      2,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.8480072021484,
+      "candidate": 572.1920132637024
+    },
+    "ratio": 1.0387475415767842
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      1,
+      0,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      1,
+      0,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      1,
+      1,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      1,
+      1,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=1]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      2,
+      0,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      2,
+      0,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      2,
+      1,
+      0
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      2,
+      2,
+      1,
+      1
+    ],
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu(122): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(172): error: static assertion failed with \"streamed ring: two blocks (gate + projection each) in flight\"\n    static_assert(W_RESIDENT || NSLOT >= 4, \"streamed ring: two blocks (gate + projection each) in flight\");\n    ^\n          detected during:\n            instantiation of class \"tmn::K3Cfg<CZ_, CH_, MODE_, BI_, BJ_, NSLOT_, NACC_> [with CZ_=128, CH_=256, MODE_=0, BI_=1, BJ_=128, NSLOT_=2, NACC_=2]\" at line 121 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n            instantiation of \"void tmn::sm90::infer_k3_body<G,LNM,UPD>(const tmn::sm90::RecomputeParams &) [with G=tmn::sm90::Cfg, LNM=1, UPD=false]\" at line 533 of /home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\n\n1 error detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/save_k3.cu\".\n"
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      1,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.4480004310608,
+      "candidate": 551.5999794006348
+    },
+    "ratio": 1.0020928025329765
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      1,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 548.5759973526001,
+      "candidate": 544.2399978637695
+    },
+    "ratio": 0.9920959000945068
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      1,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.0559976100922,
+      "candidate": 558.7679743766785
+    },
+    "ratio": 1.0139949057809603
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      1,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.9680042266846,
+      "candidate": 544.3519949913025
+    },
+    "ratio": 0.9897884800711656
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      2,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.2719879150391,
+      "candidate": 595.984011888504
+    },
+    "ratio": 1.08307168995948
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      2,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 548.7039983272552,
+      "candidate": 561.1200034618378
+    },
+    "ratio": 1.0226278743592778
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      2,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.9679744243622,
+      "candidate": 591.8720066547394
+    },
+    "ratio": 1.076193586134242
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      4,
+      2,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.2879917621613,
+      "candidate": 558.1440031528473
+    },
+    "ratio": 1.0142761817598982
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      1,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.000011920929,
+      "candidate": 567.1039819717407
+    },
+    "ratio": 1.0310981266910786
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      1,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.4080226421356,
+      "candidate": 571.1199939250946
+    },
+    "ratio": 1.0357484303338693
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      1,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.3920187950134,
+      "candidate": 566.4159953594208
+    },
+    "ratio": 1.027247359505203
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      1,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.391988992691,
+      "candidate": 565.2480125427246
+    },
+    "ratio": 1.0251291709466914
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      2,
+      0,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 551.472008228302,
+      "candidate": 599.1199910640717
+    },
+    "ratio": 1.0864014530653097
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      2,
+      0,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 547.1680164337158,
+      "candidate": 556.192010641098
+    },
+    "ratio": 1.0164921814440069
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      2,
+      1,
+      0
+    ],
+    "valid": true,
+    "times": {
+      "control": 550.815999507904,
+      "candidate": 596.1599946022034
+    },
+    "ratio": 1.0823214923582638
+  },
+  {
+    "scope": "k3",
+    "config": [
+      1,
+      128,
+      6,
+      2,
+      1,
+      1
+    ],
+    "valid": true,
+    "times": {
+      "control": 549.0399897098541,
+      "candidate": 556.6719770431519
+    },
+    "ratio": 1.0139006037380462
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 96,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 1,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.282498386804946e-05,
+      0.0,
+      1.8849235061679792e-07,
+      2.6091470317624044e-07,
+      5.082132338429801e-05
+    ],
+    "times": {
+      "control": 983.6159944534302,
+      "candidate": 1288.0799770355225
+    },
+    "ratio": 1.309535412497308,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/db07234a8f8b6c91fbe49c43a52edc332462c991307f0ebae52851f1464b33a2.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 96,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 2,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.282498386804946e-05,
+      0.0,
+      1.8849235061679792e-07,
+      2.6091470317624044e-07,
+      5.082132338429801e-05
+    ],
+    "times": {
+      "control": 988.1920218467712,
+      "candidate": 1284.9119901657104
+    },
+    "ratio": 1.3002654967446687,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/cbde100427383389ce9f6a892b1385c3b7a952c75ae94bafebb2a8b5bd8ae525.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 96,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.282498386804946e-05,
+      0.0,
+      1.8849235061679792e-07,
+      2.6091470317624044e-07,
+      5.082132338429801e-05
+    ],
+    "times": {
+      "control": 985.4879975318909,
+      "candidate": 1270.1280117034912
+    },
+    "ratio": 1.288831538166338,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/41879a7812b0c60c627df58218f375bbf5a8e62ec1a71b261546faf73c6a7940.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 96,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 8,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.282498386804946e-05,
+      0.0,
+      1.8849235061679792e-07,
+      2.6091470317624044e-07,
+      5.082132338429801e-05
+    ],
+    "times": {
+      "control": 985.3279888629913,
+      "candidate": 1262.3359560966492
+    },
+    "ratio": 1.2811327500737173,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/65a96ea930cb4fecec496ddb4714cb067c68cb2a6b746eed5878e6e1ec06629a.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 112,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 1,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      4.2222753108944744e-05,
+      0.0,
+      2.850874238902179e-07,
+      2.7799586632681894e-07,
+      4.7186575102386996e-05
+    ],
+    "times": {
+      "control": 993.8240051269531,
+      "candidate": 1141.9039964675903
+    },
+    "ratio": 1.1490002159101813,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/c208619131dd487a31b64bb6abca0f7eaa19f13ba1bde0b37c57f0dbe179babf.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 112,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 2,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      4.2222753108944744e-05,
+      0.0,
+      2.850874238902179e-07,
+      2.7799586632681894e-07,
+      4.7186575102386996e-05
+    ],
+    "times": {
+      "control": 993.2000041007996,
+      "candidate": 1128.0959844589233
+    },
+    "ratio": 1.1358195527599224,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/82b6e0dd4054cb6e698f9f87bd491ff13c95cbcf32d11933c0295a83f2d53b7f.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 112,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      4.2222753108944744e-05,
+      0.0,
+      2.850874238902179e-07,
+      2.7799586632681894e-07,
+      4.7186575102386996e-05
+    ],
+    "times": {
+      "control": 994.4960176944733,
+      "candidate": 1137.712001800537
+    },
+    "ratio": 1.1440086049193838,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/1b1ef38a41ac8b1475a724a55c1731d2295a47d8a92ac80f366cfd9b16035829.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 112,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 8,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      4.2222753108944744e-05,
+      0.0,
+      2.850874238902179e-07,
+      2.7799586632681894e-07,
+      4.7186575102386996e-05
+    ],
+    "times": {
+      "control": 993.6480224132538,
+      "candidate": 1123.3919858932495
+    },
+    "ratio": 1.1305733625523544,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/177d8ede20af519f95111391c20b37401fad1bf5e72367a881a977482c0cd334.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 120,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 1,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.3152398322708905e-05,
+      0.0,
+      3.283704188561387e-07,
+      2.8339349000816583e-07,
+      6.58876306260936e-05
+    ],
+    "times": {
+      "control": 986.0640168190002,
+      "candidate": 1076.8000483512878
+    },
+    "ratio": 1.0920183983845169,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/24384544aa1c8fa1cee1751d7ecab693343763060621ebffa76f7c02f55bcbe3.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 120,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 2,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.3152398322708905e-05,
+      0.0,
+      3.283704188561387e-07,
+      2.8339349000816583e-07,
+      6.58876306260936e-05
+    ],
+    "times": {
+      "control": 988.5759949684143,
+      "candidate": 1069.1200494766235
+    },
+    "ratio": 1.0814748232995306,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/418798aac2d995a8ecf3c2579dafd42013ed825b0861978b69fcea949bacfeff.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 120,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.3152398322708905e-05,
+      0.0,
+      3.283704188561387e-07,
+      2.8339349000816583e-07,
+      6.58876306260936e-05
+    ],
+    "times": {
+      "control": 990.6080067157745,
+      "candidate": 1063.4880065917969
+    },
+    "ratio": 1.0735709780073817,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/89fff974650767d4e5a682c4a6fb746fa4e295cbf24724ce8c405903cc2d327c.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 120,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 8,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.3152398322708905e-05,
+      0.0,
+      3.283704188561387e-07,
+      2.8339349000816583e-07,
+      6.58876306260936e-05
+    ],
+    "times": {
+      "control": 993.9520061016083,
+      "candidate": 1062.7999901771545
+    },
+    "ratio": 1.0692669099241279,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/148b48a9d8f64d5d7bc441da781880a8ece5988eead464f24427102ed1ce5009.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 128,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 1,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.156847691978328e-05,
+      0.0,
+      2.384186927884002e-07,
+      2.7072647412751394e-07,
+      4.810554310097359e-05
+    ],
+    "times": {
+      "control": 997.5199997425079,
+      "candidate": 1031.216025352478
+    },
+    "ratio": 1.0337797995214815,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/4c8e36c01c20891a8496f11e4b9ab2f2a882632ade0498d6575b4505ccffd54b.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 128,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 2,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.156847691978328e-05,
+      0.0,
+      2.384186927884002e-07,
+      2.7072647412751394e-07,
+      4.810554310097359e-05
+    ],
+    "times": {
+      "control": 996.4479804039001,
+      "candidate": 1020.080029964447
+    },
+    "ratio": 1.023716290288398,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/faae0cb018bde370624b5921b3182150fa9afdd374e64cdd8b45b411daf10fb4.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 128,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.156847691978328e-05,
+      0.0,
+      2.384186927884002e-07,
+      2.7072647412751394e-07,
+      4.810554310097359e-05
+    ],
+    "times": {
+      "control": 994.9280023574829,
+      "candidate": 1019.8240280151367
+    },
+    "ratio": 1.0250229419602852,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/ce5e3e32d7b14fbdadf2d98ddeaf09afa935ccd037521a9a5c35ff69942fd0a8.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 128,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 8,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      5.156847691978328e-05,
+      0.0,
+      2.384186927884002e-07,
+      2.7072647412751394e-07,
+      4.810554310097359e-05
+    ],
+    "times": {
+      "control": 996.9760179519653,
+      "candidate": 1009.3759894371033
+    },
+    "ratio": 1.0124375825113734,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/9b409cc8ff1c9f0df842fffbcd84e713e2d63dceb818c0bba2a8f85967d7b469.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 132,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 1,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "times": {
+      "control": 997.3120093345642,
+      "candidate": 1016.4160132408142
+    },
+    "ratio": 1.0191554936944927,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/23cd4b145a52dc143221991692614cbb1c7f2c547a67a466113661e13fe87b15.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 132,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 2,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "times": {
+      "control": 992.1280145645142,
+      "candidate": 994.4959878921509
+    },
+    "ratio": 1.0023867618824132,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/cfc3ae92e622c65790c1035bcce4481980403ce8ae52ab5b4c518fddac63be2c.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 132,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "times": {
+      "control": 980.7680249214172,
+      "candidate": 981.7919731140137
+    },
+    "ratio": 1.0010440268917602,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/fa1d5f8077198ad674d79a6b143ba18491089a18f1dc590094974c2fcd33171f.cubin"
+  },
+  {
+    "scope": "b1",
+    "config": {
+      "count": 132,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 8,
+        "XHAT_FP32": 1
+      }
+    },
+    "valid": true,
+    "errors": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "times": {
+      "control": 990.6559884548187,
+      "candidate": 982.0320010185242
+    },
+    "ratio": 0.9912946698583573,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/9a4c9f14297b8835dcfe301aed45a6af2f9bf783ed56ba74b088f3771acc43e5.cubin"
+  }
+]

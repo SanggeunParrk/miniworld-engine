@@ -1,0 +1,128 @@
+[
+  {
+    "L": 384,
+    "variant": "0_tma",
+    "sha256": "a5a014f430398250392a5d982d5a776e122c2e41ed36a7ff470a031d79349ce5",
+    "ptxas": [
+      "16 bytes stack frame, 16 bytes spill stores, 32 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "1_tma",
+    "sha256": "a94c4433f617a69f3f2ebee15592d09e9c7a16735681721b7c8d5bd0418c2da8",
+    "ptxas": [
+      "56 bytes stack frame, 52 bytes spill stores, 68 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 56 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "1_stg",
+    "sha256": "8d4c6cb37557a83daf40af9607fdd39c66a11de987a27792f439300670c5dfdf",
+    "ptxas": [
+      "32 bytes stack frame, 32 bytes spill stores, 44 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 32 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "2_tma",
+    "sha256": "491c15f919db03bdffcbc67a7ce94ad3686ea428f1b1fd37bebefb44735a4f29",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "2_stg",
+    "sha256": "6a3394bc90e4633a43e37609bec37c89fa923ec5b3e1f7253bb83e6ecbac0ba3",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "3_tma",
+    "sha256": "5c2dcf889d797aec1d98560de4aa8f8c5dec94c576e4bd027a0350ba6b53747c",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "3_stg",
+    "sha256": "bf541baad556e8ada5ec4e44d3e4e03ac4cea6be7478edec4d0ae1a1a71fe664",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "0_tma",
+    "sha256": "a5a014f430398250392a5d982d5a776e122c2e41ed36a7ff470a031d79349ce5",
+    "ptxas": [
+      "16 bytes stack frame, 16 bytes spill stores, 32 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "1_tma",
+    "sha256": "a94c4433f617a69f3f2ebee15592d09e9c7a16735681721b7c8d5bd0418c2da8",
+    "ptxas": [
+      "56 bytes stack frame, 52 bytes spill stores, 68 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 56 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "1_stg",
+    "sha256": "8d4c6cb37557a83daf40af9607fdd39c66a11de987a27792f439300670c5dfdf",
+    "ptxas": [
+      "32 bytes stack frame, 32 bytes spill stores, 44 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 32 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "2_tma",
+    "sha256": "491c15f919db03bdffcbc67a7ce94ad3686ea428f1b1fd37bebefb44735a4f29",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "2_stg",
+    "sha256": "6a3394bc90e4633a43e37609bec37c89fa923ec5b3e1f7253bb83e6ecbac0ba3",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "3_tma",
+    "sha256": "5c2dcf889d797aec1d98560de4aa8f8c5dec94c576e4bd027a0350ba6b53747c",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "3_stg",
+    "sha256": "bf541baad556e8ada5ec4e44d3e4e03ac4cea6be7478edec4d0ae1a1a71fe664",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  }
+]

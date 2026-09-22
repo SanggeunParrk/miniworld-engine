@@ -1,0 +1,114 @@
+[
+  {
+    "source": "dual_ws3f_r52",
+    "L": 384,
+    "count": 132,
+    "part": 2,
+    "dropout": 0.25,
+    "forward_seed": 341,
+    "gradient_seeds": [
+      20261463,
+      20261464,
+      20261465
+    ],
+    "counters_zero": true,
+    "errors": [
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 0.0002736923343036324,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 5.525038886844413e-06,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 1.0689320788515033e-06,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 5.842690029567166e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.0001419970503775403,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      },
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 9.298422082792968e-05,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 6.070775725675048e-06,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 1.0094485105582862e-06,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 5.02756734022114e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.00015021231956779957,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      },
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 9.353818313684314e-05,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 7.117185305105522e-06,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 1.4132141359368688e-06,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 4.386633065678325e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.00012387835886329412,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      }
+    ]
+  }
+]

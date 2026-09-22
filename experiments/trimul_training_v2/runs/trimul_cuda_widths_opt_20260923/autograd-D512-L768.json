@@ -1,0 +1,70 @@
+{
+  "D": 512,
+  "L": 768,
+  "job": "15937",
+  "checks": {
+    "y": {
+      "relative_l2": 0.0033543494064360857,
+      "finite": true
+    },
+    "dx": {
+      "relative_l2": 0.004818425513803959,
+      "finite": true
+    },
+    "dWL": {
+      "relative_l2": 0.0060191769152879715,
+      "finite": true
+    },
+    "dWLg": {
+      "relative_l2": 0.005972077138721943,
+      "finite": true
+    },
+    "dWR": {
+      "relative_l2": 0.005988053046166897,
+      "finite": true
+    },
+    "dWRg": {
+      "relative_l2": 0.005988284479826689,
+      "finite": true
+    },
+    "dWgate": {
+      "relative_l2": 0.006508402526378632,
+      "finite": true
+    },
+    "dWproj": {
+      "relative_l2": 0.006086787208914757,
+      "finite": true
+    },
+    "dgamma_in": {
+      "relative_l2": 0.006630644667893648,
+      "finite": true
+    },
+    "dbeta_in": {
+      "relative_l2": 0.005029032472521067,
+      "finite": true
+    },
+    "dgamma_out": {
+      "relative_l2": 0.005664626602083445,
+      "finite": true
+    },
+    "dbeta_out": {
+      "relative_l2": 0.0034257760271430016,
+      "finite": true
+    }
+  },
+  "multiple_forward_error": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    8.854914312905748e-07,
+    7.464390705536061e-07,
+    6.93049798883294e-07,
+    8.396593784709694e-07
+  ],
+  "version_check": true,
+  "complete": true
+}

@@ -1,0 +1,67 @@
+{
+  "length": 768,
+  "checks": [
+    {
+      "case": 0,
+      "exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "eager_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "counters_zero": true
+    },
+    {
+      "case": 1,
+      "exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "eager_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "counters_zero": true
+    },
+    {
+      "case": 2,
+      "exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "eager_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "counters_zero": true
+    }
+  ],
+  "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_gate_demote_20260922/build/1c82cc4c137395d81fb6b160b3427d3a46becd7056b09c9167c259f89100290b.cubin",
+  "sha256": "857c944a6e57ac065a4f0b52b211ec9d05fa443d9507df803f72e771eb16854e"
+}

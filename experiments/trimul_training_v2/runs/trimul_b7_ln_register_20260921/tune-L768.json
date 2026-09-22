@@ -1,0 +1,128 @@
+[
+  {
+    "skip_restore": 1,
+    "overlap": 0,
+    "ln_mode": 0,
+    "valid": true,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 1,
+      "slices": 2
+    },
+    "times": {
+      "baseline": 2024.448037147522,
+      "candidate": 1931.3600063323975
+    },
+    "ratio": 0.9540180685762194,
+    "cubins": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/59cff09c285aa614ef76c3aa5f749b6e47a191248790f8534780afe9f1a95e8f.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/4480be6dcf23c0fe6bd9ff45c8543478cc0ab891b404717e6dda4a1e27ff0865.cubin"
+    ]
+  },
+  {
+    "skip_restore": 1,
+    "overlap": 0,
+    "ln_mode": 1,
+    "valid": true,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 1,
+      "slices": 2
+    },
+    "times": {
+      "baseline": 2029.952049255371,
+      "candidate": 1941.2639737129211
+    },
+    "ratio": 0.9563102608384357,
+    "cubins": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/378e578d54a9121e49863878b38682e031b2cbd0ceba6c3e4721a5909721f90b.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/4349491d16207279cdf11d91090ca782ce5139ecc7f30fd28b2e5adef293b4f8.cubin"
+    ]
+  },
+  {
+    "skip_restore": 1,
+    "overlap": 0,
+    "ln_mode": 2,
+    "valid": true,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 1,
+      "slices": 2
+    },
+    "times": {
+      "baseline": 2032.2240591049194,
+      "candidate": 1914.8160219192505
+    },
+    "ratio": 0.942226824517873,
+    "cubins": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/f5eed391fb40b630c669b51736527aa942325042565e1cff1a361705b13ee1d8.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/86d0ebd6ba8679ab120360144d90e47d431c88a0c7c01fe2ced19a5d8429075c.cubin"
+    ]
+  }
+]

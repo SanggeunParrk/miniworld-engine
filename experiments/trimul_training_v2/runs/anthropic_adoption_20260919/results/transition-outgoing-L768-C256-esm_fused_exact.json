@@ -1,0 +1,62 @@
+{
+  "family": "transition",
+  "length": 768,
+  "width": 256,
+  "direction": "outgoing",
+  "row": "esm_fused_exact",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/transition-outgoing-L768-C256-esm_fused_exact.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "esm_fused_exact",
+    "variant": null,
+    "cfg": null,
+    "word": "esm_fused_exact",
+    "cell_key": null,
+    "tier": null,
+    "ms": null,
+    "x_stock": null,
+    "cls": null,
+    "stack": null,
+    "stack_measured": null,
+    "beyond_measured": false,
+    "fallback": "engine_module",
+    "words": [],
+    "backward": false,
+    "capture_safe": true
+  },
+  "first_call_s": 1.8794691562652588,
+  "error": {
+    "rel_rms": 0.0038864118978381157,
+    "max_abs": 0.05225181579589844,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.007536165416240692,
+    "max_abs": 0.05225181579589844,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0038864118978381157,
+    "max_abs": 0.05225181579589844,
+    "finite": true
+  },
+  "ms": 2.1880953979492186,
+  "samples_ms": [
+    2.20582275390625,
+    2.189729919433594,
+    2.187638397216797,
+    2.1880953979492186,
+    2.187966766357422
+  ],
+  "status": "passed"
+}

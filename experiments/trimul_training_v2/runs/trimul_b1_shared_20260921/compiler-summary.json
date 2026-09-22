@@ -1,0 +1,128 @@
+{
+  "384": {
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/build/690cba395784023b18a9532855c5fe27fea2da2ef3a82683d1df4d647231678f.cubin",
+    "sha256": "0d379da4154d0bc1135d44b036c8edc2e25572590390f0043ea8ce698b255fba",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 32 registers, used 0 barriers",
+      "16 bytes stack frame, 16 bytes spill stores, 16 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 16 bytes cumulative stack size, 1024 bytes smem"
+    ],
+    "instructions": {
+      "HGMMA": 52,
+      "UTMALDG": 28,
+      "UTMASTG": 6,
+      "SETMAXNREG": 0,
+      "STL": 4,
+      "LDL": 4
+    },
+    "build_metadata": {
+      "defines": {
+        "UCOUNT": 132,
+        "TRAIN_L": 384,
+        "USE_SAVED_XN": 1,
+        "PART_ONLY": 2,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1
+      },
+      "flags": [
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-I/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920",
+        "-I/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921",
+        "-DUCOUNT=132",
+        "-DTRAIN_L=384",
+        "-DUSE_SAVED_XN=1",
+        "-DPART_ONLY=2",
+        "-DB1_STREAM_AFFINE_UNROLL=4",
+        "-DGATE_PHASE=1",
+        "-DLOWREG=1",
+        "-DSTREAM_LN=1"
+      ],
+      "source_sha256": {
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu": "d09a08097a83eda8503db13307d3df4c51beb2c7457d4cc9b3a55028e3cf5833",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/common_recompute.cuh": "f62f21206c3b16aabed33eaacb74c5e438edf9369884dcecd5f35699c596a22e",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/ln_recompute.cuh": "60d1928712c787b7776b7214c78590f37f065fb062f99aaf1a2926e34adaeedc",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_lowreg.inc": "1c3feebaa287175ebe911200434b84a1f44943cce5614b1a5cc6f478852b01d6",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_pipeline_math.inc": "4aca631ce8e0e959ba551eb531911e7fdf9efc5382d7e9af7345014cdbccedd4",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_stream_ln.inc": "f4164a3af8b5a9afbe5c52129e40f78bc3d09743e9b7cc6b1ae37b7cf6695ee0",
+        "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/warp_primitives.cuh": "ffdedbf42f9ef1ee00ffc4ae7a0d9997d28eae2bd5ebb56514fa7f2e59c0b7df",
+        "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/front_mn_primitives.cuh": "142b7371ad27b54f5b894228497923ef385e96ff0f672491e752c20530da5021",
+        "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/front_primitives.cuh": "3fcdc297cc6a4753781e2bd1ba18394052e7d608c3ae37a9ee652b63ed98561e",
+        "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+        "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+        "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b"
+      }
+    }
+  },
+  "768": {
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/build/51a76be7fbddc7349a848056909f7da433670efd5c09e47ea2da890657875235.cubin",
+    "sha256": "5684878848b9bd42fb8aee8ff278ac195bf22628044c19889cb9dc6c7cccf645",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 32 registers, used 0 barriers",
+      "16 bytes stack frame, 16 bytes spill stores, 16 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 16 bytes cumulative stack size, 1024 bytes smem"
+    ],
+    "instructions": {
+      "HGMMA": 52,
+      "UTMALDG": 28,
+      "UTMASTG": 6,
+      "SETMAXNREG": 0,
+      "STL": 4,
+      "LDL": 4
+    },
+    "build_metadata": {
+      "defines": {
+        "UCOUNT": 132,
+        "TRAIN_L": 768,
+        "USE_SAVED_XN": 1,
+        "PART_ONLY": 2,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1
+      },
+      "flags": [
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-I/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920",
+        "-I/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921",
+        "-DUCOUNT=132",
+        "-DTRAIN_L=768",
+        "-DUSE_SAVED_XN=1",
+        "-DPART_ONLY=2",
+        "-DB1_STREAM_AFFINE_UNROLL=4",
+        "-DGATE_PHASE=1",
+        "-DLOWREG=1",
+        "-DSTREAM_LN=1"
+      ],
+      "source_sha256": {
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu": "d09a08097a83eda8503db13307d3df4c51beb2c7457d4cc9b3a55028e3cf5833",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/common_recompute.cuh": "f62f21206c3b16aabed33eaacb74c5e438edf9369884dcecd5f35699c596a22e",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/ln_recompute.cuh": "60d1928712c787b7776b7214c78590f37f065fb062f99aaf1a2926e34adaeedc",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_lowreg.inc": "1c3feebaa287175ebe911200434b84a1f44943cce5614b1a5cc6f478852b01d6",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_pipeline_math.inc": "4aca631ce8e0e959ba551eb531911e7fdf9efc5382d7e9af7345014cdbccedd4",
+        "/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_stream_ln.inc": "f4164a3af8b5a9afbe5c52129e40f78bc3d09743e9b7cc6b1ae37b7cf6695ee0",
+        "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/warp_primitives.cuh": "ffdedbf42f9ef1ee00ffc4ae7a0d9997d28eae2bd5ebb56514fa7f2e59c0b7df",
+        "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/front_mn_primitives.cuh": "142b7371ad27b54f5b894228497923ef385e96ff0f672491e752c20530da5021",
+        "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/front_primitives.cuh": "3fcdc297cc6a4753781e2bd1ba18394052e7d608c3ae37a9ee652b63ed98561e",
+        "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+        "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+        "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b"
+      }
+    }
+  }
+}

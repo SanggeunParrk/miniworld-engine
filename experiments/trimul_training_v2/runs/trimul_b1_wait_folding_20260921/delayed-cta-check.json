@@ -1,0 +1,86 @@
+[
+  {
+    "L": 384,
+    "seed": 19,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "replays": 20,
+    "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+  },
+  {
+    "L": 384,
+    "seed": 47,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "replays": 20,
+    "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+  },
+  {
+    "L": 384,
+    "seed": 83,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "replays": 20,
+    "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+  },
+  {
+    "L": 768,
+    "seed": 19,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "replays": 20,
+    "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+  },
+  {
+    "L": 768,
+    "seed": 47,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "replays": 20,
+    "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+  },
+  {
+    "L": 768,
+    "seed": 83,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "replays": 20,
+    "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+  }
+]

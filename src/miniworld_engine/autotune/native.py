@@ -128,7 +128,10 @@ def policy_identity():
 
 def candidates_for(op, bucket):
     """CPU-readable declared grid for one exact native workload."""
-    from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS, partition_for_bucket
+    from miniworld_engine.autotune.trimul_sm90_config import (
+        TRITON_OPS,
+        partition_for_bucket,
+    )
     if op in TRITON_OPS:
         return partition_for_bucket(op, bucket)[0]
     from miniworld_engine.autotune import hopper_cuda_config as cuda

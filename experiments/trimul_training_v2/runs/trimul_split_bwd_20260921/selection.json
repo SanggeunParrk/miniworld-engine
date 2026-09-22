@@ -1,0 +1,9 @@
+{
+  "candidate": "split_xn_pc1",
+  "production_ready": false,
+  "reason": "L768 mutated dWL relative_l2 exceeds unchanged 5e-4 independent-reference limit",
+  "L384_independent_pass": true,
+  "L768_independent_pass": false,
+  "baseline_has_same_failure": true,
+  "engine_default_changed": false
+}

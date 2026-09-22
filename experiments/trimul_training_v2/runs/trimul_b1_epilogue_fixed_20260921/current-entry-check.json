@@ -1,0 +1,66 @@
+{
+  "entry": "runs/trimul_training_current.py:Training",
+  "all_outputs_bit_exact": true,
+  "errors": {
+    "forward": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dx": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dWL": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dWLg": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dWR": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dWRg": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dWgate": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dWproj": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dgamma_in": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dbeta_in": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dgamma_out": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    },
+    "dbeta_out": {
+      "relative_l2": 0.0,
+      "bit_exact": true,
+      "finite": true
+    }
+  }
+}

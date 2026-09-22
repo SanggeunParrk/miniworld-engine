@@ -1,0 +1,75 @@
+{
+  "L": 384,
+  "baseline_error": {
+    "dg": {
+      "rel": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 0
+    },
+    "dwg": {
+      "rel": 9.009895620692987e-06,
+      "finite": true,
+      "bit_exact": false,
+      "limit": 0.0005
+    },
+    "dt": {
+      "rel": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 2e-05
+    },
+    "dgo": {
+      "rel": 2.9150916702747054e-07,
+      "finite": true,
+      "bit_exact": false,
+      "limit": 5e-06
+    },
+    "dbo": {
+      "rel": 2.445211464419117e-07,
+      "finite": true,
+      "bit_exact": false,
+      "limit": 5e-06
+    },
+    "dwp": {
+      "rel": 7.402479968732223e-05,
+      "finite": true,
+      "bit_exact": false,
+      "limit": 0.0005
+    }
+  },
+  "rows": [
+    {
+      "config": {
+        "count": 132,
+        "defines": {
+          "GATE_PHASE": 1,
+          "LOWREG": 1,
+          "STREAM_LN": 1,
+          "PRODUCER": 1,
+          "PROD_REGS": 32,
+          "CONS_REGS": 240
+        }
+      },
+      "valid": false,
+      "error": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(93): error: expected an identifier\n    static constexpr int 32 = 40;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(93): error: const member \"tmn::K1Cfg<CZ_, CH_, ZF32_, BI_, BJ_, NSLOT_, SKCH_, SCHED_>::<error>\" requires an initializer\n    static constexpr int 32 = 40;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(96): error: expected an identifier\n    static constexpr int 240 = CONS_REGS_ > 232 ? 232 : CONS_REGS_;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(96): error: const member \"tmn::K1Cfg<CZ_, CH_, ZF32_, BI_, BJ_, NSLOT_, SKCH_, SCHED_>::<error>\" requires an initializer\n    static constexpr int 240 = CONS_REGS_ > 232 ? 232 : CONS_REGS_;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(96): error: expected a \";\"\n    static constexpr int 240 = CONS_REGS_ > 232 ? 232 : CONS_REGS_;\n                                                      ^\n\n/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu(246): warning #177-D: variable \"x\" was declared but never referenced\n    uint8_t* x=sm+16384+slot*49152;\n             ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu(33): warning #177-D: variable \"DXCOUNT\" was declared but never referenced\n  constexpr int DWCOUNT=28 +2*28,DXCOUNT=132 -DWCOUNT;\n                                 ^\n\n5 errors detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu\".\n"
+    },
+    {
+      "config": {
+        "count": 132,
+        "defines": {
+          "GATE_PHASE": 1,
+          "LOWREG": 0,
+          "STREAM_LN": 1,
+          "PRODUCER": 1,
+          "PROD_REGS": 40,
+          "CONS_REGS": 232
+        }
+      },
+      "valid": false,
+      "error": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(93): error: expected an identifier\n    static constexpr int 40 = 40;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(93): error: const member \"tmn::K1Cfg<CZ_, CH_, ZF32_, BI_, BJ_, NSLOT_, SKCH_, SCHED_>::<error>\" requires an initializer\n    static constexpr int 40 = 40;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(96): error: expected an identifier\n    static constexpr int 232 = CONS_REGS_ > 232 ? 232 : CONS_REGS_;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(96): error: const member \"tmn::K1Cfg<CZ_, CH_, ZF32_, BI_, BJ_, NSLOT_, SKCH_, SCHED_>::<error>\" requires an initializer\n    static constexpr int 232 = CONS_REGS_ > 232 ? 232 : CONS_REGS_;\n                         ^\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh(96): error: expected a \";\"\n    static constexpr int 232 = CONS_REGS_ > 232 ? 232 : CONS_REGS_;\n                                                      ^\n\n/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu(246): warning #177-D: variable \"x\" was declared but never referenced\n    uint8_t* x=sm+16384+slot*49152;\n             ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu(33): warning #177-D: variable \"DXCOUNT\" was declared but never referenced\n  constexpr int DWCOUNT=28 +2*28,DXCOUNT=132 -DWCOUNT;\n                                 ^\n\n5 errors detected in the compilation of \"/home/psk6950/MiniWorld/runs/trimul_b1_shared_20260921/b1_fused.cu\".\n"
+    }
+  ],
+  "host": "node02",
+  "gpu": "NVIDIA H100 80GB HBM3"
+}

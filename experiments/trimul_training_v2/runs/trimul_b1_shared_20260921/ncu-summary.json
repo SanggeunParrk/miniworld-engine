@@ -1,0 +1,170 @@
+{
+  "baseline-L384": {
+    "gpu__time_duration.sum": {
+      "value": 314.848,
+      "unit": "us"
+    },
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 35.595532,
+      "unit": "%"
+    },
+    "dram__bytes_read.sum": {
+      "value": 256.337408,
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": 119.32032,
+      "unit": "Mbyte"
+    },
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 39.230908,
+      "unit": "%"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+      "value": 15.679248,
+      "unit": "%"
+    },
+    "sm__warps_active.avg.pct_of_peak_sustained_active": {
+      "value": 12.490739,
+      "unit": "%"
+    },
+    "smsp__issue_active.avg.pct_of_peak_sustained_active": {
+      "value": 39.750567,
+      "unit": "%"
+    },
+    "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+      "value": 1.665703,
+      "unit": "inst"
+    },
+    "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+      "value": 0.32216,
+      "unit": "inst"
+    }
+  },
+  "candidate-L384": {
+    "gpu__time_duration.sum": {
+      "value": 264.256,
+      "unit": "us"
+    },
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 43.62341,
+      "unit": "%"
+    },
+    "dram__bytes_read.sum": {
+      "value": 244.379136,
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": 142.019584,
+      "unit": "Mbyte"
+    },
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 31.234093,
+      "unit": "%"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+      "value": 15.445325,
+      "unit": "%"
+    },
+    "sm__warps_active.avg.pct_of_peak_sustained_active": {
+      "value": 12.499451,
+      "unit": "%"
+    },
+    "smsp__issue_active.avg.pct_of_peak_sustained_active": {
+      "value": 31.725258,
+      "unit": "%"
+    },
+    "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+      "value": 1.599305,
+      "unit": "inst"
+    },
+    "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+      "value": 1.436282,
+      "unit": "inst"
+    }
+  },
+  "baseline-L768": {
+    "gpu__time_duration.sum": {
+      "value": 1.221568,
+      "unit": "ms"
+    },
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 49.731584,
+      "unit": "%"
+    },
+    "dram__bytes_read.sum": {
+      "value": 1.57702,
+      "unit": "Gbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": 459.486208,
+      "unit": "Mbyte"
+    },
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 40.178561,
+      "unit": "%"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+      "value": 16.147244,
+      "unit": "%"
+    },
+    "sm__warps_active.avg.pct_of_peak_sustained_active": {
+      "value": 12.497648,
+      "unit": "%"
+    },
+    "smsp__issue_active.avg.pct_of_peak_sustained_active": {
+      "value": 40.320931,
+      "unit": "%"
+    },
+    "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+      "value": 1.679235,
+      "unit": "inst"
+    },
+    "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+      "value": 0.282017,
+      "unit": "inst"
+    }
+  },
+  "candidate-L768": {
+    "gpu__time_duration.sum": {
+      "value": 905.888,
+      "unit": "us"
+    },
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 46.287606,
+      "unit": "%"
+    },
+    "dram__bytes_read.sum": {
+      "value": 923.979008,
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": 481.671168,
+      "unit": "Mbyte"
+    },
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": 35.361373,
+      "unit": "%"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+      "value": 17.775667,
+      "unit": "%"
+    },
+    "sm__warps_active.avg.pct_of_peak_sustained_active": {
+      "value": 12.499843,
+      "unit": "%"
+    },
+    "smsp__issue_active.avg.pct_of_peak_sustained_active": {
+      "value": 35.519649,
+      "unit": "%"
+    },
+    "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+      "value": 1.387706,
+      "unit": "inst"
+    },
+    "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+      "value": 1.152695,
+      "unit": "inst"
+    }
+  }
+}

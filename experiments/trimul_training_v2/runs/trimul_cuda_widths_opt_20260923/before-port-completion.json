@@ -1,0 +1,123 @@
+{
+  "complete": true,
+  "baseline_shapes": 10,
+  "selected_adapter_shapes": 8,
+  "native_sanitizer_configurations": 6,
+  "selected_adapter_checks": [
+    {
+      "D": 64,
+      "L": 384,
+      "relative_l2": 0.0020316438749432564,
+      "mutation_exact": true,
+      "job": "15718"
+    },
+    {
+      "D": 64,
+      "L": 768,
+      "relative_l2": 0.0020349984988570213,
+      "mutation_exact": true,
+      "job": "15718"
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "relative_l2": 0.00050557148642838,
+      "mutation_exact": true,
+      "job": "15719"
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "relative_l2": 0.0006049966323189437,
+      "mutation_exact": true,
+      "job": "15719"
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "relative_l2": 0.0006170864216983318,
+      "mutation_exact": true,
+      "job": "15720"
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "relative_l2": 0.000722067488823086,
+      "mutation_exact": true,
+      "job": "15720"
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "relative_l2": 0.0006455000839196146,
+      "mutation_exact": true,
+      "job": "15717"
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "relative_l2": 0.0007223319844342768,
+      "mutation_exact": true,
+      "job": "15717"
+    }
+  ],
+  "source_sha256": {
+    "bench.py": "51fa4ff6b1c24a34ca2f8c36ef90050d0f5ea4a19075e0429a50ec05d58c41c9",
+    "selected.py": "0e8e10df36e5412fdb5467f1f1d3a863b5415710b9095faeb6eff36bba30e46f",
+    "make_offset_fix.py": "8cb7d8c05f0fb56a3ff9a579605b3d4b4fd8621341cfbfcde5f8d01ccf5aa719",
+    "report.py": "9e5c39bd39796b0c2564dd2960dfcd92a229209a5ded56a5239168c60d23c378",
+    "dual_original.py": "1cbf2d2c3208e28bb8c18b061f331018aef3c1929a10eed6063828416a2f71fe",
+    "native.py": "a389c779d57c1e4eabbb6410023234fe20edd5c4286bfab62fa6351d2ca3bf6c",
+    "native_bench.py": "2fd5cb83a5ce5b27ae18bcf85c7adf692ba86beff3c9368fa9e5313178c56e4f",
+    "dual_fixed.py": "340cbe208e4557be566e86a6897c4d69ea82a5a7793ff45081fe78b2d6d71951",
+    "native_sanitize.py": "c38c2f1137c24b8e568f2e730a9291f6d4e29e3dfce2b9a35e73b7265ecf07d5",
+    "probe_offset.py": "1ebc17df95a345548b123e76e75797b299206ed1d2d075322bf649e67241a9d6",
+    "sanitize_offset.py": "84d929c19b221443e154101edda690862e2255cf708261049553f34dc556535b",
+    "native_probe.py": "ccf271239137e40d8ebdffa9b28474f592c0100acbb3e0fb9ce030f86cce88b8",
+    "compare_ln.py": "7521e47b0f0249297030526eee1471d8a8566cdcf16dfe989c6e832d857b4e78",
+    "install_offset_fix.py": "ccd35ae3a341d5beaacc20d190cd77d637130b99926381888b08de7db3bee48d",
+    "check_selected.py": "2a640ae2c74af1a20b83f42e122c0fe01e93a25bcbf23ad11c1dcd12fd225dbd",
+    "freeze_selection.py": "673d9a8dd664d9e8662aebb2f42409859055d1f22bf36fad2b9acbeb8fc74de8",
+    "README.md": "0e18d3481e0cf55b6047333abffee4824adc10f413dab1703c881fa188d15c2e",
+    "index.html": "e9cfcd7c41d0169326362e0f1fdc850805b6cc75470fa16f8a33e10b117406ce",
+    "summary.json": "2981f6af0241d1bfef5f10485d435d3029f0d92482fd1eb184eb424f65fa965a",
+    "selection.json": "50c88169dac2787867727f2ea0e025421843c31744e07128ac4358db6a9bac22",
+    "installed-offset-fix.json": "34dde02740c17985ecf8e842cb3457373aa2459dab9bccf9465a5853fd08267a",
+    "native_d128.py": "1b7cf213774dd6a21f481ee2676dbd6a85b7c5ba744c017a2dee37e094fbf55d",
+    "d128.sbatch": "be8c80cfe59aec1c05ad9c26be1a3d06484dac883cad820b8a814af34d7145ad",
+    "native-D128-nosave.json": "2bb683d47432c4620a629f6ead773b4c2d42cfbe46a13d3daa0af52a91b32976",
+    "bench-D128-L384.json": "b329dba3422f1879cd58d21a30a8d866efc5a62c71c907d59fad9600f8f506ce",
+    "bench-D128-L768.json": "f9072f8c68bd03befcac745036728c9b3937363842e865e0b5b613bd38e34407",
+    "latest_d128.py": "9aeb6afe7715c5465c20ef22fac63a93bd7f8983b5dfef68d0d55ba92c706701",
+    "latest.sbatch": "9fd7aa13c2c49d38635baa62d8a402a6051d88a8d1e5b1296dd6ed0d3193b83c",
+    "latest-split768.sbatch": "d70742769752b839c63ac81e8b61fbf09a0b5da7489c1beeb915563e94855925",
+    "latest-D128-L384.json": "8d4180587bffd63083b5579e5b587808ece5b8bc32b644460b24683d6e09a14a",
+    "latest-D128-L768.json": "5734b250dae510b16b5c48e96e4eb42d27ced765572d295f01321e8245678067",
+    "latest-D128-L768-single-rejected.json": "0b9cccec49c1214fd11373b6411b0859056c4a3ec19d07c250b776e644978b4a"
+  },
+  "inference_table_shapes": 10,
+  "d128_added": {
+    "job_array": "15738",
+    "inference_configs": "Existing K1/K3 retained, no retuning",
+    "training_route": "Current table now includes latest cache-policy CUDA B1; L384 corrected single B7, L768 validated split CUDA B7",
+    "sanitizer_rerun": false
+  },
+  "latest_cuda_training_comparisons": [
+    {
+      "D": 128,
+      "L": 384,
+      "route": "Latest cache-policy B1 + corrected single B7",
+      "job": "15742",
+      "strict_checks_passed": true,
+      "trace_verified": true
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "route": "Latest cache-policy B1 + previous split CUDA B7",
+      "job": "15743",
+      "strict_checks_passed": true,
+      "trace_verified": true
+    }
+  ]
+}

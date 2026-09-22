@@ -1,0 +1,389 @@
+{
+  "package": "/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/miniworld_engine/__init__.py",
+  "shape": [
+    1,
+    384,
+    384,
+    128
+  ],
+  "device": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cases": {
+    "inference-eager-forward": {
+      "kernels": [
+        {
+          "name": "layer_norm_fwd_fused",
+          "us": 26.65599999999995
+        },
+        {
+          "name": "transition_fwd_kernel",
+          "us": 160.83199999999988
+        },
+        {
+          "name": "Memset (Device)",
+          "us": 0.7680000000000291
+        },
+        {
+          "name": "nvjet_tst_128x160_64x5_1x2_h_bz_TNT",
+          "us": 69.56899999999996
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "us": 35.93600000000015
+        }
+      ],
+      "operators": [
+        {
+          "name": "miniworld_engine::layernorm_fwd",
+          "count": 1,
+          "shapes": "[[147456, 128], [128], [128], [], [], [], []]",
+          "device_us": 53.3119999999999,
+          "memory": 38928384
+        },
+        {
+          "name": "miniworld_engine::transition_expand_swiglu",
+          "count": 1,
+          "shapes": "[[147456, 128], [512, 128], [512, 128], []]",
+          "device_us": 160.83199999999988,
+          "memory": 150994944
+        },
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[147456, 512], [512, 128]]",
+          "device_us": 70.33699999999999,
+          "memory": 37748736
+        },
+        {
+          "name": "aten::add",
+          "count": 1,
+          "shapes": "[[1, 384, 384, 128], [1, 384, 384, 128], []]",
+          "device_us": 35.93600000000015,
+          "memory": 37748736
+        }
+      ]
+    },
+    "inference-compile-forward": {
+      "kernels": [
+        {
+          "name": "## Call CompiledFxGraph f5ig5yoinzqprfh45tmfh3c4x4nyix33tioy53lllnhcnixzujqo ##",
+          "us": 413.4079999999997
+        },
+        {
+          "name": "layer_norm_fwd_fused",
+          "us": 27.64799999999991
+        },
+        {
+          "name": "transition_fwd_kernel",
+          "us": 165.53600000000006
+        },
+        {
+          "name": "triton_tem_fused_mm_permute_0",
+          "us": 70.30400000000009
+        },
+        {
+          "name": "triton_poi_fused_add_view_1",
+          "us": 36.511999999999716
+        }
+      ],
+      "operators": [
+        {
+          "name": "miniworld_engine::layernorm_fwd",
+          "count": 1,
+          "shapes": "[[147456, 128], [128], [128], [], [], [], []]",
+          "device_us": 27.64799999999991,
+          "memory": 38928384
+        },
+        {
+          "name": "miniworld_engine::transition_expand_swiglu",
+          "count": 1,
+          "shapes": "[[147456, 128], [512, 128], [512, 128], []]",
+          "device_us": 165.53600000000006,
+          "memory": 150994944
+        }
+      ]
+    },
+    "training-eager-forward": {
+      "kernels": [
+        {
+          "name": "transition_fwd_kernel",
+          "us": 165.663
+        },
+        {
+          "name": "Memset (Device)",
+          "us": 0.7680000000000291
+        },
+        {
+          "name": "nvjet_tst_128x160_64x5_1x2_h_bz_TNT",
+          "us": 69.69599999999991
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "us": 35.934999999999945
+        }
+      ],
+      "operators": [
+        {
+          "name": "miniworld_engine::layernorm_fwd",
+          "count": 1,
+          "shapes": "[[147456, 128], [128], [128], [], [], [], []]",
+          "device_us": 0,
+          "memory": 38928384
+        },
+        {
+          "name": "miniworld_engine::transition_expand_swiglu",
+          "count": 1,
+          "shapes": "[[147456, 128], [512, 128], [512, 128], []]",
+          "device_us": 165.663,
+          "memory": 150994944
+        },
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[147456, 512], [512, 128]]",
+          "device_us": 70.46399999999994,
+          "memory": 37748736
+        },
+        {
+          "name": "aten::add",
+          "count": 1,
+          "shapes": "[[1, 384, 384, 128], [1, 384, 384, 128], []]",
+          "device_us": 35.934999999999945,
+          "memory": 37748736
+        }
+      ]
+    },
+    "training-eager-backward": {
+      "kernels": [
+        {
+          "name": "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT",
+          "us": 69.4079999999999
+        },
+        {
+          "name": "_transition_expand_gatebwd_kernel",
+          "us": 316.15999999999985
+        },
+        {
+          "name": "nvjet_tst_128x64_64x8_1x2_h_bz_splitK_NTT",
+          "us": 74.27099999999973
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "us": 2.912000000000262
+        },
+        {
+          "name": "nvjet_tst_128x96_64x6_1x1_h_bz_splitK_NTT",
+          "us": 125.11999999999989
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "us": 3.5520000000001346
+        },
+        {
+          "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 1, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "us": 2.7519999999999527
+        },
+        {
+          "name": "Memset (Device)",
+          "us": 0.7359999999998763
+        },
+        {
+          "name": "nvjet_tst_128x160_64x5_1x2_h_bz_NNT",
+          "us": 115.42399999999998
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "us": 1.5039999999999054
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "us": 1.344000000000051
+        },
+        {
+          "name": "layer_norm_bwd_dx_fused",
+          "us": 112.70299999999997
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "us": 36.128000000000156
+        }
+      ],
+      "operators": [
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[147456, 128], [128, 512]]",
+          "device_us": 69.4079999999999,
+          "memory": 150994944
+        },
+        {
+          "name": "miniworld_engine::transition_gatebwd_savedxn_stacked",
+          "count": 1,
+          "shapes": "[[147456, 128], [512, 128], [512, 128], [147456, 512], []]",
+          "device_us": 316.15999999999985,
+          "memory": 452984832
+        },
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[128, 147456], [147456, 512]]",
+          "device_us": 77.18299999999999,
+          "memory": 131072
+        },
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[1024, 147456], [147456, 128]]",
+          "device_us": 128.67200000000003,
+          "memory": 262144
+        },
+        {
+          "name": "aten::cat",
+          "count": 1,
+          "shapes": "[[], []]",
+          "device_us": 2.7519999999999527,
+          "memory": 262144
+        },
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[147456, 1024], [1024, 128]]",
+          "device_us": 116.15999999999985,
+          "memory": 37748736
+        },
+        {
+          "name": "miniworld_engine::layernorm_bwd",
+          "count": 1,
+          "shapes": "[[147456, 128], [147456, 128], [128], [147456], [147456], [], [], [], []]",
+          "device_us": 115.55099999999993,
+          "memory": 37749760
+        },
+        {
+          "name": "aten::add",
+          "count": 1,
+          "shapes": "[[1, 384, 384, 128], [1, 384, 384, 128], []]",
+          "device_us": 36.128000000000156,
+          "memory": 37748736
+        }
+      ]
+    },
+    "training-compile-forward": {
+      "kernels": [
+        {
+          "name": "## Call CompiledFxGraph fokkilkzg26g75qhuuxiulh2h3fcdntsomvmflwuolcpynncagbz ##",
+          "us": 107.68000000000029
+        },
+        {
+          "name": "triton_tem_fused_mm_permute_0",
+          "us": 70.36799999999994
+        },
+        {
+          "name": "triton_poi_fused_add_view_1",
+          "us": 36.28800000000001
+        }
+      ],
+      "operators": [
+        {
+          "name": "miniworld_engine::layernorm_fwd",
+          "count": 1,
+          "shapes": "[[147456, 128], [128], [128], [], [], [], []]",
+          "device_us": 0,
+          "memory": 38928384
+        },
+        {
+          "name": "miniworld_engine::transition_expand_swiglu",
+          "count": 1,
+          "shapes": "[[147456, 128], [512, 128], [512, 128], []]",
+          "device_us": 0,
+          "memory": 150994944
+        }
+      ]
+    },
+    "training-compile-backward": {
+      "kernels": [
+        {
+          "name": "## Call CompiledFxGraph fspnaw4vabea7fp2xzbbyah5iwgq7ynvbwhbiuwbjz6wefb4viwm ##",
+          "us": 788.8940000000002
+        },
+        {
+          "name": "_transition_expand_gatebwd_kernel",
+          "us": 317.855
+        },
+        {
+          "name": "nvjet_tss_64x64_64x13_4x2_v_bz_NTT",
+          "us": 73.59999999999991
+        },
+        {
+          "name": "triton_poi_fused_mm_permute_view_0",
+          "us": 2.2400000000002365
+        },
+        {
+          "name": "nvjet_tss_64x64_64x13_2x4_h_bz_NTT",
+          "us": 111.61500000000024
+        },
+        {
+          "name": "triton_poi_fused_mm_permute_1",
+          "us": 1.9520000000002256
+        },
+        {
+          "name": "triton_poi_fused_cat_2",
+          "us": 2.0479999999997744
+        },
+        {
+          "name": "Memset (Device)",
+          "us": 0.7359999999998763
+        },
+        {
+          "name": "nvjet_tst_128x160_64x5_1x2_h_bz_NNT",
+          "us": 112.99200000000019
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "us": 1.5360000000000582
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "us": 1.3119999999998981
+        },
+        {
+          "name": "layer_norm_bwd_dx_fused",
+          "us": 112.48000000000002
+        },
+        {
+          "name": "triton_poi_fused_add_3",
+          "us": 36.25600000000031
+        }
+      ],
+      "operators": [
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[147456, 128], [128, 512], [147456, 512]]",
+          "device_us": 0,
+          "memory": 0
+        },
+        {
+          "name": "miniworld_engine::transition_gatebwd_savedxn_stacked",
+          "count": 1,
+          "shapes": "[[147456, 128], [512, 128], [512, 128], [147456, 512], []]",
+          "device_us": 317.855,
+          "memory": 452984832
+        },
+        {
+          "name": "aten::mm",
+          "count": 1,
+          "shapes": "[[147456, 1024], [1024, 128], [147456, 128]]",
+          "device_us": 113.72800000000007,
+          "memory": 0
+        },
+        {
+          "name": "miniworld_engine::layernorm_bwd",
+          "count": 1,
+          "shapes": "[[147456, 128], [147456, 128], [128], [147456], [147456], [], [], [], []]",
+          "device_us": 115.32799999999997,
+          "memory": 37749760
+        }
+      ]
+    }
+  }
+}

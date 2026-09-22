@@ -1,0 +1,44 @@
+{
+  "dg": {
+    "relative_l2": 0.0,
+    "max_absolute": 0.0,
+    "bit_exact": true,
+    "finite": true,
+    "limit": 0
+  },
+  "dwg": {
+    "relative_l2": 0.00010235919035039842,
+    "max_absolute": 1.0,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 0.0005
+  },
+  "dt": {
+    "relative_l2": 0.0,
+    "max_absolute": 0.0,
+    "bit_exact": true,
+    "finite": true,
+    "limit": 2e-05
+  },
+  "dgo": {
+    "relative_l2": 3.988481864780624e-07,
+    "max_absolute": 0.0005340576171875,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 5e-06
+  },
+  "dbo": {
+    "relative_l2": 2.526764717458718e-07,
+    "max_absolute": 0.00018310546875,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 5e-06
+  },
+  "dwp": {
+    "relative_l2": 0.00011445023119449615,
+    "max_absolute": 2.0,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 0.0005
+  }
+}

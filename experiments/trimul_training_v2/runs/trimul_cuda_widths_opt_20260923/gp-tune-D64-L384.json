@@ -1,0 +1,86 @@
+[
+  {
+    "cfg": [
+      1,
+      64,
+      2,
+      1,
+      2
+    ],
+    "us": 168.44800114631653,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/ea028a1ebe99f895c084e284b37be4a2352ce61c27a7e7affb1713b3cedfb48f.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      2,
+      1,
+      1
+    ],
+    "us": 270.59200406074524,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/d77b78fbb8d991c7aafbcc8251bc2cf362aaf26cfe54d40f92c2e3ced4fb9cbc.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      4,
+      1,
+      2
+    ],
+    "us": 156.78399801254272,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/a240bd9673ff0daad804840d2ff34924ffd0c8ca03418779cef4b959e72a8a94.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      4,
+      1,
+      1
+    ],
+    "us": 240.38400501012802,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/1aba94a8447e25e0355fc4e70ed5f51e8b24ee5c6e00a55eedced584d49be26f.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      8,
+      1,
+      2
+    ],
+    "us": 151.44000202417374,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/d60aae41cd3d5bd7f93d13c46c89aa145b8db3ee2323d5acc3272d190597d5c5.cubin"
+  },
+  {
+    "cfg": [
+      2,
+      64,
+      2,
+      1,
+      1
+    ],
+    "us": 170.1120063662529,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/cb63ffac0aa29f0676cb663026376745c3a70363256f98e181c9965f80c0e7b7.cubin"
+  },
+  {
+    "cfg": [
+      2,
+      64,
+      4,
+      1,
+      1
+    ],
+    "us": 154.89599853754044,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/86e887f8af44d4cd5fd642664091959b027dd581b0ebc5d561870fe38867ca50.cubin"
+  }
+]

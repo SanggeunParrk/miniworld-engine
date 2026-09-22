@@ -1,0 +1,126 @@
+"""Per-kernel autotuning DISPATCH cache: pick the fastest implementation VARIANT per problem
+shape and remember it (like the layernorm atomic-vs-partial dispatch, but across backends —
+cuBLAS / quack / triton). Some trimul ops have >1 valid impl whose winner flips with shape
+(e.g. the input-grad GEMM: cuBLAS wins small L, quack ≈ cuBLAS at large L; the gate: triton vs
+the fused-quack epilogue). Always-one-backend leaves the small-L (or large-L) case slow; this
+benchmarks the candidates ONCE per shape (first call) and caches the winner.
+
+`pick(name, key, candidates)`:
+  candidates = [(label, thunk), ...]  where thunk() runs that variant and returns its result.
+  On a cache MISS for `key`: time every thunk (do_bench), cache the fastest label, return its
+  result. On a HIT: just run the cached winner. Pure thunks only (no input mutation) — the
+  losers' outputs are discarded. In-process cache (amortized over a training/inference run).
+
+settings.trimul_cute_dispatch=False disables calibration after GPU policy filtering.
+"""
+
+from __future__ import annotations
+
+import torch
+import triton
+from miniworld_engine import settings
+from miniworld_engine.build import matrix
+from miniworld_engine.kernels._compile import device_constant
+
+_CACHE: dict[str, dict] = {}
+_LOG = False  # was settings.trimul_dispatch_log: a print toggle nothing set
+
+
+@device_constant
+def _cute_allowed(device, dtype, case):
+    """Use the builder's policy before importing or calibrating a CuTe candidate."""
+    if device.type != "cuda":
+        return False
+    sm = matrix.sm_tag(torch.cuda.get_device_capability(device))
+    return matrix.allows(sm, case, "cute", str(dtype).removeprefix("torch."))
+
+
+def pick(name, key, candidates, *, operands, case="triangle_multiplication"):
+    """Run the fastest of `candidates` for `key`, caching the choice. candidates: list of
+    (label, thunk()->result).
+
+    Calibration and stride-based cache keys stay outside Dynamo tracing. During
+    autograd backward speculation, saved tensors can have unknown strides; reading
+    those for a Python dictionary key fails before any GEMM can be traced. Compiled
+    execution therefore selects the policy-allowed cuBLAS variant directly. Eager
+    execution retains shape/layout-specific calibration and its cached winners.
+    """
+    if not _cute_allowed(operands[0].device, operands[0].dtype, case):
+        candidates = [(label, thunk) for label, thunk in candidates
+                      if label not in ("quack", "cute")]
+    if not candidates:
+        raise RuntimeError(f"{name}: GPU policy excludes every dispatch candidate")
+    if torch.compiler.is_compiling():
+        for label, thunk in candidates:
+            if label == "cublas":
+                return thunk()
+        return candidates[0][1]()
+    # Indices refer to THIS candidate list. A warm winner on another card, dtype,
+    # layout or policy must never select a different (possibly unsupported) backend.
+    key = (key, tuple((t.device, t.dtype, tuple(t.shape), tuple(t.stride())) for t in operands),
+           tuple(label for label, _ in candidates))
+    if not settings.current().trimul_cute_dispatch or len(candidates) == 1:
+        return candidates[0][1]()
+    idx = _CACHE.get(name, {}).get(key)          # plain read: no setdefault, no mutation
+    if idx is None:
+        if torch.compiler.is_compiling():
+            return candidates[0][1]()
+        idx = _calibrate(name, key, candidates)
+    return candidates[idx][1]()
+
+
+def _calibrate(name, key, candidates) -> int:
+    """Time every candidate for `key`, remember the winner, return its index. EAGER ONLY."""
+    best_i, best_t = 0, float("inf")
+    for i, (_label, thunk) in enumerate(candidates):
+        try:
+            for _ in range(3):       # warm (compile/autotune the variant)
+                thunk()
+            t = triton.testing.do_bench(thunk, warmup=10, rep=30, return_mode="median")
+        except Exception:            # noqa: BLE001 — a variant may not support this shape
+            t = float("inf")
+        if t < best_t:
+            best_t, best_i = t, i
+    _CACHE.setdefault(name, {})[key] = best_i
+    if _LOG:
+        print(f"[dispatch] {name} key={key} -> {candidates[best_i][0]} "
+              f"({best_t:.4f} ms)", flush=True)
+    return best_i
+
+
+def reset():
+    """Clear the dispatch cache (e.g. between bench configs)."""
+    _CACHE.clear()
+
+
+# --- GEMM/bmm primitives that dispatch cuBLAS vs quack (cute) per shape ----------------------
+# Generic so EVERY matmul in the pipeline can autotune its backend. Policy filtering precedes
+# Quack import; _calibrate() handles failures of supported candidates (e.g. odd strides).
+# A failing candidate scores inf and cuBLAS is chosen. dW huge-K reductions reliably pick cuBLAS; M-major input-grad
+# GEMMs can pick quack. Keys include the operand shapes so each distinct matmul caches its own.
+
+def mm(name, A, B):
+    """A @ B, dispatched cuBLAS vs quack."""
+    def _q():
+        from miniworld_engine.kernels._quack_compat import gemm as qg
+        return qg(A, B)
+    return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
+                [("cublas", lambda: A @ B), ("quack", _q)], operands=(A, B))
+
+
+def addmm(name, C, A, B):
+    """A @ B + C, dispatched cuBLAS addmm vs quack gemm_act (C-add epilogue)."""
+    def _q():
+        from miniworld_engine.kernels._quack_compat import gemm_act as qga
+        return qga(A, B, C=C, activation=None, store_preact=False)[1]
+    return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
+                [("cublas", lambda: torch.addmm(C, A, B)), ("quack", _q)], operands=(A, B, C))
+
+
+def bmm(name, A, B):
+    """batched A @ B, dispatched cuBLAS torch.bmm vs quack batched gemm."""
+    def _q():
+        from miniworld_engine.kernels._quack_compat import gemm as qg
+        return qg(A, B)
+    return pick(name, (A.shape[0], A.shape[-2], A.shape[-1], B.shape[-1]),
+                [("cublas", lambda: torch.bmm(A, B)), ("quack", _q)], operands=(A, B))

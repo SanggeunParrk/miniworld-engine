@@ -1,0 +1,38 @@
+[
+  {
+    "cfg": [
+      1,
+      64,
+      8,
+      2,
+      1
+    ],
+    "us": 2542.56010055542,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/28f4c8d67349a7f217513c0eccf6395e99236000e0b48eb99302cecb36a834f3.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      4,
+      4,
+      1
+    ],
+    "us": 2720.7999229431152,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/fcdbb25d5a8683b61a3495de04b9c56ef0c0a68289616733e518dfa318115f70.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      2,
+      8,
+      1
+    ],
+    "us": 2714.3681049346924,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/9e27434bf2904ca1da6aea5c77b7a0887469301a2c31b2e6e411128bb05e4468.cubin"
+  }
+]

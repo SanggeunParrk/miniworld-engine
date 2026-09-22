@@ -1,0 +1,82 @@
+{
+  "family": "triattn",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "block:triattn_native",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/ncu/triattn-module-L384-C128-block:triattn_native.json",
+  "profile": true,
+  "module": true,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "block:triattn_native",
+    "surround": {
+      "impl": "fpf",
+      "prologue": {
+        "id": "r07",
+        "impl": "fpf",
+        "piece": "prologue",
+        "key": [
+          128,
+          4,
+          32
+        ],
+        "cc": "9.0",
+        "triton": "*",
+        "variant": "v3",
+        "cfg": {
+          "BI": 8,
+          "BJ": 16,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "status": "certified",
+        "evidence": "H100 qualification runs on both stacks, torch 2.13 / triton 3.7 and torch 2.7 / triton 3.3 (served 20/20 per stack, rel_rms within the stock-bf16 class, self-det, cross-box bitwise)"
+      },
+      "epilogue": {
+        "id": "r16",
+        "impl": "fpf",
+        "piece": "epilogue",
+        "key": [
+          128,
+          4,
+          32
+        ],
+        "cc": "9.0",
+        "triton": "*",
+        "variant": "v2",
+        "cfg": {
+          "KVER": 2,
+          "BI": 16,
+          "BJ": 8,
+          "num_warps": 4,
+          "num_stages": 1,
+          "EXP": "libdevice"
+        },
+        "status": "certified",
+        "evidence": "H100 qualification runs on both stacks, torch 2.13 / triton 3.7 and torch 2.7 / triton 3.3 (served 20/20 per stack, rel_rms within the stock-bf16 class, self-det, cross-box bitwise)"
+      }
+    },
+    "residual": "out-of-place engine add"
+  },
+  "first_call_s": 2.0234029293060303,
+  "error": {
+    "rel_rms": 0.0017963922582566738,
+    "max_abs": 0.017403602600097656,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.01880749501287937,
+    "max_abs": 0.017403602600097656,
+    "finite": true
+  },
+  "status": "passed"
+}

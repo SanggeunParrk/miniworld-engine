@@ -1,0 +1,14 @@
+[
+  {
+    "tool": "memcheck",
+    "L": 384,
+    "returncode": 0,
+    "log": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/memcheck-L384.log"
+  },
+  {
+    "tool": "racecheck",
+    "L": 384,
+    "returncode": 0,
+    "log": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/racecheck-L384.log"
+  }
+]

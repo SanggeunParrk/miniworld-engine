@@ -1,0 +1,39 @@
+{
+ "arch": "9.0a (-gencode arch=compute_90a,code=sm_90a)",
+ "built_by": "the kernel directory's own _build() through build_prebuilt.py",
+ "built_utc": "2026-09-19T01:35:02Z",
+ "cutlass_tag": null,
+ "cxx11abi": true,
+ "device": "NVIDIA H100 80GB HBM3",
+ "ext": "triattn_mw_ext_g3x4",
+ "loadcheck": {
+  "s3584_prefix": "e9c37e84cb11c294"
+ },
+ "loadcheck_bitwise": {
+  "s3584_prefix": true
+ },
+ "module": "triattn_mw",
+ "module_sha256": {
+  "triattn_mw.py": "0cb032c69fad3ac08ebc141a8b1e91cd7a3c7b1f6efcd9bb3607092262f0b70f"
+ },
+ "note": "",
+ "nvcc": "Build cuda_12.9.r12.9/compiler.35813241_0",
+ "pkg": "v11",
+ "ptxas": {
+  "path": "/usr/local/cuda-12.9/bin/ptxas",
+  "version": "Build cuda_12.9.r12.9/compiler.35813241_0"
+ },
+ "python": "3.10.20",
+ "route": "mw",
+ "route_dir": "cuda_c",
+ "so_bytes": 1333632,
+ "so_sha256": "f89e5be794e69be929aae6e88c8df213f3844765ad8dfeed68fe80ec97316949",
+ "soabi": "cpython-310-x86_64-linux-gnu",
+ "source_sha256": {
+  "mw_ptx.h": "aa22a8a237f1915f467b2091de84c7060790c1641f6c4d8b3758c33172cf1e33",
+  "triattn_mw.cu": "d18e4ad1e6d60fd24be57f075a303b7adfc7f373bb4a41c40cc6150747af0709"
+ },
+ "stack_tag": "torch2.10.0+cu128-cpython-310-x86_64-linux-gnu",
+ "torch": "2.10.0+cu128",
+ "torch_cuda": "12.8"
+}

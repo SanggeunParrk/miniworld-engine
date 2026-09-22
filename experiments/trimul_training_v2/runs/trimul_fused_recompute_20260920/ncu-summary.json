@@ -1,0 +1,174 @@
+[
+  {
+    "L": 384,
+    "kernel": "b1_fused",
+    "source": "ncu-b1-L384.csv",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 577.824,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 18.723726,
+        "unit": "%"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 31.740897,
+        "unit": "%"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 9.638613,
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": 12.495009,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 241.968128,
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 120.704,
+        "unit": "Mbyte"
+      },
+      "launch__registers_per_thread": {
+        "value": 255.0,
+        "unit": "register/thread"
+      },
+      "launch__shared_mem_per_block": {
+        "value": 233.472,
+        "unit": "Kbyte/block"
+      }
+    }
+  },
+  {
+    "L": 384,
+    "kernel": "front_b7b12",
+    "source": "ncu-b7-L384.csv",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 731.968,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 12.919048,
+        "unit": "%"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 34.880852,
+        "unit": "%"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 22.009386,
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": 12.495994,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 268.851968,
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 48.13696,
+        "unit": "Mbyte"
+      },
+      "launch__registers_per_thread": {
+        "value": 238.0,
+        "unit": "register/thread"
+      },
+      "launch__shared_mem_per_block": {
+        "value": 134.144,
+        "unit": "Kbyte/block"
+      }
+    }
+  },
+  {
+    "L": 768,
+    "kernel": "b1_fused",
+    "source": "ncu-both-L768.csv",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 2.253184,
+        "unit": "ms"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 21.302383,
+        "unit": "%"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 31.997521,
+        "unit": "%"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 9.780853,
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": 12.49878,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 1.148635,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 460.405504,
+        "unit": "Mbyte"
+      },
+      "launch__registers_per_thread": {
+        "value": 255.0,
+        "unit": "register/thread"
+      },
+      "launch__shared_mem_per_block": {
+        "value": 233.472,
+        "unit": "Kbyte/block"
+      }
+    }
+  },
+  {
+    "L": 768,
+    "kernel": "front_b7b12",
+    "source": "ncu-both-L768.csv",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 2.825216,
+        "unit": "ms"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 12.929262,
+        "unit": "%"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 36.71434,
+        "unit": "%"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 23.226665,
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": 12.498976,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 1.06248,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 162.024704,
+        "unit": "Mbyte"
+      },
+      "launch__registers_per_thread": {
+        "value": 238.0,
+        "unit": "register/thread"
+      },
+      "launch__shared_mem_per_block": {
+        "value": 134.144,
+        "unit": "Kbyte/block"
+      }
+    }
+  }
+]

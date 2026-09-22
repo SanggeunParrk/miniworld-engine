@@ -1,0 +1,21 @@
+{
+  "config": {
+    "count": 132,
+    "defines": {
+      "GATE_PHASE": 1,
+      "LOWREG": 1,
+      "STREAM_LN": 1,
+      "B1_STREAM_AFFINE_UNROLL": 4
+    }
+  },
+  "status": "selected and verified in development training path",
+  "production_ready": false,
+  "production_blocker": "pre-existing L768 B7 dWL independent-reference error exceeds 0.05%",
+  "validation": [
+    "initial independent reference",
+    "mutated baseline parity",
+    "graph/eager bit exact",
+    "memcheck",
+    "racecheck"
+  ]
+}

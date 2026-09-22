@@ -1,0 +1,310 @@
+[
+  {
+    "L": 384,
+    "part": 1,
+    "updated": [
+      "gamma",
+      "mean",
+      "rstd",
+      "dy",
+      "ds"
+    ],
+    "errors": [
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 2.5192357497871853e-05,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 5.310183041729033e-06,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 1.0144420912183705e-06,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 5.251608854450751e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.0001627451420063153,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      },
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 6.060967643861659e-05,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 5.851921741850674e-06,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 1.4362042293214472e-06,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 5.263664206722751e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.00019441339827608317,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      }
+    ]
+  },
+  {
+    "L": 384,
+    "part": 2,
+    "updated": [
+      "gamma",
+      "mean",
+      "rstd",
+      "dy",
+      "ds"
+    ],
+    "errors": [
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 2.5192357497871853e-05,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 5.310183041729033e-06,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 4.6080126594461035e-06,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 5.374766374188766e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.0001627451420063153,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      },
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 6.060967643861659e-05,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 5.851921741850674e-06,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 1.0011295898948447e-06,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 5.872832957720675e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.00019441339827608317,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      }
+    ]
+  },
+  {
+    "L": 768,
+    "part": 1,
+    "updated": [
+      "gamma",
+      "mean",
+      "rstd",
+      "dy",
+      "ds"
+    ],
+    "errors": [
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 0.00021186773665249348,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 1.1823364729934838e-05,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 2.2967563495512877e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 2.0340742423741176e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.0002339767524972558,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      },
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 0.00010959204519167542,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 1.2492388123064302e-05,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 3.211642081168975e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 1.9543335838534404e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.00028452309197746217,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      }
+    ]
+  },
+  {
+    "L": 768,
+    "part": 2,
+    "updated": [
+      "gamma",
+      "mean",
+      "rstd",
+      "dy",
+      "ds"
+    ],
+    "errors": [
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 0.00021186773665249348,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 1.1823364729934838e-05,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 2.2967563495512877e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 2.0340742423741176e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.0002339767524972558,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      },
+      {
+        "dg": {
+          "relative_l2": 0.0,
+          "tolerance": 0.0,
+          "bit_exact": true
+        },
+        "dWg": {
+          "relative_l2": 0.00010959204519167542,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        },
+        "dtri": {
+          "relative_l2": 1.2492388123064302e-05,
+          "tolerance": 2e-05,
+          "bit_exact": null
+        },
+        "dgamma": {
+          "relative_l2": 3.211642081168975e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dbeta": {
+          "relative_l2": 1.9543335838534404e-07,
+          "tolerance": 5e-06,
+          "bit_exact": null
+        },
+        "dWp": {
+          "relative_l2": 0.00028452309197746217,
+          "tolerance": 0.0005,
+          "bit_exact": null
+        }
+      }
+    ]
+  }
+]

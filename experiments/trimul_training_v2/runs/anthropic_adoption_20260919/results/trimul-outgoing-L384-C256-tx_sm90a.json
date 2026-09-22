@@ -1,0 +1,59 @@
+{
+  "family": "trimul",
+  "length": 384,
+  "width": 256,
+  "direction": "outgoing",
+  "row": "tx_sm90a",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/trimul-outgoing-L384-C256-tx_sm90a.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "tx_sm90a",
+    "word": "tx_sm90a",
+    "cell": "9.0|bf16|C256|H256|N<=400|out|fwd",
+    "size_measured": false,
+    "stack": "H100:2.10.0+cu128/3.6.0/cueq0.10.0",
+    "cls": "fast",
+    "exact_vs": null,
+    "backward": false,
+    "capture_safe": true,
+    "x_stock": null,
+    "fallback": "v4",
+    "reason": "column=sibling:H100:2.10.0+cu128/3.6.0/cueq0.10.0; row word",
+    "config": null
+  },
+  "first_call_s": 1.6616392135620117,
+  "error": {
+    "rel_rms": 0.002587610390037298,
+    "max_abs": 0.032145023345947266,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.006123360246419907,
+    "max_abs": 0.032145023345947266,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.002587610390037298,
+    "max_abs": 0.032145023345947266,
+    "finite": true
+  },
+  "ms": 0.4043948745727539,
+  "samples_ms": [
+    0.40177791595458984,
+    0.4019289779663086,
+    0.4043948745727539,
+    0.4096352005004883,
+    0.40970367431640625
+  ],
+  "status": "passed"
+}

@@ -1,0 +1,76 @@
+{
+  "L": 384,
+  "mode": "cooperative single kernel",
+  "metrics": {
+    "gpu__time_duration.sum": {
+      "value": "265.760000",
+      "unit": "us"
+    },
+    "dram__bytes_read.sum": {
+      "value": "304.337664",
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": "119.760896",
+      "unit": "Mbyte"
+    },
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": "47.609489",
+      "unit": "%"
+    },
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": "26.253641",
+      "unit": "%"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+      "value": "11.228518",
+      "unit": "%"
+    },
+    "sm__warps_active.avg.pct_of_peak_sustained_active": {
+      "value": "12.488701",
+      "unit": "%"
+    },
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum": {
+      "value": "2116135",
+      "unit": ""
+    },
+    "launch__registers_per_thread": {
+      "value": "255",
+      "unit": "register/thread"
+    },
+    "launch__shared_mem_per_block_dynamic": {
+      "value": "231.424000",
+      "unit": "Kbyte/block"
+    },
+    "smsp__sass_inst_executed_op_local_ld.sum": {
+      "value": "0",
+      "unit": "inst"
+    },
+    "smsp__sass_inst_executed_op_local_st.sum": {
+      "value": "0",
+      "unit": "inst"
+    }
+  },
+  "stalls": {
+    "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": "1.298935",
+    "smsp__average_warps_issue_stalled_branch_resolving_per_issue_active.ratio": "0.040597",
+    "smsp__average_warps_issue_stalled_dispatch_stall_per_issue_active.ratio": "0.159076",
+    "smsp__average_warps_issue_stalled_drain_per_issue_active.ratio": "0.000142",
+    "smsp__average_warps_issue_stalled_gmma_per_issue_active.ratio": "0.009286",
+    "smsp__average_warps_issue_stalled_imc_miss_per_issue_active.ratio": "0.030883",
+    "smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio": "0.356305",
+    "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": "1.937987",
+    "smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio": "0.136646",
+    "smsp__average_warps_issue_stalled_membar_per_issue_active.ratio": "0.047851",
+    "smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio": "0.059125",
+    "smsp__average_warps_issue_stalled_misc_per_issue_active.ratio": "0.001498",
+    "smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio": "0.048203",
+    "smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio": "0.339758",
+    "smsp__average_warps_issue_stalled_selected_per_issue_active.ratio": "0.999987",
+    "smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio": "1.022037",
+    "smsp__average_warps_issue_stalled_sleeping_per_issue_active.ratio": "0.003176",
+    "smsp__average_warps_issue_stalled_tex_throttle_per_issue_active.ratio": "0",
+    "smsp__average_warps_issue_stalled_wait_per_issue_active.ratio": "0.974634"
+  },
+  "note": "NCU replay time is not CUDA Graph latency; final-results.json is the timing reference."
+}

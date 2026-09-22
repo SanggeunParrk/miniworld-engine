@@ -1,0 +1,66 @@
+{
+  "status": "experimental_validated_small_gain",
+  "scope": "L384 bidirectional B7-B12 only",
+  "plan": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/plan.py",
+  "kwargs": {
+    "clusters": 10,
+    "mode": 52
+  },
+  "environment": {
+    "B7_CONSUMERS": "10",
+    "B7_PRODUCER_REGS": "32",
+    "B7_RING_DEPTH": "12",
+    "B7_HW_CLUSTER": "2",
+    "B7_MULTICAST": "0"
+  },
+  "source_sha256": {
+    "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/joint.cu": "dee13f2d4d733bc58400fd8eb3169ac38b81a0d1bee9ebc01324fd25ac14f46f",
+    "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e"
+  },
+  "cubin": {
+    "path": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/build/49f07965e1ce5ebd0418282fd119c560fd31e16787aace4b4d51d181016e358d.cubin",
+    "sha256": "0b4bf73b7874f4ea45e0d5383d4004894ee5ca584e720c764f61336b92aa5e39"
+  },
+  "times_us": {
+    "split": 414.68799114227295,
+    "ring_baseline": 369.376003742218,
+    "v12p24": 360.25598645210266,
+    "v12p32": 356.59199953079224,
+    "v10p32": 358.97600650787354
+  },
+  "time_reduction_pct": 3.4609731227553064,
+  "rounds": [
+    {
+      "previous": 367.247998714447,
+      "selected": 355.24800419807434,
+      "time_reduction_pct": 3.267545244188863
+    },
+    {
+      "previous": 368.1440055370331,
+      "selected": 355.55198788642883,
+      "time_reduction_pct": 3.420405455804054
+    },
+    {
+      "previous": 391.1520093679428,
+      "selected": 371.16798758506775,
+      "time_reduction_pct": 5.109016777177489
+    },
+    {
+      "previous": 370.07999420166016,
+      "selected": 357.04000294208527,
+      "time_reduction_pct": 3.5235601664188487
+    },
+    {
+      "previous": 368.8479959964752,
+      "selected": 356.2079966068268,
+      "time_reduction_pct": 3.4268857434077593
+    }
+  ],
+  "benchmark": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-12-24_12-32_10-32.json",
+  "sanitizer": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/sanitizer-L384.json",
+  "profile": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/ncu-L384-mode52-p32-r12.csv",
+  "target_us": 252,
+  "target_met": false,
+  "sol90_verified": false,
+  "production_dispatch_changed": false
+}

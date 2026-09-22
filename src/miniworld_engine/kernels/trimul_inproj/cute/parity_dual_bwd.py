@@ -419,7 +419,7 @@ def input_dual_bwd_sm90_impl(g, f, w, v, length, config=None):
     tensors = (g, f, w.t(), v.t(), y)
     limit = torch.cuda.get_device_properties(g.device).shared_memory_per_block_optin
 
-    def launch(c):
+    def launch_dual_candidate(c):
         reason = feasibility(c, limit)
         if reason is not None:
             raise ValueError(reason)
@@ -442,18 +442,20 @@ def input_dual_bwd_sm90_impl(g, f, w, v, length, config=None):
             tensors[:-1],
             extra=(length, limit),
             feasibility=lambda c: feasibility(c, limit),
-            run=launch,
+            run=launch_dual_candidate,
         )
-    launch(config)
+    launch_dual_candidate(config)
     return y
 
 
-def _fake(g, f, w, v, length):
+def _input_dual_bwd_sm90_fake(g, f, w, v, length):
+    """Return output metadata without executing GPU work."""
     return g.new_empty((g.shape[0], w.shape[1]))
 
 
-@opaque(fake=_fake, name="trimul_input_dual_bwd_sm90")
+@opaque(fake=_input_dual_bwd_sm90_fake, name="trimul_input_dual_bwd_sm90")
 def input_dual_bwd_sm90(
     g: torch.Tensor, f: torch.Tensor, w: torch.Tensor, v: torch.Tensor, length: int
 ) -> torch.Tensor:
+    """Run the fused SM90 operation behind the compiler boundary."""
     return input_dual_bwd_sm90_impl(g, f, w, v, length)

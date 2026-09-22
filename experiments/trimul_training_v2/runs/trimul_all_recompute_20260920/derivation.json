@@ -1,0 +1,11 @@
+{
+  "source": "/home/psk6950/MiniWorld/runs/anthropic_ln_inference_20260919/k3.cu",
+  "source_sha256": "88a6731690369ccd53debe05932eea9a3c72136740723eaa615f61d995059e48",
+  "derived_sha256": "6813db24c3af08bcb4fa242b18cb3450cc6098228d947f49a5bdca5fa9cb6fe2",
+  "changes": [
+    "no activation saves",
+    "shared-row dropout",
+    "training rounding epilogue"
+  ],
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e"
+}

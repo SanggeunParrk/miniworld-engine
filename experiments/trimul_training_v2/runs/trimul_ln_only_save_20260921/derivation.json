@@ -1,0 +1,6 @@
+{
+  "source": "/home/psk6950/MiniWorld/runs/trimul_all_recompute_20260920/no_save_k3.cu",
+  "source_sha256": "6813db24c3af08bcb4fa242b18cb3450cc6098228d947f49a5bdca5fa9cb6fe2",
+  "save_location": "K3 already recomputes both LNs; K1 unchanged",
+  "save_values": "BF16 affine LN outputs only; no mean/rstd or other intermediates added"
+}

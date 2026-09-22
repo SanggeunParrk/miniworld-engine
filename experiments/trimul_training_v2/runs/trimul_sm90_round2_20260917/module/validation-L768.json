@@ -1,0 +1,391 @@
+{
+  "length": 768,
+  "compiled": true,
+  "explicit_triton_configs": {
+    "front": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    "f567": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "dual_bwd": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 3
+    }
+  },
+  "comparisons": [
+    {
+      "kernels": [],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "front"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 8.186928539544169e-07,
+        "ln_pair.bias": 1.4071212035560166e-06,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 1.4071212035560166e-06
+    },
+    {
+      "kernels": [
+        "f567"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 8.23426375973213e-07,
+        "ln_pair.bias": 1.4146124840408447e-06,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 1.4146124840408447e-06
+    },
+    {
+      "kernels": [
+        "dual_bwd"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 7.183976435953809e-07,
+        "ln_pair.bias": 1.20091499411501e-06,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 1.20091499411501e-06
+    },
+    {
+      "kernels": [
+        "front",
+        "f567",
+        "dual_bwd"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 7.445635787917126e-07,
+        "ln_pair.bias": 1.0335634215152822e-06,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 1.0335634215152822e-06
+    },
+    {
+      "kernels": [],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "front"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "f567"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "dual_bwd"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "front",
+        "f567",
+        "dual_bwd"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    }
+  ],
+  "observed_native_workloads": {
+    "trimul_inproj_gemm_gate_mmajor_sm90_cute": [
+      {
+        "shape": [
+          589824,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          1024
+        ],
+        "stride": [
+          1024,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          589824
+        ],
+        "stride": [
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      }
+    ],
+    "trimul_output_f567_train_sm90_cute": [
+      {
+        "shape": [
+          589824,
+          256
+        ],
+        "stride": [
+          256,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          589824,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          256
+        ],
+        "stride": [
+          256,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          589824,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          768,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      }
+    ],
+    "trimul_input_dual_bwd_sm90_cute": [
+      {
+        "shape": [
+          589824,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          589824,
+          1024
+        ],
+        "stride": [
+          1,
+          589824
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          1024
+        ],
+        "stride": [
+          1,
+          128
+        ],
+        "dtype": "torch.bfloat16"
+      }
+    ]
+  },
+  "passed": true
+}

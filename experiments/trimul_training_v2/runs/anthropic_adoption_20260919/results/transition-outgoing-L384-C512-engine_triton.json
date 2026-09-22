@@ -1,0 +1,44 @@
+{
+  "family": "transition",
+  "length": 384,
+  "width": 512,
+  "direction": "outgoing",
+  "row": "engine_triton",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/transition-outgoing-L384-C512-engine_triton.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "triton",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 38.27815055847168,
+  "error": {
+    "rel_rms": 0.0024811364710330963,
+    "max_abs": 0.026890277862548828,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.0048237210139632225,
+    "max_abs": 0.026890277862548828,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0024811364710330963,
+    "max_abs": 0.026890277862548828,
+    "finite": true
+  },
+  "ms": 2.3189990234375,
+  "samples_ms": [
+    2.254014739990234,
+    2.3260089111328126,
+    2.3137977600097654,
+    2.3189990234375,
+    2.3254579162597655
+  ],
+  "status": "passed"
+}

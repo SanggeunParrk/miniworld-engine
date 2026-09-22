@@ -1,0 +1,29 @@
+{
+  "metrics": {
+    "gpu__time_duration.sum": {
+      "unit": "ms",
+      "value": "1.444704"
+    },
+    "dram__bytes_read.sum": {
+      "unit": "Gbyte",
+      "value": "2.435185"
+    },
+    "dram__bytes_write.sum": {
+      "unit": "Mbyte",
+      "value": "212.627200"
+    },
+    "lts__t_sectors.sum": {
+      "unit": "sector",
+      "value": "328288189.000000"
+    },
+    "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "unit": "%",
+      "value": "89.257470"
+    },
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "unit": "%",
+      "value": "38.431031"
+    }
+  },
+  "scope": "NCU cache3 ring candidate; reported L2 throughput is not algorithmic SoL90"
+}

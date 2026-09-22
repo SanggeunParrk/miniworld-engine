@@ -1,0 +1,17 @@
+{
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "upstream_sha256": {
+    "tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+    "tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+    "tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b"
+  },
+  "experiment_sha256": {
+    "k1.cu": "4747254ef0ee60eed7605d0db4ac0e2e8141755a4da6536a1b553a5bcab96318",
+    "k3.cu": "88a6731690369ccd53debe05932eea9a3c72136740723eaa615f61d995059e48",
+    "separate_ln.cu": "bd71cf490a18549871b32eeec80db0ab66f040cf0606de98797b05821869b41e",
+    "separate_ln_tma.cu": "edf91de573ade038a51212c392da51f59b022e23e56c1249ef11ce6266c4f9f4",
+    "original_k1.cu": "cb151e409119c019f2114a155e4a856a6aed634e5146758569e7f81670457b9a",
+    "original_k3.cu": "172fdc445dbd801298785b30120f362e37d15849a0fe172c471dffd82bb9a4ba",
+    "k3_tma.cu": "06f66999bf9669daa8d6bbcfbbe0966c252858f2c53c401cb2b9f3c97e131728"
+  }
+}

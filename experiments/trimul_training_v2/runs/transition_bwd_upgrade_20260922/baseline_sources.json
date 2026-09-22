@@ -1,0 +1,10 @@
+{
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/fused_sm90a.py": "459000103b5afa079fbcdda158851e934aa5e31c264a64ae5f36d21c7b7e6b16",
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/transition_fused_sm90a.cu": "f70dc0b327fc0bdafa8c9dd449720b7b543148c3fa902c2c0ef7dc09798a3f58",
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/transition_fused_fwd_sm90a_kernel.cu": "5773ae836de034358fbf0dd6036f781acc3d92e24e497f88c0c05e0ea935a780",
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/transition_fused_bwd_sm90a_kernel.cu": "41de80001f576f5c6533b9db2e8f41ef56cae2c5d8418e57e7062d69f7772cd0",
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/anthropic_v5/README.md": "cbb00e1e8c836e952ac05e7ccef27886eb142615edacf2e9b1678be13573d2c7",
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/anthropic_v5/tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/anthropic_v5/tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+  "runs/minipairformer_block_cuda_20260922/transition_snapshot/anthropic_v5/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b"
+}

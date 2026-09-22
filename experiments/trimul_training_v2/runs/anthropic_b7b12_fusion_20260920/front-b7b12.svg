@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="1050" viewBox="0 0 1240 1050" role="img" aria-labelledby="title desc">
+<title id="title">Bidirectional TriMul training: B7–B12 in one CUDA kernel</title>
+<desc id="desc">Fused-input-LN forward saves remain unchanged. One cooperative kernel assigns 60 CTAs to B7 and B8 weight gradients, and 72 CTAs to B7, B9, B10, input LN backward and residual. Large intermediates remain on chip; small parameter partials are reduced inside the same launch.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#527083"/></marker></defs>
+<style>text{font-family:system-ui,-apple-system,sans-serif;fill:#183849} .h{font-size:23px;font-weight:700}.b{font-size:17px;font-weight:700}.t{font-size:15px}.s{font-size:13px;fill:#496474}.line{fill:none;stroke:#527083;stroke-width:2;marker-end:url(#arrow)}</style>
+<rect width="1240" height="1050" fill="#f3f7f8"/>
+<text x="36" y="43" class="h">TriMul · B7–B12 · ONE CUDA launch</text>
+<text x="36" y="71" class="t">H100 / BF16 / L384, L768 / C128 / left + right width 256 each / dropout 25%</text>
+<rect x="36" y="93" width="1168" height="100" rx="12" fill="#fff" stroke="#bccdd5"/>
+<text x="56" y="121" class="b">Forward stays fused: input LN + projection/gate</text>
+<text x="56" y="148" class="t">Existing saves: x_n, mean, inverse std, interleaved gate/projection preactivations; original x retained</text>
+<text x="56" y="173" class="s">B1–B4: separate development · B5–B6: existing cuBLAS contractions → d_left, d_right</text>
+<path d="M620 194V228" class="line"/>
+<rect x="36" y="230" width="1168" height="650" rx="16" fill="#edf7f4" stroke="#087c66" stroke-width="3"/>
+<text x="57" y="264" class="b">front_b7b12 · cooperative grid · 132 CTAs × 256 threads</text>
+<text x="57" y="289" class="s">Anthropic native v5 TMA/WGMMA primitives → MiniWorld training extension</text>
+<rect x="58" y="313" width="488" height="373" rx="12" fill="#fff" stroke="#80b6a8" stroke-width="2"/>
+<text x="78" y="344" class="b">60 CTAs · weight-gradient role</text>
+<text x="78" y="368" class="s">4 hidden groups × 15 reduction splits</text>
+<rect x="79" y="391" width="446" height="74" rx="8" fill="#edf4fb"/>
+<text x="96" y="419" class="b">B7 · mask + sigmoid/GLU backward</text>
+<text x="96" y="444" class="t">TMA: d_left/right + preactivation + saved x_n</text>
+<path d="M303 466V492" class="line"/>
+<rect x="79" y="495" width="446" height="86" rx="8" fill="#e5f5ed"/>
+<text x="96" y="523" class="b">B8 · WGMMA weight gradients</text>
+<text x="96" y="548" class="t">dW = B7 gradient × x_n</text>
+<text x="96" y="569" class="s">Channel-major shared tiles; no global d_concat</text>
+<text x="79" y="619" class="t">Write FP32 dW partials: 7.5 MiB total</text>
+<text x="79" y="645" class="s">Four input matrices; final BF16 conversion after sum</text>
+<text x="79" y="670" class="s">No concatenated weight buffer or transpose copies</text>
+<rect x="570" y="313" width="612" height="373" rx="12" fill="#fff" stroke="#90a9d4" stroke-width="2"/>
+<text x="590" y="344" class="b">72 CTAs · input-gradient role</text>
+<text x="590" y="368" class="s">One CTA owns all 128 input channels for a 64-row tile</text>
+<rect x="591" y="386" width="570" height="55" rx="8" fill="#edf4fb"/>
+<text x="608" y="411" class="b">B9 · WGMMA output-gate dgrad</text>
+<text x="608" y="431" class="s">d_glogit × W_gateᵀ → BF16 gate contribution in registers</text>
+<path d="M875 442V461" class="line"/>
+<rect x="591" y="464" width="570" height="66" rx="8" fill="#edf4fb"/>
+<text x="608" y="490" class="b">B7 + B10 · GLU backward + front dgrad</text>
+<text x="608" y="514" class="t">Recompute B7 locally → WGMMA → add B9 → BF16 dx_n</text>
+<path d="M875 531V550" class="line"/>
+<rect x="591" y="553" width="570" height="91" rx="8" fill="#f3eefb"/>
+<text x="608" y="579" class="b">B11 + B12 · input LN backward + residual</text>
+<text x="608" y="604" class="t">dx_n stays in registers; saved mean/inverse std reused</text>
+<text x="608" y="628" class="s">BF16 LN-gradient rounding → residual add → TMA dx store</text>
+<text x="591" y="671" class="s">Write dγ/dβ partials: 72 KiB; same kernel reduces them</text>
+<path d="M302 688V716H619V733" class="line"/>
+<path d="M875 688V716H621" fill="none" stroke="#527083" stroke-width="2"/>
+<rect x="79" y="737" width="1082" height="115" rx="10" fill="#fff" stroke="#087c66"/>
+<text x="98" y="766" class="b">Grid completion + parameter reduction · still the SAME kernel launch</text>
+<text x="98" y="793" class="t">FP32 partials → dW_left, dW_left_gate, dW_right, dW_right_gate, dγ, dβ</text>
+<text x="98" y="820" class="s">Shared buffers + registers hold large intermediates. Partial reduction uses global memory and two counters.</text>
+<text x="98" y="841" class="s">B7 is evaluated in both CTA roles. Fusion removes materialization; it does not eliminate all recomputation.</text>
+<rect x="36" y="900" width="1168" height="121" rx="12" fill="#fff" stroke="#bccdd5"/>
+<text x="56" y="930" class="b">Measured B7–B12: L384 615 → 536 µs (1.146×) · L768 2361 → 2051 µs (1.151×)</text>
+<text x="56" y="958" class="t">Full backward, same B1–B6: 1090 → 1009 µs / 4311 → 4023 µs</text>
+<text x="56" y="985" class="s">Experimental integration; production dispatch unchanged. 66-CTA validation variant uses two accumulation segments.</text>
+<text x="56" y="1007" class="s">Warm CUDA graphs, 600 samples/path, node02 · arithmetic/rounding contract checked with dropout off/on</text>
+</svg>

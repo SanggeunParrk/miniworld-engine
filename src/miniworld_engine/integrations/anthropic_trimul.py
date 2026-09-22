@@ -52,7 +52,7 @@ def _load() -> dict[str, Any]:
     if not (py / "trimul_native" / "face.py").is_file():
         raise PayloadUnavailable(f"{py} has no trimul_native package (a payload keeps python/ beside build/)")
     already = sys.modules.get("trimul_native")
-    if already is not None and Path(already.__file__).resolve().parent != py / "trimul_native":
+    if already is not None and (already.__file__ is None or Path(already.__file__).resolve().parent != py / "trimul_native"):
         raise PayloadUnavailable(f"trimul_native is already imported from {already.__file__}, not from {py}")
     if _LOADED:
         raise PayloadUnavailable("changing the payload in a live process is not supported")
@@ -121,7 +121,7 @@ def require(pair: torch.Tensor, c_z: int, c_hidden: int, *, grad: bool, dropout:
         raise PayloadUnavailable("the anthropic TriMul payload cannot serve this call: " + why)
 
 
-def _weights(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+def _weights(module: Any) -> dict[str, torch.Tensor]:
     return {"ln_in_w": module.ln_pair.weight, "ln_in_b": module.ln_pair.bias,
             "w_ag": module.to_left_gate.weight, "w_ap": module.to_left.weight,
             "w_bg": module.to_right_gate.weight, "w_bp": module.to_right.weight,
@@ -134,7 +134,7 @@ def _signature(tensors) -> tuple:
     return tuple((id(t), t._version, t.device, t.dtype, tuple(t.shape)) for t in tensors)
 
 
-def _prepared(module: torch.nn.Module) -> tuple[dict, dict]:
+def _prepared(module: Any) -> tuple[dict, dict]:
     w = _weights(module)
     key = (_signature(w.values()), module.ln_pair.eps)
     if getattr(module, "_native_key", None) != key:
@@ -159,7 +159,7 @@ def _pair_mask(pair: torch.Tensor, mask: torch.Tensor | None, ops) -> torch.Tens
     return m.contiguous() if torch.bool in native else m.to(torch.float32).contiguous()
 
 
-def update_unidirectional(module: torch.nn.Module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def update_unidirectional(module: Any, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """`pair + trimul(pair)` for one direction, residual fused in K3, through the payload's served face."""
     if module.ln_pair.eps != module.ln_out.eps:
         raise PayloadUnavailable("the native TriMul normalises input and output with one epsilon")
@@ -171,7 +171,7 @@ def update_unidirectional(module: torch.nn.Module, pair: torch.Tensor, mask: tor
     return out
 
 
-def update_bidirectional(module: torch.nn.Module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def update_bidirectional(module: Any, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """`pair + bidir_trimul(pair)` as one unit at c_hidden = 2 * d_hidden: K1 (natural layout) -> the two half-channel
     contractions -> K3 over both halves with the residual fused."""
     if module.ln_pair.eps != module.ln_out.eps:

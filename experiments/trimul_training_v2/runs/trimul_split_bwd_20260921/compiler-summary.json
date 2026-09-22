@@ -1,0 +1,260 @@
+[
+  {
+    "L": 384,
+    "variant": "baseline",
+    "sha256": "16ff0428552539e12ae84428cfcea1af27533cfc56b7acff9d512b720052a7b7",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "baseline",
+    "sha256": "33cdf0063bb8756f5572a3b7aaa809376f3f3d45542c48b6981872118e505680",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 32 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_no_save",
+    "sha256": "16ff0428552539e12ae84428cfcea1af27533cfc56b7acff9d512b720052a7b7",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_no_save",
+    "sha256": "aa943d6097081161277658ff5ae5914dd9072dc2f99a5f056c474d62e8305cf6",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_no_save",
+    "sha256": "3ee847ac4eaa97f5a09e39201a43b33aebb3fd80923e3b4816ce960e2f87a1ef",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 189 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "fused_xn",
+    "sha256": "f9114a100d1799eb720c7e9391b71fc8817271d57cc1f9506fe0ad77e9f412c3",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "fused_xn",
+    "sha256": "7893666207dec9719496ec674010d29d64b7f4b81b9c29aa30e5cbb3fd967cd4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_xn_pc2",
+    "sha256": "f9114a100d1799eb720c7e9391b71fc8817271d57cc1f9506fe0ad77e9f412c3",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_xn_pc2",
+    "sha256": "c9947693d736b0216c06d804b00e2d68e96014457396833ce8ff072ed965260a",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_xn_pc2",
+    "sha256": "17c4dc07df96d9f138f5770355a07bb95b8ce75f8f1b34b01080ef4b75febf85",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 180 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_xn_pc1",
+    "sha256": "f9114a100d1799eb720c7e9391b71fc8817271d57cc1f9506fe0ad77e9f412c3",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_xn_pc1",
+    "sha256": "2c38ab70a4b57b970011046188f583ec129f135bce39865fbf05ab72e7e0dc3b",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 128 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "split_xn_pc1",
+    "sha256": "17c4dc07df96d9f138f5770355a07bb95b8ce75f8f1b34b01080ef4b75febf85",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 180 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "baseline",
+    "sha256": "d5a5e298f78bf0bcbd503b768992218a78e9689221a1aabb901e4a47f33af710",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "baseline",
+    "sha256": "33cdf0063bb8756f5572a3b7aaa809376f3f3d45542c48b6981872118e505680",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 32 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_no_save",
+    "sha256": "d5a5e298f78bf0bcbd503b768992218a78e9689221a1aabb901e4a47f33af710",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_no_save",
+    "sha256": "aa943d6097081161277658ff5ae5914dd9072dc2f99a5f056c474d62e8305cf6",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_no_save",
+    "sha256": "3ee847ac4eaa97f5a09e39201a43b33aebb3fd80923e3b4816ce960e2f87a1ef",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 189 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "fused_xn",
+    "sha256": "6942b9c0481a7d6f8fa890d81a87f28b85004f18b9c631d9475d8770e6b32785",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "fused_xn",
+    "sha256": "7893666207dec9719496ec674010d29d64b7f4b81b9c29aa30e5cbb3fd967cd4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_xn_pc2",
+    "sha256": "6942b9c0481a7d6f8fa890d81a87f28b85004f18b9c631d9475d8770e6b32785",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_xn_pc2",
+    "sha256": "c9947693d736b0216c06d804b00e2d68e96014457396833ce8ff072ed965260a",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_xn_pc2",
+    "sha256": "17c4dc07df96d9f138f5770355a07bb95b8ce75f8f1b34b01080ef4b75febf85",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 180 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_xn_pc1",
+    "sha256": "6942b9c0481a7d6f8fa890d81a87f28b85004f18b9c631d9475d8770e6b32785",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 31 registers, used 0 barriers",
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 255 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_xn_pc1",
+    "sha256": "2c38ab70a4b57b970011046188f583ec129f135bce39865fbf05ab72e7e0dc3b",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 128 registers, used 16 barriers, 1024 bytes smem"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "split_xn_pc1",
+    "sha256": "17c4dc07df96d9f138f5770355a07bb95b8ce75f8f1b34b01080ef4b75febf85",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 180 registers, used 16 barriers, 2048 bytes smem"
+    ]
+  }
+]

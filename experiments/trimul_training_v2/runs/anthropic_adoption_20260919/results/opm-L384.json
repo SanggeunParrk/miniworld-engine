@@ -1,0 +1,39 @@
+{
+  "family": "opm",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "carried",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/opm-L384.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 1.2416808605194092,
+  "error": {
+    "rel_rms": 0.0016609284793958068,
+    "max_abs": 0.029785871505737305,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0016609284793958068,
+    "max_abs": 0.029785871505737305,
+    "finite": true
+  },
+  "ms": 0.22539712905883788,
+  "samples_ms": [
+    0.22555839538574218,
+    0.22544319152832032,
+    0.22536191940307618,
+    0.22522880554199218,
+    0.22539712905883788
+  ],
+  "status": "passed"
+}

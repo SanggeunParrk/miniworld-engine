@@ -3,6 +3,8 @@ import pytest
 import torch
 import triton
 
+from miniworld_engine.modules.exceptions import ImplementationType
+
 pytestmark = pytest.mark.gpu
 
 
@@ -37,7 +39,7 @@ def test_transition_residual_all_gradients(shape, n, monkeypatch):
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     settings.configure(engine_backend="triton", transition_residual_fusion=True)
     torch.manual_seed(72)
-    module = Transition(shape[-1], n=n, implementation="triton").cuda().bfloat16()
+    module = Transition(shape[-1], n=n, implementation=ImplementationType.TRITON).cuda().bfloat16()
     with torch.no_grad():
         for param in module.parameters():
             if param.ndim == 2:

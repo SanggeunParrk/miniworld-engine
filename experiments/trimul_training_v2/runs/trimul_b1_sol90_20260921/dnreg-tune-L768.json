@@ -1,0 +1,158 @@
+[
+  {
+    "config": {
+      "count": 132,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16,
+        "B1_DN_PAIR": 0,
+        "B1_DN_REG": 0
+      }
+    },
+    "host": "node01",
+    "valid": true,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "ratio": 0.9427074495129956,
+    "times": {
+      "baseline": 748.1600046157837,
+      "candidate": 705.2960097789764
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/dnreg/build/ec0ad4226145edd248ff56c2fabbe9c905b6a844aedf5d5cf99338e846546c1f.cubin"
+  },
+  {
+    "config": {
+      "count": 132,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16,
+        "B1_DN_PAIR": 1,
+        "B1_DN_REG": 0
+      }
+    },
+    "host": "node01",
+    "valid": true,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "ratio": 0.9330431804914529,
+    "times": {
+      "baseline": 749.8559951782227,
+      "candidate": 699.6480226516724
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/dnreg/build/6bd335ca21bc3dc11571ce97ae2825d56a51ca48aea869f4a852903e9ad81fbd.cubin"
+  },
+  {
+    "config": {
+      "count": 132,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16,
+        "B1_DN_PAIR": 0,
+        "B1_DN_REG": 1
+      }
+    },
+    "host": "node01",
+    "valid": true,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "ratio": 0.9416588245587464,
+    "times": {
+      "baseline": 747.327983379364,
+      "candidate": 703.7279903888702
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/dnreg/build/ec1346ab461103b55ef5c95b5b5dee96b0a3e74f96cf34b1abd8d00323a8920d.cubin"
+  },
+  {
+    "config": {
+      "count": 132,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16,
+        "B1_DN_PAIR": 1,
+        "B1_DN_REG": 1
+      }
+    },
+    "host": "node01",
+    "valid": true,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "ratio": 0.9285912912452173,
+    "times": {
+      "baseline": 748.8159835338593,
+      "candidate": 695.3440010547638
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/dnreg/build/ec81484b3e8b48dec2de8425885dc86a84ad99bc1ef0229c69be3323860a48e4.cubin"
+  }
+]

@@ -96,10 +96,7 @@ ONE_SIDED: dict[tuple[str, str], str] = {
         "by the sm100 merged-training paths (cute/bidir_training_sm100.py, "
         "cute/v6_training_merged_sm100.py), which `dispatch` selects only on B200; below sm90 it "
         "is a program nothing can launch. This entry retires itself when a B200 cache lands",
-    ("layernorm_bwd_atomic_triton", "HAS_ROWSCALE"):
-        "drivers/layernorm.py:111-121, the backward of the same forward and the same sm90+ gate; "
-        "`_bwd_atomic_impl` pins =0 (compile_native.py:154) and the =1 launcher (main.py:419) is "
-        "reached only through the cute paths",
+
 }
 
 #: Ops whose driver NOW drives both values but whose committed cache predates that build.

@@ -1,0 +1,26 @@
+[
+  {
+    "selected_for": 384,
+    "tested_N": 64,
+    "anthropic_bitwise": true,
+    "triton_relative_l2": 5.508791218744591e-05
+  },
+  {
+    "selected_for": 384,
+    "tested_N": 72,
+    "anthropic_bitwise": true,
+    "triton_relative_l2": 7.94543739175424e-05
+  },
+  {
+    "selected_for": 768,
+    "tested_N": 64,
+    "anthropic_bitwise": true,
+    "triton_relative_l2": 5.508791218744591e-05
+  },
+  {
+    "selected_for": 768,
+    "tested_N": 72,
+    "anthropic_bitwise": true,
+    "triton_relative_l2": 7.94543739175424e-05
+  }
+]

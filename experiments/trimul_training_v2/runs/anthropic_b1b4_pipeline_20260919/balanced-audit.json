@@ -1,0 +1,297 @@
+{
+  "selected": "dual_balanced",
+  "status": "experimental; measured relative target met, L384 has little margin; absolute 173us not met",
+  "profiles": {
+    "balanced/L384": {
+      "gpu__time_duration.sum": {
+        "value": 213.184,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 60.511754,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 324.671488,
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 107.753216,
+        "unit": "Mbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": 14.670653,
+        "unit": "%"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 14.675751,
+        "unit": "%"
+      },
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum": {
+        "value": 689281.0,
+        "unit": ""
+      },
+      "launch__registers_per_thread": {
+        "value": 252.0,
+        "unit": "register/thread"
+      },
+      "lts__t_sectors.sum": {
+        "value": 23875327.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+        "value": 1.531304,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+        "value": 0.467385,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio": {
+        "value": 0.424969,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_membar_per_issue_active.ratio": {
+        "value": 0.030267,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_wait_per_issue_active.ratio": {
+        "value": 0.785726,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_sleeping_per_issue_active.ratio": {
+        "value": 0.004589,
+        "unit": "inst"
+      },
+      "smsp__inst_executed.sum": {
+        "value": 59464302.0,
+        "unit": "inst"
+      },
+      "L2_bytes_derived": 764010464.0
+    },
+    "balanced/L768": {
+      "gpu__time_duration.sum": {
+        "value": 749.952,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 70.624896,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 1.325964,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 449.443584,
+        "unit": "Mbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": 16.697407,
+        "unit": "%"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 16.560602,
+        "unit": "%"
+      },
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum": {
+        "value": 3369031.0,
+        "unit": ""
+      },
+      "launch__registers_per_thread": {
+        "value": 252.0,
+        "unit": "register/thread"
+      },
+      "lts__t_sectors.sum": {
+        "value": 92946816.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+        "value": 1.270966,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+        "value": 0.348896,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio": {
+        "value": 0.421147,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_membar_per_issue_active.ratio": {
+        "value": 0.00766,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_wait_per_issue_active.ratio": {
+        "value": 0.767271,
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_sleeping_per_issue_active.ratio": {
+        "value": 0.002171,
+        "unit": "inst"
+      },
+      "smsp__inst_executed.sum": {
+        "value": 232098563.0,
+        "unit": "inst"
+      },
+      "L2_bytes_derived": 2974298112.0
+    }
+  },
+  "max_relative_l2": {
+    "dg": 0.0,
+    "dWg": 0.0003648984420578927,
+    "dtri": 1.4694684068672359e-05,
+    "dgamma": 1.970764969883021e-06,
+    "dbeta": 6.652655883954139e-07,
+    "dWp": 0.00035537758958525956
+  },
+  "strict_cases": 24,
+  "comparisons": 72,
+  "sanitizers": {
+    "memcheck/L64": "passed",
+    "memcheck/L384": "passed",
+    "racecheck/L64": "passed",
+    "racecheck/L384": "passed",
+    "synccheck/L64": "passed",
+    "synccheck/L384": "passed",
+    "split-memcheck/L64": "passed",
+    "split-memcheck/L384": "passed"
+  },
+  "ptxas": {
+    "66/1": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/5c7688d3273660564c714732d52f46b5db785aa1badf5a45e652730380c03770.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=66",
+        "-DPART_ONLY=1",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_balanced.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/5c7688d3273660564c714732d52f46b5db785aa1badf5a45e652730380c03770.cubin"
+      ],
+      "registers": [
+        "31",
+        "252"
+      ],
+      "spills": 0
+    },
+    "66/2": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/b215c6c81dea4b3da97ba9497b4c5005373b2887f5da92e2a4dc85191fec2176.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=66",
+        "-DPART_ONLY=2",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_balanced.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/b215c6c81dea4b3da97ba9497b4c5005373b2887f5da92e2a4dc85191fec2176.cubin"
+      ],
+      "registers": [
+        "31",
+        "252"
+      ],
+      "spills": 0
+    },
+    "132/1": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/f5043fbbb902fa8766aec99bd61b6a7335ee69030d13a9f040efc6892cd29dde.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=132",
+        "-DPART_ONLY=1",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_balanced.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/f5043fbbb902fa8766aec99bd61b6a7335ee69030d13a9f040efc6892cd29dde.cubin"
+      ],
+      "registers": [
+        "32",
+        "252"
+      ],
+      "spills": 0
+    },
+    "132/2": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/e2c4d8f5995e375cd941108a879265200487c62ed5a0ec0f63ea7eb608b98018.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=132",
+        "-DPART_ONLY=2",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_balanced.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/e2c4d8f5995e375cd941108a879265200487c62ed5a0ec0f63ea7eb608b98018.cubin"
+      ],
+      "registers": [
+        "32",
+        "252"
+      ],
+      "spills": 0
+    }
+  },
+  "sass_static_module_counts": {
+    "HGMMA": 28,
+    "UTMALDG": 59,
+    "UTMASTG": 4,
+    "LDG": 275,
+    "STG": 106,
+    "LDS": 60,
+    "STS": 47,
+    "LDL": 0,
+    "STL": 0
+  },
+  "extra_cases": 24,
+  "extra_passed": 22,
+  "extra_caveat": "L72 seed20261151 dtri2.1726077e-5, bit-identical to original dual",
+  "original_sha256": {
+    "dual.cu": "3026e8b5722106852571dc245a9693fe317b61537598f99cb7d3aa6fc6e468c8",
+    "dual_primitives.cuh": "4968268aec02402b1eb0136ca5d95336409f453c4885cc04147c72a02f93234f",
+    "dual.py": "0a08f370cc5640d3e429c783bc931bb8c4fb5382bedbb50e13cffec83c0ab355",
+    "core.py": "b7fc3efd0f378ef2aa55e72e88997b9a83f02090ef6f705bfbd5bae5521ae058",
+    "dual_dspref.cu": "7f7614f0d76309f8368df2aa0303c804960f72fd3f999f7464b6718a0d4de517"
+  },
+  "events": "balanced-paired-results.json",
+  "full_integration": "integrate.backward_cuda; B5+ unchanged; production default unchanged"
+}

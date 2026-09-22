@@ -1,0 +1,13 @@
+**/__pycache__/
+**/build/
+**/native_build/
+**/*.cubin
+**/*.pyc
+**/*.lock
+**/*.so
+**/*.ncu-rep
+!runs/trimul_cuda_widths_opt_20260923/memcheck-*.log
+!runs/trimul_cuda_widths_opt_20260923/racecheck-*.log
+**/inductor*/
+**/torchinductor*/
+**/host_cache/

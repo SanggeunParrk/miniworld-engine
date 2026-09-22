@@ -1,0 +1,14 @@
+[
+  {
+    "tool": "memcheck",
+    "returncode": 0,
+    "log": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native-memcheck-D512.log",
+    "job": "15687"
+  },
+  {
+    "tool": "racecheck",
+    "returncode": 0,
+    "log": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native-racecheck-D512.log",
+    "job": "15687"
+  }
+]

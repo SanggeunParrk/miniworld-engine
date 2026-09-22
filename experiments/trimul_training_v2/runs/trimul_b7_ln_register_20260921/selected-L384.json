@@ -1,0 +1,42 @@
+{
+  "skip_restore": 1,
+  "overlap": 0,
+  "ln_mode": 2,
+  "valid": true,
+  "relative_l2": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "bit_exact": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "config": {
+    "splits": 16,
+    "pc": 1,
+    "dxctas": 132,
+    "prod": 32,
+    "cons": 224,
+    "resident": 1,
+    "slices": 2
+  },
+  "times": {
+    "baseline": 535.3599786758423,
+    "candidate": 505.6479871273041
+  },
+  "ratio": 0.9445009101688405,
+  "cubins": [
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/f5eed391fb40b630c669b51736527aa942325042565e1cff1a361705b13ee1d8.cubin",
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ln_register_20260921/build/86d0ebd6ba8679ab120360144d90e47d431c88a0c7c01fe2ced19a5d8429075c.cubin"
+  ]
+}

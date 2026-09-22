@@ -1,0 +1,19 @@
+{
+  "ptx_sha256": "a0a34bc766b61146b2e18cca961765620bac1132bf72c435b39766386ac549a6",
+  "wgmma_instruction_lines": 24,
+  "tma_instruction_lines": 28,
+  "examples": [
+    ".target sm_90a",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r74], [%rd36, {%r7, %r6}], [%r73], %rd37;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r79], [%rd38, {%r80, %r6}], [%r78], %rd39;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r83], [%rd40, {%r84, %r7}], [%r82], %rd41;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r91], [%rd42, {%r92, %r6}], [%r90], %rd43;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r96], [%rd44, {%r97, %r7}], [%r95], %rd45;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r104], [%rd46, {%r105, %r6}], [%r103], %rd47;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r109], [%rd48, {%r110, %r7}], [%r108], %rd49;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r117], [%rd50, {%r118, %r6}], [%r116], %rd51;",
+    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint [%r122], [%rd52, {%r123, %r7}], [%r121], %rd53;",
+    "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%f4577, %f4578, %f4579, %f4580, %f4581, %f4582, %f4583, %f4584, %f4585, %f4586, %f4587, %f4588, %f4589, %f4590, %f4591, %f4592, %f4593, %f4594, %f4595, %f4596, %f4597, %f4598, %f4599, %f4600, %f4601, %f4602, %f4603, %f4604, %f4605, %f4606, %f4607, %f4608}, %rd54, %rd55, p, 1,  1, 0, 0;",
+    "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%f4577, %f4578, %f4579, %f4580, %f4581, %f4582, %f4583, %f4584, %f4585, %f4586, %f4587, %f4588, %f4589, %f4590, %f4591, %f4592, %f4593, %f4594, %f4595, %f4596, %f4597, %f4598, %f4599, %f4600, %f4601, %f4602, %f4603, %f4604, %f4605, %f4606, %f4607, %f4608}, %rd56, %rd57, p, 1,  1, 0, 0;"
+  ]
+}

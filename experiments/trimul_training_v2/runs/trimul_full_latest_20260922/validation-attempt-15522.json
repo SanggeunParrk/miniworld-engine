@@ -1,0 +1,1718 @@
+{
+  "L": 384,
+  "C": 128,
+  "H": 256,
+  "dropout": 0.25,
+  "host": "node01",
+  "job": "15522",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "includes": [
+    "fresh training forward saves",
+    "both directions",
+    "B1-B12",
+    "cuBLAS",
+    "all 11 gradients",
+    "live weight packing",
+    "pair mask",
+    "fixed dropout25%",
+    "residual"
+  ],
+  "excludes": [
+    "optimizer",
+    "dropout RNG generation",
+    "CPU dispatch",
+    "compilation"
+  ],
+  "checks": {
+    "0": {
+      "historical_1048": {
+        "valid": true,
+        "eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 9.74844879237935e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0001376368454657495,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.00012871013313997537,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.00018181296763941646,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 2.82142138985364e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 2.1242239256480389e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 9.74844879237935e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0001376368454657495,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.00012871013313997537,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.00018181296763941646,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 2.82142138985364e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 2.1242239256480389e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph_vs_eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        }
+      },
+      "regression_1185": {
+        "valid": true,
+        "eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph_vs_eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        }
+      },
+      "latest_combined": {
+        "valid": true,
+        "eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 1.7554966689203866e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.00013029869296588004,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.00019169715233147144,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0001826897350838408,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.00022618034563492984,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 4.078905476490036e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 4.711984274763381e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 1.7554966689203866e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.00013029869296588004,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.00019169715233147144,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0001826897350838408,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.00022618034563492984,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 4.078905476490036e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 4.711984274763381e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph_vs_eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        }
+      }
+    },
+    "1": {
+      "historical_1048": {
+        "valid": true,
+        "eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.00015099898155312985,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 4.2497598769841716e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 7.178586383815855e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 5.717241219826974e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 2.52439946279992e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 2.350950722984635e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.00015099898155312985,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 4.2497598769841716e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 7.178586383815855e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 5.717241219826974e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 2.52439946279992e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 2.350950722984635e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph_vs_eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        }
+      },
+      "regression_1185": {
+        "valid": true,
+        "eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph_vs_eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        }
+      },
+      "latest_combined": {
+        "valid": false,
+        "eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 4.065044777235016e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.00017278948507737368,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 9.423565643373877e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 9.051940287463367e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 8.178465941455215e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 8.37042443890823e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": false
+          },
+          "dbeta_in": {
+            "relative_l2": 6.891239536344074e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": false
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 4.065044777235016e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.00017278948507737368,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 9.423565643373877e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 9.051940287463367e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 8.178465941455215e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 8.37042443890823e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": false
+          },
+          "dbeta_in": {
+            "relative_l2": 6.891239536344074e-06,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": false
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        },
+        "graph_vs_eager": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        }
+      }
+    }
+  },
+  "times": {},
+  "rounds": {},
+  "cubins": {
+    "historical_1048": {
+      "b1": [
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_b1_wait_folding_20260921/build/75299e244ed5730591e448f60a920df87720bfde0f0d7dbc137476f6ea6213bc.cubin",
+          "sha256": "92b9c6361efb94d2a65cf9eb55bd67dc13bfa0d5f6bc471851317e1b72753d5a"
+        }
+      ],
+      "b7": [
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_b7_split_lnreduce_20260922/build/5fde48d4506ae3c994be85c5181d0a5dc28ac2af45ace6ba434646056f2d8437.cubin",
+          "sha256": "9f40e2b2fc5263d15fcd39d2721e2285b1a0f0039692d8fc1060cf57f93c0aa9"
+        },
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_b7_split_lnreduce_20260922/build/c32712c8e50883ca6a03a8fa7a438559e73ef066e7c8a4b79ebc3566f594efcc.cubin",
+          "sha256": "5bd9f058ab0b5c1f6524e3dfabb21758c0f087eb0140394f456bd00cdce22d6c"
+        }
+      ]
+    },
+    "regression_1185": {
+      "b1": [
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_b1_gate_demote_20260922/build/53d2f7d052b10d559a2a8671170afb2df8850e3844a64169bad1c7550004b356.cubin",
+          "sha256": "cde742fdc3869bfa28a353c3f815610f88ae132ad729f97e782ec6a23fbbba12"
+        }
+      ],
+      "b7": [
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_split_bwd_20260921/build/d7ca96f26d834736e71bad92539274f8f63fcfd779b719e9b4eac2cc25d4cfdd.cubin",
+          "sha256": "2c38ab70a4b57b970011046188f583ec129f135bce39865fbf05ab72e7e0dc3b"
+        },
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_split_bwd_20260921/build/ecb1769c4aaeceab620cdad111f444c14ded5f403fff44d60b4cb4c68fb63549.cubin",
+          "sha256": "17c4dc07df96d9f138f5770355a07bb95b8ce75f8f1b34b01080ef4b75febf85"
+        }
+      ]
+    },
+    "latest_combined": {
+      "b1": [
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_b1_gate_demote_20260922/build/53d2f7d052b10d559a2a8671170afb2df8850e3844a64169bad1c7550004b356.cubin",
+          "sha256": "cde742fdc3869bfa28a353c3f815610f88ae132ad729f97e782ec6a23fbbba12"
+        }
+      ],
+      "b7": [
+        {
+          "path": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/build/49f07965e1ce5ebd0418282fd119c560fd31e16787aace4b4d51d181016e358d.cubin",
+          "sha256": "0b4bf73b7874f4ea45e0d5383d4004894ee5ca584e720c764f61336b92aa5e39"
+        }
+      ]
+    }
+  },
+  "selection": {
+    "status": "experimental_validated_small_gain",
+    "scope": "L384 bidirectional B7-B12 only",
+    "plan": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/plan.py",
+    "kwargs": {
+      "clusters": 10,
+      "mode": 52
+    },
+    "environment": {
+      "B7_CONSUMERS": "10",
+      "B7_PRODUCER_REGS": "32",
+      "B7_RING_DEPTH": "12",
+      "B7_HW_CLUSTER": "2",
+      "B7_MULTICAST": "0"
+    },
+    "source_sha256": {
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/joint.cu": "dee13f2d4d733bc58400fd8eb3169ac38b81a0d1bee9ebc01324fd25ac14f46f",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e"
+    },
+    "cubin": {
+      "path": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/build/49f07965e1ce5ebd0418282fd119c560fd31e16787aace4b4d51d181016e358d.cubin",
+      "sha256": "0b4bf73b7874f4ea45e0d5383d4004894ee5ca584e720c764f61336b92aa5e39"
+    },
+    "times_us": {
+      "split": 414.68799114227295,
+      "ring_baseline": 369.376003742218,
+      "v12p24": 360.25598645210266,
+      "v12p32": 356.59199953079224,
+      "v10p32": 358.97600650787354
+    },
+    "time_reduction_pct": 3.4609731227553064,
+    "rounds": [
+      {
+        "previous": 367.247998714447,
+        "selected": 355.24800419807434,
+        "time_reduction_pct": 3.267545244188863
+      },
+      {
+        "previous": 368.1440055370331,
+        "selected": 355.55198788642883,
+        "time_reduction_pct": 3.420405455804054
+      },
+      {
+        "previous": 391.1520093679428,
+        "selected": 371.16798758506775,
+        "time_reduction_pct": 5.109016777177489
+      },
+      {
+        "previous": 370.07999420166016,
+        "selected": 357.04000294208527,
+        "time_reduction_pct": 3.5235601664188487
+      },
+      {
+        "previous": 368.8479959964752,
+        "selected": 356.2079966068268,
+        "time_reduction_pct": 3.4268857434077593
+      }
+    ],
+    "benchmark": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-12-24_12-32_10-32.json",
+    "sanitizer": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/sanitizer-L384.json",
+    "profile": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/ncu-L384-mode52-p32-r12.csv",
+    "target_us": 252,
+    "target_met": false,
+    "sol90_verified": false,
+    "production_dispatch_changed": false
+  }
+}

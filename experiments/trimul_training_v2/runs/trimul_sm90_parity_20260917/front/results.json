@@ -1,0 +1,160 @@
+[
+  {
+    "m": 144,
+    "k": 96,
+    "h2": 40,
+    "mask": "fractional",
+    "save": true,
+    "config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 32,
+      "BLOCK_K_H2": 32,
+      "num_warps": 8,
+      "num_stages": 2
+    },
+    "errors": {
+      "out": 0.0,
+      "preact": 0.0,
+      "torch_out": 0.0,
+      "torch_preact": 4.102991724153071e-09
+    }
+  },
+  {
+    "m": 256,
+    "k": 128,
+    "h2": 64,
+    "mask": "none",
+    "save": true,
+    "config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 16,
+      "BLOCK_K_H2": 16,
+      "num_warps": 8,
+      "num_stages": 1
+    },
+    "errors": {
+      "out": 0.0,
+      "preact": 0.0,
+      "torch_out": 2.9011271180934273e-06,
+      "torch_preact": 2.7082614906248637e-07
+    }
+  },
+  {
+    "m": 256,
+    "k": 128,
+    "h2": 64,
+    "mask": "binary",
+    "save": true,
+    "config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 8,
+      "num_stages": 4
+    },
+    "errors": {
+      "out": 0.0,
+      "preact": 0.0,
+      "torch_out": 1.3339994438865688e-05,
+      "torch_preact": 3.369381738593802e-05
+    }
+  },
+  {
+    "m": 256,
+    "k": 128,
+    "h2": 64,
+    "mask": "fractional",
+    "save": false,
+    "config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 32,
+      "BLOCK_K_H2": 32,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "errors": {
+      "out": 0.0,
+      "torch_out": 6.320701118056604e-07
+    }
+  },
+  {
+    "m": 16384,
+    "k": 128,
+    "h2": 256,
+    "mask": "fractional",
+    "save": true,
+    "config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 32,
+      "BLOCK_K_H2": 64,
+      "num_warps": 8,
+      "num_stages": 2
+    },
+    "errors": {
+      "out": 0.0,
+      "preact": 0.0,
+      "torch_out": 2.4906006728997454e-05,
+      "torch_preact": 2.2210611859918572e-05
+    }
+  },
+  {
+    "m": 147456,
+    "k": 128,
+    "h2": 256,
+    "mask": "binary",
+    "save": true,
+    "config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 8,
+      "num_stages": 4
+    },
+    "errors": {
+      "out": 0.0,
+      "preact": 0.0,
+      "torch_out": 2.3412296286551282e-05,
+      "torch_preact": 2.329137896595057e-05
+    }
+  },
+  {
+    "m": 144,
+    "k": 96,
+    "h2": 40,
+    "mask": "fractional",
+    "save": true,
+    "config": {
+      "BLOCK_M1": 128,
+      "BLOCK_K_D": 32,
+      "BLOCK_K_H2": 32,
+      "num_warps": 8,
+      "num_stages": 2
+    },
+    "errors": {
+      "out": 0.0,
+      "preact": 0.0,
+      "torch_out": 2.04905425960078e-08,
+      "torch_preact": 1.1577208169910591e-06
+    }
+  },
+  {
+    "m": 147456,
+    "k": 128,
+    "h2": 256,
+    "mask": "binary",
+    "save": true,
+    "config": {
+      "BLOCK_M1": 128,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 8,
+      "num_stages": 1
+    },
+    "errors": {
+      "out": 0.0,
+      "preact": 0.0,
+      "torch_out": 2.4333350665983744e-05,
+      "torch_preact": 2.3089743990567513e-05
+    }
+  }
+]

@@ -3,25 +3,24 @@
 import pytest
 import torch
 
-
 CONFIGS = [
-    dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
-    dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
-    dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
-    dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=2, num_warps=4, num_stages=3),
-    dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=4),
-    dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=8, num_stages=2),
-    dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+    {"BLOCK_M1": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 1, "num_warps": 4, "num_stages": 2},
+    {"BLOCK_M1": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 4, "num_warps": 8, "num_stages": 2},
+    {"BLOCK_M1": 64, "BLOCK_N": 32, "BLOCK_K": 32, "GROUP_M": 8, "num_warps": 4, "num_stages": 3},
+    {"BLOCK_M1": 64, "BLOCK_N": 64, "BLOCK_K": 128, "GROUP_M": 2, "num_warps": 4, "num_stages": 3},
+    {"BLOCK_M1": 64, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 1, "num_warps": 4, "num_stages": 4},
+    {"BLOCK_M1": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 1, "num_warps": 8, "num_stages": 2},
+    {"BLOCK_M1": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 1, "num_warps": 4, "num_stages": 2},
 ]
 
 CONFIGS.append(
-    dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2)
+    {"BLOCK_M1": 64, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_M": 1, "num_warps": 4, "num_stages": 2}
 )
 
 # Production winner: two gate K tiles leave a third stage available for
 # front-GEMM prefetch, then both retired gate slots join the front ring.
 CONFIGS.append(
-    dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=3)
+    {"BLOCK_M1": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 1, "num_warps": 4, "num_stages": 3}
 )
 
 
@@ -39,6 +38,7 @@ def test_dual_bwd_sm90_matches_triton(shape, config):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("requires SM90 CUDA GPU")
     import triton
+
     from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import (
         input_dual_bwd_sm90_impl,
     )

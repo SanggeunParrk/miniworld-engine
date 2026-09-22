@@ -1,0 +1,323 @@
+"""Autotune configs come from CSV. Nothing in this package generates them.
+
+One CSV per op, named ``<op>.csv``, under the active config directory. Two formats are accepted
+and told apart by the header.
+
+MATERIALISED -- one row IS one config. Every column that is not ``num_warps`` / ``num_stages`` /
+``maxnreg`` is a tile axis and must match the kernel's constexpr spelling exactly. This is the
+right shape for a tuned result: a handful of specific winning configs.
+
+    BLOCK_M1,BLOCK_N,num_warps,num_stages
+    64,128,4,3
+    128,128,8,4
+
+GRID SPEC (header ``axis,values``) -- one row is one AXIS, and the configs are the cartesian
+product. This is the right shape for a SEARCH SPACE, where the materialised form does not scale:
+the generated sweep is 205,266 configs over 91 ops and its largest op alone is 15,552 rows, which
+restate the same six value sets 15,552 times. As a spec that op is six rows, and the whole grid is
+~550 rows rather than 205,266.
+
+    axis,values
+    BLOCK_M1,32 64 128 256
+    BLOCK_N,32 64 128 256
+    BLOCK_K,16 32 64
+    GROUP_M,1 2 4 8 16 32
+    num_warps,1 2 4 8 16 32
+    num_stages,1 2 3 4 5 6 8 10 12
+    slice,0-8000
+
+``slice,<start>-<stop>`` is optional and takes a half-open range of the product, which is what
+makes config-set sharding cheap -- a shard states which part of the grid it owns instead of
+materialising it. Expansion is ``itertools.product`` over the axes in FILE ORDER and must stay
+deterministic, since a slice names positions in that sequence.
+
+A kernel declares only which op it is::
+
+    @triton.autotune(configs=configs_for("layernorm_fwd_saveact_triton"), key=["N"])
+
+``configs_for`` returns a live list, but selecting the set AFTER a kernel module has imported is
+too late for that kernel: ``triton.Autotuner.__init__`` keeps the list it is handed only when the
+list is non-empty, and substitutes its own ``[Config({})]`` otherwise -- refilling the original
+then updates a list nobody reads, and the kernel dies at launch with a ``dynamic_func() missing
+required positional arguments`` naming its tile axes. So the set must be chosen BEFORE the import.
+
+Set ``MINIWORLD_CONFIG_DIR`` and the choice is made when this module loads, which is necessarily
+before any kernel module. ``use_config_dir`` remains for callers that own the import order; it
+raises if any op already registered empty.
+"""
+
+from __future__ import annotations
+
+import csv
+import itertools
+import os
+import warnings
+from pathlib import Path
+
+import triton
+
+_META = ("num_warps", "num_stages", "maxnreg")
+
+#: op -> the live list handed to that op's autotuner.
+_LISTS: dict[str, list] = {}
+#: Ops that registered before a directory was selected. Triton has already dropped their list, so
+#: no later refill can reach them -- they are unrecoverable within the process.
+_STRANDED: set[str] = set()
+_DIR: Path | None = None
+
+
+#: A tile of three or more BLOCK axes whose PRODUCT is at or below this per axis is not generated.
+#: 16**3 = 4096 elements is the smallest tile the A6000 rebuild ever chose for a 3-D kernel -- and
+#: it chose it 0 times: over 2,015 winning configs on that card, not one 3-D or 4-D winner had a
+#: block product at or below 16**dim, while 26% of 1-D winners and 11% of 2-D ones did. Reductions
+#: legitimately win on a 4-row tile; GEMMs never win on a 16x16x16 one.
+#:
+#: Per PRODUCT, not per axis, which is the whole point. A floor on each axis at 16 would delete the
+#: winner for 26% of shapes and at 32 for 56% -- `BLOCK_K=16` with `BLOCK_M1=64, BLOCK_N=64` is a
+#: winner in this repository, and an axis floor cannot tell it from `16x16x16`.
+#:
+#: dim >= 3 only. 1-D and 2-D tiles are the reduction kernels, where small really does win.
+_MIN_TILE_BASE = 16
+_MIN_TILE_DIMS = 3
+
+
+def _tile_too_small(values: dict, tiles: list[str]) -> bool:
+    """Is this a tile no measured winner has ever been? See :data:`_MIN_TILE_BASE`."""
+    if len(tiles) < _MIN_TILE_DIMS:
+        return False
+    product = 1
+    for axis in tiles:
+        product *= values[axis]
+    return product <= _MIN_TILE_BASE ** len(tiles)
+
+
+def _read_spec(path: Path, rows: list[dict]) -> list:
+    """Expand an ``axis,values`` GRID SPEC into the full cartesian product.
+
+    A search grid written out one row per config is unusable at scale: the generated sweep is
+    205,266 configs over 91 ops, and the largest single op is 15,552 rows -- 13 MB of CSV that no
+    one can read, diff, or review, restating the same six value sets 15,552 times. The spec says
+    the value sets once:
+
+        axis,values
+        BLOCK_M1,32 64 128 256
+        BLOCK_N,32 64 128 256
+        BLOCK_K,16 32 64
+        GROUP_M,1 2 4 8 16 32
+        num_warps,1 2 4 8 16 32
+        num_stages,1 2 3 4 5 6 8 10 12
+
+    Six rows for the same 15,552 configs, and the whole grid becomes ~550 rows instead of 205,266.
+
+    ``slice`` is an optional pseudo-axis, ``slice,<start>-<stop>``, taking a half-open range of the
+    product. That is what makes CONFIG-SET sharding cheap: a shard directory states which part of
+    the grid it owns instead of materialising it, so 26 shard dirs cost kilobytes rather than the
+    13 MB the materialised split took.
+
+    Expansion order is ``itertools.product`` over the axes in FILE ORDER, and it must stay
+    deterministic: a shard's ``slice`` names positions in this sequence, so reordering the rows of
+    a spec silently re-cuts every shard.
+    """
+    spec, order = {}, []
+    for i, row in enumerate(rows, start=2):
+        axis = (row.get("axis") or "").strip()
+        raw = (row.get("values") or "").strip()
+        if not axis:
+            continue
+        if axis in spec:
+            raise ValueError(f"{path}:{i}: axis {axis!r} declared twice")
+        # `slice` is written "start-stop", so it needs `-` as a separator; a tile axis never does
+        # and must not, or a typo would silently split one value into two.
+        text = raw.replace("-", " ") if axis == "slice" else raw.replace("|", " ")
+        try:
+            spec[axis] = [int(v) for v in text.split()]
+        except ValueError as exc:
+            raise ValueError(f"{path}:{i}: {axis}: {exc}") from exc
+        if not spec[axis]:
+            raise ValueError(f"{path}:{i}: axis {axis!r} has no values")
+        order.append(axis)
+
+    rng = spec.pop("slice", None)
+    if "slice" in order:
+        order.remove("slice")
+    for meta in ("num_warps", "num_stages"):
+        if meta not in spec:
+            raise ValueError(f"{path}: grid spec has no {meta} row")
+    axes = [a for a in order if a not in _META]
+    if not axes:
+        raise ValueError(f"{path}: grid spec has no tile-axis row")
+
+    tiles = [a for a in axes if a.startswith("BLOCK")]
+    out = []
+    for combo in itertools.product(*(spec[a] for a in order)):
+        v = dict(zip(order, combo, strict=False))
+        if _tile_too_small(v, tiles):
+            continue
+        out.append(triton.Config({a: v[a] for a in axes}, num_warps=v["num_warps"],
+                                 num_stages=v["num_stages"], maxnreg=v.get("maxnreg")))
+    if rng is not None:
+        # written as a single "start-stop" token, so it parses as two ints
+        if len(rng) != 2:
+            raise ValueError(f"{path}: slice must be 'start-stop', got {rng}")
+        start, stop = rng
+        out = out[start:stop]
+        if not out:
+            raise ValueError(f"{path}: slice {start}-{stop} selects nothing")
+    return out
+
+
+def _read(path: Path) -> list:
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise ValueError(f"{path}: no config rows")
+    if set(rows[0]) >= {"axis", "values"}:
+        return _read_spec(path, rows)
+    axes = [c for c in rows[0] if c and c not in _META]
+    if not axes:
+        raise ValueError(f"{path}: header has no tile-axis column")
+    out = []
+    for i, row in enumerate(rows, start=2):
+        try:
+            kwargs = {a: int(row[a]) for a in axes if row.get(a) not in (None, "")}
+            warps = int(row["num_warps"])
+            stages = int(row["num_stages"])
+            maxnreg = int(row["maxnreg"]) if row.get("maxnreg") not in (None, "") else None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"{path}:{i}: {exc}") from exc
+        out.append(triton.Config(kwargs, num_warps=warps, num_stages=stages, maxnreg=maxnreg))
+    return out
+
+
+def use_config_dir(directory, *, require_all: bool = True) -> dict[str, int]:
+    """Point every op at ``<directory>/<op>.csv`` and refill the lists already handed out.
+
+    Raises when a registered op has no rows and ``require_all``. An op with no configs does not
+    fail at selection time -- Triton substitutes a single empty config, and the kernel then dies at
+    launch with ``dynamic_func() missing 2 required positional arguments: 'BLOCK_M1', 'BLOCK_N'``,
+    which names neither the op nor the missing CSV. Checking here turns that into one message that
+    lists exactly which files to write.
+    """
+    global _DIR
+    if _STRANDED:
+        raise RuntimeError(
+            f"{len(_STRANDED)} op(s) registered before a config directory was selected and have "
+            f"already been given triton's substitute config: " + ", ".join(sorted(_STRANDED)[:8])
+            + ("..." if len(_STRANDED) > 8 else "")
+            + ". Set MINIWORLD_CONFIG_DIR before importing any kernel module.")
+    _DIR = Path(directory)
+    counts = {}
+    for op, live in _LISTS.items():
+        live[:] = _load(op)
+        counts[op] = len(live)
+    empty = sorted(op for op, n in counts.items() if not n)
+    if empty and require_all:
+        raise FileNotFoundError(
+            f"{len(empty)} op(s) have no configs under {_DIR}: "
+            + ", ".join(empty[:8]) + ("..." if len(empty) > 8 else ""))
+    return counts
+
+
+def _load(op: str) -> list:
+    if _DIR is None:
+        return []
+    path = _DIR / f"{op}.csv"
+    return _read(path) if path.is_file() else []
+
+
+def configs_for(op: str) -> list:
+    """The live config list for ``op``. Empty until a config directory is selected."""
+    live = _LISTS.get(op)
+    if live is None:
+        live = _LISTS[op] = []
+        live[:] = _load(op)
+        if not live:
+            _STRANDED.add(op)
+    return live
+
+
+def registered_ops() -> frozenset[str]:
+    """Ops that asked for configs, i.e. every op a CSV set has to cover."""
+    return frozenset(_LISTS)
+
+
+def op_of(configs: list | None) -> str | None:
+    """Which op was handed this exact list object, or None.
+
+    ``triton.Autotuner`` stores the list ``configs_for`` returned (it substitutes its own only for
+    an empty list), so object identity is a reliable back-reference from a live autotuner to its
+    op name -- the only one left now that the prune objects that used to carry the name are gone.
+    """
+    for op, live in _LISTS.items():
+        if live is configs:
+            return op
+    return None
+
+
+def missing_ops() -> list[str]:
+    """Ops with no rows under the active directory. These cannot launch."""
+    return sorted(op for op, live in _LISTS.items() if not live)
+
+
+#: Every config set lives in exactly one place, beside this module.
+CONFIG_ROOT = Path(__file__).parent / "configs"
+
+
+def config_set(name: str) -> Path:
+    """The directory for a named config set. Raises rather than returning a missing path.
+
+    The A/B sets (`accuracy`, `blk*`, `warp*`, `mixed*`) used to sit at the repo root while `grid`
+    was packaged, so a short name resolved against two different roots depending on the caller and
+    a wheel install could reach only one of them.
+    """
+    d = CONFIG_ROOT / name
+    if not d.is_dir():
+        have = sorted(p.name for p in CONFIG_ROOT.iterdir() if p.is_dir())
+        raise FileNotFoundError(f"no config set {name!r}; have {have}")
+    return d
+
+
+def default_config_dir() -> Path | None:
+    """The config set used when ``MINIWORLD_CONFIG_DIR`` is not set, or None if none is present.
+
+    ``grid``, not one of the single-config sets: the cache reader INTERSECTS a tuned entry
+    against the live config list (``keep = [c for c in configs if _sig(c) in want]``), so a
+    default smaller than the space the cache was built over would resolve every shipped entry to
+    nothing and re-tune on every call.
+
+    There has to BE a default. Without one, an install that does not export the environment
+    variable leaves every op stranded with triton's substitute config, and the first launch of
+    every triton kernel dies with ``dynamic_func() missing 2 required positional arguments:
+    'BLOCK_M1' and 'BLOCK_K'`` -- a message that names neither the op nor the cause. Every entry
+    point in this repo happens to export it, which is exactly why that went unnoticed.
+    """
+    # One place. `grid` used to exist here AND at the repo root, byte-identical and asserted so,
+    # because `cli.resolve_config_dir` mapped a short name only against the repo root. The
+    # resolver falls back here now, so the root copy is gone and this is the single home.
+    packaged = Path(__file__).parent / "configs" / "grid"
+    return packaged if packaged.is_dir() else None
+
+
+_ENV_DIR = os.environ.get("MINIWORLD_CONFIG_DIR", "").strip()
+if _ENV_DIR:
+    # Import-time selection: this module loads before any kernel module can call configs_for,
+    # which is the only ordering that lets every op keep the list it was handed.
+    _DIR = Path(_ENV_DIR)
+    if not _DIR.is_dir():
+        # Unchecked, a stale value is indistinguishable from a valid one: every op gets an empty
+        # config list and the first launch dies with `dynamic_func() missing N required positional
+        # arguments`, naming neither the op nor the cause. Four audit .sbatch pointed at
+        # `configs/grid` for weeks after that directory moved into the package.
+        raise RuntimeError(
+            f"MINIWORLD_CONFIG_DIR={_ENV_DIR!r} is not a directory. Unset it to use the packaged "
+            f"`grid` set, or point it at a config set that exists.")
+else:
+    _DIR = default_config_dir()
+    if _DIR is None:
+        warnings.warn(
+            "[miniworld.autotune] no autotune config set found: MINIWORLD_CONFIG_DIR is unset and "
+            "the packaged `autotune/configs/grid` is missing. Every triton kernel "
+            "will fail at its first launch with `dynamic_func() missing N required positional "
+            "arguments` naming its tile axes. Set MINIWORLD_CONFIG_DIR to a config set BEFORE "
+            "importing any kernel module.",
+            RuntimeWarning, stacklevel=2)

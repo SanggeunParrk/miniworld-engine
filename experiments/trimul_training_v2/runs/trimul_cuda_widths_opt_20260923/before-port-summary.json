@@ -1,0 +1,539 @@
+{
+  "scope": "B1, bidirectional TriMul, pair width D, hidden D per direction / concatenated 2D",
+  "inference": [
+    {
+      "D": 64,
+      "L": 384,
+      "inference_before_us": 204.82431411743164,
+      "inference_after_us": 131.34719848632812,
+      "speedup": 1.5594113652812451,
+      "job": "15684",
+      "training_job": "15663",
+      "config": {
+        "D": 64,
+        "L": 384,
+        "k1": [
+          1,
+          64,
+          8,
+          1,
+          2
+        ],
+        "k3": [
+          2,
+          64,
+          6,
+          2
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D64-nosave.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin": "a57065f5f72696dd8f64f56da42267fbacbcf5cafd4aafc6597068699f7eb3db",
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/2879caa13048d8750f29377795b2cd544a5a024ca2630e66f9dec584438c0010.cubin": "056e9fedc7149d946b1b7831175c2f5e4feecc2e57637141f424495b78125112"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0020236114505678415
+    },
+    {
+      "D": 64,
+      "L": 768,
+      "inference_before_us": 811.6409301757812,
+      "inference_after_us": 530.2604675292969,
+      "speedup": 1.5306457484140812,
+      "job": "15684",
+      "training_job": "15664",
+      "config": {
+        "D": 64,
+        "L": 768,
+        "k1": [
+          1,
+          64,
+          8,
+          1,
+          2
+        ],
+        "k3": [
+          2,
+          64,
+          8,
+          2
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D64-nosave.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin": "a57065f5f72696dd8f64f56da42267fbacbcf5cafd4aafc6597068699f7eb3db",
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/8f9ae4bbf972e65fe66cf8d331c796e335350eacd295d23a48985b0ff0c3c3b9.cubin": "e6d22e49b4f406d2f811ce2cfac80097336129128bb563bf0c70dc8167791464"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.002067945897579193
+    },
+    {
+      "D": 128,
+      "L": 384,
+      "inference_before_us": 419.00096893310547,
+      "inference_after_us": 276.1846351623535,
+      "speedup": 1.5171045582850697,
+      "job": "15738",
+      "training_job": "15739",
+      "config": {
+        "D": 128,
+        "L": 384,
+        "k1": [
+          2,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": [
+          2,
+          64,
+          4,
+          1
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D128-nosave.json",
+        "tuning": "Existing D128 configs, no retuning"
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.002034910023212433
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "inference_before_us": 1683.5244750976562,
+      "inference_after_us": 1171.9913482666016,
+      "speedup": 1.43646493430828,
+      "job": "15738",
+      "training_job": "15740",
+      "config": {
+        "D": 128,
+        "L": 768,
+        "k1": [
+          2,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": [
+          2,
+          64,
+          4,
+          1
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D128-nosave.json",
+        "tuning": "Existing D128 configs, no retuning"
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.002049083821475506
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "inference_before_us": 1119.8995208740234,
+      "inference_after_us": 971.0694122314453,
+      "speedup": 1.1532641300075321,
+      "job": "15678",
+      "training_job": "15665",
+      "config": {
+        "D": 256,
+        "L": 384,
+        "k1": [
+          2,
+          64,
+          4,
+          4,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D256.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a94affa753c2999c14a2ba2bbd790cacd0384eca6eb8f103f223f0a29244428e.cubin": "eb100819e9f56143f06175bc24eb520d96d3a3492a3073c601575dbe357a1d58"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0005581218865700066
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "inference_before_us": 4661.0736083984375,
+      "inference_after_us": 3986.4846801757812,
+      "speedup": 1.169218994262612,
+      "job": "15678",
+      "training_job": "15666",
+      "config": {
+        "D": 256,
+        "L": 768,
+        "k1": [
+          2,
+          64,
+          4,
+          4,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D256.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a94affa753c2999c14a2ba2bbd790cacd0384eca6eb8f103f223f0a29244428e.cubin": "eb100819e9f56143f06175bc24eb520d96d3a3492a3073c601575dbe357a1d58"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0006427922053262591
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "inference_before_us": 2230.6079864501953,
+      "inference_after_us": 1816.9919848442078,
+      "speedup": 1.2276377689368023,
+      "job": "15696",
+      "training_job": "15669",
+      "config": {
+        "D": 384,
+        "L": 384,
+        "k1": [
+          2,
+          64,
+          2,
+          6,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D384.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f94bf13684a940c81376602019f36f270860263971a456177714ad3e07f7d4ca.cubin": "2c84f6288faa738a3c9844d90cdc5b486f5e1e70966686d71b70d3584c7cce80"
+        }
+      },
+      "k1_spill_bytes": [
+        "8",
+        "8"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0006726994179189205
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "inference_before_us": 9117.87223815918,
+      "inference_after_us": 7445.935964584351,
+      "speedup": 1.224543466600731,
+      "job": "15696",
+      "training_job": "15670",
+      "config": {
+        "D": 384,
+        "L": 768,
+        "k1": [
+          2,
+          64,
+          2,
+          6,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D384.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f94bf13684a940c81376602019f36f270860263971a456177714ad3e07f7d4ca.cubin": "2c84f6288faa738a3c9844d90cdc5b486f5e1e70966686d71b70d3584c7cce80"
+        }
+      },
+      "k1_spill_bytes": [
+        "8",
+        "8"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0007479066262021661
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "inference_before_us": 3769.871950149536,
+      "inference_after_us": 3283.1039428710938,
+      "speedup": 1.1482645739363222,
+      "job": "15695",
+      "training_job": "15671",
+      "config": {
+        "D": 512,
+        "L": 384,
+        "k1": [
+          1,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": null,
+        "input_ln": "separate",
+        "emit_xn": false,
+        "evidence": "native-D512-separate.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c01b5b2325ea04157c000cf434354c0dfbf8628e3dfd806de19e57a7996a30f1.cubin": "4b348399b37eca370529ba3c1812f63d5496b5f2886bab7aa4c064380ec8687b"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0006710441084578633
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "inference_before_us": 15331.712245941162,
+      "inference_after_us": 13672.544002532959,
+      "speedup": 1.121350367795549,
+      "job": "15695",
+      "training_job": "15682",
+      "config": {
+        "D": 512,
+        "L": 768,
+        "k1": [
+          1,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": null,
+        "input_ln": "separate",
+        "emit_xn": false,
+        "evidence": "native-D512-separate.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c01b5b2325ea04157c000cf434354c0dfbf8628e3dfd806de19e57a7996a30f1.cubin": "4b348399b37eca370529ba3c1812f63d5496b5f2886bab7aa4c064380ec8687b"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0007517333724536002
+    }
+  ],
+  "training": [
+    {
+      "D": 64,
+      "L": 384,
+      "forward_ms": 0.25681599974632263,
+      "total_ms": 0.8185920119285583,
+      "pytorch_compile_total_ms": 2.0384960174560547,
+      "cueq_total_ms": 1.090719997882843
+    },
+    {
+      "D": 64,
+      "L": 768,
+      "forward_ms": 0.9605759978294373,
+      "total_ms": 3.067312002182007,
+      "pytorch_compile_total_ms": 17.214080810546875,
+      "cueq_total_ms": 4.137295961380005
+    },
+    {
+      "D": 128,
+      "L": 384,
+      "forward_ms": 0.5328160226345062,
+      "total_ms": 1.6186879873275757,
+      "pytorch_compile_total_ms": 3.987488031387329,
+      "cueq_total_ms": 2.2254080772399902
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "forward_ms": 2.075376033782959,
+      "total_ms": 6.325648069381714,
+      "pytorch_compile_total_ms": 35.69443321228027,
+      "cueq_total_ms": 8.647535800933838
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "forward_ms": 1.2900639772415161,
+      "total_ms": 3.4645919799804688,
+      "pytorch_compile_total_ms": 7.892656087875366,
+      "cueq_total_ms": 5.517391920089722
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "forward_ms": 5.202319860458374,
+      "total_ms": 17.40115261077881,
+      "pytorch_compile_total_ms": 73.13402938842773,
+      "cueq_total_ms": 21.63153648376465
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "forward_ms": 2.270608067512512,
+      "total_ms": 6.188287973403931,
+      "pytorch_compile_total_ms": 12.564320087432861,
+      "cueq_total_ms": 10.212560176849365
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "forward_ms": 9.132479667663574,
+      "total_ms": 26.514816284179688,
+      "pytorch_compile_total_ms": 113.67055892944336,
+      "cueq_total_ms": 40.49707221984863
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "forward_ms": 3.602047920227051,
+      "total_ms": 9.333791732788086,
+      "pytorch_compile_total_ms": 17.100175857543945,
+      "cueq_total_ms": 16.400527954101562
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "forward_ms": 14.49886417388916,
+      "total_ms": 40.27662467956543,
+      "pytorch_compile_total_ms": 153.67874145507812,
+      "cueq_total_ms": 65.65977478027344
+    }
+  ],
+  "current_training": [
+    {
+      "D": 64,
+      "L": 384,
+      "old_ms": 0.8185920119285583,
+      "current_ms": 0.8185920119285583,
+      "forward_ms": 0.25681599974632263,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    },
+    {
+      "D": 64,
+      "L": 768,
+      "old_ms": 3.067312002182007,
+      "current_ms": 3.067312002182007,
+      "forward_ms": 0.9605759978294373,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    },
+    {
+      "D": 128,
+      "L": 384,
+      "old_ms": 1.653663992881775,
+      "current_ms": 0.9895679950714111,
+      "forward_ms": 0.2933120131492615,
+      "speedup": 1.6710968838098286,
+      "route": "\ucd5c\uc2e0 CUDA B1 + \ub2e8\uc77c B7",
+      "job": "15742"
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "old_ms": 6.47871994972229,
+      "current_ms": 4.79420804977417,
+      "forward_ms": 1.161296010017395,
+      "speedup": 1.351363954684334,
+      "route": "\ucd5c\uc2e0 CUDA B1 + \ubd84\ub9ac CUDA B7",
+      "job": "15743"
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "old_ms": 3.4645919799804688,
+      "current_ms": 3.4645919799804688,
+      "forward_ms": 1.2900639772415161,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "old_ms": 17.40115261077881,
+      "current_ms": 17.40115261077881,
+      "forward_ms": 5.202319860458374,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "old_ms": 6.188287973403931,
+      "current_ms": 6.188287973403931,
+      "forward_ms": 2.270608067512512,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "old_ms": 26.514816284179688,
+      "current_ms": 26.514816284179688,
+      "forward_ms": 9.132479667663574,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "old_ms": 9.333791732788086,
+      "current_ms": 9.333791732788086,
+      "forward_ms": 3.602047920227051,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "old_ms": 40.27662467956543,
+      "current_ms": 40.27662467956543,
+      "forward_ms": 14.49886417388916,
+      "speedup": 1.0,
+      "route": "\uae30\uc874 Triton \u00b7 \ucd5c\uc2e0 CUDA \ubbf8\ud3ec\ud305",
+      "job": null
+    }
+  ],
+  "training_route": "Current comparison: D128 latest CUDA B1+B7; other widths existing Triton, CUDA not ported",
+  "tuning": "Triton miss cap24; native enumerated feasible BI/BJ, weight-ring slots, SKCH, occupancy; not exhaustive global tuning"
+}

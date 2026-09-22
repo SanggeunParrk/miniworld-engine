@@ -53,6 +53,7 @@ def test_transition_policy_precedes_internal_h100_dispatch(monkeypatch, training
     configure_engine_backend("triton")
     module = Transition(128, implementation=EngineImpl.MINIWORLD).train(training)
     monkeypatch.setattr(module, "_old_triton_forward", lambda x: x * 3)
+    settings.configure(transition_residual_fusion=False)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Native/fused auto path was entered")

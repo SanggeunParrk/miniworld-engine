@@ -31,7 +31,7 @@ def declared_configs(op, directory=None):
     if any(axis == "slice" for axis, _ in axes):
         raise ValueError("Use an unsliced domain for SM90 parity search")
     names = [axis for axis, _ in axes]
-    return [dict(zip(names, values)) for values in itertools.product(*(values for _, values in axes))]
+    return [dict(zip(names, values, strict=False)) for values in itertools.product(*(values for _, values in axes))]
 
 
 def partition_configs(op, feasibility, directory=None):
@@ -54,7 +54,9 @@ def partition_for_bucket(op, bucket):
     """Reproduce runtime feasibility for native cache coverage/build inspection."""
     tensors, extra = ast.literal_eval(bucket)
     if op == "trimul_inproj_gemm_gate_mmajor_sm90_cute":
-        from miniworld_engine.kernels.trimul_inproj.cute.parity_front import front_config_rejection
+        from miniworld_engine.kernels.trimul_inproj.cute.parity_front import (
+            front_config_rejection,
+        )
         m, k = tensors[0][0]
         h2 = tensors[1][0][1] // 4
         save_preact = bool(extra[0]) if extra else True
@@ -62,11 +64,15 @@ def partition_for_bucket(op, bucket):
             c, m=m, k=k, h2=h2, save_preact=save_preact
         )
     elif op == "trimul_output_f567_train_sm90_cute":
-        from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import feasibility
+        from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import (
+            feasibility as f567_feasibility,
+        )
         kp, kg = tensors[0][0][1], tensors[1][0][1]
-        feasible = lambda c: feasibility(c, smem_limit=extra[1], kp=kp, kg=kg)
+        feasible = lambda c: f567_feasibility(c, smem_limit=extra[1], kp=kp, kg=kg)
     elif op == "trimul_input_dual_bwd_sm90_cute":
-        from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import feasibility
+        from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import (
+            feasibility,
+        )
         feasible = lambda c: feasibility(c, smem_limit=extra[1])
     else:
         raise ValueError(f"Unknown SM90 TriMul op: {op}")

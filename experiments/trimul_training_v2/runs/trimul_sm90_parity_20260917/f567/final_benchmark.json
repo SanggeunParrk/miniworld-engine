@@ -1,0 +1,266 @@
+[
+  {
+    "L": 128,
+    "triton_ms": 0.011343167337139002,
+    "cute_ms": 0.015816794363539458,
+    "speedup": 0.7171596896579141,
+    "best": {
+      "config": {
+        "BLOCK_M1": 64,
+        "BLOCK_N": 64,
+        "BLOCK_K": 64,
+        "GROUP_M": 1,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "ms": 0.015816794363539458,
+      "rel_l2": [
+        9.058935290795489e-08,
+        0.0,
+        0.0
+      ]
+    },
+    "candidates": [
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "ms": 0.015907614752156844,
+        "rel_l2": [
+          9.058935290795489e-08,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.019250842628936907,
+        "rel_l2": [
+          9.058935290795489e-08,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "ms": 0.015816794363539458,
+        "rel_l2": [
+          9.058935290795489e-08,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "ms": 0.015877858143399756,
+        "rel_l2": [
+          9.058935290795489e-08,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  {
+    "L": 384,
+    "triton_ms": 0.10628973379112727,
+    "cute_ms": 0.15168204466149443,
+    "speedup": 0.700740381159364,
+    "best": {
+      "config": {
+        "BLOCK_M1": 64,
+        "BLOCK_N": 64,
+        "BLOCK_K": 64,
+        "GROUP_M": 4,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "ms": 0.15168204466149443,
+      "rel_l2": [
+        1.47757702961826e-06,
+        0.0,
+        0.0
+      ]
+    },
+    "candidates": [
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "ms": 0.17541492355029953,
+        "rel_l2": [
+          1.47757702961826e-06,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.15168204466149443,
+        "rel_l2": [
+          1.47757702961826e-06,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "ms": 0.16434963440014155,
+        "rel_l2": [
+          1.47757702961826e-06,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "ms": 0.1643558461948408,
+        "rel_l2": [
+          1.47757702961826e-06,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  {
+    "L": 768,
+    "triton_ms": 0.41427692505869906,
+    "cute_ms": 0.5429435815066653,
+    "speedup": 0.7630202090410259,
+    "best": {
+      "config": {
+        "BLOCK_M1": 64,
+        "BLOCK_N": 64,
+        "BLOCK_K": 64,
+        "GROUP_M": 4,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "ms": 0.5429435815066653,
+      "rel_l2": [
+        2.892627662731684e-06,
+        0.0,
+        0.0
+      ]
+    },
+    "candidates": [
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "ms": 0.6603036526030144,
+        "rel_l2": [
+          2.892627662731684e-06,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.5429435815066653,
+        "rel_l2": [
+          2.892627662731684e-06,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "ms": 0.6433720438103927,
+        "rel_l2": [
+          2.892627662731684e-06,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "ms": 0.6421347768683182,
+        "rel_l2": [
+          2.892627662731684e-06,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  }
+]

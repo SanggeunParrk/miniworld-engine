@@ -1,0 +1,20 @@
+[
+  {
+    "L": 384,
+    "region": "B1\u2013B4",
+    "dram": 31.44,
+    "sm": 44.451863,
+    "tensor": 15.141917,
+    "occupancy": 12.49,
+    "no_eligible": 55.03
+  },
+  {
+    "L": 768,
+    "region": "B1\u2013B4",
+    "dram": 47.39,
+    "sm": 46.513194,
+    "tensor": 15.920662,
+    "occupancy": 12.5,
+    "no_eligible": 53.33
+  }
+]

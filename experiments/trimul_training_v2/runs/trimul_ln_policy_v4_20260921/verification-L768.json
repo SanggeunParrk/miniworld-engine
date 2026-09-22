@@ -1,0 +1,30 @@
+[
+  {
+    "log": "ncu-baseline-L768.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-baseline-L768-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-stats_only-L768.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-stats_only-L768-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-xhat_fp32-L768.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-xhat_fp32-L768-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "memcheck-L768.log",
+    "returncode": 0
+  }
+]

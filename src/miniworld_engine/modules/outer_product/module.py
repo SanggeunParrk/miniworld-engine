@@ -128,8 +128,8 @@ class OuterProductMean(nn.Module):
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused path where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):
-            _fused = dict(grad=torch.is_grad_enabled(),
-                          interchain=bool(self.mask_interchain and token_asym_id is not None))
+            _fused = {"grad": torch.is_grad_enabled(),
+                          "interchain": bool(self.mask_interchain and token_asym_id is not None)}
             _dims = (self.to_left.weight.shape[0], self.to_out.weight.shape[0])
             if self.implementation == ImplementationType.ANTHROPIC:
                 _anthropic.require_opm(msa, *_dims, **_fused)      # explicit: the reason, never a reroute

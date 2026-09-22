@@ -1,0 +1,98 @@
+[
+  {
+    "cfg": [
+      1,
+      64,
+      4,
+      2,
+      2
+    ],
+    "us": 683.8240027427673,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/a7ba4a568efbfe824c4dc8c2a8c56a95c06940a2035fdd69756dcdcfdff162af.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      4,
+      2,
+      1
+    ],
+    "us": 1078.432023525238,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/023feae2d0678211b048737e4a651628cd11bc3d4a879bd85e59d01063a334f0.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      2,
+      4,
+      2
+    ],
+    "us": 677.3280203342438,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/d4ee924003ebab8d0fa43f10365a31a2f7ba7404451d10e03fd3bbb48fa816b8.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      2,
+      4,
+      1
+    ],
+    "us": 1127.4719834327698,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/70b1a3273718db956843978326a36f6f389522de90c5bad32921dbb3ac75562b.cubin"
+  },
+  {
+    "cfg": [
+      1,
+      64,
+      4,
+      4,
+      1
+    ],
+    "us": 1012.9600167274475,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/2619611f598efb387da212486b1f57417f7804c124c755b79d57054aaae6a50a.cubin"
+  },
+  {
+    "cfg": [
+      2,
+      64,
+      4,
+      2,
+      1
+    ],
+    "us": 652.7199745178223,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/bf37bfe31a7bc599c7f3b4145708e6e557c1ba84ff7c547df4b3b529ab0d9f6c.cubin"
+  },
+  {
+    "cfg": [
+      2,
+      64,
+      2,
+      4,
+      1
+    ],
+    "us": 654.6719968318939,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/62fda7692f6062188533b729a87fbb3be50b67d18227bdb71869aff4feb50daf.cubin"
+  },
+  {
+    "cfg": [
+      2,
+      64,
+      4,
+      4,
+      1
+    ],
+    "us": 617.792010307312,
+    "error": 0.0,
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/build/6e60af01af0283afb5233d73a335d07a79219fbb5075cd0fb4083ebb6d008165.cubin"
+  }
+]

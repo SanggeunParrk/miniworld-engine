@@ -1,0 +1,92 @@
+[
+  {
+    "kind": "k1",
+    "mode": "original",
+    "config": [
+      2,
+      64,
+      8,
+      2,
+      -1,
+      232,
+      2
+    ],
+    "smem": 181504,
+    "attrs": {
+      "regs": 168,
+      "local_bytes": 0,
+      "static_smem": 0,
+      "max_threads": 384,
+      "binary_version": 90,
+      "max_dynamic_smem": 181504
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/anthropic_ln_inference_20260919/build/759057de39f7e6ee83d5918b5081b041484227fb8d4cafb34fd5e1edd0f02fd8.cubin"
+  },
+  {
+    "kind": "k1",
+    "mode": "split",
+    "config": [
+      1,
+      192,
+      8,
+      2,
+      0,
+      152,
+      0
+    ],
+    "smem": 206080,
+    "attrs": {
+      "regs": 128,
+      "local_bytes": 0,
+      "static_smem": 0,
+      "max_threads": 512,
+      "binary_version": 90,
+      "max_dynamic_smem": 206080
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/anthropic_ln_inference_20260919/build/2266c36ecca59dea0cec6a61402abcff327f73c7076ea54107573a7dc1632f90.cubin"
+  },
+  {
+    "kind": "k3",
+    "mode": "original",
+    "config": [
+      2,
+      64,
+      4,
+      1,
+      1,
+      1
+    ],
+    "smem": 183424,
+    "attrs": {
+      "regs": 168,
+      "local_bytes": 40,
+      "static_smem": 0,
+      "max_threads": 384,
+      "binary_version": 90,
+      "max_dynamic_smem": 183424
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/anthropic_ln_inference_20260919/build/fd2ee73a598dc5839f88af352e9f8fb68141a2fa49fd9afd912081a402447fd3.cubin"
+  },
+  {
+    "kind": "k3",
+    "mode": "split",
+    "config": [
+      1,
+      128,
+      6,
+      2,
+      0,
+      0
+    ],
+    "smem": 216320,
+    "attrs": {
+      "regs": 168,
+      "local_bytes": 0,
+      "static_smem": 0,
+      "max_threads": 384,
+      "binary_version": 90,
+      "max_dynamic_smem": 216320
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/anthropic_ln_inference_20260919/build/bb24cff4d8d00a63aaa8ca33805fb9ce8043a1267cc0269ccf1df1ad869fae0f.cubin"
+  }
+]

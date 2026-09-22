@@ -1,0 +1,78 @@
+{
+  "job": "15592",
+  "times_us": {
+    "training": {
+      "pytorch_eager": 9029.039859771729,
+      "pytorch_compile": 5211.264133453369,
+      "cueq_torch": 3461.4720344543457,
+      "cueq_cuda": 2749.552011489868,
+      "latest_all": 1519.599974155426
+    },
+    "training_forward": {
+      "pytorch_eager": 3312.671899795532,
+      "pytorch_compile": 1735.584020614624,
+      "cueq_torch": 978.8479804992676,
+      "cueq_cuda": 671.3280081748962,
+      "latest_all": 411.52000427246094
+    },
+    "inference": {
+      "pytorch_eager": 3274.4319438934326,
+      "pytorch_compile": 1721.8719720840454,
+      "cueq_torch": 976.5440225601196,
+      "cueq_cuda": 663.8720035552979,
+      "latest_all": 386.2079977989197
+    }
+  },
+  "speedup_vs_latest": {
+    "inference": {
+      "pytorch_eager": 8.478415678999674,
+      "pytorch_compile": 4.458405786253404,
+      "cueq_torch": 2.5285442769845488,
+      "cueq_cuda": 1.7189493934326672
+    },
+    "training_forward": {
+      "pytorch_eager": 8.04984415193159,
+      "pytorch_compile": 4.217496118282311,
+      "cueq_torch": 2.3786157910593033,
+      "cueq_cuda": 1.6313374834882157
+    },
+    "training": {
+      "pytorch_eager": 5.941721514433397,
+      "pytorch_compile": 3.4293657686785117,
+      "cueq_torch": 2.277883715007423,
+      "cueq_cuda": 1.80939198358307
+    }
+  },
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-torch": "0.9.1",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "cross_path_max_relative_l2": {
+    "training": {
+      "pytorch_eager": 0.008093214593827724,
+      "pytorch_compile": 0.0,
+      "cueq_torch": 0.004885151516646147,
+      "cueq_cuda": 0.0061070783995091915,
+      "latest_all": 0.008032777346670628
+    },
+    "training_forward": {
+      "pytorch_eager": 0.004408296663314104,
+      "pytorch_compile": 0.0,
+      "cueq_torch": 0.0026230670046061277,
+      "cueq_cuda": 0.0036536797415465117,
+      "latest_all": 0.0036536413244903088
+    },
+    "inference": {
+      "pytorch_eager": 0.004393019247800112,
+      "pytorch_compile": 0.0,
+      "cueq_torch": 0.002626066794618964,
+      "cueq_cuda": 0.0037879899609833956,
+      "latest_all": 0.0040471842512488365
+    }
+  },
+  "cueq": "matched bidirectional composition of vendor primitives; not public unidirectional TMU",
+  "latest_training_diagnostic": true,
+  "production_dispatch_changed": false
+}

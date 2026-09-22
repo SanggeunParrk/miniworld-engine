@@ -1,0 +1,212 @@
+{
+  "ncu-L384-baseline": {
+    "front_b7b12_dw": {
+      "gpu__time_duration.sum": {
+        "value": "170.528000",
+        "unit": "us"
+      },
+      "dram__bytes_read.sum": {
+        "value": "199.125504",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "24.076032",
+        "unit": "Mbyte"
+      },
+      "lts__t_sectors.sum": {
+        "value": "20121739.000000",
+        "unit": "sector"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "63730477.000000",
+        "unit": "inst"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "49.414236",
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    },
+    "front_b7b12_dx": {
+      "gpu__time_duration.sum": {
+        "value": "225.152000",
+        "unit": "us"
+      },
+      "dram__bytes_read.sum": {
+        "value": "303.041792",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "42.902272",
+        "unit": "Mbyte"
+      },
+      "lts__t_sectors.sum": {
+        "value": "39770270.000000",
+        "unit": "sector"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "81146688.000000",
+        "unit": "inst"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "39.813054",
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    }
+  },
+  "ncu-L384-selected": {
+    "front_b7b12_dw": {
+      "gpu__time_duration.sum": {
+        "value": "164.960000",
+        "unit": "us"
+      },
+      "dram__bytes_read.sum": {
+        "value": "190.931456",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "16.240128",
+        "unit": "Mbyte"
+      },
+      "lts__t_sectors.sum": {
+        "value": "17963694.000000",
+        "unit": "sector"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "63342529.000000",
+        "unit": "inst"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "51.212531",
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    },
+    "front_b7b12_dx": {
+      "gpu__time_duration.sum": {
+        "value": "226.048000",
+        "unit": "us"
+      },
+      "dram__bytes_read.sum": {
+        "value": "302.717952",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "43.430144",
+        "unit": "Mbyte"
+      },
+      "lts__t_sectors.sum": {
+        "value": "40708875.000000",
+        "unit": "sector"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "81112425.000000",
+        "unit": "inst"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "40.357253",
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    }
+  },
+  "ncu-L384-parallel": {
+    "front_b7b12_dw": {
+      "gpu__time_duration.sum": {
+        "value": "165.728000",
+        "unit": "us"
+      },
+      "dram__bytes_read.sum": {
+        "value": "191.049728",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "16.195840",
+        "unit": "Mbyte"
+      },
+      "lts__t_sectors.sum": {
+        "value": "17974287.000000",
+        "unit": "sector"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "63343614.000000",
+        "unit": "inst"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "51.094000",
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    },
+    "front_b7b12_dx": {
+      "gpu__time_duration.sum": {
+        "value": "225.088000",
+        "unit": "us"
+      },
+      "dram__bytes_read.sum": {
+        "value": "302.637824",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "43.461632",
+        "unit": "Mbyte"
+      },
+      "lts__t_sectors.sum": {
+        "value": "40910970.000000",
+        "unit": "sector"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "81131546.000000",
+        "unit": "inst"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "40.171443",
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    }
+  }
+}

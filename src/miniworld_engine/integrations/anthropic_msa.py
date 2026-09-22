@@ -69,7 +69,7 @@ def _load() -> dict[str, Any]:
     if not (Path(root) / "opt_core" / "ops" / "msa_opm" / "__init__.py").is_file():
         raise PayloadUnavailable(f"{root} has no opt_core/ops/msa_opm (point {ENV} at common/opt_core)")
     already = sys.modules.get("opt_core")
-    if already is not None and Path(already.__file__).resolve().parent.parent != Path(root):
+    if already is not None and (already.__file__ is None or Path(already.__file__).resolve().parent.parent != Path(root)):
         raise PayloadUnavailable(f"opt_core is already imported from {already.__file__}, not from {root}")
     if _LOADED:
         raise PayloadUnavailable("changing the payload in a live process is not supported")
@@ -87,7 +87,7 @@ def _ext():
     """Build (once) this repo's fused OPM epilogue."""
     if "mod" in _EXT:
         return _EXT["mod"]
-    from torch.utils.cpp_extension import load
+    from miniworld_engine.kernels._nvcc import load_extension as load
     src = Path(__file__).with_name("csrc") / "opm_epilogue.cu"
     build = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit")) / "opm_epilogue"
     build.mkdir(parents=True, exist_ok=True)
@@ -214,7 +214,7 @@ def outer_product_mean(module, msa: torch.Tensor, mask: torch.Tensor) -> torch.T
     """OuterProductMean(msa, mask) WITHOUT the residual -- the module adds its own."""
     p = _load()["opm"]
     pack = _opm_pack(module)
-    s, n = msa.shape[1], msa.shape[2]
+    _s, n = msa.shape[1], msa.shape[2]
     mask16 = mask.to(torch.bfloat16)
     # upstream's fused prologue, asked for the unblocked A layout (BI=BJ=1), which puts A2 row = i*c_hidden + c
     a2, bt, _, _, _ = p.fused_prologue(msa[0], mask16[0], module.ln_msa, pack["wa_t"], pack["wb_t"], None, None,
@@ -240,7 +240,7 @@ class _PwaView:
     """The cell reads a stock module's attribute names; this is the same weights under those names. `norm_z` is
     deliberately this engine's fused LayerNorm rather than the stock torch call the cell would otherwise make."""
 
-    __slots__ = ("norm_m", "proj_m", "proj_g", "norm_z", "proj_z", "proj_o", "inf", "num_heads", "c_h")
+    __slots__ = ("c_h", "inf", "norm_m", "norm_z", "num_heads", "proj_g", "proj_m", "proj_o", "proj_z")
 
     def __init__(self, module):
         self.norm_m = module.ln_msa

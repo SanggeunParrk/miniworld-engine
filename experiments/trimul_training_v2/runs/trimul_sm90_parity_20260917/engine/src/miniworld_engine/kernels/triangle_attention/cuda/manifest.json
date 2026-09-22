@@ -1,0 +1,16 @@
+{
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "arch": "sm_90a",
+  "module_name": "triattn_projection_bwd",
+  "binary": "triattn_projection_bwd.so",
+  "tile_m": 64,
+  "tile_k": 64,
+  "sha256": {
+    "__init__.py": "111d276babee0a3e3d54d154ed50bc6f6c24999fc23b861d188dd2eafde58daf",
+    "projection_dgrad.cu": "f4fe07c924a072ae5cce0efba4e2303ba220e628bb8229ade64bba4ce8ba6b6a",
+    "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
+    "build_native.py": "773265a70bbf985fc2383cacb37ecf1b39ebfc27e89606b6da42f607582c067d",
+    "triattn_projection_bwd.so": "9c48f4e0057a64b4462b68969e66d95c2bf314f1c6be01ab07211c1590586419"
+  }
+}

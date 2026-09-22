@@ -119,3 +119,6 @@ bands_*.json
 
 # Cache merge synchronization; contents are runtime state.
 src/miniworld_engine/autotune/data/.merge.lock
+
+!experiments/trimul_training_v2/
+/.release-build/

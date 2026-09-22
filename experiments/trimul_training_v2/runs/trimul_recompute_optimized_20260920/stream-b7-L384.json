@@ -1,0 +1,140 @@
+[
+  {
+    "config": {
+      "splits": 6,
+      "defines": {
+        "SMEM_BYTES": 114688
+      }
+    },
+    "errors": {
+      "dx": {
+        "rel": 6.3850088736217e-06,
+        "finite": true,
+        "limit": 2e-05
+      },
+      "dwl": {
+        "rel": 7.156044011935592e-05,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwlg": {
+        "rel": 0.00012523237091954798,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwr": {
+        "rel": 0.0001319540460826829,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwrg": {
+        "rel": 0.0002380234218435362,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dgi": {
+        "rel": 1.0288223165844101e-05,
+        "finite": true,
+        "limit": 5e-06
+      },
+      "dbi": {
+        "rel": 5.8262744460080285e-06,
+        "finite": true,
+        "limit": 5e-06
+      }
+    },
+    "valid": false
+  },
+  {
+    "config": {
+      "splits": 8,
+      "defines": {
+        "SMEM_BYTES": 114688
+      }
+    },
+    "errors": {
+      "dx": {
+        "rel": 6.3850088736217e-06,
+        "finite": true,
+        "limit": 2e-05
+      },
+      "dwl": {
+        "rel": 5.9318426792742684e-05,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwlg": {
+        "rel": 0.00012928637443110347,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwr": {
+        "rel": 0.00010190416651312262,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwrg": {
+        "rel": 0.00023691498790867627,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dgi": {
+        "rel": 1.026540940074483e-05,
+        "finite": true,
+        "limit": 5e-06
+      },
+      "dbi": {
+        "rel": 5.80732557864394e-06,
+        "finite": true,
+        "limit": 5e-06
+      }
+    },
+    "valid": false
+  },
+  {
+    "config": {
+      "splits": 10,
+      "defines": {
+        "SMEM_BYTES": 114688
+      }
+    },
+    "errors": {
+      "dx": {
+        "rel": 6.3850088736217e-06,
+        "finite": true,
+        "limit": 2e-05
+      },
+      "dwl": {
+        "rel": 7.946374535094947e-05,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwlg": {
+        "rel": 0.00015251456352416426,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwr": {
+        "rel": 5.489688555826433e-05,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dwrg": {
+        "rel": 0.000243223606958054,
+        "finite": true,
+        "limit": 0.0005
+      },
+      "dgi": {
+        "rel": 1.0277877663611434e-05,
+        "finite": true,
+        "limit": 5e-06
+      },
+      "dbi": {
+        "rel": 5.831916041643126e-06,
+        "finite": true,
+        "limit": 5e-06
+      }
+    },
+    "valid": false
+  }
+]

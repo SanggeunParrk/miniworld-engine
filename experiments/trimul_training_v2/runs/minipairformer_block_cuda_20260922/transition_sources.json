@@ -1,0 +1,34 @@
+{
+  "fused_sm90a.py": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/fused_sm90a.py",
+    "sha256": "459000103b5afa079fbcdda158851e934aa5e31c264a64ae5f36d21c7b7e6b16"
+  },
+  "transition_fused_sm90a.cu": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/transition_fused_sm90a.cu",
+    "sha256": "f70dc0b327fc0bdafa8c9dd449720b7b543148c3fa902c2c0ef7dc09798a3f58"
+  },
+  "transition_fused_fwd_sm90a_kernel.cu": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/transition_fused_fwd_sm90a_kernel.cu",
+    "sha256": "5773ae836de034358fbf0dd6036f781acc3d92e24e497f88c0c05e0ea935a780"
+  },
+  "transition_fused_bwd_sm90a_kernel.cu": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/transition_fused_bwd_sm90a_kernel.cu",
+    "sha256": "41de80001f576f5c6533b9db2e8f41ef56cae2c5d8418e57e7062d69f7772cd0"
+  },
+  "anthropic_v5/README.md": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/anthropic_v5/README.md",
+    "sha256": "cbb00e1e8c836e952ac05e7ccef27886eb142615edacf2e9b1678be13573d2c7"
+  },
+  "anthropic_v5/tmn_kernels.cuh": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/anthropic_v5/tmn_kernels.cuh",
+    "sha256": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6"
+  },
+  "anthropic_v5/tmn_ptx.cuh": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/anthropic_v5/tmn_ptx.cuh",
+    "sha256": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa"
+  },
+  "anthropic_v5/common/tmn_math.cuh": {
+    "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/anthropic_v5/common/tmn_math.cuh",
+    "sha256": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b"
+  }
+}

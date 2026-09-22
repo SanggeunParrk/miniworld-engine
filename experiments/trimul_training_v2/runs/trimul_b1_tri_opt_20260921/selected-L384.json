@@ -1,0 +1,33 @@
+{
+  "config": {
+    "count": 132,
+    "part": 2,
+    "defines": {
+      "GATE_PHASE": 1,
+      "LOWREG": 1,
+      "STREAM_LN": 1,
+      "B1_STREAM_AFFINE_UNROLL": 4,
+      "XHAT_FP32": -1,
+      "B1_DIRECT_DP": 1,
+      "B1_NO_REDUNDANT_SYNC": 1,
+      "PAIR_WP": 0,
+      "B1_EARLY_RAW": 1,
+      "B1_PREFETCH_DY": 0
+    }
+  },
+  "valid": true,
+  "bit_exact": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "ratio": 0.9076831718676761,
+  "times": {
+    "baseline": 242.8160011768341,
+    "candidate": 220.39999812841415
+  },
+  "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_tri_opt_20260921/build/e574c64d4a08d4330c8505c37c1774460068663c3fab3d685c1c6261dfa12236.cubin"
+}

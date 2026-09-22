@@ -1,0 +1,238 @@
+{
+  "rows": [
+    [
+      "384",
+      "\uc9c1\uc804 \uc120\ud0dd B1",
+      "0.2943",
+      "0.2217",
+      "0.9276",
+      "1.2218"
+    ],
+    [
+      "384",
+      "\uc774\ubc88 \ucd5c\uc801\ud654 B1",
+      "0.2949",
+      "0.2050",
+      "0.9111",
+      "1.2044"
+    ],
+    [
+      "768",
+      "\uc9c1\uc804 \uc120\ud0dd B1",
+      "1.1834",
+      "0.7484",
+      "3.7133",
+      "4.9580"
+    ],
+    [
+      "768",
+      "\uc774\ubc88 \ucd5c\uc801\ud654 B1",
+      "1.1832",
+      "0.6955",
+      "3.6676",
+      "4.9076"
+    ]
+  ],
+  "latency_reduction_percent": {
+    "384": {
+      "forward": -0.1957124126245935,
+      "b1": 7.521293735743029,
+      "backward": 1.7715161895715426,
+      "forward_backward": 1.4234487608692947
+    },
+    "768": {
+      "forward": 0.016218156568770237,
+      "b1": 7.067730023493313,
+      "backward": 1.229322206126171,
+      "forward_backward": 1.0158999513252054
+    }
+  },
+  "ncu": [
+    [
+      "384",
+      "baseline",
+      "223.584000 us",
+      "245.524480 Mbyte",
+      "141.729024 Mbyte",
+      "51.682763 %",
+      "17.891872 %",
+      "1.314547 inst"
+    ],
+    [
+      "384",
+      "optimized",
+      "206.208000 us",
+      "245.549824 Mbyte",
+      "141.467904 Mbyte",
+      "55.992812 %",
+      "19.524991 %",
+      "1.158319 inst"
+    ],
+    [
+      "768",
+      "baseline",
+      "752.192000 us",
+      "928.702208 Mbyte",
+      "481.252352 Mbyte",
+      "55.917529 %",
+      "21.137160 %",
+      "0.958259 inst"
+    ],
+    [
+      "768",
+      "optimized",
+      "694.368000 us",
+      "928.662016 Mbyte",
+      "481.421568 Mbyte",
+      "60.582899 %",
+      "23.000683 %",
+      "0.779515 inst"
+    ]
+  ],
+  "roofline": [
+    {
+      "L": 384,
+      "ideal_unique_payload_bytes": 265420800,
+      "dense_gemm_flops": 38654705664,
+      "ideal_memory_us": 79.23008955223881,
+      "ideal_gemm_us": 39.064886977261246,
+      "ideal_roofline_efficiency_pct": 38.42241307429334,
+      "measured_traffic_roofline_efficiency_pct": 56.02482929857233,
+      "ncu_us": 206.208
+    },
+    {
+      "L": 768,
+      "ideal_unique_payload_bytes": 1061683200,
+      "dense_gemm_flops": 154618822656,
+      "ideal_memory_us": 316.92035820895524,
+      "ideal_gemm_us": 156.25954790904498,
+      "ideal_roofline_efficiency_pct": 45.64155580455251,
+      "measured_traffic_roofline_efficiency_pct": 60.619221052211635,
+      "ncu_us": 694.368
+    }
+  ],
+  "validation": {
+    "384": [
+      {
+        "log": "ncu-baseline-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "racecheck-L384.log",
+        "returncode": 0
+      }
+    ],
+    "768": [
+      {
+        "log": "ncu-baseline-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L768.log",
+        "returncode": 0
+      }
+    ]
+  },
+  "verification_complete": true,
+  "policy_unchanged": true,
+  "production_ready": false,
+  "sol90_reached": false,
+  "baseline": "trimul_b1_tri_opt_20260921 matched on node01",
+  "experimental_source": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921",
+  "entry_check": {
+    "entry": "runs/trimul_training_current.py:Training",
+    "all_outputs_bit_exact": true,
+    "saved_tri_bf16": true,
+    "saved_stats_fp32": true,
+    "errors": {
+      "forward": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dx": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWgate": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWproj": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      }
+    }
+  }
+}

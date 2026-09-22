@@ -1,0 +1,114 @@
+{
+  "m64": {
+    "requested_physical_configs": 72,
+    "valid": 71,
+    "failed": [
+      {
+        "config": {
+          "BLOCK_K_D": 64,
+          "BLOCK_K_H2": 64,
+          "BLOCK_M1": 64,
+          "num_warps": 8,
+          "num_stages": 10
+        },
+        "status": "failed",
+        "reason": "Requested TMA stages exceed shared memory capacity"
+      }
+    ],
+    "triton_fixed_ms": 0.2665948648921779,
+    "triton_fixed_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 8,
+      "num_stages": 4
+    },
+    "best": {
+      "config": {
+        "BLOCK_K_D": 64,
+        "BLOCK_K_H2": 64,
+        "BLOCK_M1": 64,
+        "num_warps": 8,
+        "num_stages": 6
+      },
+      "ms": 0.33233813331240697,
+      "errors": [
+        0.0,
+        0.0
+      ],
+      "status": "ok",
+      "compile_check_s": 2.0669151600450277
+    }
+  },
+  "m128": {
+    "requested_physical_configs": 72,
+    "valid": 69,
+    "failed": [
+      {
+        "config": {
+          "BLOCK_K_D": 64,
+          "BLOCK_K_H2": 32,
+          "BLOCK_M1": 128,
+          "num_warps": 8,
+          "num_stages": 10
+        },
+        "status": "failed",
+        "reason": "Requested TMA stages exceed shared memory capacity"
+      },
+      {
+        "config": {
+          "BLOCK_K_D": 64,
+          "BLOCK_K_H2": 64,
+          "BLOCK_M1": 128,
+          "num_warps": 8,
+          "num_stages": 8
+        },
+        "status": "failed",
+        "reason": "Requested TMA stages exceed shared memory capacity"
+      },
+      {
+        "config": {
+          "BLOCK_K_D": 64,
+          "BLOCK_K_H2": 64,
+          "BLOCK_M1": 128,
+          "num_warps": 8,
+          "num_stages": 10
+        },
+        "status": "failed",
+        "reason": "Requested TMA stages exceed shared memory capacity"
+      }
+    ],
+    "triton_fixed_ms": 0.26652967204218325,
+    "triton_fixed_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 8,
+      "num_stages": 4
+    },
+    "best": {
+      "config": {
+        "BLOCK_K_D": 64,
+        "BLOCK_K_H2": 64,
+        "BLOCK_M1": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "ms": 0.2838320918466853,
+      "errors": [
+        0.0,
+        0.0
+      ],
+      "status": "ok",
+      "compile_check_s": 2.6478456147015095
+    }
+  },
+  "ptx": {
+    "path": "runs/trimul_sm90_parity_20260917/front/ptx/cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_frontParityFrontSm90_object_at__FakeTensorBFloat16div1div1div1i64div81i64div8_FakeTensorBFloat16div1div1div11i64div8.sm_90a.ptx",
+    "sha256": "10821b006175c8ebf4bf92a4f35848c10a1faabc89478984076b503797a8e35b",
+    "TMA_loads": 2,
+    "TMA_stores": 4,
+    "WGMMA": 4,
+    "physical_threads_256": true
+  }
+}

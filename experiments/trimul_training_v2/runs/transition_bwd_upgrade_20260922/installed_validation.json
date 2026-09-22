@@ -1,0 +1,44 @@
+{
+  "job": "15652",
+  "source": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/fused_sm90a.py",
+  "checks": {
+    "dx": {
+      "relative_l2": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 2e-05
+    },
+    "dgamma": {
+      "relative_l2": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 5e-06
+    },
+    "dbeta": {
+      "relative_l2": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 5e-06
+    },
+    "dWa": {
+      "relative_l2": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 0.0005
+    },
+    "dWb": {
+      "relative_l2": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 0.0005
+    },
+    "dWs": {
+      "relative_l2": 0.0,
+      "finite": true,
+      "bit_exact": true,
+      "limit": 0.0005
+    }
+  },
+  "graph_exact": true,
+  "complete": true
+}

@@ -1,0 +1,11 @@
+{
+  "saved": {
+    "retained_including_y_bytes": 757334016,
+    "forward_peak_increment_bytes": 757334016
+  },
+  "recompute": {
+    "retained_including_y_bytes": 37748736,
+    "forward_peak_increment_bytes": 264241152
+  },
+  "scope": "Eager forward incremental allocated memory, including output y. Shared inputs and weights pre-exist. Not whole-model or backward peak."
+}

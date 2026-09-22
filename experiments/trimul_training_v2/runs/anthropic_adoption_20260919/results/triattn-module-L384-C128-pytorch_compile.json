@@ -1,0 +1,44 @@
+{
+  "family": "triattn",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "pytorch_compile",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/triattn-module-L384-C128-pytorch_compile.json",
+  "profile": false,
+  "module": true,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 5.325216054916382,
+  "error": {
+    "rel_rms": 0.0017778737237676978,
+    "max_abs": 0.017403602600097656,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.01861361227929592,
+    "max_abs": 0.017403602600097656,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0017778737237676978,
+    "max_abs": 0.017403602600097656,
+    "finite": true
+  },
+  "ms": 1.7415692138671874,
+  "samples_ms": [
+    1.7553990173339844,
+    1.7518252563476562,
+    1.7415692138671874,
+    1.7333151245117187,
+    1.7327296447753906
+  ],
+  "status": "passed"
+}

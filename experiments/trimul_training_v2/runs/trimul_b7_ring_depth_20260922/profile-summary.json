@@ -1,0 +1,62 @@
+{
+  "prior": {
+    "gpu__time_duration.sum": {
+      "value": "367.104000",
+      "unit": "us"
+    },
+    "dram__bytes_read.sum": {
+      "value": "303.756032",
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": "56.802304",
+      "unit": "Mbyte"
+    },
+    "lts__t_sectors.sum": {
+      "value": "74978601.000000",
+      "unit": "sector"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+      "value": "34.708748",
+      "unit": "%"
+    },
+    "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+      "value": "0",
+      "unit": "sector"
+    },
+    "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+      "value": "0",
+      "unit": "sector"
+    }
+  },
+  "new": {
+    "gpu__time_duration.sum": {
+      "value": "340.192000",
+      "unit": "us"
+    },
+    "dram__bytes_read.sum": {
+      "value": "303.239936",
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": "144.610816",
+      "unit": "Mbyte"
+    },
+    "lts__t_sectors.sum": {
+      "value": "75918133.000000",
+      "unit": "sector"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+      "value": "37.421011",
+      "unit": "%"
+    },
+    "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+      "value": "0",
+      "unit": "sector"
+    },
+    "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+      "value": "0",
+      "unit": "sector"
+    }
+  }
+}

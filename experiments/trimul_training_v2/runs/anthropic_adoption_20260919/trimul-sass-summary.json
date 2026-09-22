@@ -1,0 +1,21 @@
+{
+  "cubin_sha256": "8e2d6f720e33df77534902e0a148a9248950bed1e9be74e91b5aaa956762669b",
+  "static_instruction_counts": {
+    "k1": {
+      "UTMALDG": 4,
+      "UTMASTG": 0,
+      "HGMMA": 24,
+      "STG": 36,
+      "LDSM": 8,
+      "STSM": 4
+    },
+    "k3": {
+      "UTMALDG": 9,
+      "UTMASTG": 1,
+      "HGMMA": 48,
+      "STG": 0,
+      "LDSM": 20,
+      "STSM": 4
+    }
+  }
+}

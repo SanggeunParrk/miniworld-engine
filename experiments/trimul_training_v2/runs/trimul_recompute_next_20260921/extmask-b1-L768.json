@@ -1,0 +1,41 @@
+[
+  {
+    "config": {
+      "splits": 24,
+      "defines": {
+        "GATE_SPLITS": 36,
+        "TRAIN_L": 768,
+        "B1_DWPROJ_PIPE": 1,
+        "B1_EXT_MASK": 1
+      }
+    },
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/b1_fused.cu:36:2: error: invalid preprocessing directive #endifint\n   36 | #endifint period;bool cached;};\n      |  ^~~~~~~~\n/home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/b1_fused.cu:34: error: unterminated #if\n   34 | #if B1_EXT_MASK\n      | \n"
+  },
+  {
+    "config": {
+      "splits": 22,
+      "defines": {
+        "GATE_SPLITS": 36,
+        "TRAIN_L": 768,
+        "B1_DWPROJ_PIPE": 1,
+        "B1_EXT_MASK": 1
+      }
+    },
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/b1_fused.cu:36:2: error: invalid preprocessing directive #endifint\n   36 | #endifint period;bool cached;};\n      |  ^~~~~~~~\n/home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/b1_fused.cu:34: error: unterminated #if\n   34 | #if B1_EXT_MASK\n      | \n"
+  },
+  {
+    "config": {
+      "splits": 24,
+      "defines": {
+        "GATE_SPLITS": 34,
+        "TRAIN_L": 768,
+        "B1_DWPROJ_PIPE": 1,
+        "B1_EXT_MASK": 1
+      }
+    },
+    "valid": false,
+    "error": "/home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/b1_fused.cu:36:2: error: invalid preprocessing directive #endifint\n   36 | #endifint period;bool cached;};\n      |  ^~~~~~~~\n/home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/b1_fused.cu:34: error: unterminated #if\n   34 | #if B1_EXT_MASK\n      | \n"
+  }
+]

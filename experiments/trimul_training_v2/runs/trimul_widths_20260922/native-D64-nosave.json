@@ -1,0 +1,830 @@
+{
+  "D": 64,
+  "job": "15684",
+  "source": "Anthropic v5 K1/K3, K1 occupancy widened; shared-memory-limited K3 uses existing Triton",
+  "results": {
+    "384": {
+      "k1": [
+        {
+          "config": [
+            1,
+            64,
+            2,
+            1,
+            2
+          ],
+          "us": 55.003201961517334,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/aae135b447f72d8e4b8ecb78b81c46c81a053f763e022579b05ccc55b7301e4f.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 50.634 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            2,
+            1,
+            1
+          ],
+          "us": 83.36880207061768,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/6c1cc2129ec10b6e509d59c081945891414798cc29245fc8ad8b6dbb762e8360.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 63.840 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            4,
+            1,
+            2
+          ],
+          "us": 49.29119944572449,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/91e19ff0ce81e23b9634731f60485c22bc827a9b386c39801ec41e504c50cff8.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3453 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 72.865 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            4,
+            1,
+            1
+          ],
+          "us": 70.37760019302368,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a1e26d6e232a654adea6e1e81784c6027410b2418d0dd216f1faf59fcad25107.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3448 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 63.416 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            6,
+            1,
+            2
+          ],
+          "us": 49.70560073852539,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/dc4538e00979e17fb1297cc5ee6b7f90baa89feb3e461713d176405509188e9b.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3487 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 89.400 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            6,
+            1,
+            1
+          ],
+          "us": 71.93760275840759,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/229d7d21a4d8a66929cabda59e7e72aeb958d79adc4a8eeb6d0b811774c1abb5.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3482 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 64.266 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            8,
+            1,
+            2
+          ],
+          "us": 48.8783985376358,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3459 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 70.934 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            8,
+            1,
+            1
+          ],
+          "us": 70.98240256309509,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/df4f2574c422d5e8615c2fd4e973e72033fcd14f86637482757008506a8409ab.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3454 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 65.105 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            2,
+            1,
+            1
+          ],
+          "us": 59.688800573349,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/209628aad405202fe087d02c7c6bd15447cbc27b471f7f82b89834cf50d069e5.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 50.631 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            4,
+            1,
+            1
+          ],
+          "us": 52.348798513412476,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f614a28b1f1953185e4b76324bd96d78fab2489e558227c0a1e8715387eb83c5.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3456 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 71.736 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            6,
+            1,
+            1
+          ],
+          "us": 51.99840068817139,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/d8e8b3f896f05a23e927a5aca4502401706950641fb068278d28a5ec3e4a6e27.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3490 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 70.601 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            8,
+            1,
+            1
+          ],
+          "us": 51.03920102119446,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/3eb8a2291301f276e4ae63c45b91c1b4e5e3f346126f4cc0f66b314532f4cf49.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3462 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 69.820 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            2,
+            1,
+            1
+          ],
+          "us": 58.982402086257935,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/bb35e18df8aef9e57182ae6f1bb583345c55af5cd862f36936509f8374123d80.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 51.271 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            4,
+            1,
+            1
+          ],
+          "us": 52.35679745674133,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/06967d44156b2da0c3ea45efe4d44b76c631e2a488c843262b069ab66bc0cf93.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3456 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 70.636 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            6,
+            1,
+            1
+          ],
+          "us": 52.35919952392578,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/89d99aac47a6f7c94ee6a7ea7bafacba4cd57bfb12c67b483ce2b90ad94f6abb.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3490 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 71.635 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            8,
+            1,
+            1
+          ],
+          "us": 51.554399728775024,
+          "errors": {
+            "ab": 0.0033053283113986254,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/16a6c5b4dad8dfa081c9a57565da6f33e205c09d68b69f06db4c13d6af4604e9.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3462 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 71.551 ms\n"
+        }
+      ],
+      "k3": [
+        {
+          "config": [
+            2,
+            64,
+            4,
+            1
+          ],
+          "us": 38.67360055446625,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/9349426a5a65c04cbb599fa3bc94b0fbe67b070976d9d1c8d6a437ac565edb83.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            4,
+            2
+          ],
+          "us": 37.89840042591095,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/860a17a47de2942b933f15ddd8982b9d1abf794ef61edab5a24eea771edcbe94.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            6,
+            1
+          ],
+          "us": 38.679200410842896,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/320f01d90a49da29c4603cf2f891e8279f3ef8345b4c8a7fda49315cf7919ead.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            6,
+            2
+          ],
+          "us": 37.881600856781006,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/2879caa13048d8750f29377795b2cd544a5a024ca2630e66f9dec584438c0010.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            8,
+            1
+          ],
+          "us": 38.74160051345825,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/37dd485687905d714161fca48b07a34cdc63cd948fdb0334affdc14aafa1fdca.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            8,
+            2
+          ],
+          "us": 38.00559937953949,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/8f9ae4bbf972e65fe66cf8d331c796e335350eacd295d23a48985b0ff0c3c3b9.cubin"
+        }
+      ],
+      "selected_k1": [
+        1,
+        64,
+        8,
+        1,
+        2
+      ],
+      "k1_us": 48.8783985376358,
+      "k3_us": 37.881600856781006,
+      "k3_route": "Anthropic",
+      "relative_l2": 0.0020236114505678415,
+      "mutation_graph_eager": 0.0,
+      "times": {
+        "triton": 204.82431411743164,
+        "native": 131.34719848632812
+      },
+      "rounds": {
+        "triton": [
+          201.8079948425293,
+          205.33376693725586,
+          204.54240798950195,
+          205.283203125,
+          204.82431411743164
+        ],
+        "native": [
+          130.37823677062988,
+          130.3775978088379,
+          131.34719848632812,
+          131.4080047607422,
+          131.37696266174316
+        ]
+      }
+    },
+    "768": {
+      "k1": [
+        {
+          "config": [
+            1,
+            64,
+            2,
+            1,
+            2
+          ],
+          "us": 199.95839595794678,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/aae135b447f72d8e4b8ecb78b81c46c81a053f763e022579b05ccc55b7301e4f.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 50.634 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            2,
+            1,
+            1
+          ],
+          "us": 313.23280334472656,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/6c1cc2129ec10b6e509d59c081945891414798cc29245fc8ad8b6dbb762e8360.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 63.840 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            4,
+            1,
+            2
+          ],
+          "us": 177.71600484848022,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/91e19ff0ce81e23b9634731f60485c22bc827a9b386c39801ec41e504c50cff8.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3453 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 72.865 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            4,
+            1,
+            1
+          ],
+          "us": 257.4824094772339,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a1e26d6e232a654adea6e1e81784c6027410b2418d0dd216f1faf59fcad25107.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3448 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 63.416 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            6,
+            1,
+            2
+          ],
+          "us": 178.63600254058838,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/dc4538e00979e17fb1297cc5ee6b7f90baa89feb3e461713d176405509188e9b.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3487 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 89.400 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            6,
+            1,
+            1
+          ],
+          "us": 268.6095952987671,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/229d7d21a4d8a66929cabda59e7e72aeb958d79adc4a8eeb6d0b811774c1abb5.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3482 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 64.266 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            8,
+            1,
+            2
+          ],
+          "us": 176.59679651260376,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3459 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers\nptxas info    : Compile time = 70.934 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            8,
+            1,
+            1
+          ],
+          "us": 259.6127986907959,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/df4f2574c422d5e8615c2fd4e973e72033fcd14f86637482757008506a8409ab.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3454 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers\nptxas info    : Compile time = 65.105 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            2,
+            1,
+            1
+          ],
+          "us": 210.71679592132568,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/209628aad405202fe087d02c7c6bd15447cbc27b471f7f82b89834cf50d069e5.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 50.631 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            4,
+            1,
+            1
+          ],
+          "us": 183.17760229110718,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f614a28b1f1953185e4b76324bd96d78fab2489e558227c0a1e8715387eb83c5.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3456 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 71.736 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            6,
+            1,
+            1
+          ],
+          "us": 181.60239458084106,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/d8e8b3f896f05a23e927a5aca4502401706950641fb068278d28a5ec3e4a6e27.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3490 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 70.601 ms\n"
+        },
+        {
+          "config": [
+            2,
+            64,
+            8,
+            1,
+            1
+          ],
+          "us": 179.2472004890442,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/3eb8a2291301f276e4ae63c45b91c1b4e5e3f346126f4cc0f66b314532f4cf49.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3462 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 69.820 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            2,
+            1,
+            1
+          ],
+          "us": 208.01360607147217,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/bb35e18df8aef9e57182ae6f1bb583345c55af5cd862f36936509f8374123d80.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 51.271 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            4,
+            1,
+            1
+          ],
+          "us": 182.3583960533142,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/06967d44156b2da0c3ea45efe4d44b76c631e2a488c843262b069ab66bc0cf93.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3456 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 70.636 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            6,
+            1,
+            1
+          ],
+          "us": 182.32959508895874,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/89d99aac47a6f7c94ee6a7ea7bafacba4cd57bfb12c67b483ce2b90ad94f6abb.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3490 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 71.635 ms\n"
+        },
+        {
+          "config": [
+            1,
+            128,
+            8,
+            1,
+            1
+          ],
+          "us": 180.33360242843628,
+          "errors": {
+            "ab": 0.0033050179481506348,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/16a6c5b4dad8dfa081c9a57565da6f33e205c09d68b69f06db4c13d6af4604e9.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 3462 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 71.551 ms\n"
+        }
+      ],
+      "k3": [
+        {
+          "config": [
+            2,
+            64,
+            4,
+            1
+          ],
+          "us": 129.38560247421265,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/9349426a5a65c04cbb599fa3bc94b0fbe67b070976d9d1c8d6a437ac565edb83.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            4,
+            2
+          ],
+          "us": 127.39280462265015,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/860a17a47de2942b933f15ddd8982b9d1abf794ef61edab5a24eea771edcbe94.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            6,
+            1
+          ],
+          "us": 129.37359809875488,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/320f01d90a49da29c4603cf2f891e8279f3ef8345b4c8a7fda49315cf7919ead.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            6,
+            2
+          ],
+          "us": 127.42880582809448,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/2879caa13048d8750f29377795b2cd544a5a024ca2630e66f9dec584438c0010.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            8,
+            1
+          ],
+          "us": 129.10000085830688,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/37dd485687905d714161fca48b07a34cdc63cd948fdb0334affdc14aafa1fdca.cubin"
+        },
+        {
+          "config": [
+            2,
+            64,
+            8,
+            2
+          ],
+          "us": 127.33919620513916,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/8f9ae4bbf972e65fe66cf8d331c796e335350eacd295d23a48985b0ff0c3c3b9.cubin"
+        }
+      ],
+      "selected_k1": [
+        1,
+        64,
+        8,
+        1,
+        2
+      ],
+      "k1_us": 176.59679651260376,
+      "k3_us": 127.33919620513916,
+      "k3_route": "Anthropic",
+      "relative_l2": 0.002067945897579193,
+      "mutation_graph_eager": 0.0,
+      "times": {
+        "triton": 811.6409301757812,
+        "native": 530.2604675292969
+      },
+      "rounds": {
+        "triton": [
+          774.6412658691406,
+          811.6409301757812,
+          797.5769805908203,
+          829.9257659912109,
+          844.8226928710938
+        ],
+        "native": [
+          530.4950332641602,
+          530.2604675292969,
+          528.1657409667969,
+          528.0495834350586,
+          535.3907012939453
+        ]
+      }
+    }
+  },
+  "candidates": [
+    [
+      1,
+      64,
+      2,
+      1,
+      2
+    ],
+    [
+      1,
+      64,
+      2,
+      1,
+      1
+    ],
+    [
+      1,
+      64,
+      4,
+      1,
+      2
+    ],
+    [
+      1,
+      64,
+      4,
+      1,
+      1
+    ],
+    [
+      1,
+      64,
+      6,
+      1,
+      2
+    ],
+    [
+      1,
+      64,
+      6,
+      1,
+      1
+    ],
+    [
+      1,
+      64,
+      8,
+      1,
+      2
+    ],
+    [
+      1,
+      64,
+      8,
+      1,
+      1
+    ],
+    [
+      2,
+      64,
+      2,
+      1,
+      1
+    ],
+    [
+      2,
+      64,
+      4,
+      1,
+      1
+    ],
+    [
+      2,
+      64,
+      6,
+      1,
+      1
+    ],
+    [
+      2,
+      64,
+      8,
+      1,
+      1
+    ],
+    [
+      1,
+      128,
+      2,
+      1,
+      1
+    ],
+    [
+      1,
+      128,
+      4,
+      1,
+      1
+    ],
+    [
+      1,
+      128,
+      6,
+      1,
+      1
+    ],
+    [
+      1,
+      128,
+      8,
+      1,
+      1
+    ]
+  ],
+  "complete": true
+}

@@ -88,7 +88,7 @@ def test_fused_training_path_matches_the_engines_own(module, inputs, mask_key, s
 
 
 def test_refusals(inputs):
-    kw = dict(interchain=False, normalize_before_proj=True)
+    kw = {"interchain": False, "normalize_before_proj": True}
     assert ot.refusal(inputs["msa"], D_MSA, D_HID, D_PAIR, **kw) is not None           # not opted in
     with opted_in():
         assert ot.refusal(inputs["msa"], D_MSA, D_HID, D_PAIR, **kw) is None

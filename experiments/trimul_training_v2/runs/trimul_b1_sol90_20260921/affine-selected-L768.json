@@ -1,0 +1,36 @@
+{
+  "config": {
+    "count": 132,
+    "part": 2,
+    "defines": {
+      "GATE_PHASE": 1,
+      "LOWREG": 1,
+      "STREAM_LN": 1,
+      "B1_STREAM_AFFINE_UNROLL": 4,
+      "XHAT_FP32": -1,
+      "B1_DIRECT_DP": 1,
+      "B1_NO_REDUNDANT_SYNC": 1,
+      "PAIR_WP": 1,
+      "B1_EARLY_RAW": 1,
+      "B1_PREFETCH_DY": 0,
+      "B1_SPLIT_DN": 1,
+      "B1_AFFINE_BOTH": 1
+    }
+  },
+  "host": "node01",
+  "valid": true,
+  "bit_exact": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "ratio": 0.9432699508919253,
+  "times": {
+    "baseline": 740.911990404129,
+    "candidate": 698.8800168037415
+  },
+  "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/affine/build/6a148736107411d9d9a511e90e36d27e12b1d9a4f6a10dd41301baf8eda43c02.cubin"
+}

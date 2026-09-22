@@ -1,0 +1,164 @@
+{
+  "384": {
+    "cute_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "triton_config": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "triton_winner": "triton_bm128",
+    "samples_ms": {
+      "cute": [
+        0.09378960589613705,
+        0.09388931344408508,
+        0.09383351688301719,
+        0.09428535344307883,
+        0.09394392200878689
+      ],
+      "cute_previous": [
+        0.0952710855574835,
+        0.0952485846602209,
+        0.09541333985218804,
+        0.09534058989140025,
+        0.09554112315689545
+      ],
+      "triton_bm128": [
+        0.10521873998563926,
+        0.10540357127142111,
+        0.106244999619781,
+        0.10584467339189085,
+        0.10586723564819968
+      ],
+      "triton_old": [
+        0.10641767046092886,
+        0.10826050483140369,
+        0.10542861950963296,
+        0.10726344546075701,
+        0.1066775439189518
+      ],
+      "triton_m64": [
+        0.10788998234605868,
+        0.10533641451283506,
+        0.10808071285943156,
+        0.10676724350692442,
+        0.10746464429767913
+      ],
+      "triton_matched": [
+        0.11345583850295965,
+        0.11494786422864525,
+        0.11469968975971515,
+        0.1146664083228921,
+        0.11376860732332282
+      ]
+    },
+    "medians_ms": {
+      "cute": 0.09388931344408508,
+      "cute_previous": 0.09534058989140025,
+      "triton_bm128": 0.10584467339189085,
+      "triton_old": 0.1066775439189518,
+      "triton_m64": 0.10746464429767913,
+      "triton_matched": 0.1146664083228921
+    },
+    "speedup": 1.1273346189172604,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "resources": "\nResource usage:\n Common:\n  GLOBAL:0\n Function kernel_cutlass_kernel_dropout_tmaParityF567Sm90_object_at__CopyAtom_ThrID10_TVLayoutSrc1409601_TVLayoutDst1409601_Valuetypebf16_tensor00o1474561281110_CopyAtom_ThrID10_TVLayoutSrc1409601__0:\n  REG:92 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:1744 TEXTURE:0 SURFACE:0 SAMPLER:0\n",
+    "cubin_sha256": "9884d177b3baca9649b6674d225de1104acb7e79a16f2dc1e5ff5952632b7108",
+    "has_hgmma": true,
+    "has_tma": true
+  },
+  "768": {
+    "cute_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "triton_config": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "triton_winner": "triton_bm128",
+    "samples_ms": {
+      "cute": [
+        0.3587385294823673,
+        0.3593069449483349,
+        0.3605853885245723,
+        0.3601692796419453,
+        0.3598081578089538
+      ],
+      "cute_previous": [
+        0.35995195706685384,
+        0.36233705670646066,
+        0.3610194336284291,
+        0.3620247873027673,
+        0.36130128418658414
+      ],
+      "triton_bm128": [
+        0.41461793887689247,
+        0.4095001096039816,
+        0.4059432269680885,
+        0.40820990586892153,
+        0.40898416495021384
+      ],
+      "triton_old": [
+        0.41030994202039256,
+        0.4117529975043403,
+        0.41991267143925537,
+        0.4164569331150429,
+        0.417388032357904
+      ],
+      "triton_m64": [
+        0.4198741708025836,
+        0.4202932428430628,
+        0.4171557814075101,
+        0.41749302344986156,
+        0.4194773224861391
+      ],
+      "triton_matched": [
+        0.4500912501894194,
+        0.44865121361163024,
+        0.44371405465262276,
+        0.446281035517303,
+        0.4455041294366541
+      ]
+    },
+    "medians_ms": {
+      "cute": 0.3598081578089538,
+      "cute_previous": 0.36130128418658414,
+      "triton_bm128": 0.40898416495021384,
+      "triton_old": 0.4164569331150429,
+      "triton_m64": 0.4194773224861391,
+      "triton_matched": 0.446281035517303
+    },
+    "speedup": 1.1366728521129608,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "resources": "\nResource usage:\n Common:\n  GLOBAL:0\n Function kernel_cutlass_kernel_dropout_tmaParityF567Sm90_object_at__CopyAtom_ThrID10_TVLayoutSrc1409601_TVLayoutDst1409601_Valuetypebf16_tensor00o5898241281110_CopyAtom_ThrID10_TVLayoutSrc1409601__0:\n  REG:92 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:1744 TEXTURE:0 SURFACE:0 SAMPLER:0\n",
+    "cubin_sha256": "0d0c97262e989e3d12cd5ff3fcffabdf925d5ac1b4ee1754ca29d3b4e8b5aaa9",
+    "has_hgmma": true,
+    "has_tma": true
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "status": "experimental_validated",
+  "scope": "Bidirectional TriMul B7-B12 only, L384 C128 projection width256",
+  "plan": "plan.py",
+  "kwargs": {
+    "clusters": 10,
+    "mode": 4
+  },
+  "environment": {
+    "B7_CONSUMERS": "10",
+    "B7_PRODUCER_REGS": "64"
+  },
+  "ring_chunk_bytes": 16384,
+  "ring_shared_slots": 4,
+  "ctas": 260,
+  "dynamic_shared_bytes": 114688,
+  "producer_registers": 64,
+  "compute_registers": 192,
+  "benchmark": "confirmation.json",
+  "sanitizer": "sanitizer-L384.json",
+  "times_us": {
+    "split": 394.5919871330261,
+    "ring_baseline": 395.32798528671265,
+    "old_400": 414.8479998111725,
+    "previous_16k": 374.62401390075684,
+    "g10u10p48": 376.67199969291687,
+    "g10u10p64": 373.4079897403717
+  },
+  "source_sha256": {
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ring_balance_20260922/joint.cu": "54f840e4e09f19e647c9c00bd51b51c394ffb6e54f44d59100ef0498d1e7aae0",
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ring_balance_20260922/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e"
+  },
+  "target_us": 252,
+  "target_met": false,
+  "sol90_verified": false,
+  "production_dispatch_changed": false
+}

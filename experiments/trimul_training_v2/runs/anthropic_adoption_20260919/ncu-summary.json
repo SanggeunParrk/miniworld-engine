@@ -1,0 +1,3266 @@
+[
+  {
+    "profile": "adaln-L384-C128-carried",
+    "total_us": 6.848,
+    "kernels": [
+      {
+        "name": "_ln_mod_kernel",
+        "us": 6.848,
+        "hbm_pct": 13.405521,
+        "l2_pct": 19.579884,
+        "sm_pct": 40.588034,
+        "tensor_pct": 0.0,
+        "issue_pct": 68.204971,
+        "eligible_warps": 2.616255,
+        "regs": 38.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "adaln-L768-C128-carried",
+    "total_us": 10.08,
+    "kernels": [
+      {
+        "name": "_ln_mod_kernel",
+        "us": 10.08,
+        "hbm_pct": 9.163071,
+        "l2_pct": 24.805961,
+        "sm_pct": 54.889584,
+        "tensor_pct": 0.0,
+        "issue_pct": 76.612057,
+        "eligible_warps": 3.442103,
+        "regs": 38.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "apb-L384-C384-apb_attn",
+    "total_us": 22.176,
+    "kernels": [
+      {
+        "name": "_apb_fwd",
+        "us": 18.752,
+        "hbm_pct": 2.465761,
+        "l2_pct": 20.192585,
+        "sm_pct": 15.366755,
+        "tensor_pct": 1.627816,
+        "issue_pct": 23.515811,
+        "eligible_warps": 0.277891,
+        "regs": 92.0,
+        "time_share": 0.8455988455988456
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 1)]::operator ()() const::[lambda(unsigned char) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::LoadWithCast<1>, at::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 3.424,
+        "hbm_pct": 0.304273,
+        "l2_pct": 10.349957,
+        "sm_pct": 0.019163,
+        "tensor_pct": 0.0,
+        "issue_pct": 7.055911,
+        "eligible_warps": 0.070559,
+        "regs": 32.0,
+        "time_share": 0.1544011544011544
+      }
+    ]
+  },
+  {
+    "profile": "apb-L768-C384-apb_attn",
+    "total_us": 46.784,
+    "kernels": [
+      {
+        "name": "_apb_fwd",
+        "us": 42.112,
+        "hbm_pct": 30.777076,
+        "l2_pct": 35.137564,
+        "sm_pct": 26.087332,
+        "tensor_pct": 2.929552,
+        "issue_pct": 29.792277,
+        "eligible_warps": 0.432319,
+        "regs": 92.0,
+        "time_share": 0.9001367989056088
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 1)]::operator ()() const::[lambda(unsigned char) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::LoadWithCast<1>, at::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.672,
+        "hbm_pct": 0.230506,
+        "l2_pct": 7.669851,
+        "sm_pct": 0.027772,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.577155,
+        "eligible_warps": 0.065772,
+        "regs": 32.0,
+        "time_share": 0.09986320109439124
+      }
+    ]
+  },
+  {
+    "profile": "atom_window-L384-C128-carried",
+    "total_us": 6700.6720000000005,
+    "kernels": [
+      {
+        "name": "_ln_qkvg_kernel",
+        "us": 5779.264,
+        "hbm_pct": 11.701664,
+        "l2_pct": 14.196058,
+        "sm_pct": 2.59602,
+        "tensor_pct": 0.0,
+        "issue_pct": 2.510856,
+        "eligible_warps": 0.025563,
+        "regs": 32.0,
+        "time_share": 0.8624902099371525
+      },
+      {
+        "name": "_window_attn_kernel",
+        "us": 921.408,
+        "hbm_pct": 32.835156,
+        "l2_pct": 35.628497,
+        "sm_pct": 7.095236,
+        "tensor_pct": 0.0,
+        "issue_pct": 3.39315,
+        "eligible_warps": 0.034476,
+        "regs": 32.0,
+        "time_share": 0.13750979006284741
+      }
+    ]
+  },
+  {
+    "profile": "atom_window-L384-C128-tf32rn",
+    "total_us": 74.49600000000001,
+    "kernels": [
+      {
+        "name": "_ln_qkvg_kernel",
+        "us": 43.776,
+        "hbm_pct": 5.57088,
+        "l2_pct": 12.447192,
+        "sm_pct": 4.786843,
+        "tensor_pct": 0.0,
+        "issue_pct": 19.113821,
+        "eligible_warps": 0.234177,
+        "regs": 255.0,
+        "time_share": 0.5876288659793815
+      },
+      {
+        "name": "_window_attn_kernel",
+        "us": 30.72,
+        "hbm_pct": 16.653465,
+        "l2_pct": 16.808625,
+        "sm_pct": 13.865059,
+        "tensor_pct": 0.0,
+        "issue_pct": 20.713256,
+        "eligible_warps": 0.235933,
+        "regs": 255.0,
+        "time_share": 0.4123711340206185
+      }
+    ]
+  },
+  {
+    "profile": "atom_window-L768-C128-carried",
+    "total_us": 7635.936,
+    "kernels": [
+      {
+        "name": "_ln_qkvg_kernel",
+        "us": 6273.888,
+        "hbm_pct": 23.43384,
+        "l2_pct": 27.092777,
+        "sm_pct": 4.784412,
+        "tensor_pct": 0.0,
+        "issue_pct": 2.305146,
+        "eligible_warps": 0.023452,
+        "regs": 32.0,
+        "time_share": 0.8216265825171924
+      },
+      {
+        "name": "_window_attn_kernel",
+        "us": 1362.048,
+        "hbm_pct": 54.444297,
+        "l2_pct": 55.794909,
+        "sm_pct": 9.604595,
+        "tensor_pct": 0.0,
+        "issue_pct": 4.319166,
+        "eligible_warps": 0.04485,
+        "regs": 32.0,
+        "time_share": 0.1783734174828076
+      }
+    ]
+  },
+  {
+    "profile": "atom_window-L768-C128-tf32rn",
+    "total_us": 104.28800000000001,
+    "kernels": [
+      {
+        "name": "_window_attn_kernel",
+        "us": 61.92,
+        "hbm_pct": 26.671124,
+        "l2_pct": 33.030656,
+        "sm_pct": 13.701009,
+        "tensor_pct": 0.0,
+        "issue_pct": 19.070712,
+        "eligible_warps": 0.22245,
+        "regs": 255.0,
+        "time_share": 0.5937404111690702
+      },
+      {
+        "name": "_ln_qkvg_kernel",
+        "us": 42.368,
+        "hbm_pct": 12.68122,
+        "l2_pct": 38.262851,
+        "sm_pct": 10.01837,
+        "tensor_pct": 0.0,
+        "issue_pct": 12.625233,
+        "eligible_warps": 0.151087,
+        "regs": 255.0,
+        "time_share": 0.4062595888309297
+      }
+    ]
+  },
+  {
+    "profile": "dtk-L384-C128-carried",
+    "total_us": 10.88,
+    "kernels": [
+      {
+        "name": "_gate_res_kernel",
+        "us": 6.432,
+        "hbm_pct": 12.489241,
+        "l2_pct": 32.276221,
+        "sm_pct": 31.339319,
+        "tensor_pct": 0.0,
+        "issue_pct": 64.830693,
+        "eligible_warps": 3.68774,
+        "regs": 31.0,
+        "time_share": 0.5911764705882353
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::LoadWithCast<1>, at::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.448,
+        "hbm_pct": 0.221361,
+        "l2_pct": 7.92945,
+        "sm_pct": 0.01583,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.711902,
+        "eligible_warps": 0.067119,
+        "regs": 32.0,
+        "time_share": 0.4088235294117647
+      }
+    ]
+  },
+  {
+    "profile": "dtk-L768-C128-carried",
+    "total_us": 15.328,
+    "kernels": [
+      {
+        "name": "_gate_res_kernel",
+        "us": 10.432,
+        "hbm_pct": 45.6501,
+        "l2_pct": 49.244607,
+        "sm_pct": 38.439774,
+        "tensor_pct": 0.0,
+        "issue_pct": 70.628799,
+        "eligible_warps": 5.042822,
+        "regs": 31.0,
+        "time_share": 0.6805845511482255
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::LoadWithCast<1>, at::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.896,
+        "hbm_pct": 0.20222,
+        "l2_pct": 7.257287,
+        "sm_pct": 0.028362,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.584964,
+        "eligible_warps": 0.06585,
+        "regs": 32.0,
+        "time_share": 0.31941544885177453
+      }
+    ]
+  },
+  {
+    "profile": "gather-L384-C128-carried",
+    "total_us": 44.864,
+    "kernels": [
+      {
+        "name": "_gather_attn_fwd",
+        "us": 44.864,
+        "hbm_pct": 0.76393,
+        "l2_pct": 6.209264,
+        "sm_pct": 12.246456,
+        "tensor_pct": 0.0,
+        "issue_pct": 16.005992,
+        "eligible_warps": 0.172249,
+        "regs": 96.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "gather-L768-C128-carried",
+    "total_us": 55.168,
+    "kernels": [
+      {
+        "name": "_gather_attn_fwd",
+        "us": 55.168,
+        "hbm_pct": 1.958633,
+        "l2_pct": 15.235135,
+        "sm_pct": 19.930464,
+        "tensor_pct": 0.0,
+        "issue_pct": 22.576378,
+        "eligible_warps": 0.287318,
+        "regs": 96.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C128-engine_triton",
+    "total_us": 23.488,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 23.488,
+        "hbm_pct": 70.607096,
+        "l2_pct": 88.10191,
+        "sm_pct": 44.094751,
+        "tensor_pct": 0.0,
+        "issue_pct": 39.71148,
+        "eligible_warps": 0.72262,
+        "regs": 47.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C128-fastln",
+    "total_us": 23.04,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 23.04,
+        "hbm_pct": 70.258311,
+        "l2_pct": 87.307827,
+        "sm_pct": 38.38671,
+        "tensor_pct": 0.0,
+        "issue_pct": 34.344376,
+        "eligible_warps": 0.612402,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C256-engine_triton",
+    "total_us": 48.352,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 48.352,
+        "hbm_pct": 80.994837,
+        "l2_pct": 84.46877,
+        "sm_pct": 43.867672,
+        "tensor_pct": 0.0,
+        "issue_pct": 42.370151,
+        "eligible_warps": 0.887032,
+        "regs": 47.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C256-fastln",
+    "total_us": 48.896,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 48.896,
+        "hbm_pct": 79.439301,
+        "l2_pct": 81.620161,
+        "sm_pct": 37.282391,
+        "tensor_pct": 0.0,
+        "issue_pct": 35.734527,
+        "eligible_warps": 0.615772,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C384-engine_triton",
+    "total_us": 74.944,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 74.944,
+        "hbm_pct": 82.513046,
+        "l2_pct": 82.75721,
+        "sm_pct": 49.498112,
+        "tensor_pct": 0.0,
+        "issue_pct": 49.309583,
+        "eligible_warps": 0.776404,
+        "regs": 128.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C384-fastln",
+    "total_us": 73.504,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 73.504,
+        "hbm_pct": 83.578523,
+        "l2_pct": 82.40335,
+        "sm_pct": 54.860442,
+        "tensor_pct": 0.0,
+        "issue_pct": 53.92931,
+        "eligible_warps": 1.096076,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C512-engine_triton",
+    "total_us": 97.92,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 97.92,
+        "hbm_pct": 85.881765,
+        "l2_pct": 81.888256,
+        "sm_pct": 37.661322,
+        "tensor_pct": 0.0,
+        "issue_pct": 36.742459,
+        "eligible_warps": 0.51677,
+        "regs": 128.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L384-C512-fastln",
+    "total_us": 97.376,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 97.376,
+        "hbm_pct": 86.044966,
+        "l2_pct": 81.735845,
+        "sm_pct": 40.649114,
+        "tensor_pct": 0.0,
+        "issue_pct": 40.354886,
+        "eligible_warps": 0.683029,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C128-engine_triton",
+    "total_us": 99.808,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 99.808,
+        "hbm_pct": 85.617238,
+        "l2_pct": 81.780642,
+        "sm_pct": 41.868546,
+        "tensor_pct": 0.0,
+        "issue_pct": 41.5493,
+        "eligible_warps": 0.714509,
+        "regs": 47.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C128-fastln",
+    "total_us": 97.664,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 97.664,
+        "hbm_pct": 85.766183,
+        "l2_pct": 81.686175,
+        "sm_pct": 35.918784,
+        "tensor_pct": 0.0,
+        "issue_pct": 35.644636,
+        "eligible_warps": 0.608408,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C256-engine_triton",
+    "total_us": 196.0,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 196.0,
+        "hbm_pct": 89.467494,
+        "l2_pct": 83.266307,
+        "sm_pct": 43.794312,
+        "tensor_pct": 0.0,
+        "issue_pct": 43.277368,
+        "eligible_warps": 0.88877,
+        "regs": 47.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C256-fastln",
+    "total_us": 195.776,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 195.776,
+        "hbm_pct": 88.796816,
+        "l2_pct": 81.43145,
+        "sm_pct": 37.353625,
+        "tensor_pct": 0.0,
+        "issue_pct": 37.190039,
+        "eligible_warps": 0.637835,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C384-engine_triton",
+    "total_us": 300.544,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 300.544,
+        "hbm_pct": 88.3701,
+        "l2_pct": 82.467473,
+        "sm_pct": 49.893667,
+        "tensor_pct": 0.0,
+        "issue_pct": 49.496171,
+        "eligible_warps": 0.777109,
+        "regs": 128.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C384-fastln",
+    "total_us": 294.304,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 294.304,
+        "hbm_pct": 89.69866,
+        "l2_pct": 82.382398,
+        "sm_pct": 55.173523,
+        "tensor_pct": 0.0,
+        "issue_pct": 54.783294,
+        "eligible_warps": 1.105334,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C512-engine_triton",
+    "total_us": 394.816,
+    "kernels": [
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 394.816,
+        "hbm_pct": 90.017849,
+        "l2_pct": 81.620166,
+        "sm_pct": 37.511977,
+        "tensor_pct": 0.0,
+        "issue_pct": 37.22146,
+        "eligible_warps": 0.51907,
+        "regs": 128.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln-L768-C512-fastln",
+    "total_us": 394.4,
+    "kernels": [
+      {
+        "name": "_ln_rows_lp_kernel",
+        "us": 394.4,
+        "hbm_pct": 89.765983,
+        "l2_pct": 81.30532,
+        "sm_pct": 40.427729,
+        "tensor_pct": 0.0,
+        "issue_pct": 40.099488,
+        "eligible_warps": 0.67827,
+        "regs": 64.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln_linear-L384-C128-carried",
+    "total_us": 12.0,
+    "kernels": [
+      {
+        "name": "_ln_linear_wide_kernel",
+        "us": 12.0,
+        "hbm_pct": 1.784894,
+        "l2_pct": 22.673887,
+        "sm_pct": 20.147725,
+        "tensor_pct": 6.740593,
+        "issue_pct": 28.125892,
+        "eligible_warps": 0.518894,
+        "regs": 127.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "ln_linear-L768-C128-carried",
+    "total_us": 21.344,
+    "kernels": [
+      {
+        "name": "_ln_linear_wide_kernel",
+        "us": 21.344,
+        "hbm_pct": 17.755519,
+        "l2_pct": 25.548306,
+        "sm_pct": 23.120735,
+        "tensor_pct": 7.766641,
+        "issue_pct": 30.044018,
+        "eligible_warps": 0.590139,
+        "regs": 127.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "msa_ln-L384-C128-carried",
+    "total_us": 20.288,
+    "kernels": [
+      {
+        "name": "_ln_linear_kernel",
+        "us": 9.696,
+        "hbm_pct": 2.039656,
+        "l2_pct": 21.31442,
+        "sm_pct": 17.072252,
+        "tensor_pct": 4.070785,
+        "issue_pct": 26.469025,
+        "eligible_warps": 0.398951,
+        "regs": 140.0,
+        "time_share": 0.4779179810725552
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_vectorized<at::<unnamed>::OpaqueType<2>, unsigned int, 3, 128, 1, 16, 8>(char *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 6.976,
+        "hbm_pct": 20.912192,
+        "l2_pct": 29.963295,
+        "sm_pct": 17.507041,
+        "tensor_pct": 0.0,
+        "issue_pct": 35.628665,
+        "eligible_warps": 1.352263,
+        "regs": 23.0,
+        "time_share": 0.34384858044164035
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_vectorized<at::<unnamed>::OpaqueType<2>, unsigned int, 1, 128, 1, 16, 8>(char *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.616,
+        "hbm_pct": 0.297721,
+        "l2_pct": 10.167036,
+        "sm_pct": 0.136271,
+        "tensor_pct": 0.0,
+        "issue_pct": 1.90549,
+        "eligible_warps": 0.018952,
+        "regs": 16.0,
+        "time_share": 0.17823343848580442
+      }
+    ]
+  },
+  {
+    "profile": "msa_ln-L768-C128-carried",
+    "total_us": 32.32,
+    "kernels": [
+      {
+        "name": "_ln_linear_kernel",
+        "us": 18.656,
+        "hbm_pct": 20.058855,
+        "l2_pct": 20.991415,
+        "sm_pct": 17.799132,
+        "tensor_pct": 4.260599,
+        "issue_pct": 27.585271,
+        "eligible_warps": 0.395797,
+        "regs": 140.0,
+        "time_share": 0.5772277227722772
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_vectorized<at::<unnamed>::OpaqueType<2>, unsigned int, 3, 128, 1, 16, 8>(char *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 9.952,
+        "hbm_pct": 38.031096,
+        "l2_pct": 38.235787,
+        "sm_pct": 23.616219,
+        "tensor_pct": 0.0,
+        "issue_pct": 43.309911,
+        "eligible_warps": 1.23268,
+        "regs": 23.0,
+        "time_share": 0.3079207920792079
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_vectorized<at::<unnamed>::OpaqueType<2>, unsigned int, 1, 128, 1, 16, 8>(char *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.712,
+        "hbm_pct": 0.28757,
+        "l2_pct": 9.69367,
+        "sm_pct": 0.132245,
+        "tensor_pct": 0.0,
+        "issue_pct": 1.883358,
+        "eligible_warps": 0.018909,
+        "regs": 16.0,
+        "time_share": 0.11485148514851486
+      }
+    ]
+  },
+  {
+    "profile": "opm-L384-C128-carried",
+    "total_us": 227.008,
+    "kernels": [
+      {
+        "name": "_opm_out_kernel",
+        "us": 227.008,
+        "hbm_pct": 44.338982,
+        "l2_pct": 50.228409,
+        "sm_pct": 26.831868,
+        "tensor_pct": 8.820492,
+        "issue_pct": 27.21432,
+        "eligible_warps": 0.310106,
+        "regs": 255.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "opm-L768-C128-carried",
+    "total_us": 876.448,
+    "kernels": [
+      {
+        "name": "_opm_out_kernel",
+        "us": 876.448,
+        "hbm_pct": 46.272559,
+        "l2_pct": 51.587089,
+        "sm_pct": 27.774419,
+        "tensor_pct": 9.130339,
+        "issue_pct": 27.652506,
+        "eligible_warps": 0.314122,
+        "regs": 255.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "opm_core-L384-C256-carried",
+    "total_us": 3493.184,
+    "kernels": [
+      {
+        "name": "_opm_kernel",
+        "us": 3478.88,
+        "hbm_pct": 0.502833,
+        "l2_pct": 12.69902,
+        "sm_pct": 11.410483,
+        "tensor_pct": 1.419656,
+        "issue_pct": 7.551704,
+        "eligible_warps": 0.09356,
+        "regs": 182.0,
+        "time_share": 0.9959051684652168
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 8.288,
+        "hbm_pct": 0.082286,
+        "l2_pct": 46.630852,
+        "sm_pct": 19.396613,
+        "tensor_pct": 0.0,
+        "issue_pct": 29.781819,
+        "eligible_warps": 0.610559,
+        "regs": 18.0,
+        "time_share": 0.002372620508968322
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::FillFunctor<c10::BFloat16>, std::array<char *, 1>>(int, T2, T3)",
+        "us": 3.008,
+        "hbm_pct": 0.040984,
+        "l2_pct": 25.891629,
+        "sm_pct": 3.821814,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.319311,
+        "eligible_warps": 0.260455,
+        "regs": 16.0,
+        "time_share": 0.000861105512907422
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::FillFunctor<c10::BFloat16>, std::array<char *, 1>>(int, T2, T3)",
+        "us": 3.008,
+        "hbm_pct": 0.0408,
+        "l2_pct": 25.841158,
+        "sm_pct": 3.80013,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.38389,
+        "eligible_warps": 0.262168,
+        "regs": 16.0,
+        "time_share": 0.000861105512907422
+      }
+    ]
+  },
+  {
+    "profile": "opm_core-L768-C256-carried",
+    "total_us": 13962.400000000001,
+    "kernels": [
+      {
+        "name": "_opm_kernel",
+        "us": 13940.576000000001,
+        "hbm_pct": 0.625058,
+        "l2_pct": 13.700876,
+        "sm_pct": 11.461271,
+        "tensor_pct": 1.425975,
+        "issue_pct": 7.552356,
+        "eligible_warps": 0.093608,
+        "regs": 182.0,
+        "time_share": 0.998436944937833
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 14.687999999999999,
+        "hbm_pct": 2.414666,
+        "l2_pct": 57.741136,
+        "sm_pct": 21.631072,
+        "tensor_pct": 0.0,
+        "issue_pct": 30.30888,
+        "eligible_warps": 0.629343,
+        "regs": 18.0,
+        "time_share": 0.0010519681430126624
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::FillFunctor<c10::BFloat16>, std::array<char *, 1>>(int, T2, T3)",
+        "us": 3.68,
+        "hbm_pct": 0.033467,
+        "l2_pct": 31.706492,
+        "sm_pct": 5.330655,
+        "tensor_pct": 0.0,
+        "issue_pct": 19.18647,
+        "eligible_warps": 0.50009,
+        "regs": 16.0,
+        "time_share": 0.0002635650031513207
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::FillFunctor<c10::BFloat16>, std::array<char *, 1>>(int, T2, T3)",
+        "us": 3.456,
+        "hbm_pct": 0.035714,
+        "l2_pct": 33.707642,
+        "sm_pct": 5.705178,
+        "tensor_pct": 0.0,
+        "issue_pct": 19.178125,
+        "eligible_warps": 0.50135,
+        "regs": 16.0,
+        "time_share": 0.0002475219160029794
+      }
+    ]
+  },
+  {
+    "profile": "pwa-L384-C128-carried",
+    "total_us": 429.088,
+    "kernels": [
+      {
+        "name": "void at::<unnamed>::vectorized_layer_norm_kernel<float, float, 0>(int, T2, const T1 *, const T1 *, const T1 *, T2 *, T2 *, T1 *)",
+        "us": 218.496,
+        "hbm_pct": 19.155179,
+        "l2_pct": 22.592561,
+        "sm_pct": 63.428331,
+        "tensor_pct": 0.0,
+        "issue_pct": 64.021291,
+        "eligible_warps": 1.231429,
+        "regs": 39.0,
+        "time_share": 0.5092102319337758
+      },
+      {
+        "name": "void at::<unnamed>::vectorized_layer_norm_kernel<float, float, 0>(int, T2, const T1 *, const T1 *, const T1 *, T2 *, T2 *, T1 *)",
+        "us": 38.56,
+        "hbm_pct": 2.318568,
+        "l2_pct": 7.040449,
+        "sm_pct": 60.475665,
+        "tensor_pct": 0.0,
+        "issue_pct": 67.518768,
+        "eligible_warps": 1.535138,
+        "regs": 39.0,
+        "time_share": 0.08986501603400701
+      },
+      {
+        "name": "_wv_kernel",
+        "us": 38.4,
+        "hbm_pct": 23.707575,
+        "l2_pct": 42.680334,
+        "sm_pct": 19.689277,
+        "tensor_pct": 6.410074,
+        "issue_pct": 20.326192,
+        "eligible_warps": 0.237202,
+        "regs": 255.0,
+        "time_share": 0.08949213215004846
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 33.824,
+        "hbm_pct": 84.920531,
+        "l2_pct": 87.921597,
+        "sm_pct": 6.839641,
+        "tensor_pct": 0.0,
+        "issue_pct": 4.436479,
+        "eligible_warps": 0.059534,
+        "regs": 32.0,
+        "time_share": 0.07882765306883435
+      },
+      {
+        "name": "_vg_kernel",
+        "us": 24.288,
+        "hbm_pct": 11.112894,
+        "l2_pct": 31.635456,
+        "sm_pct": 24.647433,
+        "tensor_pct": 3.335455,
+        "issue_pct": 30.097738,
+        "eligible_warps": 0.407072,
+        "regs": 154.0,
+        "time_share": 0.056603773584905655
+      },
+      {
+        "name": "nvjet_tst_8x384_64x4_1x2_h_bz_TNN",
+        "us": 20.352,
+        "hbm_pct": 71.804353,
+        "l2_pct": 61.043035,
+        "sm_pct": 5.271055,
+        "tensor_pct": 0.758674,
+        "issue_pct": 6.423457,
+        "eligible_warps": 0.071962,
+        "regs": 168.0,
+        "time_share": 0.04743083003952569
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl<at::CUDAFunctor_add<float>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 12.64,
+        "hbm_pct": 7.136022,
+        "l2_pct": 13.004397,
+        "sm_pct": 27.840111,
+        "tensor_pct": 0.0,
+        "issue_pct": 62.563625,
+        "eligible_warps": 2.761958,
+        "regs": 32.0,
+        "time_share": 0.02945782683272429
+      },
+      {
+        "name": "_po_kernel",
+        "us": 10.944,
+        "hbm_pct": 34.668035,
+        "l2_pct": 23.647987,
+        "sm_pct": 7.502799,
+        "tensor_pct": 3.7514,
+        "issue_pct": 10.837495,
+        "eligible_warps": 0.117682,
+        "regs": 106.0,
+        "time_share": 0.025505257662763816
+      },
+      {
+        "name": "void <unnamed>::softmax_warp_forward<float, float, float, 9, 0, 0>(T2 *, const T1 *, int, int, int, const bool *, int, bool)",
+        "us": 8.832,
+        "hbm_pct": 16.043054,
+        "l2_pct": 19.333355,
+        "sm_pct": 32.612148,
+        "tensor_pct": 0.0,
+        "issue_pct": 61.485013,
+        "eligible_warps": 1.326502,
+        "regs": 32.0,
+        "time_share": 0.02058319039451115
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 2, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 8.704,
+        "hbm_pct": 14.461923,
+        "l2_pct": 48.495497,
+        "sm_pct": 18.826105,
+        "tensor_pct": 0.0,
+        "issue_pct": 28.766179,
+        "eligible_warps": 0.658209,
+        "regs": 18.0,
+        "time_share": 0.020284883287344322
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 5.024,
+        "hbm_pct": 28.267463,
+        "l2_pct": 20.447893,
+        "sm_pct": 3.954408,
+        "tensor_pct": 0.0,
+        "issue_pct": 8.675522,
+        "eligible_warps": 0.180695,
+        "regs": 32.0,
+        "time_share": 0.011708553956298008
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::AUnaryFunctor<float, float, float, binary_internal::MulFunctor<float>>, std::array<char *, 2>>(int, T2, T3)",
+        "us": 3.2,
+        "hbm_pct": 5.640777,
+        "l2_pct": 15.745626,
+        "sm_pct": 0.962069,
+        "tensor_pct": 0.0,
+        "issue_pct": 3.066831,
+        "eligible_warps": 0.03099,
+        "regs": 32.0,
+        "time_share": 0.007457677679170706
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::CUDAFunctorOnOther_add<float>, std::array<char *, 2>>(int, T2, T3)",
+        "us": 2.944,
+        "hbm_pct": 0.052214,
+        "l2_pct": 21.068983,
+        "sm_pct": 1.329361,
+        "tensor_pct": 0.0,
+        "issue_pct": 2.902433,
+        "eligible_warps": 0.029309,
+        "regs": 32.0,
+        "time_share": 0.00686106346483705
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 2.88,
+        "hbm_pct": 0.096983,
+        "l2_pct": 12.492769,
+        "sm_pct": 0.007561,
+        "tensor_pct": 0.0,
+        "issue_pct": 2.182314,
+        "eligible_warps": 0.021823,
+        "regs": 32.0,
+        "time_share": 0.006711909911253635
+      }
+    ]
+  },
+  {
+    "profile": "pwa-L768-C128-carried",
+    "total_us": 1398.5919999999999,
+    "kernels": [
+      {
+        "name": "void at::<unnamed>::vectorized_layer_norm_kernel<float, float, 0>(int, T2, const T1 *, const T1 *, const T1 *, T2 *, T2 *, T1 *)",
+        "us": 864.352,
+        "hbm_pct": 20.890325,
+        "l2_pct": 22.837295,
+        "sm_pct": 64.105877,
+        "tensor_pct": 0.0,
+        "issue_pct": 64.280509,
+        "eligible_warps": 1.228014,
+        "regs": 39.0,
+        "time_share": 0.6180158330663983
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 143.68,
+        "hbm_pct": 90.615005,
+        "l2_pct": 83.051777,
+        "sm_pct": 6.346101,
+        "tensor_pct": 0.0,
+        "issue_pct": 4.505587,
+        "eligible_warps": 0.050461,
+        "regs": 32.0,
+        "time_share": 0.10273189035830323
+      },
+      {
+        "name": "_wv_kernel",
+        "us": 95.904,
+        "hbm_pct": 29.247581,
+        "l2_pct": 52.208039,
+        "sm_pct": 25.002062,
+        "tensor_pct": 10.507022,
+        "issue_pct": 22.868762,
+        "eligible_warps": 0.270293,
+        "regs": 255.0,
+        "time_share": 0.0685718208026358
+      },
+      {
+        "name": "void at::<unnamed>::vectorized_layer_norm_kernel<float, float, 0>(int, T2, const T1 *, const T1 *, const T1 *, T2 *, T2 *, T1 *)",
+        "us": 75.488,
+        "hbm_pct": 4.96827,
+        "l2_pct": 6.924481,
+        "sm_pct": 61.67996,
+        "tensor_pct": 0.0,
+        "issue_pct": 68.252234,
+        "eligible_warps": 1.489088,
+        "regs": 39.0,
+        "time_share": 0.0539742827071798
+      },
+      {
+        "name": "nvjet_tst_8x384_64x4_1x2_h_bz_TNN",
+        "us": 61.728,
+        "hbm_pct": 84.514277,
+        "l2_pct": 76.488294,
+        "sm_pct": 6.035077,
+        "tensor_pct": 1.013217,
+        "issue_pct": 6.645181,
+        "eligible_warps": 0.070791,
+        "regs": 168.0,
+        "time_share": 0.044135816592687505
+      },
+      {
+        "name": "_vg_kernel",
+        "us": 47.68,
+        "hbm_pct": 25.230722,
+        "l2_pct": 36.124301,
+        "sm_pct": 25.447635,
+        "tensor_pct": 3.445309,
+        "issue_pct": 27.522388,
+        "eligible_warps": 0.37246,
+        "regs": 154.0,
+        "time_share": 0.03409142909440352
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 2, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 27.488,
+        "hbm_pct": 53.276642,
+        "l2_pct": 63.248358,
+        "sm_pct": 23.321627,
+        "tensor_pct": 0.0,
+        "issue_pct": 25.608889,
+        "eligible_warps": 0.395552,
+        "regs": 18.0,
+        "time_share": 0.019654052075229946
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl<at::CUDAFunctor_add<float>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 26.176,
+        "hbm_pct": 14.851456,
+        "l2_pct": 27.677042,
+        "sm_pct": 52.881267,
+        "tensor_pct": 0.0,
+        "issue_pct": 74.960429,
+        "eligible_warps": 2.573519,
+        "regs": 32.0,
+        "time_share": 0.018715965771289984
+      },
+      {
+        "name": "void <unnamed>::softmax_warp_forward<float, float, float, 10, 0, 0>(T2 *, const T1 *, int, int, int, const bool *, int, bool)",
+        "us": 22.144,
+        "hbm_pct": 36.062766,
+        "l2_pct": 48.333964,
+        "sm_pct": 51.631875,
+        "tensor_pct": 0.0,
+        "issue_pct": 58.679844,
+        "eligible_warps": 1.976484,
+        "regs": 48.0,
+        "time_share": 0.015833066398206197
+      },
+      {
+        "name": "_po_kernel",
+        "us": 14.496,
+        "hbm_pct": 56.51293,
+        "l2_pct": 36.326857,
+        "sm_pct": 11.414571,
+        "tensor_pct": 5.707286,
+        "issue_pct": 11.828655,
+        "eligible_warps": 0.14875,
+        "regs": 106.0,
+        "time_share": 0.010364709650848855
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 9.888,
+        "hbm_pct": 58.463026,
+        "l2_pct": 41.412154,
+        "sm_pct": 6.266057,
+        "tensor_pct": 0.0,
+        "issue_pct": 11.477027,
+        "eligible_warps": 0.258057,
+        "regs": 32.0,
+        "time_share": 0.007069967510181669
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::CUDAFunctorOnOther_add<float>, std::array<char *, 2>>(int, T2, T3)",
+        "us": 3.52,
+        "hbm_pct": 0.068222,
+        "l2_pct": 36.882278,
+        "sm_pct": 3.711031,
+        "tensor_pct": 0.0,
+        "issue_pct": 7.691819,
+        "eligible_warps": 0.097039,
+        "regs": 32.0,
+        "time_share": 0.0025168169130096556
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::AUnaryFunctor<float, float, float, binary_internal::MulFunctor<float>>, std::array<char *, 2>>(int, T2, T3)",
+        "us": 3.328,
+        "hbm_pct": 0.062315,
+        "l2_pct": 27.17861,
+        "sm_pct": 3.34938,
+        "tensor_pct": 0.0,
+        "issue_pct": 8.501437,
+        "eligible_warps": 0.10509,
+        "regs": 32.0,
+        "time_share": 0.002379535990481856
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 2.72,
+        "hbm_pct": 0.100714,
+        "l2_pct": 13.319356,
+        "sm_pct": 0.008072,
+        "tensor_pct": 0.0,
+        "issue_pct": 3.014129,
+        "eligible_warps": 0.030141,
+        "regs": 32.0,
+        "time_share": 0.0019448130691438249
+      }
+    ]
+  },
+  {
+    "profile": "swiglu-L384-C128-carried",
+    "total_us": 7.424,
+    "kernels": [
+      {
+        "name": "_swiglu_kernel",
+        "us": 7.424,
+        "hbm_pct": 44.745309,
+        "l2_pct": 33.923299,
+        "sm_pct": 36.271517,
+        "tensor_pct": 0.0,
+        "issue_pct": 77.00576,
+        "eligible_warps": 4.623553,
+        "regs": 32.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "swiglu-L768-C128-carried",
+    "total_us": 11.904,
+    "kernels": [
+      {
+        "name": "_swiglu_kernel",
+        "us": 11.904,
+        "hbm_pct": 63.283423,
+        "l2_pct": 55.344436,
+        "sm_pct": 45.306011,
+        "tensor_pct": 0.0,
+        "issue_pct": 73.868582,
+        "eligible_warps": 3.11887,
+        "regs": 32.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "template-L384-C128-carried",
+    "total_us": 69.216,
+    "kernels": [
+      {
+        "name": "_embed_kernel",
+        "us": 55.168,
+        "hbm_pct": 49.935865,
+        "l2_pct": 61.086951,
+        "sm_pct": 41.831474,
+        "tensor_pct": 2.245602,
+        "issue_pct": 43.60033,
+        "eligible_warps": 0.858016,
+        "regs": 96.0,
+        "time_share": 0.7970411465557097
+      },
+      {
+        "name": "nvjet_tst_8x64_64x16_4x2_v_bz_TNN",
+        "us": 4.16,
+        "hbm_pct": 0.114917,
+        "l2_pct": 9.988839,
+        "sm_pct": 6.240136,
+        "tensor_pct": 0.075657,
+        "issue_pct": 22.430447,
+        "eligible_warps": 0.287667,
+        "regs": 168.0,
+        "time_share": 0.060101710587147486
+      },
+      {
+        "name": "nvjet_tst_8x64_64x16_4x2_v_bz_TNN",
+        "us": 4.128,
+        "hbm_pct": 0.117188,
+        "l2_pct": 10.12516,
+        "sm_pct": 6.267896,
+        "tensor_pct": 0.075988,
+        "issue_pct": 22.224269,
+        "eligible_warps": 0.285072,
+        "regs": 168.0,
+        "time_share": 0.05963938973647712
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 2.944,
+        "hbm_pct": 0.054962,
+        "l2_pct": 12.453825,
+        "sm_pct": 0.176322,
+        "tensor_pct": 0.0,
+        "issue_pct": 2.093347,
+        "eligible_warps": 0.020933,
+        "regs": 32.0,
+        "time_share": 0.042533518261673606
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 2.816,
+        "hbm_pct": 0.054969,
+        "l2_pct": 13.010441,
+        "sm_pct": 0.185379,
+        "tensor_pct": 0.0,
+        "issue_pct": 1.947377,
+        "eligible_warps": 0.019474,
+        "regs": 32.0,
+        "time_share": 0.04068423485899214
+      }
+    ]
+  },
+  {
+    "profile": "template-L768-C128-carried",
+    "total_us": 219.232,
+    "kernels": [
+      {
+        "name": "_embed_kernel",
+        "us": 204.48,
+        "hbm_pct": 60.992416,
+        "l2_pct": 67.0694,
+        "sm_pct": 45.242679,
+        "tensor_pct": 2.430565,
+        "issue_pct": 45.942001,
+        "eligible_warps": 0.886134,
+        "regs": 96.0,
+        "time_share": 0.9327105532039118
+      },
+      {
+        "name": "nvjet_tst_64x24_64x16_1x4_h_bz_TNT",
+        "us": 4.32,
+        "hbm_pct": 0.852435,
+        "l2_pct": 9.36728,
+        "sm_pct": 3.980127,
+        "tensor_pct": 0.145278,
+        "issue_pct": 21.035261,
+        "eligible_warps": 0.272353,
+        "regs": 168.0,
+        "time_share": 0.01970515253247701
+      },
+      {
+        "name": "nvjet_tst_64x24_64x16_1x4_h_bz_TNT",
+        "us": 4.128,
+        "hbm_pct": 0.889137,
+        "l2_pct": 9.729164,
+        "sm_pct": 4.150728,
+        "tensor_pct": 0.151511,
+        "issue_pct": 21.682529,
+        "eligible_warps": 0.280714,
+        "regs": 168.0,
+        "time_share": 0.01882936797547803
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 3.168,
+        "hbm_pct": 1.932711,
+        "l2_pct": 12.107358,
+        "sm_pct": 0.328334,
+        "tensor_pct": 0.0,
+        "issue_pct": 1.954464,
+        "eligible_warps": 0.019545,
+        "regs": 32.0,
+        "time_share": 0.014450445190483142
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 3.136,
+        "hbm_pct": 1.947249,
+        "l2_pct": 12.292776,
+        "sm_pct": 0.330898,
+        "tensor_pct": 0.0,
+        "issue_pct": 1.597426,
+        "eligible_warps": 0.015974,
+        "regs": 32.0,
+        "time_share": 0.01430448109764998
+      }
+    ]
+  },
+  {
+    "profile": "transition-L384-C128-engine_triton",
+    "total_us": 156.25599999999997,
+    "kernels": [
+      {
+        "name": "_kernel",
+        "us": 132.64,
+        "hbm_pct": 22.702529,
+        "l2_pct": 35.556065,
+        "sm_pct": 49.112778,
+        "tensor_pct": 23.56328,
+        "issue_pct": 51.079022,
+        "eligible_warps": 1.060321,
+        "regs": 128.0,
+        "time_share": 0.8488634036453001
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 23.616,
+        "hbm_pct": 71.128193,
+        "l2_pct": 87.496857,
+        "sm_pct": 43.768171,
+        "tensor_pct": 0.0,
+        "issue_pct": 39.330761,
+        "eligible_warps": 0.719601,
+        "regs": 47.0,
+        "time_share": 0.1511365963547
+      }
+    ]
+  },
+  {
+    "profile": "transition-L384-C128-v2",
+    "total_us": 160.0,
+    "kernels": [
+      {
+        "name": "_pair_transition_kernel",
+        "us": 160.0,
+        "hbm_pct": 11.225846,
+        "l2_pct": 53.850492,
+        "sm_pct": 38.365155,
+        "tensor_pct": 19.182577,
+        "issue_pct": 37.20799,
+        "eligible_warps": 0.522589,
+        "regs": 243.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "transition-L384-C256-engine_triton",
+    "total_us": 560.704,
+    "kernels": [
+      {
+        "name": "_kernel",
+        "us": 512.8,
+        "hbm_pct": 12.614942,
+        "l2_pct": 35.322548,
+        "sm_pct": 46.828557,
+        "tensor_pct": 23.414279,
+        "issue_pct": 30.770878,
+        "eligible_warps": 0.42523,
+        "regs": 210.0,
+        "time_share": 0.9145645474260929
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 47.904,
+        "hbm_pct": 81.789739,
+        "l2_pct": 83.954421,
+        "sm_pct": 38.255287,
+        "tensor_pct": 0.0,
+        "issue_pct": 36.179152,
+        "eligible_warps": 0.574768,
+        "regs": 72.0,
+        "time_share": 0.0854354525739071
+      }
+    ]
+  },
+  {
+    "profile": "transition-L384-C256-esm_t16",
+    "total_us": 395.584,
+    "kernels": [
+      {
+        "name": "ef2_transition",
+        "us": 395.584,
+        "hbm_pct": 11.301655,
+        "l2_pct": 47.146162,
+        "sm_pct": 61.714241,
+        "tensor_pct": 30.857121,
+        "issue_pct": 27.903623,
+        "eligible_warps": 0.362867,
+        "regs": 168.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "transition-L384-C384-engine_triton",
+    "total_us": 1387.712,
+    "kernels": [
+      {
+        "name": "transition_fwd_kernel",
+        "us": 903.648,
+        "hbm_pct": 18.07495,
+        "l2_pct": 74.482417,
+        "sm_pct": 39.987343,
+        "tensor_pct": 19.993672,
+        "issue_pct": 28.407877,
+        "eligible_warps": 0.366921,
+        "regs": 168.0,
+        "time_share": 0.6511783424802842
+      },
+      {
+        "name": "_squeeze_residual_kernel",
+        "us": 407.808,
+        "hbm_pct": 50.182497,
+        "l2_pct": 75.440598,
+        "sm_pct": 45.002654,
+        "tensor_pct": 22.501327,
+        "issue_pct": 20.141129,
+        "eligible_warps": 0.261752,
+        "regs": 115.0,
+        "time_share": 0.29387077433934417
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 76.256,
+        "hbm_pct": 81.192392,
+        "l2_pct": 81.34384,
+        "sm_pct": 49.233382,
+        "tensor_pct": 0.0,
+        "issue_pct": 48.629259,
+        "eligible_warps": 0.764834,
+        "regs": 128.0,
+        "time_share": 0.054950883180371723
+      }
+    ]
+  },
+  {
+    "profile": "transition-L384-C384-pf",
+    "total_us": 5547.7119999999995,
+    "kernels": [
+      {
+        "name": "_fused_transition_kernel",
+        "us": 5547.7119999999995,
+        "hbm_pct": 1.157243,
+        "l2_pct": 30.472138,
+        "sm_pct": 20.188341,
+        "tensor_pct": 6.729447,
+        "issue_pct": 17.178685,
+        "eligible_warps": 0.171787,
+        "regs": 255.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "transition-L384-C512-engine_triton",
+    "total_us": 2195.968,
+    "kernels": [
+      {
+        "name": "transition_fwd_kernel",
+        "us": 1406.56,
+        "hbm_pct": 15.682025,
+        "l2_pct": 85.478149,
+        "sm_pct": 45.216721,
+        "tensor_pct": 22.60836,
+        "issue_pct": 27.045199,
+        "eligible_warps": 0.343203,
+        "regs": 168.0,
+        "time_share": 0.6405193518302635
+      },
+      {
+        "name": "_squeeze_residual_kernel",
+        "us": 691.04,
+        "hbm_pct": 40.029922,
+        "l2_pct": 91.029853,
+        "sm_pct": 47.080693,
+        "tensor_pct": 23.540347,
+        "issue_pct": 18.636838,
+        "eligible_warps": 0.207131,
+        "regs": 220.0,
+        "time_share": 0.3146858242014456
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 98.368,
+        "hbm_pct": 85.55611,
+        "l2_pct": 81.235594,
+        "sm_pct": 37.816051,
+        "tensor_pct": 0.0,
+        "issue_pct": 37.545608,
+        "eligible_warps": 0.527552,
+        "regs": 128.0,
+        "time_share": 0.04479482396829098
+      }
+    ]
+  },
+  {
+    "profile": "transition-L768-C128-engine_triton",
+    "total_us": 570.88,
+    "kernels": [
+      {
+        "name": "_kernel",
+        "us": 471.904,
+        "hbm_pct": 27.872402,
+        "l2_pct": 44.058064,
+        "sm_pct": 53.020772,
+        "tensor_pct": 25.444059,
+        "issue_pct": 53.449966,
+        "eligible_warps": 1.128452,
+        "regs": 128.0,
+        "time_share": 0.8266255605381166
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 98.976,
+        "hbm_pct": 86.207296,
+        "l2_pct": 81.982793,
+        "sm_pct": 41.89643,
+        "tensor_pct": 0.0,
+        "issue_pct": 41.259497,
+        "eligible_warps": 0.699757,
+        "regs": 47.0,
+        "time_share": 0.1733744394618834
+      }
+    ]
+  },
+  {
+    "profile": "transition-L768-C128-v2",
+    "total_us": 602.848,
+    "kernels": [
+      {
+        "name": "_pair_transition_kernel",
+        "us": 602.848,
+        "hbm_pct": 14.19129,
+        "l2_pct": 64.196562,
+        "sm_pct": 39.881122,
+        "tensor_pct": 19.940561,
+        "issue_pct": 38.211019,
+        "eligible_warps": 0.542338,
+        "regs": 243.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "transition-L768-C256-engine_triton",
+    "total_us": 2106.24,
+    "kernels": [
+      {
+        "name": "_kernel",
+        "us": 1908.2559999999999,
+        "hbm_pct": 14.023686,
+        "l2_pct": 43.186557,
+        "sm_pct": 49.716252,
+        "tensor_pct": 24.858126,
+        "issue_pct": 31.757272,
+        "eligible_warps": 0.438835,
+        "regs": 210.0,
+        "time_share": 0.9060012154360377
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 197.98399999999998,
+        "hbm_pct": 88.588952,
+        "l2_pct": 82.153197,
+        "sm_pct": 43.501842,
+        "tensor_pct": 0.0,
+        "issue_pct": 43.062712,
+        "eligible_warps": 0.884509,
+        "regs": 47.0,
+        "time_share": 0.09399878456396232
+      }
+    ]
+  },
+  {
+    "profile": "transition-L768-C256-esm_t16",
+    "total_us": 1469.0240000000001,
+    "kernels": [
+      {
+        "name": "ef2_transition",
+        "us": 1469.0240000000001,
+        "hbm_pct": 12.48914,
+        "l2_pct": 57.020077,
+        "sm_pct": 66.266408,
+        "tensor_pct": 33.133204,
+        "issue_pct": 28.606473,
+        "eligible_warps": 0.371579,
+        "regs": 168.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "transition-L768-C384-engine_triton",
+    "total_us": 5418.848,
+    "kernels": [
+      {
+        "name": "transition_fwd_kernel",
+        "us": 3479.072,
+        "hbm_pct": 19.445135,
+        "l2_pct": 80.71336,
+        "sm_pct": 40.986406,
+        "tensor_pct": 20.493203,
+        "issue_pct": 28.123138,
+        "eligible_warps": 0.362999,
+        "regs": 168.0,
+        "time_share": 0.6420316642946988
+      },
+      {
+        "name": "_squeeze_residual_kernel",
+        "us": 1638.784,
+        "hbm_pct": 49.954649,
+        "l2_pct": 93.262171,
+        "sm_pct": 44.809032,
+        "tensor_pct": 22.404516,
+        "issue_pct": 18.215158,
+        "eligible_warps": 0.202047,
+        "regs": 210.0,
+        "time_share": 0.30242295041307676
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 300.99199999999996,
+        "hbm_pct": 88.253514,
+        "l2_pct": 82.195842,
+        "sm_pct": 49.707263,
+        "tensor_pct": 0.0,
+        "issue_pct": 49.631789,
+        "eligible_warps": 0.778039,
+        "regs": 128.0,
+        "time_share": 0.05554538529222447
+      }
+    ]
+  },
+  {
+    "profile": "transition-L768-C384-pf",
+    "total_us": 22154.688000000002,
+    "kernels": [
+      {
+        "name": "_fused_transition_kernel",
+        "us": 22154.688000000002,
+        "hbm_pct": 1.205709,
+        "l2_pct": 32.357303,
+        "sm_pct": 20.150579,
+        "tensor_pct": 6.71686,
+        "issue_pct": 17.04322,
+        "eligible_warps": 0.170432,
+        "regs": 255.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "transition-L768-C512-engine_triton",
+    "total_us": 8623.264,
+    "kernels": [
+      {
+        "name": "transition_fwd_kernel",
+        "us": 5511.584,
+        "hbm_pct": 16.377697,
+        "l2_pct": 89.594575,
+        "sm_pct": 45.937453,
+        "tensor_pct": 22.968726,
+        "issue_pct": 27.157129,
+        "eligible_warps": 0.343164,
+        "regs": 168.0,
+        "time_share": 0.6391528776110763
+      },
+      {
+        "name": "_squeeze_residual_kernel",
+        "us": 2716.672,
+        "hbm_pct": 40.295903,
+        "l2_pct": 95.224076,
+        "sm_pct": 48.431056,
+        "tensor_pct": 24.215528,
+        "issue_pct": 18.808923,
+        "eligible_warps": 0.208245,
+        "regs": 220.0,
+        "time_share": 0.31503987353280616
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 395.00800000000004,
+        "hbm_pct": 89.959885,
+        "l2_pct": 81.588652,
+        "sm_pct": 37.558193,
+        "tensor_pct": 0.0,
+        "issue_pct": 37.615011,
+        "eligible_warps": 0.52894,
+        "regs": 128.0,
+        "time_share": 0.0458072488561176
+      }
+    ]
+  },
+  {
+    "profile": "triattn-L384-C128-engine_triton",
+    "total_us": 250.592,
+    "kernels": [
+      {
+        "name": "_attn_fwd",
+        "us": 250.592,
+        "hbm_pct": 17.722779,
+        "l2_pct": 53.43875,
+        "sm_pct": 67.022272,
+        "tensor_pct": 6.124879,
+        "issue_pct": 68.468163,
+        "eligible_warps": 1.37969,
+        "regs": 168.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "triattn-L384-C128-triattn_native",
+    "total_us": 168.54399999999998,
+    "kernels": [
+      {
+        "name": "_fwd",
+        "us": 162.176,
+        "hbm_pct": 26.630594,
+        "l2_pct": 33.215832,
+        "sm_pct": 52.985713,
+        "tensor_pct": 12.132475,
+        "issue_pct": 56.160307,
+        "eligible_warps": 0.959122,
+        "regs": 168.0,
+        "time_share": 0.9622175811657491
+      },
+      {
+        "name": "_stage_bias",
+        "us": 6.368,
+        "hbm_pct": 11.121005,
+        "l2_pct": 9.892523,
+        "sm_pct": 2.044663,
+        "tensor_pct": 0.0,
+        "issue_pct": 11.867191,
+        "eligible_warps": 0.118672,
+        "regs": 54.0,
+        "time_share": 0.037782418834251
+      }
+    ]
+  },
+  {
+    "profile": "triattn-L768-C128-engine_triton",
+    "total_us": 1602.7839999999999,
+    "kernels": [
+      {
+        "name": "_attn_fwd",
+        "us": 1602.7839999999999,
+        "hbm_pct": 11.424827,
+        "l2_pct": 48.420279,
+        "sm_pct": 69.655651,
+        "tensor_pct": 7.425663,
+        "issue_pct": 69.850335,
+        "eligible_warps": 1.622196,
+        "regs": 128.0,
+        "time_share": 1.0
+      }
+    ]
+  },
+  {
+    "profile": "triattn-L768-C128-triattn_native",
+    "total_us": 914.88,
+    "kernels": [
+      {
+        "name": "void triattn_m1::triattn_m1_kernel<triattn_m1::Traits<0>>(T1::Params)",
+        "us": 870.88,
+        "hbm_pct": 20.817563,
+        "l2_pct": 56.825374,
+        "sm_pct": 55.582903,
+        "tensor_pct": 15.75804,
+        "issue_pct": 40.149532,
+        "eligible_warps": 0.698439,
+        "regs": 128.0,
+        "time_share": 0.9519062609303952
+      },
+      {
+        "name": "triattn_m1::mask_words_kernel(const bool *, long, long, long, int, int, int, unsigned int *, unsigned int *)",
+        "us": 15.648,
+        "hbm_pct": 0.015172,
+        "l2_pct": 4.791878,
+        "sm_pct": 8.686432,
+        "tensor_pct": 0.0,
+        "issue_pct": 21.172994,
+        "eligible_warps": 0.760653,
+        "regs": 16.0,
+        "time_share": 0.017103882476390345
+      },
+      {
+        "name": "void triattn_m1::stage_bias_m1_kernel<float>(const T1 *, long, long, long, long, int, int, float, const unsigned int *, int, float *, int *)",
+        "us": 13.152,
+        "hbm_pct": 21.551302,
+        "l2_pct": 35.717153,
+        "sm_pct": 40.877065,
+        "tensor_pct": 0.0,
+        "issue_pct": 59.632895,
+        "eligible_warps": 1.904276,
+        "regs": 24.0,
+        "time_share": 0.014375655823714585
+      },
+      {
+        "name": "triattn_m1::uniform_rows_kernel(const __nv_bfloat16 *, long, long, long, long, __nv_bfloat16 *, long, long, long, long, const unsigned char *, int, int, int)",
+        "us": 4.832,
+        "hbm_pct": 0.057574,
+        "l2_pct": 7.763957,
+        "sm_pct": 10.771354,
+        "tensor_pct": 0.0,
+        "issue_pct": 29.742812,
+        "eligible_warps": 1.109156,
+        "regs": 29.0,
+        "time_share": 0.005281566981462049
+      },
+      {
+        "name": "triattn_m1::mask_rows_kernel(const unsigned int *, const unsigned int *, int, int, unsigned char *, int *, int *, int *, int *, int *)",
+        "us": 3.968,
+        "hbm_pct": 0.719354,
+        "l2_pct": 9.681124,
+        "sm_pct": 3.818778,
+        "tensor_pct": 0.0,
+        "issue_pct": 16.691372,
+        "eligible_warps": 0.191147,
+        "regs": 32.0,
+        "time_share": 0.004337180832458902
+      },
+      {
+        "name": "void triattn_m1::triattn_m1_kernel<triattn_m1::Traits<1024>>(T1::Params)",
+        "us": 3.904,
+        "hbm_pct": 0.513967,
+        "l2_pct": 10.791943,
+        "sm_pct": 2.257628,
+        "tensor_pct": 0.0,
+        "issue_pct": 9.007483,
+        "eligible_warps": 0.107346,
+        "regs": 128.0,
+        "time_share": 0.004267226302903113
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::FillFunctor<int>, std::array<char *, 1>>(int, T2, T3)",
+        "us": 2.496,
+        "hbm_pct": 0.049702,
+        "l2_pct": 14.471496,
+        "sm_pct": 0.006776,
+        "tensor_pct": 0.0,
+        "issue_pct": 4.309764,
+        "eligible_warps": 0.043098,
+        "regs": 16.0,
+        "time_share": 0.002728226652675761
+      }
+    ]
+  },
+  {
+    "profile": "triattn-module-L384-C128-block:triattn_native",
+    "total_us": 407.104,
+    "kernels": [
+      {
+        "name": "_fwd",
+        "us": 161.792,
+        "hbm_pct": 26.542083,
+        "l2_pct": 33.032277,
+        "sm_pct": 52.779614,
+        "tensor_pct": 12.085282,
+        "issue_pct": 56.012692,
+        "eligible_warps": 0.954426,
+        "regs": 168.0,
+        "time_share": 0.3974217890268826
+      },
+      {
+        "name": "_triatt_prologue_kernel",
+        "us": 134.464,
+        "hbm_pct": 41.058081,
+        "l2_pct": 38.961992,
+        "sm_pct": 15.449662,
+        "tensor_pct": 7.724831,
+        "issue_pct": 15.11411,
+        "eligible_warps": 0.201439,
+        "regs": 190.0,
+        "time_share": 0.3302939789341299
+      },
+      {
+        "name": "_triatt_epilogue_kernel_v2",
+        "us": 65.344,
+        "hbm_pct": 52.962243,
+        "l2_pct": 64.180542,
+        "sm_pct": 28.446602,
+        "tensor_pct": 3.718805,
+        "issue_pct": 30.218648,
+        "eligible_warps": 0.373861,
+        "regs": 255.0,
+        "time_share": 0.16050935387517684
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::CUDAFunctor_add<c10::BFloat16>, std::array<char *, 3>>(int, T2, T3)",
+        "us": 40.832,
+        "hbm_pct": 84.30015,
+        "l2_pct": 74.020566,
+        "sm_pct": 10.220411,
+        "tensor_pct": 0.0,
+        "issue_pct": 11.114759,
+        "eligible_warps": 0.132991,
+        "regs": 34.0,
+        "time_share": 0.10029869517371483
+      },
+      {
+        "name": "_stage_bias",
+        "us": 4.672,
+        "hbm_pct": 0.042741,
+        "l2_pct": 13.425996,
+        "sm_pct": 2.790771,
+        "tensor_pct": 0.0,
+        "issue_pct": 12.519692,
+        "eligible_warps": 0.125197,
+        "regs": 54.0,
+        "time_share": 0.011476182990095897
+      }
+    ]
+  },
+  {
+    "profile": "triattn-module-L384-C128-engine_triton",
+    "total_us": 496.22400000000005,
+    "kernels": [
+      {
+        "name": "_attn_fwd",
+        "us": 253.632,
+        "hbm_pct": 17.37819,
+        "l2_pct": 66.21521,
+        "sm_pct": 65.853552,
+        "tensor_pct": 6.018073,
+        "issue_pct": 67.05206,
+        "eligible_warps": 1.320149,
+        "regs": 168.0,
+        "time_share": 0.5111240085122848
+      },
+      {
+        "name": "_gate_out_fwd",
+        "us": 42.336,
+        "hbm_pct": 68.962789,
+        "l2_pct": 73.037238,
+        "sm_pct": 36.935175,
+        "tensor_pct": 5.850853,
+        "issue_pct": 38.658823,
+        "eligible_warps": 0.467842,
+        "regs": 254.0,
+        "time_share": 0.08531630876378409
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::CUDAFunctor_add<c10::BFloat16>, std::array<char *, 3>>(int, T2, T3)",
+        "us": 40.576,
+        "hbm_pct": 83.946411,
+        "l2_pct": 74.28749,
+        "sm_pct": 10.281314,
+        "tensor_pct": 0.0,
+        "issue_pct": 11.240445,
+        "eligible_warps": 0.134349,
+        "regs": 34.0,
+        "time_share": 0.08176952344102663
+      },
+      {
+        "name": "nvjet_tst_128x160_64x5_1x2_h_bz_TNT",
+        "us": 27.648,
+        "hbm_pct": 76.860066,
+        "l2_pct": 72.426679,
+        "sm_pct": 17.943869,
+        "tensor_pct": 8.971934,
+        "issue_pct": 9.255529,
+        "eligible_warps": 0.100624,
+        "regs": 168.0,
+        "time_share": 0.05571677307022634
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(T1::Params)",
+        "us": 25.856,
+        "hbm_pct": 46.287123,
+        "l2_pct": 36.854449,
+        "sm_pct": 50.711196,
+        "tensor_pct": 2.411959,
+        "issue_pct": 58.434932,
+        "eligible_warps": 2.091313,
+        "regs": 56.0,
+        "time_share": 0.052105500741600565
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 23.616,
+        "hbm_pct": 70.949314,
+        "l2_pct": 87.059722,
+        "sm_pct": 44.362826,
+        "tensor_pct": 0.0,
+        "issue_pct": 39.979208,
+        "eligible_warps": 0.735464,
+        "regs": 47.0,
+        "time_share": 0.04759141033081833
+      },
+      {
+        "name": "nvjet_tst_128x160_64x5_1x2_h_bz_TNT",
+        "us": 23.584,
+        "hbm_pct": 72.653332,
+        "l2_pct": 85.589016,
+        "sm_pct": 21.198783,
+        "tensor_pct": 10.599392,
+        "issue_pct": 9.356235,
+        "eligible_warps": 0.101696,
+        "regs": 168.0,
+        "time_share": 0.04752692332495002
+      },
+      {
+        "name": "nvjet_tst_128x160_64x5_1x2_h_bz_TNT",
+        "us": 23.328,
+        "hbm_pct": 73.475842,
+        "l2_pct": 86.481526,
+        "sm_pct": 21.440926,
+        "tensor_pct": 10.720463,
+        "issue_pct": 9.213019,
+        "eligible_warps": 0.100056,
+        "regs": 168.0,
+        "time_share": 0.04701102727800348
+      },
+      {
+        "name": "nvjet_tst_128x160_64x5_1x2_h_bz_TNT",
+        "us": 23.072,
+        "hbm_pct": 73.976941,
+        "l2_pct": 87.451732,
+        "sm_pct": 21.699311,
+        "tensor_pct": 10.849656,
+        "issue_pct": 9.354037,
+        "eligible_warps": 0.101642,
+        "regs": 168.0,
+        "time_share": 0.04649513123105693
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::<unnamed>::masked_fill_kernel(at::TensorIterator &, const c10::Scalar &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16, bool) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.832,
+        "hbm_pct": 0.162462,
+        "l2_pct": 17.494949,
+        "sm_pct": 20.073751,
+        "tensor_pct": 0.0,
+        "issue_pct": 42.893738,
+        "eligible_warps": 1.095652,
+        "regs": 18.0,
+        "time_share": 0.009737537886115947
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.768,
+        "hbm_pct": 0.146028,
+        "l2_pct": 20.752991,
+        "sm_pct": 16.662317,
+        "tensor_pct": 0.0,
+        "issue_pct": 35.461874,
+        "eligible_warps": 0.787222,
+        "regs": 18.0,
+        "time_share": 0.00960856387437931
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::bitwise_not_kernel_cuda(at::TensorIteratorBase &)::[lambda(bool) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 2.976,
+        "hbm_pct": 0.063184,
+        "l2_pct": 12.077398,
+        "sm_pct": 0.019772,
+        "tensor_pct": 0.0,
+        "issue_pct": 10.070023,
+        "eligible_warps": 0.1007,
+        "regs": 26.0,
+        "time_share": 0.00599729154575353
+      }
+    ]
+  },
+  {
+    "profile": "triattn-module-L768-C128-block:triattn_native",
+    "total_us": 1774.048,
+    "kernels": [
+      {
+        "name": "void triattn_m1::triattn_m1_kernel<triattn_m1::Traits<0>>(T1::Params)",
+        "us": 868.48,
+        "hbm_pct": 21.593257,
+        "l2_pct": 56.962946,
+        "sm_pct": 55.438973,
+        "tensor_pct": 15.717235,
+        "issue_pct": 40.050826,
+        "eligible_warps": 0.696817,
+        "regs": 128.0,
+        "time_share": 0.4895470697523404
+      },
+      {
+        "name": "_triatt_prologue_kernel",
+        "us": 483.136,
+        "hbm_pct": 46.952819,
+        "l2_pct": 44.722214,
+        "sm_pct": 17.188272,
+        "tensor_pct": 8.594136,
+        "issue_pct": 15.07114,
+        "eligible_warps": 0.201393,
+        "regs": 190.0,
+        "time_share": 0.2723353595844081
+      },
+      {
+        "name": "_triatt_epilogue_kernel_v2",
+        "us": 228.48,
+        "hbm_pct": 68.353551,
+        "l2_pct": 73.396506,
+        "sm_pct": 33.589217,
+        "tensor_pct": 4.392348,
+        "issue_pct": 34.317794,
+        "eligible_warps": 0.426722,
+        "regs": 255.0,
+        "time_share": 0.1287902018434676
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::CUDAFunctor_add<c10::BFloat16>, std::array<char *, 3>>(int, T2, T3)",
+        "us": 149.6,
+        "hbm_pct": 90.901315,
+        "l2_pct": 80.609779,
+        "sm_pct": 11.120437,
+        "tensor_pct": 0.0,
+        "issue_pct": 11.424708,
+        "eligible_warps": 0.13062,
+        "regs": 34.0,
+        "time_share": 0.08432691787369902
+      },
+      {
+        "name": "triattn_m1::mask_words_kernel(const bool *, long, long, long, int, int, int, unsigned int *, unsigned int *)",
+        "us": 15.296,
+        "hbm_pct": 0.097937,
+        "l2_pct": 4.300562,
+        "sm_pct": 8.875905,
+        "tensor_pct": 0.0,
+        "issue_pct": 40.672684,
+        "eligible_warps": 1.673945,
+        "regs": 16.0,
+        "time_share": 0.00862208914302206
+      },
+      {
+        "name": "void triattn_m1::stage_bias_m1_kernel<float>(const T1 *, long, long, long, long, int, int, float, const unsigned int *, int, float *, int *)",
+        "us": 14.784,
+        "hbm_pct": 40.130381,
+        "l2_pct": 31.603764,
+        "sm_pct": 36.139469,
+        "tensor_pct": 0.0,
+        "issue_pct": 58.619318,
+        "eligible_warps": 1.870438,
+        "regs": 24.0,
+        "time_share": 0.008333483648694963
+      },
+      {
+        "name": "triattn_m1::uniform_rows_kernel(const __nv_bfloat16 *, long, long, long, long, __nv_bfloat16 *, long, long, long, long, const unsigned char *, int, int, int)",
+        "us": 4.512,
+        "hbm_pct": 0.061141,
+        "l2_pct": 7.943564,
+        "sm_pct": 11.397313,
+        "tensor_pct": 0.0,
+        "issue_pct": 33.049927,
+        "eligible_warps": 1.279894,
+        "regs": 29.0,
+        "time_share": 0.002543335918757553
+      },
+      {
+        "name": "void triattn_m1::triattn_m1_kernel<triattn_m1::Traits<1024>>(T1::Params)",
+        "us": 3.872,
+        "hbm_pct": 0.732703,
+        "l2_pct": 10.958589,
+        "sm_pct": 2.294248,
+        "tensor_pct": 0.0,
+        "issue_pct": 8.776635,
+        "eligible_warps": 0.10479,
+        "regs": 128.0,
+        "time_share": 0.0021825790508486803
+      },
+      {
+        "name": "triattn_m1::mask_rows_kernel(const unsigned int *, const unsigned int *, int, int, unsigned char *, int *, int *, int *, int *, int *)",
+        "us": 3.424,
+        "hbm_pct": 0.197274,
+        "l2_pct": 11.262535,
+        "sm_pct": 4.427203,
+        "tensor_pct": 0.0,
+        "issue_pct": 19.048611,
+        "eligible_warps": 0.218485,
+        "regs": 32.0,
+        "time_share": 0.0019300492433124694
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::FillFunctor<int>, std::array<char *, 1>>(int, T2, T3)",
+        "us": 2.464,
+        "hbm_pct": 0.053125,
+        "l2_pct": 14.548603,
+        "sm_pct": 0.006861,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.043437,
+        "eligible_warps": 0.060434,
+        "regs": 16.0,
+        "time_share": 0.0013889139414491602
+      }
+    ]
+  },
+  {
+    "profile": "triattn-module-L768-C128-engine_triton",
+    "total_us": 2584.096,
+    "kernels": [
+      {
+        "name": "_attn_fwd",
+        "us": 1631.808,
+        "hbm_pct": 11.585566,
+        "l2_pct": 48.658142,
+        "sm_pct": 68.779816,
+        "tensor_pct": 7.332294,
+        "issue_pct": 69.069643,
+        "eligible_warps": 1.584118,
+        "regs": 128.0,
+        "time_share": 0.6314811833616089
+      },
+      {
+        "name": "_gate_out_fwd",
+        "us": 155.488,
+        "hbm_pct": 87.545191,
+        "l2_pct": 77.872395,
+        "sm_pct": 41.137256,
+        "tensor_pct": 6.518232,
+        "issue_pct": 43.228059,
+        "eligible_warps": 0.520873,
+        "regs": 254.0,
+        "time_share": 0.06017113915272498
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<8, at::CUDAFunctor_add<c10::BFloat16>, std::array<char *, 3>>(int, T2, T3)",
+        "us": 148.288,
+        "hbm_pct": 91.621675,
+        "l2_pct": 81.050778,
+        "sm_pct": 11.176145,
+        "tensor_pct": 0.0,
+        "issue_pct": 11.399307,
+        "eligible_warps": 0.130334,
+        "regs": 34.0,
+        "time_share": 0.05738486495857739
+      },
+      {
+        "name": "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN",
+        "us": 109.72800000000001,
+        "hbm_pct": 81.78614,
+        "l2_pct": 72.493677,
+        "sm_pct": 18.354218,
+        "tensor_pct": 9.177109,
+        "issue_pct": 7.497987,
+        "eligible_warps": 0.081391,
+        "regs": 168.0,
+        "time_share": 0.04246281871880921
+      },
+      {
+        "name": "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN",
+        "us": 109.568,
+        "hbm_pct": 81.883743,
+        "l2_pct": 72.317422,
+        "sm_pct": 18.428427,
+        "tensor_pct": 9.214213,
+        "issue_pct": 7.585363,
+        "eligible_warps": 0.082428,
+        "regs": 168.0,
+        "time_share": 0.04240090151449482
+      },
+      {
+        "name": "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN",
+        "us": 108.736,
+        "hbm_pct": 82.457164,
+        "l2_pct": 72.869575,
+        "sm_pct": 18.525686,
+        "tensor_pct": 9.262843,
+        "issue_pct": 7.642994,
+        "eligible_warps": 0.082995,
+        "regs": 168.0,
+        "time_share": 0.04207893205205999
+      },
+      {
+        "name": "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN",
+        "us": 108.44800000000001,
+        "hbm_pct": 82.673766,
+        "l2_pct": 73.272964,
+        "sm_pct": 18.435882,
+        "tensor_pct": 9.217941,
+        "issue_pct": 7.516013,
+        "eligible_warps": 0.081589,
+        "regs": 168.0,
+        "time_share": 0.041967481084294087
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 100.448,
+        "hbm_pct": 87.345602,
+        "l2_pct": 81.275059,
+        "sm_pct": 41.982075,
+        "tensor_pct": 0.0,
+        "issue_pct": 41.709906,
+        "eligible_warps": 0.71936,
+        "regs": 47.0,
+        "time_share": 0.03887162086857454
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(T1::Params)",
+        "us": 91.328,
+        "hbm_pct": 57.831993,
+        "l2_pct": 54.240181,
+        "sm_pct": 57.781479,
+        "tensor_pct": 2.75684,
+        "issue_pct": 60.700082,
+        "eligible_warps": 2.147742,
+        "regs": 56.0,
+        "time_share": 0.03534234022265427
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 8.831999999999999,
+        "hbm_pct": 27.977962,
+        "l2_pct": 27.520886,
+        "sm_pct": 34.779072,
+        "tensor_pct": 0.0,
+        "issue_pct": 63.968158,
+        "eligible_warps": 2.40736,
+        "regs": 18.0,
+        "time_share": 0.0034178296781543715
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::<unnamed>::masked_fill_kernel(at::TensorIterator &, const c10::Scalar &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16, bool) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 8.288,
+        "hbm_pct": 0.104552,
+        "l2_pct": 28.337014,
+        "sm_pct": 45.920184,
+        "tensor_pct": 0.0,
+        "issue_pct": 68.141949,
+        "eligible_warps": 3.246894,
+        "regs": 18.0,
+        "time_share": 0.0032073111834854434
+      },
+      {
+        "name": "void at::vectorized_elementwise_kernel<4, at::bitwise_not_kernel_cuda(at::TensorIteratorBase &)::[lambda(bool) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+        "us": 3.136,
+        "hbm_pct": 0.061637,
+        "l2_pct": 11.325686,
+        "sm_pct": 0.022616,
+        "tensor_pct": 0.0,
+        "issue_pct": 9.39184,
+        "eligible_warps": 0.093918,
+        "regs": 26.0,
+        "time_share": 0.0012135772045620598
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L384-C128-engine_triton",
+    "total_us": 279.936,
+    "kernels": [
+      {
+        "name": "_back_kernel",
+        "us": 102.432,
+        "hbm_pct": 41.896107,
+        "l2_pct": 45.295456,
+        "sm_pct": 33.105869,
+        "tensor_pct": 4.898214,
+        "issue_pct": 34.406009,
+        "eligible_warps": 0.483649,
+        "regs": 160.0,
+        "time_share": 0.3659122085048011
+      },
+      {
+        "name": "_bidir_front_kernel",
+        "us": 70.592,
+        "hbm_pct": 39.686174,
+        "l2_pct": 59.146691,
+        "sm_pct": 41.072524,
+        "tensor_pct": 14.420286,
+        "issue_pct": 43.224996,
+        "eligible_warps": 0.746787,
+        "regs": 128.0,
+        "time_share": 0.2521719250114312
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 40.32,
+        "hbm_pct": 75.147839,
+        "l2_pct": 79.748975,
+        "sm_pct": 37.214639,
+        "tensor_pct": 18.60732,
+        "issue_pct": 8.586374,
+        "eligible_warps": 0.096554,
+        "regs": 168.0,
+        "time_share": 0.1440329218106996
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 23.52,
+        "hbm_pct": 72.899419,
+        "l2_pct": 87.346003,
+        "sm_pct": 44.433729,
+        "tensor_pct": 0.0,
+        "issue_pct": 42.374046,
+        "eligible_warps": 0.771967,
+        "regs": 47.0,
+        "time_share": 0.08401920438957476
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.64,
+        "hbm_pct": 0.232527,
+        "l2_pct": 9.172881,
+        "sm_pct": 5.201922,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.596157,
+        "eligible_warps": 0.161239,
+        "regs": 32.0,
+        "time_share": 0.016575217192501143
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.32,
+        "hbm_pct": 0.181727,
+        "l2_pct": 9.112316,
+        "sm_pct": 5.947194,
+        "tensor_pct": 0.0,
+        "issue_pct": 16.478658,
+        "eligible_warps": 0.201209,
+        "regs": 18.0,
+        "time_share": 0.015432098765432101
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.968,
+        "hbm_pct": 0.172748,
+        "l2_pct": 9.170159,
+        "sm_pct": 0.556543,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.52037,
+        "eligible_warps": 0.065204,
+        "regs": 18.0,
+        "time_share": 0.014174668495656151
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.936,
+        "hbm_pct": 0.175252,
+        "l2_pct": 9.139498,
+        "sm_pct": 0.558609,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.518542,
+        "eligible_warps": 0.065185,
+        "regs": 18.0,
+        "time_share": 0.014060356652949246
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.84,
+        "hbm_pct": 0.308494,
+        "l2_pct": 9.630385,
+        "sm_pct": 0.572085,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.416871,
+        "eligible_warps": 0.064169,
+        "regs": 18.0,
+        "time_share": 0.013717421124828533
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.808,
+        "hbm_pct": 0.178974,
+        "l2_pct": 9.708391,
+        "sm_pct": 0.577023,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.36485,
+        "eligible_warps": 0.063649,
+        "regs": 18.0,
+        "time_share": 0.013603109282121629
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::<unnamed>::OpaqueType<2>, unsigned int, 3, 128, 1, 8>(T1 *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.808,
+        "hbm_pct": 0.073052,
+        "l2_pct": 13.019228,
+        "sm_pct": 1.260838,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.862835,
+        "eligible_warps": 0.068628,
+        "regs": 32.0,
+        "time_share": 0.013603109282121629
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.744,
+        "hbm_pct": 0.185521,
+        "l2_pct": 9.896724,
+        "sm_pct": 0.588783,
+        "tensor_pct": 0.0,
+        "issue_pct": 5.989438,
+        "eligible_warps": 0.059894,
+        "regs": 18.0,
+        "time_share": 0.01337448559670782
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::<unnamed>::OpaqueType<2>, unsigned int, 3, 128, 1, 8>(T1 *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.744,
+        "hbm_pct": 0.074062,
+        "l2_pct": 13.426666,
+        "sm_pct": 1.28287,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.92689,
+        "eligible_warps": 0.069269,
+        "regs": 32.0,
+        "time_share": 0.01337448559670782
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.744,
+        "hbm_pct": 0.183218,
+        "l2_pct": 9.706602,
+        "sm_pct": 0.587422,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.538446,
+        "eligible_warps": 0.065384,
+        "regs": 18.0,
+        "time_share": 0.01337448559670782
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_vectorized<at::<unnamed>::OpaqueType<2>, unsigned int, 2, 128, 1, 16, 8>(char *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.52,
+        "hbm_pct": 0.028609,
+        "l2_pct": 11.686952,
+        "sm_pct": 0.844201,
+        "tensor_pct": 0.0,
+        "issue_pct": 3.023384,
+        "eligible_warps": 0.030234,
+        "regs": 18.0,
+        "time_share": 0.012574302697759488
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L384-C128-native_rebuilt",
+    "total_us": 168.95999999999998,
+    "kernels": [
+      {
+        "name": "tmn_k3_z128_h128_b_t2x64_s8a2_l1",
+        "us": 59.232,
+        "hbm_pct": 50.367632,
+        "l2_pct": 55.342122,
+        "sm_pct": 39.180711,
+        "tensor_pct": 8.377719,
+        "issue_pct": 41.711424,
+        "eligible_warps": 0.639037,
+        "regs": 168.0,
+        "time_share": 0.35056818181818183
+      },
+      {
+        "name": "tmn_k1_z128_h128_b_t6x32_s8k2_m1_l2_v0",
+        "us": 56.672,
+        "hbm_pct": 49.411108,
+        "l2_pct": 54.840611,
+        "sm_pct": 48.079781,
+        "tensor_pct": 17.603098,
+        "issue_pct": 52.6235,
+        "eligible_warps": 0.954728,
+        "regs": 128.0,
+        "time_share": 0.3354166666666667
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 39.744,
+        "hbm_pct": 76.254114,
+        "l2_pct": 81.558156,
+        "sm_pct": 37.827271,
+        "tensor_pct": 18.913636,
+        "issue_pct": 8.475929,
+        "eligible_warps": 0.095113,
+        "regs": 168.0,
+        "time_share": 0.23522727272727276
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.672,
+        "hbm_pct": 0.227184,
+        "l2_pct": 9.013274,
+        "sm_pct": 5.133032,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.551737,
+        "eligible_warps": 0.160646,
+        "regs": 32.0,
+        "time_share": 0.027651515151515153
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.48,
+        "hbm_pct": 0.21457,
+        "l2_pct": 11.002404,
+        "sm_pct": 5.220628,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.283951,
+        "eligible_warps": 0.161407,
+        "regs": 32.0,
+        "time_share": 0.02651515151515152
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.16,
+        "hbm_pct": 0.189225,
+        "l2_pct": 9.354718,
+        "sm_pct": 6.162567,
+        "tensor_pct": 0.0,
+        "issue_pct": 16.53166,
+        "eligible_warps": 0.201631,
+        "regs": 18.0,
+        "time_share": 0.024621212121212124
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L384-C256-native_rebuilt",
+    "total_us": 366.432,
+    "kernels": [
+      {
+        "name": "tmn_k1_z256_h256_b_t2x64_s4k4_m1_l2_v0",
+        "us": 148.352,
+        "hbm_pct": 41.426363,
+        "l2_pct": 44.006901,
+        "sm_pct": 57.201236,
+        "tensor_pct": 28.600618,
+        "issue_pct": 38.878377,
+        "eligible_warps": 0.540483,
+        "regs": 168.0,
+        "time_share": 0.4048554711378919
+      },
+      {
+        "name": "tmn_k3_z256_h256_b_t2x64_s4a1_l1",
+        "us": 126.144,
+        "hbm_pct": 49.71529,
+        "l2_pct": 52.553602,
+        "sm_pct": 42.469892,
+        "tensor_pct": 16.315762,
+        "issue_pct": 45.962036,
+        "eligible_warps": 0.714508,
+        "regs": 168.0,
+        "time_share": 0.3442494105318313
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 77.856,
+        "hbm_pct": 82.547286,
+        "l2_pct": 83.789139,
+        "sm_pct": 39.148494,
+        "tensor_pct": 19.574247,
+        "issue_pct": 8.786367,
+        "eligible_warps": 0.09742,
+        "regs": 168.0,
+        "time_share": 0.21247052659156404
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 5.376,
+        "hbm_pct": 1.82864,
+        "l2_pct": 9.168223,
+        "sm_pct": 4.325081,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.253463,
+        "eligible_warps": 0.161089,
+        "regs": 32.0,
+        "time_share": 0.014671207754781241
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.576,
+        "hbm_pct": 0.234734,
+        "l2_pct": 9.422853,
+        "sm_pct": 5.249453,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.502066,
+        "eligible_warps": 0.160233,
+        "regs": 32.0,
+        "time_share": 0.01248799231508165
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.128,
+        "hbm_pct": 0.189732,
+        "l2_pct": 9.591036,
+        "sm_pct": 6.165616,
+        "tensor_pct": 0.0,
+        "issue_pct": 16.443282,
+        "eligible_warps": 0.200667,
+        "regs": 18.0,
+        "time_share": 0.011265391668849881
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L384-C64-native_rebuilt",
+    "total_us": 99.744,
+    "kernels": [
+      {
+        "name": "tmn_k3_z64_h64_b_t2x64_s4a2_l1",
+        "us": 32.512,
+        "hbm_pct": 36.602974,
+        "l2_pct": 52.091919,
+        "sm_pct": 34.112846,
+        "tensor_pct": 3.849892,
+        "issue_pct": 35.599693,
+        "eligible_warps": 0.550872,
+        "regs": 168.0,
+        "time_share": 0.3259544433750401
+      },
+      {
+        "name": "tmn_k1_z64_h64_b_t6x32_s4k1_m1_l2_v0",
+        "us": 31.904,
+        "hbm_pct": 35.043375,
+        "l2_pct": 51.433648,
+        "sm_pct": 46.687557,
+        "tensor_pct": 7.890172,
+        "issue_pct": 52.048974,
+        "eligible_warps": 0.950169,
+        "regs": 128.0,
+        "time_share": 0.3198588386268848
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 22.016,
+        "hbm_pct": 54.945193,
+        "l2_pct": 73.670103,
+        "sm_pct": 33.783688,
+        "tensor_pct": 16.891844,
+        "issue_pct": 8.612873,
+        "eligible_warps": 0.098538,
+        "regs": 168.0,
+        "time_share": 0.22072505614372792
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.704,
+        "hbm_pct": 0.205721,
+        "l2_pct": 10.379644,
+        "sm_pct": 4.946995,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.270668,
+        "eligible_warps": 0.161277,
+        "regs": 32.0,
+        "time_share": 0.04716073147256978
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.608,
+        "hbm_pct": 0.233535,
+        "l2_pct": 9.271787,
+        "sm_pct": 5.226633,
+        "tensor_pct": 0.0,
+        "issue_pct": 14.492145,
+        "eligible_warps": 0.160233,
+        "regs": 32.0,
+        "time_share": 0.04619826756496631
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.0,
+        "hbm_pct": 0.195372,
+        "l2_pct": 9.924734,
+        "sm_pct": 6.345988,
+        "tensor_pct": 0.0,
+        "issue_pct": 16.384014,
+        "eligible_warps": 0.199877,
+        "regs": 18.0,
+        "time_share": 0.04010266281681104
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L768-C128-engine_triton",
+    "total_us": 960.9599999999999,
+    "kernels": [
+      {
+        "name": "_back_kernel",
+        "us": 378.048,
+        "hbm_pct": 48.123301,
+        "l2_pct": 50.231671,
+        "sm_pct": 35.912068,
+        "tensor_pct": 5.255395,
+        "issue_pct": 37.431464,
+        "eligible_warps": 0.47243,
+        "regs": 255.0,
+        "time_share": 0.39340659340659345
+      },
+      {
+        "name": "_bidir_front_kernel",
+        "us": 259.104,
+        "hbm_pct": 50.047898,
+        "l2_pct": 68.797333,
+        "sm_pct": 45.609813,
+        "tensor_pct": 16.019905,
+        "issue_pct": 46.119673,
+        "eligible_warps": 0.840517,
+        "regs": 128.0,
+        "time_share": 0.2696303696303696
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 180.992,
+        "hbm_pct": 73.654233,
+        "l2_pct": 91.229361,
+        "sm_pct": 73.454924,
+        "tensor_pct": 36.727462,
+        "issue_pct": 13.195537,
+        "eligible_warps": 0.143797,
+        "regs": 168.0,
+        "time_share": 0.18834498834498836
+      },
+      {
+        "name": "layer_norm_fwd_fused",
+        "us": 99.008,
+        "hbm_pct": 86.136883,
+        "l2_pct": 82.259716,
+        "sm_pct": 42.27679,
+        "tensor_pct": 0.0,
+        "issue_pct": 41.269742,
+        "eligible_warps": 0.706977,
+        "regs": 47.0,
+        "time_share": 0.10303030303030303
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.928,
+        "hbm_pct": 0.216862,
+        "l2_pct": 12.65057,
+        "sm_pct": 19.323554,
+        "tensor_pct": 0.0,
+        "issue_pct": 49.553519,
+        "eligible_warps": 1.026245,
+        "regs": 32.0,
+        "time_share": 0.005128205128205128
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.768,
+        "hbm_pct": 0.166645,
+        "l2_pct": 10.56917,
+        "sm_pct": 21.41912,
+        "tensor_pct": 0.0,
+        "issue_pct": 48.736305,
+        "eligible_warps": 1.563014,
+        "regs": 18.0,
+        "time_share": 0.004961704961704962
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.936,
+        "hbm_pct": 0.174592,
+        "l2_pct": 9.377932,
+        "sm_pct": 0.558473,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.356593,
+        "eligible_warps": 0.063566,
+        "regs": 18.0,
+        "time_share": 0.004095904095904096
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.936,
+        "hbm_pct": 0.177734,
+        "l2_pct": 9.367217,
+        "sm_pct": 0.553298,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.370884,
+        "eligible_warps": 0.063709,
+        "regs": 18.0,
+        "time_share": 0.004095904095904096
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.84,
+        "hbm_pct": 0.178285,
+        "l2_pct": 9.546031,
+        "sm_pct": 0.567446,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.509082,
+        "eligible_warps": 0.065091,
+        "regs": 18.0,
+        "time_share": 0.003996003996003996
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.808,
+        "hbm_pct": 0.179609,
+        "l2_pct": 9.527503,
+        "sm_pct": 0.570912,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.468335,
+        "eligible_warps": 0.064683,
+        "regs": 18.0,
+        "time_share": 0.003962703962703963
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.808,
+        "hbm_pct": 0.178859,
+        "l2_pct": 9.295001,
+        "sm_pct": 0.571414,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.514107,
+        "eligible_warps": 0.065141,
+        "regs": 18.0,
+        "time_share": 0.003962703962703963
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::<unnamed>::OpaqueType<2>, unsigned int, 3, 128, 1, 8>(T1 *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.776,
+        "hbm_pct": 0.071464,
+        "l2_pct": 13.561719,
+        "sm_pct": 1.256665,
+        "tensor_pct": 0.0,
+        "issue_pct": 5.953838,
+        "eligible_warps": 0.059538,
+        "regs": 32.0,
+        "time_share": 0.003929403929403929
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 3.776,
+        "hbm_pct": 0.180683,
+        "l2_pct": 9.574141,
+        "sm_pct": 0.581594,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.506405,
+        "eligible_warps": 0.065064,
+        "regs": 18.0,
+        "time_share": 0.003929403929403929
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::<unnamed>::OpaqueType<2>, unsigned int, 3, 128, 1, 8>(T1 *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.712,
+        "hbm_pct": 0.075,
+        "l2_pct": 14.068725,
+        "sm_pct": 1.282523,
+        "tensor_pct": 0.0,
+        "issue_pct": 6.790414,
+        "eligible_warps": 0.067904,
+        "regs": 32.0,
+        "time_share": 0.0038628038628038632
+      },
+      {
+        "name": "void at::<unnamed>::CatArrayBatchedCopy_vectorized<at::<unnamed>::OpaqueType<2>, unsigned int, 2, 128, 1, 16, 8>(char *, at::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::<unnamed>::TensorSizeStride<T2, 4>, int, T2)",
+        "us": 3.52,
+        "hbm_pct": 0.030777,
+        "l2_pct": 11.168892,
+        "sm_pct": 0.840329,
+        "tensor_pct": 0.0,
+        "issue_pct": 3.189606,
+        "eligible_warps": 0.031896,
+        "regs": 18.0,
+        "time_share": 0.0036630036630036634
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L768-C128-native_rebuilt",
+    "total_us": 618.432,
+    "kernels": [
+      {
+        "name": "tmn_k3_z128_h128_b_t2x64_s8a2_l1",
+        "us": 211.776,
+        "hbm_pct": 63.959648,
+        "l2_pct": 62.425455,
+        "sm_pct": 44.233615,
+        "tensor_pct": 9.530407,
+        "issue_pct": 45.893554,
+        "eligible_warps": 0.708497,
+        "regs": 168.0,
+        "time_share": 0.34244023595156786
+      },
+      {
+        "name": "tmn_k1_z128_h128_b_t6x32_s8k2_m1_l2_v0",
+        "us": 209.28,
+        "hbm_pct": 64.077099,
+        "l2_pct": 59.593048,
+        "sm_pct": 53.677644,
+        "tensor_pct": 19.777694,
+        "issue_pct": 57.040042,
+        "eligible_warps": 1.057702,
+        "regs": 128.0,
+        "time_share": 0.3384042222912139
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 182.4,
+        "hbm_pct": 75.168842,
+        "l2_pct": 91.121721,
+        "sm_pct": 72.181022,
+        "tensor_pct": 36.090511,
+        "issue_pct": 13.175886,
+        "eligible_warps": 0.143536,
+        "regs": 168.0,
+        "time_share": 0.29493945979509467
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 5.408,
+        "hbm_pct": 6.724432,
+        "l2_pct": 16.659749,
+        "sm_pct": 17.08024,
+        "tensor_pct": 0.0,
+        "issue_pct": 47.940101,
+        "eligible_warps": 1.133034,
+        "regs": 32.0,
+        "time_share": 0.008744696264100175
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.896,
+        "hbm_pct": 0.218994,
+        "l2_pct": 12.739268,
+        "sm_pct": 19.467454,
+        "tensor_pct": 0.0,
+        "issue_pct": 49.542851,
+        "eligible_warps": 1.024266,
+        "regs": 32.0,
+        "time_share": 0.007916796026078856
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.672,
+        "hbm_pct": 0.166841,
+        "l2_pct": 10.649918,
+        "sm_pct": 21.684316,
+        "tensor_pct": 0.0,
+        "issue_pct": 48.738475,
+        "eligible_warps": 1.559888,
+        "regs": 18.0,
+        "time_share": 0.00755458967194453
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L768-C256-native_rebuilt",
+    "total_us": 1370.688,
+    "kernels": [
+      {
+        "name": "tmn_k1_z256_h256_b_t2x64_s4k4_m1_l2_v0",
+        "us": 557.088,
+        "hbm_pct": 48.822628,
+        "l2_pct": 46.679049,
+        "sm_pct": 59.066708,
+        "tensor_pct": 29.533354,
+        "issue_pct": 39.160143,
+        "eligible_warps": 0.552633,
+        "regs": 168.0,
+        "time_share": 0.406429471914834
+      },
+      {
+        "name": "tmn_k3_z256_h256_b_t2x64_s4a1_l1",
+        "us": 441.376,
+        "hbm_pct": 61.527284,
+        "l2_pct": 60.514675,
+        "sm_pct": 47.513084,
+        "tensor_pct": 18.33395,
+        "issue_pct": 49.291849,
+        "eligible_warps": 0.770665,
+        "regs": 168.0,
+        "time_share": 0.3220105523649437
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 356.48,
+        "hbm_pct": 76.680721,
+        "l2_pct": 92.27459,
+        "sm_pct": 73.107653,
+        "tensor_pct": 36.553827,
+        "issue_pct": 13.141151,
+        "eligible_warps": 0.14285,
+        "regs": 168.0,
+        "time_share": 0.26007377317084557
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 5.696,
+        "hbm_pct": 11.665856,
+        "l2_pct": 15.837111,
+        "sm_pct": 16.29855,
+        "tensor_pct": 0.0,
+        "issue_pct": 47.957836,
+        "eligible_warps": 1.134043,
+        "regs": 32.0,
+        "time_share": 0.004155577345099686
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 5.44,
+        "hbm_pct": 3.452758,
+        "l2_pct": 11.544469,
+        "sm_pct": 17.474973,
+        "tensor_pct": 0.0,
+        "issue_pct": 49.467506,
+        "eligible_warps": 1.01921,
+        "regs": 32.0,
+        "time_share": 0.003968809823971612
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.608,
+        "hbm_pct": 0.170546,
+        "l2_pct": 11.08872,
+        "sm_pct": 22.073091,
+        "tensor_pct": 0.0,
+        "issue_pct": 48.973197,
+        "eligible_warps": 1.568055,
+        "regs": 18.0,
+        "time_share": 0.0033618153803053642
+      }
+    ]
+  },
+  {
+    "profile": "trimul-L768-C64-native_rebuilt",
+    "total_us": 333.76,
+    "kernels": [
+      {
+        "name": "tmn_k3_z64_h64_b_t2x64_s4a1_l1",
+        "us": 116.064,
+        "hbm_pct": 55.333961,
+        "l2_pct": 57.930612,
+        "sm_pct": 36.865352,
+        "tensor_pct": 4.296986,
+        "issue_pct": 38.331029,
+        "eligible_warps": 0.583792,
+        "regs": 168.0,
+        "time_share": 0.34774688398849474
+      },
+      {
+        "name": "tmn_k1_z64_h64_b_t6x32_s4k1_m1_l2_v0",
+        "us": 109.056,
+        "hbm_pct": 57.255225,
+        "l2_pct": 59.944393,
+        "sm_pct": 54.656709,
+        "tensor_pct": 9.364097,
+        "issue_pct": 58.514596,
+        "eligible_warps": 1.093554,
+        "regs": 128.0,
+        "time_share": 0.3267497603068073
+      },
+      {
+        "name": "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        "us": 93.76,
+        "hbm_pct": 69.234304,
+        "l2_pct": 84.171359,
+        "sm_pct": 70.478311,
+        "tensor_pct": 35.239156,
+        "issue_pct": 12.902444,
+        "eligible_warps": 0.141222,
+        "regs": 168.0,
+        "time_share": 0.2809204218600192
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 5.28,
+        "hbm_pct": 6.909738,
+        "l2_pct": 17.296059,
+        "sm_pct": 17.536603,
+        "tensor_pct": 0.0,
+        "issue_pct": 47.968856,
+        "eligible_warps": 1.138462,
+        "regs": 32.0,
+        "time_share": 0.015819750719079578
+      },
+      {
+        "name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "us": 4.928,
+        "hbm_pct": 0.217188,
+        "l2_pct": 12.693404,
+        "sm_pct": 19.326448,
+        "tensor_pct": 0.0,
+        "issue_pct": 49.575918,
+        "eligible_warps": 1.025494,
+        "regs": 32.0,
+        "time_share": 0.01476510067114094
+      },
+      {
+        "name": "void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::BinaryFunctor<bool, bool, bool, at::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+        "us": 4.672,
+        "hbm_pct": 0.167852,
+        "l2_pct": 10.612251,
+        "sm_pct": 21.787256,
+        "tensor_pct": 0.0,
+        "issue_pct": 48.828594,
+        "eligible_warps": 1.564631,
+        "regs": 18.0,
+        "time_share": 0.013998082454458292
+      }
+    ]
+  }
+]

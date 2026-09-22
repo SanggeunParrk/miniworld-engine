@@ -1,0 +1,46 @@
+{
+  "L": 768,
+  "clusters": 15,
+  "relative_l2": [
+    9.49066088651307e-06,
+    0.0004974959883838892,
+    0.0003556797746568918,
+    0.00021380855469033122,
+    0.0002612222160678357,
+    1.6459813195979223e-05,
+    9.382428288517985e-06
+  ],
+  "bit_exact": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "limits": [
+    2e-05,
+    0.0005,
+    0.0005,
+    0.0005,
+    0.0005,
+    5e-06,
+    5e-06
+  ],
+  "valid": false,
+  "source_sha256": {
+    "/home/psk6950/MiniWorld/runs/trimul_b7_joint8_20260922/joint.cu": "ca2916526013163f270ad784f7403cda7eed916dbafd740b4b8e24611c32b31f",
+    "/home/psk6950/MiniWorld/runs/trimul_b7_joint8_20260922/single_wg.inc": "b9084f96fad5f6b53dfaef4495192fd8b59eb1c9635bfcf10c3b4239f8566c80"
+  },
+  "compiler_log": "/home/psk6950/MiniWorld/runs/trimul_b7_joint8_20260922/joint.cu(84): warning #177-D: variable \"j\" was declared but never referenced\n     static_for<2>([&](auto pp){constexpr int pair=decltype(pp)::value;int j=pair*2,c=q*16+2*(lane%4)+8*pair;\n                                                                           ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint8_20260922/joint.cu(111): warning #177-D: variable \"rb\" was declared but never referenced\n   int wi=threadIdx.x/128,tid=threadIdx.x%128,lane=threadIdx.x%32,w=tid/32,ra=w*16+lane/4,rb=ra+8;\n                                                                                          ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint8_20260922/joint.cu(112): warning #177-D: variable \"cid\" was declared but never referenced\n   auto cl=cooperative_groups::this_cluster();int rank=blockIdx.x%8,cid=blockIdx.x/8,clusters=gridDim.x/8;\n                                                                    ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint8_20260922/joint.cu(5): warning #177-D: variable \"SMEM\" was declared but never referenced\n  constexpr int THREADS=384,SMEM=180224;\n                            ^\n\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'b7_joint' for 'sm_90a'\nptxas info    : Function properties for b7_joint\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers, 1024 bytes smem\nptxas info    : Compile time = 351.095 ms\n",
+  "counters": [
+    0,
+    0
+  ],
+  "timed_invalid_diagnostic_only": true,
+  "times": {
+    "baseline": 1963.1199836730957,
+    "joint": 12153.039932250977
+  }
+}

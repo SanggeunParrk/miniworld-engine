@@ -1,0 +1,123 @@
+{
+  "front_ring96_cache3": {
+    "source_sha256": "db5ecf11eb15a0d92f129037b232d2c6de4a6b797048da52b6fb25261a94ff49",
+    "raw_csv": "ring96cache3-raw.csv",
+    "raw_csv_sha256": "126a4eddc655b107b0587384ae461db65b32ef4dcda38e0aa3222d726313b358",
+    "splits": 20,
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 1.444704,
+        "unit": "ms"
+      },
+      "lts__t_sectors.sum": {
+        "value": 328288189.0,
+        "unit": "sector"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 38.431031,
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 89.25747,
+        "unit": "%"
+      },
+      "smsp__inst_executed.sum": {
+        "value": 515838776.0,
+        "unit": "inst"
+      },
+      "dram__bytes_read.sum": {
+        "value": 2.435185,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 212.6272,
+        "unit": "Mbyte"
+      },
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum": {
+        "value": 6896613.0,
+        "unit": ""
+      }
+    }
+  },
+  "front_ring_pair256": {
+    "source_sha256": "ad52566a64b7ec3c0a62435a04329c26f091aeee87e5c2554129b80ab6a09c36",
+    "raw_csv": "pair256-full-L768.raw.csv",
+    "raw_csv_sha256": "8de52806d9d9628c213a7d0bf984888586f91c6858fcdfe22807c0cae03960a0",
+    "splits": 22,
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 1.568448,
+        "unit": "ms"
+      },
+      "lts__t_sectors.sum": {
+        "value": 293861679.0,
+        "unit": "sector"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 35.777952,
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 85.180488,
+        "unit": "%"
+      },
+      "smsp__inst_executed.sum": {
+        "value": 529067906.0,
+        "unit": "inst"
+      },
+      "dram__bytes_read.sum": {
+        "value": 2.436087,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 206.887168,
+        "unit": "Mbyte"
+      },
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum": {
+        "value": 7103168.0,
+        "unit": ""
+      }
+    }
+  },
+  "front_ring_pair256_w128": {
+    "source_sha256": "5619232eeb075a6b5afc0d86932dd468bdf1e9ec8606a34c382c92c8d51bc6ec",
+    "raw_csv": "pair256-w128-full-L768.raw.csv",
+    "raw_csv_sha256": "45c0aa519870ed2209ce94c9038bc13fde778f15fbe6dc7204d91a5b5fff7ce5",
+    "splits": 22,
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 1.43392,
+        "unit": "ms"
+      },
+      "lts__t_sectors.sum": {
+        "value": 294596115.0,
+        "unit": "sector"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 39.152373,
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 89.362046,
+        "unit": "%"
+      },
+      "smsp__inst_executed.sum": {
+        "value": 527735020.0,
+        "unit": "inst"
+      },
+      "dram__bytes_read.sum": {
+        "value": 2.450819,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 366.412032,
+        "unit": "Mbyte"
+      },
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum": {
+        "value": 6881071.0,
+        "unit": ""
+      }
+    }
+  },
+  "interpretation": "Separate NCU profiles with unlocked clocks and warm caches, not a paired speedup measurement. The final 600-sample shared-address comparisons favor the original selected source; no pair256 candidate is promoted or sanitizer-qualified."
+}

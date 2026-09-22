@@ -1,0 +1,203 @@
+{
+  "date": "2026-09-23",
+  "scope": "H100, bidirectional TriMul, BF16, B1, direction hidden=D, total hidden=2D, dropout25%, mask, residual, all 11 gradients",
+  "rows": [
+    {
+      "D": 64,
+      "L": 384,
+      "previous_us": 1627.664029598236,
+      "current_us": 1339.4880294799805,
+      "speedup": 1.2151389141044673,
+      "time_reduction_pct": 17.704882265499688,
+      "triton_us": 809.5040023326874,
+      "cuda_us": 1354.4479608535767,
+      "vs_triton": 0.5976634213562076,
+      "forward_us": 270.7520127296448,
+      "job": "15915"
+    },
+    {
+      "D": 64,
+      "L": 768,
+      "previous_us": 6256.879806518555,
+      "current_us": 4961.168050765991,
+      "speedup": 1.261170704659462,
+      "time_reduction_pct": 20.708592714257712,
+      "triton_us": 3050.096035003662,
+      "cuda_us": 4982.4159145355225,
+      "vs_triton": 0.6121721043210023,
+      "forward_us": 1005.4879784584045,
+      "job": "15916"
+    },
+    {
+      "D": 128,
+      "L": 384,
+      "previous_us": 991.1360144615173,
+      "current_us": 990.3199970722198,
+      "speedup": 1.0008239936502443,
+      "time_reduction_pct": 0.08233152437113755,
+      "triton_us": 1650.7200002670288,
+      "cuda_us": 988.2559776306152,
+      "vs_triton": 1.67033646912483,
+      "forward_us": 292.89600253105164,
+      "job": "15917"
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "previous_us": 4794.512033462524,
+      "current_us": 3935.296058654785,
+      "speedup": 1.2183357902433007,
+      "time_reduction_pct": 17.9208221568948,
+      "triton_us": 6528.319835662842,
+      "cuda_us": 4030.57599067688,
+      "vs_triton": 1.619698983659777,
+      "forward_us": 1164.3679738044739,
+      "job": "15918"
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "previous_us": 6672.0640659332275,
+      "current_us": 5428.431987762451,
+      "speedup": 1.2290960043294914,
+      "time_reduction_pct": 18.639390537639088,
+      "triton_us": 3450.9119987487793,
+      "cuda_us": 5434.416055679321,
+      "vs_triton": 0.6350106365415931,
+      "forward_us": 1146.5280055999756,
+      "job": "15919"
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "previous_us": 27217.98324584961,
+      "current_us": 22053.871154785156,
+      "speedup": 1.234158985278372,
+      "time_reduction_pct": 18.97316213482464,
+      "triton_us": 17492.33627319336,
+      "cuda_us": 22115.82374572754,
+      "vs_triton": 0.7909421088858437,
+      "forward_us": 4623.136043548584,
+      "job": "15920"
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "previous_us": 11762.048244476318,
+      "current_us": 9596.048355102539,
+      "speedup": 1.2257179006629375,
+      "time_reduction_pct": 18.415159029729146,
+      "triton_us": 6184.191942214966,
+      "cuda_us": 9697.344303131104,
+      "vs_triton": 0.6377201581074313,
+      "forward_us": 2027.2799730300903,
+      "job": "15945"
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "previous_us": 48509.56726074219,
+      "current_us": 39322.94464111328,
+      "speedup": 1.233619905718455,
+      "time_reduction_pct": 18.937754217122148,
+      "triton_us": 26967.24796295166,
+      "cuda_us": 40336.47918701172,
+      "vs_triton": 0.6685573085822292,
+      "forward_us": 8218.688011169434,
+      "job": "15946"
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "previous_us": 16630.59139251709,
+      "current_us": 14394.976139068604,
+      "speedup": 1.1553052420407233,
+      "time_reduction_pct": 13.442788657860948,
+      "triton_us": 9290.272235870361,
+      "cuda_us": 14589.600086212158,
+      "vs_triton": 0.63677360455206,
+      "forward_us": 3200.096011161804,
+      "job": "15947"
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "previous_us": 69617.4545288086,
+      "current_us": 60241.5828704834,
+      "speedup": 1.155637870247913,
+      "time_reduction_pct": 13.467702491830325,
+      "triton_us": 41251.66320800781,
+      "cuda_us": 61238.36708068848,
+      "vs_triton": 0.6736244804446546,
+      "forward_us": 13574.928283691406,
+      "job": "15941"
+    }
+  ],
+  "comparison": "Previous CUDA is the immediately preceding all-width port. It is not Anthropic, cuEquivariance, or the original pre-adoption engine.",
+  "entry": "runs/trimul_training_current.py",
+  "production_dispatch_changed": false,
+  "sol90_verified": false,
+  "validation_shapes": 10,
+  "ncu": {
+    "256": {
+      "gpu__time_duration.sum": {
+        "value": "2.029984",
+        "unit": "ms"
+      },
+      "dram__bytes_read.sum": {
+        "value": "2.366666",
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "830.561792",
+        "unit": "Mbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "23.987966",
+        "unit": "%"
+      },
+      "smsp__warps_eligible.avg.per_cycle_active": {
+        "value": "0.348037",
+        "unit": "warp"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    },
+    "512": {
+      "gpu__time_duration.sum": {
+        "value": "6.131488",
+        "unit": "ms"
+      },
+      "dram__bytes_read.sum": {
+        "value": "6.214602",
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "1.788893",
+        "unit": "Gbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+        "value": "31.738750",
+        "unit": "%"
+      },
+      "smsp__warps_eligible.avg.per_cycle_active": {
+        "value": "0.387908",
+        "unit": "warp"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": "0",
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": "0",
+        "unit": "sector"
+      }
+    }
+  }
+}

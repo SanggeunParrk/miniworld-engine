@@ -1,0 +1,276 @@
+{
+  "scope": "Untracked compiler dumps directly in MiniWorld root only",
+  "count": 66,
+  "bytes": 3512388,
+  "extensions": {
+    ".ptx": 33,
+    ".cubin": 33
+  },
+  "files": [
+    {
+      "name": "cutlass___call___ablationParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12812812.sm_90a.cubin",
+      "bytes": 32488
+    },
+    {
+      "name": "cutlass___call___ablationParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12812812.sm_90a.ptx",
+      "bytes": 66188
+    },
+    {
+      "name": "cutlass___call___ablationParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.cubin",
+      "bytes": 32488
+    },
+    {
+      "name": "cutlass___call___ablationParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.ptx",
+      "bytes": 72196
+    },
+    {
+      "name": "cutlass___call___aliased_stagesParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12.sm_90a.cubin",
+      "bytes": 26344
+    },
+    {
+      "name": "cutlass___call___aliased_stagesParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12.sm_90a.ptx",
+      "bytes": 53575
+    },
+    {
+      "name": "cutlass___call___aliased_stagesParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tens.sm_90a.cubin",
+      "bytes": 26344
+    },
+    {
+      "name": "cutlass___call___aliased_stagesParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tens.sm_90a.ptx",
+      "bytes": 53582
+    },
+    {
+      "name": "cutlass___call___baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.cubin",
+      "bytes": 26344
+    },
+    {
+      "name": "cutlass___call___baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.ptx",
+      "bytes": 53582
+    },
+    {
+      "name": "cutlass___call___baselineParityF567Sm90_object_at__Tensorgmemo5898241281281_Tensorgmemo5898242562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo5898241281281_Tensorgmem.sm_90a.cubin",
+      "bytes": 40680
+    },
+    {
+      "name": "cutlass___call___baselineParityF567Sm90_object_at__Tensorgmemo5898241281281_Tensorgmemo5898242562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo5898241281281_Tensorgmem.sm_90a.ptx",
+      "bytes": 81229
+    },
+    {
+      "name": "cutlass___call___candidate_productionParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo147456128128.sm_90a.cubin",
+      "bytes": 27368
+    },
+    {
+      "name": "cutlass___call___candidate_productionParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo147456128128.sm_90a.ptx",
+      "bytes": 56266
+    },
+    {
+      "name": "cutlass___call___candidate_productionParityF567Sm90_object_at__Tensorgmemo5898241281281_Tensorgmemo5898242562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo589824128128.sm_90a.cubin",
+      "bytes": 38632
+    },
+    {
+      "name": "cutlass___call___candidate_productionParityF567Sm90_object_at__Tensorgmemo5898241281281_Tensorgmemo5898242562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo589824128128.sm_90a.ptx",
+      "bytes": 86465
+    },
+    {
+      "name": "cutlass___call___chunkedParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmemo.sm_90a.cubin",
+      "bytes": 28392
+    },
+    {
+      "name": "cutlass___call___chunkedParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmemo.sm_90a.ptx",
+      "bytes": 56122
+    },
+    {
+      "name": "cutlass___call___chunked_runtimeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Ten.sm_90a.cubin",
+      "bytes": 28392
+    },
+    {
+      "name": "cutlass___call___chunked_runtimeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Ten.sm_90a.ptx",
+      "bytes": 56122
+    },
+    {
+      "name": "cutlass___call___chunkloadsParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgm.sm_90a.cubin",
+      "bytes": 28392
+    },
+    {
+      "name": "cutlass___call___chunkloadsParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgm.sm_90a.ptx",
+      "bytes": 56560
+    },
+    {
+      "name": "cutlass___call___chunkloads_runtimeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_.sm_90a.cubin",
+      "bytes": 28392
+    },
+    {
+      "name": "cutlass___call___chunkloads_runtimeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_.sm_90a.ptx",
+      "bytes": 56560
+    },
+    {
+      "name": "cutlass___call___combinedParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.cubin",
+      "bytes": 26344
+    },
+    {
+      "name": "cutlass___call___combinedParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.ptx",
+      "bytes": 53561
+    },
+    {
+      "name": "cutlass___call___divfullParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo128128128.sm_90a.cubin",
+      "bytes": 34536
+    },
+    {
+      "name": "cutlass___call___divfullParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo128128128.sm_90a.ptx",
+      "bytes": 67628
+    },
+    {
+      "name": "cutlass___call___divfullParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmemo.sm_90a.cubin",
+      "bytes": 35560
+    },
+    {
+      "name": "cutlass___call___divfullParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmemo.sm_90a.ptx",
+      "bytes": 73636
+    },
+    {
+      "name": "cutlass___call___early_gateParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgm.sm_90a.cubin",
+      "bytes": 26344
+    },
+    {
+      "name": "cutlass___call___early_gateParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgm.sm_90a.ptx",
+      "bytes": 53527
+    },
+    {
+      "name": "cutlass___call___fastgroup_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_.sm_90a.cubin",
+      "bytes": 39656
+    },
+    {
+      "name": "cutlass___call___fastgroup_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_.sm_90a.ptx",
+      "bytes": 81018
+    },
+    {
+      "name": "cutlass___call___fastgroup_overlap_packed_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmem.sm_90a.cubin",
+      "bytes": 40680
+    },
+    {
+      "name": "cutlass___call___fastgroup_overlap_packed_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmem.sm_90a.ptx",
+      "bytes": 81558
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo128256256.sm_90a.cubin",
+      "bytes": 34536
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo128256256.sm_90a.ptx",
+      "bytes": 67628
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo1291281281_Tensorgmemo1292562561_Tensorgmemo1281281281_Tensorgmemo128256256.sm_90a.cubin",
+      "bytes": 49896
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo1291281281_Tensorgmemo1292562561_Tensorgmemo1281281281_Tensorgmemo128256256.sm_90a.ptx",
+      "bytes": 118395
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo128.sm_90a.cubin",
+      "bytes": 38632
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo128.sm_90a.ptx",
+      "bytes": 81414
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo163841281281_Tensorgmemo163842562561_Tensorgmemo1281281128_Tensorgmemo12825.sm_90a.cubin",
+      "bytes": 38632
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo163841281281_Tensorgmemo163842562561_Tensorgmemo1281281128_Tensorgmemo12825.sm_90a.ptx",
+      "bytes": 81233
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo5898241281281_Tensorgmemo5898242562561_Tensorgmemo1281281128_Tensorgmemo128.sm_90a.cubin",
+      "bytes": 38632
+    },
+    {
+      "name": "cutlass___call___miniworld_enginekernelstrimul_inprojcuteparity_f567ParityF567Sm90_object_at__Tensorgmemo5898241281281_Tensorgmemo5898242562561_Tensorgmemo1281281128_Tensorgmemo128.sm_90a.ptx",
+      "bytes": 81413
+    },
+    {
+      "name": "cutlass___call___originalParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12812812.sm_90a.cubin",
+      "bytes": 43752
+    },
+    {
+      "name": "cutlass___call___originalParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12812812.sm_90a.ptx",
+      "bytes": 101823
+    },
+    {
+      "name": "cutlass___call___originalParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.cubin",
+      "bytes": 44776
+    },
+    {
+      "name": "cutlass___call___originalParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorgmem.sm_90a.ptx",
+      "bytes": 110675
+    },
+    {
+      "name": "cutlass___call___overlap_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Te.sm_90a.cubin",
+      "bytes": 40680
+    },
+    {
+      "name": "cutlass___call___overlap_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Te.sm_90a.ptx",
+      "bytes": 81593
+    },
+    {
+      "name": "cutlass___call___overlap_packed_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo147456128.sm_90a.cubin",
+      "bytes": 40680
+    },
+    {
+      "name": "cutlass___call___overlap_packed_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo147456128.sm_90a.ptx",
+      "bytes": 81558
+    },
+    {
+      "name": "cutlass___call___packed_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Ten.sm_90a.cubin",
+      "bytes": 39656
+    },
+    {
+      "name": "cutlass___call___packed_baselineParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Ten.sm_90a.ptx",
+      "bytes": 81018
+    },
+    {
+      "name": "cutlass___call___packed_early_gateParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_T.sm_90a.cubin",
+      "bytes": 39656
+    },
+    {
+      "name": "cutlass___call___packed_early_gateParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_T.sm_90a.ptx",
+      "bytes": 81056
+    },
+    {
+      "name": "cutlass___call___packed_triple_storeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281.sm_90a.cubin",
+      "bytes": 40680
+    },
+    {
+      "name": "cutlass___call___packed_triple_storeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281.sm_90a.ptx",
+      "bytes": 81196
+    },
+    {
+      "name": "cutlass___call___triple_storeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensor.sm_90a.cubin",
+      "bytes": 27368
+    },
+    {
+      "name": "cutlass___call___triple_storeParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensor.sm_90a.ptx",
+      "bytes": 55458
+    },
+    {
+      "name": "cutlass___call___vector_loadParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12812.sm_90a.cubin",
+      "bytes": 27368
+    },
+    {
+      "name": "cutlass___call___vector_loadParityF567Sm90_object_at__Tensorgmemo1281281281_Tensorgmemo1282562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1281281281_Tensorgmemo12812.sm_90a.ptx",
+      "bytes": 54428
+    },
+    {
+      "name": "cutlass___call___vector_loadParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorg.sm_90a.cubin",
+      "bytes": 27368
+    },
+    {
+      "name": "cutlass___call___vector_loadParityF567Sm90_object_at__Tensorgmemo1474561281281_Tensorgmemo1474562562561_Tensorgmemo1281281128_Tensorgmemo1282562561_Tensorgmemo1474561281281_Tensorg.sm_90a.ptx",
+      "bytes": 54437
+    }
+  ],
+  "deleted": true
+}

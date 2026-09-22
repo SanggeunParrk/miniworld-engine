@@ -1,0 +1,317 @@
+{
+  "baseline": "trimul_b1_sol90_selected_20260921, paired on node01",
+  "rows": [
+    [
+      "384",
+      "\uc9c1\uc804 v49 B1",
+      "0.2936",
+      "0.2063",
+      "0.9118",
+      "1.2062"
+    ],
+    [
+      "384",
+      "\ud604\uc7ac LN \ud569\uc0b0/TMA/\ub3d9\uae30\ud654 \uac1c\uc120",
+      "0.2940",
+      "0.1919",
+      "0.8979",
+      "1.1892"
+    ],
+    [
+      "768",
+      "\uc9c1\uc804 v49 B1",
+      "1.1818",
+      "0.6959",
+      "3.6797",
+      "4.9155"
+    ],
+    [
+      "768",
+      "\ud604\uc7ac LN \ud569\uc0b0/TMA/\ub3d9\uae30\ud654 \uac1c\uc120",
+      "1.1806",
+      "0.6444",
+      "3.6237",
+      "4.8572"
+    ]
+  ],
+  "latency_reduction_percent": {
+    "384": {
+      "forward": -0.1471438949748327,
+      "b1": 6.995500918863051,
+      "backward": 1.5196974764876359,
+      "forward_backward": 1.4047880098084553
+    },
+    "768": {
+      "forward": 0.09883670170487413,
+      "b1": 7.394128064195515,
+      "backward": 1.5227098649864046,
+      "forward_backward": 1.1861221597419869
+    }
+  },
+  "ncu": [
+    [
+      "384",
+      "baseline",
+      "206.272000 us",
+      "245.561344 Mbyte",
+      "141.553920 Mbyte",
+      "55.990997 %",
+      "19.249851 %",
+      "1.140388 inst"
+    ],
+    [
+      "384",
+      "optimized",
+      "191.456000 us",
+      "245.661696 Mbyte",
+      "141.593600 Mbyte",
+      "60.352207 %",
+      "21.140525 %",
+      "1.135382 inst"
+    ],
+    [
+      "768",
+      "baseline",
+      "693.024000 us",
+      "928.684800 Mbyte",
+      "481.425408 Mbyte",
+      "60.699193 %",
+      "23.113598 %",
+      "0.782934 inst"
+    ],
+    [
+      "768",
+      "optimized",
+      "639.008000 us",
+      "928.753152 Mbyte",
+      "481.152512 Mbyte",
+      "65.820569 %",
+      "25.184043 %",
+      "0.721779 inst"
+    ]
+  ],
+  "roofline": [
+    {
+      "L": 384,
+      "ncu_us": 191.456,
+      "unique_payload_bytes": 265420800,
+      "gemm_flops": 38654705664,
+      "ideal_roofline_pct": 41.38292325768783,
+      "measured_traffic_roofline_pct": 60.37867490227288
+    },
+    {
+      "L": 768,
+      "ncu_us": 639.008,
+      "unique_payload_bytes": 1061683200,
+      "gemm_flops": 154618822656,
+      "ideal_roofline_pct": 49.595679273022434,
+      "measured_traffic_roofline_pct": 65.86261242238903
+    }
+  ],
+  "validation": {
+    "384": [
+      {
+        "log": "ncu-baseline-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "racecheck-L384.log",
+        "returncode": 0
+      }
+    ],
+    "768": [
+      {
+        "log": "ncu-baseline-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L768.log",
+        "returncode": 0
+      }
+    ]
+  },
+  "delayed_cta_checks": [
+    {
+      "L": 384,
+      "seed": 19,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B"
+    },
+    {
+      "L": 384,
+      "seed": 47,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B"
+    },
+    {
+      "L": 384,
+      "seed": 83,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B"
+    },
+    {
+      "L": 768,
+      "seed": 19,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B"
+    },
+    {
+      "L": 768,
+      "seed": 47,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B"
+    },
+    {
+      "L": 768,
+      "seed": 83,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B"
+    }
+  ],
+  "verification_complete": true,
+  "production_ready": false,
+  "sol90_reached": false,
+  "policy_unchanged": true,
+  "entry_check": {
+    "entry": "runs/trimul_training_current.py:Training",
+    "all_outputs_bit_exact": true,
+    "errors": {
+      "forward": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dx": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWgate": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWproj": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      }
+    }
+  }
+}

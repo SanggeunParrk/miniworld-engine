@@ -1,0 +1,25 @@
+{
+  "trimul_inproj_gemm_gate_mmajor_sm90_cute": {
+    "BLOCK_K_D": 64,
+    "BLOCK_K_H2": 64,
+    "BLOCK_M1": 128,
+    "num_warps": 8,
+    "num_stages": 2
+  },
+  "trimul_output_f567_train_sm90_cute": {
+    "BLOCK_M1": 64,
+    "BLOCK_N": 64,
+    "BLOCK_K": 64,
+    "GROUP_M": 4,
+    "num_warps": 4,
+    "num_stages": 2
+  },
+  "trimul_input_dual_bwd_sm90_cute": {
+    "BLOCK_M1": 64,
+    "BLOCK_N": 128,
+    "BLOCK_K": 64,
+    "GROUP_M": 1,
+    "num_warps": 4,
+    "num_stages": 3
+  }
+}

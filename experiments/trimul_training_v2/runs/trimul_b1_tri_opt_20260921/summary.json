@@ -1,0 +1,213 @@
+{
+  "rows": [
+    [
+      "384",
+      "\uc9c1\uc804 tri+\ud1b5\uacc4 B1",
+      "0.2930",
+      "0.2444",
+      "0.9521",
+      "1.2417"
+    ],
+    [
+      "384",
+      "\ud604\uc7ac \ubcf5\uc0ac \uc81c\uac70+\uc870\uae30 \ub85c\ub4dc",
+      "0.2928",
+      "0.2221",
+      "0.9300",
+      "1.2179"
+    ],
+    [
+      "768",
+      "\uc9c1\uc804 tri+\ud1b5\uacc4 B1",
+      "1.1807",
+      "0.8168",
+      "3.7424",
+      "4.9664"
+    ],
+    [
+      "768",
+      "\ud604\uc7ac \ubcf5\uc0ac \uc81c\uac70+\uc870\uae30 \ub85c\ub4dc",
+      "1.1789",
+      "0.7337",
+      "3.6565",
+      "4.8710"
+    ]
+  ],
+  "latency_reduction_percent": {
+    "384": {
+      "forward": 0.054607752958102385,
+      "b1": 9.088530224533997,
+      "backward": 2.322378090925803,
+      "forward_backward": 1.9148047815588543
+    },
+    "768": {
+      "forward": 0.15447877384612285,
+      "b1": 10.170421997675072,
+      "backward": 2.29544509206403,
+      "forward_backward": 1.9210797615518582
+    }
+  },
+  "ncu": [
+    [
+      "384",
+      "baseline",
+      "245.440000 us",
+      "245.551360 Mbyte",
+      "141.711616 Mbyte",
+      "47.072782 %",
+      "15.971965 %",
+      "1.709715 inst"
+    ],
+    [
+      "384",
+      "optimized",
+      "224.928000 us",
+      "245.521152 Mbyte",
+      "141.751296 Mbyte",
+      "51.374682 %",
+      "17.994494 %",
+      "1.293431 inst"
+    ],
+    [
+      "768",
+      "baseline",
+      "834.272000 us",
+      "928.806400 Mbyte",
+      "481.250560 Mbyte",
+      "50.419787 %",
+      "19.267056 %",
+      "1.302970 inst"
+    ],
+    [
+      "768",
+      "optimized",
+      "745.824000 us",
+      "928.662272 Mbyte",
+      "481.308416 Mbyte",
+      "56.395553 %",
+      "21.294549 %",
+      "0.939957 inst"
+    ]
+  ],
+  "validation": {
+    "384": [
+      {
+        "log": "ncu-baseline-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "racecheck-L384.log",
+        "returncode": 0
+      }
+    ],
+    "768": [
+      {
+        "log": "ncu-baseline-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L768.log",
+        "returncode": 0
+      }
+    ]
+  },
+  "verification_complete": true,
+  "policy_unchanged": true,
+  "production_ready": false,
+  "entry_check": {
+    "entry": "runs/trimul_training_current.py:Training",
+    "all_outputs_bit_exact": true,
+    "saved_tri_bf16": true,
+    "saved_stats_fp32": true,
+    "errors": {
+      "forward": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dx": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWgate": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWproj": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "tool": "memcheck",
+    "returncode": 0,
+    "log": "memcheck-L768.log"
+  },
+  {
+    "tool": "racecheck",
+    "returncode": 0,
+    "log": "racecheck-L768.log"
+  }
+]

@@ -1,0 +1,280 @@
+{
+  "D": 128,
+  "L": 768,
+  "job": "15741",
+  "dropout": 0.25,
+  "route": "Latest cache-policy B1 + corrected single B7",
+  "checks": {
+    "0": {
+      "strict": {
+        "valid": false,
+        "errors": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 2e-05,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0005191310192458332,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": false
+          },
+          "dWLg": {
+            "relative_l2": 0.0004569919256027788,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.00025991062284447253,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0003467989736236632,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0.0005,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 2.6935222763313504e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 3.02922217088053e-07,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 5e-06,
+            "valid": true
+          }
+        }
+      },
+      "triton": {
+        "valid": true,
+        "errors": {
+          "forward": {
+            "relative_l2": 8.489240281051025e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.005,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.00014841844676993787,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0004092800372745842,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0004757219285238534,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0003777614329010248,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.00029165748856030405,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0005976437241770327,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.00042803725227713585,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0003395496169105172,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.00013957179908175021,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 3.646331242634915e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 2.931307244580239e-05,
+            "bit_exact": false,
+            "finite": true,
+            "limit": 0.01,
+            "valid": true
+          }
+        }
+      },
+      "graph": {
+        "valid": true,
+        "errors": {
+          "forward": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dx": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dWL": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dWLg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dWR": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dWRg": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dWgate": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dWproj": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dgamma_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dbeta_in": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dgamma_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          },
+          "dbeta_out": {
+            "relative_l2": 0.0,
+            "bit_exact": true,
+            "finite": true,
+            "limit": 0,
+            "valid": true
+          }
+        }
+      }
+    }
+  },
+  "times": {},
+  "traces": {}
+}

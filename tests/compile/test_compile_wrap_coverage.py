@@ -93,6 +93,11 @@ def _launchers_and_ops(paths):
             for dec in node.decorator_list:
                 f = dec.func if isinstance(dec, ast.Call) else dec
                 names.append(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
+            # A callback defined inside a function executes within that enclosing
+            # call chain even when the autotuner invokes it through a parameter.
+            for child in ast.walk(node):
+                if isinstance(child, ast.FunctionDef) and child is not node:
+                    calls.setdefault(child.name, set()).add((node.name, False))
             key = f"{path.name}::{node.name}"
             is_op = bool({"opaque", "custom_op", "triton_op"} & set(names))
             if is_op:

@@ -1,0 +1,86 @@
+{
+  "front_prefetch_lnpair_storepipe_mcastasync_xn4": {
+    "count": 248,
+    "capacity": 62,
+    "splits": 13,
+    "errors": {
+      "dx": {
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 5.8033339882967994e-05,
+        "max_absolute": 0.125,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 2.5143497623503208e-05,
+        "max_absolute": 0.015625,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 2.507727731426712e-05,
+        "max_absolute": 0.03125,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 7.643169374205172e-05,
+        "max_absolute": 0.0625,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 3.521216456192633e-07,
+        "max_absolute": 3.4332275390625e-05,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 7.77565460907681e-08,
+        "max_absolute": 7.62939453125e-06,
+        "finite": true
+      }
+    }
+  },
+  "front_prefetch_lnpair_storepipe_mcastasync_xn8": {
+    "count": 240,
+    "capacity": 30,
+    "splits": 13,
+    "errors": {
+      "dx": {
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 5.8033339882967994e-05,
+        "max_absolute": 0.125,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 2.5143497623503208e-05,
+        "max_absolute": 0.015625,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 2.507727731426712e-05,
+        "max_absolute": 0.03125,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 7.643169374205172e-05,
+        "max_absolute": 0.0625,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 3.521216456192633e-07,
+        "max_absolute": 3.4332275390625e-05,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 7.77565460907681e-08,
+        "max_absolute": 7.62939453125e-06,
+        "finite": true
+      }
+    }
+  }
+}

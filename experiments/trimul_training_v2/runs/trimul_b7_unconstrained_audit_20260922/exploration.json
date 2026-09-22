@@ -1,0 +1,867 @@
+[
+  {
+    "folder": "trimul_b7_split_async_20260922",
+    "record": "runs/trimul_b7_split_async_20260922/check-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 415.8079922199249,
+      "atomic": 403.888002038002
+    },
+    "roles_us": null,
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_async_20260922",
+    "record": "runs/trimul_b7_split_async_20260922/check-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0,
+      "concurrent": false
+    },
+    "times_us": {
+      "split": 409.32799875736237,
+      "atomic": 402.51199901103973
+    },
+    "roles_us": null,
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_async_20260922",
+    "record": "runs/trimul_b7_split_async_20260922/check-2.json",
+    "config": {
+      "splits": 8,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 408.52800011634827,
+      "atomic": 413.7920141220093
+    },
+    "roles_us": null,
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_async_20260922",
+    "record": "runs/trimul_b7_split_async_20260922/check-3.json",
+    "config": {
+      "splits": 12,
+      "pc": 1,
+      "dxctas": 198,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 401.43999457359314,
+      "atomic": 469.07199919223785
+    },
+    "roles_us": null,
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_dwatomic_20260922",
+    "record": "runs/trimul_b7_split_dwatomic_20260922/check-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 406.0639888048172,
+      "atomic": 407.74400532245636
+    },
+    "roles_us": {
+      "split_dw": 182.22399801015854,
+      "split_dx": 241.11999571323395,
+      "atomic_dw": 181.92000687122345,
+      "atomic_dx": 239.28000032901764
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_dwatomic_20260922",
+    "record": "runs/trimul_b7_split_dwatomic_20260922/check-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 256,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 403.9040058851242,
+      "atomic": 406.0479998588562
+    },
+    "roles_us": {
+      "split_dw": 178.0479997396469,
+      "split_dx": 236.15999519824982,
+      "atomic_dw": 180.03199994564056,
+      "atomic_dx": 234.94400084018707
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_dx32_20260922",
+    "record": "runs/trimul_b7_split_dx32_20260922/check-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 401.42400562763214,
+      "atomic": 447.58400321006775
+    },
+    "roles_us": {
+      "split_dw": 181.48799985647202,
+      "split_dx": 240.4160052537918,
+      "atomic_dw": 178.83199453353882,
+      "atomic_dx": 281.68000280857086
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_gppipe_20260922",
+    "record": "runs/trimul_b7_split_gppipe_20260922/check-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 24,
+      "cons": 232,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 418.36801171302795,
+      "atomic": 422.95999825000763
+    },
+    "roles_us": {
+      "split_dw": 180.4479956626892,
+      "split_dx": 238.15999925136566,
+      "atomic_dw": 184.25600230693817,
+      "atomic_dx": 237.90399730205536
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_lnreduce_20260922",
+    "record": "runs/trimul_b7_split_lnreduce_20260922/check-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 256,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 406.8640023469925,
+      "atomic": 400.06400644779205
+    },
+    "roles_us": {
+      "split_dw": 180.4959997534752,
+      "split_dx": 234.6400022506714,
+      "atomic_dw": 170.78399658203125,
+      "atomic_dx": 235.76000332832336
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_lnreduce_20260922",
+    "record": "runs/trimul_b7_split_lnreduce_20260922/check-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 256,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 410.12799739837646,
+      "atomic": 408.7039977312088
+    },
+    "roles_us": {
+      "split_dw": 176.7840012907982,
+      "split_dx": 232.7200025320053,
+      "atomic_dw": 179.80800569057465,
+      "atomic_dx": 236.62400245666504
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_mask_20260922",
+    "record": "runs/trimul_b7_split_mask_20260922/check-8.json",
+    "config": {
+      "splits": 8,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 404.28799390792847,
+      "atomic": 456.30399882793427
+    },
+    "roles_us": {
+      "split_dw": 173.95199835300446,
+      "split_dx": 232.16000199317932,
+      "atomic_dw": 221.42399847507477,
+      "atomic_dx": 227.87199914455414
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_mask_20260922",
+    "record": "runs/trimul_b7_split_mask_20260922/check-static-12.json",
+    "config": {
+      "splits": 12,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 414.99200463294983,
+      "atomic": 460.62400937080383
+    },
+    "roles_us": {
+      "split_dw": 176.4480024576187,
+      "split_dx": 236.64000630378723,
+      "atomic_dw": 222.03200310468674,
+      "atomic_dx": 229.0399968624115
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_mask_20260922",
+    "record": "runs/trimul_b7_split_mask_20260922/check-static-16.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 409.0240001678467,
+      "atomic": 404.04799580574036
+    },
+    "roles_us": {
+      "split_dw": 183.80799889564514,
+      "split_dx": 239.02399837970734,
+      "atomic_dw": 175.26400089263916,
+      "atomic_dx": 241.05599522590637
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_mask_20260922",
+    "record": "runs/trimul_b7_split_mask_20260922/check-static-8.json",
+    "config": {
+      "splits": 8,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 399.4079977273941,
+      "atomic": 450.1919895410538
+    },
+    "roles_us": {
+      "split_dw": 172.44800180196762,
+      "split_dx": 236.40000075101852,
+      "atomic_dw": 221.8559980392456,
+      "atomic_dx": 225.50399601459503
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_n128_20260922",
+    "record": "runs/trimul_b7_split_n128_20260922/check-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 410.7680022716522,
+      "atomic": 440.8160001039505
+    },
+    "roles_us": {
+      "split_dw": 176.28799378871918,
+      "split_dx": 234.68799889087677,
+      "atomic_dw": 177.279993891716,
+      "atomic_dx": 261.24799251556396
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_n128_20260922",
+    "record": "runs/trimul_b7_split_n128_20260922/check-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 409.39199924468994,
+      "atomic": 405.7759940624237
+    },
+    "roles_us": {
+      "split_dw": 178.6080002784729,
+      "split_dx": 238.0959987640381,
+      "atomic_dw": 181.74400180578232,
+      "atomic_dx": 236.40000075101852
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_pack0_20260922",
+    "record": "runs/trimul_b7_split_pack0_20260922/check-default.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 406.8799912929535,
+      "atomic": 404.08000349998474
+    },
+    "roles_us": {
+      "split_dw": 179.1040003299713,
+      "split_dx": 237.8239929676056,
+      "atomic_dw": 179.53599989414215,
+      "atomic_dx": 237.2799962759018
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_pack1_20260922",
+    "record": "runs/trimul_b7_split_pack1_20260922/check-default.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 409.7919911146164,
+      "atomic": 406.1120003461838
+    },
+    "roles_us": {
+      "split_dw": 177.44000256061554,
+      "split_dx": 239.80799317359924,
+      "atomic_dw": 181.11999332904816,
+      "atomic_dx": 234.44800078868866
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_proj128_20260922",
+    "record": "runs/trimul_b7_split_proj128_20260922/check-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 417.11999475955963,
+      "atomic": 415.95199704170227
+    },
+    "roles_us": {
+      "split_dw": 177.12000012397766,
+      "split_dx": 236.87999695539474,
+      "atomic_dw": 179.1519969701767,
+      "atomic_dx": 235.1519986987114
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_proj128_20260922",
+    "record": "runs/trimul_b7_split_proj128_20260922/check-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 1
+    },
+    "times_us": {
+      "split": 409.1999977827072,
+      "atomic": 439.29600715637207
+    },
+    "roles_us": {
+      "split_dw": 176.65600031614304,
+      "split_dx": 235.27999967336655,
+      "atomic_dw": 176.86399817466736,
+      "atomic_dx": 264.5760029554367
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_reduce_20260922",
+    "record": "runs/trimul_b7_split_reduce_20260922/check-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 2,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 416.56000912189484,
+      "atomic": 416.6239947080612
+    },
+    "roles_us": {
+      "split_dw": 179.9039989709854,
+      "split_dx": 235.82399636507034,
+      "atomic_dw": 178.68800461292267,
+      "atomic_dx": 237.5359982252121
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_reduce_20260922",
+    "record": "runs/trimul_b7_split_reduce_20260922/check-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 409.40798819065094,
+      "atomic": 404.3999910354614
+    },
+    "roles_us": {
+      "split_dw": 177.05599963665009,
+      "split_dx": 235.58400571346283,
+      "atomic_dw": 172.28800058364868,
+      "atomic_dx": 237.85599321126938
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_reduce_20260922",
+    "record": "runs/trimul_b7_split_reduce_20260922/check-2.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 264,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 1
+    },
+    "times_us": {
+      "split": 412.0960086584091,
+      "atomic": 408.52800011634827
+    },
+    "roles_us": {
+      "split_dw": 182.36799538135529,
+      "split_dx": 239.04000222682953,
+      "atomic_dw": 175.64800381660461,
+      "atomic_dx": 240.12799561023712
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_reduce_20260922",
+    "record": "runs/trimul_b7_split_reduce_20260922/check-balanced-0.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 256,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 0
+    },
+    "times_us": {
+      "split": 406.47999942302704,
+      "atomic": 400.64001083374023
+    },
+    "roles_us": {
+      "split_dw": 182.92800337076187,
+      "split_dx": 241.68000370264053,
+      "atomic_dw": 176.67199671268463,
+      "atomic_dx": 238.0639985203743
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_reduce_20260922",
+    "record": "runs/trimul_b7_split_reduce_20260922/check-balanced-1.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 256,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 1
+    },
+    "times_us": {
+      "split": 404.55999970436096,
+      "atomic": 401.95199847221375
+    },
+    "roles_us": {
+      "split_dw": 180.4959997534752,
+      "split_dx": 235.77600717544556,
+      "atomic_dw": 172.54400253295898,
+      "atomic_dx": 238.17600309848785
+    },
+    "valid": true
+  },
+  {
+    "folder": "trimul_b7_split_reduce_20260922",
+    "record": "runs/trimul_b7_split_reduce_20260922/check-balanced-2.json",
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 256,
+      "prod": 32,
+      "cons": 224,
+      "resident": 0,
+      "slices": 1,
+      "skip_restore": 1,
+      "overlap": 0,
+      "ln_mode": 2,
+      "xn_early": 0,
+      "mask_hoist": 1,
+      "dw_mask_early": 1,
+      "weight_prefetch": 0,
+      "dx_pc": 1,
+      "dw_pair": 1,
+      "nextrow": 2
+    },
+    "times_us": {
+      "split": 415.5840128660202,
+      "atomic": 408.80000591278076
+    },
+    "roles_us": {
+      "split_dw": 179.83999848365784,
+      "split_dx": 237.56799846887589,
+      "atomic_dw": 175.4560023546219,
+      "atomic_dx": 236.32000386714935
+    },
+    "valid": true
+  }
+]

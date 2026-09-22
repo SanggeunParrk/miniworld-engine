@@ -1,0 +1,59 @@
+{
+  "family": "trimul",
+  "length": 768,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "esm_shapes",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/trimul-outgoing-L768-C128-esm_shapes.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "esm_shapes",
+    "word": "esm_shapes",
+    "cell": "9.0|bf16|C128|H128|N<=800|out|fwd",
+    "size_measured": false,
+    "stack": "H100:2.10.0+cu128/3.6.0/cueq0.10.0",
+    "cls": "tol(maxabs=0.0173;relrms=0.000479)",
+    "exact_vs": null,
+    "backward": false,
+    "capture_safe": true,
+    "x_stock": 1.466,
+    "fallback": "v4 (c 128 / 256, (64,128)) else cueq",
+    "reason": "column=sibling:H100:2.10.0+cu128/3.6.0/cueq0.10.0; row word",
+    "config": null
+  },
+  "first_call_s": 1.8897571563720703,
+  "error": {
+    "rel_rms": 0.00243399734608829,
+    "max_abs": 0.027883529663085938,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.005770877934992313,
+    "max_abs": 0.027883529663085938,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.00243399734608829,
+    "max_abs": 0.027883529663085938,
+    "finite": true
+  },
+  "ms": 0.7438803100585938,
+  "samples_ms": [
+    0.7303392028808594,
+    0.7438803100585938,
+    0.7496607971191406,
+    0.7387193298339844,
+    0.7472557067871094
+  ],
+  "status": "passed"
+}

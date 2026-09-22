@@ -1,0 +1,28 @@
+[
+  {
+    "config": {
+      "splits": 3,
+      "defines": {
+        "SMEM_BYTES": 221184,
+        "PIPE_DW": 1,
+        "DX_RESIDENT": 1,
+        "PIPE_CONSUMERS": 3
+      }
+    },
+    "valid": false,
+    "error": "Spilling variant rejected: /home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/build/357605af228952e862d43622a4757329c8f19a3a022633f8bb39111039257867.cubin"
+  },
+  {
+    "config": {
+      "splits": 4,
+      "defines": {
+        "SMEM_BYTES": 221184,
+        "PIPE_DW": 1,
+        "DX_RESIDENT": 1,
+        "PIPE_CONSUMERS": 3
+      }
+    },
+    "valid": false,
+    "error": "Spilling variant rejected: /home/psk6950/MiniWorld/runs/trimul_recompute_next_20260921/build/0c919a07ef19d24a6a256156b08e1899e9164a45b87b2999f96497d9281407d1.cubin"
+  }
+]

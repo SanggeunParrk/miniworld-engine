@@ -1,0 +1,44 @@
+{
+  "family": "trimul",
+  "length": 768,
+  "width": 128,
+  "direction": "incoming",
+  "row": "engine_triton",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/trimul-incoming-L768-C128-engine_triton.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "triton",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 7.353356599807739,
+  "error": {
+    "rel_rms": 0.002432864625006914,
+    "max_abs": 0.02751636505126953,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.0057683163322508335,
+    "max_abs": 0.02751636505126953,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.002432864625006914,
+    "max_abs": 0.02751636505126953,
+    "finite": true
+  },
+  "ms": 0.9867046356201172,
+  "samples_ms": [
+    0.9495014190673828,
+    0.9558322906494141,
+    1.003854751586914,
+    0.9953952026367188,
+    0.9867046356201172
+  ],
+  "status": "passed"
+}

@@ -1,0 +1,42 @@
+[
+  {
+    "L": 384,
+    "kind": "b1",
+    "registers": [
+      31,
+      255
+    ],
+    "stack_and_spills_zero": true,
+    "sha256": "16ff0428552539e12ae84428cfcea1af27533cfc56b7acff9d512b720052a7b7"
+  },
+  {
+    "L": 384,
+    "kind": "b7",
+    "registers": [
+      32,
+      168
+    ],
+    "stack_and_spills_zero": true,
+    "sha256": "33cdf0063bb8756f5572a3b7aaa809376f3f3d45542c48b6981872118e505680"
+  },
+  {
+    "L": 768,
+    "kind": "b1",
+    "registers": [
+      31,
+      255
+    ],
+    "stack_and_spills_zero": true,
+    "sha256": "d5a5e298f78bf0bcbd503b768992218a78e9689221a1aabb901e4a47f33af710"
+  },
+  {
+    "L": 768,
+    "kind": "b7",
+    "registers": [
+      32,
+      168
+    ],
+    "stack_and_spills_zero": true,
+    "sha256": "33cdf0063bb8756f5572a3b7aaa809376f3f3d45542c48b6981872118e505680"
+  }
+]

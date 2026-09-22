@@ -1,0 +1,265 @@
+{
+  "selected": "dual_ln_prefetch",
+  "status": "experimental; relative 1.7x met, SoL90 not established",
+  "strict_cases": 24,
+  "comparisons": 72,
+  "updated_saved_replays": 8,
+  "max_relative_l2": {
+    "dg": 0.0,
+    "dWg": 0.0003648984420578927,
+    "dtri": 1.4694684068672359e-05,
+    "dgamma": 2.133843963747495e-06,
+    "dbeta": 6.262828264880227e-07,
+    "dWp": 0.00035537758958525956
+  },
+  "sanitizers": {
+    "memcheck/L64": "passed",
+    "memcheck/L384": "passed",
+    "racecheck/L64": "passed",
+    "racecheck/L384": "passed",
+    "synccheck/L64": "passed",
+    "synccheck/L384": "passed",
+    "split-memcheck/L64": "passed",
+    "split-memcheck/L384": "passed"
+  },
+  "ptxas": {
+    "66/1": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/6d8a7d913beba25d9904467897996032e401e2f2e01426ff0601cf3b0541c8a1.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=66",
+        "-DPART_ONLY=1",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_ln_prefetch.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/6d8a7d913beba25d9904467897996032e401e2f2e01426ff0601cf3b0541c8a1.cubin"
+      ],
+      "registers": [
+        "31",
+        "252"
+      ],
+      "spills": 0
+    },
+    "66/2": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/5505a5bbca000ac2c786695bf2833e37d032107fa6ce2c5e8764ee1883aaa752.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=66",
+        "-DPART_ONLY=2",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_ln_prefetch.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/5505a5bbca000ac2c786695bf2833e37d032107fa6ce2c5e8764ee1883aaa752.cubin"
+      ],
+      "registers": [
+        "31",
+        "252"
+      ],
+      "spills": 0
+    },
+    "132/1": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/dff7306bd68e1ebc63de6bbf2d6f3bfec7f2109cf08599f900e1e01f40f0d389.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=132",
+        "-DPART_ONLY=1",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_ln_prefetch.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/dff7306bd68e1ebc63de6bbf2d6f3bfec7f2109cf08599f900e1e01f40f0d389.cubin"
+      ],
+      "registers": [
+        "32",
+        "252"
+      ],
+      "spills": 0
+    },
+    "132/2": {
+      "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/22b9f1907c908ec5f2f6489e70e6d90a1704808ff4b8d2915c625f9c1d1929db.cubin",
+      "command": [
+        "nvcc",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DROLE=0",
+        "-DUCOUNT=132",
+        "-DPART_ONLY=2",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/dual_ln_prefetch.cu",
+        "-o",
+        "/home/psk6950/MiniWorld/runs/anthropic_b1b4_pipeline_20260919/build/22b9f1907c908ec5f2f6489e70e6d90a1704808ff4b8d2915c625f9c1d1929db.cubin"
+      ],
+      "registers": [
+        "32",
+        "252"
+      ],
+      "spills": 0
+    }
+  },
+  "sass_static_counts": {
+    "HGMMA": 28,
+    "UTMALDG": 59,
+    "UTMASTG": 4,
+    "LDL": 0,
+    "STL": 0
+  },
+  "profiles": {
+    "balanced/L384": {
+      "gpu__time_duration.sum": {
+        "value": 176.416,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 72.735676,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 306.843904,
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 123.229184,
+        "unit": "Mbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 13.976144,
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      }
+    },
+    "prefetch/L384": {
+      "gpu__time_duration.sum": {
+        "value": 172.672,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 74.144995,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 306.394368,
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 122.77632,
+        "unit": "Mbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 14.526079,
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      }
+    },
+    "balanced/L768": {
+      "gpu__time_duration.sum": {
+        "value": 627.264,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 81.733335,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 1.256669,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 461.956352,
+        "unit": "Mbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 15.721989,
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      }
+    },
+    "prefetch/L768": {
+      "gpu__time_duration.sum": {
+        "value": 612.768,
+        "unit": "us"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 81.978413,
+        "unit": "%"
+      },
+      "dram__bytes_read.sum": {
+        "value": 1.221776,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 462.1248,
+        "unit": "Mbyte"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 16.348939,
+        "unit": "%"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      },
+      "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+        "value": 0.0,
+        "unit": "sector"
+      }
+    }
+  },
+  "original_sha256": {
+    "dual.cu": "3026e8b5722106852571dc245a9693fe317b61537598f99cb7d3aa6fc6e468c8",
+    "dual_primitives.cuh": "4968268aec02402b1eb0136ca5d95336409f453c4885cc04147c72a02f93234f",
+    "dual.py": "0a08f370cc5640d3e429c783bc931bb8c4fb5382bedbb50e13cffec83c0ab355",
+    "core.py": "b7fc3efd0f378ef2aa55e72e88997b9a83f02090ef6f705bfbd5bae5521ae058",
+    "dual_dspref.cu": "7f7614f0d76309f8368df2aa0303c804960f72fd3f999f7464b6718a0d4de517"
+  },
+  "events": "sol-final-paired-results.json",
+  "cueq_full": [
+    "cueq-default-comparison.json",
+    "cueq-tuned-comparison.json"
+  ],
+  "production_default_changed": false
+}

@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "source": "front_roundonly",
+    "count": 132,
+    "splits": 15,
+    "part": 2,
+    "debug": 0,
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-arch=sm_90a",
+      "--cubin",
+      "-lineinfo",
+      "-Xptxas=-v",
+      "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+      "-DUCOUNT=132",
+      "-DDW_SPLITS=15",
+      "-DPART_ONLY=2",
+      "-DDEBUG_SAVE=0",
+      "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/front_roundonly.cu",
+      "-o",
+      "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/7fb832a9e8e7966a1b8a55c475efe5cb87fb30ff4c8573e5083cb8f5003e53fc.cubin"
+    ]
+  },
+  "cubin": "/home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/7fb832a9e8e7966a1b8a55c475efe5cb87fb30ff4c8573e5083cb8f5003e53fc.cubin",
+  "cubin_sha256": "e0858ebaa9ef20f9fa97ab37f3461c67396c9fc600ea0fd62359e987bbd3a50d"
+}

@@ -1,0 +1,146 @@
+{
+  "D": 128,
+  "job": "15738",
+  "source": "Anthropic v5 K1/K3, K1 occupancy widened; shared-memory-limited K3 uses existing Triton",
+  "results": {
+    "384": {
+      "k1": [
+        {
+          "config": [
+            2,
+            64,
+            8,
+            2,
+            1
+          ],
+          "us": 106.01199865341187,
+          "errors": {
+            "ab": 0.003307161619886756,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/09a19060ad49b51a4979d374ba586daf4873b1c92aa7477a22c4279446fe548c.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 4545 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 101.958 ms\n"
+        }
+      ],
+      "k3": [
+        {
+          "config": [
+            2,
+            64,
+            4,
+            1
+          ],
+          "us": 76.7799973487854,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f90808db540d10edc10ff3210b7fe1f2188422b9807af80547ff11966eb63d8e.cubin"
+        }
+      ],
+      "selected_k1": [
+        2,
+        64,
+        8,
+        2,
+        1
+      ],
+      "k1_us": 106.01199865341187,
+      "k3_us": 76.7799973487854,
+      "k3_route": "Anthropic",
+      "relative_l2": 0.002034910023212433,
+      "mutation_graph_eager": 0.0,
+      "times": {
+        "triton": 419.00096893310547,
+        "native": 276.1846351623535
+      },
+      "rounds": {
+        "triton": [
+          415.5635070800781,
+          419.00096893310547,
+          418.43265533447266,
+          423.15006256103516,
+          454.88128662109375
+        ],
+        "native": [
+          273.6319923400879,
+          276.4793586730957,
+          276.1846351623535,
+          274.9616050720215,
+          283.0486488342285
+        ]
+      }
+    },
+    "768": {
+      "k1": [
+        {
+          "config": [
+            2,
+            64,
+            8,
+            2,
+            1
+          ],
+          "us": 408.71920585632324,
+          "errors": {
+            "ab": 0.0033084326423704624,
+            "xn": 0.0
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/09a19060ad49b51a4979d374ba586daf4873b1c92aa7477a22c4279446fe548c.cubin",
+          "ptxas": "ptxas info    : (C7517) warpgroup.wait is injected in around line 4545 by compiler to allow use of registers defined by GMMA in function 'width_k1'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 16 barriers\nptxas info    : Compile time = 101.958 ms\n"
+        }
+      ],
+      "k3": [
+        {
+          "config": [
+            2,
+            64,
+            4,
+            1
+          ],
+          "us": 269.1632032394409,
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f90808db540d10edc10ff3210b7fe1f2188422b9807af80547ff11966eb63d8e.cubin"
+        }
+      ],
+      "selected_k1": [
+        2,
+        64,
+        8,
+        2,
+        1
+      ],
+      "k1_us": 408.71920585632324,
+      "k3_us": 269.1632032394409,
+      "k3_route": "Anthropic",
+      "relative_l2": 0.002049083821475506,
+      "mutation_graph_eager": 0.0,
+      "times": {
+        "triton": 1683.5244750976562,
+        "native": 1171.9913482666016
+      },
+      "rounds": {
+        "triton": [
+          1662.2026062011719,
+          1687.2650146484375,
+          1683.5244750976562,
+          1676.0646057128906,
+          1714.0293884277344
+        ],
+        "native": [
+          1198.4745788574219,
+          1154.8918151855469,
+          1167.5459289550781,
+          1188.6483001708984,
+          1171.9913482666016
+        ]
+      }
+    }
+  },
+  "candidates": [
+    [
+      2,
+      64,
+      8,
+      2,
+      1
+    ]
+  ],
+  "tuning": "Original D128 configs retained; no retuning",
+  "complete": true
+}

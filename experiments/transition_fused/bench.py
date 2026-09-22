@@ -25,10 +25,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import drv  # noqa: E402
 
-D, H, ROWS, SLICES = 128, 512, 128, 8
 
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=384)
+p.add_argument("--width", type=int, default=128)
 p.add_argument("--dw-repl", type=int, default=8, help="hidden-slice replicas: NDW = 8 R weight CTAs, NDX = ctas - NDW input CTAs")
 p.add_argument("--ctas", type=int, default=132)
 p.add_argument("--cubin", default="")
@@ -39,6 +39,9 @@ p.add_argument("--eps", type=float, default=1e-5)
 p.add_argument("--engine", action="store_true", help="also run and time the engine's backward on the same saved tensors")
 p.add_argument("--save", default="")
 a = p.parse_args()
+D, H, ROWS = a.width, 4 * a.width, 128
+SLICES = H // 64
+NPART = 3 if D == 128 else 4                              # the D = 64 kernel keeps dWs^T as two row-half partial sums
 
 NDW, NCTA = SLICES * a.dw_repl, a.ctas
 NDX = NCTA - NDW
@@ -95,18 +98,18 @@ print(f"{cubin.name}: regs {k.regs} lmem {k.lmem} smem {SMEM} | grid {NCTA}x256 
 
 tm = lambda t, dims, stride, box: drv.TensorMap(t, dims=dims, stride_bytes=stride, box=box)
 maps = (tm(dy, [D, M], D * 2, [64, 64]), tm(xn, [D, M], D * 2, [64, 64]), tm(x, [D, M], D * 2, [64, 64]),
-        tm(ws, [H, D], H * 2, [64, 128]), tm(wa, [D, H], D * 2, [64, 64]), tm(wb, [D, H], D * 2, [64, 64]))
+        tm(ws, [H, D], H * 2, [64, D]), tm(wa, [D, H], D * 2, [64, 64]), tm(wb, [D, H], D * 2, [64, 64]))
 gamma_f = gb.float().contiguous()
 dx_k = torch.empty_like(x)
 dgamma_k, dbeta_k = torch.zeros(D, device=dev), torch.zeros(D, device=dev)
-partw = torch.empty(NDW * 3 * 64 * D, device=dev, dtype=torch.float32)
-dgbw = torch.empty(NDX * 8 * 256, device=dev, dtype=torch.float32)
+partw = torch.empty(NDW * NPART * 64 * D, device=dev, dtype=torch.float32)
+dgbw = torch.empty(NDX * 8 * 2 * D, device=dev, dtype=torch.float32)
 dWa_k, dWb_k, dWs_k = torch.empty_like(wa), torch.empty_like(wb), torch.empty_like(ws)
 
 
 def fused():
     k((NCTA, 1, 1), (256, 1, 1), *maps, rstd, c1, gamma_f, dx_k, dgamma_k, dbeta_k, partw, dgbw, int(M), int(tiles))
-    kr(((3 * SLICES * 64 * D + 256 + 255) // 256, 1, 1), (256, 1, 1), partw, dWa_k, dWb_k, dWs_k, dgbw, dgamma_k, dbeta_k)
+    kr(((3 * SLICES * 64 * D + 2 * D + 255) // 256, 1, 1), (256, 1, 1), partw, dWa_k, dWb_k, dWs_k, dgbw, dgamma_k, dbeta_k)
     return dx_k, dgamma_k, dbeta_k, dWa_k, dWb_k, dWs_k
 
 

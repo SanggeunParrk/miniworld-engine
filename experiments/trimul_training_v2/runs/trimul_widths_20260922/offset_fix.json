@@ -1,0 +1,11 @@
+{
+  "source": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py",
+  "source_sha256": "229846a3c021451cb0d24f400a640b807d47afc4d2ee16796139611fc13b2840",
+  "change": "cast rk to int64 before k*fs1",
+  "example": {
+    "M": 589824,
+    "KP": 4096,
+    "max_column_offset": 2415329280,
+    "int32_max": 2147483647
+  }
+}

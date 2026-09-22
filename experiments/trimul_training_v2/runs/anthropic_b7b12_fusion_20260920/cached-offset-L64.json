@@ -1,0 +1,14 @@
+{
+  "front_cached_off_r32_224": {
+    "status": "build_or_launch_rejection",
+    "reason": "Spill regression, refusing GPU execution: /home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/3c355e20bd2e75ebb9f9ac89a860ddd1928d6b3d083585b858b43b7b40b6d8b5.ptxas.log"
+  },
+  "front_cached_off_r40_216": {
+    "status": "build_or_launch_rejection",
+    "reason": "Spill regression, refusing GPU execution: /home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/a68470f832b98b8b196d113fa22ceffe4c3200bfeb99068b6e155fa1039db111.ptxas.log"
+  },
+  "front_cached_off_r24_232": {
+    "status": "build_or_launch_rejection",
+    "reason": "Spill regression, refusing GPU execution: /home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/c7976f4da1a541e4e48d410d5b8ec02e6879a1fa388d7a5a2b8d8dfdcebff9f2.ptxas.log"
+  }
+}

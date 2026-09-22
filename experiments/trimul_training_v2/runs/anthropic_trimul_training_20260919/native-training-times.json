@@ -1,0 +1,162 @@
+[
+  {
+    "N": 384,
+    "direction": "outgoing",
+    "C": 128,
+    "H": 128,
+    "B": 1,
+    "dropout": 0.25,
+    "timing": "CUDA Graph replay, no optimizer/RNG",
+    "accuracy_relative_l2": {
+      "output": 0.00038736560964025557,
+      "input": 0.002751636551693082,
+      "ln_in_w": 0.0016882214695215225,
+      "ln_in_b": 0.0006882640300318599,
+      "w_ag": 0.0012772473273798823,
+      "w_ap": 0.0012700986117124557,
+      "w_bg": 0.0013125473633408546,
+      "w_bp": 0.0012419966515153646,
+      "ln_out_w": 0.00014761611237190664,
+      "ln_out_b": 0.0,
+      "w_o": 0.0009939363226294518,
+      "w_og": 0.0008997116237878799
+    },
+    "times": {
+      "original_native_update_cached_weights": {
+        "median_us": 154.84799444675446,
+        "min_us": 152.73599326610565,
+        "max_us": 155.83999454975128,
+        "peak_allocated_GiB": 0.3057737350463867
+      },
+      "native_training_forward_with_live_pack_dropout_residual": {
+        "median_us": 257.53599405288696,
+        "min_us": 256.3199996948242,
+        "max_us": 259.2320144176483,
+        "peak_allocated_GiB": 0.3720579147338867
+      },
+      "native_training_forward_backward_reference_bwd": {
+        "median_us": 8837.408065795898,
+        "min_us": 8827.199935913086,
+        "max_us": 8842.399597167969,
+        "peak_allocated_GiB": 1.5609636306762695
+      }
+    }
+  },
+  {
+    "N": 384,
+    "direction": "bidirectional",
+    "C": 128,
+    "H": 256,
+    "B": 1,
+    "dropout": 0.25,
+    "timing": "CUDA Graph replay, no optimizer/RNG",
+    "accuracy_relative_l2": {
+      "output": 0.0004485007666517049,
+      "input": 0.0028056937735527754,
+      "ln_in_w": 0.0016499478369951248,
+      "ln_in_b": 0.0008045809809118509,
+      "w_ag": 0.0014036172069609165,
+      "w_ap": 0.0013082976220175624,
+      "w_bg": 0.0013491110876202583,
+      "w_bp": 0.0012036688858643174,
+      "ln_out_w": 0.00018014400848187506,
+      "ln_out_b": 0.0,
+      "w_o": 0.0008507558959536254,
+      "w_og": 0.0009375839726999402
+    },
+    "times": {
+      "native_training_forward_with_live_pack_dropout_residual": {
+        "median_us": 386.24000549316406,
+        "min_us": 384.6080005168915,
+        "max_us": 387.32799887657166,
+        "peak_allocated_GiB": 0.5714302062988281
+      },
+      "native_training_forward_backward_reference_bwd": {
+        "median_us": 13953.503608703613,
+        "min_us": 13939.807891845703,
+        "max_us": 13964.544296264648,
+        "peak_allocated_GiB": 2.4988927841186523
+      }
+    }
+  },
+  {
+    "N": 768,
+    "direction": "outgoing",
+    "C": 128,
+    "H": 128,
+    "B": 1,
+    "dropout": 0.25,
+    "timing": "CUDA Graph replay, no optimizer/RNG",
+    "accuracy_relative_l2": {
+      "output": 0.0004561815585475415,
+      "input": 0.00287134712561965,
+      "ln_in_w": 0.0017501474358141422,
+      "ln_in_b": 0.0007573158945888281,
+      "w_ag": 0.0014470862224698067,
+      "w_ap": 0.001425974303856492,
+      "w_bg": 0.0014958849642425776,
+      "w_bp": 0.0014138849219307303,
+      "ln_out_w": 0.00021561227913480252,
+      "ln_out_b": 0.0,
+      "w_o": 0.0010077490005642176,
+      "w_og": 0.0009134833235293627
+    },
+    "times": {
+      "original_native_update_cached_weights": {
+        "median_us": 602.5919914245605,
+        "min_us": 560.096025466919,
+        "max_us": 605.6640148162842,
+        "peak_allocated_GiB": 1.1594877243041992
+      },
+      "native_training_forward_with_live_pack_dropout_residual": {
+        "median_us": 914.7840142250061,
+        "min_us": 909.824013710022,
+        "max_us": 919.5200204849243,
+        "peak_allocated_GiB": 1.3312406539916992
+      },
+      "native_training_forward_backward_reference_bwd": {
+        "median_us": 50803.16925048828,
+        "min_us": 50790.81726074219,
+        "max_us": 50812.73651123047,
+        "peak_allocated_GiB": 5.898442268371582
+      }
+    }
+  },
+  {
+    "N": 768,
+    "direction": "bidirectional",
+    "C": 128,
+    "H": 256,
+    "B": 1,
+    "dropout": 0.25,
+    "timing": "CUDA Graph replay, no optimizer/RNG",
+    "accuracy_relative_l2": {
+      "output": 0.0005173268727958202,
+      "input": 0.0028923277277499437,
+      "ln_in_w": 0.0018756553763523698,
+      "ln_in_b": 0.0006106679211370647,
+      "w_ag": 0.0014714468270540237,
+      "w_ap": 0.0013879898469895124,
+      "w_bg": 0.0014874289045110345,
+      "w_bp": 0.0014108866453170776,
+      "ln_out_w": 0.0001752634852891788,
+      "ln_out_b": 0.0,
+      "w_o": 0.0009767162846401334,
+      "w_og": 0.00099371955730021
+    },
+    "times": {
+      "native_training_forward_with_live_pack_dropout_residual": {
+        "median_us": 1420.032024383545,
+        "min_us": 1414.6560430526733,
+        "max_us": 1500.991940498352,
+        "peak_allocated_GiB": 1.8470191955566406
+      },
+      "native_training_forward_backward_reference_bwd": {
+        "median_us": 89457.50427246094,
+        "min_us": 89417.44232177734,
+        "max_us": 89510.94055175781,
+        "peak_allocated_GiB": 9.367621421813965
+      }
+    }
+  }
+]

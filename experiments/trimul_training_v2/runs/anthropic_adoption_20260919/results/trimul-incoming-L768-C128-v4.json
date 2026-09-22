@@ -1,0 +1,90 @@
+{
+  "family": "trimul",
+  "length": 768,
+  "width": 128,
+  "direction": "incoming",
+  "row": "v4",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/trimul-incoming-L768-C128-v4.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "v4",
+    "word": "v4",
+    "cell": "9.0|bf16|C128|H128|N<=800|in|fwd",
+    "size_measured": false,
+    "stack": "H100:2.10.0+cu128/3.6.0/cueq0.10.0",
+    "cls": "tol(maxabs=0.0156;relrms=0.000169)",
+    "exact_vs": null,
+    "backward": false,
+    "capture_safe": true,
+    "x_stock": 1.435,
+    "fallback": "cueq",
+    "reason": "column=sibling:H100:2.10.0+cu128/3.6.0/cueq0.10.0; row word",
+    "config": {
+      "k1": {
+        "impl": "tma",
+        "BM": 128,
+        "BN": 32,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "k3": {
+        "BM": 64,
+        "BN": 64,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "source": "kit table fpf_trimul_v4_cells.json row 9.0|3.6 (CERTIFIED_OP (v4.0.4 tma cell; torch 2.11 / triton 3.6.0))",
+      "package_table_would_launch": {
+        "k1": {
+          "impl": "tma2",
+          "BM": 128,
+          "BN": 32,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "k3": {
+          "impl": "tma",
+          "BM": 64,
+          "BN": 64,
+          "num_warps": 4,
+          "num_stages": 1
+        }
+      }
+    }
+  },
+  "first_call_s": 1.9388761520385742,
+  "error": {
+    "rel_rms": 0.002585367765277624,
+    "max_abs": 0.032525062561035156,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.006129900924861431,
+    "max_abs": 0.032525062561035156,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.002585367765277624,
+    "max_abs": 0.032525062561035156,
+    "finite": true
+  },
+  "ms": 0.8070207977294922,
+  "samples_ms": [
+    0.8070207977294922,
+    0.8004761505126953,
+    0.8010041809082031,
+    0.8196006774902344,
+    0.8210591888427734
+  ],
+  "status": "passed"
+}

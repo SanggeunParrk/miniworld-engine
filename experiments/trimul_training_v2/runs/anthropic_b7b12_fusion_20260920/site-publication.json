@@ -1,0 +1,74 @@
+{
+  "version": {
+    "id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_b34034ce69e881918d0d1e3ed025afe1",
+    "version_number": 22,
+    "source": {
+      "commit_sha": "3f62a40addbb04d8a762b6f83b84cf3770f8940f"
+    }
+  },
+  "deployment": {
+    "id": "appgdep_6aaf996849f08191b74d3904b4f5fa30",
+    "status": "succeeded",
+    "url": "https://miniworld-kernel-status.psk6950.chatgpt.site",
+    "updated_at": "2026-09-20T08:29:42.523092+00:00"
+  },
+  "source_checkout": "runs/anthropic_b1b4_pipeline_20260919/site-visuals",
+  "published_scope": "HTML summary and SVG wiring only",
+  "source_and_raw_reports": "Local runs/anthropic_b7b12_fusion_20260920",
+  "gpu_allocation": {
+    "job_id": 13329,
+    "released": true,
+    "node": "node02",
+    "note": "Historical allocation; optimization continues on a new node02 allocation."
+  },
+  "other_jobs_verified_running": [
+    {
+      "id": 13330,
+      "name": "b1b4-claude"
+    },
+    {
+      "id": 13228,
+      "name": "mw-v120-medium-1a"
+    }
+  ],
+  "production_engine_dispatch_changed": false,
+  "previous_version": {
+    "id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_d0775070e4a8819199b403145623f825",
+    "version_number": 21,
+    "source": {
+      "commit_sha": "faa16f57083d015757ea9a5665312c221f5d558b"
+    }
+  },
+  "project_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0",
+  "version_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_5ba2f88b966881919b527d5831bb964e",
+  "version_number": 25,
+  "commit_sha": "6ee97d5a9f836695758ea3687e32701fad011e39",
+  "deployment_id": "appgdep_6aafc421432c8191af0f6b8b10f9c7b9",
+  "status": "succeeded",
+  "updated_at": "2026-09-20T11:31:58.935537+00:00",
+  "archive": "site-v25.tar.gz",
+  "note": "Only B7-B12 HTML section updated. Selected sources and production dispatch unchanged. Owner-private access preserved.",
+  "version24": {
+    "source_sha": "db80861355d913052b452a2a56977b27f36f2aff",
+    "version_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_3a016cb90a70819193127111844e754e",
+    "deployment_id": "appgdep_6aafb5d461f88191b7748605c43a6f70",
+    "status": "succeeded",
+    "updated_at": "2026-09-20T10:30:58.909793+00:00",
+    "scope": "B7-B12 full forward+backward timing and L2 fabric breakdown only"
+  },
+  "engine_publication": {
+    "repository": "https://github.com/SanggeunParrk/miniworld-engine",
+    "branch": "main",
+    "source_commit": "3f1c7a77a4af1a107257f87c24645255c294abb2",
+    "profile_commit": "789665af9b8a90a8d9bf8bf6600fdcc2cfde178c",
+    "default_dispatch_changed": false
+  },
+  "version25": {
+    "source_sha": "6ee97d5a9f836695758ea3687e32701fad011e39",
+    "version_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_5ba2f88b966881919b527d5831bb964e",
+    "deployment_id": "appgdep_6aafc421432c8191af0f6b8b10f9c7b9",
+    "status": "succeeded",
+    "updated_at": "2026-09-20T11:31:58.935537+00:00",
+    "scope": "B7-B12 experimental reuse/multicast/lookahead comparison table only"
+  }
+}

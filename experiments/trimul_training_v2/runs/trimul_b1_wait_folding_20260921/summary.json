@@ -1,0 +1,225 @@
+{
+  "baseline": "v50 trimul_b1_epilogue_fixed_20260921, paired node01",
+  "rows": [
+    [
+      "384",
+      "\uc9c1\uc804 v50",
+      "0.2924",
+      "0.1904",
+      "0.9012",
+      "1.1883"
+    ],
+    [
+      "384",
+      "\ub300\uae30 \ucd95\uc18c",
+      "0.2919",
+      "0.1885",
+      "0.8992",
+      "1.1857"
+    ],
+    [
+      "768",
+      "\uc9c1\uc804 v50",
+      "1.1665",
+      "0.6467",
+      "3.5883",
+      "4.7890"
+    ],
+    [
+      "768",
+      "\ub300\uae30 \ucd95\uc18c",
+      "1.1699",
+      "0.6359",
+      "3.5766",
+      "4.7740"
+    ]
+  ],
+  "latency_reduction_percent": {
+    "384": {
+      "forward": 0.15321922958411172,
+      "b1": 1.0250338917069501,
+      "backward": 0.2272436415729051,
+      "forward_backward": 0.2167789995331626
+    },
+    "768": {
+      "forward": -0.28803984925109827,
+      "b1": 1.672477400121708,
+      "backward": 0.32684244129264073,
+      "forward_backward": 0.31404379288194617
+    }
+  },
+  "roofline": [
+    {
+      "L": 384,
+      "ncu_us": 188.768,
+      "dram_peak_pct": 61.194157,
+      "tensor_peak_pct": 21.366675,
+      "traffic_bytes": 387130880.0,
+      "measured_traffic_roofline_pct": 61.21877474806,
+      "ideal_roofline_pct": 41.97220373804819
+    },
+    {
+      "L": 768,
+      "ncu_us": 624.32,
+      "dram_peak_pct": 67.378677,
+      "tensor_peak_pct": 25.285108,
+      "traffic_bytes": 1410080256.0,
+      "measured_traffic_roofline_pct": 67.42047017602913,
+      "ideal_roofline_pct": 50.76248689917914
+    }
+  ],
+  "gate_phase_diagnostic": [
+    {
+      "L": 384,
+      "isolated_us": 37.02399879693985,
+      "ncu_us": 35.136,
+      "dram_peak_pct": 73.711609
+    },
+    {
+      "L": 768,
+      "isolated_us": 109.47199910879135,
+      "ncu_us": 109.984,
+      "dram_peak_pct": 84.995472
+    }
+  ],
+  "validation": {
+    "384": [
+      {
+        "log": "ncu-baseline-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "racecheck-L384.log",
+        "returncode": 0
+      }
+    ],
+    "768": [
+      {
+        "log": "ncu-baseline-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-baseline-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-optimized-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L768.log",
+        "returncode": 0
+      }
+    ]
+  },
+  "delayed_cta_checks": [
+    {
+      "L": 384,
+      "seed": 19,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+    },
+    {
+      "L": 384,
+      "seed": 47,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+    },
+    {
+      "L": 384,
+      "seed": 83,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+    },
+    {
+      "L": 768,
+      "seed": 19,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+    },
+    {
+      "L": 768,
+      "seed": 47,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+    },
+    {
+      "L": 768,
+      "seed": 83,
+      "bit_exact": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "replays": 20,
+      "delayed_ctas": "blockIdx % 17 == 0, 20 x nanosleep(50000ns) before Phase B plus WG1 delayed before dTri wait"
+    }
+  ],
+  "verification_complete": true,
+  "production_ready": false,
+  "sol90_reached": false,
+  "policy_unchanged": true
+}

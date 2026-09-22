@@ -1,0 +1,46 @@
+[
+  {
+    "L": 384,
+    "minimum_named_tensor_traffic_bytes": 643761664,
+    "traffic": {
+      "pre_read": 301989888,
+      "left_right_grad_read": 150994944,
+      "xn_read": 37748736,
+      "gate_grad_read": 37748736,
+      "x_read": 37748736,
+      "residual_read": 37748736,
+      "dx_write": 37748736,
+      "pair_mask_read": 294912,
+      "mean_rstd_read": 1179648,
+      "weight_read": 294912,
+      "gamma_read": 512,
+      "weight_and_ln_grad_write": 263168
+    },
+    "tensor_flops": 82141249536,
+    "copy_ceiling_lower_bound_us": 217.34019716407832,
+    "gemm_ceiling_lower_bound_us": 119.39135106976744,
+    "scope": "optimistic compulsory tensor bytes, excluding parameter partials and cache misses; diagnostic ceilings, not proof of achievable fused-kernel SoL"
+  },
+  {
+    "L": 768,
+    "minimum_named_tensor_traffic_bytes": 2573370880,
+    "traffic": {
+      "pre_read": 1207959552,
+      "left_right_grad_read": 603979776,
+      "xn_read": 150994944,
+      "gate_grad_read": 150994944,
+      "x_read": 150994944,
+      "residual_read": 150994944,
+      "dx_write": 150994944,
+      "pair_mask_read": 1179648,
+      "mean_rstd_read": 4718592,
+      "weight_read": 294912,
+      "gamma_read": 512,
+      "weight_and_ln_grad_write": 263168
+    },
+    "tensor_flops": 328564998144,
+    "copy_ceiling_lower_bound_us": 868.7950303848751,
+    "gemm_ceiling_lower_bound_us": 477.56540427906975,
+    "scope": "optimistic compulsory tensor bytes, excluding parameter partials and cache misses; diagnostic ceilings, not proof of achievable fused-kernel SoL"
+  }
+]

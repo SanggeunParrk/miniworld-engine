@@ -40,12 +40,14 @@ def _squeeze_residual_kernel(
 
 
 def _squeeze_residual_fake(h, weight, residual, shape_key):
+    """Return the residual-shaped output metadata."""
     return residual.new_empty(residual.shape)
 
 
 @opaque(fake=_squeeze_residual_fake, name="transition_squeeze_residual")
 def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor,
                      shape_key: int) -> torch.Tensor:
+    """Project the hidden state and add the residual in one Triton launch."""
     m, k = h.shape
     n = weight.shape[0]
     if weight.shape[1] != k or residual.shape != (m, n):

@@ -1,0 +1,92 @@
+[
+  {
+    "skip_restore": 1,
+    "overlap": 0,
+    "ln_mode": 2,
+    "xn_early": 1,
+    "mask_hoist": 1,
+    "dw_mask_early": 0,
+    "valid": true,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 1,
+      "slices": 2
+    },
+    "times": {
+      "baseline": 537.8559827804565,
+      "candidate": 482.83199965953827
+    },
+    "ratio": 0.8976975530950297,
+    "cubins": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_dw_mask_20260921/build/8742c48f673719772dcf7f54c2c5f0e796a18989613d806b6b44dc28aedf69da.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_dw_mask_20260921/build/d46b85f97644fb6478d76ac0b011443975a06ce28dd62309d13e92855c28b0c8.cubin"
+    ]
+  },
+  {
+    "skip_restore": 1,
+    "overlap": 0,
+    "ln_mode": 2,
+    "xn_early": 1,
+    "mask_hoist": 1,
+    "dw_mask_early": 1,
+    "valid": true,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 1,
+      "slices": 2
+    },
+    "times": {
+      "baseline": 538.4640097618103,
+      "candidate": 475.3760099411011
+    },
+    "ratio": 0.8828371094873801,
+    "cubins": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_dw_mask_20260921/build/abfb2f0b92f759173c9190f84ce3fe5ff8792851582e5f17b64d274ba4b05b5f.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_dw_mask_20260921/build/85d32bd9510ab30cc593bec505f86ce5870e591a54b1c5be81b69260aac29a8b.cubin"
+    ]
+  }
+]

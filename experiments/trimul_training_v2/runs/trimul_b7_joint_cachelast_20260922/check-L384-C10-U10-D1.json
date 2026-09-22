@@ -1,0 +1,43 @@
+{
+  "consumers": 10,
+  "reuse_dp": 1,
+  "L": 384,
+  "clusters": 10,
+  "relative_l2": [
+    1.7554966689203866e-06,
+    0.00013029869296588004,
+    0.00019169715233147144,
+    0.0001826897350838408,
+    0.00022618034563492984,
+    4.078905476490036e-06,
+    4.711984274763381e-06
+  ],
+  "bit_exact": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "limits": [
+    2e-05,
+    0.0005,
+    0.0005,
+    0.0005,
+    0.0005,
+    5e-06,
+    5e-06
+  ],
+  "valid": true,
+  "source_sha256": {
+    "/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu": "1a69052d4b50b600ae27dccdc9c005073b4ae83b2cbfeb7ebc7242869b0b2b27",
+    "/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e"
+  },
+  "compiler_log": "/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(74): warning #177-D: variable \"splitpoint\" was declared but never referenced\n   int rounds=(p.tiles-1-cid)/groups+1,splitpoint=((rounds+3)/4)*2;\n                                       ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(161): warning #177-D: variable \"j\" was declared but never referenced\n     static_for<2>([&](auto pp){constexpr int pair=decltype(pp)::value;int j=pair*2,c=q*16+2*(lane%4)+8*pair;\n                                                                           ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(189): warning #177-D: variable \"cid\" was declared but never referenced\n   int wi=threadIdx.x/128,rank=blockIdx.x%GROUP,cid=blockIdx.x/GROUP,groups=gridDim.x/GROUP;\n                                                ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(5): warning #177-D: variable \"SMEM\" was declared but never referenced\n  constexpr int THREADS=256,SMEM=114688;\n                            ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(18): warning #177-D: variable \"SG\" was declared but never referenced\n  constexpr int SG=0,LN=0,XN=32768,WGATE=49152,WDX=0,SRC_SG=16384,SRC_XN=32768;\n                ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(18): warning #177-D: variable \"XN\" was declared but never referenced\n  constexpr int SG=0,LN=0,XN=32768,WGATE=49152,WDX=0,SRC_SG=16384,SRC_XN=32768;\n                          ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(18): warning #177-D: variable \"WDX\" was declared but never referenced\n  constexpr int SG=0,LN=0,XN=32768,WGATE=49152,WDX=0,SRC_SG=16384,SRC_XN=32768;\n                                               ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(18): warning #177-D: variable \"SRC_SG\" was declared but never referenced\n  constexpr int SG=0,LN=0,XN=32768,WGATE=49152,WDX=0,SRC_SG=16384,SRC_XN=32768;\n                                                     ^\n\n/home/psk6950/MiniWorld/runs/trimul_b7_joint_cachelast_20260922/joint.cu(18): warning #177-D: variable \"SRC_XN\" was declared but never referenced\n  constexpr int SG=0,LN=0,XN=32768,WGATE=49152,WDX=0,SRC_SG=16384,SRC_XN=32768;\n                                                                  ^\n\nptxas info    : (C7519) warpgroup.arrive is injected in around line 3599 by compiler to allow use of registers in GMMA in function 'b7_joint'\nptxas info    : (C7519) warpgroup.arrive is injected in around line 3727 by compiler to allow use of registers in GMMA in function 'b7_joint'\nptxas info    : (C7519) warpgroup.arrive is injected in around line 4042 by compiler to allow use of registers in GMMA in function 'b7_joint'\nptxas info    : (C7519) warpgroup.arrive is injected in around line 4129 by compiler to allow use of registers in GMMA in function 'b7_joint'\nptxas info    : (C7519) warpgroup.arrive is injected in around line 3009 by compiler to allow use of registers in GMMA in function 'b7_joint'\nptxas info    : (C7519) warpgroup.arrive is injected in around line 3088 by compiler to allow use of registers in GMMA in function 'b7_joint'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'b7_joint' for 'sm_90a'\nptxas info    : Function properties for b7_joint\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 16 barriers, 1024 bytes smem\nptxas info    : Compile time = 427.401 ms\n",
+  "counters": [
+    0,
+    0
+  ]
+}

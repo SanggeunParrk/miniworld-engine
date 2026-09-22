@@ -1,0 +1,261 @@
+[
+  {
+    "L": 384,
+    "triton_ms": 0.17904524374460742,
+    "triton_config": "BLOCK_M1: 64, BLOCK_N: 64, BLOCK_K: 64, GROUP_M: 4, num_warps: 4, num_ctas: 1, num_stages: 3, maxnreg: None",
+    "cute": [
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.2898915174169448,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.2891028374177337,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.2954294191609421,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.29325414258380267,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.2882962342768765,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.28953813240146364,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 128,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.2908862275201917,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "BLOCK_K": 128,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.29175763853506187,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.20347756611723417,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.20023080486140837,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.20247045125942445,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 64,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.20052393160171558,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.19987905142535228,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.20853863476431944,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 128,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.19942917756111392,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "BLOCK_K": 128,
+          "GROUP_M": 4,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.20839051244058582,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "ms": 0.1806882364766581,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "ms": 0.204881744487657,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 4,
+          "num_stages": 4
+        },
+        "ms": 0.19851752781436732,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "ms": 0.18912609672546388,
+        "relative_l2": 0.0
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "BLOCK_K": 128,
+          "GROUP_M": 1,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "ms": 0.1822711832584772,
+        "relative_l2": 0.0
+      }
+    ]
+  }
+]

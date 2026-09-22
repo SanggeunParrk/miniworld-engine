@@ -1,0 +1,53 @@
+{
+  "arch": "sm_90a",
+  "cubins": {
+    "ef2_transition_cute": {
+      "file": "ef2_transition_cute.cubin",
+      "cubin_sha256": "bdcc76df49178b155741ad158911df63d42b03319110060e4778887df617b70e",
+      "bytes": 570192,
+      "source_key": "8c7536d9b578b0179292a0508d587cea8e96e372f4505b1d0ea7ec79f716d7a7",
+      "source_sha256": "1d6ea12897078d58b1414076c440c9f51abc5a2acdaa281c100b2419ea184446",
+      "source_file": "ef2_transition_cute.cu",
+      "module": "ef2_t16_transition",
+      "tag": "ef2_transition_cute transition_cute.1.0",
+      "entry": "ef2_transition",
+      "options": [
+        "--gpu-architecture=sm_90a",
+        "-std=c++17",
+        "-default-device",
+        "-DCUTE_ARCH_MMA_SM90A_ENABLED",
+        "-DCUTLASS_ARCH_MMA_SM90A_ENABLED=1"
+      ],
+      "macros": {},
+      "nvrtc": "12.8",
+      "arch": "sm_90a",
+      "compile_secs": 14.563190698623657,
+      "smem": 230512,
+      "regs_ptxas": 168,
+      "regs": 168,
+      "spill_bytes": 0,
+      "stack_bytes": 0,
+      "spill_stores": 0,
+      "spill_loads": 0,
+      "c7512": false,
+      "diagnostics": [],
+      "spill_free_required": true,
+      "ptxas_twin_sha256": "bdcc76df49178b155741ad158911df63d42b03319110060e4778887df617b70e",
+      "ptxas_source": "ptxas statistics read from a twin build with --ptxas-options=-v; every ELF section but .note.nv.tkinfo identical to the shipped cubin",
+      "local_rebuild": true,
+      "loadcheck": null
+    }
+  },
+  "build": {
+    "nvrtc": [
+      12,
+      8
+    ],
+    "headers": {
+      "cutlass_path": "/home/psk6950/ext/cutlass",
+      "CUDA_headers": "12.9",
+      "note": "local rebuild; not upstream certified object"
+    },
+    "source_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e"
+  }
+}

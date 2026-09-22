@@ -1,0 +1,18 @@
+{
+  "b1": {
+    "splits": 24,
+    "defines": {
+      "GATE_SPLITS": 36,
+      "TRAIN_L": 384,
+      "B1_DWPROJ_PIPE": 1
+    }
+  },
+  "b7": {
+    "splits": 4,
+    "defines": {
+      "SMEM_BYTES": 221184,
+      "PIPE_DW": 1,
+      "DX_RESIDENT": 1
+    }
+  }
+}

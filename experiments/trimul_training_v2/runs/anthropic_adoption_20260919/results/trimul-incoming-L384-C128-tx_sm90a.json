@@ -1,0 +1,21 @@
+{
+  "family": "trimul",
+  "length": 384,
+  "width": 128,
+  "direction": "incoming",
+  "row": "tx_sm90a",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/trimul-incoming-L384-C128-tx_sm90a.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 interleaved-with-idle rounds x 50 replays",
+  "dropout": 0,
+  "training": false,
+  "status": "failed",
+  "error_type": "Refusal",
+  "reason": "c_z=128,c_hidden=128!=256 [row tx_sm90a] -> fallback row v4"
+}

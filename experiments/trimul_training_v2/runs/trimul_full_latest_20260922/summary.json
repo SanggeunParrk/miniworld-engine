@@ -1,0 +1,96 @@
+{
+  "times_us": {
+    "full": {
+      "historical_1048": 1065.824031829834,
+      "regression_1185": 1222.2880125045776,
+      "latest_combined": 1009.8080039024353
+    },
+    "forward": {
+      "historical_1048": 294.40000653266907,
+      "regression_1185": 294.5919930934906,
+      "latest_combined": 294.3840026855469
+    },
+    "backward": {
+      "historical_1048": 767.2960162162781,
+      "regression_1185": 923.7120151519775,
+      "latest_combined": 712.6239836215973
+    },
+    "b1": {
+      "historical_1048": 188.4479969739914,
+      "regression_1185": 180.06399273872375,
+      "latest_combined": 180.4479956626892
+    },
+    "b7": {
+      "historical_1048": 406.0159921646118,
+      "regression_1185": 570.5919861793518,
+      "latest_combined": 349.7920036315918
+    }
+  },
+  "speedup_vs_historical": 1.0554719587396049,
+  "time_reduction_pct": 5.255654428360835,
+  "failures": [
+    {
+      "case": "1",
+      "model": "latest_combined",
+      "gradient": "dgamma_in",
+      "relative_l2": 8.37042443890823e-06,
+      "limit": 5e-06
+    },
+    {
+      "case": "1",
+      "model": "latest_combined",
+      "gradient": "dbeta_in",
+      "relative_l2": 6.891239536344074e-06,
+      "limit": 5e-06
+    },
+    {
+      "case": "2",
+      "model": "latest_combined",
+      "gradient": "dgamma_in",
+      "relative_l2": 9.534855962556321e-06,
+      "limit": 5e-06
+    }
+  ],
+  "telemetry": {
+    "full": {
+      "sm_mhz": 1875.0,
+      "memory_mhz": 2619.0,
+      "power_w": 691.2,
+      "power_limit_w": 700.0,
+      "temperature_c": 52.0
+    },
+    "forward": {
+      "sm_mhz": 1965.0,
+      "memory_mhz": 2619.0,
+      "power_w": 597.04,
+      "power_limit_w": 700.0,
+      "temperature_c": 54.0
+    },
+    "backward": {
+      "sm_mhz": 1875.0,
+      "memory_mhz": 2619.0,
+      "power_w": 689.885,
+      "power_limit_w": 700.0,
+      "temperature_c": 56.0
+    },
+    "b1": {
+      "sm_mhz": 1980.0,
+      "memory_mhz": 2619.0,
+      "power_w": 567.56,
+      "power_limit_w": 700.0,
+      "temperature_c": 56.0
+    },
+    "b7": {
+      "sm_mhz": 1830.0,
+      "memory_mhz": 2619.0,
+      "power_w": 689.75,
+      "power_limit_w": 700.0,
+      "temperature_c": 58.0
+    }
+  },
+  "job": "15526",
+  "latest_correctness_passed": false,
+  "latest_timing_is_diagnostic": true,
+  "production_dispatch_changed": false,
+  "current_adapter_changed": false
+}

@@ -1,0 +1,64 @@
+{
+  "family": "transition",
+  "length": 384,
+  "width": 384,
+  "direction": "outgoing",
+  "row": "v1",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/transition-outgoing-L384-C384-v1.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "v1",
+    "variant": null,
+    "cfg": null,
+    "word": "v1",
+    "cell_key": null,
+    "tier": null,
+    "ms": null,
+    "x_stock": null,
+    "cls": null,
+    "stack": null,
+    "stack_measured": null,
+    "beyond_measured": false,
+    "fallback": "torch_swiglu",
+    "words": [
+      "exact_class_given_the_callers_ln_output"
+    ],
+    "backward": false,
+    "capture_safe": true
+  },
+  "first_call_s": 2.4011471271514893,
+  "error": {
+    "rel_rms": 0.002963288454338908,
+    "max_abs": 0.030614852905273438,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.005755467806011438,
+    "max_abs": 0.030614852905273438,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.002963288454338908,
+    "max_abs": 0.030614852905273438,
+    "finite": true
+  },
+  "ms": 5.80984130859375,
+  "samples_ms": [
+    5.851145629882812,
+    5.8102294921875,
+    5.809305419921875,
+    5.80984130859375,
+    5.809511108398437
+  ],
+  "status": "passed"
+}

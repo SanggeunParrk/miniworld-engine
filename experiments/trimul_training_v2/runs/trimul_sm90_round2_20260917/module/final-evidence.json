@@ -1,0 +1,70 @@
+{
+  "baseline_commit": "0f2d455b",
+  "commit": "8c7d8b39f0b44b9016725855ca880ccc8b167fa3",
+  "source_sha256": {
+    "src/miniworld_engine/kernels/trimul_inproj/cute/front_single_warpgroup.py": "dbfef2415dfe516a0c32ac20e402d0ed07b12df7aa20c0c22033b318c95c8f16",
+    "src/miniworld_engine/kernels/trimul_inproj/cute/parity_front.py": "41448533f82a2346f0b8962532fcf6346f167ff4acccc4976c30c585968716e2",
+    "src/miniworld_engine/kernels/trimul_inproj/cute/parity_f567.py": "e37cea60c902af0fd9beae2eeca75a07718a08142da4be1dbc05e051e0cdd550",
+    "src/miniworld_engine/kernels/trimul_inproj/cute/parity_dual_bwd.py": "9a0586e65a5da41d3f2d913dbf3d566af203457387659cb625e1f282cea9dfe4"
+  },
+  "performance_scope": [
+    384,
+    768
+  ],
+  "whole_module": {
+    "384": {
+      "ms": {
+        "triton": 1.6083840131759644,
+        "front": 1.5767599940299988,
+        "f567": 1.5980640053749084,
+        "dual_bwd": 1.6021279692649841,
+        "all": 1.5574720203876495
+      },
+      "speedup_vs_triton": {
+        "triton": 1.0,
+        "front": 1.0200563302377672,
+        "f567": 1.006457818814732,
+        "dual_bwd": 1.0039048340900323,
+        "all": 1.0326888651108115
+      },
+      "artifact": "benchmark-L384.json"
+    },
+    "768": {
+      "ms": {
+        "triton": 6.281248092651367,
+        "front": 6.185567855834961,
+        "f567": 6.237663984298706,
+        "dual_bwd": 6.266543865203857,
+        "all": 6.106903910636902
+      },
+      "speedup_vs_triton": {
+        "triton": 1.0,
+        "front": 1.015468302837572,
+        "f567": 1.0069872485055895,
+        "dual_bwd": 1.0023464652548206,
+        "all": 1.0285487023483038
+      },
+      "artifact": "benchmark-L768.json"
+    }
+  },
+  "validation": {
+    "384": {
+      "passed": true,
+      "max_relative_l2": 7.849140502003138e-07,
+      "artifact": "validation-L384.json"
+    },
+    "768": {
+      "passed": true,
+      "max_relative_l2": 1.4146124840408447e-06,
+      "artifact": "validation-L768.json"
+    }
+  },
+  "f567_evidence": "../f567/final-results.json",
+  "f567_selected_sanitizer_cases": 35,
+  "sanitizer_errors": 0,
+  "native_cache_complete": false,
+  "whole_module_target_met": false,
+  "f567_l768_target": "borderline; not robustly above1.15x",
+  "root_cutlass_dumps_deleted": 66,
+  "production_f567_regressions_passed": 35
+}

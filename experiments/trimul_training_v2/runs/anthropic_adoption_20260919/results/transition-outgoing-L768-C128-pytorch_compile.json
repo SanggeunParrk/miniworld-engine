@@ -1,0 +1,44 @@
+{
+  "family": "transition",
+  "length": 768,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "pytorch_compile",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/transition-outgoing-L768-C128-pytorch_compile.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 6.602191686630249,
+  "error": {
+    "rel_rms": 0.002853012178093195,
+    "max_abs": 0.03191852569580078,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.005462833680212498,
+    "max_abs": 0.03191852569580078,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.002853012178093195,
+    "max_abs": 0.03191852569580078,
+    "finite": true
+  },
+  "ms": 1.652120361328125,
+  "samples_ms": [
+    1.652120361328125,
+    1.6524966430664063,
+    1.652309112548828,
+    1.6518663024902345,
+    1.6519468688964845
+  ],
+  "status": "passed"
+}

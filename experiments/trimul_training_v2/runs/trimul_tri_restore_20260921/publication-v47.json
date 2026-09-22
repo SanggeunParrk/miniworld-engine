@@ -1,0 +1,33 @@
+{
+  "version": {
+    "id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_80874d0f38188191ba249fe2fa134bb4",
+    "project_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0",
+    "version_number": 47,
+    "source": {
+      "commit_sha": "195fac39fcd8d029788e397ccc2f52295c3872bc"
+    },
+    "archive_storage": {
+      "archive_format": "tar",
+      "sediment_file_id": "file_000000005e4c820797a674fe11d828e8",
+      "content_hash": "sha256:ff607b97780c223bd36c5d97d6790d21c73f423d9a134294b1d48951bf59dc21",
+      "size_bytes": 17879040,
+      "file_count": 143
+    },
+    "screenshot_url": null,
+    "deployment_id": null
+  },
+  "deployment": {
+    "id": "appgdep_6ab0b3a965d881918eab113c174bbf94",
+    "project_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0",
+    "title": "MiniWorld 커널 개발 현황",
+    "version_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_80874d0f38188191ba249fe2fa134bb4",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://miniworld-kernel-status.psk6950.chatgpt.site",
+    "screenshot_asset_pointer": null,
+    "provider_deployment_id": "site---6aadfb72b1008191ad841b5514b3a0e0",
+    "failure_message": null,
+    "env_set_revision": 0,
+    "updated_at": "2026-09-21T04:34:00.918052+00:00"
+  }
+}

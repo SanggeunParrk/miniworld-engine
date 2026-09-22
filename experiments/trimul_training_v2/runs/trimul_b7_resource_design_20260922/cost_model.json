@@ -1,0 +1,41 @@
+{
+  "status": "design_only_not_benchmarked",
+  "scope": "L384 bidirectional B7-B12 single launch",
+  "selected_source_sha256": {
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ring_cluster_schedule_20260922/joint.cu": "12b86175bee5d367cafe844823ab6ded9ae7153e59124cc939a804826d3cb767",
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ring_cluster_schedule_20260922/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e"
+  },
+  "row_tiles": 2304,
+  "paired_row_tiles_in_10_groups": 1154,
+  "traffic_kind": "logical payload, not measured HBM or L2 bytes",
+  "traffic": [
+    {
+      "name": "source x_n 읽기",
+      "current_bytes": 603979776,
+      "proposed_bytes": 603979776
+    },
+    {
+      "name": "dp/dg ring 쓰기+읽기",
+      "current_bytes": 603979776,
+      "proposed_bytes": 603979776
+    },
+    {
+      "name": "dX 주 가중치 읽기",
+      "current_bytes": 603979776,
+      "proposed_bytes": 302514176
+    },
+    {
+      "name": "output-gate 가중치 읽기",
+      "current_bytes": 75497472,
+      "proposed_bytes": 37814272
+    },
+    {
+      "name": "dW partial 쓰기+읽기",
+      "current_bytes": 10485760,
+      "proposed_bytes": 10485760
+    }
+  ],
+  "register_budget_per_cta": 30720,
+  "resource_budget_verified_by_compiler": false,
+  "new_gpu_measurements": false
+}

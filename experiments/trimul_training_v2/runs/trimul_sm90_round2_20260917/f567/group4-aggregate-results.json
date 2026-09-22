@@ -1,0 +1,72 @@
+{
+  "384": {
+    "cute_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "triton_config": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "medians_ms": {
+      "cute": 0.09335578199018511,
+      "dropout_only": 0.09348265728219282,
+      "cute_previous": 0.09525843137048286,
+      "triton_bm128": 0.10575033912259943,
+      "triton_old": 0.10724996187871554,
+      "triton_m64": 0.10731446881397051,
+      "triton_matched": 0.11407630583819221
+    },
+    "speedup": 1.132766893149879,
+    "source_evidence": "prefetch-final-results.json",
+    "allocation_seeds": [
+      123,
+      345,
+      678
+    ],
+    "rotated_rounds_per_seed": 5
+  },
+  "768": {
+    "cute_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "triton_config": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "medians_ms": {
+      "cute": 0.3566028911105836,
+      "dropout_only": 0.3605781640420413,
+      "cute_previous": 0.36226295643607104,
+      "triton_bm128": 0.4083393432809122,
+      "triton_old": 0.4186188861822626,
+      "triton_m64": 0.41750743250693045,
+      "triton_matched": 0.44537005088698695
+    },
+    "speedup": 1.145081415378332,
+    "source_evidence": "prefetch-final-results.json",
+    "allocation_seeds": [
+      123,
+      345,
+      678
+    ],
+    "rotated_rounds_per_seed": 5
+  }
+}

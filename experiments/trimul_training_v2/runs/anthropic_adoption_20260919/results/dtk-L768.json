@@ -1,0 +1,44 @@
+{
+  "family": "dtk",
+  "length": 768,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "carried",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/dtk-L768.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 0.37668323516845703,
+  "error": {
+    "rel_rms": 2.370895479941737e-08,
+    "max_abs": 9.5367431640625e-07,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 5.429876992479876e-08,
+    "max_abs": 9.5367431640625e-07,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 2.370895479941737e-08,
+    "max_abs": 9.5367431640625e-07,
+    "finite": true
+  },
+  "ms": 0.010140160322189331,
+  "samples_ms": [
+    0.010417280197143554,
+    0.010140160322189331,
+    0.01011839985847473,
+    0.010138239860534668,
+    0.01014847993850708
+  ],
+  "status": "passed"
+}

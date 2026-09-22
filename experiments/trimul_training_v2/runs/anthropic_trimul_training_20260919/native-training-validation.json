@@ -1,0 +1,11 @@
+{
+  "gpu_test_command": "python -m pytest tests/numerics/test_trimul_anthropic_native_training_gpu.py -q",
+  "gpu_test_result": "14 passed in 8.99s",
+  "node": "node02",
+  "slurm_job": 13312,
+  "job_released": true,
+  "target_shape_gradient_checks": 4,
+  "native_forward_trace_count": 4,
+  "syntax_check": "Python 3.10 environment py_compile passed",
+  "diff_check": "passed"
+}

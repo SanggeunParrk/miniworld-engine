@@ -1,0 +1,134 @@
+[
+  {
+    "h": 128,
+    "config": [
+      2,
+      64,
+      8,
+      2,
+      232,
+      1
+    ],
+    "config_count": 60,
+    "cubin": "/home/psk6950/.cache/miniworld-engine/anthropic-trimul-training/da1c7d5155408623ff871823ac2c1ddc44ec46b4fc6c493dd60b9d9e127f2fbc.cubin",
+    "sha256": "6cd87025e30abbb18387ccf8561b0972244b20ad1e7c24a8e519aa3386797cd7",
+    "opcodes_static": {
+      "UTMALDG": 10,
+      "UTMASTG": 5,
+      "HGMMA": 48,
+      "LDL": 0,
+      "STL": 0
+    },
+    "attrs": {
+      "regs": 168,
+      "local_bytes": 0,
+      "static_smem": 0,
+      "max_threads": 384,
+      "binary_version": 90,
+      "max_dynamic_smem": 182528
+    },
+    "manifest": {
+      "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+      "sources": {
+        "anthropic_k3_training.cu": "7b5e3ddae2e569ae8d31199ae1c4a658f9877f75ac3c94ed170d3a78f9dac824",
+        "csrc/tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+        "csrc/tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+        "csrc/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b"
+      },
+      "flags": [
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DMWK3_CZ=128",
+        "-DMWK3_CH=128",
+        "-DMWK3_BI=2",
+        "-DMWK3_BJ=64",
+        "-DMWK3_NSLOT=8",
+        "-DMWK3_NACC=2",
+        "-DMWK3_REGS=232",
+        "-DMWK3_LNSERIAL=1"
+      ],
+      "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Apr__9_19:24:57_PDT_2025\nCuda compilation tools, release 12.9, V12.9.41\nBuild cuda_12.9.r12.9/compiler.35813241_0\n",
+      "config": [
+        2,
+        64,
+        8,
+        2,
+        232,
+        1
+      ],
+      "sha256": "6cd87025e30abbb18387ccf8561b0972244b20ad1e7c24a8e519aa3386797cd7"
+    },
+    "ptxas": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/kernels/trimul_inproj/cuda/anthropic_k3_training.cu(323): warning #177-D: variable \"off\" was declared but never referenced\n              const size_t off = ((size_t)iw * p.N + jr) * CZ + c;\n                           ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/kernels/trimul_inproj/cuda/anthropic_k3_training.cu(28): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nptxas info    : (C7517) warpgroup.wait is injected in around line 5572 by compiler to allow use of registers defined by GMMA in function 'mw_k3_train'\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'mw_k3_train' for 'sm_90a'\nptxas info    : Function properties for mw_k3_train\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 1 barriers\nptxas info    : Compile time = 132.181 ms\n"
+  },
+  {
+    "h": 256,
+    "config": [
+      2,
+      64,
+      4,
+      1,
+      232,
+      1
+    ],
+    "config_count": 24,
+    "cubin": "/home/psk6950/.cache/miniworld-engine/anthropic-trimul-training/5f66ee97ba2b6e31ee0a6ecdde52f28cb70986f336b9f0e197d92c70a6e346cd.cubin",
+    "sha256": "59e25e27e50985d85d6d13f78e738b2ef2e9008b6360063611b6e4a147002780",
+    "opcodes_static": {
+      "UTMALDG": 16,
+      "UTMASTG": 7,
+      "HGMMA": 48,
+      "LDL": 0,
+      "STL": 0
+    },
+    "attrs": {
+      "regs": 168,
+      "local_bytes": 0,
+      "static_smem": 0,
+      "max_threads": 384,
+      "binary_version": 90,
+      "max_dynamic_smem": 216192
+    },
+    "manifest": {
+      "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+      "sources": {
+        "anthropic_k3_training.cu": "7b5e3ddae2e569ae8d31199ae1c4a658f9877f75ac3c94ed170d3a78f9dac824",
+        "csrc/tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+        "csrc/tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+        "csrc/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b"
+      },
+      "flags": [
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc",
+        "-DMWK3_CZ=128",
+        "-DMWK3_CH=256",
+        "-DMWK3_BI=2",
+        "-DMWK3_BJ=64",
+        "-DMWK3_NSLOT=4",
+        "-DMWK3_NACC=1",
+        "-DMWK3_REGS=232",
+        "-DMWK3_LNSERIAL=1"
+      ],
+      "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Apr__9_19:24:57_PDT_2025\nCuda compilation tools, release 12.9, V12.9.41\nBuild cuda_12.9.r12.9/compiler.35813241_0\n",
+      "config": [
+        2,
+        64,
+        4,
+        1,
+        232,
+        1
+      ],
+      "sha256": "59e25e27e50985d85d6d13f78e738b2ef2e9008b6360063611b6e4a147002780"
+    },
+    "ptxas": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/kernels/trimul_inproj/cuda/anthropic_k3_training.cu(323): warning #177-D: variable \"off\" was declared but never referenced\n              const size_t off = ((size_t)iw * p.N + jr) * CZ + c;\n                           ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/kernels/trimul_inproj/cuda/anthropic_k3_training.cu(28): warning #177-D: variable \"ESZ\" was declared but never referenced\n    constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;\n                                                                                                                        ^\n\nptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'mw_k3_train' for 'sm_90a'\nptxas info    : Function properties for mw_k3_train\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 168 registers, used 1 barriers\nptxas info    : Compile time = 163.233 ms\n"
+  }
+]

@@ -758,7 +758,8 @@ class ParityF567Sm90:
 _COMPILE_CACHE = {}
 
 
-def _fake(norm, x, wp, wg, residual, dropscale, seq_len):
+def _output_f567_sm90_fake(norm, x, wp, wg, residual, dropscale, seq_len):
+    """Return output metadata without executing GPU work."""
     return tuple(norm.new_empty((norm.shape[0], wp.shape[0])) for _ in range(3))
 
 
@@ -824,7 +825,7 @@ def output_f567_impl(norm, x, wp, wg, residual, dropscale, seq_len, config=None)
                 "F567 TMA layout must have unit inner stride and aligned outer stride"
             )
     limit = torch.cuda.get_device_properties(norm.device).shared_memory_per_block_optin
-    outputs = _fake(norm, x, wp, wg, residual, dropscale, seq_len)
+    outputs = _output_f567_sm90_fake(norm, x, wp, wg, residual, dropscale, seq_len)
     # The output buffers, metadata-only transpose, and DLPack adapters are made
     # once per invocation. Native tuning replays only the prepared launch below.
     wg_nk = wg.t()
@@ -837,7 +838,7 @@ def output_f567_impl(norm, x, wp, wg, residual, dropscale, seq_len, config=None)
 
     key_prefix = (str(norm.device), tensor_key(*tensors, extra=(seq_len,)))
 
-    def launch(candidate):
+    def launch_output_candidate(candidate):
         reason = feasibility(candidate, limit, kp, kg)
         if reason:
             raise ValueError(reason)
@@ -863,13 +864,13 @@ def output_f567_impl(norm, x, wp, wg, residual, dropscale, seq_len, config=None)
             tensors,
             extra=(seq_len, limit),
             feasibility=lambda c: feasibility(c, limit, kp, kg),
-            run=launch,
+            run=launch_output_candidate,
         )
-    launch(config)
+    launch_output_candidate(config)
     return outputs
 
 
-@opaque(fake=_fake, name="trimul_parity_f567_sm90")
+@opaque(fake=_output_f567_sm90_fake, name="trimul_parity_f567_sm90")
 def output_f567_sm90(
     norm: torch.Tensor,
     x: torch.Tensor,

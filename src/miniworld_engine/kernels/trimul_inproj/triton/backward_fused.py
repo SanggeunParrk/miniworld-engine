@@ -197,7 +197,7 @@ def _input_dual_bwd_kernel(G,F,W,V,Y,M,
     pid=tl.program_id(0).to(tl.int64);nm=tl.cdiv(M,BLOCK_M1);nn=tl.cdiv(N,BLOCK_N)
     pm,pn=tile_order(pid,nm,nn,GROUP_M)
     rows=pm*BLOCK_M1+tl.arange(0,BLOCK_M1);cols=pn*BLOCK_N+tl.arange(0,BLOCK_N)
-    rk=tl.arange(0,BLOCK_K);ag=tl.zeros((BLOCK_M1,BLOCK_N),tl.float32)
+    rk=tl.arange(0,BLOCK_K).to(tl.int64);ag=tl.zeros((BLOCK_M1,BLOCK_N),tl.float32)
     for step in range(tl.cdiv(KG,BLOCK_K)):
         k=step*BLOCK_K+rk
         a=tl.load(G+rows[:,None]*gs0+k[None,:]*gs1,(rows[:,None]<M)&(k[None,:]<KG),0)

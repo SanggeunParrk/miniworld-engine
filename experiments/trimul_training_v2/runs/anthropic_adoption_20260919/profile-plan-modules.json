@@ -1,0 +1,280 @@
+[
+  {
+    "family": "triattn",
+    "length": 384,
+    "width": 128,
+    "direction": "outgoing",
+    "row": "block:triattn_native",
+    "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/triattn-block-L384.json",
+    "profile": false,
+    "module": true,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+    "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+    "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+    "engine_backend": "auto",
+    "dropout": 0,
+    "training": false,
+    "selection": {
+      "row": "block:triattn_native",
+      "surround": {
+        "impl": "fpf",
+        "prologue": {
+          "id": "r07",
+          "impl": "fpf",
+          "piece": "prologue",
+          "key": [
+            128,
+            4,
+            32
+          ],
+          "cc": "9.0",
+          "triton": "*",
+          "variant": "v3",
+          "cfg": {
+            "BI": 8,
+            "BJ": 16,
+            "num_warps": 8,
+            "num_stages": 2
+          },
+          "status": "certified",
+          "evidence": "H100 qualification runs on both stacks, torch 2.13 / triton 3.7 and torch 2.7 / triton 3.3 (served 20/20 per stack, rel_rms within the stock-bf16 class, self-det, cross-box bitwise)"
+        },
+        "epilogue": {
+          "id": "r16",
+          "impl": "fpf",
+          "piece": "epilogue",
+          "key": [
+            128,
+            4,
+            32
+          ],
+          "cc": "9.0",
+          "triton": "*",
+          "variant": "v2",
+          "cfg": {
+            "KVER": 2,
+            "BI": 16,
+            "BJ": 8,
+            "num_warps": 4,
+            "num_stages": 1,
+            "EXP": "libdevice"
+          },
+          "status": "certified",
+          "evidence": "H100 qualification runs on both stacks, torch 2.13 / triton 3.7 and torch 2.7 / triton 3.3 (served 20/20 per stack, rel_rms within the stock-bf16 class, self-det, cross-box bitwise)"
+        }
+      },
+      "residual": "out-of-place engine add"
+    },
+    "first_call_s": 4.303976058959961,
+    "error": {
+      "rel_rms": 0.0017963922582566738,
+      "max_abs": 0.017403602600097656,
+      "finite": true
+    },
+    "update_error": {
+      "rel_rms": 0.01880749501287937,
+      "max_abs": 0.017403602600097656,
+      "finite": true
+    },
+    "graph_error": {
+      "rel_rms": 0.0017963922582566738,
+      "max_abs": 0.017403602600097656,
+      "finite": true
+    },
+    "ms": 0.3955961608886719,
+    "samples_ms": [
+      0.3952454376220703,
+      0.3957619094848633,
+      0.39431808471679686,
+      0.3958585739135742,
+      0.3955961608886719
+    ],
+    "status": "passed"
+  },
+  {
+    "family": "triattn",
+    "length": 384,
+    "width": 128,
+    "direction": "outgoing",
+    "row": "engine_triton",
+    "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/triattn-module-L384-C128-engine_triton.json",
+    "profile": false,
+    "module": true,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+    "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+    "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+    "engine_backend": "triton",
+    "dropout": 0,
+    "training": false,
+    "first_call_s": 4.662867069244385,
+    "error": {
+      "rel_rms": 0.0017521026311442256,
+      "max_abs": 0.016977310180664062,
+      "finite": true
+    },
+    "update_error": {
+      "rel_rms": 0.01834380067884922,
+      "max_abs": 0.016977310180664062,
+      "finite": true
+    },
+    "graph_error": {
+      "rel_rms": 0.0017521026311442256,
+      "max_abs": 0.016977310180664062,
+      "finite": true
+    },
+    "ms": 0.5069011306762695,
+    "samples_ms": [
+      0.5104460906982422,
+      0.5083974456787109,
+      0.5069011306762695,
+      0.505656967163086,
+      0.5053292846679688
+    ],
+    "status": "passed"
+  },
+  {
+    "family": "triattn",
+    "length": 768,
+    "width": 128,
+    "direction": "outgoing",
+    "row": "block:triattn_native",
+    "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/triattn-block-L768.json",
+    "profile": false,
+    "module": true,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+    "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+    "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+    "engine_backend": "auto",
+    "dropout": 0,
+    "training": false,
+    "selection": {
+      "row": "block:triattn_native",
+      "surround": {
+        "impl": "fpf",
+        "prologue": {
+          "id": "r07",
+          "impl": "fpf",
+          "piece": "prologue",
+          "key": [
+            128,
+            4,
+            32
+          ],
+          "cc": "9.0",
+          "triton": "*",
+          "variant": "v3",
+          "cfg": {
+            "BI": 8,
+            "BJ": 16,
+            "num_warps": 8,
+            "num_stages": 2
+          },
+          "status": "certified",
+          "evidence": "H100 qualification runs on both stacks, torch 2.13 / triton 3.7 and torch 2.7 / triton 3.3 (served 20/20 per stack, rel_rms within the stock-bf16 class, self-det, cross-box bitwise)"
+        },
+        "epilogue": {
+          "id": "r16",
+          "impl": "fpf",
+          "piece": "epilogue",
+          "key": [
+            128,
+            4,
+            32
+          ],
+          "cc": "9.0",
+          "triton": "*",
+          "variant": "v2",
+          "cfg": {
+            "KVER": 2,
+            "BI": 16,
+            "BJ": 8,
+            "num_warps": 4,
+            "num_stages": 1,
+            "EXP": "libdevice"
+          },
+          "status": "certified",
+          "evidence": "H100 qualification runs on both stacks, torch 2.13 / triton 3.7 and torch 2.7 / triton 3.3 (served 20/20 per stack, rel_rms within the stock-bf16 class, self-det, cross-box bitwise)"
+        }
+      },
+      "residual": "out-of-place engine add"
+    },
+    "first_call_s": 1.8104228973388672,
+    "error": {
+      "rel_rms": 0.001755434786900878,
+      "max_abs": 0.016991615295410156,
+      "finite": true
+    },
+    "update_error": {
+      "rel_rms": 0.021811172366142273,
+      "max_abs": 0.016991615295410156,
+      "finite": true
+    },
+    "graph_error": {
+      "rel_rms": 0.001755434786900878,
+      "max_abs": 0.016991615295410156,
+      "finite": true
+    },
+    "ms": 1.7491993713378906,
+    "samples_ms": [
+      1.74521728515625,
+      1.7326322937011718,
+      1.7508338928222655,
+      1.7491993713378906,
+      1.752508087158203
+    ],
+    "status": "passed"
+  },
+  {
+    "family": "triattn",
+    "length": 768,
+    "width": 128,
+    "direction": "outgoing",
+    "row": "engine_triton",
+    "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/triattn-module-L768-C128-engine_triton.json",
+    "profile": false,
+    "module": true,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+    "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+    "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+    "engine_backend": "triton",
+    "dropout": 0,
+    "training": false,
+    "first_call_s": 4.923920392990112,
+    "error": {
+      "rel_rms": 0.0017215907573699951,
+      "max_abs": 0.017703533172607422,
+      "finite": true
+    },
+    "update_error": {
+      "rel_rms": 0.02139066345989704,
+      "max_abs": 0.017703533172607422,
+      "finite": true
+    },
+    "graph_error": {
+      "rel_rms": 0.0017215907573699951,
+      "max_abs": 0.017703533172607422,
+      "finite": true
+    },
+    "ms": 2.5237791442871096,
+    "samples_ms": [
+      2.588254089355469,
+      2.5237791442871096,
+      2.519012451171875,
+      2.522217559814453,
+      2.5282861328125
+    ],
+    "status": "passed"
+  }
+]

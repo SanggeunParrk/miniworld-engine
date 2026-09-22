@@ -1,0 +1,201 @@
+{
+  "D": 512,
+  "job": "15676",
+  "source": "Anthropic v5 K1/K3, K1 occupancy widened; shared-memory-limited K3 uses existing Triton",
+  "results": {
+    "384": {
+      "k1": [
+        {
+          "config": [
+            1,
+            64,
+            8,
+            2,
+            1
+          ],
+          "us": 1443.1591987609863,
+          "errors": {
+            "ab": 0.0033070798963308334,
+            "xn": 1.1786808499891777e-05
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/56a4b58a96a95f964a92bfdf65620fcd4a8d3de0373f8b07a855a6b5764c613f.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    712 bytes stack frame, 744 bytes spill stores, 976 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers, 712 bytes cumulative stack size\nptxas info    : Compile time = 339.629 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            4,
+            4,
+            1
+          ],
+          "us": 1450.0736236572266,
+          "errors": {
+            "ab": 0.0033070798963308334,
+            "xn": 1.1786808499891777e-05
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/5d85a0687d074892b9bc42e1427b9baec1afe9205bf8a66942c0109240b6ea5b.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    712 bytes stack frame, 740 bytes spill stores, 964 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers, 712 bytes cumulative stack size\nptxas info    : Compile time = 325.607 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            2,
+            8,
+            1
+          ],
+          "us": 1451.3527870178223,
+          "errors": {
+            "ab": 0.0033070798963308334,
+            "xn": 1.1786808499891777e-05
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c0c58af9290e3dd1e49d74e3ceaa1756e92382f05772b6820376f465bd384652.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    704 bytes stack frame, 740 bytes spill stores, 996 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers, 704 bytes cumulative stack size\nptxas info    : Compile time = 327.966 ms\n"
+        }
+      ],
+      "k3": [],
+      "selected_k1": [
+        1,
+        64,
+        8,
+        2,
+        1
+      ],
+      "k1_us": 1443.1591987609863,
+      "k3_us": null,
+      "k3_route": "Triton fused output",
+      "relative_l2": 0.0006687818677164614,
+      "mutation_graph_eager": 0.0,
+      "times": {
+        "triton": 3823.1536865234375,
+        "native": 3370.5398559570312
+      },
+      "rounds": {
+        "triton": [
+          3747.3614501953125,
+          3793.433837890625,
+          3830.6512451171875,
+          3833.4197998046875,
+          3823.1536865234375
+        ],
+        "native": [
+          3370.5398559570312,
+          3387.6507568359375,
+          3358.1100463867188,
+          3369.2123413085938,
+          3372.94921875
+        ]
+      }
+    },
+    "768": {
+      "k1": [
+        {
+          "config": [
+            1,
+            64,
+            8,
+            2,
+            1
+          ],
+          "us": 5688.239288330078,
+          "errors": {
+            "ab": 0.0033061099238693714,
+            "xn": 1.1635469491011463e-05
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/56a4b58a96a95f964a92bfdf65620fcd4a8d3de0373f8b07a855a6b5764c613f.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    712 bytes stack frame, 744 bytes spill stores, 976 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers, 712 bytes cumulative stack size\nptxas info    : Compile time = 339.629 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            4,
+            4,
+            1
+          ],
+          "us": 5690.512847900391,
+          "errors": {
+            "ab": 0.0033061099238693714,
+            "xn": 1.1635469491011463e-05
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/5d85a0687d074892b9bc42e1427b9baec1afe9205bf8a66942c0109240b6ea5b.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    712 bytes stack frame, 740 bytes spill stores, 964 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers, 712 bytes cumulative stack size\nptxas info    : Compile time = 325.607 ms\n"
+        },
+        {
+          "config": [
+            1,
+            64,
+            2,
+            8,
+            1
+          ],
+          "us": 5971.891021728516,
+          "errors": {
+            "ab": 0.0033061099238693714,
+            "xn": 1.1635469491011463e-05
+          },
+          "cubin": "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c0c58af9290e3dd1e49d74e3ceaa1756e92382f05772b6820376f465bd384652.cubin",
+          "ptxas": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'width_k1' for 'sm_90a'\nptxas info    : Function properties for width_k1\n    704 bytes stack frame, 740 bytes spill stores, 996 bytes spill loads\nptxas info    : Used 232 registers, used 16 barriers, 704 bytes cumulative stack size\nptxas info    : Compile time = 327.966 ms\n"
+        }
+      ],
+      "k3": [],
+      "selected_k1": [
+        1,
+        64,
+        8,
+        2,
+        1
+      ],
+      "k1_us": 5688.239288330078,
+      "k3_us": null,
+      "k3_route": "Triton fused output",
+      "relative_l2": 0.0007532289600931108,
+      "mutation_graph_eager": 0.0,
+      "times": {
+        "triton": 15802.03369140625,
+        "native": 13733.39111328125
+      },
+      "rounds": {
+        "triton": [
+          15810.587158203125,
+          15800.01220703125,
+          15793.59619140625,
+          15802.03369140625,
+          15806.429443359375
+        ],
+        "native": [
+          13752.415771484375,
+          13755.965576171875,
+          13733.39111328125,
+          13725.013427734375,
+          13725.780029296875
+        ]
+      }
+    }
+  },
+  "candidates": [
+    [
+      1,
+      64,
+      8,
+      2,
+      1
+    ],
+    [
+      1,
+      64,
+      4,
+      4,
+      1
+    ],
+    [
+      1,
+      64,
+      2,
+      8,
+      1
+    ]
+  ],
+  "complete": true
+}

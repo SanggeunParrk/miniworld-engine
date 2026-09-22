@@ -41,10 +41,18 @@ def test_only_the_named_and_the_auto_option_ask_for_it(monkeypatch):
 def test_the_refusal_says_why(monkeypatch):
     assert native.refusal(BF16, 128, 128, grad=False, dropout=False) == f"{native.ENV} is not set"
     monkeypatch.setenv(native.ENV, "/nonexistent/build")
-    assert "forward-only" in native.refusal(BF16, 128, 128, grad=True, dropout=False)
-    assert "dropout" in native.refusal(BF16, 128, 128, grad=False, dropout=True)
-    assert "bf16" in native.refusal(PAIR, 128, 128, grad=False, dropout=False)
-    assert "CUDA" in native.refusal(BF16, 128, 128, grad=False, dropout=False)   # the cheap checks come first
+    reason = native.refusal(BF16, 128, 128, grad=True, dropout=False)
+    assert reason is not None
+    assert "forward-only" in reason
+    reason = native.refusal(BF16, 128, 128, grad=False, dropout=True)
+    assert reason is not None
+    assert "dropout" in reason
+    reason = native.refusal(PAIR, 128, 128, grad=False, dropout=False)
+    assert reason is not None
+    assert "bf16" in reason
+    reason = native.refusal(BF16, 128, 128, grad=False, dropout=False)
+    assert reason is not None
+    assert "CUDA" in reason
     assert not native.serves(BF16, 128, 128, grad=False, dropout=False)
 
 
@@ -78,11 +86,15 @@ def test_the_mask_element_type_follows_the_payload():
 
     mask = torch.ones(1, 8, dtype=torch.bool)
     mask[:, ::3] = False
-    assert native._pair_mask(PAIR, mask, Templated()).dtype is torch.bool
-    assert native._pair_mask(PAIR, mask, Upstream()).dtype is torch.float32
+    converted = native._pair_mask(PAIR, mask, Templated())
+    assert converted is not None
+    assert converted.dtype is torch.bool
+    converted = native._pair_mask(PAIR, mask, Upstream())
+    assert converted is not None
+    assert converted.dtype is torch.float32
     assert native._pair_mask(PAIR, None, Upstream()) is None
 
 
 def test_the_auto_option_falls_back_when_nothing_is_named():
-    out = TriangleMultiplication(128, implementation="pytorch")(PAIR)
+    out = TriangleMultiplication(128, implementation=ImplementationType.PYTORCH)(PAIR)
     assert out.shape == PAIR.shape

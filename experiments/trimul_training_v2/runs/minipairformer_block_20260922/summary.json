@@ -1,0 +1,67 @@
+{
+  "times_us": {
+    "training": {
+      "previous_triton": 2502.0480155944824,
+      "previous_h100": 2456.9599628448486,
+      "latest_candidate": 1947.3119974136353
+    },
+    "training_forward": {
+      "previous_triton": 673.9679872989655,
+      "previous_h100": 624.4800090789795,
+      "latest_candidate": 465.37598967552185
+    },
+    "inference": {
+      "previous_triton": 598.0319976806641,
+      "previous_h100": 575.4240155220032,
+      "latest_candidate": 447.2479969263077
+    }
+  },
+  "speedups": {
+    "training": {
+      "previous_triton": 1.284872695755807,
+      "previous_h100": 1.2617187005000294
+    },
+    "training_forward": {
+      "previous_triton": 1.448222517386172,
+      "previous_h100": 1.3418827419832964
+    },
+    "inference": {
+      "previous_triton": 1.3371373416775767,
+      "previous_h100": 1.2865882451717605
+    }
+  },
+  "telemetry": {
+    "training": {
+      "sm_mhz": 1905.0,
+      "memory_mhz": 2619.0,
+      "power_w": 694.8,
+      "power_limit_w": 700.0,
+      "temperature_c": 55.0
+    },
+    "training_forward": {
+      "sm_mhz": 1890.0,
+      "memory_mhz": 2619.0,
+      "power_w": 692.4000000000001,
+      "power_limit_w": 700.0,
+      "temperature_c": 59.0
+    },
+    "inference": {
+      "sm_mhz": 1875.0,
+      "memory_mhz": 2619.0,
+      "power_w": 693.15,
+      "power_limit_w": 700.0,
+      "temperature_c": 60.0
+    }
+  },
+  "latest_cross_path_max_relative_l2": {
+    "training": 0.0012524971971288323,
+    "training_forward": 0.0001862296339822933,
+    "inference": 0.0034506763331592083
+  },
+  "graph_eager_max_relative_l2": 1.1923260672119795e-06,
+  "scope": "one pair-only MiniPairformer block, L384, C128, B1",
+  "latest_training_diagnostic": true,
+  "transition_identical": true,
+  "production_dispatch_changed": false,
+  "job": "15573"
+}

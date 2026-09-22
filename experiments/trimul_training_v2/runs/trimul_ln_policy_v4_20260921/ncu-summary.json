@@ -1,0 +1,60 @@
+{
+  "384": {
+    "baseline": {
+      "time_us": 264.096,
+      "dram_read_MB": 244.359168,
+      "dram_write_MB": 141.966848,
+      "dram_pct": 43.639822,
+      "tensor_pct": 15.375448,
+      "occupancy_pct": 12.499483,
+      "registers": 255.0
+    },
+    "stats_only": {
+      "time_us": 251.168,
+      "dram_read_MB": 245.549312,
+      "dram_write_MB": 141.75872,
+      "dram_pct": 46.006727,
+      "tensor_pct": 16.414393,
+      "occupancy_pct": 12.499409,
+      "registers": 243.0
+    },
+    "xhat_fp32": {
+      "time_us": 303.456,
+      "dram_read_MB": 320.424704,
+      "dram_write_MB": 141.86496,
+      "dram_pct": 45.449258,
+      "tensor_pct": 13.441765,
+      "occupancy_pct": 12.499521,
+      "registers": 255.0
+    }
+  },
+  "768": {
+    "baseline": {
+      "time_us": 903.872,
+      "dram_read_MB": 924.0576,
+      "dram_write_MB": 481.494016,
+      "dram_pct": 46.389478,
+      "tensor_pct": 17.504824,
+      "occupancy_pct": 12.499852,
+      "registers": 255.0
+    },
+    "stats_only": {
+      "time_us": 825.792,
+      "dram_read_MB": 928.686592,
+      "dram_write_MB": 481.338112,
+      "dram_pct": 50.934791,
+      "tensor_pct": 18.982888,
+      "occupancy_pct": 12.499831,
+      "registers": 243.0
+    },
+    "xhat_fp32": {
+      "time_us": 1025.6000000000001,
+      "dram_read_MB": 1228.3390000000002,
+      "dram_write_MB": 481.75616,
+      "dram_pct": 49.740725,
+      "tensor_pct": 15.328369,
+      "occupancy_pct": 12.499874,
+      "registers": 255.0
+    }
+  }
+}

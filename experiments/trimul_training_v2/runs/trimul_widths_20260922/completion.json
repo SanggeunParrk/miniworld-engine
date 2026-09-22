@@ -1,0 +1,7 @@
+{
+  "complete": true,
+  "superseded_by": "../trimul_cuda_widths_20260923/manifest.json",
+  "previous_completion": "../trimul_cuda_widths_20260923/before-port-completion.json",
+  "cuda_training_shapes": 10,
+  "autograd_shapes": 10
+}

@@ -1,0 +1,54 @@
+{
+  "family": "triattn",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "triattn_native",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/triattn-outgoing-L384-C128-triattn_native.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "triattn_native",
+    "word": "triattn_native",
+    "cell": "9.0|bf16|D32|H4|N<=400|fwd",
+    "config": null,
+    "input_precision": null,
+    "cls": "fast",
+    "exact_vs": null,
+    "capture_safe": true,
+    "backward": false,
+    "measured": true,
+    "x_stock": 1.57,
+    "tested": true,
+    "reason": "named row; cell 9.0|bf16|D32|H4|N<=400|fwd: fast=cuda_sm90a exact=triattn_exact"
+  },
+  "first_call_s": 4.466502904891968,
+  "error": {
+    "rel_rms": 0.0023875816259533167,
+    "max_abs": 0.005713820457458496,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0023875816259533167,
+    "max_abs": 0.005713820457458496,
+    "finite": true
+  },
+  "ms": 0.1625542449951172,
+  "samples_ms": [
+    0.16338687896728515,
+    0.16318271636962892,
+    0.1625542449951172,
+    0.16251968383789062,
+    0.16242944717407226
+  ],
+  "status": "passed"
+}

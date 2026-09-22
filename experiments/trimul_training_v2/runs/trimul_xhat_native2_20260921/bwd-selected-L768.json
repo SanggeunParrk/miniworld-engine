@@ -1,0 +1,28 @@
+{
+  "scope": "b1",
+  "config": {
+    "count": 132,
+    "defines": {
+      "GATE_PHASE": 1,
+      "LOWREG": 1,
+      "STREAM_LN": 1,
+      "B1_STREAM_AFFINE_UNROLL": 8,
+      "XHAT_FP32": 1
+    }
+  },
+  "valid": true,
+  "errors": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "times": {
+    "control": 990.6559884548187,
+    "candidate": 982.0320010185242
+  },
+  "ratio": 0.9912946698583573,
+  "cubin": "/home/psk6950/MiniWorld/runs/trimul_xhat_native2_20260921/build/9a4c9f14297b8835dcfe301aed45a6af2f9bf783ed56ba74b088f3771acc43e5.cubin"
+}

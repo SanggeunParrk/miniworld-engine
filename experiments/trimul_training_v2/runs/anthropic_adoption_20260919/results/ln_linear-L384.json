@@ -1,0 +1,39 @@
+{
+  "family": "ln_linear",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "carried",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/ln_linear-L384.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 1.064209222793579,
+  "error": {
+    "rel_rms": 0.0028872278053313494,
+    "max_abs": 0.022705078125,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0028872278053313494,
+    "max_abs": 0.022705078125,
+    "finite": true
+  },
+  "ms": 0.010902400016784669,
+  "samples_ms": [
+    0.01108415961265564,
+    0.010902400016784669,
+    0.010908160209655762,
+    0.010899200439453124,
+    0.01090175986289978
+  ],
+  "status": "passed"
+}

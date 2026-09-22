@@ -1,0 +1,170 @@
+{
+  "L": 384,
+  "C": 128,
+  "H": 256,
+  "dropout": 0.25,
+  "checks": {
+    "baseline": {
+      "forward": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dx": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWgate": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWproj": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      }
+    },
+    "optimized": {
+      "forward": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dx": {
+        "relative_l2": 0.5634114146232605,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 125.61192321777344,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 75.0499038696289,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 147.59808349609375,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 91.82347869873047,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dWgate": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWproj": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_in": {
+        "relative_l2": 5.120259761810303,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dbeta_in": {
+        "relative_l2": 118.40152740478516,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dgamma_out": {
+        "relative_l2": 108.81704711914062,
+        "bit_exact": false,
+        "finite": true
+      },
+      "dbeta_out": {
+        "relative_l2": 110.16227722167969,
+        "bit_exact": false,
+        "finite": true
+      }
+    }
+  },
+  "mutated": {},
+  "poison": {},
+  "times": {},
+  "blocks": {},
+  "meta": {
+    "host": "node01",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "raw_tri_in_backward": {
+      "baseline": true,
+      "optimized": true
+    },
+    "includes": [
+      "both directions",
+      "mask",
+      "dropout",
+      "residual",
+      "live packing",
+      "all eleven gradients"
+    ],
+    "excludes": [
+      "optimizer",
+      "RNG generation",
+      "compile",
+      "CPU dispatch"
+    ]
+  },
+  "production_ready": false,
+  "saved_policy": {
+    "tri_is_original_buffer": true,
+    "tri_dtype": "torch.bfloat16",
+    "input_xn_dtype": "torch.bfloat16",
+    "output_activation_allocated": false,
+    "stats_shape": [
+      294912
+    ],
+    "stats_dtype": "torch.float32",
+    "output_side_bytes": 76677120
+  }
+}

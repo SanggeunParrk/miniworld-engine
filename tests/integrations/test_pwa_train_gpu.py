@@ -9,7 +9,9 @@ import torch
 
 from miniworld_engine.integrations import pwa_train as pt
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.msa_pair_weighted_averaging import MSAPairWeightedAveraging
+from miniworld_engine.modules.msa_pair_weighted_averaging import (
+    MSAPairWeightedAveraging,
+)
 
 pytestmark = [
     pytest.mark.gpu,

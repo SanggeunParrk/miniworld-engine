@@ -11,7 +11,9 @@ import torch
 
 from miniworld_engine.integrations import anthropic_msa as msa
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.msa_pair_weighted_averaging import MSAPairWeightedAveraging
+from miniworld_engine.modules.msa_pair_weighted_averaging import (
+    MSAPairWeightedAveraging,
+)
 from miniworld_engine.modules.outer_product import OuterProductMean
 
 pytestmark = [
@@ -91,7 +93,7 @@ def test_opm_is_no_further_from_the_exact_answer_than_the_engines_own_path(input
 
 
 def test_opm_residual_is_added_by_the_module_not_the_path(inputs):
-    own, fused = _opm_pair()
+    _own, fused = _opm_pair()
     m, mask = inputs["msa"], inputs["full"]
     z = torch.randn(1, L, L, D_PAIR, device=DEV, dtype=DT)
     with torch.inference_mode():

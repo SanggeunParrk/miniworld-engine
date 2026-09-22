@@ -1,0 +1,82 @@
+{
+  "front_cached_tail12_r40_216": {
+    "status": "numerical_rejection",
+    "errors": {
+      "dx": {
+        "relative_l2": 1.0626806020736694,
+        "max_absolute": 6.490234375,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 21.841291427612305,
+        "max_absolute": 1368.779052734375,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 180.96694946289062,
+        "max_absolute": 18195.931640625,
+        "finite": true
+      }
+    }
+  },
+  "front_cached_tail14_r32_224": {
+    "status": "numerical_rejection",
+    "errors": {
+      "dx": {
+        "relative_l2": 1.0626806020736694,
+        "max_absolute": 6.490234375,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 21.841291427612305,
+        "max_absolute": 1368.779052734375,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 180.96694946289062,
+        "max_absolute": 18195.931640625,
+        "finite": true
+      }
+    }
+  },
+  "front_cached_tail15_r32_224": {
+    "status": "numerical_rejection",
+    "errors": {
+      "dx": {
+        "relative_l2": 1.0626806020736694,
+        "max_absolute": 6.490234375,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 21.841291427612305,
+        "max_absolute": 1368.779052734375,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 180.96694946289062,
+        "max_absolute": 18195.931640625,
+        "finite": true
+      }
+    }
+  },
+  "front_cached_tail12_r48_208": {
+    "status": "numerical_rejection",
+    "errors": {
+      "dx": {
+        "relative_l2": 1.0626806020736694,
+        "max_absolute": 6.490234375,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 21.841291427612305,
+        "max_absolute": 1368.779052734375,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 180.96694946289062,
+        "max_absolute": 18195.931640625,
+        "finite": true
+      }
+    }
+  }
+}

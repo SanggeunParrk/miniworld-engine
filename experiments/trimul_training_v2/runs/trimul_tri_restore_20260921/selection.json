@@ -1,0 +1,13 @@
+{
+  "entrypoint": "runs/trimul_training_current.py:Training",
+  "implementation": "runs/trimul_tri_restore_20260921/tri_policy.py:Training",
+  "policy": {
+    "keep_input_affine_xn": true,
+    "keep_tri": true,
+    "save_output_mean_rstd": true,
+    "save_output_xhat": false,
+    "save_output_affine_z": false
+  },
+  "production_ready": false,
+  "production_blocker": "Inherited B7 L768 independent-reference dWL relative L2 0.055569% exceeds 0.05%"
+}

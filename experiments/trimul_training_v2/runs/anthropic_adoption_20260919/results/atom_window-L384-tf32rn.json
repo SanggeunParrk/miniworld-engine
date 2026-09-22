@@ -1,0 +1,45 @@
+{
+  "family": "atom_window",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "tf32rn",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/atom_window-L384-tf32rn.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "upstream fp32 atom-window interface; explicit dot precision tf32rn",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "fixture_source": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/tests/gpu/test_atom_window_gpu.py",
+  "first_call_s": 0.4441382884979248,
+  "error": {
+    "rel_rms": 3.7207212244538823e-06,
+    "max_abs": 2.7298927307128906e-05,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.0001309187209699303,
+    "max_abs": 2.7298927307128906e-05,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 3.7207212244538823e-06,
+    "max_abs": 2.7298927307128906e-05,
+    "finite": true
+  },
+  "ms": 0.07169856071472168,
+  "samples_ms": [
+    0.07183360099792481,
+    0.07169856071472168,
+    0.07163392066955566,
+    0.07168191909790039,
+    0.07172224044799805
+  ],
+  "status": "passed"
+}

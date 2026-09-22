@@ -1,0 +1,391 @@
+{
+  "length": 384,
+  "compiled": true,
+  "explicit_triton_configs": {
+    "front": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    "f567": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "dual_bwd": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 3
+    }
+  },
+  "comparisons": [
+    {
+      "kernels": [],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "front"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 7.596778459628695e-07,
+        "ln_pair.bias": 4.3038616581725364e-07,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 6.160969405755168e-07,
+        "ln_out.bias": 6.052331968930957e-07,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 7.596778459628695e-07
+    },
+    {
+      "kernels": [
+        "f567"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 6.105283318902366e-07,
+        "ln_pair.bias": 5.171271482140583e-07,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 6.535802867801976e-07,
+        "ln_out.bias": 6.55920985082048e-07,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 6.55920985082048e-07
+    },
+    {
+      "kernels": [
+        "dual_bwd"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 7.033256110844377e-07,
+        "ln_pair.bias": 4.0152846736418724e-07,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 6.708685873491049e-07,
+        "ln_out.bias": 5.642497171720606e-07,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 7.033256110844377e-07
+    },
+    {
+      "kernels": [
+        "front",
+        "f567",
+        "dual_bwd"
+      ],
+      "zero_scale": false,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 7.849140502003138e-07,
+        "ln_pair.bias": 4.570590022012766e-07,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 6.601895847779815e-07,
+        "ln_out.bias": 5.699308758266852e-07,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 7.849140502003138e-07
+    },
+    {
+      "kernels": [],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "front"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "f567"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "dual_bwd"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    },
+    {
+      "kernels": [
+        "front",
+        "f567",
+        "dual_bwd"
+      ],
+      "zero_scale": true,
+      "relative_l2": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_pair.weight": 0.0,
+        "ln_pair.bias": 0.0,
+        "to_left.weight": 0.0,
+        "to_left_gate.weight": 0.0,
+        "to_right.weight": 0.0,
+        "to_right_gate.weight": 0.0,
+        "ln_out.weight": 0.0,
+        "ln_out.bias": 0.0,
+        "to_gate.weight": 0.0,
+        "to_out.weight": 0.0
+      },
+      "max_relative_l2": 0.0
+    }
+  ],
+  "observed_native_workloads": {
+    "trimul_inproj_gemm_gate_mmajor_sm90_cute": [
+      {
+        "shape": [
+          147456,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          1024
+        ],
+        "stride": [
+          1024,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          147456
+        ],
+        "stride": [
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      }
+    ],
+    "trimul_output_f567_train_sm90_cute": [
+      {
+        "shape": [
+          147456,
+          256
+        ],
+        "stride": [
+          256,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          147456,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          256
+        ],
+        "stride": [
+          256,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          147456,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          384,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      }
+    ],
+    "trimul_input_dual_bwd_sm90_cute": [
+      {
+        "shape": [
+          147456,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          147456,
+          1024
+        ],
+        "stride": [
+          1,
+          147456
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          128
+        ],
+        "stride": [
+          128,
+          1
+        ],
+        "dtype": "torch.bfloat16"
+      },
+      {
+        "shape": [
+          128,
+          1024
+        ],
+        "stride": [
+          1,
+          128
+        ],
+        "dtype": "torch.bfloat16"
+      }
+    ]
+  },
+  "passed": true
+}

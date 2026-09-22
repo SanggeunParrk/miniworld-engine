@@ -1,0 +1,14 @@
+[
+  {
+    "tool": "memcheck",
+    "role": "dx",
+    "returncode": 0,
+    "log": "/home/psk6950/MiniWorld/runs/trimul_b7_nextrow_20260921/memcheck-dx-L384.log"
+  },
+  {
+    "tool": "racecheck",
+    "role": "dx",
+    "returncode": 0,
+    "log": "/home/psk6950/MiniWorld/runs/trimul_b7_nextrow_20260921/racecheck-dx-L384.log"
+  }
+]

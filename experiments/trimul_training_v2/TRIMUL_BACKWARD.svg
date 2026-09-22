@@ -1,0 +1,362 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2800" height="5678" viewBox="0 0 2800 5678" role="img" aria-labelledby="title desc"><title id="title">TriMul BACKWARD L384 HBM 입력 출력 지도</title><desc id="desc">각 행은 HBM 읽기, 커널 내부 계산, HBM 쓰기를 왼쪽부터 표시한다. 버퍼 크기는 실제 DRAM 트래픽과 구분한다.</desc><defs><marker id="read" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#2879ad"/></marker><marker id="write" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#b36b19"/></marker><marker id="scratch" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#a6537b"/></marker></defs><rect width="2800" height="5678" fill="#f8fafc"/>
+<rect x="0" y="0" width="2800" height="218" rx="0" fill="#133343" stroke="none" stroke-width="2"/>
+<text x="40" y="60" font-family="Noto Sans CJK KR, sans-serif" font-size="36" fill="#ffffff" font-weight="700">TriMul BACKWARD  |  HBM 입력 → 커널 → HBM 출력</text>
+<text x="40" y="103" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#cce0e7">L384 · M=L²=147,456 · C128 / 양방향 H256 · BF16 · dropout 25% / mask / residual</text>
+<text x="40" y="145" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#dfecf0">표시된 크기 = 버퍼 payload. 실제 HBM 전송량은 L2 hit·CTA 재읽기·spill에 따라 달라진다.</text>
+<text x="40" y="181" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#bad2de">입출력은 global memory 경계 기준  |  커널 내부 shared memory / register 값은 가운데에만 표시</text>
+<text x="40" y="259" font-family="Noto Sans CJK KR, sans-serif" font-size="25" fill="#2879ad" font-weight="700">HBM READ · 어디서 온 무엇을 읽는가</text>
+<text x="690" y="259" font-family="Noto Sans CJK KR, sans-serif" font-size="25" fill="#12856e" font-weight="700">KERNEL · tile 내부 계산</text>
+<text x="2160" y="259" font-family="Noto Sans CJK KR, sans-serif" font-size="25" fill="#b36b19" font-weight="700">HBM WRITE · 무엇을 어디로 넘기는가</text>
+<text x="40" y="293" font-family="Noto Sans CJK KR, sans-serif" font-size="18" fill="#2879ad">파랑 화살표: 읽기</text>
+<text x="690" y="293" font-family="Noto Sans CJK KR, sans-serif" font-size="18" fill="#52707e">B1의 A/B 두 행 = 같은 호출 · 왼쪽: 설명·수식 / 오른쪽: PyTorch</text>
+<text x="2160" y="293" font-family="Noto Sans CJK KR, sans-serif" font-size="18" fill="#b36b19">주황: 쓰기  ·  자주: scratch 재읽기</text>
+<text x="40" y="337" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">준비 · Wproj 전치 버퍼</text>
+<rect x="40" y="355" width="570" height="214" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="390" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="428" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">Wp: BF16 [128,256] · 65.54 kB</text>
+<text x="58" y="459" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">← 현재 forward의 출력 projection 가중치</text>
+<rect x="690" y="355" width="1390" height="214" rx="12" fill="#effaf5" stroke="#12856e" stroke-width="2"/>
+<path d="M1180 355 V569" stroke="#12856e" stroke-width="1.5"/>
+<text x="708" y="390" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">transpose + contiguous</text>
+<text x="708" y="428" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">Wproj.t().contiguous()</text>
+<text x="708" y="459" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">단순 view가 아닌 실제 복사</text>
+<text x="708" y="490" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="521" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">Wp_T = contiguous(Wpᵀ)</text>
+<text x="1202" y="390" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="428" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">Wp_T = Wp.T.contiguous()</text>
+<text x="1202" y="456" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># HBM output: Wp_T (a real copy).</text>
+<rect x="2160" y="355" width="600" height="214" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="390" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="428" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">Wp_T: BF16 [256,128] · 65.54 kB</text>
+<text x="2178" y="459" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">→ B1의 dW/projection 재계산 및 dTri</text>
+<path d="M 612 462 L 678 462" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 462 L 2148 462" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="448" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="448" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<rect x="40" y="591" width="2720" height="176" rx="12" fill="#f0f4f6" stroke="#52707e" stroke-width="2"/>
+<text x="58" y="626" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#52707e" font-weight="700">① B1–B4 · b1_fused · 아래 A/B는 같은 CUDA launch 1회</text>
+<text x="58" y="664" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">132 CTA ×256 threads. 각 CTA는 Phase A → local fence → Phase B. 마지막 grid barrier 뒤 전체 partial 합산.</text>
+<text x="58" y="695" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">입력 x_n 및 출력 μ/rstd 저장. BF16 tri로 정규화/affine/P/G 재계산; 평균/분산 reduction은 없음.</text>
+<text x="58" y="726" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">로드 전용 producer warpgroup은 선택하지 않음. Phase B에서 TMA 이중 버퍼로 다음 타일 로드와 WGMMA를 겹침.</text>
+<text x="40" y="813" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">①-A · 공유 재계산 + dWproj / dTri / 출력 LN 미분</text>
+<rect x="40" y="831" width="570" height="592" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="866" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="904" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dy: BF16 [M,128] · 37.75 MB ← 상위 미분</text>
+<text x="58" y="935" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">x_n: BF16 [M,128] · 37.75 MB ← K3 저장</text>
+<text x="58" y="966" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">tri: BF16 [256,L,L] · 75.50 MB ← F3 유지</text>
+<text x="58" y="997" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">μ_out/rstd_out: FP32 [M]×2 · 1.18 MB ← K3</text>
+<text x="58" y="1028" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">Wp_T + Wg_T: BF16 · 합계 98.30 kB</text>
+<text x="58" y="1059" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">γ_out / β_out: FP32 [256] ×2 · 2.05 kB</text>
+<text x="58" y="1090" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">ds: BF16 [L,128] · 98.30 kB</text>
+<rect x="690" y="831" width="1390" height="592" rx="12" fill="#effaf5" stroke="#12856e" stroke-width="2"/>
+<path d="M1180 831 V1423" stroke="#12856e" stroke-width="1.5"/>
+<text x="708" y="866" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">b1_fused · Phase A</text>
+<text x="708" y="904" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">(tri−μ)×rstd → affine · 두 그룹 분담</text>
+<text x="708" y="935" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dGate / dProj를 함께 계산하여 공유</text>
+<text x="708" y="966" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">같은 CTA: dWproj + dTri / LN 미분</text>
+<text x="708" y="997" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">B4: LN 미분 + γ/β shared 합산</text>
+<text x="708" y="1028" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dNorm: 묶음 WGMMA → BF16 레지스터</text>
+<text x="708" y="1059" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri TMA 쓰기 ↔ γ/β 합산</text>
+<text x="708" y="1090" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">P/G/dProj: global 저장 없음</text>
+<text x="708" y="1121" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="1152" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">P = LN_out(tri) Wpᵀ</text>
+<text x="708" y="1183" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">G = σ(x_n Wgᵀ)</text>
+<text x="708" y="1214" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dP = dy ⊙ ds ⊙ G</text>
+<text x="708" y="1245" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dGlogit = dy ⊙ ds ⊙ P ⊙ G ⊙ (1−G)</text>
+<text x="708" y="1276" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">partial dWp += dPᵀ xn_out</text>
+<text x="708" y="1307" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri = LN_out′(dP Wp; x̂, rstd)</text>
+<text x="1202" y="866" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="904" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># Per row tile; acc_* are CTA-local accumulators.</text>
+<text x="1202" y="932" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">t = tri_tile.float()  # load original BF16 tri</text>
+<text x="1202" y="960" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">mu = saved_mu_tile[:, None]</text>
+<text x="1202" y="988" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">rs = saved_rs_tile[:, None]</text>
+<text x="1202" y="1016" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">xhat = (t - mu) * rs  # no statistics reduction</text>
+<text x="1202" y="1044" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">xn_out = xhat * gout + bout</text>
+<text x="1202" y="1072" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">proj = F.linear(xn_out, Wp)</text>
+<text x="1202" y="1100" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">gate = torch.sigmoid(F.linear(x_n_tile, Wg))</text>
+<text x="1202" y="1128" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">du = dy_tile * dropout_scale_tile</text>
+<text x="1202" y="1156" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dProj = du * gate</text>
+<text x="1202" y="1184" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dGate_tile = du * proj * gate * (1 - gate)</text>
+<text x="1202" y="1212" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">acc_dWp += dProj.T @ xn_out</text>
+<text x="1202" y="1240" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dNorm = dProj @ Wp  # BF16 register fragments</text>
+<text x="1202" y="1268" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dt, dg, db = ln_bwd(dNorm, xhat, gout, rs)</text>
+<text x="1202" y="1296" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">acc_dg += dg; acc_db += db</text>
+<text x="1202" y="1324" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># HBM: dGate/dTri tiles; store acc_* at CTA end.</text>
+<text x="1202" y="1352" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># dNorm GEMM reads dProj in place; no shared copy.</text>
+<text x="1202" y="1380" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># Prefetch next tri/x_n/stats during LN backward.</text>
+<rect x="2160" y="831" width="600" height="592" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="866" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="904" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri: BF16 [256,L,L] · 75.50 MB → B5/B6</text>
+<text x="2178" y="935" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dGate: BF16 [M,128] · 37.75 MB</text>
+<text x="2178" y="966" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">→ 아래 Phase B에서 READ + 이후 B7 내부 dX</text>
+<text x="2178" y="997" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dWproj: 레지스터 유지 → B 종료 후 저장</text>
+<text x="2178" y="1028" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">partial LN: FP32 · 270.34 kB</text>
+<text x="2178" y="1059" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">부분합 → Phase B 끝의 최종 reduction</text>
+<path d="M 612 1127 L 678 1127" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 1127 L 2148 1127" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="1113" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="1113" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<rect x="40" y="1445" width="2720" height="176" rx="12" fill="#f0f4f6" stroke="#52707e" stroke-width="2"/>
+<text x="58" y="1480" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#52707e" font-weight="700">같은 호출 내부 · CTA별 Phase 전환 · dGate의 global WRITE → READ</text>
+<text x="58" y="1518" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dGate: L2 보존 힌트로 출력 → Phase B에서 재사용 → 소비한 타일의 캐시 우선순위를 낮춤.</text>
+<text x="58" y="1549" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">x_n도 global/L2 재읽기. 각 CTA의 소유 행만 소비하므로 이 경계에 전체 grid barrier는 없음.</text>
+<text x="58" y="1580" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">마지막에 모든 CTA의 parameter partial을 합치기 전에는 전체 grid barrier를 유지한다.</text>
+<text x="40" y="1667" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">①-B · dWgate + 모든 parameter gradient 최종 reduction</text>
+<rect x="40" y="1685" width="570" height="369" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="1720" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="1758" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">x_n: BF16 [M,128] · 37.75 MB ← K3 저장</text>
+<text x="58" y="1789" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dGate: BF16 [M,128] · 37.75 MB ← Phase A</text>
+<text x="58" y="1820" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">타일 로드: x_n + dGate 합계 75.50 MB</text>
+<text x="58" y="1851" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">최종 reduction: partial dWproj / LN 재읽기</text>
+<text x="58" y="1882" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">자체 partial dWgate도 WRITE 후 READ</text>
+<rect x="690" y="1685" width="1390" height="369" rx="12" fill="#effaf5" stroke="#12856e" stroke-width="2"/>
+<path d="M1180 1685 V2054" stroke="#12856e" stroke-width="1.5"/>
+<text x="708" y="1720" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">b1_fused · Phase B + reduction</text>
+<text x="708" y="1758" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">x_nᵀ × dGate → dWgate 부분합</text>
+<text x="708" y="1789" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">TMA: 다음 타일 LOAD || 현재 WGMMA</text>
+<text x="708" y="1820" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">partial dWg / dWp: B 끝에 저장</text>
+<text x="708" y="1851" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">grid barrier → 모든 partial 합산</text>
+<text x="708" y="1882" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">LN / projection / gate 재계산 없음</text>
+<text x="708" y="1913" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="1944" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">partial dWg_T += x_nᵀ dGlogit</text>
+<text x="708" y="1975" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">grid barrier → sum of CTA partials</text>
+<text x="708" y="2006" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dWg / dWp / dγ_out / dβ_out</text>
+<text x="1202" y="1720" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="1758" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># SAME launch: each CTA reads only its own Phase A rows.</text>
+<text x="1202" y="1786" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># Read x_n and Phase A output dGate from HBM/L2.</text>
+<text x="1202" y="1814" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># TMA prefetches the next tile into another buffer.</text>
+<text x="1202" y="1842" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">acc_dWg += x_n_tile.T @ dGate_tile</text>
+<text x="1202" y="1870" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># CTA end: store acc_dWg AND acc_dWp; barrier.</text>
+<text x="1202" y="1898" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dWgate = partial_dWg.sum(0)  # transposed layout</text>
+<text x="1202" y="1926" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dWproj = partial_dWp.sum(0)</text>
+<text x="1202" y="1954" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dgout = partial_dg.sum(0)</text>
+<text x="1202" y="1982" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">dbout = partial_db.sum(0)</text>
+<text x="1202" y="2010" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># No LN, projection or gate recomputation here.</text>
+<rect x="2160" y="1685" width="600" height="369" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="1720" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="1758" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dWgate: BF16 [128,128] · 32.77 kB</text>
+<text x="2178" y="1789" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dWproj: BF16 [128,256] · 65.54 kB</text>
+<text x="2178" y="1820" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dγ_out / dβ_out: FP32 [256] ×2 · 2.05 kB</text>
+<text x="2178" y="1851" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">→ 최종 parameter gradients</text>
+<path d="M 612 1869.5 L 678 1869.5" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 1869.5 L 2148 1869.5" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="1855.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="1855.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<rect x="690" y="2076" width="2070" height="87" rx="12" fill="#fcf0f7" stroke="#a6537b" stroke-width="2"/>
+<text x="710" y="2106" font-family="Noto Sans CJK KR, sans-serif" font-size="20" fill="#a6537b" font-weight="700">같은 호출: partial global WRITE → grid 동기화 → READ → 최종 gradient</text>
+<text x="710" y="2141" font-family="Noto Sans CJK KR, sans-serif" font-size="20" fill="#163746">B 종료 후 dW 25.95 MB + A의 LN 270.34 kB · 총 WRITE 26.22 MB / READ 26.22 MB</text>
+<path d="M 910 2054 L 910 2076" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<path d="M 1160 2076 L 1160 2054" fill="none" stroke="#a6537b" stroke-width="3" marker-end="url(#scratch)"/>
+<path d="M28 791 H16 V2175 H28" fill="none" stroke="#12856e" stroke-width="6"/>
+<text x="40" y="2207" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">② B5 · outgoing dLeft</text>
+<rect x="40" y="2225" width="570" height="245" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="2260" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="2298" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri_out: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="2329" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">right_out: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="2360" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">← B1의 dTri + K1에서 보존한 right</text>
+<rect x="690" y="2225" width="1390" height="245" rx="12" fill="#f4f0fb" stroke="#7754ab" stroke-width="2"/>
+<path d="M1180 2225 V2470" stroke="#7754ab" stroke-width="1.5"/>
+<text x="708" y="2260" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">cuBLAS · bmm 1회</text>
+<text x="708" y="2298" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri_out × right_out</text>
+<text x="708" y="2329" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">contraction의 입력 미분</text>
+<text x="708" y="2360" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">최종 gradient slice에 직접 store</text>
+<text x="708" y="2391" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="2422" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dL_out = dT_out R_out</text>
+<text x="1202" y="2260" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="2298" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">torch.bmm(dTri[:128], right[:128],</text>
+<text x="1202" y="2326" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">          out=dLeft[:128])</text>
+<rect x="2160" y="2225" width="600" height="245" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="2260" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="2298" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dLeft_out: BF16 [128,L,L] · 37.75 MB</text>
+<text x="2178" y="2329" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">→ 단일 B7에서 한 번 읽고 dW·dX가 공유</text>
+<text x="2178" y="2360" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">두 방향 합쳐 dLeft [256,L,L]</text>
+<path d="M 612 2347.5 L 678 2347.5" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 2347.5 L 2148 2347.5" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="2333.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="2333.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<text x="40" y="2514" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">③ B5 · outgoing dRight</text>
+<rect x="40" y="2532" width="570" height="245" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="2567" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="2605" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri_out: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="2636" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">left_out: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="2667" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">← B1의 dTri + K1에서 보존한 left</text>
+<rect x="690" y="2532" width="1390" height="245" rx="12" fill="#f4f0fb" stroke="#7754ab" stroke-width="2"/>
+<path d="M1180 2532 V2777" stroke="#7754ab" stroke-width="1.5"/>
+<text x="708" y="2567" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">cuBLAS · bmm 1회</text>
+<text x="708" y="2605" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri_outᵀ × left_out</text>
+<text x="708" y="2636" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">contraction의 입력 미분</text>
+<text x="708" y="2667" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">최종 gradient slice에 직접 store</text>
+<text x="708" y="2698" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="2729" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dR_out = dT_outᵀ L_out</text>
+<text x="1202" y="2567" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="2605" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">torch.bmm(dTri[:128].transpose(1, 2), left[:128],</text>
+<text x="1202" y="2633" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">          out=dRight[:128])</text>
+<rect x="2160" y="2532" width="600" height="245" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="2567" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="2605" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dRight_out: BF16 [128,L,L] · 37.75 MB</text>
+<text x="2178" y="2636" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">→ 단일 B7에서 한 번 읽고 dW·dX가 공유</text>
+<text x="2178" y="2667" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">두 방향 합쳐 dRight [256,L,L]</text>
+<path d="M 612 2654.5 L 678 2654.5" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 2654.5 L 2148 2654.5" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="2640.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="2640.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<text x="40" y="2821" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">④ B6 · incoming dLeft</text>
+<rect x="40" y="2839" width="570" height="245" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="2874" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="2912" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri_in: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="2943" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">right_in: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="2974" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">← B1의 dTri + K1에서 보존한 right</text>
+<rect x="690" y="2839" width="1390" height="245" rx="12" fill="#f4f0fb" stroke="#7754ab" stroke-width="2"/>
+<path d="M1180 2839 V3084" stroke="#7754ab" stroke-width="1.5"/>
+<text x="708" y="2874" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">cuBLAS · bmm 1회</text>
+<text x="708" y="2912" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">right_in × dTri_inᵀ</text>
+<text x="708" y="2943" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">contraction의 입력 미분</text>
+<text x="708" y="2974" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">최종 gradient slice에 직접 store</text>
+<text x="708" y="3005" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="3036" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dL_in = R_in dT_inᵀ</text>
+<text x="1202" y="2874" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="2912" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">torch.bmm(right[128:], dTri[128:].transpose(1, 2),</text>
+<text x="1202" y="2940" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">          out=dLeft[128:])</text>
+<rect x="2160" y="2839" width="600" height="245" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="2874" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="2912" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dLeft_in: BF16 [128,L,L] · 37.75 MB</text>
+<text x="2178" y="2943" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">→ 단일 B7에서 한 번 읽고 dW·dX가 공유</text>
+<text x="2178" y="2974" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">두 방향 합쳐 dLeft [256,L,L]</text>
+<path d="M 612 2961.5 L 678 2961.5" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 2961.5 L 2148 2961.5" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="2947.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="2947.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<text x="40" y="3128" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">⑤ B6 · incoming dRight</text>
+<rect x="40" y="3146" width="570" height="245" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="3181" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="3219" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dTri_in: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="3250" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">left_in: BF16 [128,L,L] · 37.75 MB</text>
+<text x="58" y="3281" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">← B1의 dTri + K1에서 보존한 left</text>
+<rect x="690" y="3146" width="1390" height="245" rx="12" fill="#f4f0fb" stroke="#7754ab" stroke-width="2"/>
+<path d="M1180 3146 V3391" stroke="#7754ab" stroke-width="1.5"/>
+<text x="708" y="3181" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">cuBLAS · bmm 1회</text>
+<text x="708" y="3219" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">left_in × dTri_in</text>
+<text x="708" y="3250" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">contraction의 입력 미분</text>
+<text x="708" y="3281" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">최종 gradient slice에 직접 store</text>
+<text x="708" y="3312" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="3343" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dR_in = L_in dT_in</text>
+<text x="1202" y="3181" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#7754ab" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="3219" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">torch.bmm(left[128:], dTri[128:],</text>
+<text x="1202" y="3247" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">          out=dRight[128:])</text>
+<rect x="2160" y="3146" width="600" height="245" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="3181" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="3219" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dRight_in: BF16 [128,L,L] · 37.75 MB</text>
+<text x="2178" y="3250" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">→ 단일 B7에서 한 번 읽고 dW·dX가 공유</text>
+<text x="2178" y="3281" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">두 방향 합쳐 dRight [256,L,L]</text>
+<path d="M 612 3268.5 L 678 3268.5" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 3268.5 L 2148 3268.5" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="3254.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="3254.5" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<text x="40" y="3435" font-family="Noto Sans CJK KR, sans-serif" font-size="21" fill="#52707e" font-weight="700">⑥ B7–B12 · 단일 CUDA launch / dW + dX + input LN + residual</text>
+<rect x="40" y="3453" width="570" height="610" rx="12" fill="#eef6fc" stroke="#2879ad" stroke-width="2"/>
+<text x="58" y="3488" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#2879ad" font-weight="700">INPUT · global buffers</text>
+<text x="58" y="3526" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dLeft + dRight: BF16 [256,L,L] ×2 · 150.99</text>
+<text x="58" y="3557" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">MB</text>
+<text x="58" y="3588" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">x_n: BF16 [M,128] · 37.75 MB ← K3</text>
+<text x="58" y="3619" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dGate: BF16 [M,128] · 37.75 MB ← B1</text>
+<text x="58" y="3650" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">raw x + dy: BF16 [M,128] ×2 · 75.50 MB</text>
+<text x="58" y="3681" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">W1 262.14 kB + WT/Wg_T 294.91 kB</text>
+<text x="58" y="3712" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">mask BF16 294.91 kB / γ_in FP32 512 B</text>
+<text x="58" y="3743" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">큰 입력 각 1회 logical load / TMA multicast</text>
+<rect x="690" y="3453" width="1390" height="610" rx="12" fill="#effaf5" stroke="#12856e" stroke-width="2"/>
+<path d="M1180 3453 V4063" stroke="#12856e" stroke-width="1.5"/>
+<text x="708" y="3488" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">b7_joint · 1 launch / 4-CTA cluster</text>
+<text x="708" y="3526" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">P/G와 dP/dG 한 번 계산 → shared 공유</text>
+<text x="708" y="3557" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dW: register에 누적, 중간 dQ는 HBM 미</text>
+<text x="708" y="3588" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">저장</text>
+<text x="708" y="3619" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dX: CTA마다 C32 출력 / hidden 전체 합</text>
+<text x="708" y="3650" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">산</text>
+<text x="708" y="3681" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">input LN도 C32 분할 / 소량 통계만 DSME</text>
+<text x="708" y="3712" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">M</text>
+<text x="708" y="3743" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">30 clusters · 512 threads/CTA · shar</text>
+<text x="708" y="3774" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">ed 224 KiB</text>
+<text x="708" y="3805" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">register spill 0 · 정확도 통과 / 속도</text>
+<text x="708" y="3836" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">목표 미달</text>
+<text x="708" y="3867" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">── 수식 ──</text>
+<text x="708" y="3898" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dW_i = Σ_tiles dQ_iᵀ x_n</text>
+<text x="708" y="3929" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dN = Σ_i dQ_i W_i + dGate Wg</text>
+<text x="708" y="3960" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dx = LN_in′(dN; raw x) + dy</text>
+<text x="1202" y="3488" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#12856e" font-weight="700">PyTorch · 수학적 대응 코드</text>
+<text x="1202" y="3526" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># ONE launch: each large input loaded once.</text>
+<text x="1202" y="3554" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># 4 CTAs share derivatives through DSMEM.</text>
+<text x="1202" y="3582" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">for xn, dl, dr in persistent_row_tiles:</text>
+<text x="1202" y="3610" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    pL, pR, gL, gR = projection_gate(xn)</text>
+<text x="1202" y="3638" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dPL = dl * mask * gL</text>
+<text x="1202" y="3666" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dGL = dl * mask * pL * gL * (1-gL)</text>
+<text x="1202" y="3694" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dPR = dr * mask * gR</text>
+<text x="1202" y="3722" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dGR = dr * mask * pR * gR * (1-gR)</text>
+<text x="1202" y="3750" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dq = [dGL, dPL, dGR, dPR]  # on-chip</text>
+<text x="1202" y="3778" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    acc_dW += [q.T @ xn for q in dq]</text>
+<text x="1202" y="3806" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dn = sum(q @ w for q, w in zip(dq, W))</text>
+<text x="1202" y="3834" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dn += dGate_tile @ Wg</text>
+<text x="1202" y="3862" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dx, dg, db = ln_bwd_raw(dn, raw_x, gin)</text>
+<text x="1202" y="3890" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    store_dx(dx + dy_tile)</text>
+<text x="1202" y="3918" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    acc_dg += dg; acc_db += db</text>
+<text x="1202" y="3946" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># Same launch: grid sync, reduce FP32 partials.</text>
+<text x="1202" y="3974" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">store_grads(reduce(acc_dW, acc_dg, acc_db))</text>
+<rect x="2160" y="3453" width="600" height="610" rx="12" fill="#fff7e7" stroke="#b36b19" stroke-width="2"/>
+<text x="2178" y="3488" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#b36b19" font-weight="700">OUTPUT · global buffers</text>
+<text x="2178" y="3526" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dWL / dWLg / dWR / dWRg: 합계 262.14 kB</text>
+<text x="2178" y="3557" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dx: BF16 [M,128] · 37.75 MB → 이전 모듈</text>
+<text x="2178" y="3588" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">dγ_in / dβ_in: FP32 [128] ×2 · 1.02 kB</text>
+<text x="2178" y="3619" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">새 HBM activation 중간 버퍼 없음</text>
+<text x="2178" y="3650" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">호출 안에서 FP32 partial reduction ↓</text>
+<path d="M 612 3758 L 678 3758" fill="none" stroke="#2879ad" stroke-width="3" marker-end="url(#read)"/>
+<path d="M 2082 3758 L 2148 3758" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<text x="620" y="3744" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#2879ad" font-weight="700">READ</text>
+<text x="2085" y="3744" font-family="Noto Sans CJK KR, sans-serif" font-size="15" fill="#b36b19" font-weight="700">WRITE</text>
+<rect x="690" y="4085" width="2070" height="87" rx="12" fill="#fcf0f7" stroke="#a6537b" stroke-width="2"/>
+<text x="710" y="4115" font-family="Noto Sans CJK KR, sans-serif" font-size="20" fill="#a6537b" font-weight="700">같은 호출: partial global WRITE → grid 동기화 → READ → 최종 gradient</text>
+<text x="710" y="4150" font-family="Noto Sans CJK KR, sans-serif" font-size="20" fill="#163746">partial dW: WRITE/READ 각 15.73 MB; partial LN: WRITE/READ 각 30.72 kB; reduction도 같은 launch</text>
+<path d="M 910 4063 L 910 4085" fill="none" stroke="#b36b19" stroke-width="3" marker-end="url(#write)"/>
+<path d="M 1160 4085 L 1160 4063" fill="none" stroke="#a6537b" stroke-width="3" marker-end="url(#scratch)"/>
+<rect x="40" y="4194" width="2720" height="238" rx="12" fill="#f0f4f6" stroke="#52707e" stroke-width="2"/>
+<text x="58" y="4229" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#52707e" font-weight="700">큰 global 버퍼의 재읽기: source에서 확인한 load 범위 (HBM miss 횟수 아님)</text>
+<text x="58" y="4267" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">B1: Phase A는 dy / x_n / tri 및 μ/rstd 각 1회. Phase B는 x_n / dGate 각 1회. 정규화는 shared에서 재계산.</text>
+<text x="58" y="4298" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">B7: x_n은 TMA multicast로 4 CTA가 공유. dLeft/right는 서로 겹치지 않는 H128 slice로 전체 각 1회 읽음.</text>
+<text x="58" y="4329" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">B7: dP/dG는 한 번 계산 후 DSMEM으로 공유. dW와 dX 사이의 HBM 저장·재읽기나 GP 재계산 없음.</text>
+<text x="58" y="4360" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">B7: dGate / raw x / residual도 한 번 전송. mask·weight·통계 및 gradient partial의 읽기는 별도.</text>
+<text x="58" y="4391" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">TMA가 L2에서 만족하면 이 load가 전부 HBM 왕복이 되지는 않는다. 실제 DRAM bytes/SoL 수치는 여기서 추정하지 않음.</text>
+<rect x="40" y="4456" width="2720" height="207" rx="12" fill="#f0f4f6" stroke="#52707e" stroke-width="2"/>
+<text x="58" y="4491" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#52707e" font-weight="700">Global reduction scratch도 융합 커널의 입출력이다</text>
+<text x="58" y="4529" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">B1 partial: FP32 [132,49152] + [132,512]. B7 scratch도 위에 WRITE/READ 표시.</text>
+<text x="58" y="4560" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">B1 및 단일 B7은 각각 호출 내부 grid 동기화 뒤 partial을 다시 읽어 최종 gradient를 쓴다.</text>
+<text x="58" y="4591" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">소량 atomic counter READ/WRITE: B1 할당 536 B, B7 8 B. Spin-loop 실제 접근량은 별도이며 위 payload에서 제외.</text>
+<text x="58" y="4622" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">Backward 큰 activation/gradient WRITE: dTri, dGate, dLeft, dRight, dx. 중간 dProj / d(xn_out) / d(x_n)은 미저장.</text>
+<rect x="40" y="4687" width="2720" height="207" rx="12" fill="#f0f4f6" stroke="#52707e" stroke-width="2"/>
+<text x="58" y="4722" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#52707e" font-weight="700">코드 표기: 수식 대응용 PyTorch · 실제 CUDA의 BF16 반올림/타일 순서는 생략</text>
+<text x="58" y="4760" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">코드는 모든 연산값과 가중치를 FP32로 해석. 바깥 HBM 박스의 dtype과 구분하며 bit-exact 실행 코드가 아니다.</text>
+<text x="58" y="4791" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">x, x_n, dy = [M,128]; tri/left/right = [256,L,L]; mask = [M]; ds = [L,128]. M=L², batch=1.</text>
+<text x="58" y="4822" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">WL/WLg/WR/WRg는 packed W1의 논리 행렬. 코드에 등장해도 원본 가중치를 HBM에서 추가로 읽는다는 뜻은 아니다.</text>
+<text x="58" y="4853" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">gin/bin = 입력 LN γ/β; gout/bout = 출력 LN γ/β. dGate는 출력 gate logit의 미분이다.</text>
+<rect x="40" y="4918" width="2720" height="520" rx="12" fill="#edf5f1" stroke="#12856e" stroke-width="2"/>
+<text x="60" y="4954" font-family="Noto Sans CJK KR, sans-serif" font-size="24" fill="#12856e" font-weight="700">공통 PyTorch helper · LN / tensor layout</text>
+<text x="1420" y="4954" font-family="Noto Sans CJK KR, sans-serif" font-size="24" fill="#12856e" font-weight="700">LN backward · B1은 tri + 저장 μ/rstd 사용</text>
+<text x="60" y="4996" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">def rows(t):</text>
+<text x="60" y="5024" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    return t.reshape(256, M).T</text>
+<text x="60" y="5052" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">def channels(t):</text>
+<text x="60" y="5080" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    return t.T.reshape(256, L, L)</text>
+<text x="60" y="5108" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">def ln(z, gamma, beta):</text>
+<text x="60" y="5136" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    return F.layer_norm(z, (z.shape[-1],),</text>
+<text x="60" y="5164" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">                        gamma, beta, eps=1e-5)</text>
+<text x="60" y="5192" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76"># F = torch.nn.functional; torch is imported.</text>
+<text x="1420" y="4996" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">def ln_bwd(dh, h, gamma, rs):</text>
+<text x="1420" y="5024" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76">    # h: pre-affine normalized values, FP32</text>
+<text x="1420" y="5052" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#607a76">    # No mean/variance or normalization here.</text>
+<text x="1420" y="5080" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    q = dh * gamma</text>
+<text x="1420" y="5108" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dz = rs * (q - q.mean(-1, keepdim=True)</text>
+<text x="1420" y="5136" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">               - h * (q*h).mean(-1, keepdim=True))</text>
+<text x="1420" y="5164" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dgamma = (dh*h).sum(0)</text>
+<text x="1420" y="5192" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    dbeta = dh.sum(0)</text>
+<text x="1420" y="5220" xml:space="preserve" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#173d37">    return dz, dgamma, dbeta</text>
+<rect x="40" y="5462" width="2720" height="176" rx="12" fill="#f0f4f6" stroke="#52707e" stroke-width="2"/>
+<text x="58" y="5497" font-family="Noto Sans CJK KR, sans-serif" font-size="23" fill="#52707e" font-weight="700">범위 / 확인 근거</text>
+<text x="58" y="5535" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">2026-09-22 · B1 v51 + B7 단일 CUDA launch 개발 기본값. 수치·graph·sanitizer 통과. 기존 분리형보다 느림 / production 아님.</text>
+<text x="58" y="5566" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">출력 LN activation 저장 폐기. BF16 tri 유지 + K3 저장 FP32 μ/rstd로 B1 정규화 값을 재구성.</text>
+<text x="58" y="5597" font-family="Noto Sans CJK KR, sans-serif" font-size="22" fill="#163746">근거: trimul_b1_wait_folding/{wait_policy.py,b1_fused.cu,lowreg_stats.inc,results-L*.json} / 기존 K3 / trimul_b7_joint_lncolumns_20260922.</text>
+</svg>

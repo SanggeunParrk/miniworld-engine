@@ -1,0 +1,164 @@
+[
+  {
+    "op": "adaln_bwd_dx_dlnw_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "6c9ec8f59cdb1f56490fa141544a174003ea9c82353aa5c7d23fd8f447500ae0"
+  },
+  {
+    "op": "adaln_bwd_dx_dlnw_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "29576a046c49b5082d3caeeb7b9e69fbdc14a905adf86d3050bca79f9e0a7bff"
+  },
+  {
+    "op": "adaln_bwd_dx_dlnw_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "545d5daf108ef336607a760c742503f53ba587dae31dec03ecebebf26c7a10b3"
+  },
+  {
+    "op": "adaln_fwd_gate_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "sha256": "2d121d83f8743ac1c73620d657d7f600c3fe711d33cae6fe310282f93c33f8bd"
+  },
+  {
+    "op": "adaln_fwd_gate_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "sha256": "4a97524c21e7c50aeb87acbe751416877d81fe0b4570e86354aa7e05e69e0d14"
+  },
+  {
+    "op": "adaln_fwd_gate_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "sha256": "1f242adab2123707c9cd8218e4edb9fc2e74788fd0d3cc684fe8ecdddb205f49"
+  },
+  {
+    "op": "layernorm_bwd_atomic_strided_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "86180192974e3de0e1ed874a78cb38c86965948604dfac5c4d488d6f46e0388a"
+  },
+  {
+    "op": "layernorm_bwd_atomic_strided_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "c2555b6667dd349c2669eee097443dce8337fa2c0f41645bfd2ad9ff026d8921"
+  },
+  {
+    "op": "layernorm_bwd_atomic_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "1ace70c15c5eb22fc237ff1e595fd47e95b3187c48905c3f13290572bf498321"
+  },
+  {
+    "op": "layernorm_bwd_atomic_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "a553887bc389c382663ebe4ba8044a1a7610ade417d80ce6a518097873890882"
+  },
+  {
+    "op": "layernorm_bwd_foldstats_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "787aaa8ff4b634c0affeb6548eb66691f902fab06083d37dd51dea3e37b68e32"
+  },
+  {
+    "op": "layernorm_fwd_saveact_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "b23e19a7f4dbee2b08f53df34bd0a59359fa6f7076f84915cd545d974bee34b4"
+  },
+  {
+    "op": "layernorm_fwd_saveact_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "f0d5eba23cf97b50e1454389f7d8f52caf54435906cf26af933f85d8ad10ce13"
+  },
+  {
+    "op": "layernorm_linear_bwd_fp32_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "1479b37bb6d793590f40d8d32e6bc59a305daddff69934986c8619642a60f72f"
+  },
+  {
+    "op": "layernorm_linear_bwd_fp32_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "7929ce9998c9dd2449c9befe88d0a47388a066187c852b810e5b6d750878bec3"
+  },
+  {
+    "op": "layernorm_linear_fwd_foldstats_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "reason": "native implementation changed",
+    "sha256": "913a24416f7c7f4de48af500dfe5557205e295c8f770f4b8b03404b8ff48045c"
+  },
+  {
+    "op": "rmsnorm_adamod_bwd_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "90a7eb52e9fa5580e1a054e184a5cafaf1506910450df5d7cac4fa92da9c3ae7"
+  },
+  {
+    "op": "rmsnorm_adamod_bwd_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "440147fd627939196e0bf48513f0b071b9c68218d57fc0afe95fd713cb476ba9"
+  },
+  {
+    "op": "rmsnorm_adamod_fwd_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "sha256": "3130e3451923163abb4e3cad924f0f8b1d98cd54ecc878379ec9d735e39d5cdb"
+  },
+  {
+    "op": "rmsnorm_adamod_fwd_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "sha256": "926dd68c48ccfdee3164e0e4be585280a2d728e670c6bf8368dd373cfdc2b102"
+  },
+  {
+    "op": "rmsnorm_bwd_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "0d0463360c78553d712efc56b9f46b86df5b61f3958dcc1daae20cf73409da3d"
+  },
+  {
+    "op": "rmsnorm_bwd_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "767ec4b58b454bb117c1c0254dd8c7b1e89fe01f5923146ca93caf8f7604aebf"
+  },
+  {
+    "op": "transition_bwd_swiglu_recompute_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "aed78bb2069288c95ea2f62cf670f3cbb8909a450ac1ed9cf4c112e93b10cca2"
+  },
+  {
+    "op": "transition_bwd_swiglu_recompute_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "e234d738f53102b2e93d2815c093ff4758a84e7120b6829c275a77ac0a45c830"
+  },
+  {
+    "op": "transition_expand_swiglu_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "3bc572714a314494c1dfd165760656f1966a37de3e2b0d83bd082f7e386d343f"
+  },
+  {
+    "op": "transition_expand_swiglu_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "41455a85ee569aee9aaf91f89bb5d2c323b54f46aa24d490952530c02819b817"
+  },
+  {
+    "op": "trimul_input_dual_bwd_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "reason": "kernel source/key changed (op_identity)",
+    "sha256": "38bb404670fec3709036163eed2a6145b29f9b7f36b3a32be7ff3815318c2d31"
+  }
+]

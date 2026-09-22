@@ -1,0 +1,313 @@
+# vendored from team-gm origin/miniworld@7c3c67e : src/team_gm/modules/kernels/gated_projection.py
+from miniworld_engine.autotune.configs import configs_for
+import os
+
+import torch
+
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine import settings
+import triton
+import triton.language as tl
+
+from einops import rearrange
+from jaxtyping import Float
+
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine._typecheck import typecheck
+
+AUTOTUNE = settings.current().autotunes("tri_attention")
+# BOTH tile axes are searched. BLOCK_N used to be pinned at the launch site to
+# next_power_of_2(R) — a whole-row register tile decided by the shape, not by measurement, and
+# one that grows without bound as the hidden width grows. The R axis now loops in BLOCK_N tiles.
+
+
+
+
+# AUTOTUNE KEY: ['shape_key', 'R'].
+# `n_elements` is a MISNOMER: both launch sites pass the flattened ROW count M into it (it is only
+# ever read as `offset_row < n_elements`), so keying it added the raw M back beside its own bucket
+# and minted a full config sweep per distinct M. shape_key is that axis, bucketed -- and it is
+# bucketed from L (both_key(rows_of(original_shape))), NOT from M: M alone cannot say whether
+# it came from L or L*L, which is what autotune/shape_key.py exists to fix.
+# `R` (the launcher's N = hidden/projection width) IS a real config axis -- it is the extent of the
+# BLOCK_K column loop -- and was absent from the key, so a new width recompiled (it is constexpr
+# here) but silently reused the config tuned for a different width. It is a searched axis now.
+@triton.autotune(configs=configs_for("gated_projection_gate_triton"),
+                 key=['shape_key'])
+@triton.jit
+def sigmoid_gate_fwd_kernel(
+    gate_ptr,
+    rep_ptr,
+    stride_gate,
+    stride_rep,
+    out_ptr,
+    n_elements,
+    R: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
+):
+    row = tl.program_id(0).to(tl.int64)
+    offset_row = row * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
+    row_mask = offset_row < n_elements
+
+    for c0 in range(0, R, BLOCK_K):
+        offset_col = c0 + tl.arange(0, BLOCK_K)
+        col_mask = offset_col < R
+        offset = offset_row[:, None] * stride_rep + offset_col[None, :]
+        mask = row_mask[:, None] & col_mask[None, :]
+
+        gate = tl.load(gate_ptr + offset, mask=mask).to(tl.float32)
+        rep = tl.load(rep_ptr + offset, mask=mask)
+
+        s = 1.0 + tl.math.exp2(-1.44269504 * gate)
+        out_val = rep / s
+
+        tl.store(out_ptr + offset, out_val, mask=mask)
+
+
+
+
+# AUTOTUNE KEY: ['shape_key', 'R'] -- same reasoning as the forward: `n_elements` receives the raw
+# row count M (shape_key is its bucket), and `R` (the column-loop extent, a plain runtime arg here)
+# is the second real axis.
+@triton.autotune(configs=configs_for("gated_projection_bwd_gate_triton"),
+                 key=['shape_key'])
+@triton.jit
+def sigmoid_gate_bwd_kernel(
+    gate_ptr,
+    rep_ptr,
+    grad_out_ptr,
+    dgate_ptr,
+    drep_ptr,
+    stride_gate,
+    stride_rep,
+    n_elements,
+    R,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
+):
+    row = tl.program_id(0).to(tl.int64)
+    offset_row = row * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
+    row_mask = offset_row < n_elements
+
+    for c0 in range(0, R, BLOCK_K):
+        offset_col = c0 + tl.arange(0, BLOCK_K)
+        col_mask = offset_col < R
+        offset = offset_row[:, None] * stride_rep + offset_col[None, :]
+        mask = row_mask[:, None] & col_mask[None, :]
+
+        gate = tl.load(gate_ptr + offset, mask=mask).to(tl.float32)
+        rep = tl.load(rep_ptr + offset, mask=mask)
+        grad_out = tl.load(grad_out_ptr + offset, mask=mask)
+
+        s = 1.0 / (1.0 + tl.math.exp2(-1.44269504 * gate))
+
+        dgate_val = grad_out * (rep * s * (1 - s))
+        drep_val = grad_out * s
+
+        tl.store(dgate_ptr + offset, dgate_val, mask=mask)
+        tl.store(drep_ptr + offset, drep_val, mask=mask)
+
+
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_mixed
+    return bucket_mixed(length)
+
+
+def _sigmoid_gate_fake(gate, x, shape_key):
+    """(M, N) like x -- the gate is applied elementwise."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_sigmoid_gate_fake, name="gated_projection_sigmoid_gate_fwd")
+def _sigmoid_gate(gate: torch.Tensor, x: torch.Tensor, shape_key: int) -> torch.Tensor:
+    """``sigmoid(gate) * x``. Both operands arrive already flattened to (M, N) and contiguous.
+
+    Split out of ``TritonGatedProjectionFunction`` so the rearranges, the dtype casts, the
+    projection GEMM and ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    M, N = x.shape
+    out = torch.empty_like(x)
+    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
+    sigmoid_gate_fwd_kernel[grid](
+        gate, x, gate.stride(0), x.stride(0), out, M, N, shape_key=pack(shape_key, R=N),
+    )
+    return out
+
+
+def _sigmoid_gate_bwd_fake(gate, x, grad_out, shape_key):
+    """(dgate, dx), shaped like gate and x respectively."""
+    return torch.empty_like(gate), torch.empty_like(x)
+
+
+@opaque(fake=_sigmoid_gate_bwd_fake, name="gated_projection_sigmoid_gate_bwd")
+def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tensor,
+                      shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gradients of ``sigmoid(gate) * x`` -> ``(dgate, dx)``, both flat. The two GEMMs that
+    produce ``grad_out`` and ``dW_out`` stay in the caller."""
+    M, N = x.shape
+    dgate = torch.empty_like(gate)
+    dx = torch.empty_like(x)
+    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
+    sigmoid_gate_bwd_kernel[grid](
+        gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0), M, N, shape_key=pack(shape_key, R=N),
+    )
+    return dgate, dx
+
+
+class TritonGatedProjectionFunction(torch.autograd.Function):
+    @typecheck
+    @staticmethod
+    def forward(
+        ctx,
+        gate: Float[torch.Tensor, "* hd"],
+        x: Float[torch.Tensor, "* hd"],
+        out_weight: Float[torch.Tensor, "hd d"],
+    ) -> Float[torch.Tensor, "* d"]:
+        original_shape = x.shape
+        gate = rearrange(gate, "... d -> (...) d").contiguous()
+        x = rearrange(x, "... d -> (...) d").contiguous()
+        op_dtype = x.dtype
+        gate = gate.to(op_dtype)
+        # L = original_shape[-2], captured BEFORE the rearrange to (M, hd) -- one rule
+        # for pair (B, L, L, D) and token/atom (B, L, D). Never the row count M.
+        out = _sigmoid_gate(gate, x, both_key(rows_of(original_shape)))
+
+        ctx.save_for_backward(
+            gate.to(torch.bfloat16),
+            x.to(torch.bfloat16),
+            out_weight,
+        )
+        ctx.original_shape = original_shape
+        ctx.op_dtype = op_dtype
+
+        out = torch.matmul(out, out_weight)
+        return out.reshape(*original_shape[:-1], -1)
+
+    @staticmethod
+    # `Function.backward(ctx, *grad_outputs)` in torch's stubs; this op has exactly one
+    # output, so the concrete signature is narrower. Covered by `invalid-method-override`
+    # being off in `[tool.ty.rules]`.
+    def backward(ctx, grad_out: torch.Tensor):
+        gate, x, out_weight = ctx.saved_tensors
+        op_dtype = ctx.op_dtype
+        gate = gate.to(op_dtype)
+        x = x.to(op_dtype)
+        grad_out = grad_out.to(op_dtype)
+        out_weight = out_weight.to(op_dtype)
+        original_shape = ctx.original_shape
+        shape_key = both_key(rows_of(original_shape))
+        # Recompute the gated activation (forward saved gate/x, not the product) -- the same
+        # launch the forward used, so it is the same op.
+        out = _sigmoid_gate(gate, x, shape_key)
+
+        grad_out = rearrange(grad_out, "... W -> (...) W").contiguous()
+        dW_out = torch.matmul(out.T, grad_out)
+        grad_out = torch.matmul(grad_out, out_weight.T)
+
+        dgate, dx = _sigmoid_gate_bwd(gate, x, grad_out, shape_key)
+
+        dgate = dgate.reshape(original_shape)
+        dx = dx.reshape(original_shape)
+        return dgate.float(), dx.float(), dW_out.float()
+
+
+triton_gated_projection = TritonGatedProjectionFunction.apply
+
+
+# ── flat (1-D) form of the two kernels above ────────────────────────────────────────────
+# Moved here from bias_only_attention/triton/gate_out.py. conditioned_transition/triton/
+# training.py carried a bitwise-equal copy of each (.bench/direct.out); both files import
+# these now. The tiled kernels above take (M, N, strides); these take one element count and
+# assume every operand is contiguous.
+@triton.autotune(configs=configs_for("gated_projection_gate_flat_triton"), key=['shape_key'])
+@triton.jit
+def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key):
+    off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
+    m = off < n
+    g = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
+    o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
+    tl.store(a_ptr + off, (g * o).to(a_ptr.dtype.element_ty), mask=m)
+
+
+@triton.autotune(configs=configs_for("gated_projection_bwd_gate_flat_triton"), key=['shape_key'])
+@triton.jit
+def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, shape_key):
+    off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
+    m = off < n
+    da = tl.load(da_ptr + off, mask=m, other=0.0).to(tl.float32)
+    s = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
+    o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
+    tl.store(do_ptr + off, (da * s).to(do_ptr.dtype.element_ty), mask=m)
+    tl.store(dg_ptr + off, (da * o * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=m)
+
+
+# ── sigmoid(gate) * x, the standalone one-pass gate ─────────────────────────────────────────
+# The wrappers, the autograd Function and the public entry live WITH the kernels they launch.
+# They used to sit in `bias_only_attention/triton/gate_out.py`, which is one of the callers: the
+# family that owns `_sigmul_fwd`/`_sigmul_bwd` then had to reach across to drive and check them
+# (`drivers/gated_projection.py` said so in its own docstring, "via bias_only_attention's
+# sigmoid_gate_fused"), and every profile attributed the launch to `bias_only_attention_sigmul_*`.
+# `bias_only_attention` still re-exports the name, because its `dispatch.py` is where the choice
+# between this and `fused_gate_out` is made -- that part of the old layout was right.
+
+def _sigmul_fake(gate, out, shape_key):
+    """Same shape and dtype as gate."""
+    return torch.empty_like(gate)
+
+
+@opaque(fake=_sigmul_fake, name="gated_projection_sigmul_fwd")
+def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tensor:
+    """``sigmoid(gate) * out`` in one pass."""
+    a = torch.empty_like(gate)
+    n = gate.numel()
+    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+    _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, shape_key=shape_key)
+    return a
+
+
+def _sigmul_grad_fake(da, gate, out, shape_key):
+    """(dgate, dout), shaped like gate and out respectively."""
+    return torch.empty_like(gate), torch.empty_like(out)
+
+
+@opaque(fake=_sigmul_grad_fake, name="gated_projection_sigmul_bwd")
+def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor,
+                 shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""
+    dg = torch.empty_like(gate)
+    do = torch.empty_like(out)
+    n = gate.numel()
+    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+    _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, shape_key=shape_key)
+    return dg, do
+
+
+class _SigmoidGate(torch.autograd.Function):
+    # both_key, NOT token_key: these kernels are declared level=both, and token_key's top
+    # bucket is 512. Keying a
+    # level=both kernel through it makes every L >= 512 record 512, so its 1024..8192
+    # buckets are unreachable AND the same kernel ends up in two bucket spaces, since
+    # conditioned_transition/{training,train_fused}.py launch it with both_key. Measured over
+    # every bucket: L=512,1024,2048,4096 all recorded shape_key=512 from this path.
+    @staticmethod
+    def forward(ctx, gate, out):
+        a = _sigmul(gate, out, both_key(rows_of(gate.shape)))
+        ctx.save_for_backward(gate, out)
+        return a
+
+    @staticmethod
+    def backward(ctx, da):
+        gate, out = ctx.saved_tensors
+        return _sigmul_grad(da, gate, out, both_key(rows_of(gate.shape)))
+
+
+def sigmoid_gate_fused(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """sigmoid(gate) * out in ONE triton pass (vs torch's sigmoid then mul = 2 passes).
+
+    For the DH>=256 back path: this fused elementwise + a cuBLAS to_out beats the
+    wide fused tl.dot of `fused_gate_out`. gate/out same shape -> same shape."""
+    return _SigmoidGate.apply(gate, out)

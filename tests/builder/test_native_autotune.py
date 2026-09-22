@@ -330,7 +330,10 @@ def test_native_launchers_use_registered_measurement_names():
                     op = node.args[0].value
                     assert op in native.BUILD_OPS, (path, op)
                     seen.add(op)
-    assert len(seen) == len(native.BUILD_OPS) - 3  # CUDA transition constructs its three names
+    from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS
+    # Parity resolves through trimul_sm90_config, whose op is a parameter.
+    assert set(TRITON_OPS) <= native.BUILD_OPS
+    assert len(seen | set(TRITON_OPS)) == len(native.BUILD_OPS) - 3  # CUDA Transition constructs three names
 
 
 def test_m2_rejects_unused_architecture_fields_before_compilation(monkeypatch):

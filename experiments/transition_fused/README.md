@@ -51,10 +51,13 @@ with `-DFWD_SAVE=0` it drops the `xn` / `rstd` / `c1` stores that only the backw
 | forward | L384 | L768 |
 |---|---:|---:|
 | training (saves `xn`, `rstd`, `c1`) | **130 µs** | **482 µs** |
-| inference (`-DFWD_SAVE=0`) | 139 µs | 521 µs |
+| inference, stores compiled out (`-DFWD_SAVE=0`, until 2026-09-22) | 139 µs | 521 µs |
+| **inference, stores behind a runtime guard (shipped)** | **117 µs** | **433 µs** |
 
-`-DFWD_SAVE=0` used to be the faster of the two and no longer is: after the LayerNorm restructure the build that writes
-`xn` schedules better than the one that does not. One build serves both cases.
+Compiling the stores out let ptxas pick a 155-register schedule that is slower than the training build; keeping them in the
+code behind a runtime `save = 0` keeps the training schedule. Until 2026-09-22 no real inference call reached either
+inference build: the choice was made from `ctx.needs_input_grad`, which module parameters keep True under `torch.no_grad()`,
+so every no_grad call ran the training build. Both are fixed; `records/progression.md` ("Forward, round 2") has the numbers.
 
 Against Anthropic's own kernels at this width (`records/vs-anthropic.md`, one process, same timing, forward only): their
 best row is Triton `v2` at 157.9 µs (L384) / 596.9 µs (L768) — they ship **no CUDA Transition kernel at c = 128**, and no
@@ -232,11 +235,13 @@ and saves the backward nothing — removing the `xn` read outright measures insi
 557 GB/s against a ~3 TB/s peak — while adding a LayerNorm-apply pass to the weight role, which is the binding one.
 `records/progression.md` has the numbers. It remains the right trade if activation memory, not time, is the constraint.
 
-The forward is at 47-51 % of its tensor floor after one round of tuning (`records/progression.md`): the LayerNorm's
-reductions and the output stores are fixed, the weight stream and the transcendental measured free, and what is left is the
-ring handshake (12 µs by ablation) and the wgmma drain between the two chains in a chunk. Software-pipelining that drain
-needs a second `[a|b]` accumulator (64 registers on top of 183) and a three-deep ring for the squeeze operand, which the
-freed shared memory would now allow.
+The forward is at 47-51 % of its tensor floor. A second round (`records/progression.md`, "Forward, round 2") tried the
+levers this paragraph used to list -- the software-pipelined chunk loop with a second `[a|b]` accumulator, deeper and split
+weight rings, the next tile's LayerNorm under this tile's GEMMs, FA3 ping-pong, producer warps -- and every one measured
+slower. A clock-stamped trace puts a tile at ~14.5 µs (LayerNorm 13 %, chunks 72 %, epilogue 15 %) with the two warpgroups
+in lockstep, and the controls show the kernel is extremely sensitive to its register allocation (the same code at 168
+instead of 183 registers is 16 % slower). The only training-path gain found, a one-MUFU `tanh.approx` sigmoid (−3.5 %),
+changes 0.6 % of outputs by one bf16 ulp and was not adopted.
 
 The backward's tensor pipe is 58.1 % active (NCU `--set full`, L384). Since this design must execute 22·M·D·H FLOP, that *is* 406 µs;
 330 µs would need 70 %. The stall profile is flat — the largest single SASS line is 4.5 % — so there is no hotspot left, and

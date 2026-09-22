@@ -1,0 +1,51 @@
+{
+  "dx": {
+    "relative_l2": 3.3701444408507086e-06,
+    "max_absolute": 0.0078125,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 2e-05
+  },
+  "dwl": {
+    "relative_l2": 0.0001972939062397927,
+    "max_absolute": 2.0,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 0.0005
+  },
+  "dwlg": {
+    "relative_l2": 0.00016738958947826177,
+    "max_absolute": 0.5,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 0.0005
+  },
+  "dwr": {
+    "relative_l2": 9.083742770599201e-05,
+    "max_absolute": 0.5,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 0.0005
+  },
+  "dwrg": {
+    "relative_l2": 0.00023770502593833953,
+    "max_absolute": 1.0,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 0.0005
+  },
+  "dgi": {
+    "relative_l2": 6.418750331249612e-07,
+    "max_absolute": 0.0002593994140625,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 5e-06
+  },
+  "dbi": {
+    "relative_l2": 5.498338282450277e-07,
+    "max_absolute": 0.000457763671875,
+    "bit_exact": false,
+    "finite": true,
+    "limit": 5e-06
+  }
+}

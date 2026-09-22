@@ -1,0 +1,72 @@
+[
+  {
+    "case": "trimul-out",
+    "masked": false,
+    "status": "passed",
+    "rel_rms": 0.002779268193989992,
+    "update_rel_rms": 0.005867804400622845
+  },
+  {
+    "case": "trimul-out",
+    "masked": true,
+    "status": "passed",
+    "rel_rms": 0.002523174276575446,
+    "update_rel_rms": 0.005862421356141567
+  },
+  {
+    "case": "trimul-in",
+    "masked": false,
+    "status": "passed",
+    "rel_rms": 0.0027889516204595566,
+    "update_rel_rms": 0.0058545516803860664
+  },
+  {
+    "case": "trimul-in",
+    "masked": true,
+    "status": "passed",
+    "rel_rms": 0.0025369690265506506,
+    "update_rel_rms": 0.00584400026127696
+  },
+  {
+    "case": "attn-start",
+    "masked": false,
+    "status": "passed",
+    "rel_rms": 0.0017413981258869171,
+    "update_rel_rms": 0.0207708477973938
+  },
+  {
+    "case": "attn-start",
+    "masked": true,
+    "status": "passed",
+    "rel_rms": 0.0017440365627408028,
+    "update_rel_rms": 0.020294085144996643
+  },
+  {
+    "case": "attn-end",
+    "masked": false,
+    "status": "passed",
+    "rel_rms": 0.0017375706229358912,
+    "update_rel_rms": 0.020993048325181007
+  },
+  {
+    "case": "attn-end",
+    "masked": true,
+    "status": "passed",
+    "rel_rms": 0.001756197540089488,
+    "update_rel_rms": 0.019448770210146904
+  },
+  {
+    "case": "transition",
+    "masked": false,
+    "status": "passed",
+    "rel_rms": 0.00280402903445065,
+    "update_rel_rms": 0.005529537796974182
+  },
+  {
+    "case": "transition",
+    "masked": true,
+    "status": "passed",
+    "rel_rms": 0.0028176961932331324,
+    "update_rel_rms": 0.00550824124366045
+  }
+]

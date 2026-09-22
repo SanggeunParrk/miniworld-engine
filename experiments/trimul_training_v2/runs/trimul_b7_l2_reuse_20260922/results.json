@@ -1,0 +1,395 @@
+{
+  "candidate_count": 41,
+  "experiments": [
+    {
+      "family": "TMA multicast / cluster 배치",
+      "file": "trimul_b7_ring_multicast_20260922/configs-2-10-10-0_2-10-10-1.json",
+      "baseline_us": 356.112003326416,
+      "checked_cases": 3,
+      "candidates": {
+        "c2g10u10m0": {
+          "us": 354.4960021972656,
+          "latency_change_pct": -0.45379013177186955
+        },
+        "c2g10u10m1": {
+          "us": 393.312007188797,
+          "latency_change_pct": 10.446152759496584
+        }
+      }
+    },
+    {
+      "family": "TMA multicast / cluster 배치",
+      "file": "trimul_b7_ring_multicast_20260922/configs-4-10-8-0_4-10-8-1_4-8-12-1.json",
+      "baseline_us": 339.28000926971436,
+      "checked_cases": 5,
+      "candidates": {
+        "c4g10u8m0": {
+          "us": 398.3360081911087,
+          "latency_change_pct": 17.40627131215595
+        },
+        "c4g10u8m1": {
+          "us": 394.19201016426086,
+          "latency_change_pct": 16.18486188229664
+        },
+        "c4g8u12m1": {
+          "us": 448.17599654197693,
+          "latency_change_pct": 32.09619909721664
+        }
+      }
+    },
+    {
+      "family": "dX 두 행 가중치 재사용",
+      "file": "trimul_b7_ring_dxpair_20260922/configs-10-10-24-64.json",
+      "baseline_us": 365.4080033302307,
+      "checked_cases": 3,
+      "candidates": {
+        "g10u10r24p64": {
+          "us": 386.28800213336945,
+          "latency_change_pct": 5.714160229892062
+        }
+      }
+    },
+    {
+      "family": "dX 두 행 가중치 재사용",
+      "file": "trimul_b7_ring_dxpair_20260922/configs-11-8-18-32_11-8-20-32_11-8-20-48_11-8-24-64_12-6-16-64_13-4-12-64.json",
+      "baseline_us": 344.0160006284714,
+      "checked_cases": 5,
+      "candidates": {
+        "g11u8r18p32": {
+          "us": 361.4239990711212,
+          "latency_change_pct": 5.060229294814111
+        },
+        "g11u8r20p32": {
+          "us": 364.0640079975128,
+          "latency_change_pct": 5.827638055327777
+        },
+        "g11u8r20p48": {
+          "us": 361.88800632953644,
+          "latency_change_pct": 5.19510885203458
+        },
+        "g11u8r24p64": {
+          "us": 361.64799332618713,
+          "latency_change_pct": 5.12534087528036
+        },
+        "g12u6r16p64": {
+          "us": 421.5199947357178,
+          "latency_change_pct": 22.529182934996328
+        },
+        "g13u4r12p64": {
+          "us": 541.7439937591553,
+          "latency_change_pct": 57.47639434487384
+        }
+      }
+    },
+    {
+      "family": "dX 두 행 가중치 재사용",
+      "file": "trimul_b7_ring_dxpair_20260922/configs-11-8-20-64_9-12-28-64_8-16-36-64_10-10-20-32_10-10-24-48.json",
+      "baseline_us": 347.9680120944977,
+      "checked_cases": 5,
+      "candidates": {
+        "g11u8r20p64": {
+          "us": 362.08000779151917,
+          "latency_change_pct": 4.0555439599399445
+        },
+        "g9u12r28p64": {
+          "us": 403.1679928302765,
+          "latency_change_pct": 15.863521593125096
+        },
+        "g8u16r36p64": {
+          "us": 440.5120015144348,
+          "latency_change_pct": 26.595545051079284
+        },
+        "g10u10r20p32": {
+          "us": 376.3999938964844,
+          "latency_change_pct": 8.170860772761323
+        },
+        "g10u10r24p48": {
+          "us": 372.1279948949814,
+          "latency_change_pct": 6.943162003616177
+        }
+      }
+    },
+    {
+      "family": "dX 재사용 + LN prefetch",
+      "file": "trimul_b7_ring_dxpair_prefetch_20260922/configs-10-10-24-64.json",
+      "baseline_us": 358.99199545383453,
+      "checked_cases": 5,
+      "candidates": {
+        "g10u10r24p64": {
+          "us": 382.9599916934967,
+          "latency_change_pct": 6.676470936172829
+        }
+      }
+    },
+    {
+      "family": "source 두 채널 x_n 재사용",
+      "file": "trimul_b7_ring_sourcepair_20260922/configs-20-5-6-32_20-5-7-32_20-5-8-32_18-6-8-48_18-6-8-64.json",
+      "baseline_us": 351.0880023241043,
+      "checked_cases": 5,
+      "candidates": {
+        "g20u5r6p32": {
+          "us": 354.7680079936981,
+          "latency_change_pct": 1.048171867233627
+        },
+        "g20u5r7p32": {
+          "us": 356.4639985561371,
+          "latency_change_pct": 1.5312389476271449
+        },
+        "g20u5r8p32": {
+          "us": 360.27199029922485,
+          "latency_change_pct": 2.6158649439243398
+        },
+        "g18u6r8p48": {
+          "us": 465.0079905986786,
+          "latency_change_pct": 32.447701864049996
+        },
+        "g18u6r8p64": {
+          "us": 588.3999764919281,
+          "latency_change_pct": 67.59330213419
+        }
+      }
+    },
+    {
+      "family": "source 두 채널 x_n 재사용",
+      "file": "trimul_b7_ring_sourcepair_20260922/configs-22-4-6-32_18-6-8-32_16-8-10-32.json",
+      "baseline_us": 356.51199519634247,
+      "checked_cases": 3,
+      "candidates": {
+        "g22u4r6p32": {
+          "us": 409.60000455379486,
+          "latency_change_pct": 14.890946187719468
+        },
+        "g18u6r8p32": {
+          "us": 364.22398686408997,
+          "latency_change_pct": 2.163178734982041
+        },
+        "g16u8r10p32": {
+          "us": 399.1999924182892,
+          "latency_change_pct": 11.973789885649456
+        }
+      }
+    },
+    {
+      "family": "source 재사용 pipeline",
+      "file": "trimul_b7_ring_sourcepair_pipeline_20260922/pipes-1_2_3.json",
+      "baseline_us": 353.13600301742554,
+      "checked_cases": 5,
+      "candidates": {
+        "pipe1": {
+          "us": 356.224000453949,
+          "latency_change_pct": 0.8744499031924091
+        },
+        "pipe2": {
+          "us": 386.27201318740845,
+          "latency_change_pct": 9.38335652180664
+        },
+        "pipe3": {
+          "us": 384.4799995422363,
+          "latency_change_pct": 8.875899442987167
+        }
+      }
+    },
+    {
+      "family": "역할별 레지스터 배분",
+      "file": "trimul_b7_ring_sourcepair_regs_20260922/configs-20-5-6-24-64_20-5-6-32-64_20-5-6-24-32_18-6-8-24-64.json",
+      "baseline_us": 359.8720133304596,
+      "checked_cases": 5,
+      "candidates": {
+        "g20u5r6p24d64": {
+          "us": 367.0400083065033,
+          "latency_change_pct": 1.99181784371254
+        },
+        "g20u5r6p32d64": {
+          "us": 363.5840117931366,
+          "latency_change_pct": 1.031477393399971
+        },
+        "g20u5r6p24d32": {
+          "us": 368.9119964838028,
+          "latency_change_pct": 2.5119994938428425
+        },
+        "g18u6r8p24d64": {
+          "us": 364.8800104856491,
+          "latency_change_pct": 1.3916050622671872
+        }
+      }
+    },
+    {
+      "family": "source 재사용 + SS WGMMA",
+      "file": "trimul_b7_ring_sourcepair_ss_20260922/configs-20-5-6-24-64_20-5-6-32-64_18-6-8-32-64.json",
+      "baseline_us": 351.77600383758545,
+      "checked_cases": 5,
+      "candidates": {
+        "g20u5r6p24d64": {
+          "us": 368.1759983301163,
+          "latency_change_pct": 4.6620560565872715
+        },
+        "g20u5r6p32d64": {
+          "us": 363.3120059967041,
+          "latency_change_pct": 3.279360170469392
+        },
+        "g18u6r8p32d64": {
+          "us": 366.43199622631073,
+          "latency_change_pct": 4.166285428465999
+        }
+      }
+    },
+    {
+      "family": "기존 배선 + SS WGMMA",
+      "file": "trimul_b7_ring_gp_ss_20260922/configs-10-10-12-32_10-10-12-48_10-10-12-64.json",
+      "baseline_us": 358.5280030965805,
+      "checked_cases": 5,
+      "candidates": {
+        "g10u10r12p32": {
+          "us": 364.9120032787323,
+          "latency_change_pct": 1.7806141018312793
+        },
+        "g10u10r12p48": {
+          "us": 364.1279935836792,
+          "latency_change_pct": 1.5619394967009592
+        },
+        "g10u10r12p64": {
+          "us": 365.02400040626526,
+          "latency_change_pct": 1.8118521436482737
+        }
+      }
+    },
+    {
+      "family": "초기 동기화 없는 cluster 배치",
+      "file": "trimul_b7_ring_cluster_schedule_20260922/configs-1-10-10-0_2-10-10-0.json",
+      "baseline_us": 365.79200625419617,
+      "checked_cases": 5,
+      "candidates": {
+        "c1g10u10m0": {
+          "us": 370.94399333000183,
+          "latency_change_pct": 1.4084471469355764
+        },
+        "c2g10u10m0": {
+          "us": 361.61600053310394,
+          "latency_change_pct": -1.1416339476238435
+        }
+      }
+    }
+  ],
+  "profiles": {
+    "previous": {
+      "gpu__time_duration.sum": {
+        "value": "340.192000",
+        "unit": "us"
+      },
+      "lts__t_sectors.sum": {
+        "value": "75918133.000000",
+        "unit": "sector"
+      },
+      "dram__bytes_read.sum": {
+        "value": "303.239936",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "144.610816",
+        "unit": "Mbyte"
+      }
+    },
+    "dx_reuse": {
+      "gpu__time_duration.sum": {
+        "value": "349.568000",
+        "unit": "us"
+      },
+      "lts__t_sectors.sum": {
+        "value": "69634467.000000",
+        "unit": "sector"
+      },
+      "dram__bytes_read.sum": {
+        "value": "311.158272",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "334.457600",
+        "unit": "Mbyte"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "36.213815",
+        "unit": "%"
+      },
+      "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "55.099544",
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "71.121418",
+        "unit": "%"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "55.099544",
+        "unit": "%"
+      }
+    },
+    "source_reuse": {
+      "gpu__time_duration.sum": {
+        "value": "344.160000",
+        "unit": "us"
+      },
+      "lts__t_sectors.sum": {
+        "value": "75808904.000000",
+        "unit": "sector"
+      },
+      "dram__bytes_read.sum": {
+        "value": "307.500032",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "135.992064",
+        "unit": "Mbyte"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "36.889643",
+        "unit": "%"
+      },
+      "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "54.346106",
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "76.730929",
+        "unit": "%"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "38.444268",
+        "unit": "%"
+      }
+    },
+    "selected": {
+      "gpu__time_duration.sum": {
+        "value": "339.296000",
+        "unit": "us"
+      },
+      "lts__t_sectors.sum": {
+        "value": "80855824.000000",
+        "unit": "sector"
+      },
+      "dram__bytes_read.sum": {
+        "value": "302.953984",
+        "unit": "Mbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": "153.681920",
+        "unit": "Mbyte"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "37.449871",
+        "unit": "%"
+      },
+      "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "58.141616",
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "80.000192",
+        "unit": "%"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "40.149304",
+        "unit": "%"
+      }
+    }
+  }
+}

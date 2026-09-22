@@ -40,7 +40,7 @@ def check(actual, expected, dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("transposed", [False, True])
 @pytest.mark.parametrize("width", [128, 137, 256, 384])
-@pytest.mark.parametrize("covering,warps", [(False, 8), (True, 16)])
+@pytest.mark.parametrize(("covering", "warps"), [(False, 8), (True, 16)])
 def test_persistent_backward_wide_warps(dtype, transposed, width, covering, warps):
     from miniworld_engine.kernels.layernorm.triton.persistent import _ln_bwd_persistent
     x, dy, w, mean, rstd = inputs(width, dtype, transposed)
@@ -60,7 +60,9 @@ def test_persistent_backward_wide_warps(dtype, transposed, width, covering, warp
 @pytest.mark.parametrize("block_k", [64, 256])
 def test_atomic_backward_mask_and_residual(dtype, rowscale, residual, block_k):
     from miniworld_engine.kernels.layernorm.triton.main import layer_norm_bwd_dx_fused
-    from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import _ln_bwd_residual_kernel
+    from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
+        _ln_bwd_residual_kernel,
+    )
     x, dy, w, mean, rstd = inputs(137, dtype)
     scale = (torch.arange(x.shape[0], device="cuda") % 3 != 0).float() * 1.25
     dr = torch.randn_like(x)

@@ -1,0 +1,6 @@
+{
+  "status": "superseded",
+  "historical_manifest": "before-opt-manifest.json",
+  "current_manifest": "../trimul_cuda_widths_opt_20260923/manifest.json",
+  "note": "Historical timing JSON and CUDA sources/cubins are preserved. index.html and report.py are live aliases."
+}

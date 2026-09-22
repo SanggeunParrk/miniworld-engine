@@ -1,0 +1,362 @@
+[
+  {
+    "L": 384,
+    "variant": "none",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "none",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/88309481d18fe62b866e2b40bbaed5193c69bd4a449bd95898b9439c15b4f3d6.cubin",
+    "sha256": "7d4b3532872af42f01581dbd42d8eeafda78b6e1d9c3b3f157fbca6375ba96f6",
+    "ptxas": [
+      "16 bytes stack frame, 16 bytes spill stores, 32 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/9b4dc359753c7941803c93776a4b21d741486c2e7f32b46c7dbc3f60685bb75e.cubin",
+    "sha256": "1083eb16d6ef5906e37f0c9948525c7435abd5db5e192ec6c4903b7cb118f0ad",
+    "ptxas": [
+      "56 bytes stack frame, 52 bytes spill stores, 68 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 56 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_in_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_in_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/cc5d0fe11a80cecd37ed65d55f5c6d2a9866c6336f58a2ecfed5d290498849f5.cubin",
+    "sha256": "0a5132239048a7c133af9a4857366e857499e6bbef6f25aafc79d8b42ce033fb",
+    "ptxas": [
+      "40 bytes stack frame, 40 bytes spill stores, 56 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 40 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_out_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_out_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/4154bd8895ace181f58d41dd8d3dbb00cd868106263f5ddbc40e6183e318ead2.cubin",
+    "sha256": "e9071937330cb040358b522c49d65001002cfed516e359a74448abb097e01b0e",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_both_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_both_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/1146bd3d4f64310ef56411e5d4ce7f5c194124f8a3a269ed618c2a73aa57c42c.cubin",
+    "sha256": "0524a3162779153f2569613e0d56e31c022e95be23fd4c20f1205d4ca5457bc1",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_stats_out_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_stats_out_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/088e01f9cc0bc74edfaeceeb3bd621537e094be2f662d47f45d12281df2c3c23.cubin",
+    "sha256": "c77650abee7deedccce5ec76bfab90f84795f1079e7f3a8a3c6073eee958d542",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_stats_in_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/8b861e15d41ae146471b9db3bff699a3bb48ba71c894471e060c6ba3af1ebec9.cubin",
+    "sha256": "6464e962c4efb7457211ceb6d4827f1a72410e9d0c6c8c0da7b18ee28f449db4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_stats_in_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/1146bd3d4f64310ef56411e5d4ce7f5c194124f8a3a269ed618c2a73aa57c42c.cubin",
+    "sha256": "0524a3162779153f2569613e0d56e31c022e95be23fd4c20f1205d4ca5457bc1",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/8b861e15d41ae146471b9db3bff699a3bb48ba71c894471e060c6ba3af1ebec9.cubin",
+    "sha256": "6464e962c4efb7457211ceb6d4827f1a72410e9d0c6c8c0da7b18ee28f449db4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "xn_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/088e01f9cc0bc74edfaeceeb3bd621537e094be2f662d47f45d12281df2c3c23.cubin",
+    "sha256": "c77650abee7deedccce5ec76bfab90f84795f1079e7f3a8a3c6073eee958d542",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "both_ln_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/8b861e15d41ae146471b9db3bff699a3bb48ba71c894471e060c6ba3af1ebec9.cubin",
+    "sha256": "6464e962c4efb7457211ceb6d4827f1a72410e9d0c6c8c0da7b18ee28f449db4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 384,
+    "variant": "both_ln_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/b9af155c49636b1c85a246cc70f0c421a8b37398f2985b2eba02ff426bcf2404.cubin",
+    "sha256": "567da525e5ad0f5c940de8c167b199a5394ae76ea916676d5dcfa356a27edf36",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "none",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "none",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/88309481d18fe62b866e2b40bbaed5193c69bd4a449bd95898b9439c15b4f3d6.cubin",
+    "sha256": "7d4b3532872af42f01581dbd42d8eeafda78b6e1d9c3b3f157fbca6375ba96f6",
+    "ptxas": [
+      "16 bytes stack frame, 16 bytes spill stores, 32 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/9b4dc359753c7941803c93776a4b21d741486c2e7f32b46c7dbc3f60685bb75e.cubin",
+    "sha256": "1083eb16d6ef5906e37f0c9948525c7435abd5db5e192ec6c4903b7cb118f0ad",
+    "ptxas": [
+      "56 bytes stack frame, 52 bytes spill stores, 68 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 56 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_in_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_in_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/cc5d0fe11a80cecd37ed65d55f5c6d2a9866c6336f58a2ecfed5d290498849f5.cubin",
+    "sha256": "0a5132239048a7c133af9a4857366e857499e6bbef6f25aafc79d8b42ce033fb",
+    "ptxas": [
+      "40 bytes stack frame, 40 bytes spill stores, 56 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers, 40 bytes cumulative stack size"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_out_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_out_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/4154bd8895ace181f58d41dd8d3dbb00cd868106263f5ddbc40e6183e318ead2.cubin",
+    "sha256": "e9071937330cb040358b522c49d65001002cfed516e359a74448abb097e01b0e",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_both_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_both_stats",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/1146bd3d4f64310ef56411e5d4ce7f5c194124f8a3a269ed618c2a73aa57c42c.cubin",
+    "sha256": "0524a3162779153f2569613e0d56e31c022e95be23fd4c20f1205d4ca5457bc1",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_stats_out_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/77549ed4428abd8c2b796044cc8891464761932391333eefbc2d80cce10d9a04.cubin",
+    "sha256": "9213bb61fda465cd7a448584f7f7ae4699a450a1d915d1c0bc2edd1954c13cda",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_stats_out_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/088e01f9cc0bc74edfaeceeb3bd621537e094be2f662d47f45d12281df2c3c23.cubin",
+    "sha256": "c77650abee7deedccce5ec76bfab90f84795f1079e7f3a8a3c6073eee958d542",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_stats_in_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/8b861e15d41ae146471b9db3bff699a3bb48ba71c894471e060c6ba3af1ebec9.cubin",
+    "sha256": "6464e962c4efb7457211ceb6d4827f1a72410e9d0c6c8c0da7b18ee28f449db4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_stats_in_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/1146bd3d4f64310ef56411e5d4ce7f5c194124f8a3a269ed618c2a73aa57c42c.cubin",
+    "sha256": "0524a3162779153f2569613e0d56e31c022e95be23fd4c20f1205d4ca5457bc1",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/8b861e15d41ae146471b9db3bff699a3bb48ba71c894471e060c6ba3af1ebec9.cubin",
+    "sha256": "6464e962c4efb7457211ceb6d4827f1a72410e9d0c6c8c0da7b18ee28f449db4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "xn_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/088e01f9cc0bc74edfaeceeb3bd621537e094be2f662d47f45d12281df2c3c23.cubin",
+    "sha256": "c77650abee7deedccce5ec76bfab90f84795f1079e7f3a8a3c6073eee958d542",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "both_ln_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/8b861e15d41ae146471b9db3bff699a3bb48ba71c894471e060c6ba3af1ebec9.cubin",
+    "sha256": "6464e962c4efb7457211ceb6d4827f1a72410e9d0c6c8c0da7b18ee28f449db4",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 16 barriers"
+    ]
+  },
+  {
+    "L": 768,
+    "variant": "both_ln_stats_all_pg",
+    "path": "/home/psk6950/MiniWorld/runs/trimul_save_cost_20260921/build/b9af155c49636b1c85a246cc70f0c421a8b37398f2985b2eba02ff426bcf2404.cubin",
+    "sha256": "567da525e5ad0f5c940de8c167b199a5394ae76ea916676d5dcfa356a27edf36",
+    "ptxas": [
+      "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+      "ptxas info    : Used 168 registers, used 1 barriers"
+    ]
+  }
+]

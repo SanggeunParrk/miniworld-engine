@@ -1,0 +1,549 @@
+{
+  "selected": {
+    "status": "experimental_validated_small_gain",
+    "scope": "L384 bidirectional B7-B12 only",
+    "plan": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/plan.py",
+    "kwargs": {
+      "clusters": 10,
+      "mode": 52
+    },
+    "environment": {
+      "B7_CONSUMERS": "10",
+      "B7_PRODUCER_REGS": "32",
+      "B7_RING_DEPTH": "12",
+      "B7_HW_CLUSTER": "2",
+      "B7_MULTICAST": "0"
+    },
+    "source_sha256": {
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/joint.cu": "dee13f2d4d733bc58400fd8eb3169ac38b81a0d1bee9ebc01324fd25ac14f46f",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e"
+    },
+    "cubin": {
+      "path": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/build/49f07965e1ce5ebd0418282fd119c560fd31e16787aace4b4d51d181016e358d.cubin",
+      "sha256": "0b4bf73b7874f4ea45e0d5383d4004894ee5ca584e720c764f61336b92aa5e39"
+    },
+    "times_us": {
+      "split": 414.68799114227295,
+      "ring_baseline": 369.376003742218,
+      "v12p24": 360.25598645210266,
+      "v12p32": 356.59199953079224,
+      "v10p32": 358.97600650787354
+    },
+    "time_reduction_pct": 3.4609731227553064,
+    "rounds": [
+      {
+        "previous": 367.247998714447,
+        "selected": 355.24800419807434,
+        "time_reduction_pct": 3.267545244188863
+      },
+      {
+        "previous": 368.1440055370331,
+        "selected": 355.55198788642883,
+        "time_reduction_pct": 3.420405455804054
+      },
+      {
+        "previous": 391.1520093679428,
+        "selected": 371.16798758506775,
+        "time_reduction_pct": 5.109016777177489
+      },
+      {
+        "previous": 370.07999420166016,
+        "selected": 357.04000294208527,
+        "time_reduction_pct": 3.5235601664188487
+      },
+      {
+        "previous": 368.8479959964752,
+        "selected": 356.2079966068268,
+        "time_reduction_pct": 3.4268857434077593
+      }
+    ],
+    "benchmark": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-12-24_12-32_10-32.json",
+    "sanitizer": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/sanitizer-L384.json",
+    "profile": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/ncu-L384-mode52-p32-r12.csv",
+    "target_us": 252,
+    "target_met": false,
+    "sol90_verified": false,
+    "production_dispatch_changed": false
+  },
+  "experiments": [
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-0-64_1-64_2-64_3-64.json",
+      "variant": "v0p64",
+      "us": 362.70400881767273,
+      "baseline_us": 359.74401235580444,
+      "time_reduction_pct": -0.8228063178826961,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-0-64_1-64_2-64_3-64.json",
+      "variant": "v1p64",
+      "us": 365.08798599243164,
+      "baseline_us": 359.74401235580444,
+      "time_reduction_pct": -1.4854934211779858,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-0-64_1-64_2-64_3-64.json",
+      "variant": "v2p64",
+      "us": 360.76799035072327,
+      "baseline_us": 359.74401235580444,
+      "time_reduction_pct": -0.28464073334069084,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-0-64_1-64_2-64_3-64.json",
+      "variant": "v3p64",
+      "us": 363.45601081848145,
+      "baseline_us": 359.74401235580444,
+      "time_reduction_pct": -1.031844404683424,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-2-48_2-40_2-32_3-48_3-40_3-32.json",
+      "variant": "v2p48",
+      "us": 365.58400094509125,
+      "baseline_us": 366.16000533103943,
+      "time_reduction_pct": 0.15730947606563683,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-2-48_2-40_2-32_3-48_3-40_3-32.json",
+      "variant": "v2p40",
+      "us": 367.5839900970459,
+      "baseline_us": 366.16000533103943,
+      "time_reduction_pct": -0.388896860736887,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-2-48_2-40_2-32_3-48_3-40_3-32.json",
+      "variant": "v2p32",
+      "us": 369.52000856399536,
+      "baseline_us": 366.16000533103943,
+      "time_reduction_pct": -0.9176325060182844,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-2-48_2-40_2-32_3-48_3-40_3-32.json",
+      "variant": "v3p48",
+      "us": 370.62400579452515,
+      "baseline_us": 366.16000533103943,
+      "time_reduction_pct": -1.2191392829618009,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-2-48_2-40_2-32_3-48_3-40_3-32.json",
+      "variant": "v3p40",
+      "us": 370.60800194740295,
+      "baseline_us": 366.16000533103943,
+      "time_reduction_pct": -1.2147685578992151,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_register_pack_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_register_pack_20260922/configs-2-48_2-40_2-32_3-48_3-40_3-32.json",
+      "variant": "v3p32",
+      "us": 366.1919981241226,
+      "baseline_us": 366.16000533103943,
+      "time_reduction_pct": -0.008737380548784479,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_gate_half_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_gate_half_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v4p64",
+      "us": 364.28800225257874,
+      "baseline_us": 358.7680011987686,
+      "time_reduction_pct": -1.538599048790834,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_gate_half_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_gate_half_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v5p64",
+      "us": 366.239994764328,
+      "baseline_us": 358.7680011987686,
+      "time_reduction_pct": -2.0826811590199945,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_gate_half_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_gate_half_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v6p64",
+      "us": 362.5119924545288,
+      "baseline_us": 358.7680011987686,
+      "time_reduction_pct": -1.0435688922228792,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_gate_half_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_gate_half_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v7p64",
+      "us": 364.6239936351776,
+      "baseline_us": 358.7680011987686,
+      "time_reduction_pct": -1.6322504841128849,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_384_n64_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_384_n64_20260922/configs-7-24_5-24_7-32.json",
+      "variant": "v7p24",
+      "us": 370.65601348876953,
+      "baseline_us": 352.80001163482666,
+      "time_reduction_pct": -5.061224848378165,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_384_n64_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_384_n64_20260922/configs-7-24_5-24_7-32.json",
+      "variant": "v5p24",
+      "us": 370.5279976129532,
+      "baseline_us": 352.80001163482666,
+      "time_reduction_pct": -5.02493917048854,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_384_n64_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_384_n64_20260922/configs-7-24_5-24_7-32.json",
+      "variant": "v7p32",
+      "us": 444.11200284957886,
+      "baseline_us": 352.80001163482666,
+      "time_reduction_pct": -25.88208282409772,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_256_n64_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_256_n64_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v4p64",
+      "us": 371.3279962539673,
+      "baseline_us": 364.0959858894348,
+      "time_reduction_pct": -1.9862922539136685,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_256_n64_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_256_n64_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v5p64",
+      "us": 371.39201164245605,
+      "baseline_us": 364.0959858894348,
+      "time_reduction_pct": -2.0038742627711548,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_256_n64_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_256_n64_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v6p64",
+      "us": 372.1439987421036,
+      "baseline_us": 364.0959858894348,
+      "time_reduction_pct": -2.2104096624434355,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_256_n64_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_256_n64_20260922/configs-4-64_5-64_6-64_7-64.json",
+      "variant": "v7p64",
+      "us": 373.27998876571655,
+      "baseline_us": 364.0959858894348,
+      "time_reduction_pct": -2.522412559382259,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_two_wg_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_20260922/configs-7-24.json",
+      "variant": "v7p24",
+      "us": 1031.1519801616669,
+      "baseline_us": 339.87200260162354,
+      "time_reduction_pct": -203.3942108406964,
+      "cases": 3
+    },
+    {
+      "folder": "trimul_b7_two_wg_uniform_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_uniform_20260922/configs-7-24.json",
+      "variant": "v7p24",
+      "us": 1037.8399789333344,
+      "baseline_us": 340.14400839805603,
+      "time_reduction_pct": -205.11781872070918,
+      "cases": 3
+    },
+    {
+      "folder": "trimul_b7_two_wg_lowreg_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_lowreg_20260922/configs-7-24.json",
+      "variant": "v7p24",
+      "us": 581.2319815158844,
+      "baseline_us": 341.7920023202896,
+      "time_reduction_pct": -70.05429546921293,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_two_wg_register_budget_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_register_budget_20260922/reg120g6u10-configs-7-24.json",
+      "variant": "v7p24",
+      "us": 724.7360050678253,
+      "baseline_us": 345.5680012702942,
+      "time_reduction_pct": -109.72312320693023,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_two_wg_register_budget_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_register_budget_20260922/reg96g6u10-configs-7-24.json",
+      "variant": "v7p24",
+      "us": 739.6639883518219,
+      "baseline_us": 339.4719958305359,
+      "time_reduction_pct": -117.88659961249395,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_two_wg_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_batch128_20260922/configs-7-24.json",
+      "variant": "v7p24",
+      "us": 667.5520241260529,
+      "baseline_us": 347.26399183273315,
+      "time_reduction_pct": -92.23185813275828,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_two_wg_static_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_static_20260922/configs-7-24.json",
+      "variant": "v7p24",
+      "us": 621.0559904575348,
+      "baseline_us": 346.94400429725647,
+      "time_reduction_pct": -79.00755821259942,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-0-64_0-48_0-32.json",
+      "variant": "v0p64",
+      "us": 357.1839928627014,
+      "baseline_us": 360.54399609565735,
+      "time_reduction_pct": 0.931925997753813,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-0-64_0-48_0-32.json",
+      "variant": "v0p48",
+      "us": 354.8319935798645,
+      "baseline_us": 360.54399609565735,
+      "time_reduction_pct": 1.5842733695882627,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-0-64_0-48_0-32.json",
+      "variant": "v0p32",
+      "us": 354.2719930410385,
+      "baseline_us": 360.54399609565735,
+      "time_reduction_pct": 1.7395943692139038,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-12-24_12-32_10-32.json",
+      "variant": "v12p24",
+      "us": 360.25598645210266,
+      "baseline_us": 369.376003742218,
+      "time_reduction_pct": 2.4690335045370437,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-12-24_12-32_10-32.json",
+      "variant": "v12p32",
+      "us": 356.59199953079224,
+      "baseline_us": 369.376003742218,
+      "time_reduction_pct": 3.4609731227553064,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-12-24_12-32_10-32.json",
+      "variant": "v10p32",
+      "us": 358.97600650787354,
+      "baseline_us": 369.376003742218,
+      "time_reduction_pct": 2.8155584361139185,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-8-32_10-32_12-24_14-32_16-32_14-48.json",
+      "variant": "v8p32",
+      "us": 387.5200003385544,
+      "baseline_us": 366.2880063056946,
+      "time_reduction_pct": -5.796529962037611,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-8-32_10-32_12-24_14-32_16-32_14-48.json",
+      "variant": "v10p32",
+      "us": 358.7839901447296,
+      "baseline_us": 366.2880063056946,
+      "time_reduction_pct": 2.048665539625205,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-8-32_10-32_12-24_14-32_16-32_14-48.json",
+      "variant": "v12p24",
+      "us": 357.7760010957718,
+      "baseline_us": 366.2880063056946,
+      "time_reduction_pct": 2.3238558356778127,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-8-32_10-32_12-24_14-32_16-32_14-48.json",
+      "variant": "v14p32",
+      "us": 362.63999342918396,
+      "baseline_us": 366.2880063056946,
+      "time_reduction_pct": 0.9959411211149738,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-8-32_10-32_12-24_14-32_16-32_14-48.json",
+      "variant": "v16p32",
+      "us": 368.8639998435974,
+      "baseline_us": 366.2880063056946,
+      "time_reduction_pct": -0.7032699661350561,
+      "cases": 5
+    },
+    {
+      "folder": "trimul_b7_weight_batch128_20260922",
+      "record": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/configs-8-32_10-32_12-24_14-32_16-32_14-48.json",
+      "variant": "v14p48",
+      "us": 359.824001789093,
+      "baseline_us": 366.2880063056946,
+      "time_reduction_pct": 1.764732780031808,
+      "cases": 5
+    }
+  ],
+  "profiles": {
+    "previous": {
+      "path": "/home/psk6950/MiniWorld/runs/trimul_b7_ring_cluster_schedule_20260922/ncu-L384-mode52-p64-r12.csv",
+      "values": {
+        "gpu__time_duration.sum": 339.296,
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": 37.449871,
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 58.141616,
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": 80.000192,
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 40.149304,
+        "lts__t_sectors.sum": 80855824.0,
+        "dram__bytes_read.sum": 302.953984,
+        "dram__bytes_write.sum": 153.68192,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": 0.0,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": 0.0,
+        "smsp__inst_executed.sum": 99543857.0
+      },
+      "units": {
+        "gpu__time_duration.sum": "us",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__t_sectors.sum": "sector",
+        "dram__bytes_read.sum": "Mbyte",
+        "dram__bytes_write.sum": "Mbyte",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": "sector",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": "sector",
+        "smsp__inst_executed.sum": "inst"
+      }
+    },
+    "two_wg": {
+      "path": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_20260922/ncu-L384-mode52-p24-r12.csv",
+      "values": {
+        "gpu__time_duration.sum": 887.68,
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": 12.663078,
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 41.49172,
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": 54.513233,
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 18.179451,
+        "lts__t_sectors.sum": 124853191.0,
+        "dram__bytes_read.sum": 347.311104,
+        "dram__bytes_write.sum": 193.641216,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": 23657696.0,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": 23630356.0,
+        "smsp__inst_executed.sum": 135769246.0
+      },
+      "units": {
+        "gpu__time_duration.sum": "us",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__t_sectors.sum": "sector",
+        "dram__bytes_read.sum": "Mbyte",
+        "dram__bytes_write.sum": "Mbyte",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": "sector",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": "sector",
+        "smsp__inst_executed.sum": "inst"
+      }
+    },
+    "two_wg_lowreg": {
+      "path": "/home/psk6950/MiniWorld/runs/trimul_b7_two_wg_lowreg_20260922/ncu-L384-mode52-p24-r12.csv",
+      "values": {
+        "gpu__time_duration.sum": 537.504,
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": 21.582046,
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 34.628306,
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": 59.450227,
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 28.682934,
+        "lts__t_sectors.sum": 76208564.0,
+        "dram__bytes_read.sum": 326.726656,
+        "dram__bytes_write.sum": 190.095872,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": 2165458.0,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": 2153768.0,
+        "smsp__inst_executed.sum": 123294488.0
+      },
+      "units": {
+        "gpu__time_duration.sum": "us",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__t_sectors.sum": "sector",
+        "dram__bytes_read.sum": "Mbyte",
+        "dram__bytes_write.sum": "Mbyte",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": "sector",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": "sector",
+        "smsp__inst_executed.sum": "inst"
+      }
+    },
+    "selected": {
+      "path": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/ncu-L384-mode52-p32-r12.csv",
+      "values": {
+        "gpu__time_duration.sum": 337.984,
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.038309,
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 59.499085,
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": 80.090032,
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 39.177242,
+        "lts__t_sectors.sum": 82410898.0,
+        "dram__bytes_read.sum": 303.949824,
+        "dram__bytes_write.sum": 139.910144,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": 0.0,
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": 0.0,
+        "smsp__inst_executed.sum": 96629734.0
+      },
+      "units": {
+        "gpu__time_duration.sum": "us",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": "%",
+        "lts__t_sectors.sum": "sector",
+        "dram__bytes_read.sum": "Mbyte",
+        "dram__bytes_write.sum": "Mbyte",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": "sector",
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": "sector",
+        "smsp__inst_executed.sum": "inst"
+      }
+    }
+  },
+  "compile_rejection": "384-thread 2-CTA/SM N128 control: ptxas needed >=90 registers but target was 80; not benchmarked"
+}

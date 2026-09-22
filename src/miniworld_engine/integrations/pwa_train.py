@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import triton
@@ -66,7 +66,7 @@ def refusal(msa: torch.Tensor, pair: torch.Tensor, d_msa: int, d_pair: int, n_he
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
         return None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
 
 
@@ -88,7 +88,7 @@ def serves(*a, **kw) -> bool:
 def _build(name: str, src_name: str):
     if name in _EXT:
         return _EXT[name]
-    from torch.utils.cpp_extension import load
+    from miniworld_engine.kernels._nvcc import load_extension as load
     src = Path(__file__).with_name("csrc") / src_name
     build = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit")) / name
     build.mkdir(parents=True, exist_ok=True)
@@ -101,8 +101,8 @@ def _k():
     """The CUDA extensions, built once (JIT, cached under MINIWORLD_ENGINE_JIT_ROOT). The forward comes from
     `pwa_fwd3.cu` (register-resident y tiles, 48 KB stages) when that file is present, else from `pwa_fwd2.cu`."""
     if "all" not in _EXT:
-        k = dict(fwd=_build("miniworld_pwa_fwd2", "pwa_fwd2.cu"), ctr=_build("miniworld_pwa_ctr", "pwa_ctr.cu"),
-                 dgv=_build("miniworld_pwa_dgv_bwd", "dgv_bwd.cu"), lnvg=_build("miniworld_pwa_ln_vg", "ln_vg.cu"))
+        k = {"fwd": _build("miniworld_pwa_fwd2", "pwa_fwd2.cu"), "ctr": _build("miniworld_pwa_ctr", "pwa_ctr.cu"),
+                 "dgv": _build("miniworld_pwa_dgv_bwd", "dgv_bwd.cu"), "lnvg": _build("miniworld_pwa_ln_vg", "ln_vg.cu")}
         k["glue3"] = _build("miniworld_pwa_glue3", "pwa_glue3.cu") if (Path(__file__).with_name("csrc") / "pwa_glue3.cu").is_file() else None
         k["pair3"] = _build("miniworld_pwa_pair3", "pair3.cu") if (Path(__file__).with_name("csrc") / "pair3.cu").is_file() else None   # tensor-core pair forward
         # the row-broadcast dropout keep-mask (training) is applied inside the residual epilogue of either forward
@@ -229,7 +229,7 @@ def pair_fwd(z, mask, ln_w, ln_b, eps, wb, H, BJ=64, num_warps=4, BJO=None):
     assert N % BJO == 0 and BJO % BJ == 0
     wbt = torch.zeros((DZ, HP), dtype=torch.bfloat16, device=z.device); wbt[:, :H] = wb.to(torch.bfloat16).t()
     w = torch.empty((H, N, N), dtype=torch.bfloat16, device=z.device)
-    _pair_fwd_kernel[(N, N // BJO)](z, mask, ln_w, ln_b, wbt, w, N, float(eps), DZ=DZ, HP=HP, H=H, BJ=BJ, BJO=BJO, num_warps=num_warps)
+    cast(Any, _pair_fwd_kernel)[(N, N // BJO)](z, mask, ln_w, ln_b, wbt, w, N, float(eps), DZ=DZ, HP=HP, H=H, BJ=BJ, BJO=BJO, num_warps=num_warps)
     return w
 
 
@@ -245,7 +245,7 @@ def pair_bwd(z, w16, dw, ln_w, ln_b, eps, wb, BJ=32, num_warps=4, BJO=None):
     pln = torch.empty((nprog, 2 * DZ), dtype=torch.float32, device=z.device)
     dwc = dw.contiguous()
     sdot = (w16.float() * dwc).sum(-1).contiguous() if BJO < N else dwc   # [H, N]; only needed when the row is split
-    _pair_bwd_kernel[(N, N // BJO)](z, w16, dwc, sdot, ln_w, ln_b, wbp, dz, pwb, pln, N, float(eps), DZ=DZ, HP=HP, H=H, BJ=BJ, BJO=BJO,
+    cast(Any, _pair_bwd_kernel)[(N, N // BJO)](z, w16, dwc, sdot, ln_w, ln_b, wbp, dz, pwb, pln, N, float(eps), DZ=DZ, HP=HP, H=H, BJ=BJ, BJO=BJO,
                                     HAS_SDOT=BJO < N, num_warps=num_warps)
     ps = colsum(pln)
     return dz, colsum(pwb)[:H], ps[:DZ], ps[DZ:]

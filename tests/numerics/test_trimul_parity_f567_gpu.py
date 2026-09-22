@@ -135,15 +135,14 @@ def test_f567_full_range_sigmoid_matches_triton(reduction):
 
     kp, kg = reduction
     m, n, length = 129, 128, 128
-    kw = {"device": "cuda", "dtype": torch.bfloat16}
-    norm = torch.ones(m, kp, **kw)
-    x = torch.zeros(m, kg, **kw)
+    norm = torch.ones(m, kp, device="cuda", dtype=torch.bfloat16)
+    x = torch.zeros(m, kg, device="cuda", dtype=torch.bfloat16)
     x[:, 0] = 1
-    wp = torch.ones(n, kp, **kw)
-    wg = torch.zeros(kg, n, **kw)
+    wp = torch.ones(n, kp, device="cuda", dtype=torch.bfloat16)
+    wg = torch.zeros(kg, n, device="cuda", dtype=torch.bfloat16)
     wg[0] = torch.linspace(-100, 100, n, device="cuda").bfloat16()
-    residual = torch.zeros(m, n, **kw)
-    ds = torch.ones(length, n, **kw)
+    residual = torch.zeros(m, n, device="cuda", dtype=torch.bfloat16)
+    ds = torch.ones(length, n, device="cuda", dtype=torch.bfloat16)
     config = {
         "BLOCK_M1": 64,
         "BLOCK_N": 64,

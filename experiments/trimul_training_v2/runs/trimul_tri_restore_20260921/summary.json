@@ -1,0 +1,259 @@
+{
+  "policy": {
+    "entrypoint": "runs/trimul_training_current.py:Training",
+    "implementation": "runs/trimul_tri_restore_20260921/tri_policy.py:Training",
+    "policy": {
+      "keep_input_affine_xn": true,
+      "keep_tri": true,
+      "save_output_mean_rstd": true,
+      "save_output_xhat": false,
+      "save_output_affine_z": false
+    },
+    "production_ready": false,
+    "production_blocker": "Inherited B7 L768 independent-reference dWL relative L2 0.055569% exceeds 0.05%"
+  },
+  "rows": [
+    [
+      "384",
+      "tri + LN \ud1b5\uacc4 \uc7ac\uacc4\uc0b0",
+      "0.2972",
+      "0.2593",
+      "0.9700",
+      "1.2589"
+    ],
+    [
+      "384",
+      "\ud3d0\uae30: FP32 \uc815\uaddc\ud654 \uc800\uc7a5",
+      "0.3453",
+      "0.2978",
+      "1.0037",
+      "1.3464"
+    ],
+    [
+      "384",
+      "\ud604\uc7ac: tri + \uc800\uc7a5 \ud1b5\uacc4",
+      "0.2975",
+      "0.2424",
+      "0.9502",
+      "1.2403"
+    ],
+    [
+      "768",
+      "tri + LN \ud1b5\uacc4 \uc7ac\uacc4\uc0b0",
+      "1.1638",
+      "0.8774",
+      "3.7566",
+      "4.9436"
+    ],
+    [
+      "768",
+      "\ud3d0\uae30: FP32 \uc815\uaddc\ud654 \uc800\uc7a5",
+      "1.3866",
+      "0.9781",
+      "3.8548",
+      "5.2769"
+    ],
+    [
+      "768",
+      "\ud604\uc7ac: tri + \uc800\uc7a5 \ud1b5\uacc4",
+      "1.1539",
+      "0.8143",
+      "3.6910",
+      "4.8708"
+    ]
+  ],
+  "latency_reduction_percent": {
+    "384": {
+      "baseline": {
+        "forward": -0.08074002094247135,
+        "b1": 6.528444244201214,
+        "backward": 2.0469771480790877,
+        "forward_backward": 1.4819158035698776
+      },
+      "xhat_fp32": {
+        "forward": 13.857487627959763,
+        "b1": 18.602902583561796,
+        "backward": 5.33086960219229,
+        "forward_backward": 7.882449424100457
+      }
+    },
+    "768": {
+      "baseline": {
+        "forward": 0.8537535795428153,
+        "b1": 7.197434203679542,
+        "backward": 1.747100214306252,
+        "forward_backward": 1.4726094734395678
+      },
+      "xhat_fp32": {
+        "forward": 16.7866698366996,
+        "b1": 16.751999944912534,
+        "backward": 4.250645270862852,
+        "forward_backward": 7.695177088527361
+      }
+    }
+  },
+  "verification": {
+    "384": {
+      "saved_policy": {
+        "tri_is_original_buffer": true,
+        "tri_dtype": "torch.bfloat16",
+        "input_xn_dtype": "torch.bfloat16",
+        "output_activation_allocated": false,
+        "stats_shape": [
+          294912
+        ],
+        "stats_dtype": "torch.float32",
+        "output_side_bytes": 76677120
+      },
+      "same_b1_cubin_as_previous_sanitized_stats_path": true,
+      "prior_sanitizer_records": [
+        {
+          "log": "ncu-baseline-L384.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-baseline-L384-export.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-stats_only-L384.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-stats_only-L384-export.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-xhat_fp32-L384.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-xhat_fp32-L384-export.log",
+          "returncode": 0
+        },
+        {
+          "log": "memcheck-L384.log",
+          "returncode": 0
+        },
+        {
+          "log": "racecheck-L384.log",
+          "returncode": 0
+        }
+      ],
+      "current_all_gradients_bit_exact": true
+    },
+    "768": {
+      "saved_policy": {
+        "tri_is_original_buffer": true,
+        "tri_dtype": "torch.bfloat16",
+        "input_xn_dtype": "torch.bfloat16",
+        "output_activation_allocated": false,
+        "stats_shape": [
+          1179648
+        ],
+        "stats_dtype": "torch.float32",
+        "output_side_bytes": 306708480
+      },
+      "same_b1_cubin_as_previous_sanitized_stats_path": true,
+      "prior_sanitizer_records": [
+        {
+          "log": "ncu-baseline-L768.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-baseline-L768-export.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-stats_only-L768.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-stats_only-L768-export.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-xhat_fp32-L768.log",
+          "returncode": 0
+        },
+        {
+          "log": "ncu-xhat_fp32-L768-export.log",
+          "returncode": 0
+        },
+        {
+          "log": "memcheck-L768.log",
+          "returncode": 0
+        }
+      ],
+      "current_all_gradients_bit_exact": true
+    }
+  },
+  "entry_check": {
+    "entry": "runs/trimul_training_current.py:Training",
+    "all_outputs_bit_exact": true,
+    "saved_tri_bf16": true,
+    "saved_stats_fp32": true,
+    "errors": {
+      "forward": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dx": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWgate": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dWproj": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_in": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dgamma_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      },
+      "dbeta_out": {
+        "relative_l2": 0.0,
+        "bit_exact": true,
+        "finite": true
+      }
+    }
+  }
+}

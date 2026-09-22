@@ -1,0 +1,37 @@
+{
+  "status": "experimental_validated_small_gain",
+  "scope": "B7-B12 bidirectional TriMul L384 only",
+  "plan": "../trimul_b7_ring_cluster_schedule_20260922/plan.py",
+  "kwargs": {
+    "clusters": 10,
+    "mode": 52
+  },
+  "environment": {
+    "B7_HW_CLUSTER": "2",
+    "B7_MULTICAST": "0",
+    "B7_CONSUMERS": "10",
+    "B7_RING_DEPTH": "12",
+    "B7_PRODUCER_REGS": "64"
+  },
+  "source_sha256": {
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ring_cluster_schedule_20260922/joint.cu": "12b86175bee5d367cafe844823ab6ded9ae7153e59124cc939a804826d3cb767",
+    "/home/psk6950/MiniWorld/runs/trimul_b7_ring_cluster_schedule_20260922/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e"
+  },
+  "cubin": {
+    "path": "/home/psk6950/MiniWorld/runs/trimul_b7_ring_cluster_schedule_20260922/build/63e9d8b42dd98118e20fd8b9339d0b833a116672ab1b9ac8d63f7025731a913a.cubin",
+    "sha256": "15832769fba10e3fb7a5f2bb7bca7e11c38e178cde19901feae36078a4cc75d7"
+  },
+  "times_us": {
+    "split": 413.1839871406555,
+    "ring_baseline": 365.79200625419617,
+    "c1g10u10m0": 370.94399333000183,
+    "c2g10u10m0": 361.61600053310394
+  },
+  "time_reduction_pct": 1.1416339476238435,
+  "target_us": 252,
+  "target_met": false,
+  "sol90_verified": false,
+  "benchmark": "../trimul_b7_ring_cluster_schedule_20260922/configs-1-10-10-0_2-10-10-0.json",
+  "sanitizer": "../trimul_b7_ring_cluster_schedule_20260922/sanitizer-L384.json",
+  "production_dispatch_changed": false
+}

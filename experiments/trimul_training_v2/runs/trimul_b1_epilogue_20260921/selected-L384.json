@@ -1,0 +1,44 @@
+{
+  "config": {
+    "count": 132,
+    "part": 2,
+    "defines": {
+      "GATE_PHASE": 1,
+      "LOWREG": 1,
+      "STREAM_LN": 1,
+      "B1_STREAM_AFFINE_UNROLL": 4,
+      "XHAT_FP32": -1,
+      "B1_DIRECT_DP": 1,
+      "B1_NO_REDUNDANT_SYNC": 1,
+      "PAIR_WP": 1,
+      "B1_EARLY_RAW": 1,
+      "B1_PREFETCH_DY": 0,
+      "B1_SPLIT_DN": 1,
+      "B1_AFFINE_BOTH": 1,
+      "B1_DTRI_STORE_C": 32,
+      "B1_DN_PAIR": 1,
+      "B1_DN_REG": 1,
+      "B1_REG_EARLY_RAW": 1,
+      "B1_PARAM_SHARED": 1,
+      "B1_PARAM_UNROLL": 4,
+      "B1_DTRI_ASYNC_EPI": 1,
+      "B1_LOCAL_GATE": 1
+    }
+  },
+  "host": "node01",
+  "valid": true,
+  "bit_exact": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "ratio": 0.9286771996352241,
+  "times": {
+    "baseline": 205.26400208473206,
+    "candidate": 190.62399864196777
+  },
+  "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_local_gate_20260921/build/59782bc322ab5bf9358c8a0c21b49b19e024eb7d99d4607f259bf25f8b766270.cubin"
+}

@@ -1,0 +1,516 @@
+{
+  "scope": "Bidirectional TriMul; B1; BF16; D pair channels; H=2D total; dropout25%; residual; all 11 gradients",
+  "training": [
+    {
+      "D": 64,
+      "L": 384,
+      "triton_ms": 0.8094559907913208,
+      "cuda_ms": 1.6345760226249695,
+      "speedup": 0.4952085308895046,
+      "triton_forward_ms": 0.2560479938983917,
+      "cuda_forward_ms": 0.2699199914932251,
+      "forward_speedup": 0.9486070019560535,
+      "route": "Width CUDA B1 + B7",
+      "job": "15805",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D64-L384.json"
+    },
+    {
+      "D": 64,
+      "L": 768,
+      "triton_ms": 3.0671199560165405,
+      "cuda_ms": 6.2572479248046875,
+      "speedup": 0.4901707576357983,
+      "triton_forward_ms": 0.9594720005989075,
+      "cuda_forward_ms": 1.002896010875702,
+      "forward_speedup": 0.9567013829889723,
+      "route": "Width CUDA B1 + B7",
+      "job": "15807",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D64-L768.json"
+    },
+    {
+      "D": 128,
+      "L": 384,
+      "triton_ms": 1.653663992881775,
+      "cuda_ms": 0.9895679950714111,
+      "speedup": 1.6710968838098286,
+      "triton_forward_ms": 0.5575039982795715,
+      "cuda_forward_ms": 0.2933120131492615,
+      "forward_speedup": 1.9007199612920977,
+      "route": "B1 latest + B7 single",
+      "job": "15742",
+      "evidence": "runs/trimul_widths_20260922/latest-D128-L384.json"
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "triton_ms": 6.47871994972229,
+      "cuda_ms": 4.79420804977417,
+      "speedup": 1.351363954684334,
+      "triton_forward_ms": 2.175071954727173,
+      "cuda_forward_ms": 1.161296010017395,
+      "forward_speedup": 1.872969454785772,
+      "route": "B1 latest + B7 split",
+      "job": "15743",
+      "evidence": "runs/trimul_widths_20260922/latest-D128-L768.json"
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "triton_ms": 3.439840078353882,
+      "cuda_ms": 6.695440053939819,
+      "speedup": 0.5137586253691818,
+      "triton_forward_ms": 1.2811200022697449,
+      "cuda_forward_ms": 1.151087999343872,
+      "forward_speedup": 1.1129644327801105,
+      "route": "Width CUDA B1 + B7",
+      "job": "15808",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D256-L384.json"
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "triton_ms": 17.08191967010498,
+      "cuda_ms": 27.605600357055664,
+      "speedup": 0.6187845744763542,
+      "triton_forward_ms": 5.304111957550049,
+      "cuda_forward_ms": 4.67411208152771,
+      "forward_speedup": 1.1347849313481646,
+      "route": "Width CUDA B1 + B7",
+      "job": "15809",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D256-L768.json"
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "triton_ms": 6.147088050842285,
+      "cuda_ms": 11.730448246002197,
+      "speedup": 0.5240284021488477,
+      "triton_forward_ms": 2.2716801166534424,
+      "cuda_forward_ms": 2.0204639434814453,
+      "forward_speedup": 1.124335885321036,
+      "route": "Width CUDA B1 + B7",
+      "job": "15810",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D384-L384.json"
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "triton_ms": 26.685616493225098,
+      "cuda_ms": 48.86412811279297,
+      "speedup": 0.5461187485352597,
+      "triton_forward_ms": 9.395679950714111,
+      "cuda_forward_ms": 8.185647964477539,
+      "forward_speedup": 1.147823604372877,
+      "route": "Width CUDA B1 + B7",
+      "job": "15811",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D384-L768.json"
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "triton_ms": 9.34174394607544,
+      "cuda_ms": 16.81014347076416,
+      "speedup": 0.5557206553485042,
+      "triton_forward_ms": 3.5949759483337402,
+      "cuda_forward_ms": 3.261088013648987,
+      "forward_speedup": 1.1023854410820242,
+      "route": "Width CUDA B1 + B7",
+      "job": "15812",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D512-L384.json"
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "triton_ms": 40.49502372741699,
+      "cuda_ms": 71.55126571655273,
+      "speedup": 0.5659581744903898,
+      "triton_forward_ms": 14.795711994171143,
+      "cuda_forward_ms": 13.472608089447021,
+      "forward_speedup": 1.0982069615578365,
+      "route": "Width CUDA B1 + B7",
+      "job": "15804",
+      "evidence": "runs/trimul_cuda_widths_20260923/check-D512-L768.json"
+    }
+  ],
+  "inference": [
+    {
+      "D": 64,
+      "L": 384,
+      "inference_before_us": 204.82431411743164,
+      "inference_after_us": 131.34719848632812,
+      "speedup": 1.5594113652812451,
+      "job": "15684",
+      "training_job": "15663",
+      "config": {
+        "D": 64,
+        "L": 384,
+        "k1": [
+          1,
+          64,
+          8,
+          1,
+          2
+        ],
+        "k3": [
+          2,
+          64,
+          6,
+          2
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D64-nosave.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin": "a57065f5f72696dd8f64f56da42267fbacbcf5cafd4aafc6597068699f7eb3db",
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/2879caa13048d8750f29377795b2cd544a5a024ca2630e66f9dec584438c0010.cubin": "056e9fedc7149d946b1b7831175c2f5e4feecc2e57637141f424495b78125112"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0020236114505678415
+    },
+    {
+      "D": 64,
+      "L": 768,
+      "inference_before_us": 811.6409301757812,
+      "inference_after_us": 530.2604675292969,
+      "speedup": 1.5306457484140812,
+      "job": "15684",
+      "training_job": "15664",
+      "config": {
+        "D": 64,
+        "L": 768,
+        "k1": [
+          1,
+          64,
+          8,
+          1,
+          2
+        ],
+        "k3": [
+          2,
+          64,
+          8,
+          2
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D64-nosave.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin": "a57065f5f72696dd8f64f56da42267fbacbcf5cafd4aafc6597068699f7eb3db",
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/8f9ae4bbf972e65fe66cf8d331c796e335350eacd295d23a48985b0ff0c3c3b9.cubin": "e6d22e49b4f406d2f811ce2cfac80097336129128bb563bf0c70dc8167791464"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.002067945897579193
+    },
+    {
+      "D": 128,
+      "L": 384,
+      "inference_before_us": 419.00096893310547,
+      "inference_after_us": 276.1846351623535,
+      "speedup": 1.5171045582850697,
+      "job": "15738",
+      "training_job": "15739",
+      "config": {
+        "D": 128,
+        "L": 384,
+        "k1": [
+          2,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": [
+          2,
+          64,
+          4,
+          1
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D128-nosave.json",
+        "tuning": "Existing D128 configs, no retuning"
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.002034910023212433
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "inference_before_us": 1683.5244750976562,
+      "inference_after_us": 1171.9913482666016,
+      "speedup": 1.43646493430828,
+      "job": "15738",
+      "training_job": "15740",
+      "config": {
+        "D": 128,
+        "L": 768,
+        "k1": [
+          2,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": [
+          2,
+          64,
+          4,
+          1
+        ],
+        "input_ln": "fused",
+        "emit_xn": false,
+        "evidence": "native-D128-nosave.json",
+        "tuning": "Existing D128 configs, no retuning"
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.002049083821475506
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "inference_before_us": 1119.8995208740234,
+      "inference_after_us": 971.0694122314453,
+      "speedup": 1.1532641300075321,
+      "job": "15678",
+      "training_job": "15665",
+      "config": {
+        "D": 256,
+        "L": 384,
+        "k1": [
+          2,
+          64,
+          4,
+          4,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D256.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a94affa753c2999c14a2ba2bbd790cacd0384eca6eb8f103f223f0a29244428e.cubin": "eb100819e9f56143f06175bc24eb520d96d3a3492a3073c601575dbe357a1d58"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0005581218865700066
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "inference_before_us": 4661.0736083984375,
+      "inference_after_us": 3986.4846801757812,
+      "speedup": 1.169218994262612,
+      "job": "15678",
+      "training_job": "15666",
+      "config": {
+        "D": 256,
+        "L": 768,
+        "k1": [
+          2,
+          64,
+          4,
+          4,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D256.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a94affa753c2999c14a2ba2bbd790cacd0384eca6eb8f103f223f0a29244428e.cubin": "eb100819e9f56143f06175bc24eb520d96d3a3492a3073c601575dbe357a1d58"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0006427922053262591
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "inference_before_us": 2230.6079864501953,
+      "inference_after_us": 1816.9919848442078,
+      "speedup": 1.2276377689368023,
+      "job": "15696",
+      "training_job": "15669",
+      "config": {
+        "D": 384,
+        "L": 384,
+        "k1": [
+          2,
+          64,
+          2,
+          6,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D384.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f94bf13684a940c81376602019f36f270860263971a456177714ad3e07f7d4ca.cubin": "2c84f6288faa738a3c9844d90cdc5b486f5e1e70966686d71b70d3584c7cce80"
+        }
+      },
+      "k1_spill_bytes": [
+        "8",
+        "8"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0006726994179189205
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "inference_before_us": 9117.87223815918,
+      "inference_after_us": 7445.935964584351,
+      "speedup": 1.224543466600731,
+      "job": "15696",
+      "training_job": "15670",
+      "config": {
+        "D": 384,
+        "L": 768,
+        "k1": [
+          2,
+          64,
+          2,
+          6,
+          1
+        ],
+        "k3": null,
+        "input_ln": "fused",
+        "emit_xn": true,
+        "evidence": "native-D384.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f94bf13684a940c81376602019f36f270860263971a456177714ad3e07f7d4ca.cubin": "2c84f6288faa738a3c9844d90cdc5b486f5e1e70966686d71b70d3584c7cce80"
+        }
+      },
+      "k1_spill_bytes": [
+        "8",
+        "8"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0007479066262021661
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "inference_before_us": 3769.871950149536,
+      "inference_after_us": 3283.1039428710938,
+      "speedup": 1.1482645739363222,
+      "job": "15695",
+      "training_job": "15671",
+      "config": {
+        "D": 512,
+        "L": 384,
+        "k1": [
+          1,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": null,
+        "input_ln": "separate",
+        "emit_xn": false,
+        "evidence": "native-D512-separate.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c01b5b2325ea04157c000cf434354c0dfbf8628e3dfd806de19e57a7996a30f1.cubin": "4b348399b37eca370529ba3c1812f63d5496b5f2886bab7aa4c064380ec8687b"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0006710441084578633
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "inference_before_us": 15331.712245941162,
+      "inference_after_us": 13672.544002532959,
+      "speedup": 1.121350367795549,
+      "job": "15695",
+      "training_job": "15682",
+      "config": {
+        "D": 512,
+        "L": 768,
+        "k1": [
+          1,
+          64,
+          8,
+          2,
+          1
+        ],
+        "k3": null,
+        "input_ln": "separate",
+        "emit_xn": false,
+        "evidence": "native-D512-separate.json",
+        "cubins": {
+          "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c01b5b2325ea04157c000cf434354c0dfbf8628e3dfd806de19e57a7996a30f1.cubin": "4b348399b37eca370529ba3c1812f63d5496b5f2886bab7aa4c064380ec8687b"
+        }
+      },
+      "k1_spill_bytes": [
+        "0",
+        "0"
+      ],
+      "k1_smem": null,
+      "forward_relative_l2": 0.0007517333724536002
+    }
+  ],
+  "autograd_shapes": 10,
+  "sanitizers": {
+    "64": {
+      "memcheck": true,
+      "racecheck": true,
+      "length": 384
+    },
+    "256": {
+      "memcheck": true,
+      "racecheck": true,
+      "length": 384
+    },
+    "384": {
+      "memcheck": true,
+      "racecheck": true,
+      "length": 384
+    },
+    "512": {
+      "memcheck": true,
+      "racecheck": true,
+      "length": 384
+    }
+  },
+  "connection": "runs/trimul_training_current.py:Training and bidirectional_trimul_cuda",
+  "limitations": [
+    "Wide ports are slower than Triton and are not performance-complete",
+    "Wide kernels retain the recomputation policy and B1/B7 single-launch grouping but use full-size transient global scratch instead of the D128 specialized streaming schedule",
+    "Manual CUDA graph timings exclude plan construction, compilation, CPU dispatch, optimizer and dropout RNG",
+    "One visible H100 GPU per process, B1, L384/768 only",
+    "No automatic production engine dispatch or push"
+  ]
+}

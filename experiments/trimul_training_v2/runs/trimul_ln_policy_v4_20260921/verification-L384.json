@@ -1,0 +1,34 @@
+[
+  {
+    "log": "ncu-baseline-L384.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-baseline-L384-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-stats_only-L384.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-stats_only-L384-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-xhat_fp32-L384.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-xhat_fp32-L384-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "memcheck-L384.log",
+    "returncode": 0
+  },
+  {
+    "log": "racecheck-L384.log",
+    "returncode": 0
+  }
+]

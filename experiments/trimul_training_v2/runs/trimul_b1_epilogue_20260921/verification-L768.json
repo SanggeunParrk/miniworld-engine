@@ -1,0 +1,22 @@
+[
+  {
+    "log": "ncu-baseline-L768.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-baseline-L768-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-optimized-L768.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-optimized-L768-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "memcheck-L768.log",
+    "returncode": 1
+  }
+]

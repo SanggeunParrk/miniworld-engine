@@ -1,0 +1,7 @@
+{
+  "loaded_from": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/transition/flash_prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90/flash_transition_sm90a.so",
+  "abi_key": "torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90",
+  "silu_mismatch": 0,
+  "smem_bytes": 230400,
+  "hidden_chunk": 32
+}

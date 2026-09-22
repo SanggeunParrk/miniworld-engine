@@ -1,0 +1,32 @@
+{
+  "memcheck-L64": {
+    "result": "passed",
+    "returncode": 0,
+    "log": "glu-ahead-writer32-memcheck-L64.log"
+  },
+  "racecheck-L64": {
+    "result": "passed",
+    "returncode": 0,
+    "log": "glu-ahead-writer32-racecheck-L64.log"
+  },
+  "synccheck-L64": {
+    "result": "passed",
+    "returncode": 0,
+    "log": "glu-ahead-writer32-synccheck-L64.log"
+  },
+  "memcheck-L384": {
+    "result": "passed",
+    "returncode": 0,
+    "log": "glu-ahead-writer32-memcheck-L384.log"
+  },
+  "racecheck-L384": {
+    "result": "passed",
+    "returncode": 0,
+    "log": "glu-ahead-writer32-racecheck-L384.log"
+  },
+  "synccheck-L384": {
+    "result": "passed",
+    "returncode": 0,
+    "log": "glu-ahead-writer32-synccheck-L384.log"
+  }
+}

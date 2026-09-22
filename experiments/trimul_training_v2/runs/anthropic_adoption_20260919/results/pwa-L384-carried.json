@@ -1,0 +1,39 @@
+{
+  "family": "pwa",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "carried",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/pwa-L384-carried.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "first_call_s": 2.8743014335632324,
+  "error": {
+    "rel_rms": 0.005376443266868591,
+    "max_abs": 0.0003032982349395752,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.005376443266868591,
+    "max_abs": 0.0003032982349395752,
+    "finite": true
+  },
+  "ms": 0.41979393005371096,
+  "samples_ms": [
+    0.4198489761352539,
+    0.41979393005371096,
+    0.41994174957275393,
+    0.4197420883178711,
+    0.4197907257080078
+  ],
+  "status": "passed"
+}

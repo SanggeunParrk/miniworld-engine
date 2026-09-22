@@ -1,0 +1,48 @@
+{
+  "config": {
+    "count": 132,
+    "part": 2,
+    "defines": {
+      "GATE_PHASE": 1,
+      "LOWREG": 1,
+      "STREAM_LN": 1,
+      "B1_STREAM_AFFINE_UNROLL": 4,
+      "XHAT_FP32": -1,
+      "B1_DIRECT_DP": 1,
+      "B1_NO_REDUNDANT_SYNC": 1,
+      "PAIR_WP": 1,
+      "B1_EARLY_RAW": 1,
+      "B1_PREFETCH_DY": 0,
+      "B1_SPLIT_DN": 1,
+      "B1_AFFINE_BOTH": 1,
+      "B1_DTRI_STORE_C": 32,
+      "B1_DN_PAIR": 1,
+      "B1_DN_REG": 1,
+      "B1_REG_EARLY_RAW": 1,
+      "B1_PARAM_SHARED": 1,
+      "B1_PARAM_UNROLL": 4,
+      "B1_DTRI_ASYNC_EPI": 1,
+      "B1_LOCAL_GATE": 1,
+      "B1_ASYNC_WP_DN": 0,
+      "B1_DEFER_DG_STORE": 1,
+      "B1_WG_PARAM_SYNC": 0,
+      "B1_SKIP_FINAL_GROUP_SYNC": 1
+    }
+  },
+  "host": "node01",
+  "valid": true,
+  "bit_exact": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "ratio": 0.9893919308350623,
+  "times": {
+    "baseline": 191.55199825763702,
+    "candidate": 189.520001411438
+  },
+  "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_param_barriers_20260921/build/9ff11e5cbcc7695afc9a49c3a7049d216f175e62ab9b51a5d7ec4e0b83a95da0.cubin"
+}

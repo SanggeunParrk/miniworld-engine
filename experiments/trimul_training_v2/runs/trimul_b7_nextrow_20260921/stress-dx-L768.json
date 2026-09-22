@@ -1,0 +1,32 @@
+[
+  {
+    "case": 0,
+    "replays": 2,
+    "dx_bit_exact": true,
+    "LN_relative_l2": [
+      3.5370049999983166e-07,
+      3.637305781012401e-07
+    ],
+    "counters_zero": true
+  },
+  {
+    "case": 1,
+    "replays": 2,
+    "dx_bit_exact": true,
+    "LN_relative_l2": [
+      3.9841268062446034e-07,
+      4.0945252521851216e-07
+    ],
+    "counters_zero": true
+  },
+  {
+    "case": 2,
+    "replays": 2,
+    "dx_bit_exact": true,
+    "LN_relative_l2": [
+      4.5539204052147397e-07,
+      3.468439615517127e-07
+    ],
+    "counters_zero": true
+  }
+]

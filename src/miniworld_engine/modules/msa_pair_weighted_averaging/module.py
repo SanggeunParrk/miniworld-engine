@@ -91,7 +91,7 @@ class MSAPairWeightedAveraging(nn.Module):
         if _anthropic.wanted(self.implementation):
             _dims = (self.to_value.weight.shape[1], self.to_bias.weight.shape[1], self.n_head,
                      self.to_value.weight.shape[0] // self.n_head)
-            _fused = dict(grad=torch.is_grad_enabled(), dropout=bool(self.training and self.drop_msa.p_drop))
+            _fused = {"grad": torch.is_grad_enabled(), "dropout": bool(self.training and self.drop_msa.p_drop)}
             if self.implementation == ImplementationType.ANTHROPIC:
                 _anthropic.require_pwa(msa, *_dims, **_fused)      # explicit: the reason, never a reroute
             if _anthropic.serves_pwa(msa, *_dims, **_fused):

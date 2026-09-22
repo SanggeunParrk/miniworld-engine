@@ -1,0 +1,158 @@
+{
+  "64-384": {
+    "D": 64,
+    "L": 384,
+    "k1": [
+      1,
+      64,
+      8,
+      1,
+      2
+    ],
+    "k3": [
+      2,
+      64,
+      6,
+      2
+    ],
+    "input_ln": "fused",
+    "emit_xn": false,
+    "evidence": "native-D64-nosave.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin": "a57065f5f72696dd8f64f56da42267fbacbcf5cafd4aafc6597068699f7eb3db",
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/2879caa13048d8750f29377795b2cd544a5a024ca2630e66f9dec584438c0010.cubin": "056e9fedc7149d946b1b7831175c2f5e4feecc2e57637141f424495b78125112"
+    }
+  },
+  "64-768": {
+    "D": 64,
+    "L": 768,
+    "k1": [
+      1,
+      64,
+      8,
+      1,
+      2
+    ],
+    "k3": [
+      2,
+      64,
+      8,
+      2
+    ],
+    "input_ln": "fused",
+    "emit_xn": false,
+    "evidence": "native-D64-nosave.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c280ee96da90721fcb43640daa24ee1f39eff875134b16b00c1a748dc4dd258f.cubin": "a57065f5f72696dd8f64f56da42267fbacbcf5cafd4aafc6597068699f7eb3db",
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/8f9ae4bbf972e65fe66cf8d331c796e335350eacd295d23a48985b0ff0c3c3b9.cubin": "e6d22e49b4f406d2f811ce2cfac80097336129128bb563bf0c70dc8167791464"
+    }
+  },
+  "256-384": {
+    "D": 256,
+    "L": 384,
+    "k1": [
+      2,
+      64,
+      4,
+      4,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true,
+    "evidence": "native-D256.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a94affa753c2999c14a2ba2bbd790cacd0384eca6eb8f103f223f0a29244428e.cubin": "eb100819e9f56143f06175bc24eb520d96d3a3492a3073c601575dbe357a1d58"
+    }
+  },
+  "256-768": {
+    "D": 256,
+    "L": 768,
+    "k1": [
+      2,
+      64,
+      4,
+      4,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true,
+    "evidence": "native-D256.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/a94affa753c2999c14a2ba2bbd790cacd0384eca6eb8f103f223f0a29244428e.cubin": "eb100819e9f56143f06175bc24eb520d96d3a3492a3073c601575dbe357a1d58"
+    }
+  },
+  "384-384": {
+    "D": 384,
+    "L": 384,
+    "k1": [
+      2,
+      64,
+      2,
+      6,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true,
+    "evidence": "native-D384.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f94bf13684a940c81376602019f36f270860263971a456177714ad3e07f7d4ca.cubin": "2c84f6288faa738a3c9844d90cdc5b486f5e1e70966686d71b70d3584c7cce80"
+    }
+  },
+  "384-768": {
+    "D": 384,
+    "L": 768,
+    "k1": [
+      2,
+      64,
+      2,
+      6,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true,
+    "evidence": "native-D384.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/f94bf13684a940c81376602019f36f270860263971a456177714ad3e07f7d4ca.cubin": "2c84f6288faa738a3c9844d90cdc5b486f5e1e70966686d71b70d3584c7cce80"
+    }
+  },
+  "512-384": {
+    "D": 512,
+    "L": 384,
+    "k1": [
+      1,
+      64,
+      8,
+      2,
+      1
+    ],
+    "k3": null,
+    "input_ln": "separate",
+    "emit_xn": false,
+    "evidence": "native-D512-separate.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c01b5b2325ea04157c000cf434354c0dfbf8628e3dfd806de19e57a7996a30f1.cubin": "4b348399b37eca370529ba3c1812f63d5496b5f2886bab7aa4c064380ec8687b"
+    }
+  },
+  "512-768": {
+    "D": 512,
+    "L": 768,
+    "k1": [
+      1,
+      64,
+      8,
+      2,
+      1
+    ],
+    "k3": null,
+    "input_ln": "separate",
+    "emit_xn": false,
+    "evidence": "native-D512-separate.json",
+    "cubins": {
+      "/home/psk6950/MiniWorld/runs/trimul_widths_20260922/native_build/c01b5b2325ea04157c000cf434354c0dfbf8628e3dfd806de19e57a7996a30f1.cubin": "4b348399b37eca370529ba3c1812f63d5496b5f2886bab7aa4c064380ec8687b"
+    }
+  }
+}

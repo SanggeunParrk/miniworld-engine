@@ -1,0 +1,55 @@
+{
+  "status": "strict_validated_L384",
+  "scope": "L384 bidirectional BF16 C128/H256 training",
+  "plan": "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/fixed/plan.py",
+  "policy": "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/policy.py",
+  "kwargs": {
+    "clusters": 10,
+    "mode": 52
+  },
+  "environment": {
+    "B7_CONSUMERS": "10",
+    "B7_PRODUCER_REGS": "32",
+    "B7_RING_DEPTH": "12",
+    "B7_HW_CLUSTER": "2",
+    "B7_MULTICAST": "0"
+  },
+  "cubin": {
+    "path": "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/fixed/build/5242c0dacfd9f18fb6f13babfe6272952ffc5e24dfefd3dfdd91c89449e84a3b.cubin",
+    "sha256": "f3ede2345e8c7bc907473d5e2662eac00c3e0204b3cf66062ab8f01770386c61"
+  },
+  "source_sha256": {
+    "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/fixed/joint.cu": "70abb0c2da0cbb1efe8133d01895b2d4ce22cf1f5a44c63ee60c774e0b4e4712",
+    "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/fixed/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e",
+    "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/fixed/plan.py": "ee3ec971d902561343f8b395c3a4e49d5e1145d091a019f4af689b51389ee109"
+  },
+  "threshold_ln": 5e-06,
+  "max_ln": 3.549664597812807e-07,
+  "max_block_ln": 3.457561464001728e-07,
+  "full_original_failures_retested": 3,
+  "stress_cases": 12,
+  "stress_scopes": [
+    "TriMul",
+    "MiniPairformer block"
+  ],
+  "current_entry": {
+    "all_outputs_bit_exact": true,
+    "cubin_sha256": "f3ede2345e8c7bc907473d5e2662eac00c3e0204b3cf66062ab8f01770386c61",
+    "current_entry_sha256": "fbf913a8ef306e4ccf075701c8ebefc40766d40f03ff287353a39c0540be9ca2"
+  },
+  "sanitizer": [
+    {
+      "tool": "memcheck",
+      "returncode": 0,
+      "log": "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/memcheck.log",
+      "job": "15620"
+    },
+    {
+      "tool": "racecheck",
+      "returncode": 0,
+      "log": "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/racecheck.log",
+      "job": "15620"
+    }
+  ],
+  "production_engine_dispatch_changed": false
+}

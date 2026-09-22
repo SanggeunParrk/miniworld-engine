@@ -8,6 +8,41 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-23
+
+### Breaking changes and migration
+
+- Release the accumulated public API removals listed below, including
+  `kernels.triton_adaptive_layer_norm` and obsolete autotune budget settings.
+- `SWADiTBlock` uses the ESMFold2 RMSNorm/adaLN-Zero contract; old AF3-style
+  block checkpoints are incompatible. Recreate those blocks and retune caches.
+- New H100 Transition dispatch is enabled for supported BF16 widths. Users
+  requiring the Triton route can set `MINIWORLD_TRANSITION_FUSED_SM90A=0`.
+  The new TriMul training implementation remains an explicit research entry.
+
+### Anthropic-derived development
+
+- Preserve upstream credit, licenses and provenance. MiniWorld inherits the
+  stronger published inference implementation and extends it for training;
+  see `THIRD_PARTY_NOTICES.md`.
+- Integrate K1/K3 single/bidirectional TriMul inference, fused Transition
+  forward/backward and its wide-width ports, MSA OPM/PWA training and
+  inference integrations, and token DiT research histories.
+- Preserve latest CUDA TriMul B1–B4 and single-launch B7–B12, saved input `x_n`,
+  output-LN recomputation, dropout/residual/mask semantics, all eleven gradients,
+  strict D128 LN-gradient fixes, and D64/128/256/384/512 validation records.
+- Package a relocatable research capsule and its pinned benchmark engine so the
+  latest work no longer depends on a private MiniWorld checkout. D128 is the
+  performance winner; other widths remain slower than Triton and their further
+  optimization is deferred. This is not a claim of SoL90 or complete cache coverage.
+- Fix large packed TriMul gradient offset arithmetic using 64-bit K indices.
+- Archive 27 stale runtime cache files unchanged with SHA-256 provenance; they
+  require rebuilding and are not represented as valid 2.0.0 tuning records.
+- Transition adds the parallel LN-gradient reduction and transposed dWs stores.
+
+Release map, migration limits and evidence: [2.0.0](docs/releases/2.0.0.md).
+
+
 ### Added
 
 - `ops.gated_residual(x, gate, branch)`: fused linear residual gate with backward.

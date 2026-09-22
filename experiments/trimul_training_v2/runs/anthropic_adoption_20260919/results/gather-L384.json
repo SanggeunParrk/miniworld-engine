@@ -1,0 +1,41 @@
+{
+  "family": "gather",
+  "length": 384,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "carried",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/gather-L384.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "fixture_source": "/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/tests/gpu/test_gather_attn_gpu.py",
+  "index_preparation": "sorted once outside replay; ensure_sorted=False avoids upstream host sync",
+  "first_call_s": 0.3793339729309082,
+  "error": {
+    "rel_rms": 0.002049348084256053,
+    "max_abs": 0.002943754196166992,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.002049348084256053,
+    "max_abs": 0.002943754196166992,
+    "finite": true
+  },
+  "ms": 0.042398080825805665,
+  "samples_ms": [
+    0.04247680187225342,
+    0.0424179220199585,
+    0.04235328197479248,
+    0.04239295959472656,
+    0.042398080825805665
+  ],
+  "status": "passed"
+}

@@ -1,0 +1,64 @@
+{
+  "family": "transition",
+  "length": 384,
+  "width": 256,
+  "direction": "outgoing",
+  "row": "flash_sm90a",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/transition-outgoing-L384-C256-flash_sm90a.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "flash_sm90a",
+    "variant": null,
+    "cfg": null,
+    "word": "flash_sm90a",
+    "cell_key": null,
+    "tier": null,
+    "ms": null,
+    "x_stock": null,
+    "cls": null,
+    "stack": null,
+    "stack_measured": null,
+    "beyond_measured": false,
+    "fallback": "torch_swiglu",
+    "words": [
+      "exact_class_given_the_callers_ln_output"
+    ],
+    "backward": false,
+    "capture_safe": true
+  },
+  "first_call_s": 1.4502472877502441,
+  "error": {
+    "rel_rms": 0.0029677608981728554,
+    "max_abs": 0.031641483306884766,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.005754042882472277,
+    "max_abs": 0.031641483306884766,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0029677608981728554,
+    "max_abs": 0.031641483306884766,
+    "finite": true
+  },
+  "ms": 0.8320460510253906,
+  "samples_ms": [
+    0.8268089294433594,
+    0.8267609405517579,
+    0.8530445098876953,
+    0.8495571136474609,
+    0.8320460510253906
+  ],
+  "status": "passed"
+}

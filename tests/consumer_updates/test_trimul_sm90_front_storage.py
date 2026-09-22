@@ -30,7 +30,8 @@ def test_front_native_bucket_preserves_training_storage_contract(save_preact):
         candidate, m=512, k=128, h2=256, save_preact=save_preact
     )
     if save_preact:
-        assert reason is not None and "shared" in reason
+        assert reason is not None
+        assert "shared" in reason
         assert candidate not in kept
         assert any(row["config"] == candidate and row["reason"] == reason
                    for row in rejected)

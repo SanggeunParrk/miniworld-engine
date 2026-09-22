@@ -1,0 +1,150 @@
+{
+  "rows": [
+    [
+      "384",
+      "raw tri \uc7ac\uacc4\uc0b0 \uae30\uc900",
+      "0.2953",
+      "0.2575",
+      "0.9720",
+      "1.2648"
+    ],
+    [
+      "384",
+      "\uc774\uc804 FP32 x\u0302",
+      "0.3443",
+      "0.2977",
+      "1.0108",
+      "1.3534"
+    ],
+    [
+      "384",
+      "\ud604\uc7ac native FP32 x\u0302",
+      "0.3435",
+      "0.2936",
+      "1.0055",
+      "1.3459"
+    ],
+    [
+      "768",
+      "raw tri \uc7ac\uacc4\uc0b0 \uae30\uc900",
+      "1.1596",
+      "0.8760",
+      "3.7681",
+      "4.9581"
+    ],
+    [
+      "768",
+      "\uc774\uc804 FP32 x\u0302",
+      "1.3788",
+      "1.0061",
+      "3.8942",
+      "5.3205"
+    ],
+    [
+      "768",
+      "\ud604\uc7ac native FP32 x\u0302",
+      "1.3842",
+      "0.9776",
+      "3.8765",
+      "5.2976"
+    ]
+  ],
+  "ncu": [
+    [
+      "384",
+      "prior_xhat",
+      "299.584000 us",
+      "320.437248 Mbyte",
+      "141.634560 Mbyte",
+      "46.010735 %",
+      "13.452837 %"
+    ],
+    [
+      "384",
+      "xhat_fp32",
+      "288.160000 us",
+      "320.969472 Mbyte",
+      "142.375680 Mbyte",
+      "47.965712 %",
+      "13.441785 %"
+    ],
+    [
+      "768",
+      "prior_xhat",
+      "1.030848 ms",
+      "1.228378 Gbyte",
+      "481.541632 Mbyte",
+      "49.482291 %",
+      "15.377927 %"
+    ],
+    [
+      "768",
+      "xhat_fp32",
+      "999.744000 us",
+      "1.230742 Gbyte",
+      "482.683392 Mbyte",
+      "51.125724 %",
+      "15.738783 %"
+    ]
+  ],
+  "verification": {
+    "384": [
+      {
+        "log": "ncu-prior_xhat-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-prior_xhat-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-xhat_fp32-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-xhat_fp32-L384-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L384.log",
+        "returncode": 0
+      },
+      {
+        "log": "racecheck-L384.log",
+        "returncode": 0
+      }
+    ],
+    "768": [
+      {
+        "log": "ncu-prior_xhat-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-prior_xhat-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-xhat_fp32-L768.log",
+        "returncode": 0
+      },
+      {
+        "log": "ncu-xhat_fp32-L768-export.log",
+        "returncode": 0
+      },
+      {
+        "log": "memcheck-L768.log",
+        "returncode": 0
+      }
+    ]
+  },
+  "policy": {
+    "save": [
+      "input_affine_bf16_xn",
+      "output_pre_affine_fp32_xhat",
+      "output_fp32_rstd"
+    ],
+    "b1_reads_tri": false,
+    "b1_recomputes_normalization": false
+  },
+  "production_ready": false
+}

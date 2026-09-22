@@ -1,0 +1,182 @@
+[
+  {
+    "config": {
+      "count": 132,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16
+      }
+    },
+    "host": "node01",
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "valid": true,
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "ratio": 0.9418622227989563,
+    "times": {
+      "baseline": 749.3920028209686,
+      "candidate": 705.8240175247192
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/store/build/a16a0b660d84b43daec299be36214998ca6bde37128b6a995c5200c5135a5921.cubin"
+  },
+  {
+    "config": {
+      "count": 128,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16
+      }
+    },
+    "host": "node01",
+    "relative_l2": [
+      0.0,
+      5.156847691978328e-05,
+      0.0,
+      2.384186927884002e-07,
+      2.7072647412751394e-07,
+      4.810554310097359e-05
+    ],
+    "valid": true,
+    "bit_exact": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ],
+    "ratio": 1.0215118567426085,
+    "times": {
+      "baseline": 743.7759935855865,
+      "candidate": 759.7759962081909
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/store/build/7cd457030b68865a7a41d2df764eec2bd00c1fd610169522798a19ab22f57217.cubin"
+  },
+  {
+    "config": {
+      "count": 120,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16
+      }
+    },
+    "host": "node01",
+    "relative_l2": [
+      0.0,
+      5.3152398322708905e-05,
+      0.0,
+      3.283704188561387e-07,
+      2.8339349000816583e-07,
+      6.58876306260936e-05
+    ],
+    "valid": true,
+    "bit_exact": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ],
+    "ratio": 1.010119918684188,
+    "times": {
+      "baseline": 743.0880069732666,
+      "candidate": 750.6079971790314
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/store/build/d01fe339dfac8345514562421661983bf606c24ff22f7090730b96c3204890eb.cubin"
+  },
+  {
+    "config": {
+      "count": 96,
+      "part": 2,
+      "defines": {
+        "GATE_PHASE": 1,
+        "LOWREG": 1,
+        "STREAM_LN": 1,
+        "B1_STREAM_AFFINE_UNROLL": 4,
+        "XHAT_FP32": -1,
+        "B1_DIRECT_DP": 1,
+        "B1_NO_REDUNDANT_SYNC": 1,
+        "PAIR_WP": 1,
+        "B1_EARLY_RAW": 1,
+        "B1_PREFETCH_DY": 0,
+        "B1_SPLIT_DN": 1,
+        "B1_AFFINE_BOTH": 1,
+        "B1_DTRI_STORE_C": 16
+      }
+    },
+    "host": "node01",
+    "relative_l2": [
+      0.0,
+      5.282498386804946e-05,
+      0.0,
+      1.8849235061679792e-07,
+      2.6091470317624044e-07,
+      5.082132338429801e-05
+    ],
+    "valid": true,
+    "bit_exact": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ],
+    "ratio": 1.2199333137186135,
+    "times": {
+      "baseline": 738.6239767074585,
+      "candidate": 901.0719954967499
+    },
+    "cubin": "/home/psk6950/MiniWorld/runs/trimul_b1_sol90_20260921/store/build/c73aaad3da71f1089142415827c27bcde7db3b777c344b52292ad3d4f6149e6b.cubin"
+  }
+]

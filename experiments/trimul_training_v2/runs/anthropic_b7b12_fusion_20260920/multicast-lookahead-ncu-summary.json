@@ -1,0 +1,73 @@
+{
+  "front_ring96_cache3_mcastasync_xn8": {
+    "source_sha256": "83ceec077612513393a8e3ca6384feb9f7a7d9154175b9068c3bc58de1b0da13",
+    "raw_csv": "mcast8-xn-full-L768.raw.csv",
+    "raw_csv_sha256": "7395224156fe8fcf1ecfbeb24a6855b219c17aa54ff925eeb5ca97be17acf9a1",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 2.046592,
+        "unit": "ms"
+      },
+      "lts__t_sectors.sum": {
+        "value": 337367630.0,
+        "unit": "sector"
+      },
+      "dram__bytes_read.sum": {
+        "value": 2.433783,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 206.649856,
+        "unit": "Mbyte"
+      },
+      "smsp__inst_executed.sum": {
+        "value": 534307554.0,
+        "unit": "inst"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 27.595755,
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 74.844597,
+        "unit": "%"
+      }
+    }
+  },
+  "front_ring96_cache3_glu_ahead_u4_early": {
+    "source_sha256": "3049ca0aca48bc0c6acf99488f1d7bb534da0b5f0df155b7cfaae6bb02195203",
+    "raw_csv": "glu-ahead-early-full-L768.raw.csv",
+    "raw_csv_sha256": "e2a1cecaa62c4db783c00f00a1f8509c04cd8bd06f8bec19322b0e96753e3223",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 1.40416,
+        "unit": "ms"
+      },
+      "lts__t_sectors.sum": {
+        "value": 333747705.0,
+        "unit": "sector"
+      },
+      "dram__bytes_read.sum": {
+        "value": 2.434736,
+        "unit": "Gbyte"
+      },
+      "dram__bytes_write.sum": {
+        "value": 219.235072,
+        "unit": "Mbyte"
+      },
+      "smsp__inst_executed.sum": {
+        "value": 551008923.0,
+        "unit": "inst"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 41.355606,
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": 90.801261,
+        "unit": "%"
+      }
+    }
+  },
+  "interpretation": "Separate warm, uncontrolled-clock NCU profiles. Use paired benchmark records for speedups. L2 throughput is not proof of algorithmic SoL90."
+}

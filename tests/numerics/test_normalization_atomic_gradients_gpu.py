@@ -17,7 +17,9 @@ def check(got, want, band):
 @pytest.mark.parametrize("heads", [4, 17])
 @pytest.mark.parametrize("tile", [32, 128])
 def test_pair_bias_parameter_gradients(dtype, heads, tile):
-    from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import _layer_norm_linear_bwd
+    from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import (
+        _layer_norm_linear_bwd,
+    )
     torch.manual_seed(131)
     m, n = 259, 65
     x = torch.randn(m, n, device="cuda", dtype=dtype)
@@ -45,7 +47,9 @@ def test_pair_bias_parameter_gradients(dtype, heads, tile):
 @pytest.mark.parametrize("private", [False, True])
 @pytest.mark.parametrize("tile", [32, 128])
 def test_transition_replica_parameter_gradients(private, tile):
-    from miniworld_engine.kernels.transition.triton.fused import _transition_ln_bwd_kernel
+    from miniworld_engine.kernels.transition.triton.fused import (
+        _transition_ln_bwd_kernel,
+    )
     torch.manual_seed(619)
     m, n = 1031, 65
     x = torch.randn(m, n, device="cuda", dtype=torch.bfloat16)

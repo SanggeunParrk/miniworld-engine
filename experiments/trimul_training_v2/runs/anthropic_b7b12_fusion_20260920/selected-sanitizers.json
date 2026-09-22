@@ -1,0 +1,35 @@
+{
+  "memcheck-L64": {
+    "result": "passed",
+    "log": "final-memcheck-L64.log"
+  },
+  "racecheck-L64": {
+    "result": "passed",
+    "log": "final-racecheck-L64.log"
+  },
+  "synccheck-L64": {
+    "result": "passed",
+    "log": "final-synccheck-L64.log"
+  },
+  "memcheck-L384": {
+    "result": "passed",
+    "log": "final-memcheck-L384.log"
+  },
+  "racecheck-L384": {
+    "result": "passed",
+    "log": "final-racecheck-L384.log"
+  },
+  "synccheck-L384": {
+    "result": "passed",
+    "log": "final-synccheck-L384.log"
+  },
+  "memcheck-split-L384": {
+    "result": "passed",
+    "log": "final-memcheck-split-L384.log"
+  },
+  "initcheck-isolated-L64": {
+    "result": "passed",
+    "log": "initcheck-isolated-L64.log",
+    "scope": "host-initialized inputs; no upstream forward/B1-B6; internal reads and counter reset"
+  }
+}

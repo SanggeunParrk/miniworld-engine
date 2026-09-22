@@ -1,0 +1,94 @@
+[
+  {
+    "skip_restore": 1,
+    "overlap": 0,
+    "ln_mode": 2,
+    "xn_early": 1,
+    "mask_hoist": 1,
+    "dw_mask_early": 1,
+    "weight_prefetch": 0,
+    "valid": true,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 1,
+      "slices": 2
+    },
+    "times": {
+      "baseline": 2032.080054283142,
+      "candidate": 1790.4959917068481
+    },
+    "ratio": 0.8811148891171428,
+    "cubins": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_prefetch_20260921/build/b622bf73e51a54a9aa1b248935716eb46640a5a2af51dae7ddce9ea4bdbd93a9.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_prefetch_20260921/build/4e4803c07474d43ee2e2f097cc3390fda0d0e6dc9ded60872cabfe965ae3ff88.cubin"
+    ]
+  },
+  {
+    "skip_restore": 1,
+    "overlap": 0,
+    "ln_mode": 2,
+    "xn_early": 1,
+    "mask_hoist": 1,
+    "dw_mask_early": 1,
+    "weight_prefetch": 1,
+    "valid": true,
+    "relative_l2": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bit_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "config": {
+      "splits": 16,
+      "pc": 1,
+      "dxctas": 132,
+      "prod": 32,
+      "cons": 224,
+      "resident": 1,
+      "slices": 2
+    },
+    "times": {
+      "baseline": 2032.1279764175415,
+      "candidate": 1771.1679935455322
+    },
+    "ratio": 0.8715828993545681,
+    "cubins": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_prefetch_20260921/build/7ae3ad5fc5b3390f80cb1ab7cbf3612a054a8f3c581a07f1263979dc2928c973.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_weight_prefetch_20260921/build/7b39c732b71840ff13383275f1db1c7b083cd7bb0a9e46b176bbda8a54afd6b3.cubin"
+    ]
+  }
+]

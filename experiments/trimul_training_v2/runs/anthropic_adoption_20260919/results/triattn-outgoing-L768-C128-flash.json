@@ -1,0 +1,54 @@
+{
+  "family": "triattn",
+  "length": 768,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "flash",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/results/triattn-outgoing-L768-C128-flash.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "flash",
+    "word": "flash",
+    "cell": "9.0|bf16|D32|H4|N<=800|fwd",
+    "config": null,
+    "input_precision": null,
+    "cls": "fast",
+    "exact_vs": null,
+    "capture_safe": true,
+    "backward": false,
+    "measured": true,
+    "x_stock": 1.55,
+    "tested": true,
+    "reason": "named row; cell 9.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v10 exact=triattn_exact"
+  },
+  "first_call_s": 2.6571431159973145,
+  "error": {
+    "rel_rms": 0.0021476843394339085,
+    "max_abs": 0.0037499666213989258,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.0021476843394339085,
+    "max_abs": 0.0037499666213989258,
+    "finite": true
+  },
+  "ms": 1.794713592529297,
+  "samples_ms": [
+    1.825629425048828,
+    1.794713592529297,
+    1.7933990478515625,
+    1.7850227355957031,
+    1.7956512451171875
+  ],
+  "status": "passed"
+}

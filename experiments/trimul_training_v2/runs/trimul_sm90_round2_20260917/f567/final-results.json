@@ -1,0 +1,94 @@
+{
+  "384": {
+    "cute_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "triton_config": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "medians_ms": {
+      "cute": 0.09323079916325872,
+      "group4": 0.09346544106097976,
+      "cute_previous": 0.09523600298890639,
+      "triton_bm128": 0.10550975364300251,
+      "triton_old": 0.107321486266512,
+      "triton_m64": 0.10696752812899454,
+      "triton_matched": 0.11380937416468684
+    },
+    "speedup": 1.1317049150060574,
+    "allocation_results": [
+      {
+        "seed": 901,
+        "speedup": 1.124953233172885,
+        "cute_us": 93.38890514542571,
+        "triton_us": 105.05815078582253
+      },
+      {
+        "seed": 234,
+        "speedup": 1.138479535496123,
+        "cute_us": 93.07269318109172,
+        "triton_us": 105.96135650018249
+      }
+    ],
+    "source_evidence": "group1-final-results.json",
+    "rotated_rounds_per_seed": 5,
+    "prior_3_allocation_evidence": "prefetch-final-results.json",
+    "threshold_note": "L384 below1.15; L768 straddles1.15 and is not robustly above target."
+  },
+  "768": {
+    "cute_config": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "triton_config": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "medians_ms": {
+      "cute": 0.35570626341396494,
+      "group4": 0.3560348780658801,
+      "cute_previous": 0.3621161678232899,
+      "triton_bm128": 0.40910668373107906,
+      "triton_old": 0.4167181666893295,
+      "triton_m64": 0.41750591189192854,
+      "triton_matched": 0.4457769787388748
+    },
+    "speedup": 1.150125049260006,
+    "allocation_results": [
+      {
+        "seed": 901,
+        "speedup": 1.1506202709029376,
+        "cute_us": 355.47036018160827,
+        "triton_us": 409.01140213012695
+      },
+      {
+        "seed": 234,
+        "speedup": 1.1496304840404894,
+        "cute_us": 355.9421666463216,
+        "triton_us": 409.20196533203125
+      }
+    ],
+    "source_evidence": "group1-final-results.json",
+    "rotated_rounds_per_seed": 5,
+    "prior_3_allocation_evidence": "prefetch-final-results.json",
+    "threshold_note": "L384 below1.15; L768 straddles1.15 and is not robustly above target."
+  }
+}

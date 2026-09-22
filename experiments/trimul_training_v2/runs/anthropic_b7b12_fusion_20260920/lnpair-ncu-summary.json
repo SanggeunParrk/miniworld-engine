@@ -1,0 +1,30 @@
+{
+  "metrics": {
+    "dram__bytes_read.sum": {
+      "unit": "Gbyte",
+      "value": "3.577376"
+    },
+    "dram__bytes_write.sum": {
+      "unit": "Mbyte",
+      "value": "167.483392"
+    },
+    "gpu__time_duration.sum": {
+      "unit": "ms",
+      "value": "1.463008"
+    },
+    "lts__t_sectors.sum": {
+      "unit": "sector",
+      "value": "280799920.000000"
+    },
+    "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+      "unit": "%",
+      "value": "82.151581"
+    }
+  },
+  "scope": "NCU multi-pass metrics without fixed clocks/cache control; diagnostic, not SoL90 proof",
+  "read_plus_write_bytes": 3744859392.0,
+  "observed_TB_s": 2.5596985060915594,
+  "historical_copy_probe_TB_s": 2.962079189137987,
+  "copy_bandwidth_ratio_diagnostic": 0.86415600078419,
+  "warning": "Copy has a different read/write mix and access pattern; observed implementation traffic is not compulsory traffic. This ratio does not establish algorithmic SoL."
+}

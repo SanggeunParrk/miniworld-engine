@@ -1,0 +1,94 @@
+{
+  "definition": "Current-work hardware roofline: max(dense BF16 HGMMA work / measured-clock peak, observed HBM traffic / measured-clock peak, observed L2 writeback / measured-clock peak), divided by kernel time. Sequential launches aggregate lower bounds and durations.",
+  "limitations": [
+    "Not a calibrated dependency-aware attainable limit",
+    "Scalar GLU/LN instruction throughput and mandatory synchronization are not in this roofline",
+    "Observed memory traffic includes removable work; reducing traffic can lower this percentage while making the kernel faster",
+    "NCU durations are separate from alternating CUDA-event measurements",
+    "Dense HGMMA BF16 sparsity_off peak is required; aggregate BF16 peak also permits sparsity and is twice as high"
+  ],
+  "source": "https://docs.nvidia.com/nsight-compute/ProfilingGuide/",
+  "job": 14187,
+  "candidate": "trimul_b7_nextrow_20260921",
+  "SoL90_achieved": false,
+  "lengths": {
+    "384": {
+      "kernels": [
+        {
+          "kernel": "front_b7b12_dw",
+          "ncu_us": 173.888,
+          "gemm_flops": 77309411328.0,
+          "dense_tensor_peak_TFLOPs": 916.621897681,
+          "hbm_peak_TBps": 3.35212032,
+          "l2_peak_TBps": 8.73004032,
+          "bounds_us": {
+            "dense_tensor": 84.34165878383257,
+            "hbm": 62.88196213672903,
+            "l2": 55.86222804157679
+          },
+          "limiting_roof": "dense_tensor",
+          "roofline_pct": 48.50343829581833
+        },
+        {
+          "kernel": "front_b7b12_dx",
+          "ncu_us": 227.872,
+          "gemm_flops": 82141249536.0,
+          "dense_tensor_peak_TFLOPs": 938.850826569,
+          "hbm_peak_TBps": 3.35145728,
+          "l2_peak_TBps": 8.731648000000002,
+          "bounds_us": {
+            "dense_tensor": 87.49126827334491,
+            "hbm": 100.58887151561724,
+            "l2": 123.05103867127946
+          },
+          "limiting_roof": "l2",
+          "roofline_pct": 54.00006963175794
+        }
+      ],
+      "ncu_total_us": 401.76,
+      "hardware_lower_bound_us": 207.39269745511203,
+      "roofline_pct": 51.621041779946246
+    },
+    "768": {
+      "kernels": [
+        {
+          "kernel": "front_b7b12_dw",
+          "ncu_us": 609.824,
+          "gemm_flops": 309237645312.0,
+          "dense_tensor_peak_TFLOPs": 953.362806738,
+          "hbm_peak_TBps": 3.3521535999999994,
+          "l2_peak_TBps": 8.73042432,
+          "bounds_us": {
+            "dense_tensor": 324.3651243015018,
+            "hbm": 244.6833967035401,
+            "l2": 202.42944558094513
+          },
+          "limiting_roof": "dense_tensor",
+          "roofline_pct": 53.189957151817865
+        },
+        {
+          "kernel": "front_b7b12_dx",
+          "ncu_us": 806.656,
+          "gemm_flops": 328564998144.0,
+          "dense_tensor_peak_TFLOPs": 943.612719772,
+          "hbm_peak_TBps": 3.35226112,
+          "l2_peak_TBps": 8.744232960000001,
+          "bounds_us": {
+            "dense_tensor": 348.1989922978035,
+            "hbm": 405.10107080918567,
+            "l2": 531.3166090506353
+          },
+          "limiting_roof": "l2",
+          "roofline_pct": 65.86656629971579
+        }
+      ],
+      "ncu_total_us": 1416.48,
+      "hardware_lower_bound_us": 855.6817333521371,
+      "roofline_pct": 60.409023307927896
+    }
+  },
+  "source_sha256": {
+    "ncu-L384-mode0.csv": "92e6cd0892d304513ed8eee58017397988a13dc0edf1d46f9b339ef4ad022118",
+    "ncu-L768-mode0.csv": "36a6b465ef7f955f0a1c70ee73152a6ec1cb3bdd8b840a91ae124ca8857b952a"
+  }
+}

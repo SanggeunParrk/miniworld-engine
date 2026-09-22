@@ -326,9 +326,11 @@ class Transition(nn.Module):
         its epilogue, and the matching backward.
 
         On sm_90 at the AF3 pair width (d=128, n=4, bf16, whole 128-row tiles) this runs the
-        fused hand-CUDA kernels -- one launch each way instead of three and two. Every other
-        shape, dtype and architecture keeps the Triton path, which is shape-general. The gate is
-        ``fused_sm90a.available``; it is the kernel's own requirements, not a policy.
+        fused hand-CUDA kernels -- one launch each way instead of three and two. d = 64, 256, 384
+        and 512 (n = 4) have their own hand-CUDA builds (``fused_wide_sm90a``). Every other
+        shape, dtype and architecture keeps the Triton path, which is shape-general. The gates are
+        ``fused_sm90a.available`` / ``fused_wide_sm90a.available``; they are the kernels' own
+        requirements, not a policy.
         """
         wa = self.expand_a.weight.to(x.dtype)
         wb = self.expand_b.weight.to(x.dtype)
@@ -339,8 +341,16 @@ class Transition(nn.Module):
             if fused_sm90a.available(x, wa, ws):
                 return fused_sm90a.transition_fused_sm90a(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+            # the other widths with an sm_90a build: D = 64, 256, 384, 512 (see fused_wide_sm90a)
+            from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a
 
-        from miniworld_engine.kernels.transition.triton.residual import transition_residual
+            if fused_wide_sm90a.available(x, wa, ws):
+                return fused_wide_sm90a.transition_wide_sm90a(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+
+        from miniworld_engine.kernels.transition.triton.residual import (
+            transition_residual,
+        )
 
         return transition_residual(
             x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps,

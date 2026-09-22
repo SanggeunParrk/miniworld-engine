@@ -1,0 +1,50 @@
+[
+  {
+    "L": 384,
+    "region": "B1–B4",
+    "report": "ncu-b1-L384.ncu-rep",
+    "dram": 21.51,
+    "sm": 44.862525,
+    "tensor": 13.869727,
+    "occupancy": 12.49,
+    "no_eligible": 54.63,
+    "duration": 392.61,
+    "duration_unit": "us"
+  },
+  {
+    "L": 384,
+    "region": "B7–B12",
+    "report": "ncu-final-b7-L384.ncu-rep",
+    "dram": 16.48,
+    "sm": 46.372203,
+    "tensor": 27.841823,
+    "occupancy": 18.74,
+    "no_eligible": 53.32,
+    "duration": 592.93,
+    "duration_unit": "us"
+  },
+  {
+    "L": 768,
+    "region": "B1–B4",
+    "report": "ncu-b1-L768.ncu-rep",
+    "dram": 33.44,
+    "sm": 44.995486,
+    "tensor": 13.996487,
+    "occupancy": 12.5,
+    "no_eligible": 54.87,
+    "duration": 1.5,
+    "duration_unit": "ms"
+  },
+  {
+    "L": 768,
+    "region": "B7–B12",
+    "report": "ncu-final-b7-L768.ncu-rep",
+    "dram": 16.2,
+    "sm": 47.638398,
+    "tensor": 28.662251,
+    "occupancy": 18.75,
+    "no_eligible": 52.28,
+    "duration": 2.27,
+    "duration_unit": "ms"
+  }
+]

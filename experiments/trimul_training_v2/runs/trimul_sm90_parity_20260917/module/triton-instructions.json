@@ -1,0 +1,17 @@
+{
+  "front": {
+    "wgmma.mma_async": 8,
+    "mma.sync": 0,
+    "cp.async.bulk.tensor": 0
+  },
+  "f567": {
+    "wgmma.mma_async": 8,
+    "mma.sync": 0,
+    "cp.async.bulk.tensor": 0
+  },
+  "dual_bwd": {
+    "wgmma.mma_async": 8,
+    "mma.sync": 0,
+    "cp.async.bulk.tensor": 0
+  }
+}

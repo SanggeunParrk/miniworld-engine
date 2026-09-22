@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1560" role="img" aria-labelledby="title desc"><title id="title">B1-B4 SoL experiments: wiring deltas and measured results</title><desc id="desc">Selected dual_ln_prefetch kept. Six structural experiments (ds TMA, warp specialization variants, DW pipeline depth) and two arithmetic-free memory floors, with same-process paired timings on H100.</desc><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#58717b"/></marker></defs><style>text{font-family:Arial,sans-serif;fill:#18343f}.edge{fill:none;stroke:#58717b;stroke-width:2;marker-end:url(#arr)}.t{font-size:15px}.h{font-size:17px;font-weight:700}.s{font-size:13px;fill:#4a6270}</style><rect width="1200" height="1560" fill="#f4f8fa"/>
+<text x="35" y="45" font-size="27" font-weight="700">TriMul 학습 B1–B4 · SoL 상한 측정과 구조 실험 (2026-09-20, Claude)</text>
+<text x="35" y="77" font-size="16">선택안 dual_ln_prefetch 유지 · 채택 변경 없음 · H100 node02 · BF16 · dropout 25% · 같은 프로세스 paired CUDA-graph 200샘플 median</text>
+<rect x="35" y="100" width="1130" height="150" rx="12" fill="#e9eff4" stroke="#a7bac6"/>
+<text x="55" y="130" class="h">선택안 배선 (변경 없음): 1 cooperative launch · 132 CTAs × 256 threads</text>
+<text x="55" y="158" class="t">DW 40 CTAs: TMA dy/gate/proj/xn/norm (96KiB × 2 slots) → B1 dp/dg (in place) → WGMMA dWg/dWp (192 FP32 acc) · 2.77 µs/64행</text>
+<text x="55" y="184" class="t">DX 92 CTAs: TMA dy/gate/tri (64KiB × 2 slots) + resident Wp → B1 dp → WGMMA dnorm → LN backward → dtri TMA store · 6.33 µs/64행</text>
+<text x="55" y="210" class="t">L384 172.4 µs / L768 612.6 µs (재현) · 명령 59.3M warp-inst · IPC 1.5/SM · stall: barrier 29% · wait 15% · short-sb 9% · DRAM 74% / 82%</text>
+<text x="55" y="236" class="s">SASS(prefetch): HGMMA 28 · UTMALDG 59 · UTMASTG 4 · LDL/STL 0. dy/gate는 두 역할이 읽지만 tile 진행이 lockstep이라 두 번째 읽기는 L2 hit (DRAM 306MB ≈ 모델 303MB).</text>
+<path d="M600 250V282" class="edge"/>
+<text x="35" y="310" font-size="20" font-weight="700">구조 실험 · 배선 차이 → 실측 (L384 / L768 µs, 선택안 대비)</text>
+<rect x="35" y="325" width="365" height="250" rx="12" fill="#fff" stroke="#b44137"/>
+<text x="52" y="352" class="h">① dual_ds_tma · 기각</text>
+<text x="52" y="378" class="t">ds[L,128] bf16 행을 TMA로 smem에 적재</text>
+<text x="52" y="400" class="t">(DW slot당 16KiB×2, DX 단일 16KiB+mbarrier)</text>
+<text x="52" y="422" class="t">→ 마스크 레지스터 디코드(5.7M inst) 제거</text>
+<text x="52" y="452" class="h" fill="#b44137">175.0 / 705.6 (+2.5% / +15%)</text>
+<text x="52" y="478" class="s">196KiB 텐서를 132 SM이 매 tile 같은 주소로 읽어 L2 hot-spot.</text>
+<text x="52" y="498" class="s">기존 레지스터 마스크 캐시(period≤3)가 옳은 설계.</text>
+<text x="52" y="524" class="s">spill 0 · dg bit-exact · 6출력 통과</text>
+<rect x="418" y="325" width="365" height="250" rx="12" fill="#fff" stroke="#b44137"/>
+<text x="435" y="352" class="h">② dual_ws3e · 기각 (양 역할 WS)</text>
+<text x="435" y="378" class="t">384 threads: WG0 producer(warp0 TMA issuer +</text>
+<text x="435" y="400" class="t">warp1-3 B1 96thr), WG1/2 consumer</text>
+<text x="435" y="422" class="t">setmaxnreg 56/224 · full/ready/empty mbarrier</text>
+<text x="435" y="452" class="h" fill="#b44137">227.3 / 836.0 · 비율 5:6에서도 182.9</text>
+<text x="435" y="478" class="s">프로브: DX 5.62 µs/tile (−11%) 그러나 DW 3.50 (+26%).</text>
+<text x="435" y="498" class="s">B1은 latency-bound: 3 warp로는 DW의 1 µs MMA를 못 따라감.</text>
+<text x="435" y="524" class="s">Anthropic 자체 커널의 PROD 40/CONS 232 패턴을 따름.</text>
+<rect x="801" y="325" width="364" height="250" rx="12" fill="#fff" stroke="#b44137"/>
+<text x="818" y="352" class="h">③ dual_ws3f · 기각 (DX만 WS)</text>
+<text x="818" y="378" class="t">DX: WS(56/224) · DW: 기존 fused(240 regs,</text>
+<text x="818" y="400" class="t">마스크 워드 smem 캐시) · idle WG 24 regs</text>
+<text x="818" y="422" class="t">비율 40/92 · 44/88 · 48/84 · 52/80 sweep</text>
+<text x="818" y="452" class="h" fill="#b44137">207.6→189.8→180.3→179.5 (L384)</text>
+<text x="818" y="478" class="s">프로브 48/84: DX 5.2 µs/tile, DW 3.08 (fused 2.77보다 느려짐).</text>
+<text x="818" y="498" class="s">NCU warm 174.6 vs 172.5 µs (동일) · DRAM 75%/75% · 읽기 +3%.</text>
+<text x="818" y="524" class="s">384-thread WS 커널은 그래프 재생에서 launch/exit ~10 µs 추가</text>
+<text x="818" y="544" class="s">(프로브 내부 종료 166.6 vs 이벤트 178.0).</text>
+<rect x="35" y="592" width="365" height="230" rx="12" fill="#fff" stroke="#b44137"/>
+<text x="52" y="619" class="h">④ dual_dwsplit · 기각</text>
+<text x="52" y="645" class="t">DW: dp/dg를 공유 32KiB 버퍼(196608)에 저장,</text>
+<text x="52" y="667" class="t">B1 직후 dy/gate/proj 48KiB를 t+2로 선적재(fullA),</text>
+<text x="52" y="689" class="t">xn/norm은 MMA 후(fullB) · in-flight 96→144KiB</text>
+<text x="52" y="719" class="h" fill="#b44137">171.3 / 644.8 (0% / +5%)</text>
+<text x="52" y="745" class="s">in-flight 바이트를 늘려도 DW tile 시간 불변 →</text>
+<text x="52" y="765" class="s">"DW가 SM당 in-flight 한계"라는 가설 반증.</text>
+<text x="52" y="791" class="s">spill 0 · 252 regs · 정확성 통과</text>
+<rect x="418" y="592" width="365" height="230" rx="12" fill="#fff" stroke="#b44137"/>
+<text x="435" y="619" class="h">⑤ dual_dw32 · 기각</text>
+<text x="435" y="645" class="t">DW: 32행 tile × 4 slots(48KiB), WGMMA K=32</text>
+<text x="435" y="667" class="t">32행 TMA box map 5개 추가(host), DX 불변</text>
+<text x="435" y="719" class="h" fill="#b44137">202.9 / 729.7 (+18% / +19%)</text>
+<text x="435" y="745" class="s">tile당 barrier/WGMMA 발행 고정비가 2배 → 메모리 이득 상회.</text>
+<text x="435" y="791" class="s">spill 0 · 252 regs · 정확성 통과</text>
+<rect x="801" y="592" width="364" height="230" rx="12" fill="#fff" stroke="#a3650a"/>
+<text x="818" y="619" class="h">⑥ 대조: dual_ln_prefetch_r240</text>
+<text x="818" y="645" class="t">선택안을 __maxnreg__(240)으로만 재컴파일</text>
+<text x="818" y="667" class="t">(ws3f의 DW fused 레지스터 조건 재현)</text>
+<text x="818" y="719" class="h" fill="#a3650a">172.9 / 639.8 (+1% / +4%)</text>
+<text x="818" y="745" class="s">L768에서 240 레지스터 캡 자체가 4% 손해 →</text>
+<text x="818" y="765" class="s">3-WG 설계는 L768에서 구조적으로 불리.</text>
+<path d="M600 822V850" class="edge"/>
+<text x="35" y="878" font-size="20" font-weight="700">연산 제거 메모리 하한 (진단 커널 · 출력 무의미)</text>
+<rect x="35" y="893" width="555" height="215" rx="12" fill="#fff7d9" stroke="#d7b869"/>
+<text x="52" y="920" class="h">dual_traffic_floor · 선택안 스케줄 그대로, 연산 0</text>
+<text x="52" y="946" class="t">DW/DX 역할·2 slot·TMA·dg/dtri 쓰기 동일, B1/WGMMA/LN 제거</text>
+<text x="52" y="976" class="h">184.8 / 703.2 µs — 선택안보다 느림</text>
+<text x="52" y="1002" class="s">NCU: DRAM 읽기 367MB (+61MB: 역할 pacing이 깨져 dy/gate 두 번째</text>
+<text x="52" y="1022" class="s">읽기가 L2 miss) · DRAM 81.9% · 2.74 TB/s. 선택안의 연산은 이미</text>
+<text x="52" y="1042" class="s">메모리 스케줄 뒤에 완전히 숨겨져 있음. 역할 lockstep이 L2 재사용의 전제.</text>
+<rect x="610" y="893" width="555" height="215" rx="12" fill="#e7f3ee" stroke="#087c66"/>
+<text x="627" y="920" class="h">dual_stream_floor · 패턴 충실 균형 하한 (SoL 분모)</text>
+<text x="627" y="946" class="t">132 CTA 동일 역할, 32행 × 3 slots(64KiB), 같은 9 스트림 바이트</text>
+<text x="627" y="976" class="h" fill="#087c66">146.1 / 581.8 µs · DRAM 83.9% / 86.2%</text>
+<text x="627" y="1002" class="s">바이트 302+115MB = 모델 416MB와 일치 (L768: 1.22GB+456MB)</text>
+<text x="627" y="1022" class="s">유효 2.85 TB/s. 스트리밍 probe(2.99)와 3.35 peak 사이의 실측 상한.</text>
+<text x="627" y="1042" class="s">동일 바이트로 이보다 빠른 커널은 이 접근 패턴에서 측정되지 않음.</text>
+<path d="M600 1108V1136" class="edge"/>
+<rect x="35" y="1136" width="1130" height="250" rx="12" fill="#fff" stroke="#a7bac6"/>
+<text x="55" y="1166" font-size="19" font-weight="700">SoL 판단 · 분모별 (선택안 dual_ln_prefetch 재현값 172.4 / 612.6 µs)</text>
+<text x="55" y="1198" class="t">① 3.35 TB/s 이론 peak (124.3 / 497.2 µs): 72.1% / 81.2% · NCU DRAM 74.1% / 82.0%</text>
+<text x="55" y="1226" class="t">② 3-read/1-write 스트리밍 probe 2.99–3.06 TB/s (139.2 / 544.1 µs): 80.7% / 88.8%</text>
+<text x="55" y="1254" class="h">③ 패턴 충실 하한 dual_stream_floor (146.1 / 581.8 µs): 84.7% / 95.0% ← L768 90% 달성, L384 미달</text>
+<text x="55" y="1282" class="t">④ 하한 + 선택안 종료 단계(dump 2.8 + grid 0.6 + reduce 2.8 + reset 0.3 = 6.5 µs) 보정: L384 88.5%, L768 96.0%</text>
+<text x="55" y="1312" class="s">L384 잔여 ~20 µs의 귀속: DX ragged tail (2304 = 92×25 + 4 → 4 CTA가 26 tile, ≈6 µs) · 종료 단계 6.5 µs · 역할 balance/barrier ≈ 8 µs.</text>
+<text x="55" y="1334" class="s">DX 연산을 14% 줄여도(WS) 총시간이 줄지 않음을 3개 변형·프로브·NCU로 확인: 남은 여지는 연산이 아니라 메모리 스케줄(역할 lockstep, 2-slot 깊이, launch 오버헤드)에 있음.</text>
+<text x="55" y="1362" class="s">production dispatch 미변경 · 모든 후보 spill 0 · L384/132/PART2/dropout .25 strict case + graph replay 2회 통과 · 24-case/sanitizer는 채택 후보가 없어 재실행하지 않음.</text>
+<rect x="35" y="1400" width="1130" height="130" rx="12" fill="#e9eff4" stroke="#a7bac6"/>
+<text x="55" y="1430" class="h">재현: runs/anthropic_b1b4_pipeline_20260919 (node02 GPU shell)</text>
+<text x="55" y="1458" class="s">bash $ENV python -u -B $P/measure_claude_start.py · measure_experiment.py --sources dual_ln_prefetch dual_ws3f_r48 · measure_floor.py --sources dual_ln_prefetch dual_stream_floor</text>
+<text x="55" y="1480" class="s">probe_roles.py --source dual_ws3e_probe · probe_end.py --source dual_ws3f_probe48 (B1B4_ALLOW_SPILL=1, 진단 전용) · 결과 JSON: claude-ab-*.json, claude-*floor*.json, claude_logs/</text>
+<text x="55" y="1508" class="s">보고서: CLAUDE_SOL_REPORT_20260920.md · 이전 인계: CLAUDE_HANDOFF_B1B4.md · 선택안 감사: SOL_AUDIT_20260920.md</text>
+</svg>

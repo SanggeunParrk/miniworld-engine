@@ -1,0 +1,62 @@
+{
+  "unified_b1b4": {
+    "gpu__time_duration.sum": {
+      "value": "489.376000",
+      "unit": "us"
+    },
+    "dram__bytes_read.sum": {
+      "value": "360.314624",
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": "303.153664",
+      "unit": "Mbyte"
+    },
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": "40.447567",
+      "unit": "%"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+      "value": "6.070417",
+      "unit": "%"
+    },
+    "l1tex__t_bytes_pipe_lsu_mem_local_op_ld.sum": {
+      "value": "281.935872",
+      "unit": "Mbyte"
+    },
+    "l1tex__t_bytes_pipe_lsu_mem_local_op_st.sum": {
+      "value": "282.138624",
+      "unit": "Mbyte"
+    }
+  },
+  "unified_reduce": {
+    "gpu__time_duration.sum": {
+      "value": "12.128000",
+      "unit": "us"
+    },
+    "dram__bytes_read.sum": {
+      "value": "26.234368",
+      "unit": "Mbyte"
+    },
+    "dram__bytes_write.sum": {
+      "value": "0.216064",
+      "unit": "Mbyte"
+    },
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+      "value": "65.347349",
+      "unit": "%"
+    },
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+      "value": "0.000316",
+      "unit": "%"
+    },
+    "l1tex__t_bytes_pipe_lsu_mem_local_op_ld.sum": {
+      "value": "0.000000",
+      "unit": "Mbyte"
+    },
+    "l1tex__t_bytes_pipe_lsu_mem_local_op_st.sum": {
+      "value": "0.000000",
+      "unit": "Mbyte"
+    }
+  }
+}

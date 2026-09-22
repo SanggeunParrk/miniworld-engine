@@ -12,6 +12,8 @@ import copy
 import pytest
 import torch
 
+from miniworld_engine.modules.exceptions import ImplementationType
+
 pytestmark = pytest.mark.gpu
 
 CUDA = torch.cuda.is_available()
@@ -59,7 +61,7 @@ def _build(shape, seed=72):
     from miniworld_engine.modules import Transition
 
     torch.manual_seed(seed)
-    module = Transition(shape[-1], n=4, implementation="triton").cuda().bfloat16()
+    module = Transition(shape[-1], n=4, implementation=ImplementationType.TRITON).cuda().bfloat16()
     with torch.no_grad():
         for param in module.parameters():
             if param.ndim == 2:
@@ -169,7 +171,8 @@ def test_replay_is_bit_identical():
             t.grad = None
         y = fused_sm90a.transition_fused_sm90a(x, gamma, beta, wa, wb, ws, 1e-5)
         y.backward(dy)
-        return [y.detach().clone()] + [t.grad.clone() for t in (x, wa, wb, ws)]
+        assert all(t.grad is not None for t in (x, wa, wb, ws))
+        return [y.detach().clone()] + [t.grad.clone() for t in (x, wa, wb, ws) if t.grad is not None]
 
     first, second = once(), once()
-    assert all(torch.equal(a, b) for a, b in zip(first, second))
+    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=False))

@@ -1,0 +1,43 @@
+{
+  "job": "15581",
+  "times_us": {
+    "training": {
+      "previous_triton": 2521.5680599212646,
+      "previous_h100": 2469.7279930114746,
+      "latest_trimul_only": 1964.6719694137573,
+      "latest_all": 1582.0159912109375
+    },
+    "training_forward": {
+      "previous_triton": 676.2880086898804,
+      "previous_h100": 625.903993844986,
+      "latest_trimul_only": 466.8160080909729,
+      "latest_all": 431.13601207733154
+    },
+    "inference": {
+      "previous_triton": 600.1279950141907,
+      "previous_h100": 577.8400003910065,
+      "latest_trimul_only": 449.75998997688293,
+      "latest_all": 405.60001134872437
+    }
+  },
+  "speedup": {
+    "inference": {
+      "previous_triton": 1.4796054689905227,
+      "previous_h100": 1.424654793449191,
+      "latest_trimul_only": 1.1088756839067022
+    },
+    "training_forward": {
+      "previous_triton": 1.5686186951336756,
+      "previous_h100": 1.4517553076329877,
+      "latest_trimul_only": 1.0827580972457516
+    },
+    "training": {
+      "previous_triton": 1.593895430849063,
+      "previous_h100": 1.5611270725026283,
+      "latest_trimul_only": 1.2418787043422486
+    }
+  },
+  "scope": "B1/L384/C128, one bidirectional TriMul + Transition block",
+  "latest_training_diagnostic": true,
+  "production_dispatch_changed": false
+}

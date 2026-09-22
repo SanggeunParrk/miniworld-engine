@@ -1,0 +1,131 @@
+{
+  "L": 384,
+  "changed_input_weight_upstream": true,
+  "restored_forward_exact": true,
+  "counters_zero": true,
+  "changed": {
+    "forward": {
+      "relative_l2": 0.0,
+      "limit": 0.0,
+      "finite": true
+    },
+    "dx": {
+      "relative_l2": 1.8674540115171112e-05,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWL": {
+      "relative_l2": 0.00021004219888709486,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWLg": {
+      "relative_l2": 0.00012199593766126782,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWR": {
+      "relative_l2": 0.0003524846979416907,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWRg": {
+      "relative_l2": 0.00010765404294943437,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWgate": {
+      "relative_l2": 0.00014963903231546283,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWproj": {
+      "relative_l2": 0.00011825154797406867,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dgamma_in": {
+      "relative_l2": 3.568920510588214e-05,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dbeta_in": {
+      "relative_l2": 2.3028242139844224e-05,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dgamma_out": {
+      "relative_l2": 1.2187140328023816e-06,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dbeta_out": {
+      "relative_l2": 5.3744503247799e-07,
+      "limit": 0.0005,
+      "finite": true
+    }
+  },
+  "restored": {
+    "forward": {
+      "relative_l2": 0.0,
+      "limit": 0.0,
+      "finite": true
+    },
+    "dx": {
+      "relative_l2": 1.9597082427935675e-05,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWL": {
+      "relative_l2": 0.00019834039267152548,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWLg": {
+      "relative_l2": 0.0001867310202214867,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWR": {
+      "relative_l2": 0.00016028837126214057,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWRg": {
+      "relative_l2": 0.00029234105022624135,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWgate": {
+      "relative_l2": 0.0001251121429959312,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dWproj": {
+      "relative_l2": 0.00010545417171670124,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dgamma_in": {
+      "relative_l2": 3.4076409065164626e-05,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dbeta_in": {
+      "relative_l2": 2.3696791686234064e-05,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dgamma_out": {
+      "relative_l2": 2.3707168566033943e-06,
+      "limit": 0.0005,
+      "finite": true
+    },
+    "dbeta_out": {
+      "relative_l2": 5.318417493072047e-07,
+      "limit": 0.0005,
+      "finite": true
+    }
+  },
+  "benchmark": "compare_all_training.py; same captured current_train callable"
+}

@@ -1,0 +1,86 @@
+{
+  "front_ring96_cache3_mcastasync_xn4": {
+    "count": 248,
+    "capacity": 62,
+    "splits": 20,
+    "errors": {
+      "dx": {
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 6.285400741035119e-05,
+        "max_absolute": 0.125,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 2.5156452466035262e-05,
+        "max_absolute": 0.015625,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 2.5077211830648594e-05,
+        "max_absolute": 0.03125,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 7.643046410521492e-05,
+        "max_absolute": 0.0625,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 3.415580067667179e-07,
+        "max_absolute": 2.47955322265625e-05,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 8.311855026477133e-08,
+        "max_absolute": 1.52587890625e-05,
+        "finite": true
+      }
+    }
+  },
+  "front_ring96_cache3_mcastasync_xn8": {
+    "count": 240,
+    "capacity": 30,
+    "splits": 20,
+    "errors": {
+      "dx": {
+        "relative_l2": 0.0,
+        "max_absolute": 0.0,
+        "finite": true
+      },
+      "dWL": {
+        "relative_l2": 6.285400741035119e-05,
+        "max_absolute": 0.125,
+        "finite": true
+      },
+      "dWLg": {
+        "relative_l2": 2.5156452466035262e-05,
+        "max_absolute": 0.015625,
+        "finite": true
+      },
+      "dWR": {
+        "relative_l2": 2.5077211830648594e-05,
+        "max_absolute": 0.03125,
+        "finite": true
+      },
+      "dWRg": {
+        "relative_l2": 7.643046410521492e-05,
+        "max_absolute": 0.0625,
+        "finite": true
+      },
+      "dgamma": {
+        "relative_l2": 3.415580067667179e-07,
+        "max_absolute": 2.47955322265625e-05,
+        "finite": true
+      },
+      "dbeta": {
+        "relative_l2": 8.311855026477133e-08,
+        "max_absolute": 1.52587890625e-05,
+        "finite": true
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "gpu__time_duration.sum": "2.232352",
+  "dram__throughput.avg.pct_of_peak_sustained_elapsed": null,
+  "dram__bytes_read.sum": "4.203203",
+  "dram__bytes_write.sum": "169.253632",
+  "sm__throughput.avg.pct_of_peak_sustained_elapsed": "43.051159",
+  "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": "15.025817",
+  "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum": "246709",
+  "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": "0",
+  "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": "0",
+  "smsp__warps_issue_stalled_barrier_per_warp_active.pct": null,
+  "smsp__warps_issue_stalled_short_scoreboard_per_warp_active.pct": null
+}

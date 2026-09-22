@@ -9,7 +9,9 @@ import torch
 
 from miniworld_engine.integrations import anthropic_msa as msa
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.msa_pair_weighted_averaging import MSAPairWeightedAveraging
+from miniworld_engine.modules.msa_pair_weighted_averaging import (
+    MSAPairWeightedAveraging,
+)
 from miniworld_engine.modules.outer_product import OuterProductMean
 
 BF16 = torch.zeros(1, 8, 16, 64, dtype=torch.bfloat16)
@@ -29,8 +31,12 @@ def test_only_the_named_and_the_auto_option_ask_for_it(monkeypatch):
 
 
 def test_an_absent_payload_is_a_reason_not_a_crash(monkeypatch):
-    assert msa.ENV in msa.opm_refusal(BF16, 32, 128, grad=False, interchain=False)
-    assert msa.ENV in msa.pwa_refusal(BF16, 64, 128, 8, 32, grad=False, dropout=False)
+    reason = msa.opm_refusal(BF16, 32, 128, grad=False, interchain=False)
+    assert reason is not None
+    assert msa.ENV in reason
+    reason = msa.pwa_refusal(BF16, 64, 128, 8, 32, grad=False, dropout=False)
+    assert reason is not None
+    assert msa.ENV in reason
     # a directory that is not a checkout is named in the reason too (the loader states it; on a CPU box the
     # device refusal comes first, which is why this asks the loader rather than the refusal)
     monkeypatch.setenv(msa.ENV, "/nonexistent/opt_core")
@@ -39,24 +45,34 @@ def test_an_absent_payload_is_a_reason_not_a_crash(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kwargs, dims, word",
+    ("kwargs", "dims", "word"),
     [
-        (dict(grad=True, interchain=False), (32, 128), "forward-only"),
-        (dict(grad=False, interchain=True), (32, 128), "interchain"),
-        (dict(grad=False, interchain=False), (32, 192), "d_pair=128"),
+        ({"grad": True, "interchain": False}, (32, 128), "forward-only"),
+        ({"grad": False, "interchain": True}, (32, 128), "interchain"),
+        ({"grad": False, "interchain": False}, (32, 192), "d_pair=128"),
     ],
 )
 def test_the_opm_refusals_name_what_they_refused(monkeypatch, kwargs, dims, word):
     monkeypatch.setenv(msa.ENV, "/nonexistent/opt_core")           # past the "not set" check
-    assert word in msa.opm_refusal(BF16, *dims, **kwargs)
+    reason = msa.opm_refusal(BF16, *dims, **kwargs)
+    assert reason is not None
+    assert word in reason
 
 
 def test_the_pwa_refusals_name_what_they_refused(monkeypatch):
     monkeypatch.setenv(msa.ENV, "/nonexistent/opt_core")
-    assert "forward-only" in msa.pwa_refusal(BF16, 64, 128, 8, 32, grad=True, dropout=False)
-    assert "row-dropout" in msa.pwa_refusal(BF16, 64, 128, 8, 32, grad=False, dropout=True)
-    assert "n_head=8" in msa.pwa_refusal(BF16, 64, 128, 4, 32, grad=False, dropout=False)
-    assert "bf16" in msa.pwa_refusal(BF16.float(), 64, 128, 8, 32, grad=False, dropout=False)
+    reason = msa.pwa_refusal(BF16, 64, 128, 8, 32, grad=True, dropout=False)
+    assert reason is not None
+    assert "forward-only" in reason
+    reason = msa.pwa_refusal(BF16, 64, 128, 8, 32, grad=False, dropout=True)
+    assert reason is not None
+    assert "row-dropout" in reason
+    reason = msa.pwa_refusal(BF16, 64, 128, 4, 32, grad=False, dropout=False)
+    assert reason is not None
+    assert "n_head=8" in reason
+    reason = msa.pwa_refusal(BF16.float(), 64, 128, 8, 32, grad=False, dropout=False)
+    assert reason is not None
+    assert "bf16" in reason
 
 
 def test_the_explicit_option_raises_instead_of_rerouting():
@@ -76,6 +92,5 @@ def test_the_modules_build_under_the_option_and_keep_their_own_primitives():
 
 def test_a_cpu_call_under_the_option_refuses_rather_than_run():
     opm = OuterProductMean(64, 128, 32, implementation=ImplementationType.ANTHROPIC)
-    with pytest.raises(msa.PayloadUnavailable):
-        with torch.inference_mode():
-            opm(BF16, torch.ones(1, 8, 16, dtype=torch.bool))
+    with pytest.raises(msa.PayloadUnavailable), torch.inference_mode():
+        opm(BF16, torch.ones(1, 8, 16, dtype=torch.bool))

@@ -1,0 +1,322 @@
+{
+  "summary": {
+    "date": "2026-09-23",
+    "scope": "H100, bidirectional TriMul, BF16, B1, direction hidden=D, total hidden=2D, dropout25%, mask, residual, all 11 gradients",
+    "rows": [
+      {
+        "D": 64,
+        "L": 384,
+        "previous_us": 1627.664029598236,
+        "current_us": 1339.4880294799805,
+        "speedup": 1.2151389141044673,
+        "time_reduction_pct": 17.704882265499688,
+        "triton_us": 809.5040023326874,
+        "cuda_us": 1354.4479608535767,
+        "vs_triton": 0.5976634213562076,
+        "forward_us": 270.7520127296448,
+        "job": "15915"
+      },
+      {
+        "D": 64,
+        "L": 768,
+        "previous_us": 6256.879806518555,
+        "current_us": 4961.168050765991,
+        "speedup": 1.261170704659462,
+        "time_reduction_pct": 20.708592714257712,
+        "triton_us": 3050.096035003662,
+        "cuda_us": 4982.4159145355225,
+        "vs_triton": 0.6121721043210023,
+        "forward_us": 1005.4879784584045,
+        "job": "15916"
+      },
+      {
+        "D": 128,
+        "L": 384,
+        "previous_us": 991.1360144615173,
+        "current_us": 990.3199970722198,
+        "speedup": 1.0008239936502443,
+        "time_reduction_pct": 0.08233152437113755,
+        "triton_us": 1650.7200002670288,
+        "cuda_us": 988.2559776306152,
+        "vs_triton": 1.67033646912483,
+        "forward_us": 292.89600253105164,
+        "job": "15917"
+      },
+      {
+        "D": 128,
+        "L": 768,
+        "previous_us": 4794.512033462524,
+        "current_us": 3935.296058654785,
+        "speedup": 1.2183357902433007,
+        "time_reduction_pct": 17.9208221568948,
+        "triton_us": 6528.319835662842,
+        "cuda_us": 4030.57599067688,
+        "vs_triton": 1.619698983659777,
+        "forward_us": 1164.3679738044739,
+        "job": "15918"
+      },
+      {
+        "D": 256,
+        "L": 384,
+        "previous_us": 6672.0640659332275,
+        "current_us": 5428.431987762451,
+        "speedup": 1.2290960043294914,
+        "time_reduction_pct": 18.639390537639088,
+        "triton_us": 3450.9119987487793,
+        "cuda_us": 5434.416055679321,
+        "vs_triton": 0.6350106365415931,
+        "forward_us": 1146.5280055999756,
+        "job": "15919"
+      },
+      {
+        "D": 256,
+        "L": 768,
+        "previous_us": 27217.98324584961,
+        "current_us": 22053.871154785156,
+        "speedup": 1.234158985278372,
+        "time_reduction_pct": 18.97316213482464,
+        "triton_us": 17492.33627319336,
+        "cuda_us": 22115.82374572754,
+        "vs_triton": 0.7909421088858437,
+        "forward_us": 4623.136043548584,
+        "job": "15920"
+      },
+      {
+        "D": 384,
+        "L": 384,
+        "previous_us": 11762.048244476318,
+        "current_us": 9596.048355102539,
+        "speedup": 1.2257179006629375,
+        "time_reduction_pct": 18.415159029729146,
+        "triton_us": 6184.191942214966,
+        "cuda_us": 9697.344303131104,
+        "vs_triton": 0.6377201581074313,
+        "forward_us": 2027.2799730300903,
+        "job": "15945"
+      },
+      {
+        "D": 384,
+        "L": 768,
+        "previous_us": 48509.56726074219,
+        "current_us": 39322.94464111328,
+        "speedup": 1.233619905718455,
+        "time_reduction_pct": 18.937754217122148,
+        "triton_us": 26967.24796295166,
+        "cuda_us": 40336.47918701172,
+        "vs_triton": 0.6685573085822292,
+        "forward_us": 8218.688011169434,
+        "job": "15946"
+      },
+      {
+        "D": 512,
+        "L": 384,
+        "previous_us": 16630.59139251709,
+        "current_us": 14394.976139068604,
+        "speedup": 1.1553052420407233,
+        "time_reduction_pct": 13.442788657860948,
+        "triton_us": 9290.272235870361,
+        "cuda_us": 14589.600086212158,
+        "vs_triton": 0.63677360455206,
+        "forward_us": 3200.096011161804,
+        "job": "15947"
+      },
+      {
+        "D": 512,
+        "L": 768,
+        "previous_us": 69617.4545288086,
+        "current_us": 60241.5828704834,
+        "speedup": 1.155637870247913,
+        "time_reduction_pct": 13.467702491830325,
+        "triton_us": 41251.66320800781,
+        "cuda_us": 61238.36708068848,
+        "vs_triton": 0.6736244804446546,
+        "forward_us": 13574.928283691406,
+        "job": "15941"
+      }
+    ],
+    "comparison": "Previous CUDA is the immediately preceding all-width port. It is not Anthropic, cuEquivariance, or the original pre-adoption engine.",
+    "entry": "runs/trimul_training_current.py",
+    "production_dispatch_changed": false,
+    "sol90_verified": false,
+    "validation_shapes": 10,
+    "ncu": {
+      "256": {
+        "gpu__time_duration.sum": {
+          "value": "2.029984",
+          "unit": "ms"
+        },
+        "dram__bytes_read.sum": {
+          "value": "2.366666",
+          "unit": "Gbyte"
+        },
+        "dram__bytes_write.sum": {
+          "value": "830.561792",
+          "unit": "Mbyte"
+        },
+        "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+          "value": "23.987966",
+          "unit": "%"
+        },
+        "smsp__warps_eligible.avg.per_cycle_active": {
+          "value": "0.348037",
+          "unit": "warp"
+        },
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+          "value": "0",
+          "unit": "sector"
+        },
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+          "value": "0",
+          "unit": "sector"
+        }
+      },
+      "512": {
+        "gpu__time_duration.sum": {
+          "value": "6.131488",
+          "unit": "ms"
+        },
+        "dram__bytes_read.sum": {
+          "value": "6.214602",
+          "unit": "Gbyte"
+        },
+        "dram__bytes_write.sum": {
+          "value": "1.788893",
+          "unit": "Gbyte"
+        },
+        "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": {
+          "value": "31.738750",
+          "unit": "%"
+        },
+        "smsp__warps_eligible.avg.per_cycle_active": {
+          "value": "0.387908",
+          "unit": "warp"
+        },
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum": {
+          "value": "0",
+          "unit": "sector"
+        },
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum": {
+          "value": "0",
+          "unit": "sector"
+        }
+      }
+    }
+  },
+  "sha256": {
+    "runs/trimul_cuda_widths_opt_20260923/memcheck-D512.log": "a9d061cee538182f762e132abeea7bac7bddb844338f25751bbbb043f242c425",
+    "runs/trimul_cuda_widths_opt_20260923/README.md": "48535523aaea9c3529c2fbd16e5e6556ddaac7432813c31e4e70bb87152a4ba7",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D384-L768.json": "01cb32946ec1307b622f2056406d045613f083bed677bd6cba607414fa616aac",
+    "runs/trimul_cuda_widths_opt_20260923/widths_singlewg.cu": "e4a0c2a557eb12675e960f3a24ee36e84b8d8dedcc696656aeb44fa3dc2d8263",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D384-L768.json": "bd8dbbe0baa8be104e96e727a996eec5ee8df89c8ae87e2fb77dfa9b5045c542",
+    "runs/trimul_cuda_widths_opt_20260923/native_gp_shared.cuh": "f9b05caaeef40b7ecd9a9d6b8199d51c2e07ae16bf1616a919c352386545cfa0",
+    "runs/trimul_cuda_widths_opt_20260923/widths_pack.cu": "a9ca8e0b311dfd715a055c31288255312326a22876bce5218e66ee2768da4c2d",
+    "runs/trimul_cuda_widths_opt_20260923/summary.json": "a59bcd8976bcd9a36c64e218c5e7692e264dc2bd47e1624e028565f6a37deb91",
+    "runs/trimul_cuda_widths_opt_20260923/build/f80ae9d80f4fa81c16a1100b26c2c6b1fad41296cce01b80499e2ac1c87c302c.cubin": "9db456bb58fb86db07252d74e20461a572c621a28ba01455072b0cc2c7ae2018",
+    "runs/trimul_cuda_widths_opt_20260923/check-D512-L768.json": "aea8b6c8f251da5e396a8c0fa05abaa0947788eafbe7dbccf72145895656afd8",
+    "runs/trimul_cuda_widths_opt_20260923/check-D512-L384.json": "03dc50c3f06ebacc667e15bc1f8245e46b5572f7adf288acc24af657c79be674",
+    "runs/trimul_cuda_widths_opt_20260923/check-D384-L384.json": "7e7567e0dafcc813e0602890b1beb90d89903eeb6207f4ca97b87254bd5a4f0f",
+    "runs/trimul_cuda_widths_opt_20260923/plan_singlewg.py": "6afdabae7120f8eae46c2a66f6b54be81f4c4ecfd5f8cd555e5e9752f834096f",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D64-L768.json": "b3c40b7284fe48cc577236b97e2e6b6a6cf3ae50ae8a94a3a937096e82e270d8",
+    "runs/trimul_cuda_widths_opt_20260923/width_plan_n64.py": "64b6a6539208458040a0c870c5d17eb55785df9ef6c32c8dedf0a2729ca9d87e",
+    "runs/trimul_cuda_widths_opt_20260923/memcheck-D384.log": "a9d061cee538182f762e132abeea7bac7bddb844338f25751bbbb043f242c425",
+    "runs/trimul_cuda_widths_opt_20260923/racecheck-D512.log": "91dbb142f8feb8786cd6fde6ac035e816b67db14e4b7b400a01386ec106b75c4",
+    "runs/trimul_cuda_widths_opt_20260923/probe.py": "05daad5b555e2bbb14d2822d652c0c6767c9fd6e2754c0869f83100d4291139a",
+    "runs/trimul_cuda_widths_opt_20260923/stages.py": "a5fea55a0c3fd4af81387c8d776da248ca8522b0c7c2c4f99f200f0462aecb61",
+    "runs/trimul_b1_gate_demote_20260922/build/1c82cc4c137395d81fb6b160b3427d3a46becd7056b09c9167c259f89100290b.cubin": "857c944a6e57ac065a4f0b52b211ec9d05fa443d9507df803f72e771eb16854e",
+    "runs/trimul_cuda_widths_opt_20260923/fixed128/joint.cu": "38b5c5697c484473199b9c595397af2b8dd6fbec3fd225b08a019b0fea3a5e22",
+    "runs/trimul_cuda_widths_opt_20260923/tune_gp.py": "69a5dbd428c9ead78a9f9510bcaa490f77721e90e28b0ae820cf0896400d0398",
+    "runs/trimul_cuda_widths_opt_20260923/native_gp.py": "2adb43971ea71689c5c8f5d319fe53953665940aa615023c0c1fbf7bf1126bdf",
+    "runs/trimul_cuda_widths_opt_20260923/build/0612769c639b6334461b548903772a3bf226d5df657a1febcd87dbf3c0b73886.cubin": "ab62bad4bd0f0af636bb4b9ae0ffe7f9db93653c8d3d1f40dd2cf96e0fc39f9c",
+    "runs/trimul_cuda_widths_opt_20260923/fixture.py": "4820dc6dd7a7a513e2a6b41deb395ab775a2b200996c2d30a930e556db044d92",
+    "runs/trimul_b1_gate_demote_20260922/build/53d2f7d052b10d559a2a8671170afb2df8850e3844a64169bad1c7550004b356.cubin": "cde742fdc3869bfa28a353c3f815610f88ae132ad729f97e782ec6a23fbbba12",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D512-L384.json": "a5754decbd1a782c3350e1a86db9dcd0d4157bdaab2d3934b1158c4f62fcb2c3",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D512-L384.json": "85bc242f0f78c365f005ade623234d53959dc7fbca7da8967e4821d914679f54",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D128-L384.json": "9ee452d63c77e1d63b9975233be21f8035e6dbdfbf239aaecbe19e098391a7d8",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D256-L384.json": "ef68ce2fe2699b7d15fcc200a84755beeb358d6e892f6dbc4a509c2175814143",
+    "runs/trimul_cuda_widths_opt_20260923/memcheck-D128-L768.log": "a9d061cee538182f762e132abeea7bac7bddb844338f25751bbbb043f242c425",
+    "runs/trimul_cuda_widths_opt_20260923/latest_d128.py": "ccfd0cf042bfb4608583cd6aabbf3505ab771a576e87ced927984bc2d9aac972",
+    "runs/trimul_cuda_widths_opt_20260923/fixed128/build/147e63b485657eae80ae7305c771501a25d6f1b1e950150d1d1daf8ece252a17.cubin": "8fb307d6c31073f74f28317adc630f588b9771f487d765a5e101c2ab5cb5d303",
+    "runs/trimul_cuda_widths_opt_20260923/gp_headers/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D512-L768.json": "b1a97fa704362469880f23f671e2b04e783b5ac8ab21be22812d8944d20e90aa",
+    "runs/trimul_cuda_widths_opt_20260923/ncu_profile.py": "62f0958cc7cc7b4acef57b9e234d6f2b04c1a60e4e43d02f66a9333da222b7fd",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D64-L384.json": "ae8214b228a912c0360651adda65c0e650210ce1c5d54671a7541bef897c537f",
+    "runs/trimul_cuda_widths_opt_20260923/widths.cu": "ea4142fa82d392f9b0a4aa31fa0f1297298ca9e145e4e658edc8834c0a9eb3c8",
+    "runs/trimul_cuda_widths_opt_20260923/racecheck-D64.log": "91dbb142f8feb8786cd6fde6ac035e816b67db14e4b7b400a01386ec106b75c4",
+    "runs/trimul_training_current.py": "907c96eb17baf042d2126f996f7723f132ac9fb7c732eccbb69d4cf008c964a8",
+    "runs/trimul_cuda_widths_opt_20260923/before-port-report.py": "9e5c39bd39796b0c2564dd2960dfcd92a229209a5ded56a5239168c60d23c378",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-D512-L384.csv": "44b5f600613996a5c0d2609efc674af1a6e833d037b606e0e91cc6eeb7574044",
+    "runs/trimul_cuda_widths_opt_20260923/tune_shared.py": "b9aabc89c240ec7252b6f947031d23a8db868cf9b18653c49398b362118a7dec",
+    "runs/trimul_cuda_widths_opt_20260923/width_plan_split.py": "3fec129d0335014a58d0ef25eacc39b37d6ef7fab83bb9d47b1599d6cdb3b754",
+    "runs/trimul_cuda_widths_opt_20260923/native_gp_scalar.cuh": "56a53f516b4291384ad42d84c2af1e9d6f647ce1a52662fa0d4d6e385a0fd8f9",
+    "runs/trimul_cuda_widths_opt_20260923/racecheck-D384.log": "91dbb142f8feb8786cd6fde6ac035e816b67db14e4b7b400a01386ec106b75c4",
+    "runs/trimul_cuda_widths_opt_20260923/tune_width.py": "16b1d19118b0758a44d09767202b70ab8bc113459b71960be208a7364a7d86d3",
+    "runs/trimul_cuda_widths_opt_20260923/width_plan.py": "52264a11111a3601c8a4db9dcd056b96e3ba24618341d66a33ed09320829fc32",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D128-L768.json": "740bfcfc737e6c17c7a6aecdc10cfc140f9df9c49acc40b135be9de6bbd98929",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D128-L384.json": "6e0b62e4bef13cfcf070a6e4220be75cc60f979d47b3e2b48be4e486a4fd65f6",
+    "runs/trimul_cuda_widths_opt_20260923/pack_probe.py": "b233645f1819a9c1608e9ba13e6f9f8347be5ebffa86febc1422d8431365d8ca",
+    "runs/trimul_cuda_widths_opt_20260923/memcheck-D256.log": "a9d061cee538182f762e132abeea7bac7bddb844338f25751bbbb043f242c425",
+    "runs/trimul_cuda_widths_opt_20260923/check-D256-L768.json": "dba71bd6fabadaa4591486ab4e8e0890f050258a8f8ddbe2b0ecdef6b2da0d25",
+    "runs/trimul_cuda_widths_opt_20260923/latest-D128-L384.json": "416cc74b8f1a6de6d1375bfbf542aa1741d44d6c458822b662c8967e0aa43472",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-D512-L384.log": "70bf5b5d820c482ebb061f97f6b62a2bdae568f0d3a71186e99873b08fbd4318",
+    "runs/trimul_cuda_widths_opt_20260923/native_gp.cuh": "47f301cab572a04ae4786308a3c335fa5803091b8f381f4e7fab76b9d5566e37",
+    "runs/trimul_cuda_widths_opt_20260923/memcheck-D64.log": "a9d061cee538182f762e132abeea7bac7bddb844338f25751bbbb043f242c425",
+    "runs/trimul_cuda_widths_opt_20260923/gp_headers/tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+    "runs/trimul_cuda_widths_opt_20260923/widths_before_tune.cu": "46653f99cc139c63d14c5f38a50442d211d4c5c5e3cf656f2f9adc4b37f81480",
+    "runs/trimul_cuda_widths_opt_20260923/compare_previous.py": "6f279df388fe9702539e54b02cd6d729a1a5cf8f48df5b6972ebdc41001e23b7",
+    "runs/trimul_cuda_widths_20260923/build/cfb0c89902d052b53b4db9bc2c5d8b84b25415c4556c836d06bfd9d5f23529e8.cubin": "94300a7028d53f0d4c8b8276b71605d2f7a3fd366df891d6438cf79bb547ac7e",
+    "runs/trimul_cuda_widths_opt_20260923/report.py": "bf58a95c0e12b4213bdad1bcd6387db3d123801f83399074b12d1b9a58d2ce9d",
+    "runs/trimul_cuda_widths_opt_20260923/latest-D128-L768.json": "b2c62022ef36199f5526a464380c8fcc63af89e0585711259f611086c268d27b",
+    "runs/trimul_cuda_widths_opt_20260923/plan_initial.py": "06b97785c46c9d30c89765f7e19aca81d766d9b6ec13471ddddfc1357e991b52",
+    "runs/trimul_cuda_widths_opt_20260923/probe128.py": "2301e8623c484127949ae0cbe372541fde9ce61591f8b8908fa24b10d7ac5c0b",
+    "runs/trimul_cuda_widths_opt_20260923/width_autograd.py": "c87c0fa5ab7630847b8e4c21f604cc481e970ff36eff309d2e5096780f8c88e9",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-15943_1.log": "f63c1c2908df5c152ae376a7da59adf9f603f83f308dce375c0fdae539e52894",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-15927_1.log": "f63c1c2908df5c152ae376a7da59adf9f603f83f308dce375c0fdae539e52894",
+    "runs/trimul_cuda_widths_opt_20260923/check-D384-L768.json": "485aa9ca2569f80ffd09b9a5fe3b05b7a7e71a0e7dd53bfb34797a59fbf0bc54",
+    "runs/trimul_ln_gradient_20260922/fixed/build/5242c0dacfd9f18fb6f13babfe6272952ffc5e24dfefd3dfdd91c89449e84a3b.cubin": "f3ede2345e8c7bc907473d5e2662eac00c3e0204b3cf66062ab8f01770386c61",
+    "runs/trimul_cuda_widths_opt_20260923/racecheck-D256.log": "91dbb142f8feb8786cd6fde6ac035e816b67db14e4b7b400a01386ec106b75c4",
+    "runs/trimul_cuda_widths_opt_20260923/gp_headers/tmn_kernels.cuh": "34de8e6186b6d45ce563bbe3da5711c135c694fddd0727a64ab90c67b66ce15c",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D64-L768.json": "a1deec9e8839a1d2005e9dc31dfb9b6ac718a09dc87ef648ac697fcfe9eca2fe",
+    "runs/trimul_cuda_widths_opt_20260923/check_autograd.py": "b6fb4f0f40bfa105745e89319af1c5d2b4406d317a6462516c9cd1322a7d39bf",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D128-L768.json": "8978185f3e312701488b7e84a11a863dad5a5178141105de5336871777f66556",
+    "runs/trimul_cuda_widths_opt_20260923/tune_regs.py": "ffc74697be07389680cc8740692e1c248a4120738d8df872f0d8d4199e971b4c",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-D256-L384.csv": "fe18b90923975817df66df0cf68ca4dec35e59c4586b49173bf0973da1d6a030",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D384-L384.json": "46345e6c087bcfcf6d117ddf4a68fad782c1d1a203703c96954ba70e110674b7",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-D256-L384.log": "a322843ddb8eb5500c94c76f4b6213b2e0bb012545664a5fe31a6bb66e3f42c5",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-summary.json": "e976a79bcd5e52ee1306e321027d2d21711cfd147846bae15ff2fe3a116656d8",
+    "runs/trimul_cuda_widths_opt_20260923/fixed128/single_wg.inc": "d2e233a020454b624f4d3cd2ac38ca2b8bfc3a13e0a85dd4dbd8b880f2f8444e",
+    "runs/trimul_cuda_widths_20260923/build/90c0f6b60db611ff21c29cdbf108c14e7baad1852d75e34a7e781e6bece31cbd.cubin": "3a29282cf64a8a5415a2c87e3860f75ebbc36be21547d7bfcced6a50ca206636",
+    "runs/trimul_cuda_widths_opt_20260923/build/152f1a38c6c6853f7f74377335b2b72cdaf89a48efdf8a26494711ab87d9ace0.cubin": "3a26f6c3751e01970b31c0193e3252ea34eab8b1810ca4358a962f1658438cdd",
+    "runs/trimul_cuda_widths_opt_20260923/fixed128/plan.py": "ee3ec971d902561343f8b395c3a4e49d5e1145d091a019f4af689b51389ee109",
+    "runs/trimul_cuda_widths_opt_20260923/check-D64-L768.json": "53ddf9bb82abc374a5e8221053bf63525302162f0f7cb41129cc4816b5c097fe",
+    "runs/trimul_cuda_widths_opt_20260923/ncu_probe.py": "d18679567444aaa39bfcc88dc7455978bb71d67f126c5e0556b2d7217f3b0593",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D256-L384.json": "e9a9ac1decabad7b941fe347b6109ba64adc781f179235be242a628ee899cadf",
+    "runs/trimul_cuda_widths_opt_20260923/racecheck-D128-L768.log": "91dbb142f8feb8786cd6fde6ac035e816b67db14e4b7b400a01386ec106b75c4",
+    "runs/trimul_cuda_widths_opt_20260923/index.html": "574a7b75d0c7e51b4b08e7794a34647695270ba664a44556bccf4ada72c2cdae",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D256-L768.json": "c4b94c821a320fbe1b255f26334970491572643f249c8a499ddaf8042cc7d065",
+    "runs/trimul_cuda_widths_opt_20260923/build/0a0c30ede01d5443d9f521461d0d6072851b165d8ab82e379666b099ac923fb7.cubin": "0d34f59495749292fdb77b55f27a6890c015345cf722ffd9c1b6f0fc1b0435ee",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D64-L384.json": "ca409be32ec24ae8ca508cbc3033a794f74f6910e1fd1fc58874436f901a42b2",
+    "runs/trimul_cuda_widths_opt_20260923/widths_initial.cu": "535224742006d4f62a300752f5e063b80040b9660303eb79d6153aad1abb868e",
+    "runs/trimul_cuda_widths_opt_20260923/check-D256-L384.json": "523e5f522d981c878ccde7aca4023b1d854dd7595314d3a85e32bea709de7522",
+    "runs/trimul_cuda_widths_opt_20260923/tune_fused.py": "23d25f044db04c4fb1a96699cbeb5497c0cbc300723ef12a5e53d8a6388d5301",
+    "runs/trimul_cuda_widths_opt_20260923/widths_split.cu": "80987eda5839e4201247db6f556893db62aa9752407ebc7e0e191ab78fd234e5",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D384-L384.json": "fbcbb847b2f5e92799a7e51af14ddedf0688bf8917506d7f944deb2def2bac0c",
+    "runs/trimul_cuda_widths_opt_20260923/check.py": "071843663757e807586b3039aab50f5534a65bebcec95e80847274c252f5c6f8",
+    "runs/trimul_cuda_widths_opt_20260923/paired-D512-L768.json": "429e59edcc4cb0d39d847658aecdfb856004b196dc10f11a67501055319ae63d",
+    "runs/trimul_cuda_widths_20260923/build/a0d75c1fb67f175dce4ca8f333fec1c4ddbe906bf10d7f144b4e15cbde6319a1.cubin": "a5eb41689b5cae365d9e4fad8f8bb191fa4c3832e10a181c9a0168f194cced70",
+    "runs/trimul_cuda_widths_opt_20260923/tune128.py": "e01689233a2a9cbb3aa99b64992b54f7eb6128275074d289c7d36982cc8a9e14",
+    "runs/trimul_cuda_widths_opt_20260923/ncu-15927_0.log": "f63c1c2908df5c152ae376a7da59adf9f603f83f308dce375c0fdae539e52894",
+    "runs/trimul_cuda_widths_20260923/build/2cd28786706577d0a06a2c4600bca5f0a9cd32c2e48f80831e2efa85bb2505d1.cubin": "d20cf532ec89b3ead98ec4aed6dae2ce7d46ab5ada2cb5839935b4f96b309a21",
+    "runs/trimul_cuda_widths_opt_20260923/autograd-D256-L768.json": "5163096d8a8f18aa07e0486dcdef67fedea8accadcd1fcce8de16607e7fb73d0",
+    "runs/trimul_cuda_widths_opt_20260923/widths_n64.cu": "e5a61c9b88ecc2c10c71cb0c9a2c26c73c9153e41973e3a1a039478622adeded",
+    "runs/trimul_cuda_widths_opt_20260923/sanitize128.py": "10f0dee47f73520c7b22861bd7ad57990fb762a7fe275f8e07af179d7cc38f99",
+    "runs/trimul_cuda_widths_opt_20260923/native_gp_tma.cuh": "7be46217a553ad5583461747e5366c74620d53ba605b76726ef3803c0a8be13c",
+    "runs/trimul_cuda_widths_opt_20260923/check-D64-L384.json": "b2d3e458b5b6aa23361847488087685af0c28be9a1ed3ab116bfd26cd14468ca"
+  },
+  "commands": [
+    "sbatch /home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/final.sbatch",
+    "sbatch /home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/paired.sbatch",
+    "sbatch /home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/autograd.sbatch",
+    "sbatch /home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/sanitize.sbatch",
+    "sbatch /home/psk6950/MiniWorld/runs/trimul_cuda_widths_opt_20260923/sanitize128.sbatch"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "L": 768,
+  "config": {
+    "BLOCK_M1": 64,
+    "BLOCK_N": 128,
+    "BLOCK_K": 64,
+    "GROUP_M": 4,
+    "num_warps": 4,
+    "num_stages": 2
+  },
+  "sha256": "abcc5be54a8a21d18aa8130f5424bef1b5a24151ef51b3a4fd07eaaa4bcc5466"
+}

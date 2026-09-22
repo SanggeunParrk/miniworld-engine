@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import triton
@@ -58,7 +58,7 @@ def refusal(msa: torch.Tensor, d_msa: int, d_hidden: int, d_pair: int, *, interc
         if n % 64 or s % 256:
             return f"N must be a multiple of 64 and S of 256 (the prologue backward's 32 x 8 row blocks), got N={n}, S={s}"
         return None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
 
 
@@ -81,7 +81,7 @@ def _ext():
     """This repo's fused OPM kernels (the same extension the inference path builds)."""
     if "mod" in _EXT:
         return _EXT["mod"]
-    from torch.utils.cpp_extension import load
+    from miniworld_engine.kernels._nvcc import load_extension as load
     src = Path(__file__).with_name("csrc") / "opm_epilogue.cu"
     build = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit")) / "opm_epilogue"
     build.mkdir(parents=True, exist_ok=True)
@@ -91,7 +91,7 @@ def _ext():
 
 
 # ---- the fused prologue (vendored from the upstream msa_opm cell, with the LayerNorm statistics kept) ----
-@triton.jit(do_not_specialize=['S'])   # the MSA depth (row count) enters as a loop bound / mask only: one compiled class per config, no re-JIT when S mod 16 flips between inputs (MSA track)
+@triton.jit(do_not_specialize=["S"])   # the MSA depth (row count) enters as a loop bound / mask only: one compiled class per config, no re-JIT when S mod 16 flips between inputs (MSA track)
 def _opm_prologue_kernel(M, MASK, LNW, LNB, WA, WB, BA, BB, A2, BT, STATS,
                          S, N, SK, NA, NBj, stride_ms, stride_mi, eps,
                          CM: tl.constexpr, CH: tl.constexpr, BI: tl.constexpr, BS: tl.constexpr, BIP: tl.constexpr,
@@ -159,7 +159,7 @@ def fused_prologue(m, mask, lnw, lnb, eps, wa_t, wb_t, BI=1, BJ=1, BK=64, num_wa
     grid = (SK // BS, triton.cdiv(max(NA, NBj), BIP))
     mask_c = mask.contiguous()
     stats = torch.empty(S, N, 2, device=m.device, dtype=torch.float32)
-    _opm_prologue_kernel[grid](m, mask_c, lnw, lnb, wa_t, wb_t, wa_t, wa_t, A2, BT, stats,
+    cast(Any, _opm_prologue_kernel)[grid](m, mask_c, lnw, lnb, wa_t, wb_t, wa_t, wa_t, A2, BT, stats,
                                S, N, SK, NA, NBj, m.stride(0), m.stride(1), float(eps),
                                CM=cm, CH=CH, BI=BI, BS=BS, BIP=BIP, HAS_MASK=True, HAS_BIAS=False, LN_AFFINE=True,
                                MASK_I64=False, SAVE_STATS=True, num_warps=num_warps, num_stages=1)
@@ -175,7 +175,7 @@ class OpmTrainFn(torch.autograd.Function):
         ext = _ext()
         bf = torch.bfloat16
         m = msa[0].contiguous(); mask16 = mask[0].to(bf).contiguous()
-        s, n = m.shape[0], m.shape[1]
+        _s, n = m.shape[0], m.shape[1]
         a2, bt, stats = fused_prologue(m, mask16, lnw.detach().float().contiguous(), lnb.detach().float().contiguous(), eps,
                                        wa.detach().to(bf).t().contiguous(), wb.detach().to(bf).t().contiguous())
         o = torch.matmul(a2, bt.t())                                                # the grouped outer product [(i,c), (j,e)], cuBLAS NT

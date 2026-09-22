@@ -246,16 +246,18 @@ def launch_front(a, w, packed, preact, pair_mask, config):
        None, epi, sched, make_varlen_args(None, None, None), None)
 
 
-def _front_fake(a, w, pair_mask, save_preact, bm, bh, bk, warps, stages):
+def _front_sm90_fake(a, w, pair_mask, save_preact, bm, bh, bk, warps, stages):
+    """Return output metadata without executing GPU work."""
     return (a.new_empty((w.shape[1] // 2, a.shape[0])),
             a.new_empty((w.shape[1], a.shape[0])) if save_preact else a.new_empty((0, 0)))
 
 
-@opaque(fake=_front_fake, name="trimul_front_parity_sm90")
+@opaque(fake=_front_sm90_fake, name="trimul_front_parity_sm90")
 def front_sm90(a: torch.Tensor, w: torch.Tensor, pair_mask: torch.Tensor | None,
                save_preact: bool, bm: int, bh: int, bk: int, warps: int, stages: int
                ) -> tuple[torch.Tensor, torch.Tensor]:
-    packed, preact = _front_fake(a, w, pair_mask, save_preact, bm, bh, bk, warps, stages)
+    """Run the fused SM90 operation behind the compiler boundary."""
+    packed, preact = _front_sm90_fake(a, w, pair_mask, save_preact, bm, bh, bk, warps, stages)
     config = dict(BLOCK_M1=bm, BLOCK_K_H2=bh, BLOCK_K_D=bk,
                   num_warps=warps, num_stages=stages)
     if bm == 0:

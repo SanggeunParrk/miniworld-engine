@@ -1,0 +1,26 @@
+[
+  {
+    "log": "ncu-baseline-L384.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-baseline-L384-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-optimized-L384.log",
+    "returncode": 0
+  },
+  {
+    "log": "ncu-optimized-L384-export.log",
+    "returncode": 0
+  },
+  {
+    "log": "memcheck-L384.log",
+    "returncode": 0
+  },
+  {
+    "log": "racecheck-L384.log",
+    "returncode": 0
+  }
+]

@@ -1,0 +1,18 @@
+{
+  "project_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0",
+  "version_number": 33,
+  "version_id": "appgprj_6aadfb72b1008191ad841b5514b3a0e0~appgver_ea74e1ed6a688191bef108a806a124e3",
+  "commit_sha": "a3e04439f0cd64b86360dd6038abd8a5cf67e43a",
+  "deployment_id": "appgdep_6ab05f6d762081919ff318b537c2f83a",
+  "status": "succeeded",
+  "updated_at": "2026-09-20T22:34:35.448637+00:00",
+  "url": "https://miniworld-kernel-status.psk6950.chatgpt.site/trimul.html#recompute-next",
+  "access": "owner-only preserved",
+  "gpu_allocation": {
+    "job": 13361,
+    "node": "node02",
+    "gpus": 2,
+    "released": true
+  },
+  "engine_production_default_changed": false
+}

@@ -1,0 +1,70 @@
+{
+  "D": 128,
+  "L": 768,
+  "job": "15816",
+  "checks": {
+    "y": {
+      "relative_l2": 0.003393904771655798,
+      "finite": true
+    },
+    "dx": {
+      "relative_l2": 0.005094926804304123,
+      "finite": true
+    },
+    "dWL": {
+      "relative_l2": 0.006091840099543333,
+      "finite": true
+    },
+    "dWLg": {
+      "relative_l2": 0.006121008191257715,
+      "finite": true
+    },
+    "dWR": {
+      "relative_l2": 0.006140241865068674,
+      "finite": true
+    },
+    "dWRg": {
+      "relative_l2": 0.006037367507815361,
+      "finite": true
+    },
+    "dWgate": {
+      "relative_l2": 0.006573774386197329,
+      "finite": true
+    },
+    "dWproj": {
+      "relative_l2": 0.006111057475209236,
+      "finite": true
+    },
+    "dgamma_in": {
+      "relative_l2": 0.005587802734225988,
+      "finite": true
+    },
+    "dbeta_in": {
+      "relative_l2": 0.005616838112473488,
+      "finite": true
+    },
+    "dgamma_out": {
+      "relative_l2": 0.005397060886025429,
+      "finite": true
+    },
+    "dbeta_out": {
+      "relative_l2": 0.003450361080467701,
+      "finite": true
+    }
+  },
+  "multiple_forward_error": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "version_check": true,
+  "complete": true
+}

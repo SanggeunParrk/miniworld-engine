@@ -1,0 +1,22 @@
+{
+  "b1": {
+    "historical_paths": [
+      "/home/psk6950/MiniWorld/runs/trimul_b1_wait_folding_20260921/build/75299e244ed5730591e448f60a920df87720bfde0f0d7dbc137476f6ea6213bc.cubin"
+    ],
+    "sha256": [
+      "92b9c6361efb94d2a65cf9eb55bd67dc13bfa0d5f6bc471851317e1b72753d5a"
+    ],
+    "matches": true
+  },
+  "b7": {
+    "historical_paths": [
+      "/home/psk6950/MiniWorld/runs/trimul_b7_split_lnreduce_20260922/build/5fde48d4506ae3c994be85c5181d0a5dc28ac2af45ace6ba434646056f2d8437.cubin",
+      "/home/psk6950/MiniWorld/runs/trimul_b7_split_lnreduce_20260922/build/c32712c8e50883ca6a03a8fa7a438559e73ef066e7c8a4b79ebc3566f594efcc.cubin"
+    ],
+    "sha256": [
+      "9f40e2b2fc5263d15fcd39d2721e2285b1a0f0039692d8fc1060cf57f93c0aa9",
+      "5bd9f058ab0b5c1f6524e3dfabb21758c0f087eb0140394f456bd00cdce22d6c"
+    ],
+    "matches": true
+  }
+}

@@ -1,0 +1,28 @@
+{
+ "build_s": 97.4,
+ "built_utc": "2026-09-19T01:59:23Z",
+ "bytes": 1246776,
+ "file": "torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90/protenix_trimul_tx_sm90.so",
+ "key": "torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90",
+ "module": "protenix_trimul_tx_sm90",
+ "note": "miniworld-H100",
+ "nvcc_flags": [
+  "-O3",
+  "-std=c++17",
+  "-gencode=arch=compute_90a,code=sm_90a",
+  "--expt-relaxed-constexpr",
+  "-DNDEBUG",
+  "-Xptxas=--register-usage-level=10",
+  "-Xcompiler -ffile-prefix-map=<scratch>=csrc"
+ ],
+ "python_soabi": "cpython-310-x86_64-linux-gnu",
+ "sha256": "a4b01ac498514803246ac5eaf8e8eeb95ad84ca23d4335585434dfe369110477",
+ "toolchain": {
+  "cuda": "12.8",
+  "device_built_on": "NVIDIA H100 80GB HBM3",
+  "gcc": "gcc (GCC) 12.4.0",
+  "nvcc": "Build cuda_12.9.r12.9/compiler.35813241_0",
+  "python": "3.10.20",
+  "torch": "2.10.0+cu128"
+ }
+}
