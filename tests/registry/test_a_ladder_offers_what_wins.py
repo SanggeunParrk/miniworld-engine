@@ -68,6 +68,12 @@ FIXED_AXES = {
 # offers every recorded winner; adding warp1 would start an unrequested rebuild.
 MEASURED_AXES = {
     ("gated_projection_bwd_dx_triton", "num_warps"): [2, 4, 8],
+    # H100's complete current plan wins at 1/2, but the historical A100
+    # float32 shape_key=2048/4096 measurements won at 4. That older cache is
+    # superseded and cannot prove a current winner; neither can an H100-only
+    # rebuild justify removing its rung from this card-independent grid.
+    # Keep the existing space until the A100 measurements can be refreshed.
+    ("augmented_attention_bwd_reduce_triton", "num_warps"): [1, 2, 4],
 }
 
 

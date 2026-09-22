@@ -28,13 +28,12 @@
     "GPU evidence is scoped; no claim every kernel in the engine was numerically revalidated."
   ],
   "cpu_suite": {
-    "passed": 3710,
+    "passed": 3716,
+    "failed": 0,
     "skipped": 152,
     "gpu_deselected": 650,
-    "initial_failures": 4,
-    "followup_passed": 35,
-    "followup_failed": 0,
-    "all_initial_failures_resolved": true
+    "duration_seconds": 325.79,
+    "command": "PYTHONPATH=src python -m pytest tests/ -m 'not gpu' -q"
   },
   "fake_availability": {
     "tests": 2,
@@ -56,5 +55,18 @@
       "errors": 0
     },
     "source_identity": "fcb8eb9120ede2d50de9169681e20728c8adc8ad502c9e0de36f0b75ec6e29b8"
+  },
+  "wheel": {
+    "filename": "miniworld_engine-2.0.0-py3-none-any.whl",
+    "sha256": "22f46a5e8991fb0fde811d981d9e716df0ab476e0499050217dbff5ff46117a4",
+    "runtime_cuda_sources_present": true,
+    "licenses_present": true,
+    "research_archive_excluded": true,
+    "architecture_plans": "source checkout only; installed wheels derive into the user cache",
+    "isolated_install_import": "passed: version 2.0.0; native Transition and Anthropic integration imports; source assets present"
+  },
+  "research_capsule_hashes": {
+    "files_verified": 6636,
+    "mismatches": 0
   }
 }

@@ -209,4 +209,3 @@ mainloop at cuBLAS parity, but the whole op loses to v7's mm + row kernel:
 The grid is one wave, so the x and xa writes (17.7 MB) run after the mainloop with nothing to overlap, and y was already
 L2-resident in the split version. A bf16 residual would gain 3-5 % and bring rel_rms back to the engine's 1.1e-2; rejected.
 With this and the attention-core bound above, v7 stands as the schedule.
-
