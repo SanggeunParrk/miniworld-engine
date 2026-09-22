@@ -66,6 +66,7 @@ experiments/*
 !experiments/trimul_k1k3_inference/
 !experiments/transition_fused/
 !experiments/token_dit_fused/
+!experiments/token_dit_overlap/
 # dev/ holds development scratch, research probes, ncu harnesses (never shipped: the wheel is
 # src/ only). dev/scratchpad_ncu/ is local scratch (ncu dumps, kernel .cu backups, optimizer
 # prompt logs) — kept ignored as it was under the old scratchpad_ncu/ path; a handful of files
