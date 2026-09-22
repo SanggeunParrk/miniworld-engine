@@ -40,14 +40,17 @@ def payload_dir():  # kept for symmetry with anthropic_msa: this path needs no p
 
 
 def wanted(implementation) -> bool:
+    """Grad-enabled calls: opted in by MINIWORLD_PWA_TRAIN. Grad-free calls (inference) take the same forward kernels
+    whenever MINIWORLD_PWA_TRAIN or MINIWORLD_PWA_INFER is set (no payload needed; faster than the upstream cell)."""
     from miniworld_engine.modules.exceptions import ImplementationType
-    return bool(os.environ.get(ENV)) and implementation in (ImplementationType.MINIWORLD, ImplementationType.ANTHROPIC)
+    on = bool(os.environ.get(ENV)) or (not torch.is_grad_enabled() and bool(os.environ.get("MINIWORLD_PWA_INFER")))
+    return on and implementation in (ImplementationType.MINIWORLD, ImplementationType.ANTHROPIC)
 
 
 def refusal(msa: torch.Tensor, pair: torch.Tensor, d_msa: int, d_pair: int, n_head: int, d_hidden: int, *, dropout: bool = False) -> str | None:
     """None if this path can run this training call, else why it cannot. Never raises."""
     try:
-        if not os.environ.get(ENV):
+        if not (os.environ.get(ENV) or (not torch.is_grad_enabled() and os.environ.get("MINIWORLD_PWA_INFER"))):
             return f"{ENV} is not set"
         if (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C):
             return f"the kernels serve (d_msa={D}, d_pair={DZ}, n_head={H}, d_hidden={C}), got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
@@ -105,7 +108,7 @@ def _k():
         # the row-broadcast dropout keep-mask (training) is applied inside the residual epilogue of either forward
         fwd2 = lambda w16, v, y, wg16, wo16, m, dmask, dscale: k["fwd"].pwa_fwd2(w16, v, y, wg16, wo16, m, True, 1, 4, dmask, dscale)
         if (Path(__file__).with_name("csrc") / "pwa_fwd3.cu").is_file():
-            f3 = _build("miniworld_pwa_fwd3", "pwa_fwd3.cu")
+            f3 = _build("miniworld_pwa_fwd3", "pwa_fwd3.cu"); k["fwd3"] = f3
             k["forward"] = lambda w16, v, y, wg16, wo16, m, dmask, dscale: f3.pwa_fwd3(w16, v, y, wg16, wo16, m, True, 1, 3, 1, 0, dmask, dscale)
         else:
             k["forward"] = fwd2
@@ -304,6 +307,29 @@ class PwaTrainFn(torch.autograd.Function):
         dz, dWb, dzw, dzb = pair_bwd(z, w16, dw, lnz_w.float().contiguous(), lnz_b.float().contiguous(), eps_z, wb, BJ=32)
         return (dm.view(S, N, D)[None], dz[None], None, dlw.to(lnm_w.dtype), dlb.to(lnm_b.dtype), dWv.to(wv.dtype), dWg.to(wg.dtype),
                 dzw.to(lnz_w.dtype), dzb.to(lnz_b.dtype), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
+
+
+@torch.no_grad()
+@torch.autocast("cuda", enabled=False)
+def pair_weighted_averaging_inference(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    """msa + PWA(msa, pair, key mask) for a grad-free call: the same three forward kernels, o not kept, no dropout."""
+    k = _k(); bf = torch.bfloat16
+    m = msa[0].contiguous(); z = pair[0].contiguous(); n = m.shape[1]
+    pm = torch.ones(n, n, dtype=bf, device=m.device) if mask is None else mask[0].to(bf)[None, :].expand(n, n).contiguous()
+    lnz_w = module.ln_pair.weight.detach().float().contiguous(); lnz_b = module.ln_pair.bias.detach().float().contiguous()
+    eps_m = float(getattr(module.ln_msa, "eps", 1e-5)); eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
+    if k["pair3"] is not None and n % 16 == 0 and n <= 1024:
+        w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, lnz_b, eps_z, module.to_bias.weight.detach())
+    else:
+        w16 = pair_fwd(z, pm, lnz_w, lnz_b, eps_z, module.to_bias.weight.detach(), H, BJ=64)
+    v, y = k["lnvg"].ln_vg(m, module.ln_msa.weight.detach().float().contiguous(), module.ln_msa.bias.detach().float().contiguous(),
+                           module.to_value.weight.detach().to(bf).contiguous(), eps_m, 2, 3, 1)
+    wg16 = module.to_gate.weight.detach().to(bf).contiguous(); wo16 = module.to_out.weight.detach().to(bf).contiguous()
+    if "fwd3" in k:
+        out, _ = k["fwd3"].pwa_fwd3(w16, v, y, wg16, wo16, m, False, 1, 3, 1, 0, None, 1.0)
+    else:
+        out, _ = k["fwd"].pwa_fwd2(w16, v, y, wg16, wo16, m, False, 1, 4, None, 1.0)
+    return out[None]
 
 
 def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:

@@ -138,3 +138,18 @@ def test_fused_dropout_is_the_modules_row_dropout(module, inputs):
         assert rel(upd_f, upd_n) < 1e-2
     finally:
         module.drop_msa.p_drop = 0.0
+
+
+def test_inference_takes_the_same_kernels(module, inputs):
+    module.eval()
+    try:
+        with torch.no_grad():
+            out_e = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+            served = pt.STATS["served"]
+            with opted_in():
+                out_f = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+        assert pt.STATS["served"] == served + 1
+        assert rel(out_f, out_e) < 5e-3
+        assert rel(out_f.float() - inputs["msa"].float(), out_e.float() - inputs["msa"].float()) < 2e-2   # the update itself
+    finally:
+        module.train()
