@@ -2,7 +2,7 @@
 CUDA / Triton kernels developed in MiniWorld's `runs/msa_bench_20260921` (2026-09-22), served from this
 repo's `csrc/` and the Triton kernels below. No external payload is needed.
 
-Forward (3 launches):  pair_fwd  (LN_z -> proj_z -> key mask -> softmax, one Triton program per row -> w [H,N,N] bf16)
+Forward (3 launches):  pair_fwd3 (LN_z -> proj_z -> key mask -> softmax on tensor cores, csrc/pair3.cu; Triton pair_fwd below as the fallback)
                        ln_vg     (LN_m + value projection, v head-major [H][N][S*C] and y = LN(m), all TMA)
                        pwa_fwd2  (contraction + gate + out-projection + residual, warp-specialized TMA; keeps o)
 Backward (6 launches): pwa_glue3  (du, gate glue from the saved o -> do head-major, dgp into the dgp | dv buffer, and the
@@ -101,6 +101,7 @@ def _k():
         k = dict(fwd=_build("miniworld_pwa_fwd2", "pwa_fwd2.cu"), ctr=_build("miniworld_pwa_ctr", "pwa_ctr.cu"),
                  dgv=_build("miniworld_pwa_dgv_bwd", "dgv_bwd.cu"), lnvg=_build("miniworld_pwa_ln_vg", "ln_vg.cu"))
         k["glue3"] = _build("miniworld_pwa_glue3", "pwa_glue3.cu") if (Path(__file__).with_name("csrc") / "pwa_glue3.cu").is_file() else None
+        k["pair3"] = _build("miniworld_pwa_pair3", "pair3.cu") if (Path(__file__).with_name("csrc") / "pair3.cu").is_file() else None   # tensor-core pair forward
         # the row-broadcast dropout keep-mask (training) is applied inside the residual epilogue of either forward
         fwd2 = lambda w16, v, y, wg16, wo16, m, dmask, dscale: k["fwd"].pwa_fwd2(w16, v, y, wg16, wo16, m, True, 1, 4, dmask, dscale)
         if (Path(__file__).with_name("csrc") / "pwa_fwd3.cu").is_file():
@@ -258,7 +259,10 @@ class PwaTrainFn(torch.autograd.Function):
         N = m.shape[1]
         bf = torch.bfloat16
         wv16 = wv.detach().to(bf).contiguous(); wg16 = wg.detach().to(bf).contiguous(); wo16 = wo.detach().to(bf).contiguous()
-        w16 = pair_fwd(z, pm, lnz_w.detach().float().contiguous(), lnz_b.detach().float().contiguous(), eps_z, wb.detach(), H, BJ=64)
+        if k["pair3"] is not None and N % 16 == 0 and N <= 1024:
+            w16 = k["pair3"].pair_fwd3(z, pm, lnz_w.detach().float().contiguous(), lnz_b.detach().float().contiguous(), eps_z, wb.detach())
+        else:
+            w16 = pair_fwd(z, pm, lnz_w.detach().float().contiguous(), lnz_b.detach().float().contiguous(), eps_z, wb.detach(), H, BJ=64)
         v, y = k["lnvg"].ln_vg(m, lnm_w.detach().float().contiguous(), lnm_b.detach().float().contiguous(), wv16, eps_m, 2, 3, 1)
         # the module's drop_msa (Dropout(broadcast_dim=1)): one keep-mask per (token, channel) shared over the MSA rows,
         # x * mask / (1 - p); applied to the bf16 update inside the kernel's residual epilogue
