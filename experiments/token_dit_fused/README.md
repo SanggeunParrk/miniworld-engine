@@ -193,3 +193,20 @@ Without the bias the Triton core ties FA4 at L384 and trails it by 5.7 us at L76
 core could therefore save at most the structural 5.7 us plus part of the bias cost -- about 8-9 us a block at L768 (5 %)
 and 1-2 us at L384. Not pursued: the core is at the practical floor for its cost.
 
+## AdaLN / residual in the GEMM epilogue: built elsewhere, slower
+
+Session miniworld-6c built it in `~/miniworld-engine-dit2`, `experiments/token_dit_overlap/` (branch
+`research/token-dit-overlap`, commits 26057bda, b3b56d37, 0b7dac87): an sm90a Wo / squeeze GEMM with the residual update
+and the next AdaLN in its epilogue, rows split over a 4-CTA cluster with DSMEM statistics. Accurate to 1e-6 against fp32,
+mainloop at cuBLAS parity, but the whole op loses to v7's mm + row kernel:
+
+| | fused epilogue | v7 (mm + resgate_adaln_rows) |
+|---|---:|---:|
+| Wo, L768 | 25.4 us | 20.1 us |
+| squeeze, L768 | 33.1 us | 25.7 us |
+| Wo, L384 | 17.4 us | 11.9 us |
+
+The grid is one wave, so the x and xa writes (17.7 MB) run after the mainloop with nothing to overlap, and y was already
+L2-resident in the split version. A bf16 residual would gain 3-5 % and bring rel_rms back to the engine's 1.1e-2; rejected.
+With this and the attention-core bound above, v7 stands as the schedule.
+
