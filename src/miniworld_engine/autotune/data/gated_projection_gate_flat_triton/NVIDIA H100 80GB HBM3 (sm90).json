@@ -130,7 +130,7 @@
   ],
   "config_space_hash": "f1261f8ed75e",
   "driver_id_scheme": 2,
-  "driver_identity": "0cf747ad8dc4",
+  "driver_identity": "c3e267a213b6",
   "entries": {
     "bfloat16|shape_key=147456": [
       {
@@ -968,6 +968,8 @@
       "f1261f8ed75e"
     ],
     "bfloat16|shape_key=16384": [
+      "0145e8e28363",
+      "b72f2e07e592",
       "f1261f8ed75e"
     ],
     "bfloat16|shape_key=262144": [
@@ -1001,6 +1003,20 @@
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "grids": {
+    "0145e8e28363": [
+      "((('BLOCK_E', 2048),), 4, 4)",
+      "((('BLOCK_E', 512),), 1, 6)",
+      "((('BLOCK_E', 512),), 2, 1)",
+      "((('BLOCK_E', 512),), 2, 2)",
+      "((('BLOCK_E', 512),), 2, 4)"
+    ],
+    "b72f2e07e592": [
+      "((('BLOCK_E', 2048),), 4, 6)",
+      "((('BLOCK_E', 512),), 1, 4)",
+      "((('BLOCK_E', 512),), 2, 1)",
+      "((('BLOCK_E', 512),), 2, 4)",
+      "((('BLOCK_E', 512),), 2, 6)"
+    ],
     "f1261f8ed75e": [
       "((('BLOCK_E', 128),), 1, 1)",
       "((('BLOCK_E', 128),), 1, 2)",

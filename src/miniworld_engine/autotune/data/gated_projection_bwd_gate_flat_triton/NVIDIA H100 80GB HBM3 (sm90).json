@@ -60,7 +60,7 @@
   ],
   "config_space_hash": "495155f4a9ba",
   "driver_id_scheme": 2,
-  "driver_identity": "954a70e791b1",
+  "driver_identity": "b9fcc4ce415a",
   "entries": {
     "bfloat16|shape_key=147456": [
       {
@@ -1040,7 +1040,9 @@
       "495155f4a9ba"
     ],
     "bfloat16|shape_key=16384": [
-      "495155f4a9ba"
+      "495155f4a9ba",
+      "6faca836a1ad",
+      "c05f7a07b7fc"
     ],
     "bfloat16|shape_key=262144": [
       "495155f4a9ba"
@@ -1139,6 +1141,20 @@
       "((('BLOCK_E', 64),), 2, 2)",
       "((('BLOCK_E', 64),), 2, 3)",
       "((('BLOCK_E', 64),), 2, 4)"
+    ],
+    "6faca836a1ad": [
+      "((('BLOCK_E', 2048),), 2, 1)",
+      "((('BLOCK_E', 2048),), 2, 2)",
+      "((('BLOCK_E', 2048),), 2, 4)",
+      "((('BLOCK_E', 256),), 2, 1)",
+      "((('BLOCK_E', 512),), 2, 1)"
+    ],
+    "c05f7a07b7fc": [
+      "((('BLOCK_E', 256),), 1, 2)",
+      "((('BLOCK_E', 512),), 1, 1)",
+      "((('BLOCK_E', 512),), 1, 3)",
+      "((('BLOCK_E', 512),), 2, 1)",
+      "((('BLOCK_E', 512),), 2, 3)"
     ]
   },
   "key_scheme": 3,
