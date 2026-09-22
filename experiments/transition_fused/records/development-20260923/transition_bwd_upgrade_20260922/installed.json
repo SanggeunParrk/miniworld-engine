@@ -1,0 +1,7 @@
+{
+  "repo": "/home/psk6950/miniworld-engine-tbwd",
+  "file": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/transition_fused_bwd_sm90a_kernel.cu",
+  "old_sha256": "41de80001f576f5c6533b9db2e8f41ef56cae2c5d8418e57e7062d69f7772cd0",
+  "new_sha256": "9175599d2223bd9b82e72ec7213108d4d427531d01739daf8f6982fadbf10c1e",
+  "scope": "Only partial reducer and its launch grid. Existing forward, main backward and dispatch preserved."
+}

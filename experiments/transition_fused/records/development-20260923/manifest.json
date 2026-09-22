@@ -1,0 +1,107 @@
+[
+  {
+    "path": "transition_bwd_fused_20260921/RESULTS.md",
+    "source": "runs/transition_bwd_fused_20260921/RESULTS.md",
+    "sha256": "eeaa696ef8aee23eb2295f3437f43ec4b4f1ad780c86ca5521da996ea1c8a539"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/README.md",
+    "source": "runs/transition_bwd_upgrade_20260922/README.md",
+    "sha256": "91d93b3b703275c099dc281ed558141f19760be536db298d9925da62c1055b2d"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/baseline_sources.json",
+    "source": "runs/transition_bwd_upgrade_20260922/baseline_sources.json",
+    "sha256": "84bae2101a764348044d9601f9daecdfc391ce16a071b6be14f90d5da0c1072d"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/block.json",
+    "source": "runs/transition_bwd_upgrade_20260922/block.json",
+    "sha256": "a973f099b96db5fefb5892aa26e9b4af2264f2af021aa8b3fa8262afcf68c8ae"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/installed.json",
+    "source": "runs/transition_bwd_upgrade_20260922/installed.json",
+    "sha256": "f95739979a08db6ac0091745b55a3d97d5504e1739ecc60adc684c5f2d29980f"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/installed_validation.json",
+    "source": "runs/transition_bwd_upgrade_20260922/installed_validation.json",
+    "sha256": "d5a9ce79f8b0b48306b487076b380ff352c071965693aac855ee9d49835a91fb"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/ncu-baseline.csv",
+    "source": "runs/transition_bwd_upgrade_20260922/ncu-baseline.csv",
+    "sha256": "41bf5d37433e201db4d7bd7c9a6057195f90f1923df8ec71ea62283c29675e53"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/ncu-parallel_transpose.csv",
+    "source": "runs/transition_bwd_upgrade_20260922/ncu-parallel_transpose.csv",
+    "sha256": "232e36ea50a656b3f07bdd33aae46047a415d13e6973a0b275b13deb0b65e46a"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/sanitizer.json",
+    "source": "runs/transition_bwd_upgrade_20260922/sanitizer.json",
+    "sha256": "5084623f1d531845cf557cde992d16049af5da1c010128ff8245666314d951f9"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/selection.json",
+    "source": "runs/transition_bwd_upgrade_20260922/selection.json",
+    "sha256": "d7e551be387b572fe61fa0b89c07aca4b71a39f47b7b805b702bea5a26bd4cbb"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/summary.json",
+    "source": "runs/transition_bwd_upgrade_20260922/summary.json",
+    "sha256": "d411fa688c27b2e2f538b80892dd355583b8d6e3f44de0fd62612a650fed95b0"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/sweep-L384.json",
+    "source": "runs/transition_bwd_upgrade_20260922/sweep-L384.json",
+    "sha256": "aa08519d8b222e73cb8249498be3112babb7fa8cfe9be4e4d5f517e27d23d2d1"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/trace-block.json",
+    "source": "runs/transition_bwd_upgrade_20260922/trace-block.json",
+    "sha256": "c4919005904a7a90f911e92aac636415a0878ad39b37be00fb507d93b43a1607"
+  },
+  {
+    "path": "transition_bwd_upgrade_20260922/validation.json",
+    "source": "runs/transition_bwd_upgrade_20260922/validation.json",
+    "sha256": "dafe35848c1d65626a44bdb54353d7c159c478545ab6c01765d6b3d7aed46cf8"
+  },
+  {
+    "path": "transition_esm_opt_20260921/RESULTS.md",
+    "source": "runs/transition_esm_opt_20260921/RESULTS.md",
+    "sha256": "0c5454094175d6c4d5b83e129a79f119b76c5196bd1a9c9ba89f352570d11fa9"
+  },
+  {
+    "path": "transition_ncu_20260921/FINDINGS.md",
+    "source": "runs/transition_ncu_20260921/FINDINGS.md",
+    "sha256": "a7933a91630aee244af17617c4c1ef1725bfa77c00f44b0bfb8559d1ed2abbc9"
+  },
+  {
+    "path": "transition_widths_20260922/survey-D128.json",
+    "source": "runs/transition_widths_20260922/survey-D128.json",
+    "sha256": "0ab074471b6f558c75b34fd15e84cfcf5e312a0a5c4625dd3025f4163551df08"
+  },
+  {
+    "path": "transition_widths_20260922/survey-D256.json",
+    "source": "runs/transition_widths_20260922/survey-D256.json",
+    "sha256": "505d59cb82aa9356464bb537dc4dfd823609796bd2c15f5ad3b37cb5a865ed0f"
+  },
+  {
+    "path": "transition_widths_20260922/survey-D384.json",
+    "source": "runs/transition_widths_20260922/survey-D384.json",
+    "sha256": "62cd6fd0c752c3ffd24164d8074b1673296da9c8bf72ab4323010f4916f7186c"
+  },
+  {
+    "path": "transition_widths_20260922/survey-D512.json",
+    "source": "runs/transition_widths_20260922/survey-D512.json",
+    "sha256": "03a3bf71111fbecc3903fa2e9285ff4bb4cc5f467b4197be9b8e5d83c7fee24b"
+  },
+  {
+    "path": "transition_widths_20260922/survey-D64.json",
+    "source": "runs/transition_widths_20260922/survey-D64.json",
+    "sha256": "0d714a242cfd9f2c03522f9374e5bed5d320511c5e73d7480d917b324fb033c9"
+  }
+]

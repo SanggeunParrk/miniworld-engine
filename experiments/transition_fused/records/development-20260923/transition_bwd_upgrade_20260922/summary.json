@@ -1,0 +1,67 @@
+{
+  "comparison": "Previous hand-CUDA Transition vs same code with parallel LN reducer and tiled dWs store",
+  "rows": [
+    {
+      "scope": "Transition backward \u00b7 L384",
+      "before_us": 443.83999705314636,
+      "after_us": 429.31199073791504,
+      "time_reduction_pct": 3.2732530668009407
+    },
+    {
+      "scope": "Transition backward \u00b7 L768",
+      "before_us": 1714.896023273468,
+      "after_us": 1703.3600211143494,
+      "time_reduction_pct": 0.6726939710955948
+    },
+    {
+      "scope": "MiniPairformer fwd+bwd \u00b7 L384",
+      "before_us": 1565.9199953079224,
+      "after_us": 1548.687994480133,
+      "time_reduction_pct": 1.1004394144926155
+    }
+  ],
+  "ln_relative_l2_max": 6.046353542164924e-07,
+  "non_ln_bit_exact": true,
+  "ncu": {
+    "baseline": [
+      {
+        "Kernel Name": "transition_bwd_fused",
+        "gpu__time_duration.sum": "390.624000",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "56.204130",
+        "smsp__warps_eligible.avg.per_cycle_active": "0.598790"
+      },
+      {
+        "Kernel Name": "reduce_partials",
+        "gpu__time_duration.sum": "17.920000",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "2.203000",
+        "smsp__warps_eligible.avg.per_cycle_active": "0.471645"
+      }
+    ],
+    "parallel_transpose": [
+      {
+        "Kernel Name": "transition_bwd_fused",
+        "gpu__time_duration.sum": "392.288000",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "56.358384",
+        "smsp__warps_eligible.avg.per_cycle_active": "0.600241"
+      },
+      {
+        "Kernel Name": "reduce_partials",
+        "gpu__time_duration.sum": "5.568000",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": "7.869871",
+        "smsp__warps_eligible.avg.per_cycle_active": "0.848329"
+      }
+    ]
+  },
+  "validation_jobs": [
+    "15646",
+    "15648",
+    "15651"
+  ],
+  "installation": {
+    "repo": "/home/psk6950/miniworld-engine-tbwd",
+    "file": "/home/psk6950/miniworld-engine-tbwd/src/miniworld_engine/kernels/transition/cuda/transition_fused_bwd_sm90a_kernel.cu",
+    "old_sha256": "41de80001f576f5c6533b9db2e8f41ef56cae2c5d8418e57e7062d69f7772cd0",
+    "new_sha256": "9175599d2223bd9b82e72ec7213108d4d427531d01739daf8f6982fadbf10c1e",
+    "scope": "Only partial reducer and its launch grid. Existing forward, main backward and dispatch preserved."
+  }
+}

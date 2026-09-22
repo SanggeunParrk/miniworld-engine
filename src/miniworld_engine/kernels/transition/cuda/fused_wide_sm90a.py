@@ -108,6 +108,10 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     a dispatch bug: it warns once per width and keeps the existing path."""
     if not supported(x, wa, ws) or x.shape[-1] in _BUILD_FAILED:
         return False
+    # FakeTensor dispatch records shapes only; it must not invoke nvcc or
+    # wait for another process's extension lock. Launch wrappers have fakes.
+    if _is_fake(x, wa, ws):
+        return True
     try:
         _ext_for(x)
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"

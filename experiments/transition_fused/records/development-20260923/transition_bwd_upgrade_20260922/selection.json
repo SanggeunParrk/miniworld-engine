@@ -1,0 +1,10 @@
+{
+  "variant": "parallel_transpose",
+  "rep": 8,
+  "source_sha256": {
+    "selected/transition_fused_sm90a.cu": "f70dc0b327fc0bdafa8c9dd449720b7b543148c3fa902c2c0ef7dc09798a3f58",
+    "selected/transition_fused_fwd_sm90a_kernel.cu": "5773ae836de034358fbf0dd6036f781acc3d92e24e497f88c0c05e0ea935a780",
+    "selected/transition_fused_bwd_sm90a_kernel.cu": "9175599d2223bd9b82e72ec7213108d4d427531d01739daf8f6982fadbf10c1e",
+    "selected/fused_sm90a.py": "8b77795f892ca00fa2c5c4068a1dd2b1d2243262ca7c8b5c6beea4d645ea1b20"
+  }
+}

@@ -118,6 +118,10 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     global _BUILD_FAILED
     if _BUILD_FAILED or not supported(x, wa, ws):
         return False
+    # FakeTensor dispatch records shapes only; it must not invoke nvcc or
+    # wait for another process's extension lock. Launch wrappers have fakes.
+    if _is_fake(x, wa, ws):
+        return True
     try:
         # Build the variant this call will actually use, so inference never pays for the
         # training forward's build.

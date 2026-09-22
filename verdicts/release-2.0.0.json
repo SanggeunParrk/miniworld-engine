@@ -1,0 +1,60 @@
+{
+  "version": "2.0.0",
+  "tested_code_commit": "3e81f15cbae1",
+  "trimul": {
+    "cases": 10,
+    "pass": 10,
+    "job": 15948,
+    "record": "release-2.0.0-trimul.json"
+  },
+  "transition": {
+    "tests": 39,
+    "passed": 39,
+    "job": 15958,
+    "duration_seconds": 819.28
+  },
+  "clean_checkout_gpu": {
+    "job": 15961,
+    "scope": "rope family",
+    "drivers_passed": 3,
+    "failed": 0,
+    "manifest": "src/miniworld_engine/autotune/manifests/NVIDIA H100 80GB HBM3 (sm90).csv"
+  },
+  "lint": "passed",
+  "types": "passed",
+  "wheel_source_presence": "passed",
+  "notes": [
+    "Latest TriMul remains explicit research; D other than128 optimization deferred.",
+    "GPU evidence is scoped; no claim every kernel in the engine was numerically revalidated."
+  ],
+  "cpu_suite": {
+    "passed": 3710,
+    "skipped": 152,
+    "gpu_deselected": 650,
+    "initial_failures": 4,
+    "followup_passed": 35,
+    "followup_failed": 0,
+    "all_initial_failures_resolved": true
+  },
+  "fake_availability": {
+    "tests": 2,
+    "passed": 2,
+    "change": "Skip extension build for FakeTensor dispatch; no numeric kernel change"
+  },
+  "dispatch_derivation": {
+    "job": 15962,
+    "sm86": {
+      "module_invocations": 8506,
+      "kernels": 52,
+      "buckets": 1523,
+      "errors": 0
+    },
+    "sm90": {
+      "module_invocations": 9106,
+      "kernels": 54,
+      "buckets": 1455,
+      "errors": 0
+    },
+    "source_identity": "fcb8eb9120ede2d50de9169681e20728c8adc8ad502c9e0de36f0b75ec6e29b8"
+  }
+}

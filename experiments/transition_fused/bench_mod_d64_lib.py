@@ -53,4 +53,3 @@ class Ours(torch.autograd.Function):
            cmap("bwb", wb, [D, H], D * 2, [64, 64]), rstd, c1, gf, dx, dg, db, partw, dgbw, int(M), int(M // 128))
         kr(((3 * SLICES * 64 * D + 2 * D + 255) // 256, 1, 1), (256, 1, 1), partw, dWa, dWb, dWs, dgbw, dg, db)
         return dx.reshape(dy.shape), dg.to(gamma.dtype), db.to(beta.dtype), dWa, dWb, dWs
-
