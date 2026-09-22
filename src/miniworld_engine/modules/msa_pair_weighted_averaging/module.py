@@ -6,6 +6,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
+from miniworld_engine.integrations import pwa_train as _pwa_train
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear
@@ -75,6 +76,13 @@ class MSAPairWeightedAveraging(nn.Module):
         """Forward pass. ALWAYS returns the residual output msa + drop_msa(pwa(msa, pair)) — the
         residual is UNCONDITIONAL (domain standard, explicit add) and drop_msa is optional (p_drop,
         training only). The residual is unconditional and has no flag."""
+        # Training: the fused CUDA/Triton forward+backward (integrations.pwa_train), opt-in by MINIWORLD_PWA_TRAIN,
+        # serves a grad-enabled call where it fits; its output already carries the residual.
+        if torch.is_grad_enabled() and _pwa_train.wanted(self.implementation):
+            _dims = (self.to_value.weight.shape[1], self.to_bias.weight.shape[1], self.n_head,
+                     self.to_value.weight.shape[0] // self.n_head)
+            if _pwa_train.serves(msa, pair, *_dims):                # drop_msa is fused into the path (training only)
+                return _pwa_train.pair_weighted_averaging(self, msa, pair, mask)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused cell where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):

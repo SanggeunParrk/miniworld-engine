@@ -204,7 +204,7 @@ def _opm_pack(module) -> dict[str, Any]:
         return pack
     pack = {"wa_t": module.to_left.weight.detach().to(torch.bfloat16).t().contiguous(),
             "wb_t": module.to_right.weight.detach().to(torch.bfloat16).t().contiguous(),
-            "bf": _swizzle_b(module.to_out.weight.detach().t().contiguous().to(torch.bfloat16)),
+            "bf": module.to_out.weight.detach().contiguous().to(torch.bfloat16),       # Wo [c_z, c_hidden^2] as it is: the epilogue's wgmma reads B from shared with k contiguous
             "bias": module.to_out.bias.detach().to(torch.bfloat16).to(torch.float32).contiguous()}
     module._anthropic_msa_pack = pack
     return pack
@@ -221,8 +221,9 @@ def outer_product_mean(module, msa: torch.Tensor, mask: torch.Tensor) -> torch.T
                                        1, 1, 64, C_HIDDEN)
     o = torch.matmul(a2, bt.t())                                   # the grouped outer product, cuBLAS NT
     mf = mask[0].to(torch.float32)
-    norm = (mf.t() @ mf).clamp_(min=1).contiguous()                # the module's own fp32 mask count
-    return _ext().opm_epilogue(o, norm, pack["bf"], pack["bias"], n)
+    with torch.autocast("cuda", enabled=False):                    # the module's own fp32 mask count (autocast would make it bf16)
+        norm = (mf.t() @ mf).clamp_(min=1).contiguous()
+    return _ext().opm_epilogue(o, norm, pack["bf"], pack["bias"], n, n)
 
 
 def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
