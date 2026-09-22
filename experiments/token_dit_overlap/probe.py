@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "token_dit_fused"))
 from tdit import FusedTokenDiT                                  # noqa: E402
 from tdit import kernels as K                                   # noqa: E402
 from tdit.attn import attention_gated_in_place2, bias_descriptor  # noqa: E402
+from gra import gemm_resgate_adaln               # noqa: E402
 
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=768)
@@ -59,7 +60,7 @@ def buffers(Sg):
                 h=torch.empty(M, 2 * DS, device=dev, dtype=bf))
 
 
-def run_group(sg, s0, buf, g1, g2, rows=True, core=True):
+def run_group(sg, s0, buf, g1, g2, rows=True, core=True, gra=False):
     """The v6 per-block schedule for samples [s0, s0 + sg)."""
     M = sg * L
     x, xa, qkvg, y, h = (buf[k] for k in ("x", "xa", "qkvg", "y", "h"))
@@ -71,13 +72,19 @@ def run_group(sg, s0, buf, g1, g2, rows=True, core=True):
         torch.addmm(pk["bqkvg"], xa, pk["wqkvg"].t(), out=qkvg)
         if core:
             attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, f.core_precision)
+        last = b + 1 == NB
+        if gra:
+            gemm_resgate_adaln(qkvg[:, :DS], pk["wo"], x, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, f.eps)
+            f._expand_swiglu(xa, pk["wab_i"], h)
+            gemm_resgate_adaln(h, pk["ws"], x, g2[:, b, 1], None if last else g1[:, b + 1, 0],
+                               None if last else g1[:, b + 1, 1], None if last else xa, L, f.eps)
+            continue
         torch.mm(qkvg[:, :DS], pk["wo"].t(), out=y)
         if rows:
             K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, f.eps)
         f._expand_swiglu(xa, pk["wab_i"], h)
         torch.mm(h, pk["ws"].t(), out=y)
         if rows:
-            last = b + 1 == NB
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                  None if last else g1[:, b + 1, 1], xa, L, f.eps)
     return x
@@ -88,11 +95,11 @@ BUFS = {name: [buffers(sg) for sg in gs] for name, gs in GROUPS.items()}
 STREAMS = [torch.cuda.Stream() for _ in range(S)]
 
 
-def step(name, rows=True, core=True):
+def step(name, rows=True, core=True, gra=False):
     gs, bufs = GROUPS[name], BUFS[name]
     g1, g2 = f._cond(cond, L, DS)
     if len(gs) == 1:
-        return run_group(gs[0], 0, bufs[0], g1, g2, rows, core)
+        return run_group(gs[0], 0, bufs[0], g1, g2, rows, core, gra)
     cur = torch.cuda.current_stream()
     s0 = 0
     for sg, buf, st in zip(gs, bufs, STREAMS):
@@ -136,9 +143,9 @@ with torch.no_grad():
     t_pkg = time_us(lambda: f.step(single, cond, bias))
     print(f"L={L} S={S} {NB} blocks bf16, per block")
     print(f"  FusedTokenDiT.step (v6)        {t_pkg / NB:7.1f} us")
-    for name, kw in (("base", {}), ("base", dict(rows=False)), ("base", dict(core=False)),
+    for name, kw in (("base", {}), ("base", dict(gra=True)), ("base", dict(rows=False)), ("base", dict(core=False)),
                      ("streams 3+2", {}), ("streams 2+2+1", {}), ("streams 1x5", {})):
         out = step(name, **kw).clone().float()
-        tag = name + ("  -rows (upper bound)" if kw.get("rows") is False else "") + ("  -core" if kw.get("core") is False else "")
+        tag = name + ("  -rows (upper bound)" if kw.get("rows") is False else "") + ("  -core" if kw.get("core") is False else "") + ("  +gemm_resgate_adaln" if kw.get("gra") else "")
         d = float((out - ref).norm() / ref.norm())
         print(f"  {tag:<32s} {time_us(lambda: step(name, **kw)) / NB:7.1f} us   vs step {d:.1e}", flush=True)
