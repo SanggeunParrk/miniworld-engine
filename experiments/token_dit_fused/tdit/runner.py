@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from . import kernels as K
-from .attn import attention_gated_in_place
+from .attn import attention_gated_in_place, attention_gated_in_place2, bias_descriptor
 
 
 def _t(w):
@@ -45,7 +45,7 @@ def attention_in_place(q, k, v, bias, mask, m, key):
 
 
 class FusedTokenDiT:
-    def __init__(self, blocks, dtype=torch.bfloat16, core="gated", prescale=True, core_precision="tf32"):
+    def __init__(self, blocks, dtype=torch.bfloat16, core="gated2", prescale=True, core_precision="tf32"):
         """``dtype`` is the activation / weight dtype of the whole path: bf16, or fp32 (MiniWorld's v1 diffusion recipe).
         The residual stream is fp32 either way. fp32 GEMMs follow ``torch.backends.cuda.matmul.allow_tf32`` -- the caller's
         policy, as for any torch matmul -- and ``core_precision`` sets the attention core's MMA precision for fp32."""
@@ -79,7 +79,7 @@ class FusedTokenDiT:
             pw.append(f32(at.to_bias.weight) * f32(at.ln_pair.weight))            # [H, dp], ln_pair weight folded
             wqkvg = torch.cat([at.to_query.weight, at.to_key.weight, at.to_value.weight, at.to_gate.weight], 0)
             bqkvg = torch.cat([at.to_query.bias.detach(), torch.zeros(3 * self.d, device=dev, dtype=at.to_query.bias.dtype)])
-            if prescale and core == "gated":
+            if prescale and core in ("gated", "gated2"):
                 qs = (self.d // self.h) ** -0.5 * 1.4426950408889634          # sm_scale * log2(e)
                 wqkvg = wqkvg.detach().float().clone(); bqkvg = bqkvg.float().clone()
                 wqkvg[: self.d] *= qs
@@ -98,18 +98,21 @@ class FusedTokenDiT:
         self.w2 = torch.cat(w2, 0).to(dtype).contiguous()          # [nb*2*d, dc]
         self.b2 = torch.cat(b2, 0).to(dtype).contiguous()
         pwc = torch.cat(pw, 0)
-        if prescale and core == "gated":
+        if prescale and core in ("gated", "gated2"):
             pwc = pwc * 1.4426950408889634                                  # log2(e): the core works in the exp2 domain
         self.pw_t = pwc.t().to(dtype).contiguous()                          # [dp, nb*H]
         self.dtype = dtype
         self._buf = {}
 
     # ------------------------------------------------------------------ once per sample()
-    def hoist(self, pair):
-        """pair [1, L, L, dp] -> every block's bias, [nb*H, L, L] head-major."""
+    def hoist(self, pair, mask=None):
+        """pair [1, L, L, dp] -> every block's bias, [nb*H, L, L] head-major. ``mask`` [L] bool marks the real tokens;
+        padded keys get -inf here, once per sample, so the attention core never touches a mask."""
         L = pair.shape[1]
         out = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
         K.pair_bias_all(pair.reshape(L * L, self.dp), self.pw_t, out, L, self.eps)
+        if mask is not None:
+            out[:, :, ~mask.reshape(L)] = float("-inf")
         return out
 
     def _buffers(self, S, L, dev):
@@ -185,9 +188,18 @@ class FusedTokenDiT:
         key = atom_key(L)
         q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(4))
         keep2 = buf["keep"].view(S, L)
+        if self.core == "gated2":
+            assert self.prescale, "the v2 core expects pre-scaled logits"
+            key_d = (bias.data_ptr(), tuple(bias.shape))
+            if getattr(self, "_bdesc_key", None) != key_d:
+                self._bdesc, self._bdesc_key = bias_descriptor(bias), key_d
+            bdesc = self._bdesc
         for b, p in enumerate(self.per):
             torch.addmm(p["bqkvg"], xa, p["wqkvg"].t(), out=qkvg)
-            if self.core == "gated":
+            if self.core == "gated2":
+                attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
+                torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
+            elif self.core == "gated":
                 attention_gated_in_place(q4, k4, v4, g4, bias[b * H:(b + 1) * H], keep2, self.prescale, self.core_precision)   # sigmoid(g)*o over q
                 torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
             else:

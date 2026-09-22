@@ -143,10 +143,14 @@ with torch.no_grad():
     fused = FusedTokenDiT(bf_blocks, dtype=bf)
     bias = fused.hoist(z_bf)
     out = fused.step(s_bf, c_bf, bias).clone()
-    report("fused v4 (v3 + pre-scaled logits)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)
+    report("fused v5 (TMA-bias mask-free core)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)
+    fused.core = "gated"
+    out = fused.step(s_bf, c_bf, bias).clone()
+    report("fused v4 (v1 core, pre-scaled)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)
+    fused.core = "gated2"
 if a.dtype == "bf16":
   with torch.no_grad():
-    unscaled = FusedTokenDiT(bf_blocks, prescale=False)
+    unscaled = FusedTokenDiT(bf_blocks, prescale=False, core="gated")
     bias_u = unscaled.hoist(z_bf)
     out = unscaled.step(s_bf, c_bf, bias_u).clone()
     report("fused v3, logits not pre-scaled", time_us(lambda: unscaled.step(s_bf, c_bf, bias_u)), out)
@@ -154,7 +158,7 @@ if a.dtype == "bf16":
     out = unscaled.step(s_bf, c_bf, bias_u).clone()
     report("fused v2, engine attention core", time_us(lambda: unscaled.step(s_bf, c_bf, bias_u)), out)
     del unscaled, bias_u
-    v1 = FusedTokenDiT(bf_blocks, prescale=False)
+    v1 = FusedTokenDiT(bf_blocks, prescale=False, core="gated")
     bias_v1 = v1.hoist(z_bf)
     out = v1.step_v1(s_bf, c_bf, bias_v1).clone()
     report("fused v1 (AdaLN in Triton GEMM)", time_us(lambda: v1.step_v1(s_bf, c_bf, bias_v1)), out)

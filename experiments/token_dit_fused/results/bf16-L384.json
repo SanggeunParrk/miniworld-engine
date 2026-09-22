@@ -5,25 +5,27 @@
  "dtype": "bf16",
  "device": "NVIDIA H100 80GB HBM3",
  "step_us": {
-  "engine MINIWORLD": 6556.524658203125,
-  "fused v4 (v3 + pre-scaled logits)": 2299.5967864990234,
-  "fused v3, logits not pre-scaled": 2319.923210144043,
-  "fused v2, engine attention core": 2396.748733520508,
-  "fused v1 (AdaLN in Triton GEMM)": 4305.081558227539,
-  "Anthropic composed": 3785.561752319336,
-  "Anthropic composed, hoisted": 3177.3887634277344
+  "engine MINIWORLD": 6554.860687255859,
+  "fused v5 (TMA-bias mask-free core)": 2267.0080184936523,
+  "fused v4 (v1 core, pre-scaled)": 2316.320037841797,
+  "fused v3, logits not pre-scaled": 2358.3295822143555,
+  "fused v2, engine attention core": 2427.891159057617,
+  "fused v1 (AdaLN in Triton GEMM)": 4281.71501159668,
+  "Anthropic composed": 3791.9551849365234,
+  "Anthropic composed, hoisted": 3176.006317138672
  },
  "rel_rms": {
   "engine MINIWORLD": 0.011319911107420921,
-  "fused v4 (v3 + pre-scaled logits)": 0.004651269409805536,
-  "fused v3, logits not pre-scaled": 0.004649309441447258,
+  "fused v5 (TMA-bias mask-free core)": 0.004649419337511063,
+  "fused v4 (v1 core, pre-scaled)": 0.004649419337511063,
+  "fused v3, logits not pre-scaled": 0.004646966699510813,
   "fused v2, engine attention core": 0.0046493797563016415,
   "fused v1 (AdaLN in Triton GEMM)": 0.004465475678443909,
   "Anthropic composed": 0.0041944244876503944,
   "Anthropic composed, hoisted": 0.0041944244876503944
  },
  "once_per_sample_us": {
-  "fused hoist (all blocks' pair bias)": 74.47680234909058,
-  "Anthropic hoist (24 x ln_proj.pair_bias)": 515.0207996368408
+  "fused hoist (all blocks' pair bias)": 75.03359913825989,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 519.5328235626221
  }
 }
