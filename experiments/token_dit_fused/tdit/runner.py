@@ -61,6 +61,9 @@ def _quack_gemm_act():
 
 # (tile_M, tile_N, cluster_M, pingpong); tile_N <= 208 with pingpong. Measured at M = 1920 / 3840, K 768, N 2 x 1536.
 GATED_CFGS = ((128, 192, 2, True), (128, 192, 1, True), (128, 128, 2, True), (128, 256, 1, False))
+# plain GEMM candidates for _mm (tile_M, tile_N, cluster_M, pingpong); cuBLAS is always a candidate too
+PLAIN_CFGS = ((128, 128, 1, True), (128, 128, 2, True), (128, 192, 1, True), (128, 192, 2, True),
+              (128, 256, 1, False), (128, 256, 2, False))
 
 
 class FusedTokenDiT:
@@ -125,6 +128,9 @@ class FusedTokenDiT:
         self.pw_t = pwc.t().to(dtype).contiguous()                          # [dp, nb*H]
         self.dtype = dtype
         self._buf = {}
+        self.streams = 1
+        self._mm_cfg = {}
+        self._streams = []
         # SwiGLU in the expand GEMM's epilogue (quack gemm_act, sm90): bf16 only; fp32 keeps cuBLAS + swiglu_rows
         self.gated_gemm = dtype == torch.bfloat16 and _quack_gemm_act() is not None
         self._gated_cfg = {}
@@ -140,8 +146,8 @@ class FusedTokenDiT:
             out[:, :, ~mask.reshape(L)] = float("-inf")
         return out
 
-    def _buffers(self, S, L, dev):
-        key = (S, L, dev)
+    def _buffers(self, S, L, dev, tag=0):
+        key = (S, L, dev, tag)
         if key not in self._buf:
             M = S * L
             T = self.d // K.STAT_W
@@ -197,15 +203,40 @@ class FusedTokenDiT:
         g2 = torch.addmm(self.b2, c.to(self.dtype), self.w2.t()).view(L, self.nb, 2, D)
         return g1, g2
 
-    def step(self, single, cond, bias, out_dtype=None):
-        """v2: four cuBLAS GEMMs, the attention core, and four row kernels per block."""
-        from miniworld_engine.autotune.shape_key import atom_key
+    def step(self, single, cond, bias, out_dtype=None, streams=None):
+        """One solver step. ``streams`` > 1 splits the samples into that many groups, each on its own CUDA stream: the
+        samples share only the conditioning and the pair bias, so one group's memory-bound passes can run under another
+        group's GEMMs and attention."""
         S, B, L, D = single.shape
         assert B == 1
-        M, H = S * L, self.h
-        buf = self._buffers(S, L, single.device)
-        x, xa, qkvg, a, y, ab, h = (buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h"))
+        streams = min(streams or self.streams, S)
         g1, g2 = self._cond(cond, L, D)
+        if streams <= 1:
+            return self._run(single, g1, g2, bias, 0).view(S, 1, L, D).to(out_dtype or single.dtype)
+        main = torch.cuda.current_stream()
+        if len(self._streams) < streams:
+            self._streams += [torch.cuda.Stream() for _ in range(streams - len(self._streams))]
+        ready = torch.cuda.Event()
+        ready.record(main)
+        cuts = [round(i * S / streams) for i in range(streams + 1)]
+        outs = []
+        for i in range(streams):
+            st = self._streams[i]
+            st.wait_event(ready)
+            with torch.cuda.stream(st):
+                outs.append(self._run(single[cuts[i]:cuts[i + 1]], g1, g2, bias, i + 1))
+            done = torch.cuda.Event()
+            done.record(st)
+            main.wait_event(done)
+        return torch.cat([o.view(-1, 1, L, D) for o in outs], 0).to(out_dtype or single.dtype)
+
+    def _run(self, single, g1, g2, bias, tag):
+        """The blocks for one group of samples; returns the fp32 residual, [S*L, D]."""
+        from miniworld_engine.autotune.shape_key import atom_key
+        S, B, L, D = single.shape
+        M, H = S * L, self.h
+        buf = self._buffers(S, L, single.device, tag)
+        x, xa, qkvg, a, y, ab, h = (buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h"))
         x.copy_(single.reshape(M, D))
         K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, L, self.eps)
         # q, k, v, g as strided views of ONE [M, 4D] GEMM output; the core launcher honours strides
@@ -220,10 +251,10 @@ class FusedTokenDiT:
                 self._bdesc, self._bdesc_key = bias_descriptor(bias), key_d
             bdesc = self._bdesc
         for b, p in enumerate(self.per):
-            torch.addmm(p["bqkvg"], xa, p["wqkvg"].t(), out=qkvg)
+            self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
             if self.core == "gated2":
                 attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
-                torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
+                self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated":
                 attention_gated_in_place(q4, k4, v4, g4, bias[b * H:(b + 1) * H], keep2, self.prescale, self.core_precision)   # sigmoid(g)*o over q
                 torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
@@ -237,11 +268,56 @@ class FusedTokenDiT:
             else:
                 torch.mm(xa, p["wab"].t(), out=ab)
                 K.swiglu_rows(ab, h)
-            torch.mm(h, p["ws"].t(), out=y)
+            self._mm(h, p["ws"], y)
             last = b + 1 == self.nb
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                  None if last else g1[:, b + 1, 1], xa, L, self.eps)
-        return x.view(S, 1, L, D).to(out_dtype or single.dtype)
+        return x
+
+    def _mm(self, A, W, out, bias=None):
+        """out = A @ W^T (+ bias): cuBLAS or a quack tile config, whichever measured fastest for this (M, N, K) on its
+        first call (before any capture). quack wins only some shapes (q|k|v|g at M = 3840), so neither is the default."""
+        key = (A.shape[0], W.shape[0], A.shape[1], bias is not None)
+        choice = self._mm_cfg.get(key)
+        if choice is None:
+            choice = self._pick_mm(A, W, out, bias)
+            self._mm_cfg[key] = choice
+        if choice == "cublas":
+            if bias is None:
+                torch.mm(A, W.t(), out=out)
+            else:
+                torch.addmm(bias, A, W.t(), out=out)
+        else:
+            self._quack_mm(A, W, out, bias, choice)
+
+    def _quack_mm(self, A, W, out, bias, c):
+        _quack_gemm_act()(A[None], W[None], None, None, out[None], None, None, c[0], c[1], c[2], 1, pingpong=c[3],
+                          rowvec_bias=None if bias is None else bias[None])
+
+    def _pick_mm(self, A, W, out, bias):
+        def timed(fn):
+            fn()
+            torch.cuda.synchronize()
+            st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            st.record()
+            for _ in range(10):
+                fn()
+            en.record()
+            torch.cuda.synchronize()
+            return st.elapsed_time(en)
+        cands = {"cublas": lambda: (torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out))}
+        if A.dtype in (torch.bfloat16, torch.float16) and _quack_gemm_act() is not None:
+            for c in PLAIN_CFGS:
+                cands[c] = lambda c=c: self._quack_mm(A, W, out, bias, c)
+        best, best_t = "cublas", None
+        for name, fn in cands.items():
+            try:
+                t = timed(fn)
+            except Exception:  # noqa: BLE001 -- a config this shape cannot run
+                continue
+            if best_t is None or t < best_t:
+                best, best_t = name, t
+        return best
 
     def _expand_swiglu(self, xa, wab_i, h):
         """h = silu(xa @ Wa^T) * (xa @ Wb^T) with the SwiGLU in the GEMM epilogue: ab never reaches HBM."""

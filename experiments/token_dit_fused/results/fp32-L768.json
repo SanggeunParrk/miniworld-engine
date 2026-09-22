@@ -5,21 +5,21 @@
  "dtype": "fp32",
  "device": "NVIDIA H100 80GB HBM3",
  "step_us": {
-  "engine MINIWORLD": 25335.891723632812,
-  "fused v5 (TMA-bias mask-free core)": 8609.574127197266,
-  "fused v4 (v1 core, pre-scaled)": 9250.98876953125,
-  "Anthropic composed": 14329.306030273438,
-  "Anthropic composed, hoisted": 9907.283020019531
+  "engine MINIWORLD": 25327.743530273438,
+  "fused v7 (v6 + per-shape GEMM choice)": 8761.817932128906,
+  "fused v4 (v1 core, pre-scaled)": 9314.144134521484,
+  "Anthropic composed": 14242.335510253906,
+  "Anthropic composed, hoisted": 9885.958099365234
  },
  "rel_rms": {
   "engine MINIWORLD": 0.0019086539978161454,
-  "fused v5 (TMA-bias mask-free core)": 0.00035888576530851424,
-  "fused v4 (v1 core, pre-scaled)": 0.00035888576530851424,
+  "fused v7 (v6 + per-shape GEMM choice)": 0.0003588705149013549,
+  "fused v4 (v1 core, pre-scaled)": 0.0003588705149013549,
   "Anthropic composed": 0.0003713061742018908,
   "Anthropic composed, hoisted": 0.0003713061742018908
  },
  "once_per_sample_us": {
-  "fused hoist (all blocks' pair bias)": 725.1327991485596,
-  "Anthropic hoist (24 x ln_proj.pair_bias)": 4358.9630126953125
+  "fused hoist (all blocks' pair bias)": 718.2144165039062,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 4396.051025390625
  }
 }

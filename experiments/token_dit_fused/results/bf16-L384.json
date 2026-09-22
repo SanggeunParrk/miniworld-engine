@@ -5,19 +5,19 @@
  "dtype": "bf16",
  "device": "NVIDIA H100 80GB HBM3",
  "step_us": {
-  "engine MINIWORLD": 6525.4974365234375,
-  "fused v6 (v5 + SwiGLU in expand GEMM)": 1982.815933227539,
-  "fused v5 (cuBLAS expand + swiglu_rows)": 2186.419105529785,
-  "fused v4 (v1 core, pre-scaled)": 2134.7904205322266,
-  "fused v3, logits not pre-scaled": 2217.433547973633,
-  "fused v2, engine attention core": 2329.6703338623047,
-  "fused v1 (AdaLN in Triton GEMM)": 4274.5086669921875,
-  "Anthropic composed": 3782.432174682617,
-  "Anthropic composed, hoisted": 3180.1536560058594
+  "engine MINIWORLD": 6563.155364990234,
+  "fused v7 (v6 + per-shape GEMM choice)": 1975.2063751220703,
+  "fused v5 (cuBLAS expand + swiglu_rows)": 2172.1343994140625,
+  "fused v4 (v1 core, pre-scaled)": 2056.928062438965,
+  "fused v3, logits not pre-scaled": 2186.150360107422,
+  "fused v2, engine attention core": 2258.0223083496094,
+  "fused v1 (AdaLN in Triton GEMM)": 4277.734375,
+  "Anthropic composed": 3790.2271270751953,
+  "Anthropic composed, hoisted": 3185.465621948242
  },
  "rel_rms": {
   "engine MINIWORLD": 0.011319911107420921,
-  "fused v6 (v5 + SwiGLU in expand GEMM)": 0.0044159553945064545,
+  "fused v7 (v6 + per-shape GEMM choice)": 0.0044159553945064545,
   "fused v5 (cuBLAS expand + swiglu_rows)": 0.004649419337511063,
   "fused v4 (v1 core, pre-scaled)": 0.004417358431965113,
   "fused v3, logits not pre-scaled": 0.0044154212810099125,
@@ -27,7 +27,7 @@
   "Anthropic composed, hoisted": 0.0041944244876503944
  },
  "once_per_sample_us": {
-  "fused hoist (all blocks' pair bias)": 75.04000067710876,
-  "Anthropic hoist (24 x ln_proj.pair_bias)": 515.4943943023682
+  "fused hoist (all blocks' pair bias)": 74.99520182609558,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 516.480016708374
  }
 }

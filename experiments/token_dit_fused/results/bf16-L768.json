@@ -5,29 +5,29 @@
  "dtype": "bf16",
  "device": "NVIDIA H100 80GB HBM3",
  "step_us": {
-  "engine MINIWORLD": 13346.553039550781,
-  "fused v6 (v5 + SwiGLU in expand GEMM)": 4231.123352050781,
-  "fused v5 (cuBLAS expand + swiglu_rows)": 4474.079895019531,
-  "fused v4 (v1 core, pre-scaled)": 4520.230484008789,
-  "fused v3, logits not pre-scaled": 4687.065505981445,
-  "fused v2, engine attention core": 4896.076965332031,
-  "fused v1 (AdaLN in Triton GEMM)": 9394.86083984375,
-  "Anthropic composed": 7252.146911621094,
-  "Anthropic composed, hoisted": 5575.462341308594
+  "engine MINIWORLD": 13385.798645019531,
+  "fused v7 (v6 + per-shape GEMM choice)": 4091.3089752197266,
+  "fused v5 (cuBLAS expand + swiglu_rows)": 4447.93586730957,
+  "fused v4 (v1 core, pre-scaled)": 4443.257522583008,
+  "fused v3, logits not pre-scaled": 4572.639846801758,
+  "fused v2, engine attention core": 4760.921478271484,
+  "fused v1 (AdaLN in Triton GEMM)": 9383.71810913086,
+  "Anthropic composed": 7212.825775146484,
+  "Anthropic composed, hoisted": 5600.81901550293
  },
  "rel_rms": {
   "engine MINIWORLD": 0.01114362571388483,
-  "fused v6 (v5 + SwiGLU in expand GEMM)": 0.004403423517942429,
+  "fused v7 (v6 + per-shape GEMM choice)": 0.004403423517942429,
   "fused v5 (cuBLAS expand + swiglu_rows)": 0.004636626690626144,
-  "fused v4 (v1 core, pre-scaled)": 0.004403950180858374,
-  "fused v3, logits not pre-scaled": 0.004405188839882612,
+  "fused v4 (v1 core, pre-scaled)": 0.004403423517942429,
+  "fused v3, logits not pre-scaled": 0.004403922241181135,
   "fused v2, engine attention core": 0.004404510371387005,
   "fused v1 (AdaLN in Triton GEMM)": 0.004453651141375303,
   "Anthropic composed": 0.004185469821095467,
   "Anthropic composed, hoisted": 0.004185469821095467
  },
  "once_per_sample_us": {
-  "fused hoist (all blocks' pair bias)": 260.1664066314697,
-  "Anthropic hoist (24 x ln_proj.pair_bias)": 1522.0735549926758
+  "fused hoist (all blocks' pair bias)": 260.2816104888916,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 1522.5919723510742
  }
 }

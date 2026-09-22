@@ -149,3 +149,30 @@ fit, and splitting it recomputes the expand -- the engine reaches the same verdi
 `tdit/runner.py` packing, hoisting, the per-step schedule (`step`, and `step_v1` for the record); `tdit/kernels.py` the
 row kernels, the pair-bias GEMM, and the v1 prologue kernels; `tdit/attn.py` the core; `bench.py`; `prof.py` per-kernel
 profile; `run.sh` / `run_any.sh` compute-node wrappers.
+
+## v7 (per-shape GEMM choice) and what did not work after v6
+
+`FusedTokenDiT._mm` times cuBLAS against six quack tile configs for each (M, N, K) on its first call (before any capture)
+and keeps the fastest. Only q|k|v|g at M = 3840 changes hands (quack 128x192, cluster 2, pingpong); every other GEMM
+stays on cuBLAS. fp32 stays on cuBLAS (quack rejects fp32 operands).
+
+Per block, H100, 24-block step, S=5 (`results/{bf16,fp32}-L{384,768}.json`):
+
+| | bf16 L384 | bf16 L768 | fp32 L384 | fp32 L768 |
+|---|---:|---:|---:|---:|
+| engine `MINIWORLD` | 273.5 | 557.7 | 410.3 | 1055.3 |
+| Anthropic's parts, pair bias hoisted | 132.7 | 233.4 | 222.9 | 411.9 |
+| **v7** | **82.3** | **170.5** | **175.0** | **365.1** |
+| vs engine | 3.32x | 3.27x | 2.34x | 2.89x |
+| vs Anthropic hoisted | 1.61x | 1.37x | 1.27x | 1.13x |
+
+rel_rms against IEEE fp32: bf16 4.4e-3, fp32 3.6e-4 (engine 1.1e-2 / 1.9e-3).
+
+Measured and dropped:
+- **Samples on two or three CUDA streams** (one group's memory-bound passes under another group's GEMMs): slower, 86.4 ->
+  97.5 / 100.9 us at L384 and 174.6 -> 181.1 / 182.2 us at L768. Splitting M costs the GEMMs more than the overlap saves.
+  `step(streams=)` keeps the option, default 1.
+- **cuDNN fused attention** (torch SDPA, CUDNN_ATTENTION, bias broadcast over samples): 24.1 / 71.8 us at L384 / L768
+  against 17.3 / 51.0 for `tdit.attn` v2 (and 16.9 / 54.0 for Anthropic's apb). The v2 core is the fastest available.
+- **FA4 via torch flex_attention (FLASH backend)**: does not run -- inductor's generated score_mod lacks the `seqlen_info`
+  argument FA4 4.0.0b19 passes.
