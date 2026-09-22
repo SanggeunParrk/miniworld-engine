@@ -20,7 +20,8 @@ reference is the engine's PYTORCH block in IEEE fp32 on the same weights.
 | engine `MINIWORLD` today | 273.2 us | 558.3 us | 1.1e-2 |
 | Anthropic's parts, pair bias per step | 157.7 us | 302.0 us | 4.2e-3 |
 | Anthropic's parts, pair bias hoisted | 132.4 us | 233.0 us | 4.2e-3 |
-| **this package** | **95.8 us** | **200.4 us** | 4.6e-3 |
+| this package v4 | 95.8 us | 200.4 us | 4.6e-3 |
+| **this package v6** (v5 core + SwiGLU in the expand GEMM) | **82.6 us** | **176.3 us** | 4.4e-3 |
 | vs engine / vs Anthropic hoisted | 2.85x / 1.38x | 2.79x / 1.16x | |
 
 **fp32** (MiniWorld v1's recipe: fp32 activations, TF32 GEMMs; every fast path runs TF32, the reference does not):
@@ -75,6 +76,8 @@ each cond-LayerNorm weight folded, all 24 blocks' AdaLN scale / shift and output
 | v2 | 213.6 | cuBLAS GEMMs + row kernels across module boundaries; engine attention core |
 | v3 | 203.0 | own core: head dim 48 as 32 + 16 instead of padding to 64; gate in the epilogue; sigmoids moved into the consumers |
 | v4 | 198.2 | sm_scale*log2(e) folded into Wq / bq and log2(e) into the pair-bias weights: no per-logit scale or division |
+| v5 | 186.4 | attention core with the bias through TMA, no masks in the hot loop, key mask folded into the hoisted bias (bc8db071) |
+| v6 | 176.3 | SwiGLU in the expand GEMM's epilogue (quack `gemm_act`, sm90): `ab` never reaches HBM; bf16 only |
 
 v4 bf16 at L768, per block: attention core ~64 us, the four GEMMs 87 us (qkvg at 588 TFLOPS, cuBLAS-level), the two
 `resgate_adaln_rows` 27 us and `swiglu_rows` 9.5 us (both at their HBM-byte floor), conditioning 5.5 us. In fp32 the
@@ -108,6 +111,20 @@ fit, and splitting it recomputes the expand -- the engine reaches the same verdi
 - The engine's attention launcher (`_aa_fwd`) cannot take q / k / v as strided views: `_attn_fwd` computes one base
   offset from q's strides and applies it to k, v AND the output, and the launcher allocates a contiguous output --
   which is written out of bounds. `tdit.attn` writes over q instead, so all four share strides.
+
+## v6 notes (SwiGLU-epilogue GEMM)
+
+- `quack.gemm_act.gemm_act` is called directly: `quack.gemm_interface` does not import under this torch (its custom-op
+  schema has a `RoundingMode` enum default the schema parser rejects).
+- The expand weight is packed with gate/up rows interleaved (a0, b0, a1, b1, ...). The tile config is timed per M on the
+  first call (`GATED_CFGS`); best measured 128x192, pingpong, cluster 2 at M = 3840 and cluster 1 at M = 1920.
+- Alone, expand + SwiGLU: 42.5 -> 28.9 us at L768, 22.5 -> 17.8 at L384 (`bench_gated.py`), and closer to fp32
+  (h is no longer rounded through a bf16 `ab`).
+- fp32 keeps cuBLAS + `swiglu_rows`: quack rejects fp32 A ("a_dtype should be float16 or float8"), so fp32 v6 == v5.
+- Measured and not taken: quack plain GEMMs for q|k|v|g, Wo and squeeze (`bench_gemms.py`) only beat cuBLAS for
+  q|k|v|g at L768 (29.1 vs 32.8 us); Wo and squeeze tie or lose. A residual-gate GEMM epilogue moves the same HBM
+  bytes as today unless the following AdaLN moves too, which needs a whole 768-column row per tile (quack caps N at 208).
+- Triton 3.6 `tl.range(..., warp_specialize=True)` on the v2 core does not compile on sm90 (NVGPUWarpSpecialization pass).
 
 ## Traps
 

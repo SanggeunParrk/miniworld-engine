@@ -143,7 +143,12 @@ with torch.no_grad():
     fused = FusedTokenDiT(bf_blocks, dtype=bf)
     bias = fused.hoist(z_bf)
     out = fused.step(s_bf, c_bf, bias).clone()
-    report("fused v5 (TMA-bias mask-free core)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)
+    report("fused v6 (v5 + SwiGLU in expand GEMM)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)
+    if fused.gated_gemm:
+        fused.gated_gemm = False
+        out = fused.step(s_bf, c_bf, bias).clone()
+        report("fused v5 (cuBLAS expand + swiglu_rows)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)
+        fused.gated_gemm = True
     fused.core = "gated"
     out = fused.step(s_bf, c_bf, bias).clone()
     report("fused v4 (v1 core, pre-scaled)", time_us(lambda: fused.step(s_bf, c_bf, bias)), out)

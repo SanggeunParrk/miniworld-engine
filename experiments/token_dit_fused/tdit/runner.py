@@ -44,6 +44,25 @@ def attention_in_place(q, k, v, bias, mask, m, key):
     return q
 
 
+_QUACK = []
+
+
+def _quack_gemm_act():
+    """quack's gemm_act, imported directly: quack.gemm_interface does not import under this torch (its custom-op
+    schema has an enum default the schema parser rejects), and it is only a registration layer over this."""
+    if not _QUACK:
+        try:
+            from quack.gemm_act import gemm_act
+            _QUACK.append(gemm_act)
+        except Exception:  # noqa: BLE001
+            _QUACK.append(None)
+    return _QUACK[0]
+
+
+# (tile_M, tile_N, cluster_M, pingpong); tile_N <= 208 with pingpong. Measured at M = 1920 / 3840, K 768, N 2 x 1536.
+GATED_CFGS = ((128, 192, 2, True), (128, 192, 1, True), (128, 128, 2, True), (128, 256, 1, False))
+
+
 class FusedTokenDiT:
     def __init__(self, blocks, dtype=torch.bfloat16, core="gated2", prescale=True, core_precision="tf32"):
         """``dtype`` is the activation / weight dtype of the whole path: bf16, or fp32 (MiniWorld's v1 diffusion recipe).
@@ -92,7 +111,10 @@ class FusedTokenDiT:
                 # v2 operands, nn.Linear layout [out, in] for torch.addmm(b, x, W.t())
                 wqkvg=wqkvg.detach().to(dtype).contiguous(), wo=at.to_out.weight.detach().to(dtype).contiguous(),
                 wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0).detach().to(dtype).contiguous(),
-                ws=tr.squeeze.weight.detach().to(dtype).contiguous()))
+                ws=tr.squeeze.weight.detach().to(dtype).contiguous(),
+                # expand for the SwiGLU-epilogue GEMM: rows a0, b0, a1, b1, ... (quack's gate/up interleave)
+                wab_i=torch.stack([tr.expand_a.weight, tr.expand_b.weight], 1).reshape(-1, self.d)
+                .detach().to(dtype).contiguous()[None]))
         self.w1 = torch.cat(w1, 0).to(dtype).contiguous()          # [nb*4*d, dc]
         self.b1 = torch.cat(b1, 0).to(dtype).contiguous()
         self.w2 = torch.cat(w2, 0).to(dtype).contiguous()          # [nb*2*d, dc]
@@ -103,6 +125,9 @@ class FusedTokenDiT:
         self.pw_t = pwc.t().to(dtype).contiguous()                          # [dp, nb*H]
         self.dtype = dtype
         self._buf = {}
+        # SwiGLU in the expand GEMM's epilogue (quack gemm_act, sm90): bf16 only; fp32 keeps cuBLAS + swiglu_rows
+        self.gated_gemm = dtype == torch.bfloat16 and _quack_gemm_act() is not None
+        self._gated_cfg = {}
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -207,10 +232,39 @@ class FusedTokenDiT:
                 K.gate_rows(qkvg[:, :D], qkvg[:, 3 * D:], a)            # o sits where q was
                 torch.mm(a, p["wo"].t(), out=y)
             K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, self.eps)
-            torch.mm(xa, p["wab"].t(), out=ab)
-            K.swiglu_rows(ab, h)
+            if self.gated_gemm:
+                self._expand_swiglu(xa, p["wab_i"], h)
+            else:
+                torch.mm(xa, p["wab"].t(), out=ab)
+                K.swiglu_rows(ab, h)
             torch.mm(h, p["ws"].t(), out=y)
             last = b + 1 == self.nb
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                  None if last else g1[:, b + 1, 1], xa, L, self.eps)
         return x.view(S, 1, L, D).to(out_dtype or single.dtype)
+
+    def _expand_swiglu(self, xa, wab_i, h):
+        """h = silu(xa @ Wa^T) * (xa @ Wb^T) with the SwiGLU in the GEMM epilogue: ab never reaches HBM."""
+        gemm_act = _quack_gemm_act()
+        M = xa.shape[0]
+        run = lambda c: gemm_act(xa[None], wab_i, None, None, h[None], None, "swiglu", c[0], c[1], c[2], 1, pingpong=c[3])
+        cfg = self._gated_cfg.get(M)
+        if cfg is None:                                   # first call for this M: time the candidates (before any capture)
+            best = None
+            for c in GATED_CFGS:
+                try:
+                    run(c)
+                    torch.cuda.synchronize()
+                    st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                    st.record()
+                    for _ in range(10):
+                        run(c)
+                    en.record()
+                    torch.cuda.synchronize()
+                    t = st.elapsed_time(en)
+                    if best is None or t < best[0]:
+                        best = (t, c)
+                except Exception:  # noqa: BLE001 -- a config the card or shape cannot take
+                    continue
+            cfg = self._gated_cfg[M] = best[1]
+        run(cfg)

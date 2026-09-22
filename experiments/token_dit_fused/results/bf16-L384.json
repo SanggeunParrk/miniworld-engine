@@ -5,27 +5,29 @@
  "dtype": "bf16",
  "device": "NVIDIA H100 80GB HBM3",
  "step_us": {
-  "engine MINIWORLD": 6554.860687255859,
-  "fused v5 (TMA-bias mask-free core)": 2267.0080184936523,
-  "fused v4 (v1 core, pre-scaled)": 2316.320037841797,
-  "fused v3, logits not pre-scaled": 2358.3295822143555,
-  "fused v2, engine attention core": 2427.891159057617,
-  "fused v1 (AdaLN in Triton GEMM)": 4281.71501159668,
-  "Anthropic composed": 3791.9551849365234,
-  "Anthropic composed, hoisted": 3176.006317138672
+  "engine MINIWORLD": 6525.4974365234375,
+  "fused v6 (v5 + SwiGLU in expand GEMM)": 1982.815933227539,
+  "fused v5 (cuBLAS expand + swiglu_rows)": 2186.419105529785,
+  "fused v4 (v1 core, pre-scaled)": 2134.7904205322266,
+  "fused v3, logits not pre-scaled": 2217.433547973633,
+  "fused v2, engine attention core": 2329.6703338623047,
+  "fused v1 (AdaLN in Triton GEMM)": 4274.5086669921875,
+  "Anthropic composed": 3782.432174682617,
+  "Anthropic composed, hoisted": 3180.1536560058594
  },
  "rel_rms": {
   "engine MINIWORLD": 0.011319911107420921,
-  "fused v5 (TMA-bias mask-free core)": 0.004649419337511063,
-  "fused v4 (v1 core, pre-scaled)": 0.004649419337511063,
-  "fused v3, logits not pre-scaled": 0.004646966699510813,
-  "fused v2, engine attention core": 0.0046493797563016415,
+  "fused v6 (v5 + SwiGLU in expand GEMM)": 0.0044159553945064545,
+  "fused v5 (cuBLAS expand + swiglu_rows)": 0.004649419337511063,
+  "fused v4 (v1 core, pre-scaled)": 0.004417358431965113,
+  "fused v3, logits not pre-scaled": 0.0044154212810099125,
+  "fused v2, engine attention core": 0.004416941665112972,
   "fused v1 (AdaLN in Triton GEMM)": 0.004465475678443909,
   "Anthropic composed": 0.0041944244876503944,
   "Anthropic composed, hoisted": 0.0041944244876503944
  },
  "once_per_sample_us": {
-  "fused hoist (all blocks' pair bias)": 75.03359913825989,
-  "Anthropic hoist (24 x ln_proj.pair_bias)": 519.5328235626221
+  "fused hoist (all blocks' pair bias)": 75.04000067710876,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 515.4943943023682
  }
 }
