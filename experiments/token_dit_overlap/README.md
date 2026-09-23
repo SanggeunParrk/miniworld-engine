@@ -124,7 +124,14 @@ The packaged `_quack_mm` always passes cluster_N = 1, so A multicast over the cl
 | qkvg | 32.59 us | 26.46 | 26.38 (tN192, cl 1x1, pp1) |
 | expand+swiglu | - | 26.29 | 26.13 (tN192, cl 1x1, pp1) |
 
-In the step, per block: **168.0 vs 171.3 us at L768 (-1.9 %)**. At M = 1920 (L384) cuBLAS still wins Wo and squeeze and
+A wider sweep (`--wide`: tile_M 64 / 128 / 256) confirms tile_M 128 and adds cluster_M: q|k|v|g 25.84 us at
+(192, cl 2x1, pp1) and Wo 8.91 at (192, cl 1x2, pp0). The candidate list carries the union, and `_pick_mm` races it
+against cuBLAS per (M, N, K) on the first call, so nothing is hard-coded per shape.
+
+In the step, per block: **165.0 us at L768 and 82.0 at L384**, against 170.5-173.3 / 82.3-87.5 for the packaged step
+measured on the same machine today (node contention makes the baseline noisy; the L384 gain is within it). rel_rms is
+unchanged at 4.40e-3. The change is in `tdit/runner.py`: `_pick_mm` races cuBLAS against PLAIN_CFGS per (M, N, K) on the
+first call, the conditioning GEMMs go through the same picker, and GATED_CFGS carries cluster_N candidates too. At M = 1920 (L384) cuBLAS still wins Wo and squeeze and
 v7's picks are already best, so the configs must stay per-M. This is a config-table change in `tdit/runner.py`
 (PLAIN_CFGS / GATED_CFGS), which this session does not own.
 

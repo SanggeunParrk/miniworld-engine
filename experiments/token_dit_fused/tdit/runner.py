@@ -60,13 +60,16 @@ def _quack_gemm_act():
 
 
 # (tile_M, tile_N, cluster_M, pingpong); tile_N <= 208 with pingpong. Measured at M = 1920 / 3840, K 768, N 2 x 1536.
-GATED_CFGS = ((128, 192, 2, True), (128, 192, 1, True), (128, 128, 2, True), (128, 256, 1, False))
+GATED_CFGS = ((128, 192, 2, 1, True), (128, 192, 1, 1, True), (128, 128, 2, 1, True), (128, 256, 1, 1, False),
+              (128, 192, 1, 2, True), (128, 192, 1, 4, True), (128, 192, 1, 4, False))
 # Plain GEMMs (q|k|v|g, Wo, squeeze): (tile_M, tile_N, cluster_M, cluster_N, pingpong), raced against cuBLAS. cluster_N
 # multicasts A over the cluster, which these one-wave shapes want: at M = 3840 it takes Wo from 9.37 (cuBLAS) to 9.03 us
 # and squeeze from 15.14 to 14.35, worth 1.9 % of the step at L768. At M = 1920 cuBLAS still wins both, so the choice is
-# measured per (M, N, K) rather than fixed (experiments/token_dit_overlap/gemm_sweep.py has the sweep).
-PLAIN_CFGS = ((128, 192, 1, 1, True), (128, 192, 1, 4, False), (128, 192, 1, 2, False), (128, 192, 1, 4, True),
-              (128, 128, 1, 1, True), (128, 256, 1, 1, False))
+# measured per (M, N, K) rather than fixed (experiments/token_dit_overlap/gemm_sweep.py has the sweep). At M = 3840 the
+# winners are q|k|v|g (192, 2x1, pp) 25.84, Wo (tile_M 64, 192, 1x2, pp) 8.57, squeeze (192, 1x2) 14.18 us.
+PLAIN_CFGS = ((128, 192, 1, 1, True), (128, 192, 2, 1, True), (128, 192, 1, 4, False), (128, 192, 1, 2, False),
+              (64, 192, 1, 2, True), (64, 192, 1, 4, True), (128, 192, 1, 4, True), (128, 128, 1, 1, True),
+              (128, 256, 1, 1, False))
 
 
 class FusedTokenDiT:
@@ -135,6 +138,7 @@ class FusedTokenDiT:
         self.gated_gemm = dtype == torch.bfloat16 and _quack_gemm_act() is not None
         self._gated_cfg = {}
         self._mm_cfg = {}
+        self._cond_buf = {}
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -200,9 +204,13 @@ class FusedTokenDiT:
         memory-bound); a separate in-place pass over the strided scale columns cost 5.3 us a block."""
         c = cond[0, 0]                                                 # [L, dc]: shared by every sample at a step
         cn = F.layer_norm(c.float(), (self.dc,), eps=self.eps).to(self.dtype)
-        g1 = torch.addmm(self.b1, cn, self.w1.t()).view(L, self.nb, 4, D)
-        g2 = torch.addmm(self.b2, c.to(self.dtype), self.w2.t()).view(L, self.nb, 2, D)
-        return g1, g2
+        buf = self._cond_buf.get(L)
+        if buf is None:                                                # persistent, so _mm can write into it
+            buf = self._cond_buf[L] = (torch.empty(L, self.nb * 4 * D, device=c.device, dtype=self.dtype),
+                                       torch.empty(L, self.nb * 2 * D, device=c.device, dtype=self.dtype))
+        self._mm(cn, self.w1, buf[0], self.b1)
+        self._mm(c.to(self.dtype), self.w2, buf[1], self.b2)
+        return buf[0].view(L, self.nb, 4, D), buf[1].view(L, self.nb, 2, D)
 
     def step(self, single, cond, bias, out_dtype=None):
         """v2: four cuBLAS GEMMs, the attention core, and four row kernels per block."""
@@ -298,7 +306,8 @@ class FusedTokenDiT:
         """h = silu(xa @ Wa^T) * (xa @ Wb^T) with the SwiGLU in the GEMM epilogue: ab never reaches HBM."""
         gemm_act = _quack_gemm_act()
         M = xa.shape[0]
-        run = lambda c: gemm_act(xa[None], wab_i, None, None, h[None], None, "swiglu", c[0], c[1], c[2], 1, pingpong=c[3])
+        run = lambda c: gemm_act(xa[None], wab_i, None, None, h[None], None, "swiglu", c[0], c[1], c[2], c[3],
+                             pingpong=c[4])
         cfg = self._gated_cfg.get(M)
         if cfg is None:                                   # first call for this M: time the candidates (before any capture)
             best = None
