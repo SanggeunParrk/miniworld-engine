@@ -281,9 +281,12 @@ class FusedTokenDiT:
 
     def _pick_mm(self, A, W, out, bias):
         def timed(run):
-            """GPU time of a graph replay, not of eager launches: quack's python wrapper costs more per call than these
-            9-15 us kernels differ by, so eager timing picks cuBLAS every time and the step (which is captured) loses
-            the difference. Min of three rounds, because the node is shared."""
+            """GPU time of a graph replay. Two measurement regimes were compared against the step itself (the A/B in
+            experiments/token_dit_overlap/ab_mm.py): triton's do_bench, which evicts L2 between iterations and is the
+            engine's convention for benchmarking a kernel on its own, and a captured replay. The replay predicts the
+            step better here (L384: 2.58 vs 1.92 us a block saved), because that is how these GEMMs actually run --
+            captured, back to back, on data the previous kernel just left in L2. Eager launches are wrong for both:
+            quack's python wrapper then costs more than these 9-15 us kernels differ by."""
             for _ in range(3):                            # warm up: a quack config JIT-compiles on its first call
                 run()
             torch.cuda.synchronize()
@@ -306,7 +309,7 @@ class FusedTokenDiT:
                     run()
             torch.cuda.synchronize()
             best = float("inf")
-            for _ in range(3):
+            for _ in range(3):                            # min of three rounds: the node is shared
                 st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                 st.record()
                 g.replay()
