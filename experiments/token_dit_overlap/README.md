@@ -220,3 +220,43 @@ registers, and at 2 CTAs per SM (the only thing keeping this latency-bound kerne
 a tuned Triton core needs the full FA3 arrangement -- two consumer warpgroups ping-ponging phase by phase at 1 CTA per
 SM -- which is a larger build than what it would return. The algorithmic half of the work already shipped: the fixed
 softmax offset above came out of this kernel and now runs in the Triton core.
+
+
+## The CUDA core, second pass: it now wins (core_cu/)
+
+Rebuilt against `bench.py` (do_bench) and a measured floor, not a guessed one. `roof/l2_roof.cu` pulls L2-resident
+tiles through TMA at this core's own tile shape and gets **6.75 TB/s**; the kernel moves 248 MB a block in 46.8 us,
+which is 5.3 TB/s, **78 % of that roof**.
+
+| | Triton core | CUDA core |
+|---|---:|---:|
+| L768, do_bench | 52.8-59.7 us | **46.7** |
+| L384 | 22.0 | **20.7** |
+| step, L768 (A/B in one process) | 166.0 us/block | **157.2 (+8.80, 5.3 %)** |
+| step, L384 | 83.6 | **81.7 (+1.93, 2.3 %)** |
+
+rel_rms against the fp32 reference: 4.52e-3 for the CUDA core against 4.40e-3 for the Triton one at L768 (the CUDA
+core drops the softmax offset entirely rather than taking it from the first key block, so p carries larger magnitudes
+into bf16); identical at L384.
+
+What got it from 79.7 to 46.7 us, in the order it happened, each measured:
+
+| change | us |
+|---|---:|
+| start (running max, 64-row tiles, one warpgroup) | 79.7 |
+| softmax without the running max | 68.4 |
+| 128 query rows, 2 consumer warpgroups, 2 CTAs a SM (18 warps) | 54.7 |
+| q tile in registers (ldmatrix -> wgmma A operand), which buys a third ring stage | 53.2 |
+| bias read with ldmatrix, seeded into the score accumulator | 49.1 |
+| one producer warp; sums reduced once in the epilogue | 48.6 |
+| sample as the fastest grid dimension (the S CTAs sharing a bias tile launch together) | 46.7 |
+
+And what lost, each left in the defines with its number: the bias TMA-multicast over a 5-CTA cluster, with a fixed
+issuer (53.5) and with the issuer rotating per key block (53.4) -- it moves 95 MB a block and costs more in placement;
+256-row tiles (52.0); a per-slot wgmma descriptor cache (52.2, the array spills); the denominator from the tensor core
+via a tile of ones (58.6, four extra wgmma beat 32 FADDs); softmax interleaved with PV per k-step (53.5); warpgroup
+ping-pong (89.5 at the time); three TMA issuers rather than one (no change); more stages or more CTAs a SM (no change).
+
+The profile says what is left is instruction issue, not bandwidth: 12.0 M instructions at IPC 1.6, ALU 3.3 M and
+FMA 3.4 M against 1.6 M of ex2, and turning the multicast on and off moves L2 traffic 257 <-> 162 MB without moving
+the clock. Closing 78 % -> 90 % means either cutting instructions further or cutting traffic without a cluster.
