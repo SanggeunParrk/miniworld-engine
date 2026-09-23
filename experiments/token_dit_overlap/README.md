@@ -177,3 +177,46 @@ but not enough. Beating a tuned Triton core needs real warp specialisation and p
 which is a much larger build than the ~11 us the bias multicast can return. Mechanics worth keeping (`core_cu/qk_probe.cu`
 validates them): wgmma flags (0,0) already read B as [N][K], so QK^T needs no transpose; PV needs the MN-major
 descriptor (base + ks*2048) with trans-b = 1; `__nv_bfloat162_raw(...).x` is only the low half, which silently halves P.
+
+
+## The measurement, corrected (and what it changed)
+
+The engine benchmarks kernels with triton's `do_bench`, which zeroes an L2-sized buffer before every timed iteration.
+Everything above this section was first measured by replaying a CUDA graph, which leaves the operands hot in L2 --
+the regime that most flatters whichever variant re-reads the most. `bench.py` is now the one timing routine for
+kernel-level work here. Re-measured that way, the fused residual GEMM is not as far behind as it looked (L768 Wo 33.2
+vs 34.7 us for mm + rows, i.e. ahead; squeeze 41.2 vs 40.2, behind), though the step A/B still says it loses by ~10 us
+a block -- in the step the intermediate the fusion removes is L2-resident anyway.
+
+For **choosing** between implementations the regime matters the other way. These GEMMs run captured, back to back,
+on data the previous kernel just left in L2, and timing candidates that way beats do_bench at predicting the step:
+7.20 vs 5.17 us a block saved at L768, 3.46 vs 1.92 at L384. So `_pick_mm` times a graph replay, and `bench.py` uses
+do_bench; both are recorded in the code.
+
+## Softmax without the online max (kept, in the packaged core)
+
+Writing the CUDA core made the redundancy obvious: softmax is shift-invariant, so the online running max exists only
+to keep `exp2` in range. One fixed offset per row, taken from the first key block, does the same job, and then no key
+block rescales its sums or its accumulator. It is the same number, not an approximation.
+
+| | with the running max | fixed offset |
+|---|---:|---:|
+| CUDA core, L768 (do_bench) | 79.7 us | **68.4** |
+| Triton core, L768 (do_bench) | 58.1 | **52.9** |
+| step, L768 (A/B in one process) | 171.4 us/block | **163.1** |
+| step, L384 | 81.8 | 82.3 (no change) |
+
+rel_rms against the IEEE fp32 reference is unchanged: 4.40e-3 at L768, 4.42e-3 at L384. The offset is floored at -60
+so a row whose first key block is entirely masked cannot leave an offset that overflows later blocks.
+
+## The CUDA core, where it stands
+
+`core_cu/attn_core.cu` is correct at every shape and carries the one thing Triton cannot express here -- the bias tile
+TMA-multicast to the S CTAs that share it -- and it is still **68.0 us against the Triton core's 52.8** at L768
+(do_bench). The variants, all measured: 128 query rows 84.9; a software pipeline over two score buffers 113 (163 with a
+dynamic buffer index, which makes ptxas inject a warpgroup.wait); two blocks in flight 82.2; softmax interleaved with
+PV per k-step 70.4; a single producer warp instead of a warpgroup 68.0 (the best). Every attempt at overlap costs
+registers, and at 2 CTAs per SM (the only thing keeping this latency-bound kernel fed) there are none to spare. Beating
+a tuned Triton core needs the full FA3 arrangement -- two consumer warpgroups ping-ponging phase by phase at 1 CTA per
+SM -- which is a larger build than what it would return. The algorithmic half of the work already shipped: the fixed
+softmax offset above came out of this kernel and now runs in the Triton core.
