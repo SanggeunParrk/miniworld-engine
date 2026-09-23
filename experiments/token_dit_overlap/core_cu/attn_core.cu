@@ -40,6 +40,21 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef SOFTPV
 #define SOFTPV 1                 // interleave the softmax with PV per k-step: the wgmma for the first 16 keys starts
 #endif                           // while the next 16 are still in ex2, and it costs no extra registers
+#ifndef BACC
+#define BACC 1                   // seed the score accumulator with the bias and let the QK wgmma accumulate onto it,
+#endif                           // instead of adding the bias afterwards: 32 FADDs a key block a thread
+#ifndef QREG
+#define QREG 1                   // hold the q tile in registers (12 of them) instead of a 16 KB shared tile: it is read
+#endif                           // once per key block as the wgmma A operand, and the space buys another ring stage
+#ifndef NISS
+#define NISS 3                   // TMA issuers per CTA (K, V, bias on their own threads). One issuing thread caps at
+#endif                           // about 27 GB/s on an SM, and this loads 24 KB per key block per CTA
+#ifndef BLDM
+#define BLDM 1                   // read the bias tile with ldmatrix: one instruction per 4 column groups instead of
+#endif                           // one 4-byte load per column pair (16 -> 4 per thread per key block)
+#ifndef FLOOR
+#define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
+#endif
 #ifndef PIPE
 #define PIPE 0                   // 1: software-pipelined (softmax of one key block under the previous block's PV)
 #endif
@@ -58,6 +73,12 @@ TMN_DEVI float ex2(float a) { float r; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r
 TMN_DEVI void mma_s(float* d, uint64_t a, uint64_t b, int accumulate) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, %34, 0; wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1, 0, 0; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b), "r"(accumulate));
+}
+// S = q k^T with A (q) from registers: the same shape, one fewer shared-memory operand
+TMN_DEVI void mma_s_rs(float* d, const uint32_t (&a)[4], uint64_t b, int accumulate) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %37, 0; wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, {%32,%33,%34,%35}, %36, p, 1, 1, 0; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b), "r"(accumulate));
 }
 // o += p v: A from registers, B (v, rows are keys) MN-major -> trans-b = 1
 TMN_DEVI void mma_o(float (&d)[24], const uint32_t (&a)[4], uint64_t b) {
@@ -91,8 +112,9 @@ TMN_DEVI float qsum(float v) {
 }
 
 // smem: q tile, then ST stages of (K, V, bias), then the barriers
-constexpr int SQ = QM * 128, SKV = BN * 128, SB = QM * 128;
+constexpr int SQ = QREG ? 0 : QM * 128, SKV = BN * 128, SB = QM * 128;
 constexpr int OFF_ST = SQ, ST_BYTES = 2 * SKV + SB;
+constexpr int QSTAGE = 2 * SKV;                                     // where a QREG kernel parks the q tile: slot 0's bias area
 
 template <int CLS>
 __global__ void __launch_bounds__(128 * NWG + (PWARP ? 32 : 128), BLKSM)
@@ -105,6 +127,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + OFF_ST + STAGES * ST_BYTES);
   uint64_t* empty = full + STAGES;
   uint64_t* qbar = empty + STAGES;
+  uint64_t* qdone = qbar + 1;                                       // the consumers have q in registers; slot 0 is free
 
   const int tid = threadIdx.x;
   const uint32_t rank = cluster_rank();                             // = the sample this CTA owns
@@ -115,35 +138,57 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   constexpr int CONS_REGS = (NTHR * LAUNCH_REGS - 128 * 40) / (128 * NWG) / 8 * 8 > 232
                             ? 232 : (NTHR * LAUNCH_REGS - 128 * 40) / (128 * NWG) / 8 * 8;
   if (RSPLIT) { if (tid >= 128 * NWG) setmaxnreg_dec<40>(); else setmaxnreg_inc<CONS_REGS>(); }
-  const int cid = blockIdx.x / CLS;                                 // cluster: one (m-tile, head)
+  // With a cluster the sample is the CTA's rank in it, so the S CTAs that share a bias tile are co-scheduled and the
+  // tile can be multicast. CLS = 1 turns that off: the sample becomes the slowest grid dimension and each CTA loads
+  // its own bias (the multicast with mask 1 is an ordinary load).
+  const int ntile = mt * H;
+  const int cid = CLS > 1 ? blockIdx.x / CLS : blockIdx.x % ntile;
+  const uint32_t samp = CLS > 1 ? rank : (uint32_t)(blockIdx.x / ntile);
   const int m_tile = cid % mt, head = cid / mt;
-  const int m0 = m_tile * QM, qcol = head * DH, row0 = rank * L + m0;
+  const int m0 = m_tile * QM, qcol = head * DH, row0 = samp * L + m0;
   const int wg = tid >> 7;
   const int nblocks = L / BN;
 
   if (tid == 0) {
-    for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 1); mbar_init(&empty[s], CLS * 4 * NWG); }
+    for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NISS); mbar_init(&empty[s], CLS * 4 * NWG); }
     mbar_init(qbar, 1);
+    mbar_init(qdone, 4 * NWG);
     fence_barrier_init();
   }
   __syncthreads();
   asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
   cluster_wait();
 
-  if (tid >= 128 * NWG) {                                           // producer: one warp, one issuing thread
-    if (tid == 128 * NWG) {
+  if (tid >= 128 * NWG) {                                           // producer warp: one issuing thread per tensor
+    const int iss = tid - 128 * NWG;                                // 0 = k, 1 = v, 2 = bias
+    if (iss == 0) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mkv); tma_prefetch_desc(&mbias);
-      mbar_arrive_expect_tx(qbar, SQ);
-      tma_load_2d(sm, &mq, qbar, qcol, row0);                       // q tile: QM rows
+      mbar_arrive_expect_tx(qbar, QM * 128);
+      tma_load_2d(QREG ? sm + OFF_ST + QSTAGE : sm, &mq, qbar, qcol, row0);   // q tile: QM rows
+    }
+    if (QREG && iss < NISS) mbar_wait(qdone, 0);                    // q is out of slot 0 and in the consumers' registers
+    if (iss < NISS) {
       for (int n = 0; n < nblocks; ++n) {
         const int s = n % STAGES;
         mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
         uint8_t* slot = sm + OFF_ST + s * ST_BYTES;
-        mbar_arrive_expect_tx(&full[s], ST_BYTES);
-        tma_load_2d(slot, &mkv, &full[s], 768 + qcol, rank * L + n * BN);                          // k: BN rows
-        tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, rank * L + n * BN);                   // v: BN rows
-        if (rank == 0)                                              // the bias tile is the same for every sample
-          tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
+        if (NISS == 1) {                                            // one thread issues all three
+          mbar_arrive_expect_tx(&full[s], ST_BYTES);
+          tma_load_2d(slot, &mkv, &full[s], 768 + qcol, samp * L + n * BN);                        // k
+          tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v
+          if (rank == 0)
+            tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
+        } else if (iss == 0) {
+          mbar_arrive_expect_tx(&full[s], SKV);
+          tma_load_2d(slot, &mkv, &full[s], 768 + qcol, samp * L + n * BN);                        // k: BN rows
+        } else if (iss == 1) {
+          mbar_arrive_expect_tx(&full[s], SKV);
+          tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v: BN rows
+        } else {
+          mbar_arrive_expect_tx(&full[s], SB);                      // the bias bytes arrive from rank 0's multicast
+          if (rank == 0)
+            tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
+        }
       }
     }
     __syncwarp();
@@ -159,7 +204,17 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   for (int i = 0; i < 24; ++i) acc[i] = 0.f;
   float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
   mbar_wait(qbar, 0);
-  const uint32_t sq = smem_u32(sm) + wg * 8192;
+  const uint32_t sq = smem_u32(sm) + (QREG ? OFF_ST + QSTAGE : 0) + wg * 8192;
+  uint32_t qr[DH / 16][4];                                          // the A operand, straight out of shared memory
+  if (QREG) {
+#pragma unroll
+    for (int ks = 0; ks < DH / 16; ++ks)
+      ldsm_x4(qr[ks], sq + sw128(warp * 16 + 8 * ((lane >> 3) & 1) + (lane & 7), (16 * ks + 8 * (lane >> 4)) * 2));
+    // The arrive must not overtake the ldmatrix reads it releases: make it data-dependent on their destinations
+    // (zero_dep is 0 at run time but opaque to ptxas), or the producer refills slot 0 while they are still in flight.
+    const uint32_t dep = qr[0][0] ^ qr[DH / 16 - 1][3];
+    if ((tid & 31) == 0) mbar_arrive_dep(qdone, zero_dep(dep));      // slot 0 is free again before the producer fills it
+  }
 
   // One block's softmax runs under the previous block's PV: the two matmuls of iteration n are committed as
   // QK(n+1) then PV(n), so wgmma_wait<1> at the top retires QK(n+1) while PV(n) is still in flight. The key loop is
@@ -172,15 +227,38 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   auto qk_into = [&](float* dst, int n) {                           // wait for block n's tiles, issue its QK
     const int sn = n % STAGES;
     mbar_wait(&full[sn], (n / STAGES) & 1);
+    if (FLOOR) return;
+    if (BACC) {                                                     // seed with the bias; the wgmma accumulates onto it
+      const uint8_t* sbn = reinterpret_cast<const uint8_t*>(sm) + OFF_ST + sn * ST_BYTES + 2 * SKV + wg * 8192;
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        uint32_t bm[2][4];
+#pragma unroll
+        for (int half = 0; half < 2; ++half)
+          ldsm_x4(bm[half], smem_u32(sbn) + sw128(16 * warp + 8 * h + (lane & 7), 8 * (4 * half + (lane >> 3)) * 2));
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          const float2 b = bf2f(bm[j >> 2][j & 3]);
+          dst[4 * j + 2 * h] = b.x;
+          dst[4 * j + 2 * h + 1] = b.y;
+        }
+      }
+    }
     wgmma_fence();
 #pragma unroll
     for (int ks = 0; ks < DH / 16; ++ks)
-      mma_s(dst, dsw(sq + ks * 32), dsw(sbase + sn * ST_BYTES + ks * 32), ks != 0);
+      if (QREG) mma_s_rs(dst, qr[ks], dsw(sbase + sn * ST_BYTES + ks * 32), BACC || ks != 0);
+      else mma_s(dst, dsw(sq + ks * 32), dsw(sbase + sn * ST_BYTES + ks * 32), BACC || ks != 0);
     wgmma_commit();
   };
   auto softmax_pv = [&](float* sc, int n, int leave) {
     const int sl = n % STAGES;
     const uint32_t slot = sbase + sl * ST_BYTES;
+    if (FLOOR) {                                                    // floor mode: touch one word of each tile, no math
+      acc[0] += __int_as_float(*reinterpret_cast<const int*>(reinterpret_cast<const uint8_t*>(sm) + OFF_ST
+                                                            + sl * ST_BYTES + (tid & 31) * 4));
+      return;
+    }
     if (leave == 0) wgmma_wait<0>(); else wgmma_wait<1>();          // retire this block's QK, leave later groups running
 #pragma unroll
     for (int i = 0; i < 32; ++i) fence_reg(sc[i]);
@@ -194,6 +272,29 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
       // No running max: softmax is shift-invariant, so this is the same number, and it drops the max reduction, the
       // rescale factor and the 24 FMAs that rescale the accumulator -- the bulk of the per-element softmax work here.
       alpha[h] = 1.f;
+#if BACC
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {                                 // the bias is already in the accumulator
+        const float p0 = ex2(sc[4 * j + 2 * h]), p1 = ex2(sc[4 * j + 2 * h + 1]);
+        ssum += p0 + p1;
+        const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);
+        pa[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
+      }
+#elif BLDM && !SOFTPV
+      // ldmatrix hands each thread exactly the (row, column pair) the accumulator holds, four column groups at a time.
+      uint32_t bm[2][4];
+#pragma unroll
+      for (int half = 0; half < 2; ++half)
+        ldsm_x4(bm[half], smem_u32(sb) + sw128(16 * warp + 8 * h + (lane & 7), 8 * (4 * half + (lane >> 3)) * 2));
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float2 b = bf2f(bm[j >> 2][j & 3]);
+        const float p0 = ex2(sc[4 * j + 2 * h] + b.x), p1 = ex2(sc[4 * j + 2 * h + 1] + b.y);
+        ssum += p0 + p1;
+        const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);
+        pa[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
+      }
+#else
 #if SOFTPV
       if (h == 0) {                                                 // both halves of a k-step, then its wgmma
 #pragma unroll
@@ -225,6 +326,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
         const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);
         pa[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
       }
+#endif
 #endif
       l_i[h] += ssum + lsum[h];                                   // the quad reduction is deferred to the epilogue
 #else
@@ -312,13 +414,13 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     qk_into(sc0, n);
     if (PONG && NWG == 2 && wg == 0 && n == 0) named_bar_arrive(9, 256);
     softmax_pv(sc0, n, 0);
-    wgmma_wait<0>();
+    if (!FLOOR) wgmma_wait<0>();
     if ((tid & 31) == 0)
 #pragma unroll
       for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[n % STAGES], k);
   }
 #endif
-  wgmma_wait<0>();
+  if (!FLOOR) wgmma_wait<0>();
 #pragma unroll
   for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #if PIPE == 1
@@ -388,13 +490,14 @@ const CUtensorMap& tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t st
 
 template <int CLS>
 void launch(torch::Tensor& qkvg, torch::Tensor& bias, int64_t block, int L, int H, int S, float* dbg) {
+  static_assert(CLS >= 1, "cluster size");
   const size_t smem = 1024 + SQ + STAGES * ST_BYTES + 256;
   auto kern = attn_kernel<CLS>;
   static bool once = [&] { cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); return true; }();
   (void)once;
   const int mt = L / QM;
   cudaLaunchConfig_t cfg{};
-  cfg.gridDim = dim3(mt * H * CLS);
+  cfg.gridDim = dim3(mt * H * (CLS > 1 ? CLS : S));
   cfg.blockDim = dim3(128 * NWG + (PWARP ? 32 : 128));
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
@@ -417,6 +520,7 @@ void attn_core(torch::Tensor qkvg, torch::Tensor bias, int64_t block, int64_t S,
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * 768, "qkvg layout");
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L, "bias layout");
   TORCH_CHECK(L % QM == 0, "L must be a multiple of the query tile");
+  if (getenv("ATTN_NOMC")) { launch<1>(qkvg, bias, block, L, (int)H, (int)S, dbg ? dbg->data_ptr<float>() : nullptr); return; }
   switch (S) {
     case 4: launch<4>(qkvg, bias, block, L, (int)H, 4, dbg ? dbg->data_ptr<float>() : nullptr); break;
     case 5: launch<5>(qkvg, bias, block, L, (int)H, 5, dbg ? dbg->data_ptr<float>() : nullptr); break;
