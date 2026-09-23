@@ -95,3 +95,67 @@ against the baseline's 20. The baseline's two kernels have the same total traffi
 overlapping one tile's epilogue with another's mainloop can beat that: a persistent ping-pong over 64-row tiles. It
 re-reads W per tile, and L384 has one tile per CTA, so the estimate is ~3-4 % per block at L768 and nothing at L384.
 Not pursued.
+
+## Where the block's time actually goes (L768, in-step, per block)
+
+`probe.py` variants, measured against the re-assembled step (175 us/block):
+
+| part | in-step | note |
+|---|---:|---|
+| 4 GEMMs | 98.2 us | 507 TFLOP/s; standalone sum of the same kernels is ~83 |
+| attention core | 50.5 us | 183 TFLOP/s |
+| 2 row passes | 23.6 us | 71 MB, at the HBM floor |
+| conditioning | ~3 us | amortised over the 24 blocks |
+
+The GEMM gap to their standalone sum is NOT weight streaming (forcing all 24 blocks to share one L2-resident weight set
+changes nothing: 99.6 vs 98.2) and NOT launch overhead alone (`boundary.py`: cycling the four GEMMs in block order costs
+4 us more than timing each alone, ~1 us a kernel). It is the dependency chain: every kernel waits for the previous one,
+so prologues and tails never overlap, and quack's sm90 GEMMs have no PDL.
+
+## What helped: cluster_N in the GEMM configs (kept)
+
+`gemm_sweep.py` sweeps quack's (tile_N, cluster_M, cluster_N, pingpong) against cuBLAS for the block's four GEMMs.
+The packaged `_quack_mm` always passes cluster_N = 1, so A multicast over the cluster is never tried. At M = 3840 it wins:
+
+| GEMM (L768) | cuBLAS | v7's candidates | best with cluster_N |
+|---|---:|---:|---:|
+| Wo | 9.37 us | 9.11 | **9.03** (tN192, cl 1x4, pp0) |
+| squeeze | 15.14 us | 14.47 | **14.35** (tN192, cl 1x4, pp0) |
+| qkvg | 32.59 us | 26.46 | 26.38 (tN192, cl 1x1, pp1) |
+| expand+swiglu | - | 26.29 | 26.13 (tN192, cl 1x1, pp1) |
+
+In the step, per block: **168.0 vs 171.3 us at L768 (-1.9 %)**. At M = 1920 (L384) cuBLAS still wins Wo and squeeze and
+v7's picks are already best, so the configs must stay per-M. This is a config-table change in `tdit/runner.py`
+(PLAIN_CFGS / GATED_CFGS), which this session does not own.
+
+## What did not help
+
+- **L2 persisting window** (`l2p/`) on the residual x, or on x + xa + y: 176.7 and 182.4 vs 172.3 us/block at L768. The
+  window reserves capacity the streaming tensors need; the row passes are at the HBM floor either way.
+- **Sample batching in the core** (`core_sb/attn_sb.py`): the S samples share the bias tile exactly, and the ablation
+  (`core_sb/bench_ab.py`) prices the bias at **11.3 us of the core's 50.0** at L768 (2.6 of 16.0 at L384; the gate is
+  1.4). But a program that owns all S samples needs S accumulators: it spills, and the grid collapses from 960 CTAs to
+  192, so it loses badly (88.8 us even with the samples un-batched at one per program). Groups of 2 or 3 lose too.
+- **Triton clusters for the bias** (`num_ctas`): 5 is not a power of two and the grid dim must divide it; 2 and 4 fail to
+  compile with a device-side TMA descriptor.
+
+## The CUDA core (`core_cu/`): correct, and still 1.46x off Triton
+
+`attn_core.cu` is the core as one sm_90a kernel: the S CTAs that share a bias tile form a cluster and the tile arrives by
+TMA **multicast**, read once per block instead of once per sample. It matches the packaged core (2.3e-3 against an fp32
+reference in the exp2 domain; 2.3e-5 against the Triton core itself at L768). Head dim 48 needs no padding (K = 48 is
+three k-steps of 16), and P converts from the score accumulator to the PV A-operand by packing alone.
+
+| variant (L768) | us |
+|---|---:|
+| packaged Triton core | **49.4** |
+| CUDA, 64 query rows, no overlap | 72.1 |
+| CUDA, 128 query rows | 84.9 |
+| CUDA, softmax/PV software pipeline | 163.3 |
+
+The pipeline loses because the extra score buffer costs registers, and with a dynamic buffer index ptxas injects a
+`warpgroup.wait` that serialises the async matmuls (C7514); naming the buffers statically recovers part of it (113 us)
+but not enough. Beating a tuned Triton core needs real warp specialisation and ping-pong scheduling across warpgroups,
+which is a much larger build than the ~11 us the bias multicast can return. Mechanics worth keeping (`core_cu/qk_probe.cu`
+validates them): wgmma flags (0,0) already read B as [N][K], so QK^T needs no transpose; PV needs the MN-major
+descriptor (base + ks*2048) with trans-b = 1; `__nv_bfloat162_raw(...).x` is only the low half, which silently halves P.

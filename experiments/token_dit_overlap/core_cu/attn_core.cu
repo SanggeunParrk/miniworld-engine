@@ -1,0 +1,335 @@
+// attn_core.cu -- the token DiT attention core as one sm_90a kernel: gated attention over a packed q|k|v|g buffer with
+// the hoisted pair bias, for S samples that share that bias.
+//
+//   S[i] = q[i] k[i]^T + bias          bias is per (block, head), the SAME tensor for every sample
+//   o[i] = softmax(S[i]) v[i]
+//   out  = sigmoid(g[i]) * o[i]        written over q, as the Triton core does
+//
+// Why it exists: in the packaged Triton core each sample reads the whole bias, 5 x 18.9 MB from L2 per block at L768,
+// which the ablation prices at 11.3 us of the core's 50.0. Here the S CTAs that share a bias tile are one cluster and the
+// tile arrives by TMA multicast, so it is read once: ~19 MB. Triton cannot express this (a cluster with device-side
+// descriptors fails to compile, and num_ctas must divide the grid, which S = 5 does not).
+//
+// Head dim 48 needs no padding: K = 48 is three wgmma k-steps of 16. q|k|v|g live in one [S*L, 4D] buffer, so a head's
+// 48 columns are loaded 64 wide (the extra 16 belong to the next field and are never read by the three k-steps).
+// P converts from the S accumulator to the PV A-operand by packing alone: for m64k16 the two layouts coincide.
+#include "tmn_kernels.cuh"
+using namespace tmn; using namespace tmn::sm90;
+
+#ifndef STAGES
+#define STAGES 3
+#endif
+#ifndef NWG
+#define NWG 1                    // consumer warpgroups: query rows per CTA = 64 NWG
+#endif
+#ifndef PIPE
+#define PIPE 0                   // 1: software-pipelined (softmax of one key block under the previous block's PV)
+#endif
+constexpr int BN = 64, DH = 48, QW = 64, QM = 64 * NWG;    // key block, head dim, load width, query rows
+
+TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
+TMN_DEVI uint64_t dmn(uint32_t base, int ks) { return smem_desc(base + ks * 2048, 16, 1024, 1); }   // MN-major, k-step = 16 rows
+TMN_DEVI uint32_t sw128(int row, int byte) { return row * 128 + ((((byte >> 4) ^ (row & 7))) << 4) + (byte & 15); }
+TMN_DEVI float sigmoid_t(float a) {
+  float t; asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(0.5f * a));
+  return fmaf(0.5f, t, 0.5f);
+}
+TMN_DEVI float ex2(float a) { float r; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(a)); return r; }
+
+// S = q k^T: both operands K-major in shared memory
+TMN_DEVI void mma_s(float* d, uint64_t a, uint64_t b, int accumulate) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %34, 0; wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1, 0, 0; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b), "r"(accumulate));
+}
+// o += p v: A from registers, B (v, rows are keys) MN-major -> trans-b = 1
+TMN_DEVI void mma_o(float (&d)[24], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n48k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23}, {%24,%25,%26,%27}, %28, p, 1, 1, 1; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
+TMN_DEVI void tma_load_mc(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
+               :: "r"(smem_u32(dst)), "l"(map), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask) : "memory");
+}
+TMN_DEVI uint32_t mapa(uint32_t a, uint32_t rank) {
+  uint32_t r; asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(rank)); return r;
+}
+TMN_DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
+  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(mapa(smem_u32(bar), rank)) : "memory");
+}
+TMN_DEVI void cluster_arrive_relaxed() { asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory"); }
+TMN_DEVI void cluster_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory"); }
+TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r)); return r; }
+TMN_DEVI float2 bf2f(uint32_t u) { return make_float2(__uint_as_float(u << 16), __uint_as_float(u & 0xffff0000u)); }
+TMN_DEVI float qmax(float v) {                                      // max over the four lanes of a quad = over the 64 keys
+  v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, 1));
+  return fmaxf(v, __shfl_xor_sync(0xffffffffu, v, 2));
+}
+TMN_DEVI float qsum(float v) {
+  v += __shfl_xor_sync(0xffffffffu, v, 1);
+  return v + __shfl_xor_sync(0xffffffffu, v, 2);
+}
+
+// smem: q tile, then ST stages of (K, V, bias), then the barriers
+constexpr int SQ = QM * 128, SKV = BN * 128, SB = QM * 128;
+constexpr int OFF_ST = SQ, ST_BYTES = 2 * SKV + SB;
+
+template <int CLS>
+__global__ void __launch_bounds__(128 * (NWG + 1), 1)
+attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mkv,
+            const __grid_constant__ CUtensorMap mbias,
+            __nv_bfloat16* __restrict__ OUT, int L, int H, int brow0, int mt, float* __restrict__ DBG) {
+  (void)DBG;
+  extern __shared__ __align__(1024) uint8_t smem_raw[];
+  uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
+  uint64_t* full = reinterpret_cast<uint64_t*>(sm + OFF_ST + STAGES * ST_BYTES);
+  uint64_t* empty = full + STAGES;
+  uint64_t* qbar = empty + STAGES;
+
+  const int tid = threadIdx.x;
+  const uint32_t rank = cluster_rank();                             // = the sample this CTA owns
+  const int cid = blockIdx.x / CLS;                                 // cluster: one (m-tile, head)
+  const int m_tile = cid % mt, head = cid / mt;
+  const int m0 = m_tile * QM, qcol = head * DH, row0 = rank * L + m0;
+  const int wg = tid >> 7;
+  const int nblocks = L / BN;
+
+  if (tid == 0) {
+    for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 1); mbar_init(&empty[s], CLS * 4 * NWG); }
+    mbar_init(qbar, 1);
+    fence_barrier_init();
+  }
+  __syncthreads();
+  asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
+  cluster_wait();
+
+  if (wg == NWG) {                                                  // producer warpgroup
+    if (tid == 128 * NWG) {
+      tma_prefetch_desc(&mq); tma_prefetch_desc(&mkv); tma_prefetch_desc(&mbias);
+      mbar_arrive_expect_tx(qbar, SQ);
+      tma_load_2d(sm, &mq, qbar, qcol, row0);                       // q tile: QM rows
+      for (int n = 0; n < nblocks; ++n) {
+        const int s = n % STAGES;
+        mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
+        uint8_t* slot = sm + OFF_ST + s * ST_BYTES;
+        mbar_arrive_expect_tx(&full[s], ST_BYTES);
+        tma_load_2d(slot, &mkv, &full[s], 768 + qcol, rank * L + n * BN);                          // k: BN rows
+        tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, rank * L + n * BN);                   // v: BN rows
+        if (rank == 0)                                              // the bias tile is the same for every sample
+          tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
+      }
+    }
+    __syncwarp();
+    cluster_arrive_relaxed(); cluster_wait();
+    return;
+  }
+
+  // ---- consumer warpgroups: 64 query rows each
+  const int lane = tid & 31, warp = (tid >> 5) & 3;
+  const int r0 = warp * 16 + (lane >> 2), cb = 2 * (lane & 3);
+  float acc[24];
+#pragma unroll
+  for (int i = 0; i < 24; ++i) acc[i] = 0.f;
+  float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
+  mbar_wait(qbar, 0);
+  const uint32_t sq = smem_u32(sm) + wg * 8192;
+
+  // One block's softmax runs under the previous block's PV: the two matmuls of iteration n are committed as
+  // QK(n+1) then PV(n), so wgmma_wait<1> at the top retires QK(n+1) while PV(n) is still in flight. The key loop is
+  // unrolled by two and each half names its own score buffer: with a dynamic index ptxas cannot tell the buffer being
+  // read from the one an in-flight wgmma writes, and injects a warpgroup.wait that serializes the pipeline (C7514).
+  float sc0[32], sc1[32];
+  uint32_t pa[BN / 16][4];
+  const uint32_t sbase = smem_u32(sm) + OFF_ST;
+
+  auto qk_into = [&](float* dst, int n) {                           // wait for block n's tiles, issue its QK
+    const int sn = n % STAGES;
+    mbar_wait(&full[sn], (n / STAGES) & 1);
+    wgmma_fence();
+#pragma unroll
+    for (int ks = 0; ks < DH / 16; ++ks)
+      mma_s(dst, dsw(sq + ks * 32), dsw(sbase + sn * ST_BYTES + ks * 32), ks != 0);
+    wgmma_commit();
+  };
+  auto softmax_pv = [&](float* sc, int n, bool first) {
+    const int sl = n % STAGES;
+    const uint32_t slot = sbase + sl * ST_BYTES;
+    if (first) wgmma_wait<0>(); else wgmma_wait<1>();               // QK(n) done; PV(n-1) may still run
+#pragma unroll
+    for (int i = 0; i < 32; ++i) fence_reg(sc[i]);
+    const uint8_t* sb = reinterpret_cast<const uint8_t*>(sm) + OFF_ST + sl * ST_BYTES + 2 * SKV + wg * 8192;
+    float alpha[2];
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const int rr = r0 + 8 * h;
+      float mx = -INFINITY;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float2 b = bf2f(*reinterpret_cast<const uint32_t*>(sb + sw128(rr, (j * 8 + cb) * 2)));
+        sc[4 * j + 2 * h] += b.x;
+        sc[4 * j + 2 * h + 1] += b.y;
+        mx = fmaxf(mx, fmaxf(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]));
+      }
+      mx = fmaxf(qmax(mx), -1e38f);
+      const float m_new = fmaxf(m_i[h], mx);
+      alpha[h] = ex2(m_i[h] - m_new);
+      float ssum = 0.f;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float p0 = ex2(sc[4 * j + 2 * h] - m_new), p1 = ex2(sc[4 * j + 2 * h + 1] - m_new);
+        ssum += p0 + p1;
+        const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);    // both halves: .x of the raw struct is the low one
+        pa[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
+      }
+      l_i[h] = l_i[h] * alpha[h] + qsum(ssum);
+      m_i[h] = m_new;
+    }
+    wgmma_wait<0>();                                                // PV(n-1) has landed in acc
+    if (PIPE && !first && (tid & 31) == 0) {
+      const int sp = (n - 1) % STAGES;
+#pragma unroll
+      for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[sp], k);
+    }
+#pragma unroll
+    for (int h = 0; h < 2; ++h)
+#pragma unroll
+      for (int j = 0; j < 6; ++j) {
+        acc[4 * j + 2 * h] *= alpha[h];
+        acc[4 * j + 2 * h + 1] *= alpha[h];
+      }
+    wgmma_fence();
+#pragma unroll
+    for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+#pragma unroll
+    for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dmn(slot + SKV, ks));
+    wgmma_commit();
+  };
+
+#if PIPE
+  qk_into(sc0, 0);
+  for (int n = 0; n < nblocks; n += 2) {
+    if (n + 1 < nblocks) qk_into(sc1, n + 1);
+    softmax_pv(sc0, n, n == 0);
+    if (n + 1 < nblocks) {
+      if (n + 2 < nblocks) qk_into(sc0, n + 2);
+      softmax_pv(sc1, n + 1, false);
+    }
+  }
+#else
+  for (int n = 0; n < nblocks; ++n) {                               // no overlap: QK, softmax, PV, release
+    qk_into(sc0, n);
+    softmax_pv(sc0, n, true);
+    wgmma_wait<0>();
+    if ((tid & 31) == 0)
+#pragma unroll
+      for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[n % STAGES], k);
+  }
+#endif
+  wgmma_wait<0>();
+#pragma unroll
+  for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+#if PIPE
+  if ((tid & 31) == 0) {
+    const int sp = (nblocks - 1) % STAGES;
+#pragma unroll
+    for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[sp], k);
+  }
+#endif
+
+  // ---- epilogue: out = sigmoid(g) * o / l, over q
+  const float inv[2] = {1.f / fmaxf(l_i[0], 1e-30f), 1.f / fmaxf(l_i[1], 1e-30f)};
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    const size_t grow = (size_t)(row0 + wg * 64 + r0 + 8 * h) * (4 * 768) + 2304 + qcol;
+    const size_t orow = (size_t)(row0 + wg * 64 + r0 + 8 * h) * (4 * 768) + qcol;
+#pragma unroll
+    for (int j = 0; j < 6; ++j) {                                   // 48 columns, two per thread per group
+      const int c = j * 8 + cb;
+      const float2 g = bf2f(*reinterpret_cast<const uint32_t*>(OUT + grow + c));
+      const float o0 = acc[4 * j + 2 * h] * inv[h] * sigmoid_t(g.x);
+      const float o1 = acc[4 * j + 2 * h + 1] * inv[h] * sigmoid_t(g.y);
+      *reinterpret_cast<__nv_bfloat162*>(OUT + orow + c) = __floats2bfloat162_rn(o0, o1);
+    }
+  }
+  __syncwarp();
+  cluster_arrive_relaxed(); cluster_wait();
+}
+
+// ------------------------------------------------------------------------------------------------ host
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <array>
+#include <map>
+#include <mutex>
+
+namespace {
+using EncodeTiled = CUresult (*)(CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*, const cuuint64_t*, const cuuint64_t*,
+                                 const cuuint32_t*, const cuuint32_t*, CUtensorMapInterleave, CUtensorMapSwizzle,
+                                 CUtensorMapL2promotion, CUtensorMapFloatOOBfill);
+EncodeTiled encoder() {
+  static EncodeTiled fn = [] {
+    void* p = nullptr;
+    cudaDriverEntryPointQueryResult q{};
+    TORCH_CHECK(cudaGetDriverEntryPoint("cuTensorMapEncodeTiled", &p, cudaEnableDefault, &q) == cudaSuccess && p, "no TMA");
+    return reinterpret_cast<EncodeTiled>(p);
+  }();
+  return fn;
+}
+const CUtensorMap& tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t stride, uint32_t bi, uint32_t bo) {
+  static std::map<std::array<uint64_t, 6>, CUtensorMap> cache;
+  static std::mutex lock;
+  const std::array<uint64_t, 6> key{reinterpret_cast<uint64_t>(ptr), rows, cols, stride, bi, bo};
+  std::lock_guard<std::mutex> g(lock);
+  auto it = cache.find(key);
+  if (it != cache.end()) return it->second;
+  CUtensorMap map{};
+  const cuuint64_t dims[2] = {cols, rows};
+  const cuuint64_t strides[1] = {stride * 2};
+  const cuuint32_t box[2] = {bi, bo}, elem[2] = {1, 1};
+  TORCH_CHECK(encoder()(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, ptr, dims, strides, box, elem,
+                        CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) == CUDA_SUCCESS, "encode failed");
+  return cache.emplace(key, map).first->second;
+}
+
+template <int CLS>
+void launch(torch::Tensor& qkvg, torch::Tensor& bias, int64_t block, int L, int H, int S, float* dbg) {
+  const size_t smem = 1024 + SQ + STAGES * ST_BYTES + 256;
+  auto kern = attn_kernel<CLS>;
+  static bool once = [&] { cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); return true; }();
+  (void)once;
+  const int mt = L / QM;
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3(mt * H * CLS);
+  cfg.blockDim = dim3(128 * (NWG + 1));
+  cfg.dynamicSmemBytes = smem;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = CLS; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, tile_map(qkvg.data_ptr(), S * L, 4 * 768, 4 * 768, QW, QM),
+                                 tile_map(qkvg.data_ptr(), S * L, 4 * 768, 4 * 768, QW, BN),
+                                 tile_map(bias.data_ptr(), bias.size(0) * L, L, L, BN, QM),
+                                 reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()), L, H, (int)block * H * L, mt, dbg)
+              == cudaSuccess, "launch failed");
+}
+}  // namespace
+
+// qkvg [S*L, 4*768] bf16 (q|k|v|g), bias [nb*H, L, L] bf16. Writes the gated attention output over q.
+void attn_core(torch::Tensor qkvg, torch::Tensor bias, int64_t block, int64_t S, int64_t H,
+               c10::optional<torch::Tensor> dbg) {
+  const int L = bias.size(1);
+  TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * 768, "qkvg layout");
+  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L, "bias layout");
+  TORCH_CHECK(L % QM == 0, "L must be a multiple of the query tile");
+  switch (S) {
+    case 4: launch<4>(qkvg, bias, block, L, (int)H, 4, dbg ? dbg->data_ptr<float>() : nullptr); break;
+    case 5: launch<5>(qkvg, bias, block, L, (int)H, 5, dbg ? dbg->data_ptr<float>() : nullptr); break;
+    case 2: launch<2>(qkvg, bias, block, L, (int)H, 2, dbg ? dbg->data_ptr<float>() : nullptr); break;
+    case 1: launch<1>(qkvg, bias, block, L, (int)H, 1, dbg ? dbg->data_ptr<float>() : nullptr); break;
+    default: TORCH_CHECK(false, "S must be 1, 2, 4 or 5");
+  }
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("attn_core", &attn_core); }
