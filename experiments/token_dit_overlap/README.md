@@ -280,3 +280,32 @@ is mathematically a no-op and only buys exp2 headroom, but it costs ~8 us a bloc
 written -- a subtract per element (the obvious way), or folded into the bias seed so the steady-state blocks pay
 nothing (the register pressure lands somewhere else instead). Without it rel_rms is 4.42-4.52e-3 rather than 4.40e-3,
 still 2.4x better than the engine's bf16 path, and a logit would have to pass ~128 in the exp2 domain to overflow.
+
+## Every kernel in the block, against a measured roof (`sol_table.py`, `ncu_step.py`)
+
+Roofs measured in the same process on the same node: a large bf16 cuBLAS GEMM **716 TFLOP/s**, an HBM read+write
+stream **2.97 TB/s**, `roof/l2_roof.cu`'s TMA read of L2-resident tiles at the core's tile shape **6.68 TB/s**.
+Latency is `bench.py` (do_bench, L2 evicted) at L768, S = 5, bf16; the floor is the roofline max of the kernel's
+compute and memory time. NCU columns are from `run_ncu.sh` (one block, cache-flushed between kernels, so its
+durations run ~20 % long against the captured step).
+
+| kernel | us | floor | SoL | bound | NCU SM% / DRAM% / L2% |
+|---|---:|---:|---:|---|---|
+| q\|k\|v\|g GEMM (quack) | 32.77 | 25.3 | **77 %** | compute | 67 / 13 / 52 |
+| attention core (CUDA, sm_90a) | 46.88 | 37.0 | **79 %** | L2 bandwidth | 36 / 30 / 60 |
+| Wo GEMM (quack) | 16.03 | 6.3 | 39 % | neither | 40 / 15 / 33 |
+| resgate + AdaLN rows (x2) | 20.64 | 11.9 | 58 % standalone, **101 % in step** | memory | 48 / 38 / 64 |
+| expand + SwiGLU GEMM (quack `gemm_act`) | 33.25 | 25.3 | **76 %** | compute | 57 / 8 / 37 |
+| squeeze GEMM (cuBLAS) | 20.93 | 12.7 | 60 % | compute | 58 / 20 / 30 |
+
+The core's floor is its own traffic, not a FLOP count: NCU measures **247 MB of L2 reads a block**, which at 46.88 us
+is 5.27 TB/s against the 6.68 TB/s TMA roof. Its tensor side is only 193 TFLOP/s (27 % of the GEMM roof), so the
+tensor pipe is not what holds it.
+
+The row passes are the one place where the standalone number misleads. In the captured step the two passes move
+70.8 MB in 23.6 us = 3.00 TB/s, **at the HBM roof**; do_bench evicts `y`, which in the step is L2-resident between the
+GEMM that writes it and the pass that reads it.
+
+Wo is the only kernel far from both roofs: M = 3840, N = K = 768 is one wave of 120 CTAs with a short k-loop, so
+prologue and epilogue are most of it. It is 16.03 us standalone against a 6.3 us floor, but ~9 us in the captured
+step, where its operands are already hot.
