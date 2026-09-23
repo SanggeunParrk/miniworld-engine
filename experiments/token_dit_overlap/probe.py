@@ -180,6 +180,7 @@ with torch.no_grad():
     for name, kw in (("base", {}), ("base", dict(rows=False)), ("base", dict(core=False)),
                      ("base", dict(rows=False, core=False)), ("base", dict(rows=False, core=False, one_w=True)),
                      ("base", dict(qmm_on=True)), ("base", dict(qmm_on=True, rows=False, core=False)),
+                     ("base", dict(gra=True)), ("base", dict(gra=True, qmm_on=True)),
                      ):
         # the window is a stream attribute: set it before capture (cudaStreamSetAttribute is illegal while capturing),
         # and the kernel nodes inherit it

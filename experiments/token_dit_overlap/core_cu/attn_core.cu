@@ -20,8 +20,26 @@ using namespace tmn; using namespace tmn::sm90;
 #define STAGES 3
 #endif
 #ifndef NWG
-#define NWG 1                    // consumer warpgroups: query rows per CTA = 64 NWG
+#define NWG 2                    // consumer warpgroups: query rows per CTA = 64 NWG
 #endif
+#ifndef MAXLESS
+#define MAXLESS 1                // softmax without the running max: exact, and it drops the max reduction, the
+#endif                           // rescale factor and the accumulator rescale. Safe while |logit| stays under ~120.
+#ifndef RSPLIT
+#define RSPLIT 1                   // 1: hand the producer's registers to the consumers (setmaxnreg)
+#endif
+#ifndef BLKSM
+#define BLKSM (NWG == 1 ? 2 : 1)  // CTAs per SM, as the engine's own warp-specialised kernels set it
+#endif
+#ifndef PONG
+#define PONG 1                   // stagger the consumer warpgroups so one's softmax runs under the other's wgmma
+#endif
+#ifndef PWARP
+#define PWARP 1                  // 1: the producer is a single warp, not a whole warpgroup -- only one thread issues
+#endif                           // TMA, and the other three warps only occupied scheduler slots
+#ifndef SOFTPV
+#define SOFTPV 1                 // interleave the softmax with PV per k-step: the wgmma for the first 16 keys starts
+#endif                           // while the next 16 are still in ex2, and it costs no extra registers
 #ifndef PIPE
 #define PIPE 0                   // 1: software-pipelined (softmax of one key block under the previous block's PV)
 #endif
@@ -60,6 +78,8 @@ TMN_DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
 TMN_DEVI void cluster_arrive_relaxed() { asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory"); }
 TMN_DEVI void cluster_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory"); }
 TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r)); return r; }
+// bar.arrive is the non-blocking half of a named barrier: the token's producer does not stall, the waiter does.
+TMN_DEVI void named_bar_arrive(int id, int n) { __syncwarp(); asm volatile("bar.arrive %0, %1;" :: "r"(id), "r"(n) : "memory"); }
 TMN_DEVI float2 bf2f(uint32_t u) { return make_float2(__uint_as_float(u << 16), __uint_as_float(u & 0xffff0000u)); }
 TMN_DEVI float qmax(float v) {                                      // max over the four lanes of a quad = over the 64 keys
   v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, 1));
@@ -75,7 +95,7 @@ constexpr int SQ = QM * 128, SKV = BN * 128, SB = QM * 128;
 constexpr int OFF_ST = SQ, ST_BYTES = 2 * SKV + SB;
 
 template <int CLS>
-__global__ void __launch_bounds__(128 * (NWG + 1), 1)
+__global__ void __launch_bounds__(128 * NWG + (PWARP ? 32 : 128), BLKSM)
 attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mkv,
             const __grid_constant__ CUtensorMap mbias,
             __nv_bfloat16* __restrict__ OUT, int L, int H, int brow0, int mt, float* __restrict__ DBG) {
@@ -88,6 +108,13 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 
   const int tid = threadIdx.x;
   const uint32_t rank = cluster_rank();                             // = the sample this CTA owns
+  // The producer only issues TMA; give its registers to the consumers, which hold the score tile and the accumulator.
+  // Register split, the way tmn_kernels.cuh does it: the producer keeps 40 and the consumers take the rest of the
+  // CTA's launch allocation, 65536 / (threads * blocks per SM) rounded down to an 8-register granule, capped at 232.
+  constexpr int NTHR = 128 * (NWG + 1), LAUNCH_REGS = (65536 / (NTHR * (NWG == 1 ? 2 : 1))) / 8 * 8;
+  constexpr int CONS_REGS = (NTHR * LAUNCH_REGS - 128 * 40) / (128 * NWG) / 8 * 8 > 232
+                            ? 232 : (NTHR * LAUNCH_REGS - 128 * 40) / (128 * NWG) / 8 * 8;
+  if (RSPLIT) { if (tid >= 128 * NWG) setmaxnreg_dec<40>(); else setmaxnreg_inc<CONS_REGS>(); }
   const int cid = blockIdx.x / CLS;                                 // cluster: one (m-tile, head)
   const int m_tile = cid % mt, head = cid / mt;
   const int m0 = m_tile * QM, qcol = head * DH, row0 = rank * L + m0;
@@ -103,7 +130,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
   cluster_wait();
 
-  if (wg == NWG) {                                                  // producer warpgroup
+  if (tid >= 128 * NWG) {                                           // producer: one warp, one issuing thread
     if (tid == 128 * NWG) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mkv); tma_prefetch_desc(&mbias);
       mbar_arrive_expect_tx(qbar, SQ);
@@ -151,17 +178,56 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
       mma_s(dst, dsw(sq + ks * 32), dsw(sbase + sn * ST_BYTES + ks * 32), ks != 0);
     wgmma_commit();
   };
-  auto softmax_pv = [&](float* sc, int n, bool first) {
+  auto softmax_pv = [&](float* sc, int n, int leave) {
     const int sl = n % STAGES;
     const uint32_t slot = sbase + sl * ST_BYTES;
-    if (first) wgmma_wait<0>(); else wgmma_wait<1>();               // QK(n) done; PV(n-1) may still run
+    if (leave == 0) wgmma_wait<0>(); else wgmma_wait<1>();          // retire this block's QK, leave later groups running
 #pragma unroll
     for (int i = 0; i < 32; ++i) fence_reg(sc[i]);
     const uint8_t* sb = reinterpret_cast<const uint8_t*>(sm) + OFF_ST + sl * ST_BYTES + 2 * SKV + wg * 8192;
-    float alpha[2];
+    float alpha[2], lsum[2] = {0.f, 0.f};
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
       const int rr = r0 + 8 * h;
+      float ssum = 0.f;
+#if MAXLESS
+      // No running max: softmax is shift-invariant, so this is the same number, and it drops the max reduction, the
+      // rescale factor and the 24 FMAs that rescale the accumulator -- the bulk of the per-element softmax work here.
+      alpha[h] = 1.f;
+#if SOFTPV
+      if (h == 0) {                                                 // both halves of a k-step, then its wgmma
+#pragma unroll
+        for (int ks = 0; ks < BN / 16; ++ks) {
+          uint32_t a4[4];
+#pragma unroll
+          for (int t = 0; t < 4; ++t) {                             // t = (column pair, row half) of this k-step
+            const int j = 2 * ks + (t >> 1), hh = t & 1;
+            const float2 b = bf2f(*reinterpret_cast<const uint32_t*>(sb + sw128(r0 + 8 * hh, (j * 8 + cb) * 2)));
+            const float p0 = ex2(sc[4 * j + 2 * hh] + b.x), p1 = ex2(sc[4 * j + 2 * hh + 1] + b.y);
+            lsum[hh] += p0 + p1;
+            const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);
+            a4[2 * (t >> 1) + hh] = *reinterpret_cast<const uint32_t*>(&pk);
+          }
+          wgmma_fence();
+#pragma unroll
+          for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+          mma_o(acc, a4, dmn(slot + SKV, ks));                      // starts while the next k-step is still in ex2
+        }
+        wgmma_commit();
+      }
+      ssum = 0.f;
+#else
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float2 b = bf2f(*reinterpret_cast<const uint32_t*>(sb + sw128(rr, (j * 8 + cb) * 2)));
+        const float p0 = ex2(sc[4 * j + 2 * h] + b.x), p1 = ex2(sc[4 * j + 2 * h + 1] + b.y);
+        ssum += p0 + p1;
+        const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);
+        pa[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
+      }
+#endif
+      l_i[h] += ssum + lsum[h];                                   // the quad reduction is deferred to the epilogue
+#else
       float mx = -INFINITY;
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
@@ -173,7 +239,6 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
       mx = fmaxf(qmax(mx), -1e38f);
       const float m_new = fmaxf(m_i[h], mx);
       alpha[h] = ex2(m_i[h] - m_new);
-      float ssum = 0.f;
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const float p0 = ex2(sc[4 * j + 2 * h] - m_new), p1 = ex2(sc[4 * j + 2 * h + 1] - m_new);
@@ -183,13 +248,15 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
       }
       l_i[h] = l_i[h] * alpha[h] + qsum(ssum);
       m_i[h] = m_new;
+#endif
     }
-    wgmma_wait<0>();                                                // PV(n-1) has landed in acc
-    if (PIPE && !first && (tid & 31) == 0) {
+    if (PIPE == 1) wgmma_wait<0>();                                 // PV(n-1) has landed in acc
+    if (PIPE == 1 && n > 0 && (tid & 31) == 0) {
       const int sp = (n - 1) % STAGES;
 #pragma unroll
       for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[sp], k);
     }
+#if !MAXLESS
 #pragma unroll
     for (int h = 0; h < 2; ++h)
 #pragma unroll
@@ -197,28 +264,54 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
         acc[4 * j + 2 * h] *= alpha[h];
         acc[4 * j + 2 * h + 1] *= alpha[h];
       }
-    wgmma_fence();
+#else
+    (void)alpha;
+#endif
+    if (!(MAXLESS && SOFTPV)) {                                     // the interleaved path already issued its wgmmas
+      wgmma_fence();
 #pragma unroll
-    for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+      for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #pragma unroll
-    for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dmn(slot + SKV, ks));
-    wgmma_commit();
+      for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dmn(slot + SKV, ks));
+      wgmma_commit();
+    }
   };
 
-#if PIPE
+#if PIPE == 1
   qk_into(sc0, 0);
   for (int n = 0; n < nblocks; n += 2) {
     if (n + 1 < nblocks) qk_into(sc1, n + 1);
-    softmax_pv(sc0, n, n == 0);
+    softmax_pv(sc0, n, n == 0 ? 0 : 1);
     if (n + 1 < nblocks) {
       if (n + 2 < nblocks) qk_into(sc0, n + 2);
-      softmax_pv(sc1, n + 1, false);
+      softmax_pv(sc1, n + 1, 1);
     }
   }
-#else
-  for (int n = 0; n < nblocks; ++n) {                               // no overlap: QK, softmax, PV, release
+#elif PIPE == 2
+  // Without a running max the key blocks are independent -- nothing is carried but the sums -- so two can be in flight:
+  // softmax(n) runs under QK(n+1), and PV(n) under softmax(n+1).
+  for (int n = 0; n < nblocks; n += 2) {
+    const bool two = n + 1 < nblocks;
     qk_into(sc0, n);
-    softmax_pv(sc0, n, true);
+    if (two) qk_into(sc1, n + 1);
+    softmax_pv(sc0, n, two ? 1 : 0);
+    if (two) softmax_pv(sc1, n + 1, 1);
+    wgmma_wait<0>();
+    if ((tid & 31) == 0)
+#pragma unroll
+      for (int k = 0; k < CLS; ++k) {
+        mbar_arrive_remote(&empty[n % STAGES], k);
+        if (two) mbar_arrive_remote(&empty[(n + 1) % STAGES], k);
+      }
+  }
+#else
+  // Ping-pong: warpgroup 1 waits until warpgroup 0 has its first key block through the MMA pipe, so from then on one
+  // warpgroup's softmax (MUFU, ALU) runs under the other's wgmma instead of both idling the tensor cores together.
+  if (PONG && NWG == 2 && wg == 1) named_bar_sync(9, 256);
+  for (int n = 0; n < nblocks; ++n) {                               // QK, softmax, PV, release
+    qk_into(sc0, n);
+    if (PONG && NWG == 2 && wg == 0 && n == 0) named_bar_arrive(9, 256);
+    softmax_pv(sc0, n, 0);
     wgmma_wait<0>();
     if ((tid & 31) == 0)
 #pragma unroll
@@ -228,7 +321,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   wgmma_wait<0>();
 #pragma unroll
   for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
-#if PIPE
+#if PIPE == 1
   if ((tid & 31) == 0) {
     const int sp = (nblocks - 1) % STAGES;
 #pragma unroll
@@ -237,7 +330,8 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #endif
 
   // ---- epilogue: out = sigmoid(g) * o / l, over q
-  const float inv[2] = {1.f / fmaxf(l_i[0], 1e-30f), 1.f / fmaxf(l_i[1], 1e-30f)};
+  const float inv[2] = {1.f / fmaxf(MAXLESS ? qsum(l_i[0]) : l_i[0], 1e-30f),
+                        1.f / fmaxf(MAXLESS ? qsum(l_i[1]) : l_i[1], 1e-30f)};
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const size_t grow = (size_t)(row0 + wg * 64 + r0 + 8 * h) * (4 * 768) + 2304 + qcol;
@@ -301,7 +395,7 @@ void launch(torch::Tensor& qkvg, torch::Tensor& bias, int64_t block, int L, int 
   const int mt = L / QM;
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3(mt * H * CLS);
-  cfg.blockDim = dim3(128 * (NWG + 1));
+  cfg.blockDim = dim3(128 * NWG + (PWARP ? 32 : 128));
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
   cudaLaunchAttribute at[1];

@@ -1,5 +1,9 @@
 """Ablations of the packaged v5 core (a copy of tdit/attn.py's gated2 kernel, unchanged apart from the switches):
-NO_BIAS drops the bias load, NO_GATE drops the gate epilogue. Neither is correct; they price the two features."""
+NO_BIAS drops the bias load, NO_GATE drops the gate epilogue (neither is correct; they price the two features), and
+MAXLESS runs the softmax without the running max, which IS correct: softmax is shift-invariant, so the online rescale
+exists only for numerical safety. It drops the per-block row max, the rescale factor and the rescale of the accumulator.
+Found while writing the CUDA core, where it was worth 14 %. The logits here are bounded (q carries sm_scale * log2 e and
+the bias is a LayerNorm'd projection), and exp2 in fp32 has ~127 of headroom."""
 import os
 
 import triton
@@ -21,12 +25,13 @@ def _cfgs2():
 
 
 # restore_value: the output overwrites q, and autotuning runs the kernel once per config.
-@triton.autotune(configs=_cfgs2(), key=["N_CTX", "H", "HEAD_DIM", "PREC", "NO_BIAS", "NO_GATE"], restore_value=["Q"])
+@triton.autotune(configs=_cfgs2(), key=["N_CTX", "H", "HEAD_DIM", "PREC", "NO_BIAS", "NO_GATE", "MAXLESS"], restore_value=["Q"])
 @triton.jit
 def _attn_ab(Q, K, V, G, Bdesc, brow0,
                      stride_qz, stride_qm, stride_qh, stride_qk,
                      H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr, D1: tl.constexpr, D2: tl.constexpr,
                      EVEN: tl.constexpr, PREC: tl.constexpr, NO_BIAS: tl.constexpr, NO_GATE: tl.constexpr,
+                     MAXLESS: tl.constexpr,
                      BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr):
     off_z = tl.program_id(0).to(tl.int64)
     start_m = tl.program_id(1)
@@ -65,11 +70,16 @@ def _attn_ab(Q, K, V, G, Bdesc, brow0,
         sc = qk if NO_BIAS else qk + Bdesc.load([brow, start_n]).to(tl.float32)
         if not EVEN:
             sc = tl.where(((start_n + offset_n) < N_CTX)[None, :], sc, -float("inf"))
-        m_new = tl.maximum(tl.maximum(m_i, tl.max(sc, 1)), -1e38)
-        alpha = tl.math.exp2(m_i - m_new)
-        p = tl.math.exp2(sc - m_new[:, None])
-        l_i = l_i * alpha + tl.sum(p, 1)
-        m_i = m_new
+        if MAXLESS:
+            p = tl.math.exp2(sc)
+            alpha = 1.0
+            l_i = l_i + tl.sum(p, 1)
+        else:
+            m_new = tl.maximum(tl.maximum(m_i, tl.max(sc, 1)), -1e38)
+            alpha = tl.math.exp2(m_i - m_new)
+            p = tl.math.exp2(sc - m_new[:, None])
+            l_i = l_i * alpha + tl.sum(p, 1)
+            m_i = m_new
         if EVEN:
             v1 = tl.load(V + kvrow + ro + k1[None, :] * stride_qk)
             v2 = tl.load(V + kvrow + ro + k2[None, :] * stride_qk)
@@ -77,8 +87,12 @@ def _attn_ab(Q, K, V, G, Bdesc, brow0,
             v1 = tl.load(V + kvrow + ro + k1[None, :] * stride_qk, mask=nm, other=0.0)
             v2 = tl.load(V + kvrow + ro + k2[None, :] * stride_qk, mask=nm, other=0.0)
         pb = p.to(v1.dtype)
-        acc1 = tl.dot(pb, v1, acc1 * alpha[:, None], input_precision=PREC)
-        acc2 = tl.dot(pb, v2, acc2 * alpha[:, None], input_precision=PREC)
+        if MAXLESS:
+            acc1 = tl.dot(pb, v1, acc1, input_precision=PREC)
+            acc2 = tl.dot(pb, v2, acc2, input_precision=PREC)
+        else:
+            acc1 = tl.dot(pb, v1, acc1 * alpha[:, None], input_precision=PREC)
+            acc2 = tl.dot(pb, v2, acc2 * alpha[:, None], input_precision=PREC)
     inv = 1.0 / tl.maximum(l_i, 1e-30)
     grow = G + base + offset_m[:, None].to(tl.int64) * stride_qm
     if EVEN:
@@ -100,7 +114,7 @@ def bias_descriptor(bias_all):
     return TensorDescriptor(bias_all, [NBH * L, L], [L, 1], [64, 64])
 
 
-def attention_ab(q, k, v, g, bdesc, block, precision="tf32", no_bias=False, no_gate=False):
+def attention_ab(q, k, v, g, bdesc, block, precision="tf32", no_bias=False, no_gate=False, maxless=False):
     """As ``attention_gated_in_place`` with pre-scaled logits, the key mask already folded into the bias, and the bias
     read through ``bdesc`` (``bias_descriptor``) at block ``block``'s head rows."""
     S, L, H, D = q.shape
@@ -110,5 +124,5 @@ def attention_ab(q, k, v, g, bdesc, block, precision="tf32", no_bias=False, no_g
     assert d2 >= 16 and d2 & (d2 - 1) == 0, f"head dim {D} is not a power of two plus a power of two >= 16"
     grid = lambda c: (S, triton.cdiv(L, c["BLOCK_M1"]), H)
     _attn_ab[grid](q, k, v, g, bdesc, block * H * L, *q.stride(), H=H, N_CTX=L, HEAD_DIM=D, D1=d1, D2=d2,
-                   EVEN=(L % 128 == 0), PREC=precision, NO_BIAS=no_bias, NO_GATE=no_gate)
+                   EVEN=(L % 128 == 0), PREC=precision, NO_BIAS=no_bias, NO_GATE=no_gate, MAXLESS=maxless)
     return q
