@@ -29,17 +29,24 @@ using namespace tmn; using namespace tmn::sm90;
 #define RSPLIT 1                   // 1: hand the producer's registers to the consumers (setmaxnreg)
 #endif
 #ifndef BLKSM
-#define BLKSM (NWG == 1 ? 2 : 1)  // CTAs per SM, as the engine's own warp-specialised kernels set it
+#define BLKSM 2                  // CTAs per SM: this kernel wants two resident (18 warps) and fits them at 96 registers
 #endif
 #ifndef PONG
-#define PONG 1                   // stagger the consumer warpgroups so one's softmax runs under the other's wgmma
+#define PONG 0                   // staggering the consumer warpgroups once at the start bought nothing measurable
 #endif
 #ifndef PWARP
 #define PWARP 1                  // 1: the producer is a single warp, not a whole warpgroup -- only one thread issues
 #endif                           // TMA, and the other three warps only occupied scheduler slots
 #ifndef SOFTPV
-#define SOFTPV 1                 // interleave the softmax with PV per k-step: the wgmma for the first 16 keys starts
-#endif                           // while the next 16 are still in ex2, and it costs no extra registers
+#define SOFTPV 0                 // interleaving the softmax with PV per k-step (the wgmma for the first 16 keys while
+#endif                           // the next 16 are still in ex2) measured slower: 53.5 against 49.4
+#ifndef DHOIST
+#define DHOIST 0                 // one wgmma descriptor per slot up front costs more than it saves: the array spills
+                                 // (48 bytes of stack) and the kernel goes 49.0 -> 52.2 us
+#endif
+#ifndef LSUM
+#define LSUM 0                   // the softmax denominator from the tensor core: P times a tile of ones. It removes
+#endif                           // 32 FADDs a block but the four extra wgmma cost more: 58.6 against 52.6 us
 #ifndef BACC
 #define BACC 1                   // seed the score accumulator with the bias and let the QK wgmma accumulate onto it,
 #endif                           // instead of adding the bias afterwards: 32 FADDs a key block a thread
@@ -86,6 +93,12 @@ TMN_DEVI void mma_o(float (&d)[24], const uint32_t (&a)[4], uint64_t b) {
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
 }
+// l += p 1: the same A operand, B a tile of ones (MN-major); only the first of its 8 columns is read back
+TMN_DEVI void mma_l(float (&d)[4], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n8k16.f32.bf16.bf16 {%0,%1,%2,%3}, {%4,%5,%6,%7}, %8, p, 1, 1, 1; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
 TMN_DEVI void tma_load_mc(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
                :: "r"(smem_u32(dst)), "l"(map), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask) : "memory");
@@ -114,6 +127,7 @@ TMN_DEVI float qsum(float v) {
 // smem: q tile, then ST stages of (K, V, bias), then the barriers
 constexpr int SQ = QREG ? 0 : QM * 128, SKV = BN * 128, SB = QM * 128;
 constexpr int OFF_ST = SQ, ST_BYTES = 2 * SKV + SB;
+constexpr int SONES = LSUM ? BN * 128 : 0;                          // a tile of ones for the denominator wgmma
 constexpr int QSTAGE = 2 * SKV;                                     // where a QREG kernel parks the q tile: slot 0's bias area
 
 template <int CLS>
@@ -124,7 +138,8 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   (void)DBG;
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
-  uint64_t* full = reinterpret_cast<uint64_t*>(sm + OFF_ST + STAGES * ST_BYTES);
+  uint8_t* sones = sm + OFF_ST + STAGES * ST_BYTES;
+  uint64_t* full = reinterpret_cast<uint64_t*>(sones + SONES);
   uint64_t* empty = full + STAGES;
   uint64_t* qbar = empty + STAGES;
   uint64_t* qdone = qbar + 1;                                       // the consumers have q in registers; slot 0 is free
@@ -203,8 +218,16 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #pragma unroll
   for (int i = 0; i < 24; ++i) acc[i] = 0.f;
   float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
+  if (LSUM) {                                                       // every byte 1.0 in bf16, so the swizzle cannot matter
+#pragma unroll
+    for (int i = 0; i < SONES / 4 / (128 * NWG); ++i)
+      *reinterpret_cast<uint32_t*>(sones + 4 * (tid + i * 128 * NWG)) = 0x3f803f80u;
+    named_bar_sync(5, 128 * NWG);
+  }
   mbar_wait(qbar, 0);
   const uint32_t sq = smem_u32(sm) + (QREG ? OFF_ST + QSTAGE : 0) + wg * 8192;
+  const uint64_t dOnes = LSUM ? dmn(smem_u32(sones), 0) : 0;
+  float lacc[4] = {0.f, 0.f, 0.f, 0.f};
   uint32_t qr[DH / 16][4];                                          // the A operand, straight out of shared memory
   if (QREG) {
 #pragma unroll
@@ -223,6 +246,14 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   float sc0[32], sc1[32];
   uint32_t pa[BN / 16][4];
   const uint32_t sbase = smem_u32(sm) + OFF_ST;
+  // One descriptor per slot per operand, built once: smem_desc is half a dozen shifts and ors, and a k-step only moves
+  // the encoded address (32 bytes -> +2 for K-major, 2048 -> +128 for the MN-major V).
+  uint64_t dK[DHOIST ? STAGES : 1], dV[DHOIST ? STAGES : 1];
+#pragma unroll
+  for (int i = 0; i < (DHOIST ? STAGES : 1); ++i) {
+    dK[i] = dsw(sbase + i * ST_BYTES);
+    dV[i] = dmn(sbase + i * ST_BYTES + SKV, 0);
+  }
 
   auto qk_into = [&](float* dst, int n) {                           // wait for block n's tiles, issue its QK
     const int sn = n % STAGES;
@@ -246,9 +277,11 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     }
     wgmma_fence();
 #pragma unroll
-    for (int ks = 0; ks < DH / 16; ++ks)
-      if (QREG) mma_s_rs(dst, qr[ks], dsw(sbase + sn * ST_BYTES + ks * 32), BACC || ks != 0);
-      else mma_s(dst, dsw(sq + ks * 32), dsw(sbase + sn * ST_BYTES + ks * 32), BACC || ks != 0);
+    for (int ks = 0; ks < DH / 16; ++ks) {
+      const uint64_t bk = DHOIST ? dK[sn] + ks * 2 : dsw(sbase + sn * ST_BYTES + ks * 32);
+      if (QREG) mma_s_rs(dst, qr[ks], bk, BACC || ks != 0);
+      else mma_s(dst, dsw(sq + ks * 32), bk, BACC || ks != 0);
+    }
     wgmma_commit();
   };
   auto softmax_pv = [&](float* sc, int n, int leave) {
@@ -276,7 +309,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #pragma unroll
       for (int j = 0; j < 8; ++j) {                                 // the bias is already in the accumulator
         const float p0 = ex2(sc[4 * j + 2 * h]), p1 = ex2(sc[4 * j + 2 * h + 1]);
-        ssum += p0 + p1;
+        if (!LSUM) ssum += p0 + p1;
         const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);
         pa[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
       }
@@ -374,7 +407,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #pragma unroll
       for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #pragma unroll
-      for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dmn(slot + SKV, ks));
+      for (int ks = 0; ks < BN / 16; ++ks) {
+        mma_o(acc, pa[ks], DHOIST ? dV[sl] + ks * 128 : dmn(slot + SKV, ks));
+        if (LSUM) mma_l(lacc, pa[ks], dOnes + ks * 128);
+      }
       wgmma_commit();
     }
   };
@@ -432,8 +468,9 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #endif
 
   // ---- epilogue: out = sigmoid(g) * o / l, over q
-  const float inv[2] = {1.f / fmaxf(MAXLESS ? qsum(l_i[0]) : l_i[0], 1e-30f),
-                        1.f / fmaxf(MAXLESS ? qsum(l_i[1]) : l_i[1], 1e-30f)};
+  const float ld0 = LSUM ? lacc[0] : (MAXLESS ? qsum(l_i[0]) : l_i[0]);
+  const float ld1 = LSUM ? lacc[2] : (MAXLESS ? qsum(l_i[1]) : l_i[1]);
+  const float inv[2] = {1.f / fmaxf(ld0, 1e-30f), 1.f / fmaxf(ld1, 1e-30f)};
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const size_t grow = (size_t)(row0 + wg * 64 + r0 + 8 * h) * (4 * 768) + 2304 + qcol;
@@ -491,7 +528,7 @@ const CUtensorMap& tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t st
 template <int CLS>
 void launch(torch::Tensor& qkvg, torch::Tensor& bias, int64_t block, int L, int H, int S, float* dbg) {
   static_assert(CLS >= 1, "cluster size");
-  const size_t smem = 1024 + SQ + STAGES * ST_BYTES + 256;
+  const size_t smem = 1024 + SQ + STAGES * ST_BYTES + SONES + 256;
   auto kern = attn_kernel<CLS>;
   static bool once = [&] { cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); return true; }();
   (void)once;
@@ -520,7 +557,9 @@ void attn_core(torch::Tensor qkvg, torch::Tensor bias, int64_t block, int64_t S,
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * 768, "qkvg layout");
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L, "bias layout");
   TORCH_CHECK(L % QM == 0, "L must be a multiple of the query tile");
-  if (getenv("ATTN_NOMC")) { launch<1>(qkvg, bias, block, L, (int)H, (int)S, dbg ? dbg->data_ptr<float>() : nullptr); return; }
+  // No cluster by default: the bias multicast moves 95 MB of L2 traffic a block and not one microsecond, because the
+  // kernel is issue-bound, and a cluster constrains where the CTAs can be placed. ATTN_MC=1 turns it back on.
+  if (!getenv("ATTN_MC")) { launch<1>(qkvg, bias, block, L, (int)H, (int)S, dbg ? dbg->data_ptr<float>() : nullptr); return; }
   switch (S) {
     case 4: launch<4>(qkvg, bias, block, L, (int)H, 4, dbg ? dbg->data_ptr<float>() : nullptr); break;
     case 5: launch<5>(qkvg, bias, block, L, (int)H, 5, dbg ? dbg->data_ptr<float>() : nullptr); break;
