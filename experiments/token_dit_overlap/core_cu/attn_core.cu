@@ -134,7 +134,7 @@ template <int CLS>
 __global__ void __launch_bounds__(128 * NWG + (PWARP ? 32 : 128), BLKSM)
 attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mkv,
             const __grid_constant__ CUtensorMap mbias,
-            __nv_bfloat16* __restrict__ OUT, int L, int H, int brow0, int mt, float* __restrict__ DBG) {
+            __nv_bfloat16* __restrict__ OUT, int L, int H, int brow0, int mt, int S_, float* __restrict__ DBG) {
   (void)DBG;
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
@@ -157,8 +157,11 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   // tile can be multicast. CLS = 1 turns that off: the sample becomes the slowest grid dimension and each CTA loads
   // its own bias (the multicast with mask 1 is an ordinary load).
   const int ntile = mt * H;
-  const int cid = CLS > 1 ? blockIdx.x / CLS : blockIdx.x % ntile;
-  const uint32_t samp = CLS > 1 ? rank : (uint32_t)(blockIdx.x / ntile);
+  // Without a cluster the sample is the FASTEST grid dimension, so the S CTAs that share a bias tile are launched
+  // together and all but the first read it out of L2. As the slowest dimension they ran a whole grid apart and every
+  // one of them paid for the tile again.
+  const int cid = CLS > 1 ? blockIdx.x / CLS : blockIdx.x / S_;
+  const uint32_t samp = CLS > 1 ? rank : (uint32_t)(blockIdx.x % S_);
   const int m_tile = cid % mt, head = cid / mt;
   const int m0 = m_tile * QM, qcol = head * DH, row0 = samp * L + m0;
   const int wg = tid >> 7;
@@ -191,7 +194,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
           mbar_arrive_expect_tx(&full[s], ST_BYTES);
           tma_load_2d(slot, &mkv, &full[s], 768 + qcol, samp * L + n * BN);                        // k
           tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v
-          if (rank == 0)
+          if (rank == (uint32_t)(n % CLS))                          // rotate the issuer: one CTA issuing every block's
             tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
         } else if (iss == 0) {
           mbar_arrive_expect_tx(&full[s], SKV);
@@ -201,7 +204,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
           tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v: BN rows
         } else {
           mbar_arrive_expect_tx(&full[s], SB);                      // the bias bytes arrive from rank 0's multicast
-          if (rank == 0)
+          if (rank == (uint32_t)(n % CLS))                          // rotate the issuer: one CTA issuing every block's
             tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
         }
       }
@@ -545,7 +548,7 @@ void launch(torch::Tensor& qkvg, torch::Tensor& bias, int64_t block, int L, int 
   TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, tile_map(qkvg.data_ptr(), S * L, 4 * 768, 4 * 768, QW, QM),
                                  tile_map(qkvg.data_ptr(), S * L, 4 * 768, 4 * 768, QW, BN),
                                  tile_map(bias.data_ptr(), bias.size(0) * L, L, L, BN, QM),
-                                 reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()), L, H, (int)block * H * L, mt, dbg)
+                                 reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()), L, H, (int)block * H * L, mt, S, dbg)
               == cudaSuccess, "launch failed");
 }
 }  // namespace
