@@ -73,7 +73,7 @@ def _run(module, x, dy, *, fused, fp32=False):
     if fp32:
         mod = mod.float()
         x, dy = x.float(), dy.float()
-    settings.configure(engine_backend="triton", transition_residual_fusion=True, transition_fused_sm90a=fused)
+    settings.configure(engine_backend="auto" if fused else "triton", transition_residual_fusion=True, transition_fused_sm90a=fused)
     xx = x.clone().requires_grad_()
     y = mod(xx)
     y.backward(dy)
@@ -140,7 +140,7 @@ def test_no_grad_forward_is_the_training_forward(d, monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(engine_backend="triton", transition_residual_fusion=True, transition_fused_sm90a=True)
+    settings.configure(engine_backend="auto", transition_residual_fusion=True, transition_fused_sm90a=True)
     module, x, _ = _build((1, 16, 16, d))
     with torch.no_grad():
         inference = module(x)

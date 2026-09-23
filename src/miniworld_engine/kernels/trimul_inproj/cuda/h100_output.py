@@ -89,7 +89,7 @@ def front(d, pg=False, method=0, bufs=None):
     mp = tm(pre[1], [64, 1, 32], [n, n, 512], [n * 2, m * 4]) if pg else ma
     tj = (n + bj - 1) // bj
     tiles = ((n + bi - 1) // bi) * tj
-    base = L.Struct(
+    base = L.Struct.fixed("h100_output:1",
         [
             mz,
             mw,
@@ -174,7 +174,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
         y = torch.empty_like(x)
     else:
         y, saves = bufs
-    if method in (-1, 3):
+    if method in (-1, 3) and saves["ro"] is not None:
         saves["mo"] = saves["ro"][m:]
     if method == -1:
         saves["xnout"] = tri
@@ -187,7 +187,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
     ]
     tj = (n + bj - 1) // bj
     tiles = ((n + bi - 1) // bi) * tj
-    base = L.Struct(
+    base = L.Struct.fixed("h100_output:2",
         [
             *maps,
             d["gi"],
@@ -224,7 +224,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
         if method == 1
         else maps[-1]
     )
-    p = L.Struct(
+    p = L.Struct.fixed("h100_output:3",
         [
             base,
             d["ds"],

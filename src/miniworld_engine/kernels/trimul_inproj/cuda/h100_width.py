@@ -122,6 +122,39 @@ def build(D):
     return ks, path
 
 
+@T.device_cache
+def forward_grid(D):
+    ks, _ = build(D)
+    return torch.cuda.get_device_properties(
+        torch.cuda.current_device()
+    ).multi_processor_count * min(
+        4,
+        min(
+            int(
+                k.unit.drv._unwrap(
+                    "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+                    k.unit.drv.d.cuOccupancyMaxActiveBlocksPerMultiprocessor(
+                        k.unit.drv.d.CUfunction(int(k.handle)),
+                        (128 * tuning(D)[0]),
+                        (tuning(D)[2]),
+                    ),
+                )
+            )
+            for k in (ks["forward"], ks["b1"])
+        ),
+    )
+
+
+@T.device_cache
+def backward_grid(D, threads, smem):
+    k = build(D)[0]["b7"]
+    occ = int(k.unit.drv._unwrap(
+        "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+        k.unit.drv.d.cuOccupancyMaxActiveBlocksPerMultiprocessor(
+            k.unit.drv.d.CUfunction(int(k.handle)), threads, smem)))
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count * occ
+
+
 def launch(k, params, grid=132, cooperative=True, D=64, gp=None):
     threads = 128 * tuning(D)[0]
     smem = tuning(D)[2]
@@ -165,7 +198,7 @@ def tm(t):
 
 class Training:
     def __init__(
-        self, x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, mask, ds, dy, saved=None, packed=None, prepared_mask=None
+        self, x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, mask, ds, dy, saved=None, packed=None, prepared_mask=None, forward_only=False
     ):
         assert (
             x.dtype == torch.bfloat16 and x.shape[0] == 1 and x.shape[1] == x.shape[2]
@@ -182,26 +215,9 @@ class Training:
         # opaque forward outputs must not alias their inputs. Backward borrows
         # this exact saved conversion without another kernel launch.
         self.mask = (prepared_mask if prepared_mask is not None
-                     else mask.to(dtype=torch.float32, copy=True).contiguous())
+                     else mask.to(dtype=torch.float32, copy=True).contiguous()).reshape(n, n)
         self.ks, self.path = build(D)
-        self.grid = torch.cuda.get_device_properties(
-            x.device
-        ).multi_processor_count * min(
-            4,
-            min(
-                int(
-                    k.unit.drv._unwrap(
-                        "cuOccupancyMaxActiveBlocksPerMultiprocessor",
-                        k.unit.drv.d.cuOccupancyMaxActiveBlocksPerMultiprocessor(
-                            k.unit.drv.d.CUfunction(int(k.handle)),
-                            (128 * tuning(D)[0]),
-                            (tuning(D)[2]),
-                        ),
-                    )
-                )
-                for k in (self.ks["forward"], self.ks["b1"])
-            ),
-        )
+        self.grid = forward_grid(D)
         self.w1 = packed if packed is not None else x.new_empty((8 * D, D))
         # Module backward reuses its own forward pack. Standalone callers with
         # only the old activation tuple still get a valid, freshly packed plan.
@@ -210,7 +226,7 @@ class Training:
         if D == 128:
             cfg = dict(k1=[2, 64, 8, 2, 1], input_ln="fused")
         else:
-            cfg = json.loads((R / "selection.json").read_text())[f"{D}-{n}"]
+            cfg = T.read_config("wide/selection.json")[f"{D}-{n}"]
         self.separate = cfg["input_ln"] == "separate"
         self.gi, self.bi = gi, bi
         self.xn = saved[2] if saved else torch.empty_like(x) if self.separate else None
@@ -229,6 +245,18 @@ class Training:
             self.xn = self.front.xn
         self.tri = saved[1] if saved else x.new_empty((H, n, n))
         self.y = torch.empty_like(x)
+        if forward_only:
+            # Forward consumes only maps 0..3 and tensors 0,1,3,4,6.
+            # Do not construct backward workspaces, descriptors, or GP plans.
+            norm = x.new_empty((M, H))
+            maps = [tm(self.xn.reshape(M, D)), tm(wp), tm(wg), tm(norm)]
+            tensors = [x, self.tri, None, ds, self.y, self.xn, norm] + [None] * 17
+            floats = [gi, bi, go, bo, self.mask,
+                      torch.empty(M, device=x.device), torch.empty(M, device=x.device)] + [None] * 6
+            self.forward_storage = (norm, maps, tensors, floats)
+            self.params = T._launch_module().Struct.fixed("h100_width:1",
+                [*maps, *([maps[0]] * 12), *tensors, *floats, M, n])
+            return
         self.dx = torch.empty_like(x)
         self.dg = x.new_empty((M, D))
         self.dt = torch.empty_like(self.tri)
@@ -287,12 +315,12 @@ class Training:
             tm(dn),
         ]
         L = T._launch_module()
-        self.params = L.Struct([*maps, *self.tensors, *self.floats, M, n])
+        self.params = L.Struct.fixed("h100_width:2", [*maps, *self.tensors, *self.floats, M, n])
         t7 = self.tensors.copy()
         t7[22:24] = [self.dl, self.dr]
         maps7 = maps.copy()
         maps7[14:16] = [tm(self.dl.reshape(H, M)), tm(self.dr.reshape(H, M))]
-        self.params7 = L.Struct([*maps7, *t7, *self.floats, M, n])
+        self.params7 = L.Struct.fixed("h100_width:3", [*maps7, *t7, *self.floats, M, n])
         self.maps = maps
         self.maps7 = maps7
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_gp import GP
@@ -306,19 +334,7 @@ class Training:
                 2 * 8192 * (1 + self.gp_native.threads // 128) + 128,
                 self.gp_native.smem,
             )
-            occ = int(
-                k.unit.drv._unwrap(
-                    "cuOccupancyMaxActiveBlocksPerMultiprocessor",
-                    k.unit.drv.d.cuOccupancyMaxActiveBlocksPerMultiprocessor(
-                        k.unit.drv.d.CUfunction(int(k.handle)),
-                        self.gp_native.threads,
-                        smem,
-                    ),
-                )
-            )
-            self.grid7 = (
-                torch.cuda.get_device_properties(x.device).multi_processor_count * occ
-            )
+            self.grid7 = backward_grid(D, self.gp_native.threads, smem)
         self.outputs = (self.dx, *self.dw, self.dwg, self.dwp, *self.floats[8:12])
 
     def forward(self):
@@ -336,12 +352,12 @@ class Training:
     def bind_dy(self, dy):
         self.tensors[2] = dy.contiguous()
         U = T._launch_module()
-        self.params = U.Struct(
+        self.params = U.Struct.fixed("h100_width:4",
             [*self.maps, *self.tensors, *self.floats, self.M, self.n]
         )
         t7 = self.tensors.copy()
         t7[22:24] = [self.dl, self.dr]
-        self.params7 = U.Struct([*self.maps7, *t7, *self.floats, self.M, self.n])
+        self.params7 = U.Struct.fixed("h100_width:5", [*self.maps7, *t7, *self.floats, self.M, self.n])
 
     def backward(self, dy=None):
         if dy is not None:

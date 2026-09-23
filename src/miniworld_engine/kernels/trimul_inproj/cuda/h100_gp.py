@@ -24,7 +24,7 @@ class GP:
         ma = tm(m.front.ab, [64, 1, 32], [n, n, 4 * D], [n * 2, n * n * 2])
         tj = n // bj
         tiles = (n // bi) * tj
-        self.params = U.Struct(
+        self.params = U.Struct.fixed("h100_gp:1",
             [
                 mz,
                 mw,
