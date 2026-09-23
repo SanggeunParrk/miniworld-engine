@@ -66,10 +66,11 @@ GATED_CFGS = ((128, 192, 2, 1, True), (128, 192, 1, 1, True), (128, 128, 2, 1, T
 # multicasts A over the cluster, which these one-wave shapes want: at M = 3840 it takes Wo from 9.37 (cuBLAS) to 9.03 us
 # and squeeze from 15.14 to 14.35, worth 1.9 % of the step at L768. At M = 1920 cuBLAS still wins both, so the choice is
 # measured per (M, N, K) rather than fixed (experiments/token_dit_overlap/gemm_sweep.py has the sweep). At M = 3840 the
-# winners are q|k|v|g (192, 2x1, pp) 25.84, Wo (tile_M 64, 192, 1x2, pp) 8.57, squeeze (192, 1x2) 14.18 us.
+# winners are q|k|v|g (192, 2x1, pp) 25.84, Wo (tile_M 64, 192, 1x2, pp) 8.57, squeeze (192, 1x2) 14.18 us. At
+# M = 1920 tile_M 64 takes Wo (5.66 vs cuBLAS 6.17) and squeeze (8.54 vs 8.92) as well -- both used to go to cuBLAS.
 PLAIN_CFGS = ((128, 192, 1, 1, True), (128, 192, 2, 1, True), (128, 192, 1, 4, False), (128, 192, 1, 2, False),
-              (64, 192, 1, 2, True), (64, 192, 1, 4, True), (128, 192, 1, 4, True), (128, 128, 1, 1, True),
-              (128, 256, 1, 1, False))
+              (64, 192, 1, 1, True), (64, 192, 1, 2, True), (64, 192, 1, 4, True), (128, 192, 1, 4, True),
+              (128, 128, 1, 1, True), (128, 256, 1, 1, False))
 
 
 class FusedTokenDiT:
@@ -280,15 +281,39 @@ class FusedTokenDiT:
 
     def _pick_mm(self, A, W, out, bias):
         def timed(run):
-            run()
-            torch.cuda.synchronize()
-            st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-            st.record()
-            for _ in range(10):
+            """GPU time of a graph replay, not of eager launches: quack's python wrapper costs more per call than these
+            9-15 us kernels differ by, so eager timing picks cuBLAS every time and the step (which is captured) loses
+            the difference. Min of three rounds, because the node is shared."""
+            for _ in range(3):                            # warm up: a quack config JIT-compiles on its first call
                 run()
-            en.record()
             torch.cuda.synchronize()
-            return st.elapsed_time(en)
+            if torch.cuda.is_current_stream_capturing():  # already inside a capture: fall back to eager
+                st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                st.record()
+                for _ in range(20):
+                    run()
+                en.record()
+                torch.cuda.synchronize()
+                return st.elapsed_time(en)
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                run()
+            torch.cuda.synchronize()
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g, stream=side):
+                for _ in range(20):
+                    run()
+            torch.cuda.synchronize()
+            best = float("inf")
+            for _ in range(3):
+                st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                st.record()
+                g.replay()
+                en.record()
+                torch.cuda.synchronize()
+                best = min(best, st.elapsed_time(en))
+            return best
 
         best = (timed(lambda: torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out)),
                 "cublas")
