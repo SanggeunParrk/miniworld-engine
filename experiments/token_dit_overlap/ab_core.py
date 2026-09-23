@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "token_dit_fused"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tdit import FusedTokenDiT                                    # noqa: E402
 from tdit import runner as R                                      # noqa: E402
-from core_cu import attn_core                                     # noqa: E402
+from tdit.cuda_core import attn_core                                     # noqa: E402
 
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=768)
@@ -91,13 +91,11 @@ with torch.no_grad():
     runs = {"triton core": [], "cuda core": []}
     errs = {}
     for r in range(a.rounds):
-        for name, fn in (("triton core", triton_core), ("cuda core", cuda_core)):
-            R.attention_gated_in_place2 = fn
-            try:
-                runs[name].append(time_us(lambda: f.step(s_bf, c_bf, bias)))
-                errs[name] = rel(f.step(s_bf, c_bf, bias))
-            finally:
-                R.attention_gated_in_place2 = triton_core
+        for name, core in (("triton core", "gated2"), ("cuda core", "cuda")):
+            f.core, f._cuda_core = core, (None if core == "cuda" else False)   # False pins the Triton path
+            runs[name].append(time_us(lambda: f.step(s_bf, c_bf, bias)))
+            errs[name] = rel(f.step(s_bf, c_bf, bias))
+    f.core, f._cuda_core = "gated2", None
     print(f"L={L} S={S} {NB} blocks, per block", flush=True)
     for name, v in runs.items():
         print(f"  {name:<12s} {statistics.median(v):6.2f} us   rel_rms {errs[name]:.2e}   "

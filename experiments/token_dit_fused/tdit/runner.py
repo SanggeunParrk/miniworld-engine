@@ -140,6 +140,7 @@ class FusedTokenDiT:
         self._gated_cfg = {}
         self._mm_cfg = {}
         self._cond_buf = {}
+        self._cuda_core = None
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -229,7 +230,12 @@ class FusedTokenDiT:
         key = atom_key(L)
         q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(4))
         keep2 = buf["keep"].view(S, L)
-        if self.core == "gated2":
+        # The sm_90a core is the default wherever it fits: same contract (gated output over q), 46.7 us against the
+        # Triton core's 52.8 at L768, +8.8 us a block in the step. core="gated2"/"cuda" pins one for an A/B.
+        use_cuda_core = self.core in ("gated2", "cuda") and self._cuda_core_ok(L, D, H)
+        if self.core == "cuda" and not use_cuda_core:
+            raise RuntimeError("core='cuda' asked for, but this shape or build cannot take it")
+        if self.core == "gated2" and not use_cuda_core:
             assert self.prescale, "the v2 core expects pre-scaled logits"
             key_d = (bias.data_ptr(), tuple(bias.shape))
             if getattr(self, "_bdesc_key", None) != key_d:
@@ -237,7 +243,10 @@ class FusedTokenDiT:
             bdesc = self._bdesc
         for b, p in enumerate(self.per):
             self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
-            if self.core == "gated2":
+            if use_cuda_core:
+                self._cuda_core(qkvg, bias, b, S, H)                  # sigmoid(g)*o over q, one sm_90a kernel
+                self._mm(qkvg[:, :D], p["wo"], y)
+            elif self.core == "gated2":
                 attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
                 self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated":
@@ -258,6 +267,18 @@ class FusedTokenDiT:
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                  None if last else g1[:, b + 1, 1], xa, L, self.eps)
         return x.view(S, 1, L, D).to(out_dtype or single.dtype)
+
+    def _cuda_core_ok(self, L, D, H):
+        """The sm_90a core handles this shape, and its extension builds. Falls back to the Triton core otherwise."""
+        if self.dtype is not torch.bfloat16 or D != 768 or H != 16 or L % 128:
+            return False
+        if self._cuda_core is None:
+            try:
+                from .cuda_core import attn_core
+                self._cuda_core = attn_core
+            except Exception:  # noqa: BLE001 -- no nvcc, wrong arch, a build error: keep the Triton core
+                self._cuda_core = False
+        return self._cuda_core is not False
 
     def _mm(self, A, W, out, bias=None):
         """out = A @ W^T (+ bias): cuBLAS or a quack config, whichever measures fastest for this (M, N, K) on its first

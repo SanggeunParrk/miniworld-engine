@@ -47,6 +47,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef LSUM
 #define LSUM 0                   // the softmax denominator from the tensor core: P times a tile of ones. It removes
 #endif                           // 32 FADDs a block but the four extra wgmma cost more: 58.6 against 52.6 us
+#ifndef MOFF
+#define MOFF 0                   // subtract a per-row offset taken from the first key block. Mathematically a no-op
+#endif                           // (softmax is shift-invariant) and it only buys exp2 headroom, but it costs 8 us a
+                                 // block in the step whichever way it is written, and rel_rms moves 4.52e-3 -> 4.40e-3
 #ifndef BACC
 #define BACC 1                   // seed the score accumulator with the bias and let the QK wgmma accumulate onto it,
 #endif                           // instead of adding the bias afterwards: 32 FADDs a key block a thread
@@ -220,7 +224,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   float acc[24];
 #pragma unroll
   for (int i = 0; i < 24; ++i) acc[i] = 0.f;
-  float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
+#if !MAXLESS
+  float m_i[2] = {-INFINITY, -INFINITY};
+#endif
+  float l_i[2] = {0.f, 0.f};
   if (LSUM) {                                                       // every byte 1.0 in bf16, so the swizzle cannot matter
 #pragma unroll
     for (int i = 0; i < SONES / 4 / (128 * NWG); ++i)
@@ -231,6 +238,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   const uint32_t sq = smem_u32(sm) + (QREG ? OFF_ST + QSTAGE : 0) + wg * 8192;
   const uint64_t dOnes = LSUM ? dmn(smem_u32(sones), 0) : 0;
   float lacc[4] = {0.f, 0.f, 0.f, 0.f};
+  // One offset per row, from the first key block, subtracted in every block: the same number the running max would
+  // give (softmax is shift-invariant) with none of its per-block rescaling, and it keeps ex2 in range. Floored so a
+  // row whose first key block is all masked cannot leave an offset that overflows later blocks.
+  float m_off[2] = {0.f, 0.f};
   uint32_t qr[DH / 16][4];                                          // the A operand, straight out of shared memory
   if (QREG) {
 #pragma unroll
@@ -246,7 +257,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   // QK(n+1) then PV(n), so wgmma_wait<1> at the top retires QK(n+1) while PV(n) is still in flight. The key loop is
   // unrolled by two and each half names its own score buffer: with a dynamic index ptxas cannot tell the buffer being
   // read from the one an in-flight wgmma writes, and injects a warpgroup.wait that serializes the pipeline (C7514).
-  float sc0[32], sc1[32];
+  float sc0[32];
+#if PIPE
+  float sc1[32];
+#endif
   uint32_t pa[BN / 16][4];
   const uint32_t sbase = smem_u32(sm) + OFF_ST;
   // One descriptor per slot per operand, built once: smem_desc is half a dozen shifts and ors, and a k-step only moves
@@ -271,10 +285,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
         for (int half = 0; half < 2; ++half)
           ldsm_x4(bm[half], smem_u32(sbn) + sw128(16 * warp + 8 * h + (lane & 7), 8 * (4 * half + (lane >> 3)) * 2));
 #pragma unroll
-        for (int j = 0; j < 8; ++j) {
+        for (int j = 0; j < 8; ++j) {                                // seeded with bias - offset, so ex2 needs no shift
           const float2 b = bf2f(bm[j >> 2][j & 3]);
-          dst[4 * j + 2 * h] = b.x;
-          dst[4 * j + 2 * h + 1] = b.y;
+          dst[4 * j + 2 * h] = MOFF ? b.x - m_off[h] : b.x;
+          dst[4 * j + 2 * h + 1] = MOFF ? b.y - m_off[h] : b.y;
         }
       }
     }
@@ -299,7 +313,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #pragma unroll
     for (int i = 0; i < 32; ++i) fence_reg(sc[i]);
     const uint8_t* sb = reinterpret_cast<const uint8_t*>(sm) + OFF_ST + sl * ST_BYTES + 2 * SKV + wg * 8192;
-    float alpha[2], lsum[2] = {0.f, 0.f};
+#if !MAXLESS
+    float alpha[2];
+#endif
+    float lsum[2] = {0.f, 0.f};
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
       const int rr = r0 + 8 * h;
@@ -307,10 +324,20 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #if MAXLESS
       // No running max: softmax is shift-invariant, so this is the same number, and it drops the max reduction, the
       // rescale factor and the 24 FMAs that rescale the accumulator -- the bulk of the per-element softmax work here.
-      alpha[h] = 1.f;
 #if BACC
+      if (MOFF && n == 0) {                                       // the first block pays for the offset it sets
+        float mx = -INFINITY;
 #pragma unroll
-      for (int j = 0; j < 8; ++j) {                                 // the bias is already in the accumulator
+        for (int j = 0; j < 8; ++j) mx = fmaxf(mx, fmaxf(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]));
+        m_off[h] = fmaxf(qmax(mx), -60.f);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          sc[4 * j + 2 * h] -= m_off[h];
+          sc[4 * j + 2 * h + 1] -= m_off[h];
+        }
+      }
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {                                 // bias and offset are both in the accumulator
         const float p0 = ex2(sc[4 * j + 2 * h]), p1 = ex2(sc[4 * j + 2 * h + 1]);
         if (!LSUM) ssum += p0 + p1;
         const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1);
@@ -402,8 +429,6 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
         acc[4 * j + 2 * h] *= alpha[h];
         acc[4 * j + 2 * h + 1] *= alpha[h];
       }
-#else
-    (void)alpha;
 #endif
     if (!(MAXLESS && SOFTPV)) {                                     // the interleaved path already issued its wgmmas
       wgmma_fence();

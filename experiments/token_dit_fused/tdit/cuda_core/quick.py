@@ -5,9 +5,10 @@ import math
 import sys
 from pathlib import Path
 import torch
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "token_dit_overlap"))
 from bench import us as t_us  # noqa: E402
-from core_cu import attn_core  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from cuda_core import attn_core  # noqa: E402
 
 S, H, DS, NB, dev, bf = 5, 16, 768, 24, "cuda", torch.bfloat16
 D = DS // H
@@ -35,7 +36,7 @@ for L in (int(sys.argv[1]),) if len(sys.argv) > 1 else (384, 768):
     torch.cuda.synchronize()
     err = float((got[:, :DS].float() - ref).norm() / ref.norm())
     t = t_us(lambda: attn_core(qkvg, bias, 1, S, H))
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "token_dit_fused"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from tdit.attn import attention_gated_in_place2, bias_descriptor  # noqa: E402
     q4, k4, v4, g4 = (qkvg.view(S, L, 4 * DS)[..., i * DS:(i + 1) * DS].unflatten(-1, (H, D)) for i in range(4))
     bdesc = bias_descriptor(bias)
