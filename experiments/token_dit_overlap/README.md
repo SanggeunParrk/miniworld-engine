@@ -211,7 +211,7 @@ so a row whose first key block is entirely masked cannot leave an offset that ov
 
 ## The CUDA core, where it stands
 
-`core_cu/attn_core.cu` is correct at every shape and carries the one thing Triton cannot express here -- the bias tile
+`tdit/cuda_core/attn_core.cu` (moved into the package) is correct at every shape and carries the one thing Triton cannot express here -- the bias tile
 TMA-multicast to the S CTAs that share it -- and it is still **68.0 us against the Triton core's 52.8** at L768
 (do_bench). The variants, all measured: 128 query rows 84.9; a software pipeline over two score buffers 113 (163 with a
 dynamic buffer index, which makes ptxas inject a warpgroup.wait); two blocks in flight 82.2; softmax interleaved with
@@ -260,3 +260,23 @@ ping-pong (89.5 at the time); three TMA issuers rather than one (no change); mor
 The profile says what is left is instruction issue, not bandwidth: 12.0 M instructions at IPC 1.6, ALU 3.3 M and
 FMA 3.4 M against 1.6 M of ex2, and turning the multicast on and off moves L2 traffic 257 <-> 162 MB without moving
 the clock. Closing 78 % -> 90 % means either cutting instructions further or cutting traffic without a cluster.
+
+
+## Wired: the step runs the CUDA core
+
+It lives in the package now (`tdit/cuda_core`) and `step()` picks it wherever the shape fits -- bf16, d 768, 16 heads,
+L a multiple of 128 -- falling back to the Triton core otherwise (including a machine with no nvcc). `core="gated2"`
+or `"cuda"` pins one for an A/B.
+
+| | Triton core | CUDA core |
+|---|---:|---:|
+| step, L768 | 166.3 us/block | **158.0 (+8.36, 5.0 %)** |
+| step, L384 | 84.7 | **83.0 (+1.73, 2.0 %)** |
+
+rel_rms 4.42e-3 against the Triton core's 4.40e-3.
+
+**The softmax offset is a define (MOFF), and it is off.** Subtracting a per-row offset taken from the first key block
+is mathematically a no-op and only buys exp2 headroom, but it costs ~8 us a block in the step whichever way it is
+written -- a subtract per element (the obvious way), or folded into the bias seed so the steady-state blocks pay
+nothing (the register pressure lands somewhere else instead). Without it rel_rms is 4.42-4.52e-3 rather than 4.40e-3,
+still 2.4x better than the engine's bf16 path, and a logit would have to pass ~128 in the exp2 domain to overflow.
