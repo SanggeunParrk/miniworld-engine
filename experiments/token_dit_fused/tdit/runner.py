@@ -61,6 +61,12 @@ def _quack_gemm_act():
 
 # (tile_M, tile_N, cluster_M, pingpong); tile_N <= 208 with pingpong. Measured at M = 1920 / 3840, K 768, N 2 x 1536.
 GATED_CFGS = ((128, 192, 2, True), (128, 192, 1, True), (128, 128, 2, True), (128, 256, 1, False))
+# Plain GEMMs (q|k|v|g, Wo, squeeze): (tile_M, tile_N, cluster_M, cluster_N, pingpong), raced against cuBLAS. cluster_N
+# multicasts A over the cluster, which these one-wave shapes want: at M = 3840 it takes Wo from 9.37 (cuBLAS) to 9.03 us
+# and squeeze from 15.14 to 14.35, worth 1.9 % of the step at L768. At M = 1920 cuBLAS still wins both, so the choice is
+# measured per (M, N, K) rather than fixed (experiments/token_dit_overlap/gemm_sweep.py has the sweep).
+PLAIN_CFGS = ((128, 192, 1, 1, True), (128, 192, 1, 4, False), (128, 192, 1, 2, False), (128, 192, 1, 4, True),
+              (128, 128, 1, 1, True), (128, 256, 1, 1, False))
 
 
 class FusedTokenDiT:
@@ -128,6 +134,7 @@ class FusedTokenDiT:
         # SwiGLU in the expand GEMM's epilogue (quack gemm_act, sm90): bf16 only; fp32 keeps cuBLAS + swiglu_rows
         self.gated_gemm = dtype == torch.bfloat16 and _quack_gemm_act() is not None
         self._gated_cfg = {}
+        self._mm_cfg = {}
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -220,10 +227,10 @@ class FusedTokenDiT:
                 self._bdesc, self._bdesc_key = bias_descriptor(bias), key_d
             bdesc = self._bdesc
         for b, p in enumerate(self.per):
-            torch.addmm(p["bqkvg"], xa, p["wqkvg"].t(), out=qkvg)
+            self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
             if self.core == "gated2":
                 attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
-                torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
+                self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated":
                 attention_gated_in_place(q4, k4, v4, g4, bias[b * H:(b + 1) * H], keep2, self.prescale, self.core_precision)   # sigmoid(g)*o over q
                 torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
@@ -237,11 +244,55 @@ class FusedTokenDiT:
             else:
                 torch.mm(xa, p["wab"].t(), out=ab)
                 K.swiglu_rows(ab, h)
-            torch.mm(h, p["ws"].t(), out=y)
+            self._mm(h, p["ws"], y)
             last = b + 1 == self.nb
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                  None if last else g1[:, b + 1, 1], xa, L, self.eps)
         return x.view(S, 1, L, D).to(out_dtype or single.dtype)
+
+    def _mm(self, A, W, out, bias=None):
+        """out = A @ W^T (+ bias): cuBLAS or a quack config, whichever measures fastest for this (M, N, K) on its first
+        call (before any capture). Neither wins everywhere: quack takes q|k|v|g at both M, and Wo and squeeze only at
+        M = 3840, where a cluster_N = 4 config (A multicast) beats cuBLAS."""
+        key = (A.shape[0], W.shape[0], A.shape[1], bias is not None)
+        cfg = self._mm_cfg.get(key)
+        if cfg is None:
+            cfg = self._mm_cfg[key] = self._pick_mm(A, W, out, bias)
+        if cfg == "cublas":
+            if bias is None:
+                torch.mm(A, W.t(), out=out)
+            else:
+                torch.addmm(bias, A, W.t(), out=out)
+        else:
+            self._quack_mm(A, W, out, bias, cfg)
+
+    def _quack_mm(self, A, W, out, bias, c):
+        _quack_gemm_act()(A[None], W[None], None, None, out[None], None, None, c[0], c[1], c[2], c[3],
+                          pingpong=c[4], rowvec_bias=None if bias is None else bias[None])
+
+    def _pick_mm(self, A, W, out, bias):
+        def timed(run):
+            run()
+            torch.cuda.synchronize()
+            st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            st.record()
+            for _ in range(10):
+                run()
+            en.record()
+            torch.cuda.synchronize()
+            return st.elapsed_time(en)
+
+        best = (timed(lambda: torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out)),
+                "cublas")
+        if A.dtype in (torch.bfloat16, torch.float16) and _quack_gemm_act() is not None:
+            for c in PLAIN_CFGS:
+                try:
+                    t = timed(lambda c=c: self._quack_mm(A, W, out, bias, c))
+                except Exception:  # noqa: BLE001 -- a config this shape or card cannot take
+                    continue
+                if t < best[0]:
+                    best = (t, c)
+        return best[1]
 
     def _expand_swiglu(self, xa, wab_i, h):
         """h = silu(xa @ Wa^T) * (xa @ Wb^T) with the SwiGLU in the GEMM epilogue: ab never reaches HBM."""
