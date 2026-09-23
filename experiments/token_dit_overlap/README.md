@@ -309,3 +309,29 @@ GEMM that writes it and the pass that reads it.
 Wo is the only kernel far from both roofs: M = 3840, N = K = 768 is one wave of 120 CTAs with a short k-loop, so
 prologue and epilogue are most of it. It is 16.03 us standalone against a 6.3 us floor, but ~9 us in the captured
 step, where its operands are already hot.
+
+## Where the block's 155 us go now (`token_dit_fused/prof.py`, L768, 24 blocks, bf16)
+
+Re-measured with the GEMM picker, the fixed-offset softmax and the CUDA core all in. `bench.py` in the same session:
+**557.6 us/block for the engine, 233.7 for Anthropic's parts with the pair bias hoisted, 155.3 here** (3.59x / 1.50x);
+at L384, 272.7 / 133.2 / 81.2 (3.36x / 1.64x). Per-sample hoist 263.1 us against Anthropic's 1524.3.
+
+| | us/block | share |
+|---|---:|---:|
+| plain GEMMs: q\|k\|v\|g, Wo, squeeze (+ the 2 conditioning GEMMs, amortised) | 63.4 | 39 % |
+| attention core | 40.8 | 25 % |
+| expand + SwiGLU GEMM | 29.1 | 18 % |
+| resgate + AdaLN rows x2 | 25.8 | 16 % |
+| the rest | 1.6 | 1 % |
+| **GEMMs together** | **92.5** | **58 %** |
+
+The core is 40.8 us in the step against 46.9 standalone: the S samples' bias tiles overlap in L2 across the block.
+
+**The bottleneck is the GEMMs, and inside them the dependency chain.** Each is at 60-77 % of the measured 716 TFLOP/s
+cuBLAS roof, which is itself 72 % of the theoretical peak, so kernel-for-kernel there is little left. But the four
+standalone sum to ~83 us and cost 98.2 in the step (`probe.py`), and that gap is neither weight streaming (pinning one
+L2-resident weight set: 99.6 vs 98.2) nor launch overhead alone (`boundary.py`: ~1 us a kernel). It is that every
+kernel waits for the previous one, so prologues and tails never overlap and quack's sm90 GEMMs have no PDL. That
+~15 us a block is the largest single lever left, and it needs either PDL between the GEMMs or one persistent kernel
+per block. After it, the core's instruction count (79 % of its traffic roof, issue-bound at IPC 1.6) is worth ~10 us.
+The row passes are already at 100 % of the HBM roof in the step and have nothing left.
