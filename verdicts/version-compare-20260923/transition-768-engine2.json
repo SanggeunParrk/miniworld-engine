@@ -1,0 +1,72 @@
+{
+  "arm": "engine2",
+  "module": "transition",
+  "L": 768,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/.release-build/h100-installed/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16070",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 698,
+      "ms": 0.4672332763671875,
+      "rounds_ms": [
+        0.49497920989990235,
+        0.4886195373535156,
+        0.48081790924072265,
+        0.4672332763671875,
+        0.4480928039550781,
+        0.4474272155761719,
+        0.4556345748901367
+      ],
+      "kernels": {
+        "triton_poi_fused_clone_t_transition_fused_fwd_sm90a_view_0": 1,
+        "transition_fwd_fused": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 150,
+      "ms": 2.1397613525390624,
+      "rounds_ms": [
+        2.1166131591796873,
+        2.1251922607421876,
+        2.1397613525390624,
+        2.13495361328125,
+        2.287980804443359,
+        2.491661376953125,
+        2.3329037475585936
+      ],
+      "kernels": {
+        "triton_poi_fused_clone_t_transition_fused_fwd_sm90a_view_0": 1,
+        "transition_fwd_fused": 1,
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": 2,
+        "transition_bwd_fused": 1,
+        "reduce_partials": 1
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "auto",
+  "resolved_backends": {
+    "": "KernelBackend.TRITON",
+    "ln_in": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

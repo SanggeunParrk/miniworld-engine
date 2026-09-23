@@ -1,0 +1,49 @@
+{
+  "date": "2026-09-23",
+  "base_commit": "c53d881c652bd6b9e57f32d94d1211163291e621",
+  "source_identity": "cf0b26ce136511a2cbbc21326c577c162a65dbff9c767203d14e18888875dc16",
+  "cpu": {
+    "layout_passed": 195,
+    "layout_skipped": 6,
+    "registry_compile_layout_passed": 1150,
+    "registry_compile_layout_skipped": 12,
+    "sweep_page_passed": 3
+  },
+  "gpu": {
+    "job_id": 16294,
+    "node": "node01",
+    "passed": 54,
+    "warnings": 23,
+    "seconds": 867.14,
+    "suites": [
+      "test_h100_module_wiring_gpu.py",
+      "test_trimul_single_h100_gpu.py",
+      "test_trimul_wide_preparation_gpu.py",
+      "test_opm_train_gpu.py",
+      "test_pwa_train_gpu.py"
+    ]
+  },
+  "derived_plans": {
+    "sm86": {
+      "invocations": 8506,
+      "errors": 0,
+      "complete": true
+    },
+    "sm90": {
+      "invocations": 9106,
+      "errors": 0,
+      "complete": true
+    }
+  },
+  "wheel": {
+    "sha256": "4b59f85c415b3b23bb2eeb58bcfbf0c11567bffa601cb493dab1c3c63cdd0f42",
+    "trimul_sources_checked": 65,
+    "revision_plan_archives": "excluded by existing packaging policy; built in user cache",
+    "default_plan": "current and verified"
+  },
+  "notes": [
+    "Unchanged source archives retain original whitespace and hashes; ordinary changed source passes whitespace checks.",
+    "Initial sweep-page tests failed on stale source identity; complete rederivation resolved all three failures.",
+    "Derivation reported existing missing CuTe cache and FakeTensor data pointer warnings; no tuning completion is claimed."
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "engine1_commit": "850e160c4147d9d5851cbfb01e172f84820796b0",
+  "engine2_base": "c53d881c652bd6b9e57f32d94d1211163291e621",
+  "engine2_post_tag_local_wiring": true,
+  "wheel_sha256": "ae4712d308372f10e2885eeca5d092ba0a1ff139d4cb4249eb4f49523c29f187",
+  "measurements": 52,
+  "benchmark_sha256": "fb72fa83584211f97c72b97b873215b55986766b1b78fda92e63af38722a3080",
+  "benchmarked_transition_source_sha256": {
+    "fused_sm90a.py": "1fd2a29b63e938bc37e2b2d3a45df73e09fca2616856ceb120b3fcb0f93baf1c",
+    "fused_wide_sm90a.py": "0e7a4c500ac983bfa685356c33b2b9e33bdd9eab7d42ab22b20a74de53acaa2b"
+  },
+  "comparison_expected_records": 52,
+  "msa_block_source_sha256": "deeaf75262d6fe14957c49e2cf13d82ff4c992080a89076fcf5848749ce2fff4",
+  "standard_msa_depth": 1024,
+  "previous_msa_measurements": "msa-depth256/",
+  "native_compile_guard_regression": "tests/compile/test_transition_fake_availability.py: 4 passed",
+  "timing_policy": "7 rounds x 50 CUDA graph replays; approximately 300ms warmup; median ms/replay"
+}

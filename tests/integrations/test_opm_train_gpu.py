@@ -20,6 +20,13 @@ DEV, DT = "cuda", torch.bfloat16
 PARAMS = ("ln_msa.weight", "ln_msa.bias", "to_left.weight", "to_right.weight", "to_out.weight", "to_out.bias")
 
 
+@pytest.fixture(autouse=True)
+def explicit_baseline(monkeypatch):
+    """A baseline call explicitly disables the now-default native path."""
+    monkeypatch.setenv(ot.ENV, "0")
+    monkeypatch.delenv("MINIWORLD_PWA_INFER", raising=False)
+
+
 class opted_in:
     def __enter__(self):
         self.saved = os.environ.get(ot.ENV)
@@ -95,3 +102,56 @@ def test_refusals(inputs):
         assert ot.refusal(inputs["msa"], D_MSA, D_HID, D_PAIR, interchain=True, normalize_before_proj=True) is not None
         assert ot.refusal(inputs["msa"], D_MSA, D_HID, D_PAIR, interchain=False, normalize_before_proj=False) is not None
         assert ot.refusal(inputs["msa"][:, :200], D_MSA, D_HID, D_PAIR, **kw) is not None   # S % 256
+
+
+def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeypatch):
+    from miniworld_engine import settings
+    monkeypatch.delenv(ot.ENV)
+    monkeypatch.setenv("MINIWORLD_OPM_TRAIN_SAVE_O", "1")
+    assert settings.current().engine_backend == "auto"
+    assert ot.wanted(module.implementation)
+    x = inputs["msa"].transpose(-1, -2).contiguous().transpose(-1, -2).requires_grad_(True)
+    args = (x, *module.parameters())
+    y = module(x, inputs["ragged"])
+    expected = torch.autograd.grad(y, args, inputs["gz"])
+    from torch._dynamo.testing import CompileCounterWithBackend
+    counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(module, backend=counter, fullgraph=True)
+    z = compiled(x, inputs["ragged"])
+    actual = torch.autograd.grad(z, args, inputs["gz"])
+    for _ in range(12):
+        compiled(x, inputs["ragged"])
+    assert counter.frame_count == 1
+    torch.testing.assert_close(z, y, rtol=0, atol=0)
+    for a, b in zip(actual, expected, strict=True):
+        torch.testing.assert_close(a, b, rtol=1e-6, atol=1e-6)
+    with torch.no_grad():
+        torch.testing.assert_close(compiled(x, inputs["ragged"]), y, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("length", [384, 768])
+def test_residual_epilogue_rounding_and_identity_gradient(length, monkeypatch):
+    monkeypatch.setenv(ot.ENV, "1")
+    torch.manual_seed(71)
+    m = OuterProductMean(64, 128, 32, implementation="miniworld").cuda().bfloat16()
+    with torch.no_grad():
+        m.to_out.weight.normal_(std=.03)
+    x = torch.randn(1, 256, length, 64, device=DEV, dtype=DT, requires_grad=True)
+    mask = torch.rand(1, 256, length, device=DEV) > .2
+    # Noncontiguous residual must keep both its value and its gradient mapping.
+    residual = torch.randn(1, length, length, 128, device=DEV, dtype=DT).transpose(1, 2).requires_grad_()
+    with torch.no_grad():
+        expected = m(x, mask) + residual
+        actual = m(x, mask, residual=residual)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    grad = torch.randn_like(actual)
+    leaves = (x, residual, *m.parameters())
+    baseline = m(x, mask) + residual
+    expected_grads = torch.autograd.grad(baseline, leaves, grad)
+    compiled = torch.compile(m, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
+    actual = compiled(x, mask, residual=residual)
+    actual_grads = torch.autograd.grad(actual, leaves, grad)
+    torch.testing.assert_close(actual, baseline, rtol=0, atol=0)
+    for a, b in zip(actual_grads, expected_grads, strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    torch.testing.assert_close(actual_grads[1], grad, rtol=0, atol=0)

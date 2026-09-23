@@ -26,6 +26,13 @@ PARAMS = ("ln_msa.weight", "ln_msa.bias", "to_value.weight", "to_gate.weight", "
           "to_bias.weight", "to_out.weight")
 
 
+@pytest.fixture(autouse=True)
+def explicit_baseline(monkeypatch):
+    """A baseline call explicitly disables the now-default native path."""
+    monkeypatch.setenv(pt.ENV, "0")
+    monkeypatch.delenv("MINIWORLD_PWA_INFER", raising=False)
+
+
 class opted_in:
     def __enter__(self):
         self.saved = os.environ.get(pt.ENV)
@@ -155,3 +162,58 @@ def test_inference_takes_the_same_kernels(module, inputs):
         assert rel(out_f.float() - inputs["msa"].float(), out_e.float() - inputs["msa"].float()) < 2e-2   # the update itself
     finally:
         module.train()
+
+
+def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeypatch):
+    from miniworld_engine import settings
+    monkeypatch.delenv(pt.ENV)
+    assert settings.current().engine_backend == "auto"
+    assert pt.wanted(module.implementation)
+    msa = inputs["msa"].transpose(-1, -2).contiguous().transpose(-1, -2).requires_grad_(True)
+    pair = inputs["pair"].transpose(-1, -2).contiguous().transpose(-1, -2).requires_grad_(True)
+    args = (msa, pair, *module.parameters())
+    y = module(msa, pair, inputs["ragged"])
+    expected = torch.autograd.grad(y, args, inputs["gz"])
+    from torch._dynamo.testing import CompileCounterWithBackend
+    counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(module, backend=counter, fullgraph=True)
+    z = compiled(msa, pair, inputs["ragged"])
+    actual = torch.autograd.grad(z, args, inputs["gz"])
+    for _ in range(12):
+        compiled(msa, pair, inputs["ragged"])
+    assert counter.frame_count == 1
+    torch.testing.assert_close(z, y, rtol=0, atol=0)
+    for a, b in zip(actual, expected, strict=True):
+        # Native FP32 parameter reductions can differ in accumulation order.
+        torch.testing.assert_close(a, b, rtol=5e-4, atol=3e-5)
+    with torch.no_grad():
+        torch.testing.assert_close(compiled(msa, pair, inputs["ragged"]), y, rtol=0, atol=0)
+
+
+def test_no_grad_training_keeps_dropout(module, inputs, monkeypatch):
+    monkeypatch.delenv(pt.ENV)
+    monkeypatch.setattr(module.drop_msa, "p_drop", .15)
+    torch.manual_seed(461)
+    expected = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+    torch.manual_seed(461)
+    with torch.no_grad():
+        actual = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("length", [384, 768])
+def test_glue_dropout_shared_tiles_match_materialized_gradient(length):
+    """Both consumers' dWo reads must see masked tiles, including reused ring slots."""
+    torch.manual_seed(73)
+    s = 256
+    def rand(*shape):
+        return torch.randn(*shape, device=DEV, dtype=DT)
+    o, y, dy = rand(s, length, 256), rand(s, length, 64), rand(s, length, 64)
+    wg, wot = rand(256, 64), rand(256, 64)
+    mask = (torch.rand(length, 64, device=DEV) > .15).to(DT)
+    scale = 1.0 / .85
+    ext = pt._k()["glue3"]
+    expected = ext.pwa_glue3(o, y, (dy * mask[None] * scale).contiguous(), wg, wot, None, 2, 1)
+    actual = ext.pwa_glue3(o, y, dy, wg, wot, None, 2, 1, mask, scale)
+    for a, b in zip(actual, expected, strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)

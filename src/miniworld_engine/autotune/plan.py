@@ -15,7 +15,7 @@ def source_identity() -> str:
     """Hash dispatch inputs; tuning results and page edits do not invalidate a derivation."""
     files = [ROOT / "settings.py", ROOT / "kernels" / "registry_module.csv",
              ROOT / "kernels" / "registry.csv"]
-    for directory in (ROOT / "modules", ROOT / "kernels"):
+    for directory in (ROOT / "modules", ROOT / "kernels", ROOT / "integrations"):
         files.extend(path for path in directory.rglob("*.py")
                      if "notes" not in path.relative_to(directory).parts)
     files.extend((ROOT / "build" / "gpu_to_kernels").glob("*.csv"))

@@ -12,6 +12,7 @@ from jaxtyping import Bool, Float
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
+from miniworld_engine.integrations import trimul_h100 as _h100
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -276,6 +277,10 @@ class TriangleMultiplication(nn.Module):
             # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
             # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls
             # back to the backends below where it does not.  See integrations.anthropic_trimul.
+            if _h100.serves_inference(self, pair, bidirectional=False, dropscale=_ds):
+                return _h100.update_inference(self, pair, mask, bidirectional=False)
+            if _h100.serves_single(self, pair):
+                return _h100.update(self, pair, mask, _ds, bidirectional=False)
             if _anthropic.wanted(self.implementation):
                 _native = {"grad": torch.is_grad_enabled(), "dropout": _ds is not None}
                 if self.implementation == ImplementationType.ANTHROPIC:

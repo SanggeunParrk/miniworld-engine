@@ -22,6 +22,7 @@ from jaxtyping import Bool, Float
 from miniworld_engine import settings
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
+from miniworld_engine.integrations import trimul_h100 as _h100
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -104,6 +105,18 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d2, d_pair, bias=False, init="zero")
 
+        if self.implementation == ImplementationType.MINIWORLD and d_pair == self.d_hidden == 128:
+            # Keep the public [out, in] shapes and checkpoint keys, but store
+            # the four front matrices in the [in, out] order consumed by the
+            # native backward and Triton GEMMs. Their transpose is now a view.
+            # Construct real leaf Parameters before the optimizer is created;
+            # no detached copies or first-forward parameter replacement.
+            for projection in (self.to_left, self.to_left_gate, self.to_right, self.to_right_gate):
+                weight = projection.weight
+                projection.weight = nn.Parameter(
+                    weight.detach().t().contiguous().t(), requires_grad=weight.requires_grad
+                )
+
     @typecheck
     def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
         """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p)."""
@@ -133,6 +146,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
             if _ds is not None:
                 out = out * _ds
             return out + _pair_in
+
+        if (torch.is_grad_enabled() or _ds is not None) and _h100.serves(self, pair):
+            return _h100.update(self, pair, mask, _ds)
+
+        if _h100.serves_inference(self, pair, bidirectional=True, dropscale=_ds):
+            return _h100.update_inference(self, pair, mask, bidirectional=True)
 
         if settings.current().trimul_sm90_kernels and self._backend != KernelBackend.PYTORCH:
             # Explicit kernel-level overrides preserve the Triton algorithm;

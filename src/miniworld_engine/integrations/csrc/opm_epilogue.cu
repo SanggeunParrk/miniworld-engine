@@ -543,6 +543,7 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     const float* __restrict__ NORM,           // [N, N]  mask counts in fp32, already clamped >= 1
     const __nv_bfloat16* __restrict__ BF,     // [K/16][CZ/8][32][4] pre-swizzled projection weight
     const float* __restrict__ BIAS,           // [CZ]  bf16-rounded bias, held in fp32
+    const __nv_bfloat16* __restrict__ RESIDUAL, // optional [1, NI, NJ, CZ]
     int NI, int NJ, long M,     // NJ is a BLOCK of j columns when the caller bounds the workspace
     // z[i, j, :] as a 4-D box: (64 z) x j x (2 halves of z) x i.  j sits INSIDE the z half on
     // purpose: it is what makes the accumulator's eight rows land on eight distinct swizzle chunks,
@@ -634,8 +635,14 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
       const int n = nt * 8 + (lane & 3) * 2;
       const float2 b = *reinterpret_cast<const float2*>(&sBias[n]);
       const int row = (il * 2 + (n >> 6)) * BJ + jl;      // rows p and p + 8 are 8 lines apart
-      const __nv_bfloat162 v0 = __float22bfloat162_rn(make_float2(fmaf(acc[nt * 4 + 0], inv0, b.x), fmaf(acc[nt * 4 + 1], inv0, b.y)));
-      const __nv_bfloat162 v1 = __float22bfloat162_rn(make_float2(fmaf(acc[nt * 4 + 2], inv1, b.x), fmaf(acc[nt * 4 + 3], inv1, b.y)));
+      __nv_bfloat162 v0 = __float22bfloat162_rn(make_float2(fmaf(acc[nt * 4 + 0], inv0, b.x), fmaf(acc[nt * 4 + 1], inv0, b.y)));
+      __nv_bfloat162 v1 = __float22bfloat162_rn(make_float2(fmaf(acc[nt * 4 + 2], inv1, b.x), fmaf(acc[nt * 4 + 3], inv1, b.y)));
+      if (RESIDUAL != nullptr) {
+        // Round the update before adding: identical to bf16 OPM + bf16 residual.
+        const auto* rp = RESIDUAL + ((size_t)(i0 + il) * NJ + j0 + jl) * CZ + n;
+        v0 = __hadd2(v0, *reinterpret_cast<const __nv_bfloat162*>(rp));
+        v1 = __hadd2(v1, *reinterpret_cast<const __nv_bfloat162*>(rp + 8 * CZ));
+      }
       *reinterpret_cast<__nv_bfloat162*>(sO + tma::sw128(row, n & 63)) = v0;
       *reinterpret_cast<__nv_bfloat162*>(sO + tma::sw128(row + 8, n & 63)) = v1;
     }
@@ -1487,13 +1494,18 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
 }
 
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf, torch::Tensor bias,
-                           int64_t ni, int64_t nj) {
+                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual) {
   TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
   TORCH_CHECK(norm.scalar_type() == torch::kFloat32 && norm.is_contiguous(), "norm: contiguous fp32");
   TORCH_CHECK(bf.scalar_type() == torch::kBFloat16 && bf.is_contiguous() && bf.numel() == CH * CH * CZ, "bf: Wo [CZ, CH*CH] bf16, contiguous");
   TORCH_CHECK(bias.scalar_type() == torch::kFloat32 && bias.numel() == CZ, "bias: fp32 [128]");
   TORCH_CHECK(ni % BI == 0, "the epilogue tiles ", BI, " i tokens, got ", ni);
   TORCH_CHECK(nj % BJ == 0, "the epilogue tiles ", BJ, " j tokens, got ", nj);
+  if (residual.has_value()) {
+    TORCH_CHECK(residual->device() == O.device() && residual->scalar_type() == torch::kBFloat16
+                && residual->is_contiguous() && residual->sizes() == torch::IntArrayRef({1, ni, nj, CZ}),
+                "residual: contiguous bf16 [1, ni, nj, 128] on O's device");
+  }
   const long M = O.size(1);
   auto out = torch::empty({1, ni, nj, (long)CZ}, O.options());
   dim3 grid(nj / BJ, ni / BI);
@@ -1521,13 +1533,15 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
       norm.data_ptr<float>(),
       reinterpret_cast<const __nv_bfloat16*>(bf.data_ptr<at::BFloat16>()),
       bias.data_ptr<float>(),
+      residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
       (int)ni, (int)nj, M, out_map);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("opm_epilogue", &opm_epilogue, "fused OPM epilogue (div-norm + proj_out + bias)");
+  m.def("opm_epilogue", &opm_epilogue, "fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
+        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none());
   m.def("opm_dgrad", &opm_dgrad, "fused OPM dO: (dz @ Wo) / n straight into the grouped layout");
   m.def("opm_dwo", &opm_dwo, "dWo straight off the grouped outer product, no permute");
   m.def("opm_prologue_bwd", &opm_prologue_bwd, "fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");

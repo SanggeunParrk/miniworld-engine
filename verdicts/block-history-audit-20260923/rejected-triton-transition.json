@@ -1,0 +1,1421 @@
+{
+  "job": "16207",
+  "gpu_uuid": "30a58821-3631-d2f4-e58b-73454f9d7cef",
+  "torch": "2.10.0+cu128",
+  "checks": {
+    "historical": [
+      0.0019602959509938955,
+      3.644773414634983e-06,
+      0.0,
+      1.457729740650393e-05,
+      0.0,
+      7.08557354300865e-06,
+      0.0,
+      0.0,
+      6.263790510274703e-06,
+      4.188372258795425e-06,
+      0.0,
+      0.0,
+      7.356913556577638e-05,
+      8.059411629801616e-05,
+      0.0003552853304427117,
+      0.0003690798475872725,
+      0.0004079603822901845
+    ],
+    "historical_new_transition": [
+      0.0,
+      3.644773414634983e-06,
+      0.0,
+      1.457729740650393e-05,
+      0.0,
+      7.08557354300865e-06,
+      0.0,
+      0.0,
+      6.263790510274703e-06,
+      4.188372258795425e-06,
+      0.0,
+      0.0,
+      4.750015705212718e-07,
+      6.480455567725585e-07,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "corrected_research": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "current_fixed": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      4.453204383025877e-07,
+      4.7554445359310193e-07,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "times": {
+    "whole_block": {
+      "historical": 1597.06662495931,
+      "historical_new_transition": 2102.0259857177734,
+      "corrected_research": 2108.096631368001,
+      "current_fixed": 2121.6523488362627,
+      "current_rng": 2120.3480402628584
+    },
+    "transition": {
+      "historical": 575.2582550048828,
+      "current": 1093.809700012207
+    },
+    "trimul": {
+      "historical": 1008.159859975179,
+      "corrected": 1013.1210645039876,
+      "current": 1024.6013323465984
+    },
+    "kernel_bodies": {
+      "old_b1": 185.05656242370605,
+      "current_b1": 180.38687705993652,
+      "old_b7": 351.5560722351074,
+      "fixed_b7": 363.80775451660156,
+      "current_b7": 362.10975646972656
+    }
+  },
+  "samples": {
+    "whole_block": {
+      "historical": [
+        1554.4464111328125,
+        1629.9973805745442,
+        1596.6108957926433,
+        1583.3056131998699,
+        1601.3983408610027,
+        1612.2295379638672,
+        1597.5223541259766,
+        1582.9303741455078,
+        1581.014633178711,
+        1604.7786712646484,
+        1596.1755116780598,
+        1599.0890502929688
+      ],
+      "historical_new_transition": [
+        2066.9979095458984,
+        2081.92138671875,
+        2098.2845306396484,
+        2110.7111612955728,
+        2096.730168660482,
+        2099.736531575521,
+        2095.4663594563804,
+        2107.291793823242,
+        2109.2732747395835,
+        2110.877354939779,
+        2112.165069580078,
+        2104.315439860026
+      ],
+      "corrected_research": [
+        2178.0298868815103,
+        2117.5949096679688,
+        2118.0452982584634,
+        2092.8680419921875,
+        2100.551732381185,
+        2106.8487803141275,
+        2108.583450317383,
+        2105.037307739258,
+        2112.610880533854,
+        2107.6098124186196,
+        2106.4141591389975,
+        2116.4450327555337
+      ],
+      "current_fixed": [
+        2103.4786224365234,
+        2105.4885864257812,
+        2112.7415974934897,
+        2118.840535481771,
+        2123.2101440429688,
+        2123.639678955078,
+        2129.2818705240884,
+        2122.0202128092446,
+        2121.2844848632812,
+        2124.9170939127603,
+        2124.4322458902993,
+        2117.905298868815
+      ],
+      "current_rng": [
+        2094.379679361979,
+        2100.491205851237,
+        2112.9634857177734,
+        2132.5032552083335,
+        2119.597371419271,
+        2117.3778533935547,
+        2118.996047973633,
+        2128.532028198242,
+        2125.6275177001953,
+        2121.0987091064453,
+        2129.644521077474,
+        2125.754928588867
+      ]
+    },
+    "transition": {
+      "historical": [
+        574.7247695922852,
+        597.1167882283529,
+        583.1642786661783,
+        595.3287760416666,
+        569.488779703776,
+        570.4890569051107,
+        585.706901550293,
+        570.2293395996094,
+        570.1946894327799,
+        573.3266830444336,
+        575.7917404174805,
+        577.4189631144205
+      ],
+      "current": [
+        1081.2029520670574,
+        1085.6000264485676,
+        1089.5503997802734,
+        1092.9096221923828,
+        1094.3285624186199,
+        1094.6056365966797,
+        1104.4731140136719,
+        1093.8709259033203,
+        1095.453389485677,
+        1103.0909220377605,
+        1093.7484741210938,
+        1090.3048197428386
+      ]
+    },
+    "trimul": {
+      "historical": [
+        990.2311960856119,
+        997.644297281901,
+        996.989631652832,
+        1026.5802383422852,
+        1004.6911875406901,
+        1035.7351938883464,
+        1002.9874801635742,
+        1038.8549168904622,
+        1014.2053604125977,
+        1004.5728047688802,
+        1035.091718037923,
+        1011.628532409668
+      ],
+      "corrected": [
+        997.162946065267,
+        1033.776028951009,
+        999.126116434733,
+        1057.475471496582,
+        1004.0335973103842,
+        1043.0717468261719,
+        1004.1386922200521,
+        1011.0048294067383,
+        1035.9453201293945,
+        1014.5402908325195,
+        1011.7018381754557,
+        1021.4578628540039
+      ],
+      "current": [
+        1012.7845128377279,
+        1066.4269129435222,
+        1022.0786412556967,
+        1022.6725260416666,
+        1014.8858388264974,
+        1026.53013865153,
+        1038.9213562011719,
+        1033.4208170572917,
+        1016.9240315755209,
+        1045.9976196289062,
+        1036.9069417317708,
+        1018.1079864501953
+      ]
+    },
+    "kernel_bodies": {
+      "old_b1": [
+        179.64544296264648,
+        192.33392715454102,
+        188.13039779663086,
+        180.36672592163086,
+        194.6843147277832,
+        181.98272705078125,
+        190.1972770690918,
+        176.61455154418945,
+        191.51504516601562,
+        180.787353515625
+      ],
+      "current_b1": [
+        178.8707160949707,
+        190.8843231201172,
+        180.47439575195312,
+        190.42512893676758,
+        179.67119216918945,
+        192.2907257080078,
+        178.93375396728516,
+        179.97663497924805,
+        180.29935836791992,
+        190.8718490600586
+      ],
+      "old_b7": [
+        351.5911865234375,
+        358.73279571533203,
+        348.6665725708008,
+        351.52095794677734,
+        350.30895233154297,
+        359.61071014404297,
+        349.0315246582031,
+        360.14366149902344,
+        347.5102233886719,
+        364.4345474243164
+      ],
+      "fixed_b7": [
+        364.11441802978516,
+        364.10064697265625,
+        366.3849639892578,
+        363.5148620605469,
+        366.0929489135742,
+        362.40478515625,
+        361.4044952392578,
+        363.2115173339844,
+        366.75121307373047,
+        360.44384002685547
+      ],
+      "current_b7": [
+        366.7127990722656,
+        358.0681610107422,
+        360.3696060180664,
+        359.3057632446289,
+        362.6481628417969,
+        361.57135009765625,
+        368.57486724853516,
+        365.59391021728516,
+        369.7808074951172,
+        350.9107208251953
+      ]
+    }
+  },
+  "telemetry": [
+    {
+      "phase": "whole_block/historical",
+      "csv": "1980, 2619, 159.63, 700.00, 33"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1920, 2619, 247.36, 700.00, 44"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1920, 2619, 336.46, 700.00, 44"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1965, 2619, 412.50, 700.00, 44"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1965, 2619, 496.99, 700.00, 44"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1965, 2619, 571.47, 700.00, 45"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1620, 2619, 656.79, 700.00, 45"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1665, 2619, 703.17, 700.00, 43"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1800, 2619, 698.35, 700.00, 44"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1890, 2619, 693.93, 700.00, 45"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1950, 2619, 694.39, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1965, 2619, 693.64, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1965, 2619, 692.55, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1920, 2619, 691.94, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1710, 2619, 696.43, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1800, 2619, 695.74, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 691.94, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1950, 2619, 693.67, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1950, 2619, 694.43, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1965, 2619, 694.45, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 692.26, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1740, 2619, 690.87, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1695, 2619, 697.00, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1710, 2619, 697.73, 700.00, 46"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1755, 2619, 696.97, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1740, 2619, 696.26, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1770, 2619, 696.39, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1710, 2619, 695.48, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1665, 2619, 694.91, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1695, 2619, 696.67, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1710, 2619, 698.97, 700.00, 47"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1740, 2619, 700.18, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1785, 2619, 699.66, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1770, 2619, 700.18, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1725, 2619, 698.03, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1620, 2619, 699.55, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1680, 2619, 699.16, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1680, 2619, 699.88, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1725, 2619, 699.60, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1755, 2619, 698.16, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1755, 2619, 698.30, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1740, 2619, 698.09, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1710, 2619, 699.29, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1665, 2619, 699.29, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1695, 2619, 698.30, 700.00, 48"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1665, 2619, 698.54, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1695, 2619, 697.15, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1710, 2619, 694.82, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1770, 2619, 693.85, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1830, 2619, 689.74, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 688.89, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 691.35, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 692.32, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1890, 2619, 692.38, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 693.29, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1920, 2619, 694.15, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1830, 2619, 693.67, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1830, 2619, 693.42, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1890, 2619, 693.08, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1890, 2619, 694.76, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1770, 2619, 696.49, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1875, 2619, 694.60, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1830, 2619, 695.47, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1785, 2619, 693.71, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1815, 2619, 695.12, 700.00, 49"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1860, 2619, 693.87, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 692.35, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 692.72, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1935, 2619, 695.89, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 692.64, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1845, 2619, 692.75, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1875, 2619, 695.28, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1800, 2619, 693.65, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1830, 2619, 694.41, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1785, 2619, 694.63, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1815, 2619, 693.61, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1860, 2619, 691.27, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1740, 2619, 694.51, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1785, 2619, 691.83, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1875, 2619, 692.39, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1875, 2619, 691.81, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1890, 2619, 693.58, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1800, 2619, 698.13, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1890, 2619, 694.35, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1815, 2619, 695.09, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1755, 2619, 694.05, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1800, 2619, 695.54, 700.00, 50"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1860, 2619, 692.83, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1920, 2619, 694.32, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 694.78, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1920, 2619, 696.66, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1845, 2619, 692.58, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1845, 2619, 693.50, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1875, 2619, 694.92, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1725, 2619, 696.25, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1830, 2619, 697.76, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1860, 2619, 692.60, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1845, 2619, 690.72, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 691.60, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1875, 2619, 692.63, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1890, 2619, 694.40, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1845, 2619, 691.68, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1905, 2619, 694.12, 700.00, 51"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1860, 2619, 689.29, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1800, 2619, 695.27, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1860, 2619, 693.84, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1755, 2619, 695.18, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 692.43, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1860, 2619, 691.28, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1890, 2619, 693.73, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1890, 2619, 693.29, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1890, 2619, 694.33, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1845, 2619, 691.93, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1845, 2619, 691.55, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1875, 2619, 694.12, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1815, 2619, 697.20, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1815, 2619, 697.11, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1770, 2619, 697.51, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1875, 2619, 696.20, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1815, 2619, 695.75, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1785, 2619, 695.57, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 692.66, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1890, 2619, 692.93, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1860, 2619, 691.75, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1860, 2619, 693.91, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1800, 2619, 695.49, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1845, 2619, 691.00, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1770, 2619, 695.64, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1785, 2619, 693.25, 700.00, 52"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1770, 2619, 693.20, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1875, 2619, 690.84, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1890, 2619, 691.02, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 693.86, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1860, 2619, 694.11, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1815, 2619, 693.29, 700.00, 55"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1860, 2619, 693.17, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1845, 2619, 692.53, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1770, 2619, 698.01, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1890, 2619, 696.68, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1860, 2619, 695.21, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1890, 2619, 694.61, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1830, 2619, 693.65, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 694.05, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1845, 2619, 692.53, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1875, 2619, 693.04, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1890, 2619, 694.62, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1890, 2619, 692.70, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical",
+      "csv": "1845, 2619, 693.68, 700.00, 55"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1845, 2619, 690.90, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1905, 2619, 694.15, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/current_rng",
+      "csv": "1875, 2619, 695.33, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 695.62, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 696.81, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/current_fixed",
+      "csv": "1875, 2619, 697.14, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1845, 2619, 693.25, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1725, 2619, 694.94, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/corrected_research",
+      "csv": "1875, 2619, 693.48, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1830, 2619, 693.29, 700.00, 54"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1785, 2619, 694.93, 700.00, 53"
+    },
+    {
+      "phase": "whole_block/historical_new_transition",
+      "csv": "1890, 2619, 685.91, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1830, 2619, 680.53, 700.00, 58"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1965, 2619, 682.29, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1725, 2619, 690.81, 700.00, 58"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1935, 2619, 689.93, 700.00, 54"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1725, 2619, 694.43, 700.00, 57"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1830, 2619, 691.71, 700.00, 53"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1560, 2619, 694.30, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1695, 2619, 697.07, 700.00, 54"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1800, 2619, 700.71, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1665, 2619, 692.03, 700.00, 55"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1770, 2619, 700.16, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1665, 2619, 695.90, 700.00, 55"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1755, 2619, 700.29, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1635, 2619, 698.32, 700.00, 57"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1665, 2619, 701.71, 700.00, 54"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1680, 2619, 702.42, 700.00, 57"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1725, 2619, 696.54, 700.00, 55"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1710, 2619, 701.25, 700.00, 58"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1710, 2619, 696.86, 700.00, 55"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1755, 2619, 698.93, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1665, 2619, 696.00, 700.00, 55"
+    },
+    {
+      "phase": "transition/historical",
+      "csv": "1680, 2619, 697.99, 700.00, 54"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1665, 2619, 698.31, 700.00, 57"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1755, 2619, 697.38, 700.00, 55"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1680, 2619, 697.19, 700.00, 58"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1770, 2619, 696.79, 700.00, 55"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1965, 2619, 653.11, 700.00, 50"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1965, 2619, 565.16, 700.00, 45"
+    },
+    {
+      "phase": "transition/current",
+      "csv": "1980, 2619, 490.61, 700.00, 44"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1905, 2619, 483.21, 700.00, 53"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1905, 2619, 486.21, 700.00, 54"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1890, 2619, 491.00, 700.00, 55"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1905, 2619, 498.53, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1890, 2619, 524.19, 700.00, 56"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1905, 2619, 593.13, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1440, 2619, 664.96, 700.00, 53"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1740, 2619, 707.21, 700.00, 52"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1815, 2619, 695.59, 700.00, 54"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1905, 2619, 692.04, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1890, 2619, 693.14, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1890, 2619, 692.44, 700.00, 56"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1890, 2619, 691.91, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1815, 2619, 690.57, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1695, 2619, 694.03, 700.00, 54"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1770, 2619, 695.93, 700.00, 54"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1830, 2619, 695.05, 700.00, 55"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1875, 2619, 693.70, 700.00, 55"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1905, 2619, 692.23, 700.00, 56"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1875, 2619, 693.45, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1800, 2619, 691.68, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1740, 2619, 690.27, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1740, 2619, 693.89, 700.00, 54"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1830, 2619, 693.29, 700.00, 54"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1875, 2619, 692.81, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1875, 2619, 693.00, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1890, 2619, 693.35, 700.00, 56"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1860, 2619, 691.35, 700.00, 56"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1785, 2619, 689.73, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1740, 2619, 692.43, 700.00, 55"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1785, 2619, 693.20, 700.00, 55"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1875, 2619, 695.09, 700.00, 55"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1860, 2619, 693.73, 700.00, 56"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1890, 2619, 693.60, 700.00, 56"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1860, 2619, 691.72, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1785, 2619, 693.47, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1755, 2619, 692.96, 700.00, 55"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1785, 2619, 692.99, 700.00, 55"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1815, 2619, 693.58, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1830, 2619, 693.37, 700.00, 56"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1860, 2619, 693.91, 700.00, 56"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1845, 2619, 692.78, 700.00, 56"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1845, 2619, 691.42, 700.00, 56"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1785, 2619, 691.29, 700.00, 56"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1755, 2619, 692.46, 700.00, 55"
+    },
+    {
+      "phase": "trimul/corrected",
+      "csv": "1785, 2619, 692.20, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1830, 2619, 692.30, 700.00, 55"
+    },
+    {
+      "phase": "trimul/historical",
+      "csv": "1845, 2619, 691.75, 700.00, 56"
+    },
+    {
+      "phase": "trimul/current",
+      "csv": "1890, 2619, 690.86, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/current_b1",
+      "csv": "1950, 2619, 684.25, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/fixed_b7",
+      "csv": "1710, 2619, 690.01, 700.00, 57"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1665, 2619, 692.19, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1875, 2619, 691.79, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/old_b7",
+      "csv": "1680, 2619, 694.53, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/old_b7",
+      "csv": "1755, 2619, 692.14, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/fixed_b7",
+      "csv": "1680, 2619, 693.58, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1725, 2619, 693.26, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/old_b7",
+      "csv": "1965, 2619, 686.52, 700.00, 55"
+    },
+    {
+      "phase": "kernel_bodies/old_b1",
+      "csv": "1920, 2619, 684.94, 700.00, 55"
+    },
+    {
+      "phase": "kernel_bodies/fixed_b7",
+      "csv": "1650, 2619, 696.29, 700.00, 57"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1695, 2619, 693.41, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/current_b1",
+      "csv": "1905, 2619, 686.19, 700.00, 55"
+    },
+    {
+      "phase": "kernel_bodies/fixed_b7",
+      "csv": "1605, 2619, 695.92, 700.00, 57"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1710, 2619, 692.55, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/old_b7",
+      "csv": "1725, 2619, 693.02, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/old_b1",
+      "csv": "1830, 2619, 686.50, 700.00, 55"
+    },
+    {
+      "phase": "kernel_bodies/old_b7",
+      "csv": "1815, 2619, 694.14, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1680, 2619, 693.00, 700.00, 57"
+    },
+    {
+      "phase": "kernel_bodies/current_b1",
+      "csv": "1905, 2619, 692.75, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1560, 2619, 693.90, 700.00, 58"
+    },
+    {
+      "phase": "kernel_bodies/old_b7",
+      "csv": "1695, 2619, 693.81, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/fixed_b7",
+      "csv": "1695, 2619, 694.48, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/old_b1",
+      "csv": "1650, 2619, 690.36, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/old_b7",
+      "csv": "1905, 2619, 693.72, 700.00, 55"
+    },
+    {
+      "phase": "kernel_bodies/fixed_b7",
+      "csv": "1710, 2619, 690.73, 700.00, 57"
+    },
+    {
+      "phase": "kernel_bodies/current_b1",
+      "csv": "1665, 2619, 689.65, 700.00, 56"
+    },
+    {
+      "phase": "kernel_bodies/current_b7",
+      "csv": "1770, 2619, 692.78, 700.00, 56"
+    }
+  ],
+  "sources": {
+    "fused_sm90a.py": {
+      "old": "459000103b5afa079fbcdda158851e934aa5e31c264a64ae5f36d21c7b7e6b16",
+      "current": "86f036a127ef3aeb41c0585eee4ab3d8969212f79394488f1be1b123a4d7b3f6"
+    },
+    "transition_fused_fwd_sm90a_kernel.cu": {
+      "old": "5773ae836de034358fbf0dd6036f781acc3d92e24e497f88c0c05e0ea935a780",
+      "current": "5773ae836de034358fbf0dd6036f781acc3d92e24e497f88c0c05e0ea935a780"
+    },
+    "transition_fused_bwd_sm90a_kernel.cu": {
+      "old": "41de80001f576f5c6533b9db2e8f41ef56cae2c5d8418e57e7062d69f7772cd0",
+      "current": "9175599d2223bd9b82e72ec7213108d4d427531d01739daf8f6982fadbf10c1e"
+    }
+  },
+  "cubins": {
+    "historical": {
+      "p1": {
+        "path": "/home/psk6950/MiniWorld/runs/trimul_b1_gate_demote_20260922/build/53d2f7d052b10d559a2a8671170afb2df8850e3844a64169bad1c7550004b356.cubin",
+        "sha256": "cde742fdc3869bfa28a353c3f815610f88ae132ad729f97e782ec6a23fbbba12"
+      },
+      "p7": {
+        "path": "/home/psk6950/MiniWorld/runs/trimul_b7_weight_batch128_20260922/build/49f07965e1ce5ebd0418282fd119c560fd31e16787aace4b4d51d181016e358d.cubin",
+        "sha256": "0b4bf73b7874f4ea45e0d5383d4004894ee5ca584e720c764f61336b92aa5e39"
+      }
+    },
+    "corrected": {
+      "p1": {
+        "path": "/home/psk6950/MiniWorld/runs/trimul_b1_gate_demote_20260922/build/53d2f7d052b10d559a2a8671170afb2df8850e3844a64169bad1c7550004b356.cubin",
+        "sha256": "cde742fdc3869bfa28a353c3f815610f88ae132ad729f97e782ec6a23fbbba12"
+      },
+      "p7": {
+        "path": "/home/psk6950/MiniWorld/runs/trimul_ln_gradient_20260922/fixed/build/5242c0dacfd9f18fb6f13babfe6272952ffc5e24dfefd3dfdd91c89449e84a3b.cubin",
+        "sha256": "f3ede2345e8c7bc907473d5e2662eac00c3e0204b3cf66062ab8f01770386c61"
+      }
+    }
+  },
+  "complete": true
+}

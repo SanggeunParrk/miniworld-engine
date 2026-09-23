@@ -8,6 +8,29 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+- Fuse OPM/PWA training dropout and residual epilogues, retain live-weight graph
+  replay, and record MSA comparisons with the standard depth of 1024.
+- Reuse D128 TriMul preparation and expose optimizer-state layout migration for
+  existing checkpoints; preserve source/measurement provenance and limitations.
+
+- Reuse forward weight packing and FP32 masks in bidirectional TriMul backward
+  at D64/256/384/512; remove duplicate D512 input normalization and fix wide
+  training `x_n` metadata for compiled execution.
+
+- Add native single-direction H100 TriMul training for D128/L384/768, both
+  outgoing and incoming: Anthropic-derived K1/K3, fused output backward and
+  producer-consumer input backward, including dropout/residual and graph replay.
+
+- Connect packaged H100 TriMul inference and latest bidirectional CUDA training
+  to default `auto` module dispatch. Training widths: D64/128/256/384/512,
+  L384/768; width-specific performance tuning remains separate.
+- Enable supported packaged OPM/PWA paths automatically and connect fused
+  token DiT inference. Preserve live weights, saved-tensor ownership, dropout,
+  residuals and `torch.compile` boundaries.
+- Make explicit backend comparison policy consistent for Transition.
+- Ship selected CUDA sources/includes and write compilation products only to
+  the user cache. [Dispatch contracts](docs/operations/h100-module-wiring.md).
+
 ## [2.0.0] - 2026-09-23
 
 ### Breaking changes and migration

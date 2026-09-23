@@ -1,0 +1,72 @@
+{
+  "arm": "engine2",
+  "module": "transition",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/.release-build/h100-installed/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16070",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 2535,
+      "ms": 0.1269977569580078,
+      "rounds_ms": [
+        0.12339648246765136,
+        0.12876992225646972,
+        0.12886783599853516,
+        0.1286348819732666,
+        0.1269977569580078,
+        0.12690239906311035,
+        0.12649855613708497
+      ],
+      "kernels": {
+        "triton_poi_fused_clone_t_transition_fused_fwd_sm90a_view_0": 1,
+        "transition_fwd_fused": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 570,
+      "ms": 0.5620198440551758,
+      "rounds_ms": [
+        0.5630764770507812,
+        0.5620198440551758,
+        0.5623795318603516,
+        0.5615091323852539,
+        0.5617132949829101,
+        0.5611430358886719,
+        0.5626047897338867
+      ],
+      "kernels": {
+        "triton_poi_fused_clone_t_transition_fused_fwd_sm90a_view_0": 1,
+        "transition_fwd_fused": 1,
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": 2,
+        "transition_bwd_fused": 1,
+        "reduce_partials": 1
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "auto",
+  "resolved_backends": {
+    "": "KernelBackend.TRITON",
+    "ln_in": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

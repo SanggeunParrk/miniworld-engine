@@ -1,0 +1,97 @@
+{
+  "arm": "engine1",
+  "module": "opm",
+  "L": 768,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 140,
+      "ms": 2.1347552490234376,
+      "rounds_ms": [
+        2.1347552490234376,
+        2.1324114990234375,
+        2.131370849609375,
+        2.12938232421875,
+        2.1424986267089845,
+        2.2275135803222654,
+        2.1843270874023437
+      ],
+      "kernels": {
+        "layer_norm_fwd_fused": 1,
+        "nvjet_tst_32x384_64x4_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_0": 1,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 1,
+        "triton_poi_fused__to_copy_1": 1,
+        "sm80_xmma_gemm_f32f32_f32f32_f32_nt_n_tilesize32x32x8_stage3_warpsize1x2x1_ffma_aligna4_alignc4_execute_kernel__5x_cublas": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN": 1,
+        "triton_poi_fused_add_addmm_view_3": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 58,
+      "ms": 5.160381469726563,
+      "rounds_ms": [
+        5.136943359375,
+        5.160381469726563,
+        5.27708984375,
+        5.150382690429687,
+        5.132984619140625,
+        5.177377319335937,
+        5.2080908203125
+      ],
+      "kernels": {
+        "layer_norm_fwd_fused": 1,
+        "nvjet_tst_32x384_64x4_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_0": 1,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 1,
+        "triton_poi_fused__to_copy_1": 1,
+        "sm80_xmma_gemm_f32f32_f32f32_f32_nt_n_tilesize32x32x8_stage3_warpsize1x2x1_ffma_aligna4_alignc4_execute_kernel__5x_cublas": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN": 1,
+        "triton_poi_fused_add_addmm_view_3": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT": 1,
+        "nvjet_tst_128x128_64x6_2x1_v_bz_splitK_NTT": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 3,
+        "triton_red_fused_sum_view_0": 1,
+        "triton_red_fused_sum_view_1": 1,
+        "triton_poi_fused__to_copy_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_NNT": 1,
+        "nvjet_tst_128x192_64x5_2x1_v_bz_coopB_TNN": 1,
+        "triton_poi_fused_bmm_clone_mul_permute_squeeze_unsqueeze_view_3": 1,
+        "nvjet_tst_32x64_64x16_2x1_v_bz_splitK_NTN": 2,
+        "nvjet_tst_64x512_64x2_1x2_h_bz_coopB_NNT": 2,
+        "triton_poi_fused_add_layernorm_dispatch_bwd_view_4": 1,
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": 2,
+        "layer_norm_bwd_dx_fused": 1
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "historical architecture default",
+  "resolved_backends": {
+    "opm.ln_msa": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ],
+  "msa_depth": 256
+}

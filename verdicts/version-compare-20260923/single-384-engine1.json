@@ -1,0 +1,61 @@
+{
+  "arm": "engine1",
+  "module": "single",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 793,
+      "ms": 0.37712577819824217,
+      "rounds_ms": [
+        0.3767852783203125,
+        0.37694400787353516,
+        0.37712577819824217,
+        0.3771603012084961,
+        0.37713600158691407,
+        0.3772428894042969,
+        0.376743049621582
+      ],
+      "kernels": {
+        "triton_poi_fused_bitwise_and_fused_ln_mask_unsqueeze_0": 1,
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)": 1,
+        "_fused_ln_mask_kernel": 1,
+        "triton_poi_fused_as_strided_cat_gemm_act_out_permute_view_1": 2,
+        "kernel_cutlass_kernel_quackgemm_actGemmActSm90_object_at__TiledMMA_ThrLayoutVMNK1281111000_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK6416016_TVLayoutA12864160164_TVLayoutB1281601601160__0": 2,
+        "_glu_wide_kernel": 2,
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": 1,
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 2,
+        "_back_kernel": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "error": "Traceback (most recent call last):\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 109, in <module>\n    warm_grads=torch.autograd.grad(warm,tuple(x for x in inputs if x.requires_grad)+tuple(m.parameters()),torch.ones_like(warm))\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/__init__.py\", line 515, in grad\n    result = _engine_run_backward(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/graph.py\", line 865, in _engine_run_backward\n    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass\nRuntimeError: One of the differentiated Tensors appears to not have been used in the graph. Set allow_unused=True if this is the desired behavior.\n"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "historical architecture default",
+  "resolved_backends": {
+    "": "KernelBackend.CUTE",
+    "ln_pair": "KernelBackend.PYTORCH",
+    "ln_out": "KernelBackend.PYTORCH"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

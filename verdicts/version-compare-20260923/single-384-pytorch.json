@@ -1,0 +1,100 @@
+{
+  "arm": "pytorch",
+  "module": "single",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/.release-build/h100-installed/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 390,
+      "ms": 0.763399658203125,
+      "rounds_ms": [
+        0.7639584350585937,
+        0.7647801971435547,
+        0.7639276885986328,
+        0.7633529663085937,
+        0.7632256317138671,
+        0.7631699371337891,
+        0.763399658203125
+      ],
+      "kernels": {
+        "triton_per_fused__to_copy_native_layer_norm_0": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 6,
+        "triton_poi_fused__unsafe_view_bitwise_and_mul_sigmoid_unsqueeze_1": 2,
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 2,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN": 1,
+        "triton_red_fused__to_copy_native_layer_norm_permute_view_2": 1,
+        "triton_poi_fused__unsafe_view_add_mul_sigmoid_3": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 124,
+      "ms": 2.415050201416016,
+      "rounds_ms": [
+        2.415449523925781,
+        2.414826202392578,
+        2.415050201416016,
+        2.4156057739257815,
+        2.4150041198730468,
+        2.415158996582031,
+        2.4146885681152344
+      ],
+      "kernels": {
+        "void at::native::vectorized_elementwise_kernel<2, at::native::FillFunctor<long>, std::array<char*, 1ul> >(int, at::native::FillFunctor<long>, std::array<char*, 1ul>)": 2,
+        "void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned long, 2, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::(anonymous namespace)::distribution_nullary_kernel<long, unsigned long, ulonglong2, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1})::{lambda(int, unsigned long)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::(anonymous namespace)::distribution_nullary_kernel<long, unsigned long, ulonglong2, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1})::{lambda(int, unsigned long)#1})": 1,
+        "triton_poi_fused_gt_rand_0": 1,
+        "triton_per_fused__to_copy_native_layer_norm_1": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 6,
+        "triton_poi_fused__unsafe_view_bitwise_and_mul_sigmoid_unsqueeze_2": 1,
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 6,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN": 3,
+        "triton_red_fused__to_copy_native_layer_norm_permute_view_3": 1,
+        "triton_poi_fused__to_copy__unsafe_view_add_div_mul_sigmoid_4": 1,
+        "triton_poi_fused__to_copy__unsafe_view_div_mul_sigmoid_sigmoid_backward_0": 1,
+        "nvjet_tst_64x64_64x13_2x2_v_bz_splitK_NTT": 4,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 6,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_NNT": 4,
+        "triton_red_fused__to_copy_native_layer_norm_backward_permute_view_1": 1,
+        "triton_red_fused__to_copy_native_layer_norm_backward_permute_view_2": 1,
+        "triton_per_fused__to_copy_native_layer_norm_backward_permute_view_3": 1,
+        "triton_red_fused__to_copy_native_layer_norm_backward_view_4": 1,
+        "triton_red_fused__to_copy_native_layer_norm_backward_view_5": 1,
+        "triton_poi_fused__unsafe_view_bitwise_and_clone_mul_permute_sigmoid_sigmoid_backward_squeeze_unsqueeze_view_6": 1,
+        "triton_poi_fused__unsafe_view_bitwise_and_mul_permute_sigmoid_sigmoid_backward_squeeze_unsqueeze_view_7": 1,
+        "nvjet_tst_64x64_64x13_2x2_v_bz_splitK_NNT": 2,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_NTT": 2,
+        "triton_poi_fused__unsafe_view_bitwise_and_mul_permute_sigmoid_sigmoid_backward_squeeze_unsqueeze_view_8": 1,
+        "triton_poi_fused__to_copy_add_view_9": 1,
+        "triton_per_fused__to_copy_add_native_layer_norm_native_layer_norm_backward_10": 1,
+        "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)": 2
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "auto",
+  "resolved_backends": {
+    "": "KernelBackend.PYTORCH",
+    "ln_pair": "KernelBackend.PYTORCH",
+    "ln_out": "KernelBackend.PYTORCH"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

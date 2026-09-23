@@ -1,0 +1,46 @@
+{
+  "session_id": "9d153bc6-f71b-4e9e-8dae-f58f7284c83a",
+  "path": "/home/psk6950/.claude/projects/-home-psk6950-MiniWorld/9d153bc6-f71b-4e9e-8dae-f58f7284c83a.jsonl",
+  "excerpts": [
+    {
+      "line": 8469,
+      "timestamp": "2026-09-22T13:01:10.712Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "peer의 pair3 forward(tensor-core pair 커널, 25 vs 46 us)를 벤치와 엔진에 붙였어. backward는 속도가 동급이고 dWb/dγ가 대수적 유도라 Triton에서 2e-3 벗어나서 안 받고 Triton 유지.\n\n| | 결과 |\n|---|---|\n| 벤치 전체 경로 | **1.565 ms** vs 엔진 4.19 (2.68배), 1234 MB |\n| 엔진 PWA 모듈 fwd+bwd (S=1024) | **1.561 ms** vs 4.161 (2.67배), 테스트 4/4 |\n| 엔진 커밋 | `4ac6deb2` perf(msa): pair3 forward, `7c5b6b6e` 위에 (research/msa-inference, 미push) |\n\npeer는 오늘 밤 커널 작업을 마무리하고 정리 중이라 더 올 건 없어.\n\n상태 요약: 엔진 쪽은 PWA·OPM 학습 경로 + pair3까지 커밋 완료, MiniWorld 쪽은 `train.fused_msa_train` 플래그·config가 미커밋. 실제 학습에 반영되려면 엔진 브랜치 **push + pixi pin 업데이트**가 필요한데 이건 네 결정이라 대기 중이야."
+        }
+      ]
+    },
+    {
+      "line": 8497,
+      "timestamp": "2026-09-22T14:35:43.555Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "H100, L=384, S=1024, bf16 기준 (엔진 모듈 단위 실측):\n\n**학습 (fwd+bwd)**\n\n| 모듈 | 기존 엔진 경로 | fused 경로 | 배율 | 메모리 |\n|---|---|---|---|---|\n| PWA | 4.16 ms | 1.56 ms | **2.67×** | 1621 → 1430 MB |\n| OPM | 5.86 ms | 2.03 ms | **2.89×** | 1881 → 1054 MB (O 저장; 재계산 시 2.46 ms / 815 MB) |\n| 둘 합 | 10.0 ms | 3.6 ms | **2.8×** | |\n\n실제 모델 스텝(MiniSWAModel, phase1a v120, CUDA graph)에선 232.7 → 214.9 ms(−7.7%). msa_module 안의 trimul/transition은 그대로라 모듈 전체로는 49 → 32.5 ms.\n\n**추론 (forward only)** — 이건 지금 엔진에 들어 있는 건 예전에 wiring한 Anthropic Triton cell 기반 경로(OPT_CORE_DIR 필요)이고, 그때 측정값:\n\n| 모듈 | 기존 | 현재 엔진 추론 경로 | 배율 |\n|---|---|---|---|\n| OPM | 2.17 ms | 0.88 ms | 2.5× |\n| PWA | 1.52 ms | 0.69 ms | 2.2× |\n\n단, 이번에 만든 forward 커널(pair_fwd3 0.025 + ln_vg 0.116 + fwd3 0.259 ≈ **0.40 ms**)이면 PWA 추론은 **3.8×**까지 가능한데, 아직 no_grad 호출은 fused 학습 경로가 아니라 Anthropic 경로/자체 경로로 가도록 되어 있어서 추론엔 반영 안 됨. OPM은 학습 경로의 forward가 추론 경로와 같은 커널이라 차이 없음(0.88 ms).\n\n원하면 PWA 추론도 새 forward로 돌리게 no_grad 분기만 추가하면 돼 (o 저장 없이 같은 커널 3개 호출, payload 의존 없음). "
+        }
+      ]
+    },
+    {
+      "line": 8522,
+      "timestamp": "2026-09-22T14:49:03.712Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "PWA 추론 라우팅 완료 (엔진 커밋 `b47de812`, 테스트 5/5). 실측 정리 (H100, L=384, S=1024, bf16):\n\n**추론 (forward only)**\n\n| 모듈 | 기존 엔진 | Anthropic cell | fused 커널 | 배율 (기존 / Anthropic 대비) |\n|---|---|---|---|---|\n| PWA | 1.526 ms | 0.749 ms | **0.411 ms** | **3.7× / 1.8×** |\n| OPM | 2.177 ms | — | **0.633 ms** | **3.4×** |\n\nOPM은 Anthropic prologue + cuBLAS + 우리 wgmma epilogue 조합이고, 이전에 기록해둔 0.88 ms보다 빠른 건 epilogue를 다시 짠 덕분.\n\n**학습 (fwd+bwd)**: PWA 4.16 → 1.56 ms (2.67×), OPM 5.86 → 2.03 ms (2.89×).\n\n정리하면 PWA 추론은 처음부터 이번 커널들의 목표였고 Anthropic cell보다 1.8배 더 빠른 상태였는데, 엔진의 no_grad 분기가 Anthropic 경로로 가도록 남아 있었던 것뿐. 이제 `MINIWORLD_PWA_INFER=1`(또는 `_TRAIN`)로 같은 커널을 타고 payload(OPT_CORE_DIR) 없이 동작해.\n\nAnthropic 커널 추가 최적화 여지는 위에 쓴 대로: PWA 쪽은 남은 게 우리 fwd3 자체(바닥 대비 ~73%), OPM 쪽은 epilogue를 GEMM에 융합해 O 302 MB 왕복을 없애는 것(~0.2–0.3 ms, 추론 한정). 후자를 원하면 진행할게."
+        }
+      ]
+    },
+    {
+      "line": 8583,
+      "timestamp": "2026-09-23T00:25:50.784Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "MSA 모듈(OPM + PWA) 최적화 결과, H100 · L=384 · S=1024 · bf16 기준.\n\n**1. 모듈별 속도 (엔진 모듈 단위 실측)**\n\n| 모듈 | 모드 | 기존 엔진 경로 | Anthropic cell | 최종 (fused) | 기존 대비 | 메모리 (기존 → 최종) |\n|---|---|---|---|---|---|---|\n| PWA | 추론 (fwd) | 1.526 ms | 0.749 ms | **0.411 ms** | **3.7×** | — |\n| PWA | 학습 (fwd+bwd) | 4.161 ms | 없음 (bwd 없음) | **1.561 ms** | **2.67×** | 1621 → 1430 MB |\n| OPM | 추론 (fwd) | 2.177 ms | (one-kernel형은 느려서 폐기) | **0.633 ms** | **3.4×** | — |\n| OPM | 학습 (fwd+bwd) | 5.858 ms | 없음 | **2.028 ms** | **2.89×** | 1881 → 1054 MB |\n| OPM+PWA | 학습 합 | 10.0 ms | — | **3.6 ms** | **2.8×** | |\n\n**2. 실제 모델 스텝 (MiniSWAModel, phase1a v120, dropout 0.15 살아 있음)**\n\n| 항목 | own | fused | 비고 |\n|---|---|---|---|\n| 학습 스텝 (CUDA graph replay) | 232.7 ms | **214.9 ms** (−7.7%) | 실제 트레이너가 쓰는 모드 |\n| 학습 스텝 (eager) | 293 ms | 278 ms | CPU 오버헤드가 가려서 이득이 작게 보임 |\n| msa_module fwd+bwd | 49 ms | 32.5 ms | trimul/transition은 그대로 |\n| 수치 | fused vs own grad 편차 최대 3e-2 | | own vs PyTorch 구현 편차와 동일 크기(bf16 자연 오차) |\n\n**3. 커널별 (PWA 학습 경로, 벤치 전체 1.565 ms vs 엔진 4.19)**\n\n| 커널 | 이전 | 최종 | 비고 |\n|---|---|---|---|\n| pair softmax fwd | 46 us (Triton) | 25 us | peer, tensor-core |\n| ln_vg (LN + value proj) | 163 us | 116 us | 읽기/쓰기 혼합 대역폭 한계 |\n| PWA forward (contraction+gate+proj_o+residual+dropout) | 626 us (Anthropic) | 259 us | peer fwd3, 바닥 대비 ~73% |\n| glue (bwd, dWo 융합) | 375 + 91 us | 300 us | peer glue3, go 텐서 제거 |\n| dv (plain contraction) | 266 us | 195 us | |\n| dWgv + dy + LN bwd | 407 us | 227 us | dgv 한 번만 읽음, 스트림 한계 ~90% |\n| pair bwd | 101 us | 94 us (Triton 유지) | peer bwd는 동급이라 미채택 |\n\n**4. 안 된 것 / 안 한 것**\n\n| 시도 | 결과 |\n|---|---|\n| OPM GEMM+epilogue 융합 (추론) | 손수 짠 GEMM은 cuBLAS 97% 도달(bit-identical)했지만, Wo 스트리밍이 L2 트래픽 +33%, smem 부족 → 이득 ≤10%로 판정, 중단 |\n| W multicast (fwd) | 정확하지만 이득 0 (TMA latency bound) |\n| cuBLAS 변형 프로빙 | 전부 0.424 ms, 여지 없음 |\n\n**5. 상태**\n\n| 항목 | 상태 |\n|---|---|\n| 엔진 (`~/miniworld-engine-msa`, research/msa-inference) | 커밋 3개 (`7c5b6b6e`, `4ac6deb2`, `b47de812`), **미push** |\n| MiniWorld `train.fused_msa_train` 플래그 + v120 config | 미커밋 |\n| 학습 반영 조건 | 엔진 브랜치 push + pixi pin(1bc0803e) 업데이트 필요 |\n| 옵트인 | 학습 `MINIWORLD_PWA_TRAIN`/`MINIWORLD_OPM_TRAIN`, 추론 `MINIWORLD_PWA_INFER` (config 키가 대신 켜줌) |"
+        }
+      ]
+    }
+  ]
+}

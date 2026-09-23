@@ -1,0 +1,98 @@
+{
+  "arm": "engine1",
+  "module": "opm",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 551,
+      "ms": 0.5435776138305664,
+      "rounds_ms": [
+        0.5435257720947265,
+        0.5433919906616211,
+        0.5436716842651367,
+        0.5435776138305664,
+        0.5437625503540039,
+        0.5433951950073242,
+        0.5437638473510742
+      ],
+      "kernels": {
+        "layer_norm_fwd_fused": 1,
+        "nvjet_tst_32x384_64x4_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_0": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NTT": 1,
+        "triton_poi_fused__to_copy_1": 1,
+        "void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Params)": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 1,
+        "triton_poi_fused_add_addmm_view_3": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 215,
+      "ms": 1.392200927734375,
+      "rounds_ms": [
+        1.392200927734375,
+        1.391568603515625,
+        1.392236785888672,
+        1.3921644592285156,
+        1.3912562561035156,
+        1.3922451782226561,
+        1.3928620910644531
+      ],
+      "kernels": {
+        "nvjet_tst_32x384_64x4_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_0": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NTT": 1,
+        "triton_poi_fused__to_copy_1": 1,
+        "void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Params)": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 1,
+        "triton_poi_fused_add_addmm_view_3": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT": 1,
+        "nvjet_tst_96x128_64x6_1x1_v_bz_splitK_NTN": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 3,
+        "triton_red_fused_sum_view_0": 1,
+        "triton_red_fused_sum_view_1": 1,
+        "triton_poi_fused__to_copy_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_NNT": 1,
+        "nvjet_tst_128x192_64x5_2x1_v_bz_coopB_TNN": 1,
+        "triton_poi_fused_bmm_clone_mul_permute_squeeze_unsqueeze_view_3": 1,
+        "nvjet_tst_32x64_64x16_2x1_v_bz_splitK_NTN": 2,
+        "nvjet_tst_64x384_64x3_1x2_h_bz_coopB_NNT": 2,
+        "triton_poi_fused_add_layernorm_dispatch_bwd_view_4": 1,
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": 2,
+        "layer_norm_bwd_dx_fused": 1
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "historical architecture default",
+  "resolved_backends": {
+    "opm.ln_msa": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ],
+  "msa_depth": 256
+}

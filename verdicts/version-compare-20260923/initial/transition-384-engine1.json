@@ -1,0 +1,35 @@
+{
+  "arm": "engine1",
+  "module": "transition",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/__init__.py",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "error": "Traceback (most recent call last):\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 95, in <module>\n    warm=m(*inputs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py\", line 1776, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py\", line 1787, in _call_impl\n    return forward_call(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/modules/transition/module.py\", line 167, in forward\n    return self._inference_forward(x, add_residual)\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/modules/transition/module.py\", line 231, in _inference_forward\n    return kernels.cuda_transition_b2b(\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/kernels/__init__.py\", line 136, in cuda_transition_b2b\n    return _impl(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/kernels/transition/interface.py\", line 37, in cuda_transition_b2b\n    return _impl(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/kernels/transition/cuda/__init__.py\", line 161, in cuda_transition_b2b\n    out = _ext(\"transition_b2b_cuda\").transition_b2b_fwd(\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/kernels/transition/cuda/__init__.py\", line 101, in _ext\n    ext = globals()[name] = _BUILDERS[name]()\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/kernels/transition/cuda/__init__.py\", line 22, in _build_transition_b2b_cuda\n    *mathdx_includes(),\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/kernels/_nvcc.py\", line 262, in mathdx_includes\n    raise RuntimeError(\nRuntimeError: cuBLASDx headers not found, so the CUDA transition extensions cannot build. Set one of MINIWORLD_MATHDX_HOME, MATHDX_HOME, NVIDIA_MATHDX_HOME to a mathdx root -- the directory containing `include/cublasdx.hpp` -- or `pip install nvidia-mathdx`. Looked in: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/nvidia/mathdx, /home/psk6950/MiniWorld/.pixi/envs/cu128\n"
+    },
+    "training": {
+      "error": "Traceback (most recent call last):\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 97, in <module>\n    warm_grads=torch.autograd.grad(warm,tuple(x for x in inputs if x.requires_grad)+tuple(m.parameters()),torch.ones_like(warm))\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/__init__.py\", line 515, in grad\n    result = _engine_run_backward(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/graph.py\", line 865, in _engine_run_backward\n    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/function.py\", line 317, in apply\n    return user_fn(self, *args)\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/kernels/transition/triton/fused.py\", line 1573, in backward\n    dx, dgamma, dbeta, dWa, dWb, dWs = _fused_bwd(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_library/custom_ops.py\", line 698, in __call__\n    return self._opoverload(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_ops.py\", line 819, in __call__\n    return self._op(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_library/autograd.py\", line 112, in autograd_impl\n    result = forward_no_grad(*args, Metadata(keyset, keyword_only_args))\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_library/autograd.py\", line 41, in forward_no_grad\n    result = op.redispatch(keyset & _C._after_autograd_keyset, *args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_ops.py\", line 826, in redispatch\n    return self._handle.redispatch_boxed(keyset, *args, **kwargs)  # type: ignore[return-value]\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_library/custom_ops.py\", line 355, in backend_impl\n    utils._c_check_aliasing_constraint(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_library/utils.py\", line 404, in _c_check_aliasing_constraint\n    raise RuntimeError(\nRuntimeError: transition_fused_bwd (with implementation in <module 'torch._library.custom_ops' from '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_library/custom_ops.py'>): The output of this custom operator (1) must not also be an input to this custom operator and (2) may not alias any inputs to this custom operator or other returns. The most common way to trigger this error is if we have y = custom_op(x) and y and x are the same Tensor. Please instead return a clone of the offending output tensor(s) (e.g. return x.clone()) or refactor the custom operator to not return y.\n"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "resolved_backends": {
+    "": "KernelBackend.TRITON",
+    "ln_in": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

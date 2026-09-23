@@ -128,6 +128,8 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
     """
     harness = {SRC / "kernels" / "checks", SRC / "kernels" / "drivers"}
     paths = [p for p in _python_files() if p.parent not in harness]
+    # Production module entry points may live in integrations and provide the opaque boundary.
+    paths += sorted((SRC / "integrations").glob("*.py"))
     launchers, ops, calls = _launchers_and_ops(paths)
 
     # "Covered" is TRANSITIVE: `_ln_bwd_atomic`'s only caller is `ln_bwd_mmajor`, which is not an

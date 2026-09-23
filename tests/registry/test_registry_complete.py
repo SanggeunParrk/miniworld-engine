@@ -288,6 +288,9 @@ def test_launch_keywords_match_the_kernel_signature() -> None:
                 rebound |= {a.asname or a.name.split(".")[0] for a in n.names}
             elif isinstance(n, ast.Assign):
                 rebound |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+            elif isinstance(n, ast.FunctionDef):
+                # A callable supplied as an argument is not a same-named global.
+                rebound |= {a.arg for a in (*n.args.posonlyargs, *n.args.args, *n.args.kwonlyargs)}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not node.keywords:
                 continue

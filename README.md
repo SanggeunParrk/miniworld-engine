@@ -22,8 +22,11 @@ This release builds on Anthropic's stronger published inference kernels and adds
 training implementations. [Release map and migration](docs/releases/2.0.0.md) ·
 [Attribution](THIRD_PARTY_NOTICES.md) ·
 [Latest TriMul training evidence](experiments/trimul_training_v2/README.md).
-The latest TriMul CUDA training route is explicit research; D128 improves on the
-measured Triton baseline, while other widths need more optimization.
+The latest TriMul CUDA training route is now connected automatically on supported
+H100 inputs, alongside Transition, MSA and token DiT inference.
+[Current module dispatch and limits](docs/operations/h100-module-wiring.md) ·
+[Recorded comparisons](verdicts/version-compare-20260923/index.html).
+D128 improves on the measured Triton baseline; other widths need more optimization.
 
 ## Quickstart
 

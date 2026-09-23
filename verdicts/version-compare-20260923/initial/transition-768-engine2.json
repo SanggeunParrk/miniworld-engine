@@ -1,0 +1,60 @@
+{
+  "arm": "engine2",
+  "module": "transition",
+  "L": 768,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/.release-build/h100-installed/miniworld_engine/__init__.py",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "ms": 0.4560134506225586,
+      "rounds_ms": [
+        0.4222137451171875,
+        0.4406150436401367,
+        0.4559008026123047,
+        0.4560134506225586,
+        0.46069183349609377,
+        0.47105663299560546,
+        0.4697075271606445
+      ],
+      "kernels": {
+        "triton_poi_fused_clone_t_transition_fused_fwd_sm90a_view_0": 1,
+        "transition_fwd_fused": 1
+      }
+    },
+    "training": {
+      "finite": true,
+      "ms": 2.122239990234375,
+      "rounds_ms": [
+        2.1810374450683594,
+        2.129761962890625,
+        2.127027893066406,
+        2.120947265625,
+        2.111735076904297,
+        2.1205926513671876,
+        2.122239990234375
+      ],
+      "kernels": {}
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "resolved_backends": {
+    "": "KernelBackend.TRITON",
+    "ln_in": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

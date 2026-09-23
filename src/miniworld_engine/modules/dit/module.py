@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
+from miniworld_engine.integrations import token_dit as _h100
 from miniworld_engine.modules.augmented_attention import AugmentedAttentionPairBias
 from miniworld_engine.modules.conditioned_transition import ConditionedTransition
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -71,6 +72,8 @@ class DiTBlock(nn.Module):
         compute_dtype: torch.dtype | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
         """AF3 Alg. 23, both residuals explicit (the parts return updates, not streams)."""
+        if _h100.serves(self, single, cond, pair, compute_dtype):
+            return _h100.update(self, single, cond, pair, mask)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = single + self.attention(single, cond, pair, mask, **kw)
         return single + self.transition(single, cond)

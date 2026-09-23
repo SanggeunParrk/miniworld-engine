@@ -14,7 +14,7 @@ Measured H100, L=384, S=1024, bf16: fwd+bwd 1.81 ms vs this engine's own path 4.
 every gradient within 6e-3 of the engine's (the LayerNorm backward is CLOSER to fp32 truth than the engine's:
 dy never rounds to bf16).
 
-Opt-in: set MINIWORLD_PWA_TRAIN=1. It serves a grad-enabled call of a module built with
+Automatic in auto mode; MINIWORLD_PWA_TRAIN=0 disables this path. It serves a grad-enabled call of a module built with
 implementation="miniworld" or "anthropic" when the shapes fit (d_msa=64, d_pair=128, 8 heads x 32, batch 1,
 N a multiple of 128, S even, bf16 activations on sm_90a); anything else falls through to the module's own statements. The residual AND the
 module's row-broadcast dropout on the update are applied inside the kernel: the module returns this path's output as is.
@@ -42,16 +42,19 @@ def payload_dir():  # kept for symmetry with anthropic_msa: this path needs no p
 def wanted(implementation) -> bool:
     """Grad-enabled calls: opted in by MINIWORLD_PWA_TRAIN. Grad-free calls (inference) take the same forward kernels
     whenever MINIWORLD_PWA_TRAIN or MINIWORLD_PWA_INFER is set (no payload needed; faster than the upstream cell)."""
+    from miniworld_engine import settings
     from miniworld_engine.modules.exceptions import ImplementationType
-    on = bool(os.environ.get(ENV)) or (not torch.is_grad_enabled() and bool(os.environ.get("MINIWORLD_PWA_INFER")))
+    name = ENV if torch.is_grad_enabled() else "MINIWORLD_PWA_INFER"
+    on = os.environ.get(name, os.environ.get(ENV, "1")) != "0" and settings.current().engine_backend != "triton"
     return on and implementation in (ImplementationType.MINIWORLD, ImplementationType.ANTHROPIC)
 
 
 def refusal(msa: torch.Tensor, pair: torch.Tensor, d_msa: int, d_pair: int, n_head: int, d_hidden: int, *, dropout: bool = False) -> str | None:
     """None if this path can run this training call, else why it cannot. Never raises."""
     try:
-        if not (os.environ.get(ENV) or (not torch.is_grad_enabled() and os.environ.get("MINIWORLD_PWA_INFER"))):
-            return f"{ENV} is not set"
+        name = ENV if torch.is_grad_enabled() else "MINIWORLD_PWA_INFER"
+        if os.environ.get(name, os.environ.get(ENV, "1")) == "0":
+            return f"{ENV} disables the native path"
         if (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C):
             return f"the kernels serve (d_msa={D}, d_pair={DZ}, n_head={H}, d_hidden={C}), got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
         if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
@@ -75,6 +78,9 @@ STATS: dict[str, Any] = {"served": 0, "refused": {}}       # how often the path 
 
 def serves(*a, **kw) -> bool:
     why = refusal(*a, **kw)
+    # Counters are eager diagnostics; mutating them while tracing adds recompilation guards.
+    if torch.compiler.is_compiling():
+        return why is None
     if why is None:
         STATS["served"] += 1
         return True
@@ -251,7 +257,7 @@ def pair_bwd(z, w16, dw, ln_w, ln_b, eps, wb, BJ=32, num_warps=4, BJO=None):
     return dz, colsum(pwb)[:H], ps[:DZ], ps[DZ:]
 
 
-class PwaTrainFn(torch.autograd.Function):
+class _PwaMath(torch.autograd.Function):
     """out = msa + PWA(msa, pair, key mask). Weights in their own dtype (fp32 or bf16); gradients returned in it."""
 
     @staticmethod
@@ -290,12 +296,12 @@ class PwaTrainFn(torch.autograd.Function):
         bf = torch.bfloat16
         dres0 = dres[0].contiguous()
         # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
-        dout = dres0 if dmask is None else (dres0 * dmask[None] * ctx.dscale).contiguous()
         wv16 = wv.to(bf).contiguous(); wg16 = wg.to(bf).contiguous(); wo16 = wo.to(bf).contiguous()
         dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)               # dgp | dv: one [S,N,512] buffer
         if k["glue3"] is not None:                                                  # dWo partials fused: go never touches memory
-            d_o, _, dWo = k["glue3"].pwa_glue3(o, y, dout, wg16, wo16.t().contiguous(), dgv, 2)
+            d_o, _, dWo = k["glue3"].pwa_glue3(o, y, dres0, wg16, wo16.t().contiguous(), dgv, 2, 1, dmask, ctx.dscale)
         else:
+            dout = dres0 if dmask is None else (dres0 * dmask[None] * ctx.dscale).contiguous()
             d_o, _, go = k["ctr"].pwa_glue_o(o, y, dout, wg16, wo16.t().contiguous(), 1, dgv)
             dWo = dout.view(S * N, D).t() @ go.view(S * N, HC)                      # [D][HC]
         k["fwd"].pwa_plain2(w16.transpose(1, 2).contiguous(), d_o, 4, dgv)         # dv -> dgv[..., HC:]
@@ -305,13 +311,14 @@ class PwaTrainFn(torch.autograd.Function):
                                               wgvT, lnm_w.float().contiguous(), eps_m, 1, 8, True)
         dWg, dWv = dWgv[:HC], dWgv[HC:]
         dz, dWb, dzw, dzb = pair_bwd(z, w16, dw, lnz_w.float().contiguous(), lnz_b.float().contiguous(), eps_z, wb, BJ=32)
-        return (dm.view(S, N, D)[None], dz[None], None, dlw.to(lnm_w.dtype), dlb.to(lnm_b.dtype), dWv.to(wv.dtype), dWg.to(wg.dtype),
-                dzw.to(lnz_w.dtype), dzb.to(lnz_b.dtype), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
+        # Separate small weight/LN gradient views at the custom-op boundary.
+        return (dm.view(S, N, D)[None], dz[None], None, dlw.to(lnm_w.dtype, copy=True), dlb.to(lnm_b.dtype, copy=True), dWv.to(wv.dtype, copy=True), dWg.to(wg.dtype, copy=True),
+                dzw.to(lnz_w.dtype, copy=True), dzb.to(lnz_b.dtype, copy=True), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
 
 
 @torch.no_grad()
 @torch.autocast("cuda", enabled=False)
-def pair_weighted_averaging_inference(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """msa + PWA(msa, pair, key mask) for a grad-free call: the same three forward kernels, o not kept, no dropout."""
     k = _k(); bf = torch.bfloat16
     m = msa[0].contiguous(); z = pair[0].contiguous(); n = m.shape[1]
@@ -341,5 +348,72 @@ def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask:
         pm = mask[0].to(torch.bfloat16)[None, :].expand(n, n).contiguous()          # the module masks the key axis j
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5)); eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
     p_drop = float(module.drop_msa.p_drop) if module.training else 0.0          # the module's drop_msa, fused into the kernel
-    return PwaTrainFn.apply(msa, pair, pm, module.ln_msa.weight, module.ln_msa.bias, module.to_value.weight, module.to_gate.weight,
+    return PwaTrainFn.apply(msa.contiguous(), pair.contiguous(), pm, module.ln_msa.weight, module.ln_msa.bias, module.to_value.weight, module.to_gate.weight,
                             module.ln_pair.weight, module.ln_pair.bias, module.to_bias.weight, module.to_out.weight, eps_m, eps_z, p_drop)
+
+
+class _SavedContext:
+    eps: tuple[float, float]
+    dscale: float
+    def save_for_backward(self,*tensors):self.saved_tensors=tensors
+
+
+def _forward_fake(args,eps_m,eps_z,p_drop):
+    m=args[0];_,s,n,_=m.shape
+    return [torch.empty_like(m),torch.empty((H,n,n),device=m.device,dtype=torch.bfloat16),torch.empty((H,n,s*C),device=m.device,dtype=torch.bfloat16),
+            torch.empty((s,n,D),device=m.device,dtype=torch.bfloat16),torch.empty((s,n,HC),device=m.device,dtype=torch.bfloat16),
+            torch.empty((n,D) if p_drop else (0,),device=m.device,dtype=torch.bfloat16)]
+
+
+from miniworld_engine.kernels._compile import opaque
+
+
+@opaque(fake=_forward_fake,name="pwa_h100_fwd")
+def _forward_op(args:list[torch.Tensor],eps_m:float,eps_z:float,p_drop:float)->list[torch.Tensor]:
+    ctx=_SavedContext();out=_PwaMath.forward(ctx,*args,eps_m,eps_z,p_drop);sv=ctx.saved_tensors
+    return [out,*sv[2:6],sv[14] if p_drop else args[0].new_empty((0,))]
+
+
+def _backward_fake(args,kept,dy,eps_m,eps_z,p_drop):return [torch.empty_like(args[i]) for i in (0,1,3,4,5,6,7,8,9,10)]
+
+
+@opaque(fake=_backward_fake,name="pwa_h100_bwd")
+def _backward_op(args:list[torch.Tensor],kept:list[torch.Tensor],dy:torch.Tensor,eps_m:float,eps_z:float,p_drop:float)->list[torch.Tensor]:
+    ctx=_SavedContext();ctx.eps=(eps_m,eps_z);ctx.dscale=1/(1-p_drop) if p_drop else 1.
+    ctx.saved_tensors=(args[0][0],args[1][0],*kept[:4],*args[3:],*((kept[4],) if p_drop else ()))
+    gradients=_PwaMath.backward(ctx,dy)
+    return [gradients[i] for i in (0,1,3,4,5,6,7,8,9,10)]
+
+
+class PwaTrainFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx,*args):
+        tensors=list(args[:11]);ctx.eps_m,ctx.eps_z,ctx.p_drop=args[11:]
+        out,*kept=_forward_op(tensors,ctx.eps_m,ctx.eps_z,ctx.p_drop)
+        ctx.save_for_backward(*tensors,*kept)
+        return out
+    @staticmethod
+    def backward(ctx,dy):
+        vals=ctx.saved_tensors
+        grads=_backward_op(list(vals[:11]),list(vals[11:]),dy,ctx.eps_m,ctx.eps_z,ctx.p_drop)
+        return (*grads[:2],None,*grads[2:],None,None,None)
+
+
+
+def _infer_fake(args,eps_m,eps_z):return torch.empty_like(args[0])
+
+
+@opaque(fake=_infer_fake,name="pwa_h100_infer")
+def _inference_op(args:list[torch.Tensor],eps_m:float,eps_z:float)->torch.Tensor:
+    from types import SimpleNamespace as NS
+    msa,pair,mask,lmw,lmb,wv,wg,lzw,lzb,wb,wo=args
+    module=NS(ln_msa=NS(weight=lmw,bias=lmb,eps=eps_m),ln_pair=NS(weight=lzw,bias=lzb,eps=eps_z),
+              to_value=NS(weight=wv),to_gate=NS(weight=wg),to_bias=NS(weight=wb),to_out=NS(weight=wo))
+    return _inference_math(module,msa,pair,mask)
+
+
+def pair_weighted_averaging_inference(module,msa,pair,mask):
+    mask=mask if mask is not None else torch.ones((1,msa.shape[2]),device=msa.device,dtype=torch.bool)
+    args=[msa.contiguous(),pair.contiguous(),mask.contiguous(),module.ln_msa.weight,module.ln_msa.bias,module.to_value.weight,module.to_gate.weight,
+          module.ln_pair.weight,module.ln_pair.bias,module.to_bias.weight,module.to_out.weight]
+    return _inference_op(args,module.ln_msa.eps,module.ln_pair.eps)

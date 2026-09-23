@@ -116,15 +116,14 @@ class OuterProductMean(nn.Module):
         explicitly by the block (``pair = opm(msa, ..., residual=pair)``) rather than being the
         module's own input; the add is unconditional when ``residual`` is provided (no dropout on
         the OPM branch). ``residual=None`` returns the raw OPM output (standalone / benchmarking)."""
-        # Training: the fused OPM forward+backward (integrations.opm_train), opt-in by MINIWORLD_OPM_TRAIN, serves a
-        # grad-enabled call where it fits; like the inference path it returns OPM(msa) and the residual is added here.
-        if torch.is_grad_enabled() and _opm_train.wanted(self.implementation):
+        # The packaged H100 OPM forward/backward (integrations.opm_train) serves a
+        # supported call automatically, including the optional pair residual.
+        if _opm_train.wanted(self.implementation):
             _dims = (self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0])
             if _opm_train.serves(msa, *_dims, interchain=bool(self.mask_interchain and token_asym_id is not None),
                                  normalize_before_proj=self.normalize_before_proj):
                 _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
-                _pair = _opm_train.outer_product_mean(self, msa, _m)
-                return residual + _pair if residual is not None else _pair
+                return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused path where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):

@@ -1,0 +1,108 @@
+{
+  "64-384": {
+    "k1": [
+      1,
+      64,
+      8,
+      1,
+      2
+    ],
+    "k3": [
+      2,
+      64,
+      6,
+      2
+    ],
+    "input_ln": "fused",
+    "emit_xn": false
+  },
+  "64-768": {
+    "k1": [
+      1,
+      64,
+      8,
+      1,
+      2
+    ],
+    "k3": [
+      2,
+      64,
+      8,
+      2
+    ],
+    "input_ln": "fused",
+    "emit_xn": false
+  },
+  "256-384": {
+    "k1": [
+      2,
+      64,
+      4,
+      4,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true
+  },
+  "256-768": {
+    "k1": [
+      2,
+      64,
+      4,
+      4,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true
+  },
+  "384-384": {
+    "k1": [
+      2,
+      64,
+      2,
+      6,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true
+  },
+  "384-768": {
+    "k1": [
+      2,
+      64,
+      2,
+      6,
+      1
+    ],
+    "k3": null,
+    "input_ln": "fused",
+    "emit_xn": true
+  },
+  "512-384": {
+    "k1": [
+      1,
+      64,
+      8,
+      2,
+      1
+    ],
+    "k3": null,
+    "input_ln": "separate",
+    "emit_xn": false
+  },
+  "512-768": {
+    "k1": [
+      1,
+      64,
+      8,
+      2,
+      1
+    ],
+    "k3": null,
+    "input_ln": "separate",
+    "emit_xn": false
+  }
+}

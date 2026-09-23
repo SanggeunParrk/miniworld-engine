@@ -1,0 +1,21 @@
+
+Fatbin elf code:
+================
+arch = sm_90a
+code version = [1,7]
+host = linux
+compile_size = 64bit
+
+Resource usage:
+ Common:
+  GLOBAL:28 CONSTANT[4]:224
+ Function _ZN48_GLOBAL__N__9dfae8dd_15_opm_epilogue_cu_57bf44c327opm_reduce_partials_chunkedEPKfPfiiil:
+  REG:32 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:568 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN48_GLOBAL__N__9dfae8dd_15_opm_epilogue_cu_57bf44c314opm_dwo_kernelEPK13__nv_bfloat16S2_Pfiili:
+  REG:96 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:572 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN48_GLOBAL__N__9dfae8dd_15_opm_epilogue_cu_57bf44c323opm_prologue_bwd_kernelEPK13__nv_bfloat16S2_S2_PKfS2_S4_S4_fS2_PS0_PfS6_ii:
+  REG:80 STACK:0 SHARED:1536 LOCAL:0 CONSTANT[0]:632 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN48_GLOBAL__N__9dfae8dd_15_opm_epilogue_cu_57bf44c316opm_dgrad_kernelEPK13__nv_bfloat16PKfS2_PS0_Pfiil14CUtensorMap_st:
+  REG:80 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:768 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN48_GLOBAL__N__9dfae8dd_15_opm_epilogue_cu_57bf44c319opm_epilogue_kernelEPK13__nv_bfloat16PKfS2_S4_S2_iil14CUtensorMap_st:
+  REG:102 STACK:0 SHARED:2048 LOCAL:0 CONSTANT[0]:768 TEXTURE:0 SURFACE:0 SAMPLER:0

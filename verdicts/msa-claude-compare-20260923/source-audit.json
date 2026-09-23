@@ -1,0 +1,37 @@
+{
+  "claude_commit": "b47de812e8a82bc7ca1204e8db7bbbb6ffd5d42c",
+  "cuda_sources": {
+    "dgv_bwd.cu": {
+      "claude": "e94c0412f8c5feaf7a78b49cb9f02d0eb792eac19e61b422aa7b245c7d5dea37",
+      "current": "e94c0412f8c5feaf7a78b49cb9f02d0eb792eac19e61b422aa7b245c7d5dea37"
+    },
+    "ln_vg.cu": {
+      "claude": "b056361a893b775570102f9f017c4e9256ab8dda6b42802a44e0feb475a75bca",
+      "current": "b056361a893b775570102f9f017c4e9256ab8dda6b42802a44e0feb475a75bca"
+    },
+    "opm_epilogue.cu": {
+      "claude": "720573abd52889a29a67bc4a1a7a0c568542efb475787fed83b0614d575ad58b",
+      "current": "720573abd52889a29a67bc4a1a7a0c568542efb475787fed83b0614d575ad58b"
+    },
+    "pair3.cu": {
+      "claude": "06f9b6a8fb8242ce42851062171115144b18cf48c7138560c3320d57338c0d66",
+      "current": "06f9b6a8fb8242ce42851062171115144b18cf48c7138560c3320d57338c0d66"
+    },
+    "pwa_ctr.cu": {
+      "claude": "fb06f878d65eb6d3ebf2ed9a951e0d4fa8373380bec580cca7f0c46495cd8d56",
+      "current": "fb06f878d65eb6d3ebf2ed9a951e0d4fa8373380bec580cca7f0c46495cd8d56"
+    },
+    "pwa_fwd2.cu": {
+      "claude": "df97924cd81ab31129ff31c9e55d1438b7b4bb24dff2ccbfe8093e18413239b1",
+      "current": "df97924cd81ab31129ff31c9e55d1438b7b4bb24dff2ccbfe8093e18413239b1"
+    },
+    "pwa_fwd3.cu": {
+      "claude": "aeb78e18306bb62db0e0c060f96abbd0788375a5cd99310e08e9b2b43c537888",
+      "current": "aeb78e18306bb62db0e0c060f96abbd0788375a5cd99310e08e9b2b43c537888"
+    },
+    "pwa_glue3.cu": {
+      "claude": "19dd24c6ec39296fd44967a148fcdda061310838535d3aed3c1fae338ae198cb",
+      "current": "19dd24c6ec39296fd44967a148fcdda061310838535d3aed3c1fae338ae198cb"
+    }
+  }
+}

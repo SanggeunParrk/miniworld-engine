@@ -1,0 +1,93 @@
+{
+  "date": "2026-09-23",
+  "base_commit": "c53d881c652bd6b9e57f32d94d1211163291e621",
+  "scope": "Unreleased production module wiring after 2.0.0; no performance retune",
+  "gpu": "H100 80GB, node01; installed wheel tested with torch current device 1",
+  "wheel_sha256": "540223610253582b5de5aa50815406231ce39550084e6eb7843986e8e470cf66",
+  "gpu_checks": [
+    {
+      "log": "h100-wiring-15991.log",
+      "passed": 34,
+      "scope": "Installed modules: 10 TriMul training shapes, inference, live weights, masks, dropout, gradients, compile and training CUDA graphs; OPM/PWA training and inference"
+    },
+    {
+      "log": "h100-wiring-15995.log",
+      "passed": 2,
+      "scope": "Token DiT BF16/FP32 CUDA graph replay with changed pair"
+    },
+    {
+      "log": "h100-wiring-15998.log",
+      "passed": 4,
+      "scope": "Additional single/bidirectional inference widths and graph replay"
+    },
+    {
+      "log": "h100-compile-repeat-overlap.log",
+      "passed": 2,
+      "scope": "OPM/PWA: 12 repeated compiled calls each, exactly one Dynamo graph"
+    },
+    {
+      "log": "h100-wiring-16021.log",
+      "passed": 2,
+      "scope": "Noncontiguous MSA/pair inputs with 12 compiled repeats and backward"
+    },
+    {
+      "log": "h100-wiring-16025.log",
+      "passed": 2,
+      "scope": "Noncontiguous Token DiT inputs, masks, live weights, compile and CUDA graph replay"
+    }
+  ],
+  "cpu_checks": {
+    "full_initial": {
+      "passed": 3716,
+      "skipped": 152,
+      "failed": 2,
+      "failures": "Static launch audit confused a callable argument with a global name and did not recognize Config-injected BR/BJ/BN."
+    },
+    "after_fixes": {
+      "passed": 1961,
+      "skipped": 13,
+      "scope": "tests/builder, tests/registry, tests/compile; includes both failed checks"
+    },
+    "additional_regression": {
+      "passed": 1,
+      "scope": "Config-injected axes cannot hide a genuinely missing runtime input"
+    },
+    "ruff": "passed",
+    "ty": "passed"
+  },
+  "source_provenance": "43 source/config asset hashes verified; 44 packaged assets including PROVENANCE.json",
+  "defaults": {
+    "engine_backend": "auto",
+    "trimul_h100_training_widths": [
+      64,
+      128,
+      256,
+      384,
+      512
+    ]
+  },
+  "consumer": {
+    "medium_v110_backend": "auto",
+    "medium_v120_backend": "auto",
+    "installed_minworld_engine_version": "1.0.0",
+    "running_training_environment_updated": false
+  },
+  "limitations": [
+    "Other TriMul widths retain their previously measured performance limitations.",
+    "No whole-model benchmark or full native cache retune in this change.",
+    "The existing running training job was not restarted or upgraded."
+  ],
+  "dispatch_source_identity": "7921a8c11666d634a8eda93ecf186d09b15991c63bb35a7c2f7812790f5e5588",
+  "derived_plans": {
+    "sm86": {
+      "complete": true,
+      "errors": [],
+      "registry": "src/miniworld_engine/autotune/plans/sm86/7921a8c11666d634a8eda93ecf186d09b15991c63bb35a7c2f7812790f5e5588/registry_kernel.csv"
+    },
+    "sm90": {
+      "complete": true,
+      "errors": [],
+      "registry": "src/miniworld_engine/autotune/plans/sm90/7921a8c11666d634a8eda93ecf186d09b15991c63bb35a7c2f7812790f5e5588/registry_kernel.csv"
+    }
+  }
+}

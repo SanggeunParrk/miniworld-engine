@@ -1,0 +1,299 @@
+{
+  "job": "16209",
+  "gpu_uuid": "3aaa06b9-c15a-0efd-3a5b-6054e3a65c24",
+  "timings_us": {
+    "whole_block": {
+      "historical": 1606.589698791504,
+      "historical_new_transition": 1605.3390502929688,
+      "corrected_research": 1602.407455444336,
+      "current_fixed": 1616.954231262207,
+      "current_rng": 1614.2962773640952
+    },
+    "native_per_replay": {
+      "historical": 1617.680013179779,
+      "current_fixed": 1622.4640011787415
+    },
+    "original_mix": {
+      "pytorch_eager": 9010.704040527344,
+      "pytorch_compile": 5221.536159515381,
+      "cueq_torch": 3470.7839488983154,
+      "cueq_cuda": 2760.4479789733887,
+      "historical": 1516.800045967102,
+      "current_fixed": 1521.9039916992188
+    },
+    "transition": {
+      "historical": 580.6657155354818,
+      "current": 567.7687962849935
+    },
+    "trimul": {
+      "historical": 1024.5170593261719,
+      "corrected": 1024.6943791707356,
+      "current": 1038.149356842041
+    },
+    "kernel_bodies": {
+      "old_b1": 185.7038402557373,
+      "current_b1": 180.29824256896973,
+      "old_b7": 359.4064140319824,
+      "fixed_b7": 368.3915138244629,
+      "current_b7": 366.92880630493164
+    }
+  },
+  "telemetry": {
+    "whole_block": {
+      "n": 141,
+      "sm_mhz": 1830.0,
+      "power_w": 689.57,
+      "power_limit_w": 700.0
+    },
+    "native_per_replay": {
+      "n": 39,
+      "sm_mhz": 1830.0,
+      "power_w": 688.97,
+      "power_limit_w": 700.0
+    },
+    "original_mix": {
+      "n": 291,
+      "sm_mhz": 1980.0,
+      "power_w": 636.43,
+      "power_limit_w": 700.0
+    },
+    "transition": {
+      "n": 20,
+      "sm_mhz": 1822.5,
+      "power_w": 688.19,
+      "power_limit_w": 700.0
+    },
+    "trimul": {
+      "n": 49,
+      "sm_mhz": 1800.0,
+      "power_w": 692.78,
+      "power_limit_w": 700.0
+    },
+    "kernel_bodies": {
+      "n": 26,
+      "sm_mhz": 1687.5,
+      "power_w": 692.565,
+      "power_limit_w": 700.0
+    }
+  },
+  "profiles": {
+    "historical": {
+      "launches_per_replay": 19,
+      "gpu_us": {
+        "packing_copy": 8.652800000000001,
+        "math": 1523.6684000000005,
+        "scratch_zero": 2.0547999999999997
+      },
+      "kernels": {
+        "triton_poi_fused_cat_stack_view_0": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 1.8302
+        },
+        "triton_poi_fused_cat_clone_stack_t_view_1": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 2.8098
+        },
+        "infer_k1": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 111.37359999999998
+        },
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 85.10759999999999
+        },
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 82.58619999999999
+        },
+        "save_k3": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 87.7252
+        },
+        "triton_poi_fused_clone_history_transition_fused_fwd_sm90a_t_view_0": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 1.8304000000000002
+        },
+        "transition_fwd_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 126.5666
+        },
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 2.0548
+        },
+        "transition_bwd_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 408.36679999999996
+        },
+        "reduce_partials": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 19.456
+        },
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 2.1824000000000003
+        },
+        "b1_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 180.385
+        },
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 83.5334
+        },
+        "b7_joint": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 338.568
+        }
+      }
+    },
+    "corrected_research": {
+      "launches_per_replay": 19,
+      "gpu_us": {
+        "packing_copy": 8.704,
+        "math": 1497.2435999999998,
+        "scratch_zero": 2.0736
+      },
+      "kernels": {
+        "triton_poi_fused_cat_stack_view_0": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 1.8878
+        },
+        "triton_poi_fused_cat_clone_stack_t_view_1": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 2.656
+        },
+        "infer_k1": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 108.11600000000001
+        },
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 84.6978
+        },
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 81.9394
+        },
+        "save_k3": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 89.14640000000001
+        },
+        "triton_poi_fused_clone_t_transition_fused_fwd_sm90a_view_0": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 1.9202
+        },
+        "transition_fwd_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 127.239
+        },
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 2.0736000000000003
+        },
+        "transition_bwd_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 400.88559999999995
+        },
+        "reduce_partials": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 4.537599999999999
+        },
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 2.24
+        },
+        "b1_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 178.2346
+        },
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 83.30340000000001
+        },
+        "b7_joint": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 339.1438
+        }
+      }
+    },
+    "current_fixed": {
+      "launches_per_replay": 26,
+      "gpu_us": {
+        "packing_copy": 15.059199999999999,
+        "math": 1507.3046000000004,
+        "scratch_zero": 8.8582
+      },
+      "kernels": {
+        "triton_poi_fused__to_copy_0": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 1.7216
+        },
+        "triton_poi_fused_cat_copy__stack_view_0": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 1.9456
+        },
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 2.7775999999999996
+        },
+        "infer_k1": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 110.6182
+        },
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 85.33160000000001
+        },
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 82.20840000000001
+        },
+        "save_k3": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 90.20840000000001
+        },
+        "triton_poi_fused_clone_t_transition_fused_fwd_sm90a_view_1": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 1.8559999999999999
+        },
+        "transition_fwd_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 126.63119999999999
+        },
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": {
+          "count_per_replay": 3,
+          "mean_us_per_replay": 5.888400000000002
+        },
+        "transition_bwd_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 402.6582
+        },
+        "reduce_partials": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 4.5120000000000005
+        },
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": {
+          "count_per_replay": 3,
+          "mean_us_per_replay": 6.758400000000002
+        },
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": {
+          "count_per_replay": 3,
+          "mean_us_per_replay": 2.9698000000000007
+        },
+        "b1_fused": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 179.04119999999998
+        },
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN": {
+          "count_per_replay": 2,
+          "mean_us_per_replay": 83.9684
+        },
+        "b7_joint": {
+          "count_per_replay": 1,
+          "mean_us_per_replay": 342.127
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,320 @@
+"""Fused token DiT inference over a stack of engine ``modules.dit.DiTBlock`` (AF3 Alg. 23), no QK-norm, no mask.
+
+    runner = FusedTokenDiT(blocks)            # packs every weight once
+    bias = runner.hoist(pair)                 # once per sample(): every block's pair bias, head-major
+    single = runner.step(single, cond, bias)  # once per solver step
+
+What each call hoists, and why it may:
+
+  hoist   The pair representation carries no noise level, so every block's pair bias is the same at every
+          step. All 24 blocks share the LayerNorm statistics of the pair rows, so with each block's LayerNorm
+          weight folded into its projection they are ONE GEMM over one pass of the pair.
+  step    The single conditioning carries the noise level and changes every step, but at a step every sample
+          sees the same one: it is computed for L token rows, not S * L, and for all 24 blocks in two GEMMs
+          (LayerNorm(cond) statistics are shared too; each block's cond-LayerNorm weight is folded).
+"""
+import torch
+import torch.nn.functional as F
+
+from miniworld_engine.kernels.conditioned_transition.triton import token_dit_kernels as K
+from miniworld_engine.kernels.conditioned_transition.triton.token_dit_attn import attention_gated_in_place, attention_gated_in_place2, bias_descriptor
+
+
+def _t(w):
+    return w.detach().t().contiguous()
+
+
+def attention_in_place(q, k, v, bias, mask, m, key):
+    """The engine's forward attention kernel, launched with the output written over q.
+
+    ``_attn_fwd`` computes one base offset from q's strides and applies it to k, v and the output too, so all four
+    must share strides. Here q, k, v are strided views of one [M, 4D] GEMM output; the engine launcher allocates a
+    contiguous output, which does not share them and is written out of bounds. Writing over q does: a program reads
+    its own q tile before it writes that same tile, and no other program reads it.
+    """
+    import triton
+    from miniworld_engine.autotune.shape_key import pack
+    from miniworld_engine.kernels.augmented_attention.triton.main import _attn_fwd
+    A, B, L, H, D = q.shape
+    qf, kf, vf = (t.view(A * B, L, H, D) for t in (q, k, v))
+    grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B * H, triton.cdiv(D, META["HEAD_DIM_PAD"]))
+    _attn_fwd[grid](qf, kf, vf, bias, mask, D ** -0.5, m, qf, *qf.stride(), *kf.stride(), *vf.stride(), *qf.stride(),
+                    *bias.stride(), *mask.stride()[:2], A, B, H, L, D,
+                    HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)), shape_key=pack(key, H=H, HEAD_DIM=D))
+    return q
+
+
+_QUACK = []
+
+
+def _quack_gemm_act():
+    """quack's gemm_act, imported directly: quack.gemm_interface does not import under this torch (its custom-op
+    schema has an enum default the schema parser rejects), and it is only a registration layer over this."""
+    if not _QUACK:
+        try:
+            from quack.gemm_act import gemm_act
+            _QUACK.append(gemm_act)
+        except Exception:  # noqa: BLE001
+            _QUACK.append(None)
+    return _QUACK[0]
+
+
+# (tile_M, tile_N, cluster_M, pingpong); tile_N <= 208 with pingpong. Measured at M = 1920 / 3840, K 768, N 2 x 1536.
+GATED_CFGS = ((128, 192, 2, True), (128, 192, 1, True), (128, 128, 2, True), (128, 256, 1, False))
+# plain GEMM candidates for _mm (tile_M, tile_N, cluster_M, pingpong); cuBLAS is always a candidate too
+PLAIN_CFGS = ((128, 128, 1, True), (128, 128, 2, True), (128, 192, 1, True), (128, 192, 2, True),
+              (128, 256, 1, False), (128, 256, 2, False))
+
+
+class FusedTokenDiT:
+    def __init__(self, blocks, dtype=torch.bfloat16, core="gated2", prescale=True, core_precision="tf32"):
+        """``dtype`` is the activation / weight dtype of the whole path: bf16, or fp32 (MiniWorld's v1 diffusion recipe).
+        The residual stream is fp32 either way. fp32 GEMMs follow ``torch.backends.cuda.matmul.allow_tf32`` -- the caller's
+        policy, as for any torch matmul -- and ``core_precision`` sets the attention core's MMA precision for fp32."""
+        self.core_precision = core_precision
+        self.prescale = prescale     # fold sm_scale*log2(e) into Wq,bq and log2(e) into the pair-bias weights (gated core only)
+        self.core = core            # "gated": tdit.attn (sample-fastest grid, gate epilogue); "engine": the engine kernel + gate pass
+        blocks = list(blocks)
+        a0 = blocks[0].attention
+        assert not a0.use_qk_norm, "QK-norm is not implemented on this path"
+        self.nb = len(blocks)
+        self.h = a0.n_head
+        self.d = a0.to_query.weight.shape[0]
+        self.dc = a0.ada_ln_in.ln_cond.weight.shape[0]
+        self.dp = a0.ln_pair.weight.shape[0]
+        self.eps = 1e-5
+        dev = a0.to_query.weight.device
+        f32 = lambda t: t.detach().float()
+        w1, b1, w2, b2, pw = [], [], [], [], []
+        self.per = []
+        for blk in blocks:
+            at, tr = blk.attention, blk.transition
+            la, lt = f32(at.ada_ln_in.ln_cond.weight), f32(tr.ada_ln_in.ln_cond.weight)
+            # AdaLN scale / shift of both halves on LayerNorm(cond) with the norm weight folded in
+            w1 += [f32(at.ada_ln_in.to_scale.weight) * la, f32(at.ada_ln_in.to_bias.weight) * la,
+                   f32(tr.ada_ln_in.to_scale.weight) * lt, f32(tr.ada_ln_in.to_bias.weight) * lt]
+            z = torch.zeros(self.d, device=dev)
+            b1 += [f32(at.ada_ln_in.to_scale.bias), z, f32(tr.ada_ln_in.to_scale.bias), z]
+            # the two output gates read the raw conditioning
+            w2 += [f32(at.to_scale.weight), f32(tr.to_scale.weight)]
+            b2 += [f32(at.to_scale.bias), f32(tr.to_scale.bias)]
+            pw.append(f32(at.to_bias.weight) * f32(at.ln_pair.weight))            # [H, dp], ln_pair weight folded
+            wqkvg = torch.cat([at.to_query.weight, at.to_key.weight, at.to_value.weight, at.to_gate.weight], 0)
+            bqkvg = torch.cat([at.to_query.bias.detach(), torch.zeros(3 * self.d, device=dev, dtype=at.to_query.bias.dtype)])
+            if prescale and core in ("gated", "gated2"):
+                qs = (self.d // self.h) ** -0.5 * 1.4426950408889634          # sm_scale * log2(e)
+                wqkvg = wqkvg.detach().float().clone(); bqkvg = bqkvg.float().clone()
+                wqkvg[: self.d] *= qs
+                bqkvg[: self.d] *= qs
+            self.per.append(dict(
+                wqkvg_t=_t(wqkvg).to(dtype), bqkvg=bqkvg.to(dtype).contiguous(),
+                wo_t=_t(at.to_out.weight).to(dtype),
+                wa_t=_t(tr.expand_a.weight).to(dtype), wb_t=_t(tr.expand_b.weight).to(dtype),
+                ws_t=_t(tr.squeeze.weight).to(dtype),
+                # v2 operands, nn.Linear layout [out, in] for torch.addmm(b, x, W.t())
+                wqkvg=wqkvg.detach().to(dtype).contiguous(), wo=at.to_out.weight.detach().to(dtype).contiguous(),
+                wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0).detach().to(dtype).contiguous(),
+                ws=tr.squeeze.weight.detach().to(dtype).contiguous(),
+                # expand for the SwiGLU-epilogue GEMM: rows a0, b0, a1, b1, ... (quack's gate/up interleave)
+                wab_i=torch.stack([tr.expand_a.weight, tr.expand_b.weight], 1).reshape(-1, self.d)
+                .detach().to(dtype).contiguous()[None]))
+        self.w1 = torch.cat(w1, 0).to(dtype).contiguous()          # [nb*4*d, dc]
+        self.b1 = torch.cat(b1, 0).to(dtype).contiguous()
+        self.w2 = torch.cat(w2, 0).to(dtype).contiguous()          # [nb*2*d, dc]
+        self.b2 = torch.cat(b2, 0).to(dtype).contiguous()
+        pwc = torch.cat(pw, 0)
+        if prescale and core in ("gated", "gated2"):
+            pwc = pwc * 1.4426950408889634                                  # log2(e): the core works in the exp2 domain
+        self.pw_t = pwc.t().to(dtype).contiguous()                          # [dp, nb*H]
+        self.dtype = dtype
+        self._buf = {}
+        self.streams = 1
+        self._mm_cfg = {}
+        self._streams = []
+        # SwiGLU in the expand GEMM's epilogue (quack gemm_act, sm90): bf16 only; fp32 keeps cuBLAS + swiglu_rows
+        self.gated_gemm = dtype == torch.bfloat16 and _quack_gemm_act() is not None
+        self._gated_cfg = {}
+
+    # ------------------------------------------------------------------ once per sample()
+    def hoist(self, pair, mask=None):
+        """pair [1, L, L, dp] -> every block's bias, [nb*H, L, L] head-major. ``mask`` [L] bool marks the real tokens;
+        padded keys get -inf here, once per sample, so the attention core never touches a mask."""
+        L = pair.shape[1]
+        out = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
+        K.pair_bias_all(pair.reshape(L * L, self.dp), self.pw_t, out, L, self.eps)
+        if mask is not None:
+            out[:, :, ~mask.reshape(L)] = float("-inf")
+        return out
+
+    def _buffers(self, S, L, dev, tag=0):
+        key = (S, L, dev, tag)
+        if key not in self._buf:
+            M = S * L
+            T = self.d // K.STAT_W
+            self._buf[key] = dict(
+                x=torch.empty(M, self.d, device=dev, dtype=torch.float32),
+                mean=torch.empty(M, T, device=dev), m2=torch.empty(M, T, device=dev),
+                qkvg=torch.empty(4, M, self.d, device=dev, dtype=self.dtype),
+                h=torch.empty(M, self.per[0]["wa_t"].shape[1], device=dev, dtype=self.dtype),
+                # the attention core allocates and fills an all-true mask per call when handed None
+                keep=torch.ones(S, 1, L, device=dev, dtype=torch.bool),
+                lse=torch.empty(S, 1, self.h, L, device=dev, dtype=torch.float32),
+                # v2
+                xa=torch.empty(M, self.d, device=dev, dtype=self.dtype),
+                qkvg2=torch.empty(M, 4 * self.d, device=dev, dtype=self.dtype),
+                a=torch.empty(M, self.d, device=dev, dtype=self.dtype),
+                y=torch.empty(M, self.d, device=dev, dtype=self.dtype),
+                ab=torch.empty(M, 2 * self.per[0]["wa_t"].shape[1], device=dev, dtype=self.dtype))
+        return self._buf[key]
+
+    # ------------------------------------------------------------------ once per solver step
+    def _cond(self, cond, L, D):
+        """Raw logits: the v2 row kernels apply the sigmoid as they load, where it costs nothing (they are
+        memory-bound); a separate in-place pass over the strided scale columns cost 5.3 us a block."""
+        c = cond[0, 0]                                                 # [L, dc]: shared by every sample at a step
+        cn = F.layer_norm(c.float(), (self.dc,), eps=self.eps).to(self.dtype)
+        g1 = torch.addmm(self.b1, cn, self.w1.t()).view(L, self.nb, 4, D)
+        g2 = torch.addmm(self.b2, c.to(self.dtype), self.w2.t()).view(L, self.nb, 2, D)
+        return g1, g2
+
+    def step(self, single, cond, bias, out_dtype=None, streams=None):
+        """One solver step. ``streams`` > 1 splits the samples into that many groups, each on its own CUDA stream: the
+        samples share only the conditioning and the pair bias, so one group's memory-bound passes can run under another
+        group's GEMMs and attention."""
+        S, B, L, D = single.shape
+        assert B == 1
+        streams = min(streams or self.streams, S)
+        g1, g2 = self._cond(cond, L, D)
+        if streams <= 1:
+            return self._run(single, g1, g2, bias, 0).view(S, 1, L, D).to(out_dtype or single.dtype)
+        main = torch.cuda.current_stream()
+        if len(self._streams) < streams:
+            self._streams += [torch.cuda.Stream() for _ in range(streams - len(self._streams))]
+        ready = torch.cuda.Event()
+        ready.record(main)
+        cuts = [round(i * S / streams) for i in range(streams + 1)]
+        outs = []
+        for i in range(streams):
+            st = self._streams[i]
+            st.wait_event(ready)
+            with torch.cuda.stream(st):
+                outs.append(self._run(single[cuts[i]:cuts[i + 1]], g1, g2, bias, i + 1))
+            done = torch.cuda.Event()
+            done.record(st)
+            main.wait_event(done)
+        return torch.cat([o.view(-1, 1, L, D) for o in outs], 0).to(out_dtype or single.dtype)
+
+    def _run(self, single, g1, g2, bias, tag):
+        """The blocks for one group of samples; returns the fp32 residual, [S*L, D]."""
+        from miniworld_engine.autotune.shape_key import atom_key
+        S, B, L, D = single.shape
+        M, H = S * L, self.h
+        buf = self._buffers(S, L, single.device, tag)
+        x, xa, qkvg, a, y, ab, h = (buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h"))
+        x.copy_(single.reshape(M, D))
+        K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, L, self.eps)
+        # q, k, v, g as strided views of ONE [M, 4D] GEMM output; the core launcher honours strides
+        q, k, v = (qkvg.view(S, 1, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(3))
+        key = atom_key(L)
+        q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(4))
+        keep2 = buf["keep"].view(S, L)
+        if self.core == "gated2":
+            assert self.prescale, "the v2 core expects pre-scaled logits"
+            key_d = (bias.data_ptr(), tuple(bias.shape))
+            if getattr(self, "_bdesc_key", None) != key_d:
+                self._bdesc, self._bdesc_key = bias_descriptor(bias), key_d
+            bdesc = self._bdesc
+        for b, p in enumerate(self.per):
+            self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
+            if self.core == "gated2":
+                attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
+                self._mm(qkvg[:, :D], p["wo"], y)
+            elif self.core == "gated":
+                attention_gated_in_place(q4, k4, v4, g4, bias[b * H:(b + 1) * H], keep2, self.prescale, self.core_precision)   # sigmoid(g)*o over q
+                torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
+            else:
+                attention_in_place(q, k, v, bias[b * H:(b + 1) * H].unsqueeze(0), buf["keep"], buf["lse"], key)
+                K.gate_rows(qkvg[:, :D], qkvg[:, 3 * D:], a)            # o sits where q was
+                torch.mm(a, p["wo"].t(), out=y)
+            K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, self.eps)
+            if self.gated_gemm:
+                self._expand_swiglu(xa, p["wab_i"], h)
+            else:
+                torch.mm(xa, p["wab"].t(), out=ab)
+                K.swiglu_rows(ab, h)
+            self._mm(h, p["ws"], y)
+            last = b + 1 == self.nb
+            K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
+                                 None if last else g1[:, b + 1, 1], xa, L, self.eps)
+        return x
+
+    def _mm(self, A, W, out, bias=None):
+        """out = A @ W^T (+ bias): cuBLAS or a quack tile config, whichever measured fastest for this (M, N, K) on its
+        first call (before any capture). quack wins only some shapes (q|k|v|g at M = 3840), so neither is the default."""
+        key = (A.shape[0], W.shape[0], A.shape[1], bias is not None)
+        choice = self._mm_cfg.get(key)
+        if choice is None:
+            choice = self._pick_mm(A, W, out, bias)
+            self._mm_cfg[key] = choice
+        if choice == "cublas":
+            if bias is None:
+                torch.mm(A, W.t(), out=out)
+            else:
+                torch.addmm(bias, A, W.t(), out=out)
+        else:
+            self._quack_mm(A, W, out, bias, choice)
+
+    def _quack_mm(self, A, W, out, bias, c):
+        _quack_gemm_act()(A[None], W[None], None, None, out[None], None, None, c[0], c[1], c[2], 1, pingpong=c[3],
+                          rowvec_bias=None if bias is None else bias[None])
+
+    def _pick_mm(self, A, W, out, bias):
+        def timed(fn):
+            fn()
+            torch.cuda.synchronize()
+            st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            st.record()
+            for _ in range(10):
+                fn()
+            en.record()
+            torch.cuda.synchronize()
+            return st.elapsed_time(en)
+        cands = {"cublas": lambda: (torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out))}
+        if A.dtype in (torch.bfloat16, torch.float16) and _quack_gemm_act() is not None:
+            for c in PLAIN_CFGS:
+                cands[c] = lambda c=c: self._quack_mm(A, W, out, bias, c)
+        best, best_t = "cublas", None
+        for name, fn in cands.items():
+            try:
+                t = timed(fn)
+            except Exception:  # noqa: BLE001 -- a config this shape cannot run
+                continue
+            if best_t is None or t < best_t:
+                best, best_t = name, t
+        return best
+
+    def _expand_swiglu(self, xa, wab_i, h):
+        """h = silu(xa @ Wa^T) * (xa @ Wb^T) with the SwiGLU in the GEMM epilogue: ab never reaches HBM."""
+        gemm_act = _quack_gemm_act()
+        M = xa.shape[0]
+        run = lambda c: gemm_act(xa[None], wab_i, None, None, h[None], None, "swiglu", c[0], c[1], c[2], 1, pingpong=c[3])
+        cfg = self._gated_cfg.get(M)
+        if cfg is None:                                   # first call for this M: time the candidates (before any capture)
+            best = None
+            for c in GATED_CFGS:
+                try:
+                    run(c)
+                    torch.cuda.synchronize()
+                    st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                    st.record()
+                    for _ in range(10):
+                        run(c)
+                    en.record()
+                    torch.cuda.synchronize()
+                    t = st.elapsed_time(en)
+                    if best is None or t < best[0]:
+                        best = (t, c)
+                except Exception:  # noqa: BLE001 -- a config the card or shape cannot take
+                    continue
+            cfg = self._gated_cfg[M] = best[1]
+        run(cfg)

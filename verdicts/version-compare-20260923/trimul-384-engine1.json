@@ -1,0 +1,113 @@
+{
+  "arm": "engine1",
+  "module": "trimul",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16070",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 436,
+      "ms": 0.6846739196777344,
+      "rounds_ms": [
+        0.6850495910644532,
+        0.6846739196777344,
+        0.6837939453125,
+        0.6840902709960938,
+        0.6841939544677734,
+        0.6852006530761718,
+        0.6849120330810546
+      ],
+      "kernels": {
+        "triton_poi_fused_bitwise_and_fused_ln_mask_unsqueeze_0": 1,
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)": 1,
+        "_fused_ln_mask_kernel": 1,
+        "triton_poi_fused_as_strided_cat_clone_gemm_act_out_permute_slice_view_1": 2,
+        "kernel_cutlass_kernel_quackgemm_actGemmActSm90_object_at__TiledMMA_ThrLayoutVMNK1281111000_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK6416016_TVLayoutA12864160164_TVLayoutB1281601601160__0": 4,
+        "_glu_wide_kernel": 4,
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": 1,
+        "triton_poi_fused_as_strided_cat_clone_gemm_act_out_permute_slice_view_2": 2,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 1,
+        "triton_poi_fused_cat_layernorm_transpose_dbn_bnd_permute_view_3": 1,
+        "_ln_transpose_dbn_kernel": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 2,
+        "_gate_mul_kernel": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 161,
+      "ms": 1.8566905212402345,
+      "rounds_ms": [
+        1.85718017578125,
+        1.8567391967773437,
+        1.8568563842773438,
+        1.8564019775390626,
+        1.8563449096679687,
+        1.8566905212402345,
+        1.856494140625
+      ],
+      "kernels": {
+        "triton_poi_fused__to_copy_div_gt_rand_0": 1,
+        "triton_poi_fused_cat_clone_copy_slice_t_1": 1,
+        "triton_poi_fused__to_copy_bitwise_and_unsqueeze_view_2": 1,
+        "layer_norm_fwd_fused": 1,
+        "kernel_cutlass_kernel_quackgemm_actGemmGatedSm90_object_at__TiledMMA_ThrLayoutVMNK128211112800_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK6425616_TVLayoutA12864160164_TVLayoutB1282561601_0": 1,
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": 2,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 2,
+        "triton_poi_fused_cat_3": 1,
+        "_ln_mat_kernel": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 1,
+        "triton_poi_fused_clone_t_trimul_gate_elem_fwd_view_4": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_NNT": 1,
+        "_gate_mul_kernel": 1,
+        "_gate_elem_bwd_ew_kernel": 1,
+        "nvjet_tst_64x64_64x13_2x2_v_bz_splitK_NTT": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 3,
+        "nvjet_tst_320x128_64x3_1x2_h_bz_coopB_TTT": 1,
+        "nvjet_tst_64x64_64x13_2x1_v_bz_splitK_NTT": 1,
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": 4,
+        "_ln_bwd_kernel": 1,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN": 1,
+        "kernel_cutlass_kernel_quackgemm_default_epiGemmDefaultSm90_object_at__TiledMMA_ThrLayoutVMNK1281111000_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK6412816_TVLayoutA12864160164_TVLayoutB12_0": 2,
+        "triton_poi_fused_cat_trimul_front_bwd_dconcat_view_0": 1,
+        "triton_poi_fused_cat_trimul_front_bwd_dconcat_view_1": 1,
+        "_dconcat_kernel": 1,
+        "nvjet_tst_128x128_64x6_1x2_h_bz_splitK_NNT": 1,
+        "triton_poi_fused_cat_clone_gemm_out_t_2": 1,
+        "kernel_cutlass_kernel_quackgemm_actGemmActSm90_object_at__TiledMMA_ThrLayoutVMNK128211112800_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK6412816_TVLayoutA12864160164_TVLayoutB128128160112_0": 1,
+        "layer_norm_bwd_dx_fused": 1,
+        "triton_poi_fused_add_view_3": 1,
+        "triton_poi_fused_clone_slice_t_4": 1,
+        "triton_poi_fused_clone_slice_t_5": 1,
+        "triton_poi_fused_clone_slice_t_6": 1,
+        "triton_poi_fused_clone_slice_t_7": 1
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "historical architecture default",
+  "resolved_backends": {
+    "": "KernelBackend.CUTE",
+    "ln_pair": "KernelBackend.CUDA",
+    "ln_out": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

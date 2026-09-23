@@ -1,0 +1,20 @@
+{
+  "job_test": 16146,
+  "job_benchmark": 16152,
+  "gpu_uuid": "30a58821-3631-d2f4-e58b-73454f9d7cef",
+  "msa_depth": 1024,
+  "pwa_dropout": 0.15,
+  "opm_dropout": "not part of model",
+  "gpu_tests_passed": 17,
+  "memcheck_errors": 0,
+  "racecheck_errors": 0,
+  "racecheck_warnings": 0,
+  "sources": {
+    "integrations/opm_train.py": "c699b7c5dac7cd58af599ff3d2b7704b41f600baed3b1af00e14f0cf2d46c60e",
+    "integrations/pwa_train.py": "7248b77d25840c6a55fbd71d261866e498c118bcdbcca953d0a7a0afd71fa873",
+    "integrations/csrc/opm_epilogue.cu": "f06bceb55c893ad120c6c257284e9708d04f7ad04d6cf79fac1caf93e10b2589",
+    "integrations/csrc/pwa_glue3.cu": "74783bbdf1324935d730fdd5d1f69de2059c005da469b4ccf87ef5944580ee8f",
+    "modules/outer_product/module.py": "1617bbea8e24725b7c629d4e458fe3fc64acbada3660038226b417336a671e31",
+    "autotune/derive.py": "f0756373b7962028e7838370bd000162848ceb6b1e9af5ce2b5bfa292fb48b70"
+  }
+}

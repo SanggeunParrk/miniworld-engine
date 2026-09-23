@@ -19,3 +19,9 @@ includes Transition's `cuda/anthropic_v5/` headers and the research capsule's
 upstream snapshot. Original notices in source files remain in place. Other
 MiniWorld code remains under the root MIT license. The isolated engine snapshot
 in the research capsule retains that same MIT license for engine-owned code.
+
+The installed TriMul runtime also includes selected native v5/overlay sources in
+`src/miniworld_engine/kernels/trimul_inproj/cuda/h100_sources/` and adapted native
+Python driver/launch helpers in its parent directory. `PROVENANCE.json` maps
+selected source bodies to the preserved experiment archives and their hashes.
+The corresponding Apache-2.0 license applies to these inherited portions.

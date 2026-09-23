@@ -1,0 +1,98 @@
+{
+  "arm": "pytorch",
+  "module": "opm",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/.release-build/h100-installed/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 548,
+      "ms": 0.5450387191772461,
+      "rounds_ms": [
+        0.545206413269043,
+        0.5451212692260742,
+        0.5450387191772461,
+        0.5448985671997071,
+        0.5449395370483399,
+        0.5450547027587891,
+        0.5449267196655273
+      ],
+      "kernels": {
+        "triton_per_fused__to_copy_native_layer_norm_0": 1,
+        "nvjet_tst_32x384_64x4_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_1": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NTT": 1,
+        "triton_poi_fused__to_copy_2": 1,
+        "void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Params)": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_3": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 1,
+        "triton_poi_fused_add_addmm_view_4": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 221,
+      "ms": 1.3553581237792969,
+      "rounds_ms": [
+        1.355726776123047,
+        1.3550617980957032,
+        1.3557734680175781,
+        1.3555442810058593,
+        1.3553581237792969,
+        1.3550682067871094,
+        1.3546502685546875
+      ],
+      "kernels": {
+        "triton_per_fused__to_copy_native_layer_norm_0": 1,
+        "nvjet_tst_32x384_64x4_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_1": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NTT": 1,
+        "triton_poi_fused__to_copy_2": 1,
+        "void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Params)": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_3": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 1,
+        "triton_poi_fused_add_addmm_view_4": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT": 1,
+        "nvjet_tst_96x128_64x6_1x1_v_bz_splitK_NTN": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 3,
+        "triton_red_fused_sum_view_0": 1,
+        "triton_red_fused_sum_view_1": 1,
+        "triton_poi_fused__to_copy_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_NNT": 1,
+        "nvjet_tst_128x192_64x5_2x1_v_bz_coopB_TNN": 1,
+        "triton_poi_fused_bmm_clone_mul_permute_squeeze_unsqueeze_view_3": 1,
+        "nvjet_tst_32x64_64x16_2x1_v_bz_splitK_NTN": 2,
+        "nvjet_tst_64x384_64x3_1x2_h_bz_coopB_NNT": 2,
+        "triton_per_fused__to_copy_add_native_layer_norm_native_layer_norm_backward_view_4": 1,
+        "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)": 2
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "auto",
+  "resolved_backends": {
+    "opm.ln_msa": "KernelBackend.PYTORCH"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ],
+  "msa_depth": 256
+}

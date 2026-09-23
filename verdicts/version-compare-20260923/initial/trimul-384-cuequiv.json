@@ -1,0 +1,100 @@
+{
+  "arm": "cuequiv",
+  "module": "trimul",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/.release-build/h100-installed/miniworld_engine/__init__.py",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "ms": 0.5518329620361329,
+      "rounds_ms": [
+        0.5524012756347656,
+        0.5527788925170899,
+        0.5516128158569336,
+        0.5514380645751953,
+        0.5518329620361329,
+        0.5509932708740234,
+        0.5523987197875977
+      ],
+      "kernels": {
+        "layer_norm_transpose_forward_kernel": 2,
+        "triton_poi_fused_bitwise_and_cat_fused_gated_dual_gemm_unsqueeze_view_0": 2,
+        "triton_poi_fused_bitwise_and_cat_fused_gated_dual_gemm_unsqueeze_view_1": 1,
+        "fused_sigmoid_gated_dual_gemm_forward_kernel": 1,
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": 1,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 1,
+        "triton_poi_fused_cat_layer_norm_transpose_permute_view_2": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 2,
+        "triton_poi_fused__unsafe_view_add_mul_sigmoid_3": 1
+      }
+    },
+    "training": {
+      "finite": true,
+      "ms": 2.2554092407226562,
+      "rounds_ms": [
+        2.2496556091308593,
+        2.256776885986328,
+        2.255095672607422,
+        2.2554092407226562,
+        2.2551507568359375,
+        2.2564703369140626,
+        2.257230682373047
+      ],
+      "kernels": {
+        "void at::native::vectorized_elementwise_kernel<2, at::native::FillFunctor<long>, std::array<char*, 1ul> >(int, at::native::FillFunctor<long>, std::array<char*, 1ul>)": 2,
+        "void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned long, 2, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::(anonymous namespace)::distribution_nullary_kernel<long, unsigned long, ulonglong2, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1})::{lambda(int, unsigned long)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::(anonymous namespace)::distribution_nullary_kernel<long, unsigned long, ulonglong2, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(curandStatePhilox4_32_10*)#1} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(unsigned long)#1})::{lambda(int, unsigned long)#1})": 1,
+        "triton_poi_fused_gt_rand_0": 1,
+        "layer_norm_transpose_forward_kernel": 2,
+        "triton_poi_fused_bitwise_and_unsqueeze_1": 1,
+        "triton_poi_fused_cat_2": 2,
+        "fused_sigmoid_gated_dual_gemm_forward_kernel": 1,
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": 2,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 2,
+        "triton_poi_fused_cat_permute_view_3": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_TNT": 2,
+        "triton_poi_fused__to_copy__unsafe_view_add_div_mul_sigmoid_4": 1,
+        "triton_poi_fused__to_copy__unsafe_view_div_mul_sigmoid_sigmoid_backward_0": 1,
+        "nvjet_tst_64x64_64x13_2x1_v_bz_splitK_NTT": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 4,
+        "nvjet_tst_128x256_64x4_2x1_v_bz_coopA_NNN": 1,
+        "nvjet_tst_64x64_64x13_2x2_v_bz_splitK_NTT": 1,
+        "nvjet_tst_128x160_64x5_1x2_h_bz_NNT": 3,
+        "layer_norm_transpose_backward_kernel": 2,
+        "triton_red_fused_sum_view_1": 2,
+        "triton_per_fused_sum_view_2": 2,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN": 2,
+        "triton_poi_fused_add_cat_permute_slice_backward_squeeze_view_3": 1,
+        "fused_sigmoid_gated_dual_gemm_backward_pregemm_kernel": 1,
+        "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)": 1,
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)": 1,
+        "nvjet_tst_64x128_64x8_2x1_v_bz_splitK_NTN": 2,
+        "triton_poi_fused_add_layer_norm_transpose_bwd_view_4": 1,
+        "triton_red_fused_sum_view_5": 2,
+        "triton_per_fused_sum_view_6": 2,
+        "triton_poi_fused_add_view_7": 1
+      }
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "resolved_backends": {
+    "": "KernelBackend.CUEQUIVARIANCE",
+    "ln_pair": "KernelBackend.PYTORCH",
+    "ln_out": "KernelBackend.PYTORCH"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

@@ -92,7 +92,7 @@ exclude = ["*.notes", "*.notes.*", "*.autotune.plans", "*.autotune.plans.*"]
 #                                 gate protects only this repo. The file must be BOTH
 #                                 present and listed here; either alone ships nothing.
 miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h",
-                    "**/*.csv"]
+                    "**/*.csv", "**/*.inc"]
 # ...but not the optimization logs. `exclude` above drops `notes` as a package; these
 # `exclude-package-data` entries drop the assets the globs above would otherwise sweep in
 # from a parent package's tree. tests/layout/test_notes_stay_out_of_the_wheel.py checks the result.

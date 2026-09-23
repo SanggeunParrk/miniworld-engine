@@ -76,14 +76,14 @@ class MSAPairWeightedAveraging(nn.Module):
         """Forward pass. ALWAYS returns the residual output msa + drop_msa(pwa(msa, pair)) — the
         residual is UNCONDITIONAL (domain standard, explicit add) and drop_msa is optional (p_drop,
         training only). The residual is unconditional and has no flag."""
-        # Training: the fused CUDA/Triton forward+backward (integrations.pwa_train), opt-in by MINIWORLD_PWA_TRAIN,
-        # serves a grad-enabled call where it fits; its output already carries the residual.
+        # The packaged H100 forward/backward is automatic for supported module inputs;
+        # its output already carries the residual and training dropout.
         # Inference takes the same forward kernels (no o kept, no dropout) -- faster than the upstream cell and payload-free.
         if _pwa_train.wanted(self.implementation):
             _dims = (self.to_value.weight.shape[1], self.to_bias.weight.shape[1], self.n_head,
                      self.to_value.weight.shape[0] // self.n_head)
             if _pwa_train.serves(msa, pair, *_dims):                # drop_msa is fused into the path (training only)
-                if torch.is_grad_enabled():
+                if torch.is_grad_enabled() or (self.training and self.drop_msa.p_drop > 0):
                     return _pwa_train.pair_weighted_averaging(self, msa, pair, mask)
                 return _pwa_train.pair_weighted_averaging_inference(self, msa, pair, mask)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused cell where it

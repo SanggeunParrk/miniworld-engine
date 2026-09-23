@@ -120,7 +120,9 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return False
     # FakeTensor dispatch records shapes only; it must not invoke nvcc or
     # wait for another process's extension lock. Launch wrappers have fakes.
-    if _is_fake(x, wa, ws):
+    # Dynamo's TensorVariable is not itself a FakeTensor. Defer its build to
+    # the opaque runtime launch instead of tracing filesystem/compiler calls.
+    if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
         # Build the variant this call will actually use, so inference never pays for the

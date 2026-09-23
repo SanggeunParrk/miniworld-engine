@@ -44,13 +44,13 @@ def _is_kernel(fn: ast.FunctionDef) -> bool:
     return any("jit" in ast.dump(d) or "autotune" in ast.dump(d) for d in fn.decorator_list)
 
 
-def _signature(fn: ast.FunctionDef) -> tuple[list[str], set[str]]:
+def _signature(fn: ast.FunctionDef, injected: set[str] | None = None) -> tuple[list[str], set[str]]:
     a = fn.args
     ordered = [p.arg for p in a.posonlyargs + a.args]
     ndef = len(a.defaults)
     required = set(ordered[:-ndef] if ndef else ordered)
     required |= {k.arg for k, d in zip(a.kwonlyargs, a.kw_defaults, strict=False) if d is None}
-    return ordered, {r for r in required if not r.startswith(INJECTED)}
+    return ordered, {r for r in required if not r.startswith(INJECTED)} - (injected or set())
 
 
 def _module_of(path: Path) -> str:
@@ -73,6 +73,34 @@ def _resolve_import(node: ast.ImportFrom, this_module: str) -> str | None:
     return node.module
 
 
+def _config_parameters(fn: ast.FunctionDef, tree: ast.AST) -> set[str]:
+    """Read explicit Triton Config dictionary keys, including local config factories.
+
+    A tuned BR/BJ/BN parameter is injected just like a BLOCK-prefixed parameter.
+    Only Config keys count: an unrelated constant or dictionary cannot hide an
+    omitted runtime input.
+    """
+    factories = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    pending: list[ast.AST] = []
+    for decorator in fn.decorator_list:
+        if isinstance(decorator, ast.Call) and "autotune" in ast.dump(decorator.func):
+            pending.extend(k.value for k in decorator.keywords if k.arg == "configs")
+    visited, names = set(), set()
+    while pending:
+        expression = pending.pop()
+        for node in ast.walk(expression):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+            if name == "Config" and node.args and isinstance(node.args[0], ast.Dict):
+                names.update(k.value for k in node.args[0].keys
+                             if isinstance(k, ast.Constant) and isinstance(k.value, str))
+            elif name in factories and name not in visited:
+                visited.add(name)
+                pending.append(factories[name])
+    return names
+
+
 def collect() -> tuple[dict, list]:
     """(module, kernel name) -> (ordered params, required params), and every parsed tree."""
     kernels: dict[tuple[str, str], tuple[list[str], set[str]]] = {}
@@ -86,7 +114,7 @@ def collect() -> tuple[dict, list]:
         trees.append((path, mod, tree))
         for fn in ast.walk(tree):
             if isinstance(fn, ast.FunctionDef) and _is_kernel(fn):
-                kernels[(mod, fn.name)] = _signature(fn)
+                kernels[(mod, fn.name)] = _signature(fn, _config_parameters(fn, tree))
     return kernels, trees
 
 

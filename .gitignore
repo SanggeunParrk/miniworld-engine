@@ -122,3 +122,6 @@ src/miniworld_engine/autotune/data/.merge.lock
 
 !experiments/trimul_training_v2/
 /.release-build/
+
+# Local H100 wiring validation build products
+/verdicts/h100-jit/

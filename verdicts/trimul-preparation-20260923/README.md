@@ -1,0 +1,46 @@
+# TriMul D128 반복 준비 비용 제거
+
+node01 H100, B1/D128, 양방향 TriMul, dropout25% 및 RNG·mask·residual 포함. Static fullgraph compile + CUDA graph. 동일 GPU에서 전후 순서를 교대해 10라운드 × 100 replay 중앙값. 컴파일·튜닝·CPU dispatch·optimizer 시간 제외. MiniPairformer는 양방향 TriMul + native CUDA Transition 1블록이며, trace에서 Transition fwd/bwd 경로를 확인했다.
+
+| 모듈 | L | 변경 전 ms | 변경 후 ms | 단축 µs | 시간 감소 |
+|---|---:|---:|---:|---:|---:|
+| trimul | 384 | 1.044879 | 1.027609 | 17.27 | 1.65% |
+| trimul | 768 | 4.220549 | 4.193022 | 27.53 | 0.65% |
+| block | 384 | 1.638429 | 1.606880 | 31.55 | 1.93% |
+| block | 768 | 6.474678 | 6.449458 | 25.22 | 0.39% |
+
+## 구현
+
+- 네 입력 projection/gate 파라미터는 기존 이름과 `[out,in]` shape를 유지하고 실제 저장 stride만 `(1,out)`으로 변경. native backward와 Triton이 사용하는 전치가 view가 된다. 파라미터 객체는 생성자에서 만들어져 optimizer가 처음부터 소유한다.
+- K1/B7 공통 weight packing은 forward에서 한 번 수행하고 backward까지 저장한다. 호출당 256 KiB이며, 다른 forward나 optimizer step과 공유하지 않는다.
+- forward에서 사용하지 않는 전치 가중치 준비 5개 제거. backward의 중복 packing 및 float→BF16 mask 재변환 제거.
+- B7의 네 가중치 gradient를 하나의 버퍼로 custom op에서 반환하고 밖에서 view로 분리한다. 출력끼리 alias를 금지하는 custom op 규칙을 지키면서 네 복사를 제거한다. 실제 `.backward()`의 gradient 배치도 parameter와 일치한다.
+- 출력 gate 및 projection의 배치는 기존대로이며, 필요한 전치/gradient 복사는 남아 있다. 파라미터의 packing 자체를 모두 없앤 변경은 아니다.
+- D128/H128 Miniworld 양방향 모듈이 대상이다. 다른 폭과 단방향 배치는 그대로다. 계산 커널의 수식·타일·융합은 변경하지 않았다.
+
+## 검증
+
+- job16184: 위 네 조건에서 변경 전 snapshot과 고정 dropout 출력 및 모든 gradient bit-exact. 실제 AdamW 업데이트 뒤 파라미터도 bit-exact. 성능은 별도 graph에서 실제 dropout RNG를 포함해 측정.
+- 같은 잡의 GPU pytest 7건 통과: 추론 L256/384/768, compiled backward, 여러 forward의 saved tensor 소유권, L384/768 독립 PyTorch gradient 비교, graph replay 중 live weight 변경.
+- job16194: 배치·체크포인트·optimizer 테스트 4건 통과. FP32/BF16 모델 체크포인트와 CPU AdamW, GPU foreach/fused AdamW 및 legacy optimizer state 재개.
+- L384 TriMul의 진단 trace는 GPU launch 40→24. 전체 block trace는 profiler 시작 구간 이벤트가 일부 누락되어 정확한 launch-count 비교에 사용하지 않는다.
+- 1.520ms 과거 연구 벤치와 직접 비교하지 않는다. 현재 공개 모듈 변경 전후 비교이며, 클럭과 부하 변동을 완전히 제거한 상한 측정이 아니다. L768 블록의 작은 차이는 반복 라운드 변동도 함께 참고해야 한다.
+
+## 기존 optimizer 체크포인트 재개
+
+**모델 checkpoint의 key/shape/값은 호환되지만, 기존 row-major optimizer 모멘텀은 1회 배치 변환이 필요하다.** fused AdamW는 parameter/gradient/moment의 stride가 같아야 한다. 이 변환 없이 구 체크포인트의 fused AdamW를 재개하면 오류가 발생한다. 신규 optimizer는 별도 변환이 필요 없다.
+
+```python
+from miniworld_engine.integrations.optimizer import align_optimizer_state_layout_
+model.load_state_dict(checkpoint["model_state_dict"])
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+align_optimizer_state_layout_(optimizer)  # CUDA graph capture 이전, 값/step 유지
+```
+
+## 자료
+
+- [결과/반복 표본](results.json), [검증·벤치](check.py), [Slurm 실행](check.sbatch)
+- `h100_training.before.py`: 수정 직전 실행 코드 snapshot. 비교 모듈의 네 front 파라미터를 이전 row-major 배치로 되돌려 동일 값으로 실행했다.
+- 초기 잡16171/16175/16179/16182의 실패와 잡16180의 예비 측정은 최종 결과에서 제외했다. custom op 반환 alias 계약, 벤치 import/stream 설정, 기존 Inductor cache metadata와 Ninja PATH를 수정한 뒤 재검증했다.
+- 체크포인트 optimizer 배치 변환을 빠뜨렸던 16189의 fused AdamW 실패도 보존했다. 변환 적용 후 16194에서 통과했다.
+- 소스 수정은 로컬 개발 트리에 있으며, 실행 중인 학습 job이나 설치된 wheel을 교체하지 않았다.

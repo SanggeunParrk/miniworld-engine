@@ -370,6 +370,34 @@ def install_native_recorders() -> None:
         if not is_fake(x):
             raise RuntimeError("native derivation recorder received a real tensor")
 
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
+        # These packaged native composites have no MiniWorld autotune grid.
+        # Keep their module dispatch and saved-tensor/autograd contracts during
+        # derivation, while preventing driver/C++ launches on fake data.
+        import importlib
+        contracts = (
+            ("integrations.opm_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
+                                         ("_inference_op", "_inference_fake"))),
+            ("integrations.pwa_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
+                                         ("_inference_op", "_infer_fake"))),
+            ("integrations.token_dit", (("_infer", "_fake"),)),
+            ("kernels.trimul_inproj.cuda.h100_training", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
+            ("kernels.trimul_inproj.cuda.h100_single", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
+            ("kernels.trimul_inproj.cuda.h100_inference", (("inference", "_inference_fake"),)),
+        )
+
+        def native_contract(fake):
+            def run(*args, **kwargs):
+                first = args[0][0] if isinstance(args[0], list) else args[0]
+                require_fake(first)
+                return fake(*args, **kwargs)
+            return run
+
+        for module_name, functions in contracts:
+            module = importlib.import_module("miniworld_engine." + module_name)
+            for entry, fake in functions:
+                setattr(module, entry, native_contract(getattr(module, fake)))
+
     class TransitionExtension:
         def transition_b2b_fwd(self, x, rstd, c1, g, beta, wa, wb, ws, residual=True):
             require_fake(x)

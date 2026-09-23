@@ -1,0 +1,55 @@
+{
+  "arm": "engine2",
+  "module": "trimul",
+  "L": 768,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/.release-build/h100-installed/miniworld_engine/__init__.py",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16039",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "ms": 1.0405375671386718,
+      "rounds_ms": [
+        0.9732243347167969,
+        1.0045862579345703,
+        1.0608563232421875,
+        1.0464556884765626,
+        1.0405375671386718,
+        1.048079376220703,
+        1.0358918762207032
+      ],
+      "kernels": {
+        "triton_poi_fused__to_copy_bitwise_and_trimul_h100_infer_unsqueeze_0": 1,
+        "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 1, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)": 2,
+        "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 2, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)": 1,
+        "tmn_k1_z128_h256_b_t3x64_s8k2_m1_l2_v0": 1,
+        "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN": 1,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 1,
+        "tmn_k3_z128_h256_b_t2x64_s8a1_l1": 1
+      }
+    },
+    "training": {
+      "error": "Traceback (most recent call last):\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 105, in <module>\n    with torch.cuda.graph(graph):out,grads=step()\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 97, in step\n    return (out,torch.autograd.grad(out,leaves,dy)) if train else (out,())\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/__init__.py\", line 515, in grad\n    result = _engine_run_backward(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/graph.py\", line 865, in _engine_run_backward\n    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass\ntorch.AcceleratorError: CUDA error: operation would make the legacy stream depend on a capturing blocking stream\nSearch for `cudaErrorStreamCaptureImplicit' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 105, in <module>\n    with torch.cuda.graph(graph):out,grads=step()\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/graphs.py\", line 268, in __exit__\n    self.cuda_graph.capture_end()\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/graphs.py\", line 130, in capture_end\n    super().capture_end()\ntorch.AcceleratorError: CUDA error: operation failed due to a previous error during capture\nSearch for `cudaErrorStreamCaptureInvalidated' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n\n"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "resolved_backends": {
+    "": "KernelBackend.CUTE",
+    "ln_pair": "KernelBackend.CUDA",
+    "ln_out": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

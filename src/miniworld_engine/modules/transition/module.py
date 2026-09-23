@@ -44,7 +44,7 @@ def _fused_sm90a_enabled() -> bool:
     sides). Default on; set MINIWORLD_TRANSITION_FUSED_SM90A=0 to A/B against Triton."""
     from miniworld_engine import settings
 
-    return settings.current().transition_fused_sm90a
+    return settings.current().transition_fused_sm90a and settings.current().engine_backend != "triton"
 
 
 def _large_d_training_backend_from_env() -> str | None:

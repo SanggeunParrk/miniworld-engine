@@ -343,7 +343,8 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
     const __grid_constant__ CUtensorMap gmap,     // wg   [HC][D]               box (64, 32)
     const __grid_constant__ CUtensorMap wotmap,   // wo^T [HC][D]               box (64, 32)
     const __grid_constant__ CUtensorMap domap,    // do   head-major [H*N][S*C] box (64, 64) (store)
-    const __grid_constant__ CUtensorMap dgpmap) { // dgp  natural, row stride rs, 3-D box (32 c, 64 tok, 2 s), 64B swizzle (store)
+    const __grid_constant__ CUtensorMap dgpmap,
+    const __nv_bfloat16* __restrict__ drop_mask, float drop_scale) { // dgp  natural, row stride rs, 3-D box (32 c, 64 tok, 2 s), 64B swizzle (store)
   extern __shared__ __align__(1024) unsigned char smem_raw[];
   const uint32_t sbase = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
   unsigned char* smb = smem_raw + ((1024u - (sbase & 1023u)) & 1023u);
@@ -475,6 +476,22 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
     const __nv_bfloat16* sDOc = sDOb + (b * 2 + c) * 2 * TILE;     // my dout tiles [2 s][TILE]
     const __nv_bfloat16* sDOo = sDOb + (b * 2 + oc) * 2 * TILE;    // the other consumer's (for the dWo partial)
     tma::wait(fullD + b, (T >> 1) & 1);
+    if (drop_mask != nullptr) {
+      // Each consumer owns its two dres tiles. Mask in shared memory once, before
+      // both du and dWo consume them; no [S,N,D] masked gradient goes through HBM.
+      auto* tile = const_cast<__nv_bfloat16*>(sDOc);
+#pragma unroll
+      for (int v = wtid; v < BS * TILE / 2; v += 128) {
+        const int si = v / (TILE / 2), rc = (v % (TILE / 2)) * 2;
+        const int row = rc / D, col = rc % D;
+        auto* ptr = reinterpret_cast<__nv_bfloat162*>(tile + si * TILE + tma::sw128(row, col));
+        const float2 value = __bfloat1622float2(*ptr);
+        const float2 keep = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(drop_mask + (i0 + row) * D + col));
+        *ptr = __float22bfloat162_rn(make_float2((value.x * keep.x) * drop_scale, (value.y * keep.y) * drop_scale));
+      }
+      wg::proxy_fence();
+      wg_sync();
+    }
 #pragma unroll 1
     for (int h = 0; h < H; ++h, ++gs) {
       const int gh = T * H + h, hb = gh & 1, st = gs % NST;
@@ -590,7 +607,7 @@ CUtensorMap map_nat(void* base, long row_stride, int N, int S, int bi) {   // na
 
 template <int NST>
 void launch_glue3(int N, int S, int ntile, int grid, float* dWo, const CUtensorMap& omap, const CUtensorMap& dmap, const __nv_bfloat16* yp,
-                  const CUtensorMap& gmap, const CUtensorMap& wotmap, const CUtensorMap& domap, const CUtensorMap& dgpmap) {
+                  const CUtensorMap& gmap, const CUtensorMap& wotmap, const CUtensorMap& domap, const CUtensorMap& dgpmap, const __nv_bfloat16* drop_mask, float drop_scale) {
   constexpr int BYTES = SMX<NST>::BYTES;
   static bool attr = false;                                        // one per instantiation
   if (!attr) {
@@ -600,12 +617,12 @@ void launch_glue3(int N, int S, int ntile, int grid, float* dWo, const CUtensorM
     TORCH_WARN("pwa_glue3_kernel<", NST, ">: ", BYTES, " B smem -> ", nb, " blocks/SM");
     attr = true;
   }
-  pwa_glue3_kernel<NST><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(N, S, ntile, dWo, omap, dmap, yp, gmap, wotmap, domap, dgpmap);
+  pwa_glue3_kernel<NST><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(N, S, ntile, dWo, omap, dmap, yp, gmap, wotmap, domap, dgpmap, drop_mask, drop_scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // glue from the saved o: (do head-major [H][N][S*C], dgp (into dgv[..., :HC] when given, else [S][N][HC]), dWo fp32 [D][HC])
-std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Tensor dout, torch::Tensor wgw, torch::Tensor wot, c10::optional<torch::Tensor> dgv, int64_t nst, int64_t blocks_per_sm) {
+std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Tensor dout, torch::Tensor wgw, torch::Tensor wot, c10::optional<torch::Tensor> dgv, int64_t nst, int64_t blocks_per_sm, c10::optional<torch::Tensor> drop_mask, double drop_scale) {
   TORCH_CHECK(o.is_cuda() && o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 3 && o.size(2) == HC, "o: [S, N, HC] bf16");
   const int S = (int)o.size(0), N = (int)o.size(1);
   TORCH_CHECK(N % 128 == 0 && S % BS == 0, "N must be a multiple of 128 and S even");
@@ -613,6 +630,12 @@ std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Te
   TORCH_CHECK(dout.is_contiguous() && dout.sizes() == torch::IntArrayRef({S, N, D}), "dout: [S, N, D]");
   TORCH_CHECK(wgw.is_contiguous() && wgw.sizes() == torch::IntArrayRef({HC, D}), "wg: [HC, D]");
   TORCH_CHECK(wot.is_contiguous() && wot.sizes() == torch::IntArrayRef({HC, D}), "wot: Wo^T [HC, D]");
+  if (drop_mask.has_value()) {
+    TORCH_CHECK(drop_mask->device() == o.device() && drop_mask->scalar_type() == torch::kBFloat16
+                && drop_mask->is_contiguous() && drop_mask->sizes() == torch::IntArrayRef({N, D}),
+                "drop_mask: contiguous bf16 [N, D] on o's device");
+  }
+  const auto* mask_ptr = drop_mask.has_value() ? reinterpret_cast<const __nv_bfloat16*>(drop_mask->data_ptr<at::BFloat16>()) : nullptr;
   auto d_o = torch::empty({H, N, (long)S * C}, o.options());
   torch::Tensor dgp; long rs = HC;
   if (dgv.has_value()) {
@@ -631,13 +654,13 @@ std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Te
               domap = map2d(d_o.data_ptr(), (long)H * N, (long)S * C, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "do"), dgpmap = map_nat(dgp.data_ptr(), rs, N, S, 64);
   const __nv_bfloat16* yp = reinterpret_cast<const __nv_bfloat16*>(y.data_ptr<at::BFloat16>());
   const int so_unused = 0; (void)so_unused;
-  if (nst == 3) launch_glue3<3>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap);
-  else if (nst == 2) launch_glue3<2>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap);
+  if (nst == 3) launch_glue3<3>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
+  else if (nst == 2) launch_glue3<2>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
   else TORCH_CHECK(false, "nst must be 2 or 3 (the double-buffered staging leaves room for at most three o-stage slots)");
   return {d_o, dgp, dWo.sum(0)};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("pwa_glue3", &pwa_glue3, "PWA backward glue from the saved o with the dWo partial folded in: (do head-major, dgp, dWo fp32 [64][256])",
-          py::arg("o"), py::arg("y"), py::arg("dout"), py::arg("wg"), py::arg("wot"), py::arg("dgv") = py::none(), py::arg("nst") = 2, py::arg("blocks_per_sm") = 1);
+          py::arg("o"), py::arg("y"), py::arg("dout"), py::arg("wg"), py::arg("wot"), py::arg("dgv") = py::none(), py::arg("nst") = 2, py::arg("blocks_per_sm") = 1, py::arg("drop_mask") = py::none(), py::arg("drop_scale") = 1.0);
 }

@@ -200,6 +200,8 @@ class Settings:
 
     #: Process-wide application policy; configure before constructing models.
     engine_backend: Literal["auto", "triton"] = "auto"
+    #: Connected CUDA training widths; width-specific performance tuning is tracked separately.
+    trimul_h100_training_widths: tuple[int, ...] = (64, 128, 256, 384, 512)
 
     # ---- transition backend selection ------------------------------------------------------ #
     #: Force the split path (ln_in + non-fused triton_transition) over the fused kernels. An

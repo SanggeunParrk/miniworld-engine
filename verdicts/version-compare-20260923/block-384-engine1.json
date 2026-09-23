@@ -1,0 +1,40 @@
+{
+  "arm": "engine1",
+  "module": "block",
+  "L": 384,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16042",
+  "modes": {
+    "inference": {
+      "error": "Traceback (most recent call last):\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 105, in <module>\n    y=compiled(*inputs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py\", line 465, in __call__\n    return super().__call__(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py\", line 1776, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py\", line 1787, in _call_impl\n    return forward_call(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py\", line 953, in compile_wrapper\n    return fn(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py\", line 1776, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py\", line 1787, in _call_impl\n    return forward_call(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 2202, in __call__\n    result = self._torchdynamo_orig_backend(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 707, in __call__\n    result = _compile(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 1815, in _compile\n    raise InternalTorchDynamoError(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 1752, in _compile\n    guarded_code, tracer_output = compile_inner(code, one_graph, hooks)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_utils_internal.py\", line 97, in wrapper_function\n    return function(*args, **kwargs)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 1433, in compile_inner\n    return _compile_inner(code, one_graph, hooks)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 1467, in _compile_inner\n    dynamo_output = compile_frame(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 1341, in compile_frame\n    bytecode, tracer_output = transform_code_object(code, transform)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/bytecode_transformation.py\", line 1600, in transform_code_object\n    tracer_output = transformations(instructions, code_options)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 1313, in transform\n    tracer_output = trace_frame(\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py\", line 350, in _fn\n    torch.cuda.set_rng_state(cuda_rng_state)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/random.py\", line 79, in set_rng_state\n    _lazy_call(cb)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/__init__.py\", line 355, in _lazy_call\n    callable()\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/random.py\", line 77, in cb\n    default_generator.set_state(new_state)\ntorch._dynamo.exc.InternalTorchDynamoError: AcceleratorError: CUDA error: device-side assert triggered\nSearch for `cudaErrorAssert' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n\n\n"
+    },
+    "training": {
+      "error": "Traceback (most recent call last):\n  File \"/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/bench.py\", line 96, in <module>\n    side=torch.cuda.Stream();side.wait_stream(torch.cuda.current_stream())\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/streams.py\", line 75, in wait_stream\n    self.wait_event(stream.record_event())\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/streams.py\", line 89, in record_event\n    event.record(self)\n  File \"/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/cuda/streams.py\", line 205, in record\n    super().record(stream)\ntorch.AcceleratorError: CUDA error: device-side assert triggered\nSearch for `cudaErrorAssert' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n\n"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "historical architecture default",
+  "resolved_backends": {
+    "trimul": "KernelBackend.CUTE",
+    "trimul.ln_pair": "KernelBackend.CUDA",
+    "trimul.ln_out": "KernelBackend.CUDA",
+    "transition": "KernelBackend.TRITON",
+    "transition.ln_in": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

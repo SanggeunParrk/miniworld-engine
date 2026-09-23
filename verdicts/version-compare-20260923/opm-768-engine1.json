@@ -1,0 +1,97 @@
+{
+  "arm": "engine1",
+  "module": "opm",
+  "L": 768,
+  "source": "/home/psk6950/MiniWorld/.engine-release-2.0.0/verdicts/version-compare-20260923/engine1/src/miniworld_engine/__init__.py",
+  "harness_revision": 2,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "uuid": "47befa1c-f930-a995-94fc-b2c487219a91",
+  "job": "16102",
+  "modes": {
+    "inference": {
+      "finite": true,
+      "warm_replays": 89,
+      "ms": 3.4509356689453123,
+      "rounds_ms": [
+        3.446183166503906,
+        3.4509356689453123,
+        3.511110534667969,
+        3.833576965332031,
+        3.545740051269531,
+        3.4392575073242186,
+        3.440785217285156
+      ],
+      "kernels": {
+        "layer_norm_fwd_fused": 1,
+        "nvjet_tst_32x512_64x3_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_0": 1,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 1,
+        "triton_poi_fused__to_copy_1": 1,
+        "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_nt_align1>(cutlass_80_simt_sgemm_128x256_8x4_nt_align1::Params)": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN": 1,
+        "triton_poi_fused_add_addmm_view_3": 1
+      },
+      "profile_scope": "graph replay"
+    },
+    "training": {
+      "finite": true,
+      "warm_replays": 32,
+      "ms": 9.72491943359375,
+      "rounds_ms": [
+        9.775132446289062,
+        9.72491943359375,
+        9.689782104492188,
+        9.744735717773438,
+        9.699457397460938,
+        9.785975952148437,
+        9.6925
+      ],
+      "kernels": {
+        "nvjet_tst_32x512_64x3_1x2_h_bz_TNN": 2,
+        "triton_poi_fused__unsafe_view_mul_unsqueeze_0": 1,
+        "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NTN": 1,
+        "triton_poi_fused__to_copy_1": 1,
+        "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_nt_align1>(cutlass_80_simt_sgemm_128x256_8x4_nt_align1::Params)": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 1,
+        "triton_poi_fused__to_copy__unsafe_view_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_TNN": 1,
+        "triton_poi_fused_add_addmm_view_3": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT": 2,
+        "nvjet_tst_128x128_64x6_2x1_v_bz_splitK_NTT": 1,
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 3,
+        "triton_red_fused_sum_view_0": 1,
+        "triton_red_fused_sum_view_1": 1,
+        "triton_poi_fused__to_copy_bmm_clamp_clone_div_permute_unsqueeze_view_2": 1,
+        "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_TNT": 1,
+        "triton_poi_fused_bmm_clone_mul_permute_squeeze_unsqueeze_view_3": 1,
+        "nvjet_tst_64x32_64x16_1x1_v_bz_splitK_NTT": 2,
+        "nvjet_tst_64x384_64x3_1x2_h_bz_coopB_NNT": 2,
+        "triton_poi_fused_add_layernorm_dispatch_bwd_view_4": 1,
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)": 2,
+        "layer_norm_bwd_dx_fused": 1
+      },
+      "profile_scope": "graph replay"
+    }
+  },
+  "dtype": "bf16",
+  "compile": true,
+  "graph": true,
+  "mask": true,
+  "dropout_rng_included": true,
+  "versions": {
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0",
+    "cuequivariance-ops-torch-cu12": "0.10.0"
+  },
+  "engine_backend": "historical architecture default",
+  "msa_depth": 1024,
+  "resolved_backends": {
+    "opm.ln_msa": "KernelBackend.CUDA"
+  },
+  "parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ]
+}

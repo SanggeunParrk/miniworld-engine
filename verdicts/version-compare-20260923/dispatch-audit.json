@@ -1,0 +1,327 @@
+{
+  "passed": 32,
+  "checks": [
+    {
+      "module": "trimul",
+      "L": 384,
+      "mode": "inference",
+      "ms": 0.25481472015380857,
+      "expected_kernels": [
+        "tmn_k1_",
+        "tmn_k3_"
+      ]
+    },
+    {
+      "module": "trimul",
+      "L": 384,
+      "mode": "training",
+      "ms": 1.0603923034667968,
+      "expected_kernels": [
+        "b1_fused",
+        "b7_joint"
+      ]
+    },
+    {
+      "module": "trimul",
+      "L": 768,
+      "mode": "inference",
+      "ms": 1.039908447265625,
+      "expected_kernels": [
+        "tmn_k1_",
+        "tmn_k3_"
+      ]
+    },
+    {
+      "module": "trimul",
+      "L": 768,
+      "mode": "training",
+      "ms": 4.190278930664062,
+      "expected_kernels": [
+        "b1_fused",
+        "b7_joint"
+      ]
+    },
+    {
+      "module": "transition",
+      "L": 384,
+      "mode": "inference",
+      "ms": 0.1269977569580078,
+      "expected_kernels": [
+        "transition_fwd_fused"
+      ]
+    },
+    {
+      "module": "transition",
+      "L": 384,
+      "mode": "training",
+      "ms": 0.5620198440551758,
+      "expected_kernels": [
+        "transition_bwd_fused"
+      ]
+    },
+    {
+      "module": "transition",
+      "L": 768,
+      "mode": "inference",
+      "ms": 0.4672332763671875,
+      "expected_kernels": [
+        "transition_fwd_fused"
+      ]
+    },
+    {
+      "module": "transition",
+      "L": 768,
+      "mode": "training",
+      "ms": 2.1397613525390624,
+      "expected_kernels": [
+        "transition_bwd_fused"
+      ]
+    },
+    {
+      "module": "block",
+      "L": 384,
+      "mode": "inference",
+      "ms": 0.3768044662475586,
+      "expected_kernels": [
+        "tmn_k1_",
+        "tmn_k3_",
+        "transition_fwd_fused"
+      ]
+    },
+    {
+      "module": "block",
+      "L": 384,
+      "mode": "training",
+      "ms": 1.6476045227050782,
+      "expected_kernels": [
+        "b1_fused",
+        "b7_joint",
+        "transition_bwd_fused"
+      ]
+    },
+    {
+      "module": "block",
+      "L": 768,
+      "mode": "inference",
+      "ms": 1.5101817321777344,
+      "expected_kernels": [
+        "tmn_k1_",
+        "tmn_k3_",
+        "transition_fwd_fused"
+      ]
+    },
+    {
+      "module": "block",
+      "L": 768,
+      "mode": "training",
+      "ms": 6.360491943359375,
+      "expected_kernels": [
+        "b1_fused",
+        "b7_joint",
+        "transition_bwd_fused"
+      ]
+    },
+    {
+      "module": "single",
+      "L": 384,
+      "mode": "inference",
+      "ms": 0.15076543807983397,
+      "expected_kernels": [
+        "tmn_k1_",
+        "tmn_k3_"
+      ]
+    },
+    {
+      "module": "single",
+      "L": 384,
+      "mode": "training",
+      "ms": 1.0972006225585937,
+      "expected_kernels": []
+    },
+    {
+      "module": "single",
+      "L": 768,
+      "mode": "inference",
+      "ms": 0.5866086578369141,
+      "expected_kernels": [
+        "tmn_k1_",
+        "tmn_k3_"
+      ]
+    },
+    {
+      "module": "single",
+      "L": 768,
+      "mode": "training",
+      "ms": 4.145399169921875,
+      "expected_kernels": []
+    },
+    {
+      "module": "opm",
+      "L": 384,
+      "mode": "inference",
+      "ms": 0.7031289672851563,
+      "expected_kernels": [
+        "opm_epilogue_kernel"
+      ]
+    },
+    {
+      "module": "opm",
+      "L": 384,
+      "mode": "training",
+      "ms": 2.0353216552734374,
+      "expected_kernels": [
+        "opm_dgrad_kernel",
+        "opm_dwo_kernel"
+      ]
+    },
+    {
+      "module": "opm",
+      "L": 768,
+      "mode": "inference",
+      "ms": 2.6648077392578124,
+      "expected_kernels": [
+        "opm_epilogue_kernel"
+      ]
+    },
+    {
+      "module": "opm",
+      "L": 768,
+      "mode": "training",
+      "ms": 7.6247015380859375,
+      "expected_kernels": [
+        "opm_dgrad_kernel",
+        "opm_dwo_kernel"
+      ]
+    },
+    {
+      "module": "pwa",
+      "L": 384,
+      "mode": "inference",
+      "ms": 0.40742782592773436,
+      "expected_kernels": [
+        "pwa_fwd2_kernel"
+      ]
+    },
+    {
+      "module": "pwa",
+      "L": 384,
+      "mode": "training",
+      "ms": 1.5863456726074219,
+      "expected_kernels": [
+        "pwa_glue3_kernel"
+      ]
+    },
+    {
+      "module": "pwa",
+      "L": 768,
+      "mode": "inference",
+      "ms": 1.307024688720703,
+      "expected_kernels": [
+        "pwa_fwd2_kernel"
+      ]
+    },
+    {
+      "module": "pwa",
+      "L": 768,
+      "mode": "training",
+      "ms": 4.131564025878906,
+      "expected_kernels": [
+        "pwa_glue3_kernel"
+      ]
+    },
+    {
+      "module": "msa",
+      "L": 384,
+      "mode": "inference",
+      "ms": 1.6399635314941405,
+      "expected_kernels": [
+        "opm_epilogue_kernel",
+        "pwa_fwd2_kernel",
+        "tmn_k1_",
+        "tmn_k3_",
+        "transition_fwd_fused",
+        "wide_d64_fwd_kernel"
+      ]
+    },
+    {
+      "module": "msa",
+      "L": 384,
+      "mode": "training",
+      "ms": 5.893976440429688,
+      "expected_kernels": [
+        "opm_dgrad_kernel",
+        "pwa_glue3_kernel",
+        "b1_fused",
+        "b7_joint",
+        "transition_bwd_fused",
+        "wide_d64_bwd_kernel"
+      ]
+    },
+    {
+      "module": "msa",
+      "L": 768,
+      "mode": "inference",
+      "ms": 5.68031005859375,
+      "expected_kernels": [
+        "opm_epilogue_kernel",
+        "pwa_fwd2_kernel",
+        "tmn_k1_",
+        "tmn_k3_",
+        "transition_fwd_fused",
+        "wide_d64_fwd_kernel"
+      ]
+    },
+    {
+      "module": "msa",
+      "L": 768,
+      "mode": "training",
+      "ms": 19.653634033203126,
+      "expected_kernels": [
+        "opm_dgrad_kernel",
+        "pwa_glue3_kernel",
+        "b1_fused",
+        "b7_joint",
+        "transition_bwd_fused",
+        "wide_d64_bwd_kernel"
+      ]
+    },
+    {
+      "module": "dit",
+      "L": 384,
+      "mode": "inference",
+      "ms": 0.2682598304748535,
+      "expected_kernels": [
+        "_attn_fwd_gated2",
+        "_resgate_adaln_rows_kernel"
+      ]
+    },
+    {
+      "module": "dit",
+      "L": 384,
+      "mode": "training",
+      "ms": 0.4664089584350586,
+      "expected_kernels": [
+        "_attn_bwd"
+      ]
+    },
+    {
+      "module": "dit",
+      "L": 768,
+      "mode": "inference",
+      "ms": 0.36348800659179686,
+      "expected_kernels": [
+        "_attn_fwd_gated2",
+        "_resgate_adaln_rows_kernel"
+      ]
+    },
+    {
+      "module": "dit",
+      "L": 768,
+      "mode": "training",
+      "ms": 0.9396160125732422,
+      "expected_kernels": [
+        "_attn_bwd"
+      ]
+    }
+  ]
+}
