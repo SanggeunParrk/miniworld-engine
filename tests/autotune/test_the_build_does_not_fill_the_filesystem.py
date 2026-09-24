@@ -31,6 +31,15 @@ def _entry(root, name=DIGEST, kernel="k"):
     return d
 
 
+def _helper_entry(root, n):
+    """The OTHER thing triton puts in the cache: a digest directory holding its launcher helper
+    and no json at all. Roughly half a build cache's entries are these."""
+    d = root / f"{DIGEST[:-2]}{n:02d}"
+    d.mkdir()
+    (d / "cuda_utils.cpython-312-x86_64-linux-gnu.so").write_bytes(b"\x00")
+    return d
+
+
 def test_the_default_writes_only_what_a_launch_needs():
     env = {}
     triton_cache.store_binary_only_env(env)
@@ -53,6 +62,31 @@ def test_an_environment_that_already_asked_for_something_is_left_alone():
 def test_a_real_cache_is_recognised_even_with_one_entry(tmp_path):
     _entry(tmp_path)
     assert triton_cache.looks_like_a_triton_cache(tmp_path)
+
+
+def test_the_json_does_not_have_to_be_in_the_entry_that_comes_first(tmp_path):
+    """The regression that cost 623 GB.
+
+    This used to open exactly ONE entry directory -- whichever `os.scandir` returned first -- and
+    require a metadata json in it. About half of a real cache's entries are `cuda_utils` helpers
+    with no json, and scandir's order is the filesystem's, so the guard was a coin flip PER BUILD:
+    59 jobs each printed one line about a directory that "does not look like a triton cache" and
+    exited 0, leaving 623 GB of $TRITON_CACHE_DIR on a filesystem shared with the rest of the lab.
+    """
+    for n in range(8):
+        _helper_entry(tmp_path, n)
+    _entry(tmp_path)
+    assert triton_cache.looks_like_a_triton_cache(tmp_path)
+    assert triton_cache.clear(tmp_path, dry_run=True)[0] == 9
+
+
+def test_the_search_for_that_json_is_bounded(tmp_path):
+    """It gives up after `_PROBE_LIMIT` entries rather than walk 221,487 of them looking. Refusing
+    costs disk and one more line in a log; an unbounded scan of a shared filesystem costs everyone
+    else on it, which is the thing this whole module exists to avoid."""
+    for n in range(triton_cache._PROBE_LIMIT + 4):
+        _helper_entry(tmp_path, n)
+    assert not triton_cache.looks_like_a_triton_cache(tmp_path)
 
 
 def test_the_loose_files_triton_leaves_beside_the_entries_are_fine(tmp_path):

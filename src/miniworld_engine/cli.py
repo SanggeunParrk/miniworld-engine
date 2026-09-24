@@ -1087,7 +1087,11 @@ def _empty_triton_cache(dry_run: bool) -> int:
     try:
         entries, total = triton_cache.clear(directory, dry_run=dry_run)
     except ValueError as exc:
-        print(f"  {exc}")
+        # stderr, because the caller in `build all` discards this exit code on purpose -- a
+        # 20-hour build that measured everything is not a failure because cleanup declined. That
+        # made the refusal one indented line in a 900-line stdout log, which is how 623 GB
+        # accumulated unnoticed. On stderr it is at least where a job script looks.
+        print(f"  {exc}", file=sys.stderr)
         return 2
     verb = "would remove" if dry_run else "removed"
     print(f"  triton cache: {verb} {entries:,} entries, {total / 1024**3:.1f} GB from {directory}")

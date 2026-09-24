@@ -42,6 +42,18 @@ from pathlib import Path
 #: over any ordinary directory name so it does not accept something else.
 _ENTRY_NAME_LEN = 40
 
+#: How many entry directories to open before concluding there is no metadata json anywhere.
+#:
+#: One is not enough, which cost 623 GB before it was noticed. Roughly half the entries in a real
+#: build cache are triton's `cuda_utils.cpython-*.so` helper -- a digest directory holding that one
+#: file and no json -- and `os.scandir` returns entries in the filesystem's order, not one this
+#: module gets to choose. Opening only the first therefore refused a genuine cache about half the
+#: time, at random, per build: 59 jobs left 623 GB of `$TRITON_CACHE_DIR` behind on a shared
+#: filesystem, each exiting 0 with a single line of explanation. 128 opens is a rounding error
+#: against the 221,487 entries such a directory holds, and makes a wrong answer need 128
+#: consecutive helper directories rather than one.
+_PROBE_LIMIT = 128
+
 
 def store_binary_only_env(env: dict[str, str], keep_ir: bool = False) -> None:
     """Set ``TRITON_STORE_BINARY_ONLY`` on a child's environment unless IR is wanted.
@@ -65,14 +77,15 @@ def looks_like_a_triton_cache(directory: Path) -> bool:
         or one of the loose files triton drops beside them (its launcher `.so`, a lock). A single
         foreign file is enough to refuse.
       * one of those entry directories really holds a metadata json. A directory of long-named
-        empty directories is not a cache.
+        empty directories is not a cache. Up to `_PROBE_LIMIT` of them are opened before this
+        gives up -- NOT just the first, which is a coin flip: see that constant.
 
     Returns False for an empty directory: nothing to gain by emptying one, everything to lose by
     being wrong about which one it is.
     """
     if not directory.is_dir():
         return False
-    entry = None
+    probes: list[str] = []
     try:
         with os.scandir(directory) as it:
             for item in it:
@@ -81,18 +94,19 @@ def looks_like_a_triton_cache(directory: Path) -> bool:
                 if item.is_dir():
                     if len(item.name) < _ENTRY_NAME_LEN:
                         return False
-                    entry = entry or item.path
+                    if len(probes) < _PROBE_LIMIT:
+                        probes.append(item.path)
                 elif not (item.name.endswith(".so") or item.name.endswith(".lock")):
                     return False
     except OSError:
         return False
-    if entry is None:
-        return False
-    try:
-        with os.scandir(entry) as it:
-            return any(f.name.endswith(".json") for f in it)
-    except OSError:
-        return False
+    for entry in probes:
+        # An entry that vanished under us says nothing about the others -- a build still writing
+        # into this directory is the normal case. Only an exhausted list is an answer.
+        with contextlib.suppress(OSError), os.scandir(entry) as it:
+            if any(f.name.endswith(".json") for f in it):
+                return True
+    return False
 
 
 def clear(directory: Path, dry_run: bool = False) -> tuple[int, int]:
