@@ -1,0 +1,25 @@
+## start 01:52:48 restart=0
+#### picks768
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+L=768 S=5 24 blocks
+  cond 768x73728x384     raced (128, 192, 1, 1, True)       quack-only (128, 192, 1, 1, True)
+  cond 768x36864x384     raced (128, 192, 1, 1, True)       quack-only (128, 192, 1, 1, True)
+  q|k|v|g                raced (128, 192, 2, 1, True)       quack-only (128, 192, 1, 1, True)
+  Wo                     raced (64, 192, 1, 2, True)        quack-only (64, 192, 1, 2, True)
+  squeeze                raced (128, 192, 1, 1, True)       quack-only (128, 192, 1, 2, False)
+  raced        156.87 us/block (+0.00 saved)   runs 153.18 155.55 163.82 157.41 156.33 161.28
+  quack-only   155.63 us/block (+1.24 saved)   runs 155.05 156.04 163.29 155.22 154.71 161.37
+  output rel diff quack-only vs raced 0.00e+00 (different GEMM kernels round differently)
+#### picks768 done
+#### picks384
+L=384 S=5 24 blocks
+  cond 384x73728x384     raced (128, 192, 1, 1, True)       quack-only (128, 192, 1, 1, True)
+  cond 384x36864x384     raced (128, 192, 1, 4, True)       quack-only (128, 192, 1, 4, True)
+  q|k|v|g                raced (128, 192, 1, 1, True)       quack-only (128, 192, 1, 1, True)
+  Wo                     raced (64, 192, 1, 2, True)        quack-only (64, 192, 1, 2, True)
+  squeeze                raced (64, 192, 1, 4, True)        quack-only (64, 192, 1, 4, True)
+  raced         78.82 us/block (+0.00 saved)   runs 77.66 79.03 78.86 78.89 78.74 78.79
+  quack-only    78.79 us/block (+0.03 saved)   runs 78.92 78.79 78.83 78.79 78.76 78.75
+  output rel diff quack-only vs raced 0.00e+00 (different GEMM kernels round differently)
+#### picks384 done
+## all done 01:56:50

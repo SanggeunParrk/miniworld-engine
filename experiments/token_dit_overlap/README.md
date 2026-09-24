@@ -386,3 +386,43 @@ After the fix: `test_core.py` passes at L256/384/768; 0/600 kernel runs and 13/1
 
 Lesson: a data-dependent arrive has to depend on *every* load it releases -- ptxas only orders what the dependency
 names. And a kernel that runs deterministically in one wave can still race in two; test at a multi-wave shape.
+
+## Where the PDL chain still broke: trigger position (`graph_trace.py`, `ab_trig.py`)
+
+`graph_trace.py` replays the captured step under `nsys --cuda-graph-trace=node` (needs
+`NSYS_NVTX_PROFILER_REGISTER_ONLY=0` for the NVTX capture range) and `graph_trace_parse.py` reports per-kernel time
+and the gap between consecutive kernels (negative = overlapped). At L768 the wall was 151.5 us/block against 160.1 us
+of kernel time, so PDL already hid 8.6 us, but unevenly:
+
+| transition (median gap) | L768 | L384 |
+|---|---:|---:|
+| GEMM -> attention core | -3.10 us | -2.72 |
+| GEMM -> row pass | -0.54 | -1.50 |
+| core -> Wo GEMM | -0.70 | -0.51 |
+| **row pass -> expand GEMM** | **+0.13** | **+0.13** |
+| **row pass -> q\|k\|v\|g GEMM** | **+0.06** | **+0.10** |
+
+quack triggers early (in its epilogue), so whatever follows a GEMM overlaps. Our row pass triggered after its stores,
+and a dependent launches only once EVERY program has triggered: with ~1000 programs over several waves that is
+completion. Triggering at program start (and in the core right after its own wait) lets the dependent launch once the
+last program has started; it still waits for completion before reading, so this is always safe. `ab_trig.py`,
+bit-identical outputs:
+
+| per block | base | row pass at start | core at start | both |
+|---|---:|---:|---:|---:|
+| L384 | 78.48 us | 76.78 (+1.70) | 78.32 (+0.16) | **76.47 (+2.02)** |
+| L768 | 155.64 | 154.24 (+1.40) | 154.65 (+1.00) | **153.92 (+1.72)** |
+
+Both are on (`TDIT_TRIG_START`, `CTRIG=1`). `bench.py` (`results/bf16-L{768,384}-trig.json`): **149.5 us/block at
+L768** (engine 555.7, 3.72x; Anthropic hoisted 231.8, 1.55x) and **75.6 at L384** (270.7, 3.58x; 132.1, 1.75x).
+test_core passes, 0/600 kernel runs and 13/13 step runs bit-identical.
+
+**Measured and not taken:**
+- **Loads before the wait** (`ab_early.py`): the row pass reading x and the conditioning rows before `gdc_wait` (only y
+  depends on the GEMM it waits on), or the core pulling its bias rows into L2 before its wait. L384: -1.07 and -1.14
+  us/block, -2.11 together. Traffic under the previous GEMM's tail is exactly what slows that tail.
+  (`TDIT_EARLY`, `BPRE`, both off.)
+- **Keeping cuBLAS out of the GEMM race** (`ab_picks.py`, `TDIT_MM_CUBLAS=0`): cuBLAS launches without PDL, so a cuBLAS
+  pick would break the chain on both sides. But the race no longer picks it at either length (tile_M 64 quack configs
+  take Wo and squeeze at M = 1920 too): identical picks, 78.82 vs 78.79 us/block at L384. The picks do vary between
+  processes within noise (an earlier NCU run had squeeze on cuBLAS at L768).

@@ -1,0 +1,46 @@
+"""The captured step, replayed under nsys --cuda-graph-trace=node: per-kernel durations and inter-kernel gaps as they
+really run (PDL overlap included, which eager profiling cannot show). Replays are bracketed by an NVTX range 'trace'."""
+import argparse, sys
+from pathlib import Path
+import torch
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "token_dit_fused"))
+from tdit import FusedTokenDiT                                        # noqa: E402
+from miniworld_engine.modules.dit import DiTBlock                     # noqa: E402
+from miniworld_engine.modules.exceptions import ImplementationType    # noqa: E402
+
+p = argparse.ArgumentParser(); p.add_argument("--length", type=int, default=768); p.add_argument("--replays", type=int, default=5)
+a = p.parse_args()
+L, S, NB, dev, bf = a.length, 5, 24, "cuda", torch.bfloat16
+DS, DC, DP, H = 768, 384, 128, 16
+torch.manual_seed(0)
+blocks = torch.nn.ModuleList(DiTBlock(DS, DC, DP, H, n=2, implementation=ImplementationType.PYTORCH)
+                             for _ in range(NB)).to(dev)
+with torch.no_grad():
+    for prm in blocks.parameters():
+        if prm.ndim == 2: prm.normal_(std=prm.shape[1] ** -0.5)
+        elif prm.numel() > 1: prm.add_(torch.randn_like(prm) * 0.1)
+    for blk in blocks:
+        blk.attention.to_out.weight.mul_(0.25); blk.transition.squeeze.weight.mul_(0.25)
+blocks = blocks.to(bf).eval()
+f = FusedTokenDiT(blocks, dtype=bf)
+single = torch.randn(S, 1, L, DS, device=dev, dtype=bf)
+cond = torch.randn(1, 1, L, DC, device=dev, dtype=bf).expand(S, 1, L, DC).contiguous()
+pair = torch.randn(1, L, L, DP, device=dev, dtype=bf)
+with torch.no_grad():
+    bias = f.hoist(pair)
+    fn = lambda: f.step(single, cond, bias)
+    for _ in range(3): fn()
+    torch.cuda.synchronize()
+    st = torch.cuda.Stream(); st.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(st):
+        for _ in range(2): fn()
+    torch.cuda.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g, stream=st): fn()
+    for _ in range(5): g.replay()
+    torch.cuda.synchronize()
+    torch.cuda.nvtx.range_push("trace")
+    for _ in range(a.replays): g.replay()
+    torch.cuda.synchronize()
+    torch.cuda.nvtx.range_pop()
+print("done", flush=True)

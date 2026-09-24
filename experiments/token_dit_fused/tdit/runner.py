@@ -13,6 +13,8 @@ What each call hoists, and why it may:
           sees the same one: it is computed for L token rows, not S * L, and for all 24 blocks in two GEMMs
           (LayerNorm(cond) statistics are shared too; each block's cond-LayerNorm weight is folded).
 """
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -139,6 +141,9 @@ class FusedTokenDiT:
         self.gated_gemm = dtype == torch.bfloat16 and _quack_gemm_act() is not None
         self._gated_cfg = {}
         self._mm_cfg = {}
+        # cuBLAS takes part in the GEMM race unless TDIT_MM_CUBLAS=0. It is launched without PDL, so a cuBLAS pick
+        # breaks the block's programmatic-launch chain on both sides -- a cost the per-GEMM race cannot see.
+        self.mm_cublas = os.environ.get("TDIT_MM_CUBLAS", "1") != "0"
         self._cond_buf = {}
         self._cuda_core = None
 
@@ -339,8 +344,8 @@ class FusedTokenDiT:
                 best = min(best, st.elapsed_time(en))
             return best
 
-        best = (timed(lambda: torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out)),
-                "cublas")
+        best = (timed(lambda: torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out))
+                if self.mm_cublas else float("inf"), "cublas")      # "cublas" stays the fallback if no config runs
         if A.dtype in (torch.bfloat16, torch.float16) and _quack_gemm_act() is not None:
             for c in PLAIN_CFGS:
                 try:

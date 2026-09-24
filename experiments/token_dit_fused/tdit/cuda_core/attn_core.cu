@@ -61,6 +61,13 @@ using namespace tmn; using namespace tmn::sm90;
                                  // producer passes one arrival early and refills a slot a warp is still reading V from.
                                  // det_core2.py: 1-2 % of L768 runs (only 2-wave grids), one CTA each, all in wave 2,
                                  // element-wise garbage (ratio -4.8 .. 3.9), 4-67 of 300 runs depending on the defines.
+#ifndef CTRIG
+#define CTRIG 1                  // where the core triggers its dependent: 0 after the epilogue stores, 1 right after
+#endif                           // its own wait (the dependent then launches once the last CTA has started; with the
+                                 // row pass also triggering at its start, +2.02 us/block L384, +1.72 L768)
+#ifndef BPRE
+#define BPRE 0                   // 1: before waiting on the previous kernel, pull this CTA's bias rows into L2 (the bias
+#endif                           // is hoisted once per sample, so it never depends on that kernel)
 #ifndef PDL
 #define PDL 1                    // programmatic dependent launch: let the NEXT kernel's preamble run under this
 #endif                           // kernel's tail. quack's sm90 GEMMs already wait/trigger; this closes the chain.
@@ -226,8 +233,19 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   __syncthreads();
   asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
   cluster_wait();
+#if PDL && BPRE
+  // Under the previous kernel's tail: the S CTAs sharing this bias tile launch together (sample is the fastest grid
+  // dimension), so only sample 0 asks for it.
+  if (tid == 128 * NWG && samp == 0)
+    for (int n = 0; n < nblocks; ++n)
+      asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global.tile [%0, {%1, %2}];"
+                   :: "l"(reinterpret_cast<uint64_t>(&mbias)), "r"(n * BN), "r"(brow0 + head * L + m0) : "memory");
+#endif
 #if PDL
   asm volatile("griddepcontrol.wait;" ::: "memory");                // qkvg is the previous kernel's output
+#if CTRIG == 1
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
 #endif
 
   if (tid >= 128 * NWG) {                                           // producer warp: one issuing thread per tensor
@@ -576,7 +594,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     }
   }
   __syncwarp();
-#if PDL
+#if PDL && CTRIG == 0
   // The dependent kernel waits before its own loads, so triggering here only lets its preamble start early.
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
