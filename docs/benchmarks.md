@@ -225,9 +225,12 @@ Rules baked into the module:
 - **Use the shared style** (`miniworld_engine.viz`) for every figure — never
   ad-hoc colours.
 - **Both inference and training** when the op is used in training.
-- **CUDA Graph timing regime:** `cudagraph=auto` selects `manual` for inference and
-  `disabled` for training, including SWA attention and SWA DiT. Memory measurements
-  remain ungraphed. Explicit graph requests never silently fall back to disabled.
+- **CUDA Graph timing regime:** `cudagraph=auto` selects `manual` for inference.
+  Module training latency runs both `disabled` and `manual` in separate processes
+  and CSVs, with compilation enabled by default for both. Kernel training and
+  memory measurements remain ungraphed. Explicit graph requests select one regime
+  and never silently fall back to disabled. Dropout training retains probability
+  0.25 and validates matched-seed outputs/gradients and RNG advancement before timing.
   On A6000/FA2, SWA no-grad forward uses fixed-capacity packed buffers with true
   sequence lengths; padding cannot receive softmax probability. This includes the
   no-grad forward inside a training custom op; its backward recomputation retains
@@ -314,8 +317,10 @@ resolves to **5 for inference** and **48 for training**. An explicit positive in
 overrides the default for shape sweeps. CSV `n_augment` records the resolved count;
 `input_shapes` records whether that module actually has an augmentation axis.
 Pairformer triangle operations and Transition do not acquire a batch/augmentation
-dimension from this setting. Inference timing uses CUDA Graphs and training timing
-disables them through `cudagraph: auto`.
+dimension from this setting. With `cudagraph: auto`, inference timing uses CUDA
+Graphs and module training timing produces both graph OFF and ON results.
+Keep these regimes separate in figures; a graphed module step excludes optimizer,
+input loading and distributed communication and is not whole-training latency.
 
 
 TriangleMultiplication direction is explicit in `trimul_direction` and in each CSV row:

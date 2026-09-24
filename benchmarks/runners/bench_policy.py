@@ -128,3 +128,10 @@ def declared_precisions(level: str, target: str) -> list[int | str]:
     else:
         raise ValueError(f"unknown level {level!r}")
     return [FP32_PRECISION, BF16] if both else [BF16]
+
+
+def graph_regimes(level: str, mode: str, metric: str, requested: str) -> tuple[str, ...]:
+    """Automatic module training latency reports both host-dispatched and graphed steps."""
+    if requested == "auto" and level == "module" and mode == "training" and metric == "time":
+        return ("disabled", "manual")
+    return (requested,)
