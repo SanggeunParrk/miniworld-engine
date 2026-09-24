@@ -37,6 +37,33 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef PWARP
 #define PWARP 1                  // 1: the producer is a single warp, not a whole warpgroup -- only one thread issues
 #endif                           // TMA, and the other three warps only occupied scheduler slots
+#ifndef REGFIX
+#define REGFIX 1                 // size the setmaxnreg split from the real launch (see the register split below);
+                                 // 0 is the old over-ask, same speed (46.99 vs 46.99 us at L768)
+#endif
+#ifndef QDEP
+#define QDEP 2                   // the q-slot release depends on every q register the consumers loaded (1: only the
+#endif                           // first and last -- the race: 7/600 runs at L768 corrupt one CTA, 99/600 with BACC=0)
+#ifndef MCBIAS
+#define MCBIAS 1                 // 0: without a cluster, load the bias with a plain TMA instead of a multicast to mask 1
+                                 // (ruled out as the race, 143/600 with BACC=0 at QDEP=1)
+#endif
+#ifndef LOCALARR
+#define LOCALARR 0               // 1: without a cluster, release slots with a CTA-local arrive instead of mapa + shared::cluster
+                                 // (ruled out as the race, 89/600 with BACC=0 at QDEP=1)
+#endif
+#ifndef NODANGLE
+#define NODANGLE 1               // Release a slot only if the producer will wait for it again (block n + STAGES exists).
+#endif                           // The release is an mbarrier.arrive.shared::cluster through mapa and the kernel ends on
+                                 // a RELAXED cluster barrier, so the last STAGES releases -- which nobody waits for -- can
+                                 // still be in flight when the CTA exits. A second-wave CTA placed on that SM then gets
+                                 // one of them on its freshly initialised empty[s] at the same shared address, its
+                                 // producer passes one arrival early and refills a slot a warp is still reading V from.
+                                 // det_core2.py: 1-2 % of L768 runs (only 2-wave grids), one CTA each, all in wave 2,
+                                 // element-wise garbage (ratio -4.8 .. 3.9), 4-67 of 300 runs depending on the defines.
+#ifndef PDL
+#define PDL 1                    // programmatic dependent launch: let the NEXT kernel's preamble run under this
+#endif                           // kernel's tail. quack's sm90 GEMMs already wait/trigger; this closes the chain.
 #ifndef SOFTPV
 #define SOFTPV 0                 // interleaving the softmax with PV per k-step (the wgmma for the first 16 keys while
 #endif                           // the next 16 are still in ex2) measured slower: 53.5 against 49.4
@@ -113,6 +140,9 @@ TMN_DEVI uint32_t mapa(uint32_t a, uint32_t rank) {
 TMN_DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
   asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(mapa(smem_u32(bar), rank)) : "memory");
 }
+TMN_DEVI void mbar_arrive_local(uint64_t* bar) {
+  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" :: "r"(smem_u32(bar)) : "memory");
+}
 TMN_DEVI void cluster_arrive_relaxed() { asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory"); }
 TMN_DEVI void cluster_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory"); }
 TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r)); return r; }
@@ -134,6 +164,11 @@ constexpr int OFF_ST = SQ, ST_BYTES = 2 * SKV + SB;
 constexpr int SONES = LSUM ? BN * 128 : 0;                          // a tile of ones for the denominator wgmma
 constexpr int QSTAGE = 2 * SKV;                                     // where a QREG kernel parks the q tile: slot 0's bias area
 
+#define RELEASE_SLOT(b)                                                                                  \
+  do {                                                                                                   \
+    if (CLS == 1 && LOCALARR) mbar_arrive_local(b);                                                      \
+    else for (int k_ = 0; k_ < CLS; ++k_) mbar_arrive_remote(b, k_);                                     \
+  } while (0)
 template <int CLS>
 __global__ void __launch_bounds__(128 * NWG + (PWARP ? 32 : 128), BLKSM)
 attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mkv,
@@ -153,9 +188,20 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   // The producer only issues TMA; give its registers to the consumers, which hold the score tile and the accumulator.
   // Register split, the way tmn_kernels.cuh does it: the producer keeps 40 and the consumers take the rest of the
   // CTA's launch allocation, 65536 / (threads * blocks per SM) rounded down to an 8-register granule, capped at 232.
+#if REGFIX
+  // The CTA's real thread count and CTAs per SM: a 32-thread producer (PWARP) and BLKSM CTAs sharing the SM's 64 K.
+  // The old formula assumed a 128-thread producer and one CTA per SM at NWG = 2, so at the defaults the consumers
+  // asked setmaxnreg for 232 registers out of a CTA budget of 112 per thread (59 K asked, 32 K owned).
+  constexpr int PTHR = PWARP ? 32 : 128, NTHR = 128 * NWG + PTHR;
+  constexpr int LAUNCH_REGS = (65536 / (NTHR * BLKSM)) / 8 * 8;
+  constexpr int CONS_RAW = (NTHR * LAUNCH_REGS - PTHR * 40) / (128 * NWG) / 8 * 8;
+  constexpr int CONS_REGS = CONS_RAW > 232 ? 232 : CONS_RAW;
+  static_assert(PTHR * 40 + 128 * NWG * CONS_REGS <= NTHR * LAUNCH_REGS, "setmaxnreg asks for more than the CTA owns");
+#else
   constexpr int NTHR = 128 * (NWG + 1), LAUNCH_REGS = (65536 / (NTHR * (NWG == 1 ? 2 : 1))) / 8 * 8;
   constexpr int CONS_REGS = (NTHR * LAUNCH_REGS - 128 * 40) / (128 * NWG) / 8 * 8 > 232
                             ? 232 : (NTHR * LAUNCH_REGS - 128 * 40) / (128 * NWG) / 8 * 8;
+#endif
   if (RSPLIT) { if (tid >= 128 * NWG) setmaxnreg_dec<40>(); else setmaxnreg_inc<CONS_REGS>(); }
   // With a cluster the sample is the CTA's rank in it, so the S CTAs that share a bias tile are co-scheduled and the
   // tile can be multicast. CLS = 1 turns that off: the sample becomes the slowest grid dimension and each CTA loads
@@ -180,6 +226,9 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
   __syncthreads();
   asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
   cluster_wait();
+#if PDL
+  asm volatile("griddepcontrol.wait;" ::: "memory");                // qkvg is the previous kernel's output
+#endif
 
   if (tid >= 128 * NWG) {                                           // producer warp: one issuing thread per tensor
     const int iss = tid - 128 * NWG;                                // 0 = k, 1 = v, 2 = bias
@@ -198,7 +247,9 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
           mbar_arrive_expect_tx(&full[s], ST_BYTES);
           tma_load_2d(slot, &mkv, &full[s], 768 + qcol, samp * L + n * BN);                        // k
           tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v
-          if (rank == (uint32_t)(n % CLS))                          // rotate the issuer: one CTA issuing every block's
+          if (CLS == 1 && !MCBIAS)
+            tma_load_2d(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0);
+          else if (rank == (uint32_t)(n % CLS))                     // rotate the issuer: one CTA issuing every block's
             tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
         } else if (iss == 0) {
           mbar_arrive_expect_tx(&full[s], SKV);
@@ -208,7 +259,9 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
           tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v: BN rows
         } else {
           mbar_arrive_expect_tx(&full[s], SB);                      // the bias bytes arrive from rank 0's multicast
-          if (rank == (uint32_t)(n % CLS))                          // rotate the issuer: one CTA issuing every block's
+          if (CLS == 1 && !MCBIAS)
+            tma_load_2d(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0);
+          else if (rank == (uint32_t)(n % CLS))                     // rotate the issuer: one CTA issuing every block's
             tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
         }
       }
@@ -249,7 +302,17 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
       ldsm_x4(qr[ks], sq + sw128(warp * 16 + 8 * ((lane >> 3) & 1) + (lane & 7), (16 * ks + 8 * (lane >> 4)) * 2));
     // The arrive must not overtake the ldmatrix reads it releases: make it data-dependent on their destinations
     // (zero_dep is 0 at run time but opaque to ptxas), or the producer refills slot 0 while they are still in flight.
+#if QDEP == 2
+    // Every destination, not just the first and last: with only those two, ptxas may sink the middle k-step's
+    // ldmatrix past the arrive, the producer's first bias TMA lands on the q tile it is still reading (q is parked in
+    // slot 0's bias area), and a few rows get dims 16-31 of q from the bias. Seen as 1-2 % of L768 runs corrupting one
+    // CTA each (det_core2.py).
+    uint32_t dep = 0;
+#pragma unroll
+    for (int ks = 0; ks < DH / 16; ++ks) dep ^= qr[ks][0] ^ qr[ks][1] ^ qr[ks][2] ^ qr[ks][3];
+#else
     const uint32_t dep = qr[0][0] ^ qr[DH / 16 - 1][3];
+#endif
     if ((tid & 31) == 0) mbar_arrive_dep(qdone, zero_dep(dep));      // slot 0 is free again before the producer fills it
   }
 
@@ -416,10 +479,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
 #endif
     }
     if (PIPE == 1) wgmma_wait<0>();                                 // PV(n-1) has landed in acc
-    if (PIPE == 1 && n > 0 && (tid & 31) == 0) {
+    if (PIPE == 1 && n > 0 && (tid & 31) == 0 && (!NODANGLE || n - 1 + STAGES < nblocks)) {
       const int sp = (n - 1) % STAGES;
 #pragma unroll
-      for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[sp], k);
+      RELEASE_SLOT(&empty[sp]);
     }
 #if !MAXLESS
 #pragma unroll
@@ -465,9 +528,9 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     wgmma_wait<0>();
     if ((tid & 31) == 0)
 #pragma unroll
-      for (int k = 0; k < CLS; ++k) {
-        mbar_arrive_remote(&empty[n % STAGES], k);
-        if (two) mbar_arrive_remote(&empty[(n + 1) % STAGES], k);
+      {
+        if (!NODANGLE || n + STAGES < nblocks) RELEASE_SLOT(&empty[n % STAGES]);
+        if (two && (!NODANGLE || n + 1 + STAGES < nblocks)) RELEASE_SLOT(&empty[(n + 1) % STAGES]);
       }
   }
 #else
@@ -479,19 +542,19 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     if (PONG && NWG == 2 && wg == 0 && n == 0) named_bar_arrive(9, 256);
     softmax_pv(sc0, n, 0);
     if (!FLOOR) wgmma_wait<0>();
-    if ((tid & 31) == 0)
+    if ((tid & 31) == 0 && (!NODANGLE || n + STAGES < nblocks))
 #pragma unroll
-      for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[n % STAGES], k);
+      RELEASE_SLOT(&empty[n % STAGES]);
   }
 #endif
   if (!FLOOR) wgmma_wait<0>();
 #pragma unroll
   for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #if PIPE == 1
-  if ((tid & 31) == 0) {
+  if (!NODANGLE && (tid & 31) == 0) {
     const int sp = (nblocks - 1) % STAGES;
 #pragma unroll
-    for (int k = 0; k < CLS; ++k) mbar_arrive_remote(&empty[sp], k);
+    RELEASE_SLOT(&empty[sp]);
   }
 #endif
 
@@ -513,6 +576,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     }
   }
   __syncwarp();
+#if PDL
+  // The dependent kernel waits before its own loads, so triggering here only lets its preamble start early.
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
   cluster_arrive_relaxed(); cluster_wait();
 }
 
@@ -566,10 +633,15 @@ void launch(torch::Tensor& qkvg, torch::Tensor& bias, int64_t block, int L, int 
   cfg.blockDim = dim3(128 * NWG + (PWARP ? 32 : 128));
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
-  cudaLaunchAttribute at[1];
+  cudaLaunchAttribute at[2];
   at[0].id = cudaLaunchAttributeClusterDimension;
   at[0].val.clusterDim.x = CLS; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = 1;
+#if PDL
+  at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  at[1].val.programmaticStreamSerializationAllowed = 1;
+  cfg.numAttrs = 2;
+#endif
   TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, tile_map(qkvg.data_ptr(), S * L, 4 * 768, 4 * 768, QW, QM),
                                  tile_map(qkvg.data_ptr(), S * L, 4 * 768, 4 * 768, QW, BN),
                                  tile_map(bias.data_ptr(), bias.size(0) * L, L, L, BN, QM),

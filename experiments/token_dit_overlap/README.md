@@ -110,7 +110,9 @@ Not pursued.
 The GEMM gap to their standalone sum is NOT weight streaming (forcing all 24 blocks to share one L2-resident weight set
 changes nothing: 99.6 vs 98.2) and NOT launch overhead alone (`boundary.py`: cycling the four GEMMs in block order costs
 4 us more than timing each alone, ~1 us a kernel). It is the dependency chain: every kernel waits for the previous one,
-so prologues and tails never overlap, and quack's sm90 GEMMs have no PDL.
+so prologues and tails never overlap. (An earlier version of this line said quack's sm90 GEMMs have no PDL. That
+is WRONG: `quack/gemm_sm90.py` takes `use_pdl=True` by default, waits before its TMA loads and triggers in its
+epilogue. The chain is broken by OUR kernels between them -- see the PDL section at the end.)
 
 ## What helped: cluster_N in the GEMM configs (kept)
 
@@ -331,7 +333,56 @@ The core is 40.8 us in the step against 46.9 standalone: the S samples' bias til
 cuBLAS roof, which is itself 72 % of the theoretical peak, so kernel-for-kernel there is little left. But the four
 standalone sum to ~83 us and cost 98.2 in the step (`probe.py`), and that gap is neither weight streaming (pinning one
 L2-resident weight set: 99.6 vs 98.2) nor launch overhead alone (`boundary.py`: ~1 us a kernel). It is that every
-kernel waits for the previous one, so prologues and tails never overlap and quack's sm90 GEMMs have no PDL. That
+kernel waits for the previous one, so prologues and tails never overlap. That
 ~15 us a block is the largest single lever left, and it needs either PDL between the GEMMs or one persistent kernel
 per block. After it, the core's instruction count (79 % of its traffic roof, issue-bound at IPC 1.6) is worth ~10 us.
 The row passes are already at 100 % of the HBM roof in the step and have nothing left.
+
+## PDL through the block, and a race it uncovered in the CUDA core
+
+**PDL.** quack's sm90 GEMMs wait before their TMA loads and trigger in their epilogue (`use_pdl=True`, the default), so
+the block's dependency chain was broken only by our kernels between them. The CUDA core (`griddepcontrol.wait` after its
+prologue, `launch_dependents` at the end, launched with `ProgrammaticStreamSerialization`) and the resgate + AdaLN row
+pass (`gdc_wait` / `gdc_launch_dependents`, `launch_pdl=True`) now close it. Triggering early is safe whatever follows:
+a kernel launched without the attribute (cuBLAS, torch) still waits for completion. `ab_pdl.py`, in one process,
+interleaved, outputs bit-identical in every pairing:
+
+| | PDL off | PDL on | saving |
+|---|---:|---:|---:|
+| L768 | 159.13 us/block | 157.37 | +1.76 (1.1 %) |
+| L384 | 82.20 | 79.11 | +3.09 (3.8 %) |
+
+`bench.py` with everything in (`results/bf16-L{768,384}-pdl.json`): **153.3 us/block at L768** (engine 557.7, 3.64x;
+Anthropic hoisted 234.1, 1.53x) and **78.1 at L384** (272.2, 3.49x; 132.7, 1.70x). rel_rms 4.40e-3 / 4.42e-3.
+
+**The race.** The first PDL A/B showed the baseline differing from itself (1.6e-3), which led to a real bug in the wired
+CUDA core, present since the q-in-registers change. `det_core.py` (same input, 600 runs, compared bitwise) and
+`det_core2.py` (which CTA, what kind of error, which run is right):
+
+- 7/600 runs at L768 corrupted ONE CTA each; the corrupted run is the wrong one (2.54e-3 vs fp32 against 2.37e-3);
+  the error is element-wise (ratio to the right value -4.8 .. 3.9 within one row), not a row scale.
+- Only second-wave CTAs (heads >= 9, blockIdx >= 264 = 132 SMs x 2); L384 fits one wave and never failed.
+- BACC=0 and PWARP=0 widen the window (95 / 27 of 600), which made every hypothesis testable.
+
+Cause: q is parked in slot 0's bias area and read into registers with three ldmatrix (k-steps 0, 1, 2); the `qdone`
+arrive that frees slot 0 was made data-dependent on the first and last destination only, so ptxas could sink the
+middle ldmatrix past it, and the producer's first bias TMA overwrote q dims 16-31 for a few rows. A co-resident CTA's
+contention (only in the second wave) widens the window. Fix (`QDEP=2`): the arrive depends on all twelve registers.
+
+| 600 runs at L768 | old dependency | all twelve (`QDEP=2`) | q not aliased (`QREG=0`) |
+|---|---:|---:|---:|
+| BACC=0 | 99 | **0** | 0 |
+| defaults | 7 | **0** | 0 |
+
+Ruled out on the way, each with the amplified build: a warp fence before the slot release (`__syncwarp` 61/300,
+`+__threadfence_block` 45/300), the setmaxnreg over-ask (67/300 with it fixed), the bias multicast to a one-CTA cluster
+(143/600 with a plain TMA), the `mapa` + `shared::cluster` release (89/600 CTA-local). Two of those are real defects
+and are fixed anyway at no cost (`core_ab.py`, do_bench, 46.99 vs 46.88 us at L768, 20.70 vs 20.77 at L384):
+- `REGFIX`: the setmaxnreg split assumed a 128-thread producer and one CTA a SM, so the consumers asked for 232
+  registers out of 112 (59 K asked, 32 K owned). Sized from the real launch now.
+- `NODANGLE`: the last STAGES slot releases were never waited for and could be in flight at exit. Not issued now.
+
+After the fix: `test_core.py` passes at L256/384/768; 0/600 kernel runs and 13/13 step runs bit-identical, with both cores.
+
+Lesson: a data-dependent arrive has to depend on *every* load it releases -- ptxas only orders what the dependency
+names. And a kernel that runs deterministically in one wave can still race in two; test at a multi-wave shape.
