@@ -754,7 +754,7 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
 // column sums ssa are row 64 of the same accumulator.  Two compute groups take alternate tiles.
 namespace pb {
 constexpr int CM = 64, BS = 128;
-constexpr int NST = 2;
+constexpr int NST = 3;                                     // the tile loads are latency-bound: ring depth is throughput
 constexpr int DAT = BS * CH;                               // da or db tile [128 s][32]
 constexpr int XT = BS * CM;                                // x tile [128 s][64]
 constexpr int STAT = BS * 2;                               // (mean, rstd) per row, fp32

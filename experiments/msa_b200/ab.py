@@ -30,6 +30,16 @@ elif case == "dwo":
     fa = lambda: A.opm_dwo(dzp, O, N, N, 0); fb = lambda: B.opm_dwo(dzp, O, N, N, 0)
     ra, rb = fa(), fb()
     print("max |old - new| dWo", (ra - rb).abs().max().item())
+elif case == "pbwd":
+    CH, CM = 32, 64
+    m = torch.randn(S, N, CM, device="cuda", dtype=bf); mask = torch.rand(S, N, device="cuda") > 0.1
+    lnw = 1 + 0.1 * torch.randn(CM, device="cuda"); lnb = 0.1 * torch.randn(CM, device="cuda")
+    wa = (torch.randn(CH, CM, device="cuda") * 0.1).to(bf); wb = (torch.randn(CH, CM, device="cuda") * 0.1).to(bf)
+    _, _, _, stats, _ = A.opm_prologue(m, mask, lnw, lnb, 1e-5, wa, wb, True, False)
+    dA = torch.randn(S, N * CH, device="cuda", dtype=bf); dB = torch.randn(S, N * CH, device="cuda", dtype=bf)
+    fa = lambda: A.opm_prologue_bwd(dA, dB, m, stats, mask, lnw, lnb, wa, wb); fb = lambda: B.opm_prologue_bwd(dA, dB, m, stats, mask, lnw, lnb, wa, wb)
+    ra, rb = fa(), fb()
+    print("max |old - new|", [(x.float() - y.float()).abs().max().item() for x, y in zip(ra, rb)])
 elif case == "glue":
     H, C, D = 8, 32, 64
     o = torch.randn(S, N, H * C, device="cuda", dtype=bf); y = torch.randn(S, N, D, device="cuda", dtype=bf); dres = torch.randn(S, N, D, device="cuda", dtype=bf)
