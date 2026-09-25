@@ -24,6 +24,27 @@ if case == "dgrad":
     ra, rb = fa(), fb()
     print("max |old - new| dO", (ra[0].float() - rb[0].float()).abs().max().item(), "dzp", (ra[1].float() - rb[1].float()).abs().max().item(),
           "dbo", (ra[2] - rb[2]).abs().max().item())
+elif case == "epi":
+    CZ, CH = 128, 32
+    mask = torch.rand(S, N, device="cuda") > 0.1
+    bits = torch.zeros(N, S // 32, dtype=torch.int64, device="cuda")
+    for w in range(32): bits |= (mask.t().reshape(N, S // 32, 32)[..., w].long() << w)
+    bits = (bits - ((bits >> 31) & 1) * (1 << 32)).to(torch.int32)
+    O = torch.randn(N * CH, N * CH, device="cuda", dtype=bf); wo = (torch.randn(CZ, CH * CH, device="cuda") * 0.03).to(bf)
+    bias = (torch.randn(CZ, device="cuda") * 0.1).to(bf).float(); res = torch.randn(1, N, N, CZ, device="cuda", dtype=bf)
+    fa = lambda: A.opm_epilogue(O, bits, wo, bias, N, N, res); fb = lambda: B.opm_epilogue(O, bits, wo, bias, N, N, res)
+    ra, rb = fa(), fb()
+    print("max |old - new| z", (ra.float() - rb.float()).abs().max().item(),
+          "(no res)", (A.opm_epilogue(O, bits, wo, bias, N, N, None).float() - B.opm_epilogue(O, bits, wo, bias, N, N, None).float()).abs().max().item())
+elif case == "pro":
+    CH, CM = 32, 64
+    m = torch.randn(S, N, CM, device="cuda", dtype=bf); mask = torch.rand(S, N, device="cuda") > 0.1
+    lnw = 1 + 0.1 * torch.randn(CM, device="cuda"); lnb = 0.1 * torch.randn(CM, device="cuda")
+    wa = (torch.randn(CH, CM, device="cuda") * 0.1).to(bf); wb = (torch.randn(CH, CM, device="cuda") * 0.1).to(bf)
+    tr = os.environ.get("PRO_TRAIN") == "1"
+    fa = lambda: A.opm_prologue(m, mask, lnw, lnb, 1e-5, wa, wb, tr, False); fb = lambda: B.opm_prologue(m, mask, lnw, lnb, 1e-5, wa, wb, tr, False)
+    ra, rb = fa(), fb()
+    print("max |old - new|", [(x.float() - y.float()).abs().max().item() for x, y in zip(ra, rb) if x.numel()])
 elif case == "dwo":
     CZ, CH = 128, 32
     dzp = (torch.randn(N, N, CZ, device="cuda") * 0.01).to(bf); O = torch.randn(N * CH, N * CH, device="cuda", dtype=bf)
