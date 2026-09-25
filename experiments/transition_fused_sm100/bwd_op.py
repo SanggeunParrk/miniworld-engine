@@ -15,6 +15,8 @@ class FusedBwd:
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
         self.repl = repl
 
+    xch = False                                                   # EXCH_SIM builds take one more tensor map (the exchange buffer)
+
     def bind(self, dy, xn, x, rstd, c1, gamma, wa, wb, ws):
         M = x.shape[0]
         tiles = M // 128
@@ -32,11 +34,15 @@ class FusedBwd:
                 tm(ws, [H, D], H * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]), tm(wb, [D, H], D * 2, [64, 64]),
                 tm(dx, [D, M], D * 2, [64, 64]))
         nred = 3 * H * D + 256
+        extra = ()
+        if self.xch:
+            xbuf = torch.zeros(tiles * 8 * 128, 64, device=dev, dtype=torch.bfloat16)
+            extra = (tm(xbuf, [64, tiles * 8 * 128], 128, [64, 64]),)
 
         def run():
-            self.k((self.nsm, 1, 1), (512, 1, 1), *maps, rstd, c1, gamma, x, partab, parts, dgbw, int(tiles), int(ndw))
+            self.k((self.nsm, 1, 1), (512, 1, 1), *maps, rstd, c1, gamma, x, partab, parts, dgbw, int(tiles), int(ndw), *extra)
             self.red(((nred + 255) // 256, 1, 1), (256, 1, 1), partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, int(ndw), int(ndx * 4))
-        run.keep = maps
+        run.keep = maps + extra
         run.bufs = (partab, parts, dgbw)
         return run, dict(dx=dx, dwa=dwa, dwb=dwb, dws=dws, dgamma=dgam, dbeta=dbeta)
 

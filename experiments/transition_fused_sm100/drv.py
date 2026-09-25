@@ -24,13 +24,15 @@ def init():
 
 
 class TensorMap:
-    """2-D tiled map: dims innermost-first, one outer stride in bytes, box innermost-first, 128-B swizzle by default (bf16)."""
-    def __init__(self, tensor, dims, stride_bytes, box, swizzle=128):
+    """2-D tiled map: dims innermost-first, one outer stride in bytes, box innermost-first, 128-B swizzle by default (bf16; u8 = any
+    one-byte element type such as e4m3)."""
+    def __init__(self, tensor, dims, stride_bytes, box, swizzle=128, dtype="bf16"):
         init()
         self.keep = tensor
         sw = {0: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_NONE, 32: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_32B,
               64: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_64B, 128: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_128B}[swizzle]
-        self.tm = _chk(cu.cuTensorMapEncodeTiled(cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, tensor.data_ptr(),
+        dt = {"bf16": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, "u8": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8}[dtype]
+        self.tm = _chk(cu.cuTensorMapEncodeTiled(dt, 2, tensor.data_ptr(),
                                                  [cu.cuuint64_t(d) for d in dims], [cu.cuuint64_t(stride_bytes)], [cu.cuuint32_t(b) for b in box],
                                                  [cu.cuuint32_t(1), cu.cuuint32_t(1)], cu.CUtensorMapInterleave.CU_TENSOR_MAP_INTERLEAVE_NONE, sw,
                                                  cu.CUtensorMapL2promotion.CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
@@ -45,8 +47,9 @@ class TensorMap:
 
 
 class Kernel:
-    def __init__(self, cubin_path, func_name, smem_bytes, cluster=None):
+    def __init__(self, cubin_path, func_name, smem_bytes, cluster=None, pdl=False):
         init()
+        self.pdl = pdl                                 # programmatic dependent launch: may start before the previous kernel ends
         data = open(cubin_path, "rb").read()
         self.module = _chk(cu.cuModuleLoadData(data), "cuModuleLoadData")
         self.func = _chk(cu.cuModuleGetFunction(self.module, func_name.encode()), "cuModuleGetFunction")
@@ -78,16 +81,24 @@ class Kernel:
                 raise TypeError(type(a))
         arr = (ctypes.c_void_p * len(ptrs))(*ptrs)
         st = torch.cuda.current_stream().cuda_stream if stream is None else stream
-        if self.cluster:
+        if self.cluster or self.pdl:
             cfg = cu.CUlaunchConfig()
             cfg.gridDimX, cfg.gridDimY, cfg.gridDimZ = grid[0], grid[1], grid[2]
             cfg.blockDimX, cfg.blockDimY, cfg.blockDimZ = block[0], block[1], block[2]
             cfg.sharedMemBytes = self.smem
             cfg.hStream = cu.CUstream(st)
-            at = cu.CUlaunchAttribute()
-            at.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
-            at.value.clusterDim.x, at.value.clusterDim.y, at.value.clusterDim.z = self.cluster, 1, 1
-            cfg.attrs = [at]; cfg.numAttrs = 1
+            attrs = []
+            if self.cluster:
+                at = cu.CUlaunchAttribute()
+                at.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
+                at.value.clusterDim.x, at.value.clusterDim.y, at.value.clusterDim.z = self.cluster, 1, 1
+                attrs.append(at)
+            if self.pdl:
+                ap = cu.CUlaunchAttribute()
+                ap.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+                ap.value.programmaticStreamSerializationAllowed = 1
+                attrs.append(ap)
+            cfg.attrs = attrs; cfg.numAttrs = len(attrs)
             _chk(cu.cuLaunchKernelEx(cfg, self.func, ctypes.addressof(arr), 0), "cuLaunchKernelEx")
         else:
             _chk(cu.cuLaunchKernel(self.func, grid[0], grid[1], grid[2], block[0], block[1], block[2], self.smem, cu.CUstream(st),

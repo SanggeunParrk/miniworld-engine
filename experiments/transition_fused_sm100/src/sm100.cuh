@@ -18,6 +18,7 @@ DEVI float rcpf(float x) { float y; asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(y) :
 DEVI uint32_t pack_bf16(float lo, float hi) { uint32_t r; asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo)); return r; }
 DEVI float bf16lo(uint32_t v) { return __uint_as_float(v << 16); }
 DEVI float bf16hi(uint32_t v) { return __uint_as_float(v & 0xffff0000u); }
+DEVI float2 h2f2(uint32_t v) { float2 r; asm("{ .reg .f16 l, h; mov.b32 {l, h}, %2; cvt.f32.f16 %0, l; cvt.f32.f16 %1, h; }" : "=f"(r.x), "=f"(r.y) : "r"(v)); return r; }
 // math::sigmoid of the Anthropic kit, exactly as the sm_90a kernels evaluate it: rcp.approx(1 + ex2.approx(-a log2 e))
 // 2^x on the FMA pipe (no MUFU): x = n + f with n = round(x), f in [-0.5, 0.5], 2^f by a degree-6 fit (max relative error 1.9e-9
 // before rounding; measured 7.9e-8 in fp32 against ex2.approx's 1.4e-7), exponent added in the integer domain. x is clamped to [-125, 125], where 1 + 2^x and its
@@ -47,6 +48,41 @@ DEVI float rcp_nr(float d) {
 DEVI float sigmoid_nr(float a) { return rcp_nr(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, a)))); }
 // the kit sigmoid with the exponential on the FMA pipe instead of MUFU (same formula: rcp.approx(1 + 2^(-a log2 e)))
 DEVI float sigmoid_poly(float a) { return rcpf(__fadd_rn(1.f, ex2_poly(__fmul_rn(-1.4426950408889634f, a)))); }
+// relaxed-precision sigmoids (opt-in): 0.5 tanh(a / 2) + 0.5 with one MUFU op per element (f32) or per two elements (f16x2)
+DEVI float tanhf_approx(float x) { float y; asm("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
+DEVI void sigmoid2_tanh(float a0, float a1, float& s0, float& s1) {
+  s0 = fmaf(0.5f, tanhf_approx(0.5f * a0), 0.5f); s1 = fmaf(0.5f, tanhf_approx(0.5f * a1), 0.5f);
+}
+DEVI void sigmoid2_tanh_h2(float a0, float a1, float& s0, float& s1) {
+  uint32_t x, y;
+  asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(x) : "f"(0.5f * a1), "f"(0.5f * a0));
+  asm("tanh.approx.f16x2 %0, %1;" : "=r"(y) : "r"(x));
+  const float2 t = h2f2(y);
+  s0 = fmaf(0.5f, t.x, 0.5f); s1 = fmaf(0.5f, t.y, 0.5f);
+}
+// packed f16x2 arithmetic for the relaxed-precision gate
+DEVI uint32_t f2h2(float lo, float hi) { uint32_t r; asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo)); return r; }
+DEVI uint32_t hmul2(uint32_t a, uint32_t b) { uint32_t d; asm("mul.rn.f16x2 %0, %1, %2;" : "=r"(d) : "r"(a), "r"(b)); return d; }
+DEVI uint32_t hadd2(uint32_t a, uint32_t b) { uint32_t d; asm("add.rn.f16x2 %0, %1, %2;" : "=r"(d) : "r"(a), "r"(b)); return d; }
+DEVI uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t d; asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(d) : "r"(a), "r"(b), "r"(c)); return d; }
+DEVI uint32_t htanh2(uint32_t a) { uint32_t d; asm("tanh.approx.f16x2 %0, %1;" : "=r"(d) : "r"(a)); return d; }
+// SwiGLU backward in f16x2: s = sigmoid(a) = 0.5 tanh(a/2) + 0.5, l = a s, h = l b, dB = g l, dA = (g b)(s + l (1 - s))
+DEVI void gate_h2(uint32_t g, uint32_t a, uint32_t b, uint32_t& h, uint32_t& da, uint32_t& db) {
+  const uint32_t HALF = 0x38003800u;                          // (0.5, 0.5)
+  const uint32_t s = hfma2(htanh2(hmul2(a, HALF)), HALF, HALF);
+  const uint32_t l = hmul2(a, s);
+  h = hmul2(l, b);
+  db = hmul2(g, l);
+  const uint32_t u = hadd2(hfma2(l ^ 0x80008000u, s, l), s);  // l (1 - s) + s
+  da = hmul2(hmul2(g, b), u);
+}
+#if defined(SIG_TANH2)
+#define SIGMOID2(a0, a1, s0, s1) sigmoid2_tanh_h2(a0, a1, s0, s1)
+#elif defined(SIG_TANH)
+#define SIGMOID2(a0, a1, s0, s1) sigmoid2_tanh(a0, a1, s0, s1)
+#else
+#define SIGMOID2(a0, a1, s0, s1) do { s0 = sigmoid_kit(a0); s1 = sigmoid_kit(a1); } while (0)
+#endif
 DEVI float sigmoid_kit(float a) { return rcpf(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, a)))); }
 
 DEVI uint32_t lds32(uint32_t a) { uint32_t v; asm volatile("ld.shared.b32 %0, [%1];" : "=r"(v) : "r"(a) : "memory"); return v; }
@@ -97,6 +133,9 @@ DEVI bool elect_one() {
   asm volatile("{ .reg .pred p; .reg .b32 r; elect.sync r|p, 0xffffffff; selp.u32 %0, 1, 0, p; }" : "=r"(pred));
   return pred != 0;
 }
+// programmatic dependent launch: wait for the previous grid's completion (and memory flush) / let the next grid be scheduled
+DEVI void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+DEVI void pdl_launch() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
 DEVI void named_bar_sync(int id, int n) { asm volatile("bar.sync %0, %1;" :: "r"(id), "r"(n) : "memory"); }
 
 // ------------------------------------------------------------------ TMA
@@ -243,5 +282,54 @@ DEVI void mbar_wait_cl(uint64_t* b, uint32_t parity) {      // acquire at cluste
   while (!ok)
     asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
                  : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");
+}
+}  // namespace s100
+
+// ------------------------------------------------------------------ fp8 (e4m3) operands, packed f32x2 arithmetic
+namespace s100 {
+// kind::f8f6f4 instruction descriptor: e4m3 A / B (format 0), fp32 D, a/b major (0 = K, 1 = MN), N, M
+__host__ __device__ constexpr uint32_t idesc_e4m3(int M, int N, int a_mn = 0, int b_mn = 0) {
+  return (1u << 4) | ((uint32_t)a_mn << 15) | ((uint32_t)b_mn << 16) | ((uint32_t)(N >> 3) << 17) | ((uint32_t)(M >> 4) << 24);
+}
+DEVI void umma8_ss(uint32_t d, uint64_t a, uint64_t b, uint32_t id, uint32_t acc) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, p; }" :: "r"(d), "l"(a), "l"(b), "r"(id), "r"(acc) : "memory");
+}
+DEVI void umma8_ts(uint32_t d, uint32_t a, uint64_t b, uint32_t id, uint32_t acc) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], [%1], %2, %3, p; }" :: "r"(d), "r"(a), "l"(b), "r"(id), "r"(acc) : "memory");
+}
+DEVI void umma8_ss2(uint32_t d, uint64_t a, uint64_t b, uint32_t id, uint32_t acc) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], %1, %2, %3, p; }" :: "r"(d), "l"(a), "l"(b), "r"(id), "r"(acc) : "memory");
+}
+DEVI void umma8_ts2(uint32_t d, uint32_t a, uint64_t b, uint32_t id, uint32_t acc) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], [%1], %2, %3, p; }" :: "r"(d), "r"(a), "l"(b), "r"(id), "r"(acc) : "memory");
+}
+// 64-byte swizzle (layout type 4), 8-row groups 512 B apart: MN-major and K-major variants have the same encoding here
+DEVI uint64_t desc_sw64(uint32_t saddr) {
+  return (uint64_t)((saddr >> 4) & 0x3FFFu) | ((uint64_t)1 << 16) | ((uint64_t)(512 >> 4) << 32) | ((uint64_t)1 << 46) | ((uint64_t)4 << 61);
+}
+// 64-byte swizzle of a [rows][64 B] tile (512-B aligned): 16-byte chunk q of row r lives at chunk q ^ ((r >> 1) & 3)
+DEVI uint32_t sw64(uint32_t r, uint32_t q) { return r * 64u + ((q ^ ((r >> 1) & 3u)) << 4); }
+DEVI void tmem_st8(uint32_t taddr, const uint32_t (&r)[8]) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x8.b32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};"
+               :: "r"(taddr), "r"(r[0]), "r"(r[1]), "r"(r[2]), "r"(r[3]), "r"(r[4]), "r"(r[5]), "r"(r[6]), "r"(r[7]) : "memory");
+}
+// packed pairs of fp32 (FFMA2 / FMUL2 / FADD2 on sm_100)
+struct f2 { uint64_t v; };
+DEVI f2 mk2(float lo, float hi) { f2 r; asm("mov.b64 %0, {%1, %2};" : "=l"(r.v) : "f"(lo), "f"(hi)); return r; }
+DEVI f2 mk2u(uint32_t lo, uint32_t hi) { f2 r; asm("mov.b64 %0, {%1, %2};" : "=l"(r.v) : "r"(lo), "r"(hi)); return r; }
+DEVI float lo2(f2 a) { float l, h; asm("mov.b64 {%0, %1}, %2;" : "=f"(l), "=f"(h) : "l"(a.v)); return l; }
+DEVI float hi2(f2 a) { float l, h; asm("mov.b64 {%0, %1}, %2;" : "=f"(l), "=f"(h) : "l"(a.v)); return h; }
+DEVI f2 mul2(f2 a, f2 b) { f2 r; asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(r.v) : "l"(a.v), "l"(b.v)); return r; }
+DEVI f2 add2(f2 a, f2 b) { f2 r; asm("add.rn.f32x2 %0, %1, %2;" : "=l"(r.v) : "l"(a.v), "l"(b.v)); return r; }
+DEVI f2 fma2(f2 a, f2 b, f2 c) { f2 r; asm("fma.rn.f32x2 %0, %1, %2, %3;" : "=l"(r.v) : "l"(a.v), "l"(b.v), "l"(c.v)); return r; }
+DEVI f2 neg2(f2 a) { f2 r; r.v = a.v ^ 0x8000000080000000ull; return r; }
+// two fp32 -> two e4m3 (saturating) in the low 16 bits; four -> one word (byte k = element k)
+DEVI uint32_t e4m3x2(float lo, float hi) { uint16_t q; asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(q) : "f"(hi), "f"(lo)); return q; }
+DEVI uint32_t e4m3x4(f2 a, f2 b) { return e4m3x2(lo2(a), hi2(a)) | (e4m3x2(lo2(b), hi2(b)) << 16); }
+// sigmoid through one MUFU op per element: 0.5 tanh(a / 2) + 0.5 (relaxed precision; tanh.approx relative error ~2^-11)
+DEVI f2 sigmoid2(f2 a) {
+  const f2 h = mul2(a, mk2(0.5f, 0.5f));
+  const f2 t = mk2(tanhf_approx(lo2(h)), tanhf_approx(hi2(h)));
+  return fma2(t, mk2(0.5f, 0.5f), mk2(0.5f, 0.5f));
 }
 }  // namespace s100

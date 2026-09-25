@@ -1,32 +1,23 @@
-// tfwd2.cu — the Transition forward of tfwd.cu (same fusion, same arithmetic and rounding points) with 2-CTA tcgen05.mma: the two
-// CTAs of a cluster run their own 128-row tiles in lockstep, and the leader (rank 0) issues M = 256 products whose B operand is split
-// by N across the pair. Per chunk j:
-//   expand   [a|b] = xn [Wa_j; Wb_j]^T   N = 128: the leader holds Wa_j (N rows 0..63), the peer Wb_j (64..127) -- 16 KB each
-//   squeeze  acc  += h_j Ws_j^T          N = 128: the leader holds Ws_j rows d 0..63, the peer d 64..127      -- 8 KB each
-// so each SM streams and reads half of the weights, and one MMA instruction covers both SMs. Each CTA keeps its own accumulators in
-// its own tensor memory (same columns as tfwd.cu) and runs its own SwiGLU, LayerNorm and epilogue; their completions are counted on
-// the leader's barriers (remote arrives), and the leader's commits arrive on both CTAs' barriers (multicast).
+// tfwd8.cu — the Transition forward of tfwd2.cu (same fusion, 2-CTA tcgen05.mma, same schedule) with RELAXED PRECISION: e4m3
+// tensor-core operands (kind::f8f6f4, fp32 accumulate). xn is quantized with the bound-based scale s_x (sc[0]) and stored as e4m3 for
+// the backward; the weights come pre-quantized (quant8.cu: wab_q = [Wa; Wb] with s_wab = sc[1], ws_q with s_ws = sc[2]); h is quantized
+// with the delayed scale s_hf = sc[6]; the SwiGLU runs in fp32x2 with sigmoid(a) = 0.5 tanh(a / 2) + 0.5.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
 
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128;
 constexpr int NW = 4;                                          // weight ring depth (both rings)
-constexpr int WAB_SLOT = 16384, WS_SLOT = 8192;                // this CTA's half: [64 n][128 k] as 2 K-blocks of 8 KB; Ws [64 d][64 k]
+constexpr int WAB_SLOT = 8192, WS_SLOT = 4096;                 // this CTA's half: e4m3 [64 n][128 k] (128-B swizzle); Ws [64 d][64 k] (64-B)
 constexpr int O_WAB = 0, O_WS = NW * WAB_SLOT;
-constexpr int O_X = O_WS + NW * WS_SLOT, TILE = 32768;
+constexpr int O_X = O_WS + NW * WS_SLOT, TILE = 32768, XQT = 16384;
 constexpr int O_XN = O_X + 2 * TILE;
-constexpr int O_GB = O_XN + 2 * TILE;
+constexpr int O_GB = O_XN + 2 * XQT;
 constexpr int O_BAR = O_GB + 1024;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
-#ifdef FP8SIM
-constexpr int KS_EX = 4, KS_SQ = 2;                            // timing model of fp8 operands: half the MMA instructions (numerics wrong)
-#else
-constexpr int KS_EX = 8, KS_SQ = 4;
-#endif
-constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;
-constexpr uint32_t IDESC2 = idesc_bf16(256, 128);
+constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;         // h (e4m3) x2: 16 columns each
+constexpr uint32_t IDESC2 = idesc_e4m3(256, 128);
 
 #ifdef TRACE
 __device__ unsigned long long g_trace2[2][4][1024];     // [cta 0/1][role: 0 expand, 1 squeeze, 2 SwiGLU warp 4, 3 SwiGLU warp 12][event]
@@ -51,14 +42,16 @@ struct Bars {
 };
 
 extern "C" __global__ void __launch_bounds__(512, 1)
-transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mwa,
-                      const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mws,
-                      const __grid_constant__ CUtensorMap mout, const __grid_constant__ CUtensorMap mxn,
-                      const float* __restrict__ gamma, const float* __restrict__ beta, float* __restrict__ rstd,
+transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mwab,
+                      const __grid_constant__ CUtensorMap mws, const __grid_constant__ CUtensorMap mout, const __grid_constant__ CUtensorMap mxn,
+                      const float* __restrict__ gamma, const float* __restrict__ beta, const float* __restrict__ sc, float* __restrict__ rstd,
                       float* __restrict__ c1, int tiles, float eps, int save) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+#ifdef PDL
+  pdl_launch();                                                  // the backward's CTAs may take SMs as ours exit
+#endif
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int cta = blockIdx.x, G = gridDim.x;
   const int crank = (int)cluster_rank();
@@ -79,9 +72,12 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     }
     mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
     fence_barrier_init();
-    prefetch_map(&mx); prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mws); prefetch_map(&mout); prefetch_map(&mxn);
+    prefetch_map(&mx); prefetch_map(&mwab); prefetch_map(&mws); prefetch_map(&mout); prefetch_map(&mxn);
   }
-  if (tid < 128) { reinterpret_cast<float*>(sm + O_GB)[tid] = gamma[tid]; reinterpret_cast<float*>(sm + O_GB)[128 + tid] = beta[tid]; }
+  if (tid < 128) {                                               // gamma / s_x, beta / s_x: the LayerNorm lands in e4m3 units directly
+    const float ix = 1.f / sc[0];
+    reinterpret_cast<float*>(sm + O_GB)[tid] = gamma[tid] * ix; reinterpret_cast<float*>(sm + O_GB)[128 + tid] = beta[tid] * ix;
+  }
   if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
   tc_fence_before();
   __syncthreads();
@@ -108,21 +104,22 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     // ------------------------------------------------------------------------------------------ weight producer: this CTA's half of
     // every chunk; the transactions complete on the leader's barriers, which the leader armed with the pair's total bytes
     if (lane == 0) {
-      const CUtensorMap* mab = leader ? &mwa : &mwb;
+#ifdef PDL
+      pdl_wait();                                                // the e4m3 weights come from the quantization kernel
+#endif
       int ca = 0, cs = 0;
       while (ca < nch || cs < nch) {
         if (ca < nch && (ca < NW || mbar_test(&B.wab_empty[ca % NW], ((ca / NW) - 1) & 1))) {
           const int s = ca % NW, j = ca & (NCH - 1);
           if (leader) mbar_expect_tx(&B.wab_full[s], 2 * WAB_SLOT);
           const uint32_t slot = su + O_WAB + s * WAB_SLOT;
-          tma_load_2d_2sm(slot, mab, &B.wab_full[s], 0, j * HS);
-          tma_load_2d_2sm(slot + 8192, mab, &B.wab_full[s], 64, j * HS);
+          tma_load_2d_2sm(slot, &mwab, &B.wab_full[s], 0, crank * H_ + j * HS);    // Wa_j (leader) / Wb_j (peer)
           ++ca;
         }
         if (cs < nch && (cs < NW || mbar_test(&B.ws_empty[cs % NW], ((cs / NW) - 1) & 1))) {
           const int s = cs % NW, j = cs & (NCH - 1);
           if (leader) mbar_expect_tx(&B.ws_full[s], 2 * WS_SLOT);
-          tma_load_2d_2sm(su + O_WS + s * WS_SLOT, &mws, &B.ws_full[s], j * HS, crank * 64);
+          tma_load_2d_2sm(su + O_WS + s * WS_SLOT, &mws, &B.ws_full[s], j * HS, crank * 64);  // Ws [d 64 of this CTA][k 64 of chunk j]
           ++cs;
         }
       }
@@ -141,12 +138,11 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           if (c >= 2) mbar_wait_cl(&B.ab_empty[s], (u - 1) & 1);
           if (lane == 0) TR2(0, 4 * c + 2);
           tc_fence_after();
-          const uint64_t ad = desc_k128(su + O_XN + (i & 1) * TILE), bd = desc_k128(su + O_WAB + sw * WAB_SLOT);
+          const uint64_t ad = desc_k128(su + O_XN + (i & 1) * XQT), bd = desc_k128(su + O_WAB + sw * WAB_SLOT);
           if (elect_one()) {
 #pragma unroll
-            for (int ks = 0; ks < KS_EX; ++ks)
-              umma_ss2(tmem + T_AB + s * 128, ad + (uint64_t)(((ks >> 2) * 16384 + (ks & 3) * 32) >> 4),
-                       bd + (uint64_t)(((ks >> 2) * 8192 + (ks & 3) * 32) >> 4), IDESC2, ks > 0 ? 1u : 0u);
+            for (int ks = 0; ks < 4; ++ks)
+              umma8_ss2(tmem + T_AB + s * 128, ad + (uint64_t)(ks * 2), bd + (uint64_t)(ks * 2), IDESC2, ks > 0 ? 1u : 0u);
             tc_commit2_mc(&B.ex_done[s], 3);
             tc_commit2_mc(&B.wab_empty[sw], 3);
             if (j == NCH - 1) tc_commit2_mc(&B.xn_empty[i & 1], 3);
@@ -163,11 +159,11 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           if (lane == 0) TR2(1, 4 * q + 2);
           if (j == 0 && i >= 1) mbar_wait_cl(&B.out_empty, (i - 1) & 1);
           tc_fence_after();
-          const uint64_t bd = desc_k128(su + O_WS + sw * WS_SLOT);
+          const uint64_t bd = desc_sw64(su + O_WS + sw * WS_SLOT);
           if (elect_one()) {
 #pragma unroll
-            for (int ks = 0; ks < KS_SQ; ++ks)
-              umma_ts2(tmem + T_OUT, tmem + T_H + s * 32 + ks * 8, bd + (uint64_t)(ks * 2), IDESC2, (j > 0 || ks > 0) ? 1u : 0u);
+            for (int ks = 0; ks < 2; ++ks)
+              umma8_ts2(tmem + T_OUT, tmem + T_H + s * 16 + ks * 8, bd + (uint64_t)(ks * 2), IDESC2, (j > 0 || ks > 0) ? 1u : 0u);
             tc_commit2_mc(&B.sq_done[s], 3);
             tc_commit2_mc(&B.ws_empty[sw], 3);
             if (j == NCH - 1) tc_commit2_mc(&B.out_full, 3);
@@ -181,6 +177,8 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     // warpgroups alternate chunks, each in four 16-column steps with the next step's TMEM loads in flight
     setmaxnreg_inc<152>();
     const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
+    const float ca = sc[0] * sc[1];
+    const f2 CA = mk2(ca, ca), CB = mk2(ca / sc[6], ca / sc[6]);  // a in true units, b folded with 1 / s_hf: h lands in e4m3 units
     for (int c = (warp >= 12 ? 1 : 0); c < nch; c += 2) {
       const int s = c & 1, u = c >> 1;
       const int rl = warp == 4 ? 2 : 3;
@@ -188,7 +186,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
       mbar_wait(&B.ex_done[s], u & 1);
       if (lane == 0 && (warp == 4 || warp == 12)) TR2(rl, 4 * c + 1);
       tc_fence_after();
-      uint32_t hp[32];
+      uint32_t hq[16];
       {
         uint32_t a[2][16], b[2][16];
         tmem_ld16(trow + T_AB + s * 128, a[0]);
@@ -201,10 +199,15 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
             tmem_ld16(trow + T_AB + s * 128 + 64 + (q + 1) * 16, b[(q + 1) & 1]);
           }
 #pragma unroll
-          for (int k = 0; k < 8; ++k) {
-            const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
-            const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
-            hp[q * 8 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+          for (int k = 0; k < 4; ++k) {                      // 4 units -> one word of e4m3 h
+            f2 hv[2];
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+              const int x = 4 * k + 2 * e;
+              const f2 A = mul2(mk2u(a[q & 1][x], a[q & 1][x + 1]), CA), Bv = mul2(mk2u(b[q & 1][x], b[q & 1][x + 1]), CB);
+              hv[e] = mul2(mul2(A, sigmoid2(A)), Bv);
+            }
+            hq[q * 4 + k] = e4m3x4(hv[0], hv[1]);
           }
           if (q < 3) tmem_wait_ld();
         }
@@ -215,11 +218,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
       if (lane == 0 && (warp == 4 || warp == 12)) TR2(rl, 4 * c + 2);
       if (c >= 2) mbar_wait(&B.sq_done[s], (u - 1) & 1);
       tc_fence_after();
-      uint32_t h0[16], h1[16];
-#pragma unroll
-      for (int k = 0; k < 16; ++k) { h0[k] = hp[k]; h1[k] = hp[16 + k]; }
-      tmem_st16(trow + T_H + s * 32, h0);
-      tmem_st16(trow + T_H + s * 32 + 16, h1);
+      tmem_st16(trow + T_H + s * 16, hq);
       tmem_wait_st();
       tc_fence_before();
       __syncwarp();
@@ -239,7 +238,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
       if (i >= 2) mbar_wait(&B.xn_empty[b], ((i >> 1) - 1) & 1);
       if (t2 == 0) tma_store_wait_read0();
       named_bar_sync(1, 128);
-      const uint32_t xb = su + O_X + b * TILE, xnb = su + O_XN + b * TILE;
+      const uint32_t xb = su + O_X + b * TILE, xnb = su + O_XN + b * XQT;
       uint32_t v[64];
 #pragma unroll
       for (int cb = 0; cb < 2; ++cb)
@@ -271,19 +270,22 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
         for (int l = 0; l < k; ++l) p[l] = p[l] + p[l + k];
       const float rs = rsqrtf(p[0] * (1.f / D_) + eps);
 #pragma unroll
-      for (int cb = 0; cb < 2; ++cb)
+      for (int q = 0; q < 8; ++q) {                              // 16 columns -> one 16-byte chunk of e4m3 xn
+        uint32_t o[4];
 #pragma unroll
-        for (int q = 0; q < 8; ++q) {
-          uint32_t o[4];
+        for (int k = 0; k < 4; ++k) {
+          f2 pr[2];
 #pragma unroll
-          for (int k = 0; k < 4; ++k) {
-            const int col = cb * 64 + q * 8 + 2 * k;
-            const uint32_t w = v[cb * 32 + q * 4 + k];
+          for (int e = 0; e < 2; ++e) {
+            const int col = q * 16 + 4 * k + 2 * e;
+            const uint32_t w = v[col >> 1];
             const float2 g2 = lds64f(gb_u + col * 4), b2 = lds64f(gb_u + 512 + col * 4);
-            o[k] = pack_bf16((bf16lo(w) - mean) * rs * g2.x + b2.x, (bf16hi(w) - mean) * rs * g2.y + b2.y);
+            pr[e] = mk2((bf16lo(w) - mean) * rs * g2.x + b2.x, (bf16hi(w) - mean) * rs * g2.y + b2.y);
           }
-          sts128(xnb + cb * 16384 + sw128(r, q), make_uint4(o[0], o[1], o[2], o[3]));
+          o[k] = e4m3x4(pr[0], pr[1]);
         }
+        sts128(xnb + sw128(r, q), make_uint4(o[0], o[1], o[2], o[3]));
+      }
       if (save && real) { rstd[grow] = rs; c1[grow] = mean * rs; }
       fence_proxy_async();
       named_bar_sync(1, 128);
@@ -292,13 +294,12 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
         if (save && real) {
           const int row0 = tile_of(i) * ROWS;
 #pragma unroll
-          for (int cb = 0; cb < 2; ++cb)
-#pragma unroll
-            for (int h = 0; h < 2; ++h) tma_store_2d(&mxn, xnb + cb * 16384 + h * 8192, cb * 64, row0 + h * 64);
+          for (int h = 0; h < 2; ++h) tma_store_2d(&mxn, xnb + h * 8192, 0, row0 + h * 64);
           tma_store_commit();
         }
       }
     };
+    const float co = sc[6] * sc[2];                                 // acc (e4m3 h x e4m3 Ws) -> true units
     auto epi = [&](int i) {
       const int b = i & 1;
       mbar_wait(&B.out_full, i & 1);
@@ -319,7 +320,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           uint32_t o[4];
 #pragma unroll
           for (int k = 0; k < 4; ++k)
-            o[k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(acc[qq * 8 + 2 * k]), bf16hi(xw[k]) + __uint_as_float(acc[qq * 8 + 2 * k + 1]));
+            o[k] = pack_bf16(fmaf(__uint_as_float(acc[qq * 8 + 2 * k]), co, bf16lo(xw[k])), fmaf(__uint_as_float(acc[qq * 8 + 2 * k + 1]), co, bf16hi(xw[k])));
           sts128(ad, make_uint4(o[0], o[1], o[2], o[3]));
         }
       }

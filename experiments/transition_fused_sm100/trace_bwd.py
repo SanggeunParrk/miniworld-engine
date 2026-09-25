@@ -34,6 +34,8 @@ rr = range(4, n - 2)
 print(f"  input chain: wgrad(i) issued -> in(i+2) load issued {md([pr[i+2] - w2[4*i+2] for i in rr]):.0f}  load issued -> dh+ab(i+2) may start {md([w1[4*(i+2)+1] - pr[i+2] for i in rr]):.0f}")
 print(f"  per tile: dhab issue done -> gate sees dhab {md([g[4*i+1] - w1[4*i+3] for i in rr]):.0f}  gate done -> wgrad issued {md([w2[4*i+2] - g[4*i+3] for i in rr]):.0f}")
 print(f"  gate: wait dhab {md(g[1::4][:n]-g[0::4][:n]):.0f}  wait g_empty {md(g[2::4][:n]-g[1::4][:n]):.0f}  compute+store {md(g[3::4][:n]-g[2::4][:n]):.0f}")
+gl = pr[1024:1024 + n]
+print(f"  gate split: g_empty seen -> TMEM loads done {md([gl[i] - g[4*i+2] for i in rr]):.0f}   loads done -> stores done {md([g[4*i+3] - gl[i] for i in rr]):.0f}")
 # ---- DX
 m1, m2, g, e = t[1, 0], t[1, 1], t[1, 2], t[1, 3]
 nch = int((m1[4::8] > 0).sum()); nt = nch // 8
