@@ -10,6 +10,9 @@ using namespace s100;
 #ifndef EPI1
 #define EPI2                                                   // the fp32x2 LayerNorm-backward epilogue (EPI1: the scalar one)
 #endif
+#ifndef DW_BF16DY
+#define DW_DYQ                                                 // dh / dWs in e4m3 from dy converted in the DW role (DW_BF16DY: bf16)
+#endif
 
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128;
 constexpr int KB = 16384;                                      // bf16 [128][64] or e4m3 [128][128] tile, 128-B swizzled

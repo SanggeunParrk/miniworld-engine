@@ -96,7 +96,7 @@ class FusedBwd8x(FusedBwd8):
         run0, grads = super().bind(dy, xq, x, rstd, c1, gamma, wab_q, wst_q, sc, wa, wb, ws)
         M = x.shape[0]; tiles = M // 128
         maps, (dyq, flags, epoch) = list(run0.keep[:8]), run0.keep[8:]
-        if "dyq" not in str(self.cubin):
+        if "bf16dy" in str(self.cubin):
             maps[3] = drv.TensorMap(ws, [H, D], H * 2, [64, 64])   # the DW role's Ws slice: bf16, MN-major
         maps = tuple(maps)
         dab = torch.zeros(tiles * 8 * 128, D, device=x.device, dtype=torch.uint8)
