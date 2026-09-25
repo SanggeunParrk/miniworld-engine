@@ -91,6 +91,8 @@ def main():
         for mode in ("infer", "train"):
             floor_cap = sol_floor(op, mode, a.L, a.S, hbm=cal["hbm_Bps"], tc=tc) * 1e3
             floor_clk = sol_floor(op, mode, a.L, a.S) * 1e3
+            en = (float(os.environ.get("ESOL_EB", "104e-12")), float(os.environ.get("ESOL_EF", "0.578e-12")), float(os.environ.get("ESOL_PDYN", "752")))
+            floor_en = sol_floor(op, mode, a.L, a.S, hbm=cal["hbm_Bps"], tc=tc, energy=en) * 1e3
             for impl in ("pytorch", "anthropic", "ours"):
                 if a.only and f"{op}:{mode}:{impl}" not in a.only:
                     continue
@@ -99,10 +101,11 @@ def main():
                 except Exception as exc:
                     r = None; print(op, mode, impl, "failed:", str(exc)[:200])
                 torch.cuda.empty_cache()
-                row = dict(op=op, mode=mode, impl=impl, floor_cap_ms=floor_cap, floor_clk_ms=floor_clk, **(r or {}))
+                row = dict(op=op, mode=mode, impl=impl, floor_cap_ms=floor_cap, floor_clk_ms=floor_clk, floor_energy_ms=floor_en, **(r or {}))
                 rows.append(row)
                 if r:
-                    sol = f"  SoL(power-capped) {100 * floor_cap / r['ms']:5.1f}%  SoL(clock-peak) {100 * floor_clk / r['ms']:5.1f}%" if impl == "ours" else ""
+                    sol = (f"  SoL(energy) {100 * floor_en / r['ms']:5.1f}% [{floor_en:.3f}]  SoL(power-capped) {100 * floor_cap / r['ms']:5.1f}%"
+                       f"  SoL(clock-peak) {100 * floor_clk / r['ms']:5.1f}%") if impl == "ours" else ""
                     print(f"{op} {mode:5s} {impl:9s} {r['ms']:.4f} ms  {r['J']*1e3:.3f} mJ  {r['W']:.0f} W{sol}", flush=True)
                 else:
                     print(f"{op} {mode:5s} {impl:9s} n/a", flush=True)

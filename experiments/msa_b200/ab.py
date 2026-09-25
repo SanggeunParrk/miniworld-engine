@@ -70,6 +70,19 @@ elif case == "glue":
     fa = lambda: A.pwa_glue(o, y, dres, wg, wot, ga, dmask, 1 / 0.85); fb = lambda: B.pwa_glue(o, y, dres, wg, wot, gb, dmask, 1 / 0.85)
     ra, rb = fa(), fb()
     print("max |old - new| do", (ra[0].float() - rb[0].float()).abs().max().item(), "dWo", (ra[1] - rb[1]).abs().max().item(), "dgp", (ga.float() - gb.float()).abs().max().item())
+elif case in ("fwd2", "fwd2save"):              # old = the fused pwa_fwd, new = the split pwa_fwd2 (same inputs)
+    H, C, D = 8, 32, 64
+    m = torch.randn(S, N, D, device="cuda", dtype=bf); y = torch.randn(S, N, D, device="cuda", dtype=bf)
+    w = torch.softmax(torch.randn(H, N, N, device="cuda") * 2, -1).to(bf); v = torch.randn(H, N, S * C, device="cuda", dtype=bf)
+    wg = (torch.randn(H * C, D, device="cuda") * 0.2).to(bf); wo = (torch.randn(D, H * C, device="cuda") * 0.05).to(bf)
+    dmk = (torch.rand(N, D, device="cuda") > 0.15).to(bf) if os.environ.get("AB_DMASK") else None
+    so = case == "fwd2save"
+    fa = lambda: A.pwa_fwd(w, v, y, wg, wo, m, so, dmk, 1 / 0.85); fb = lambda: B.pwa_fwd2(w, v, y, wg, wo, m, so, dmk, 1 / 0.85)
+    ra, rb = fa(), fb()
+    ref_u = (m.float() - ra[0].float())
+    print("out: max |old - new|", (ra[0].float() - rb[0].float()).abs().max().item(),
+          " rel(update)", ((ra[0].float() - rb[0].float()).norm() / ref_u.norm()).item(),
+          " o max", (ra[1].float() - rb[1].float()).abs().max().item() if so else 0)
 elif case in ("fwdsave", "fwd"):
     H, C, D = 8, 32, 64
     m = torch.randn(S, N, D, device="cuda", dtype=bf); y = torch.randn(S, N, D, device="cuda", dtype=bf)

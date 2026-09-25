@@ -151,10 +151,16 @@ def run_case(op, impl, mode, L, S):
 HBM, TC = 6.9e12, 1.73e15
 
 
-def sol_floor(op, mode, L, S, hbm=None, tc=None):
+def sol_floor(op, mode, L, S, hbm=None, tc=None, energy=None):
+    """energy = (J per HBM byte, J per FLOP, dynamic power budget W): on a power-capped card a kernel also needs
+    (bytes e_b + FLOPs e_f) / (P_cap - P_idle) -- bytes and FLOPs share one power budget, so they add."""
     hbm, tc = hbm or HBM, tc or TC
     def k(byts, flops=0.0):
-        return max(byts / hbm, flops / tc)
+        t = max(byts / hbm, flops / tc)
+        if energy is not None:
+            eb, ef, pdyn = energy
+            t = max(t, (byts * eb + flops * ef) / pdyn)
+        return t
     n2, bf = L * L, 2
     m = S * L * 64 * bf                                  # an [S, N, 64] bf16 tensor
     if op == "opm":

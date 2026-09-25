@@ -221,12 +221,13 @@ constexpr int BI = 128, BS = 3, NO = BS * C;              // o / gate columns pe
 constexpr int JC = 64;                                     // j per stage
 constexpr int WTL = BI * JC, VTL = JC * NO;               // W chunk [128 i][64 j] (128B swz), v chunk [3 s][64 j][32 c] (64B swz)
 constexpr int STAGE = WTL + VTL;                           // 28 KiB
-constexpr int NST = 4;                                     // 112 KiB of loads in flight: TMA here is latency-bound (bytes in flight / ~1.2 us)
+constexpr int NST = 5;                                     // 140 KiB of loads in flight: TMA here is latency-bound (bytes in flight / ~1.2 us)
 constexpr int YT = BS * BI * D;                            // y rows [3 s][128 i][64]
 constexpr int WH = C * D + D * C;                          // Wg_h [32 c][64 d] (128B swz) | Wo_h [64 d][32 c] (64B swz)
-constexpr int UT = BS * BI * C;                            // u (or o) tile [3 s][128 i][32], 64B swizzle
 constexpr int THREADS = 320;                               // + warps 6-9: the tile's output epilogue
-constexpr int SMEM = 1024 + (NST * STAGE + YT + 2 * WH + UT) * 2 + 512;
+// u = g . o goes back to TMEM, packed bf16 over the o columns just drained (the out GEMM reads its A from TMEM): no
+// shared staging, so the ring is one stage deeper
+constexpr int SMEM = 1024 + (NST * STAGE + YT + 2 * WH) * 2 + 512;
 constexpr int COL_O = 0, COL_G = 2 * NO, COL_OUT = 3 * NO;
 constexpr uint32_t ID_CTR = idesc_bf16(128, NO, 0, 1);    // W K-major, v MN-major
 constexpr uint32_t ID_GATE = idesc_bf16(128, C, 0, 0);
@@ -254,8 +255,7 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
   __nv_bfloat16* sRing = reinterpret_cast<__nv_bfloat16*>(smb);
   __nv_bfloat16* sY = sRing + NST * STAGE;
   __nv_bfloat16* sWH = sY + YT;                  // [2][WH]
-  __nv_bfloat16* sU = sWH + 2 * WH;              // [UT]
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sU + UT);
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sWH + 2 * WH);
   uint64_t* full = bars;             // [NST]
   uint64_t* empty = full + NST;      // [NST]
   uint64_t* whf = empty + NST;       // [2]
@@ -263,19 +263,18 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
   uint64_t* yf = whe + 2;            // [1]
   uint64_t* ye = yf + 1;             // [1]  the tile's last gate GEMM retired
   uint64_t* accf = ye + 1;           // [2]  o_h (buffer gh & 1) and gate_h complete
-  uint64_t* acce = accf + 2;         // [2]  count 4: o buffer drained
+  uint64_t* acce = accf + 2;         // [2]  the out GEMM reading u_h (over o buffer gh & 1) retired
   uint64_t* ge = acce + 2;           // [1]  count 4: gate drained
-  uint64_t* uf = ge + 1;             // [2]  count 4: u_h written (parity by head)
-  uint64_t* ue = uf + 2;             // [1]  the out GEMM reading u retired
-  uint64_t* outf = ue + 1;           // [1]  the tile's out accumulator complete
+  uint64_t* uf = ge + 1;             // [2]  count 4: u_h written to TMEM (parity by head)
+  uint64_t* outf = uf + 2;           // [1]  the tile's out accumulator complete
   uint64_t* oute = outf + 1;         // [1]  count 4: drained
   uint32_t* tslot = reinterpret_cast<uint32_t*>(oute + 1);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
     for (int k = 0; k < NST; ++k) { bar_init(full + k, 1); bar_init(empty + k, 1); }
-    for (int k = 0; k < 2; ++k) { bar_init(whf + k, 1); bar_init(whe + k, 1); bar_init(accf + k, 1); bar_init(acce + k, 4);
+    for (int k = 0; k < 2; ++k) { bar_init(whf + k, 1); bar_init(whe + k, 1); bar_init(accf + k, 1); bar_init(acce + k, 1);
                                   bar_init(uf + k, 4); }
-    bar_init(ue, 1); bar_init(yf, 1); bar_init(ye, 1); bar_init(ge, 4); bar_init(outf, 1); bar_init(oute, 4);
+    bar_init(yf, 1); bar_init(ye, 1); bar_init(ge, 4); bar_init(outf, 1); bar_init(oute, 4);
     bar_init_fence();
   }
   if (warp == 1) tmem_alloc(tslot, 512);
@@ -314,7 +313,7 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
     // The whole warp walks the issue loop, converged; each batch of MMAs (and its commits) is issued by one elected
     // lane.  A lone lane-0 loop costs an ELECT round trip per tcgen05.mma -- ~70 cycles, more than an N = 96 MMA.
     int g = 0, gh = 0, lt = 0;
-    auto out_gemm = [&](int ghp, int hp, int ltp) {   // out += u_{hp} . Wo_{hp}^T, every s of the tile
+    auto out_gemm = [&](int ghp, int hp, int ltp) {   // out += u_{hp} . Wo_{hp}^T, every s of the tile (u from TMEM)
       const int b = ghp & 1;
       wait(uf + b, (ghp >> 1) & 1);
       if (hp == 0 && ltp >= 1) wait(oute, (ltp - 1) & 1);
@@ -325,8 +324,8 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
         for (int si = 0; si < BS; ++si)
 #pragma unroll
           for (int ks = 0; ks < C / 16; ++ks)
-            mma_ss(tmem + COL_OUT + si * D, desc_k64(sU + si * BI * C + ks * 16), desc_k64(wo + ks * 16), ID_OUT, (hp | ks) ? 1u : 0u);
-        mma_commit(ue);
+            mma_ts(tmem + COL_OUT + si * D, tmem + COL_O + b * NO + si * (C / 2) + ks * 8, desc_k64(wo + ks * 16), ID_OUT, (hp | ks) ? 1u : 0u);
+        mma_commit(acce + b);
         mma_commit(whe + b);
         if (hp == H - 1) mma_commit(outf);
       }
@@ -390,14 +389,12 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
         if (lane == 0) arrive(ge);               // the next head's gate GEMM may overwrite it
 #pragma unroll
         for (int k = 0; k < NO; ++k) gt[k] = 1.f / (1.f + __expf(-gt[k]));
-        if (gh >= 1) wait(ue, (gh - 1) & 1);     // the out GEMM of the previous head has read u
 #pragma unroll
         for (int si = 0; si < BS; ++si) {
           float o[C];
           tmem_ld32(tmem_at(tmem + COL_O + b * NO, q * 32, si * C), o);
           tmem_wait_ld();
-          if (si == BS - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + b); }
-          __nv_bfloat16* ur = sU + (si * BI + r) * C;
+          uint32_t up[C / 2];                    // u_s packed over columns [16 s, 16 s + 16) of this buffer: o_s' for s' <= s read
           const bool live = OSAVE != nullptr && s0 + si < S;
           uint4* og = live ? reinterpret_cast<uint4*>(OSAVE + ((size_t)(s0 + si) * N + i0 + r) * HC + h * C) : nullptr;
 #pragma unroll
@@ -412,11 +409,14 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
               uw[k] = pack2(u2.x, u2.y);
               ow[k] = pack2(o[c], o[c + 1]);
             }
-            *reinterpret_cast<uint4*>(ur + ((c8 ^ ((r >> 1) & 3)) << 3)) = uu;
+            up[c8 * 4 + 0] = uw[0]; up[c8 * 4 + 1] = uw[1]; up[c8 * 4 + 2] = uw[2]; up[c8 * 4 + 3] = uw[3];
             if (live) og[c8] = oo;
           }
+          tmem_st8(tmem_at(tmem + COL_O + b * NO, q * 32, si * (C / 2)), up);
+          tmem_st8(tmem_at(tmem + COL_O + b * NO, q * 32, si * (C / 2) + 8), up + 8);
         }
-        fence_proxy_async();
+        tmem_wait_st();
+        tc_fence_before();
         __syncwarp();
         if (lane == 0) arrive(uf + b);
       }

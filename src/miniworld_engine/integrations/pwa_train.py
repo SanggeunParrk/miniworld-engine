@@ -309,7 +309,7 @@ class _PwaMath(torch.autograd.Function):
             dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
         if sm100:
-            out, o = k["pwa"].pwa_fwd(w16, v, y, wg16, wo16, m, True, dmask, dscale)
+            out, o = k["pwa"].pwa_fwd2(w16, v, y, wg16, wo16, m, True, dmask, dscale)   # split: contraction, then gate / out pass
         else:
             out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)       # residual fused; o kept for the backward
         ctx.save_for_backward(m, z, w16, v, y, o, lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo, *((dmask,) if dmask is not None else ()))
@@ -374,7 +374,7 @@ def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
         w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, lnz_b, eps_z, module.to_bias.weight.detach())
         v, y = k["pwa"].ln_vg(m, module.ln_msa.weight.detach().contiguous(), module.ln_msa.bias.detach().contiguous(),
                               module.to_value.weight.detach().to(bf).contiguous(), eps_m)
-        out, _ = k["pwa"].pwa_fwd(w16, v, y, module.to_gate.weight.detach().to(bf).contiguous(),
+        out, _ = k["pwa"].pwa_fwd2(w16, v, y, module.to_gate.weight.detach().to(bf).contiguous(),
                                   module.to_out.weight.detach().to(bf).contiguous(), m, False, None, 1.0)
         return out[None]
     k = _k()
