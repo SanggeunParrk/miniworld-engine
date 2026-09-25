@@ -107,14 +107,14 @@ for L in a.lengths:
     # ---------------- recorded experiment, relaxed precision (e4m3 operands; exchange backward) — opt-in only
     if a.e4m3:
         try:
-          from fwd8_op import Train8
-          st8 = Train8(a.repl8, bcubin="build/tbwd8x.cubin").bind(x, wa, wb, ws, gamma, beta, dy)
-          st8(); st8.infer(); torch.cuda.synchronize()
-          name = "fused sm_100a e4m3 (relaxed precision)"
-          put(name, "inference", graph_time(st8.infer), rel(st8.infer_out, ref), note="weights pre-quantized")
-          put(name, "training", graph_time(st8), note="incl. weight quantization")
-      except Exception as exc:  # noqa: BLE001
-          traceback.print_exc()
+            from fwd8_op import Train8
+            st8 = Train8(a.repl8, bcubin="build/tbwd8x.cubin").bind(x, wa, wb, ws, gamma, beta, dy)
+            st8(); st8.infer(); torch.cuda.synchronize()
+            name = "fused sm_100a e4m3 (relaxed precision)"
+            put(name, "inference", graph_time(st8.infer), rel(st8.infer_out, ref), note="weights pre-quantized")
+            put(name, "training", graph_time(st8), note="incl. weight quantization")
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
 
 if a.save:
     with open(a.save, "w") as fh:
