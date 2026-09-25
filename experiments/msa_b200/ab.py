@@ -98,3 +98,8 @@ ta, tb = [], []
 for _ in range(9):
     ta.append(timeit(fa, rounds=3)); tb.append(timeit(fb, rounds=3))
 print(f"A/B {case}: old {statistics.median(ta)*1e3:.1f} us  new {statistics.median(tb)*1e3:.1f} us  ratio {statistics.median(ta)/statistics.median(tb):.2f}x")
+if os.environ.get("AB_ENERGY"):                 # sustained (power-capped) time and energy per call, old then new
+    from energy_sol import sustained
+    for tag, fn in (("old", fa), ("new", fb)):
+        r = sustained(fn, secs=2.0)
+        print(f"sustained {case} {tag}: {r['ms']*1e3:.1f} us  {r['J']*1e3:.2f} mJ  {r['W']:.0f} W", flush=True)

@@ -14,7 +14,7 @@ hdl = ctypes.c_void_p(); nvml.nvmlDeviceGetHandleByIndex_v2(int(os.environ.get("
 def energy_j():
     e = ctypes.c_ulonglong(); nvml.nvmlDeviceGetTotalEnergyConsumption(hdl, ctypes.byref(e)); return e.value / 1000.0
 
-def sustained(fn, secs=3.0, target_ms=20.0):
+def sustained(fn, secs=3.0, target_ms=float(os.environ.get("ESOL_GRAPH_MS", "20"))):
     for _ in range(3): fn()
     torch.cuda.synchronize()
     t0 = time.time(); fn(); torch.cuda.synchronize(); one = max(time.time() - t0, 1e-5)
@@ -77,33 +77,38 @@ def case(op, impl, mode, L, S):
     gout = torch.randn(msa.shape if op == "pwa" else pair.shape, device="cuda", dtype=torch.bfloat16)
     return sustained(lambda: torch.autograd.grad(f(), params, gout))
 
-ap = argparse.ArgumentParser(); ap.add_argument("--L", type=int, default=384); ap.add_argument("--S", type=int, default=1024); ap.add_argument("--out")
-ap.add_argument("--cal", help="reuse the ceilings of a previous --out json"); ap.add_argument("--only", nargs="*", default=[], help="op:mode:impl filters, e.g. opm:train:ours")
-a = ap.parse_args()
-cal = json.load(open(a.cal))["ceilings"] if a.cal else ceilings(a.L, a.S)
-cal["tc_pwa_cublas_bmm"] = cal.get("tc_pwa_cublas_bmm", cal["tc_pwa"])
-cal["tc_pwa"] = cal["tc_opm"]   # the PWA-shaped bmm is cuBLAS being slow on that shape, not the card's ceiling: use the dense rate
-print(json.dumps({k: (f"{v:.4g}") for k, v in cal.items()}), flush=True)
-rows = []
-for op in ("opm", "pwa"):
-    tc = cal["tc_" + op]
-    for mode in ("infer", "train"):
-        floor_cap = sol_floor(op, mode, a.L, a.S, hbm=cal["hbm_Bps"], tc=tc) * 1e3
-        floor_clk = sol_floor(op, mode, a.L, a.S) * 1e3
-        for impl in ("pytorch", "anthropic", "ours"):
-            if a.only and f"{op}:{mode}:{impl}" not in a.only:
-                continue
-            try:
-                r = case(op, impl, mode, a.L, a.S)
-            except Exception as exc:
-                r = None; print(op, mode, impl, "failed:", str(exc)[:200])
-            torch.cuda.empty_cache()
-            row = dict(op=op, mode=mode, impl=impl, floor_cap_ms=floor_cap, floor_clk_ms=floor_clk, **(r or {}))
-            rows.append(row)
-            if r:
-                sol = f"  SoL(power-capped) {100 * floor_cap / r['ms']:5.1f}%  SoL(clock-peak) {100 * floor_clk / r['ms']:5.1f}%" if impl == "ours" else ""
-                print(f"{op} {mode:5s} {impl:9s} {r['ms']:.4f} ms  {r['J']*1e3:.3f} mJ  {r['W']:.0f} W{sol}", flush=True)
-            else:
-                print(f"{op} {mode:5s} {impl:9s} n/a", flush=True)
-if a.out:
-    json.dump({"ceilings": cal, "rows": rows}, open(a.out, "w"), indent=1)
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--L", type=int, default=384); ap.add_argument("--S", type=int, default=1024); ap.add_argument("--out")
+    ap.add_argument("--cal", help="reuse the ceilings of a previous --out json"); ap.add_argument("--only", nargs="*", default=[], help="op:mode:impl filters, e.g. opm:train:ours")
+    a = ap.parse_args()
+    cal = json.load(open(a.cal))["ceilings"] if a.cal else ceilings(a.L, a.S)
+    cal["tc_pwa_cublas_bmm"] = cal.get("tc_pwa_cublas_bmm", cal["tc_pwa"])
+    cal["tc_pwa"] = cal["tc_opm"]   # the PWA-shaped bmm is cuBLAS being slow on that shape, not the card's ceiling: use the dense rate
+    print(json.dumps({k: (f"{v:.4g}") for k, v in cal.items()}), flush=True)
+    rows = []
+    for op in ("opm", "pwa"):
+        tc = cal["tc_" + op]
+        for mode in ("infer", "train"):
+            floor_cap = sol_floor(op, mode, a.L, a.S, hbm=cal["hbm_Bps"], tc=tc) * 1e3
+            floor_clk = sol_floor(op, mode, a.L, a.S) * 1e3
+            for impl in ("pytorch", "anthropic", "ours"):
+                if a.only and f"{op}:{mode}:{impl}" not in a.only:
+                    continue
+                try:
+                    r = case(op, impl, mode, a.L, a.S)
+                except Exception as exc:
+                    r = None; print(op, mode, impl, "failed:", str(exc)[:200])
+                torch.cuda.empty_cache()
+                row = dict(op=op, mode=mode, impl=impl, floor_cap_ms=floor_cap, floor_clk_ms=floor_clk, **(r or {}))
+                rows.append(row)
+                if r:
+                    sol = f"  SoL(power-capped) {100 * floor_cap / r['ms']:5.1f}%  SoL(clock-peak) {100 * floor_clk / r['ms']:5.1f}%" if impl == "ours" else ""
+                    print(f"{op} {mode:5s} {impl:9s} {r['ms']:.4f} ms  {r['J']*1e3:.3f} mJ  {r['W']:.0f} W{sol}", flush=True)
+                else:
+                    print(f"{op} {mode:5s} {impl:9s} n/a", flush=True)
+    if a.out:
+        json.dump({"ceilings": cal, "rows": rows}, open(a.out, "w"), indent=1)
+
+
+if __name__ == "__main__":
+    main()

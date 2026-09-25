@@ -26,12 +26,18 @@ else:
     f = lambda: torch.autograd.grad(g(), params, gout)
     import contextlib
     ctx = contextlib.nullcontext
+import os, time
+NIT = int(os.environ.get("PROF_ITERS", "5"))
 with ctx():
     for _ in range(3):
         f()
     torch.cuda.synchronize()
+    t0 = time.time()                                   # PROF_WARM=s: run at steady (power-capped) clocks first
+    while time.time() - t0 < float(os.environ.get("PROF_WARM", "0")):
+        for _ in range(10): f()
+        torch.cuda.synchronize()
     with profile(activities=[ProfilerActivity.CUDA]) as p:
-        for _ in range(5):
+        for _ in range(NIT):
             f()
         torch.cuda.synchronize()
 rows = {}
@@ -39,7 +45,7 @@ for e in p.events():
     if e.device_type == torch.autograd.DeviceType.CUDA:
         r = rows.setdefault(e.name, [0, 0.0])
         r[0] += 1; r[1] += e.device_time
-tot = sum(v[1] for v in rows.values()) / 5
+tot = sum(v[1] for v in rows.values()) / NIT
 print(f"{op} {mode} L{L} S{S}: summed kernel time {tot:.1f} us per call")
 for k, (n, t) in sorted(rows.items(), key=lambda kv: -kv[1][1]):
-    print(f"  {t/5:8.1f} us  x{n//5:<3d} {k[:110]}")
+    print(f"  {t/NIT:8.1f} us  x{n//NIT:<3d} {k[:110]}")
