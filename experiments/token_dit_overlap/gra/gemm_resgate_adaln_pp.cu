@@ -19,8 +19,13 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
+#ifndef EPIREG
+#define EPIREG 1                 // 1: the epilogue works from registers -- x in and out and xa out straight from the
+#endif                           // wgmma fragment -- so the two 48 KB x tiles are gone and the ring gets six stages.
+                                 // The 3-stage ring was TMA-latency-bound: ~0.65 us a 32 KB chunk against 0.21 of MMA,
+                                 // and halving W's L2 traffic (CM = 2) did not move it. 0: x staged in shared memory.
 #ifndef STAGES
-#define STAGES 3
+#define STAGES (EPIREG ? 6 : 3)
 #endif
 #ifndef PDL
 #define PDL 1
@@ -35,11 +40,15 @@ TMN_DEVI unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u
 #define PST(i, k) do { } while (0)
 #endif
 
+#ifndef CM
+#define CM 2                     // CTAs along M in a cluster: 2 pairs adjacent 64-row tiles and multicasts W between
+#endif                           // them (each loads half), halving W's L2 traffic; 1 is the 4-CTA layout
 constexpr int D_ = 768, NC = 192, CL = 4, KC = 64, TM = 64;
+constexpr int CLT = CL * CM;                                        // cluster size: rank = n-rank + CL * m-rank
 constexpr int XB = NC / 32, TILE = 8192;                            // x tile: 6 boxes of [64 rows][32 fp32]
 constexpr int SA = TM * 128, SB = NC * 128, SS = SA + SB;           // ring stage: A 8 KB + W 24 KB
 constexpr int OX = STAGES * SS, XT = XB * TILE;                     // two x tiles after the ring
-constexpr int OST = OX + 2 * XT;                                    // stats [wg][parity][CL src][TM] (mean, M2)
+constexpr int OST = OX + (EPIREG ? 0 : 2 * XT);                    // stats [wg][parity][CL src][TM] (mean, M2)
 constexpr int OMR = OST + 2 * 2 * CL * TM * 8;                      // merged [wg][TM] (mean, rstd)
 constexpr int OBAR = OMR + 2 * TM * 8;
 constexpr int SMEM_BYTES = OBAR + 256 + 1024;
@@ -89,7 +98,8 @@ __global__ void __launch_bounds__(384, 1)
 grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mw,
              const __grid_constant__ CUtensorMap mx, const __nv_bfloat16* __restrict__ GL,
              const __nv_bfloat16* __restrict__ MS, const __nv_bfloat16* __restrict__ MB,
-             __nv_bfloat16* __restrict__ XA, int L, int K, int ntiles, int sgl, int sms, int smb, float eps) {
+             __nv_bfloat16* __restrict__ XA, float* __restrict__ X, int L, int K, int ntiles, int sgl, int sms,
+             int smb, float eps) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + OBAR);
@@ -107,14 +117,15 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
   float2* mrs = reinterpret_cast<float2*>(sm + OMR);
 
   const int tid = threadIdx.x, wg = tid >> 7;                       // wg 0, 1: consumers; 2: producer
-  const uint32_t rank = cluster_rank();
+  const uint32_t rank = cluster_rank(), nr = rank % CL, mr = rank / CL;
   const int cid = cluster_id_x(), ncl = nclusters_x();
-  const int n0 = rank * NC, nk = K / KC;
-  const int nloc = cid < ntiles ? (ntiles - cid + ncl - 1) / ncl : 0;   // tiles this cluster walks
+  const int n0 = nr * NC, nk = K / KC, ngroups = ntiles / CM;     // a group: CM adjacent tiles, one per m-rank
+  const int nloc = cid < ngroups ? (ngroups - cid + ncl - 1) / ncl : 0;   // tiles this CTA walks
   const int total = nloc * nk;                                      // ring chunks this CTA sees
 
   if (tid == 0) {
-    for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 1); mbar_init(&empty[s], CL * 4); }  // one warpgroup a chunk
+    // a slot is written by its A peers (same m) and W peers (same n); every consumer warp of the cluster frees it
+    for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 1); mbar_init(&empty[s], CLT * 4); }
     for (int w = 0; w < 2; ++w) { mbar_init(&xfull[w], 1); mbar_init(&xfree[w], 1); }
     for (int i = 0; i < 4; ++i) mbar_init(&sbar[i], 1);
     for (int w = 0; w < 2; ++w) mbar_init(&turn[w], 1);
@@ -134,9 +145,9 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
     if (tid == 256) {
       tma_prefetch_desc(&ma); tma_prefetch_desc(&mw); tma_prefetch_desc(&mx);
       for (int i = 0; i < nloc; ++i) {
-        const int m0 = (cid + i * ncl) * TM, w = i & 1;
+        const int m0 = ((cid + i * ncl) * CM + mr) * TM, w = i & 1;
         const uint32_t xph = ((i >> 1) & 1) ^ 1;                    // k-th use of this warpgroup's x tile
-        bool xdone = false;
+        bool xdone = EPIREG;                                        // the register epilogue loads x itself
         auto issue_x = [&]() {
           mbar_arrive_expect_tx(&xfull[w], XT);
           for (int b = 0; b < XB; ++b) tma_load_2d(sm + OX + w * XT + b * TILE, &mx, &xfull[w], n0 + 32 * b, m0);
@@ -146,12 +157,17 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
           const int c = i * nk + kc, s = c % STAGES;
           mbar_wait(&empty[s], ((c / STAGES) & 1) ^ 1);
           mbar_arrive_expect_tx(&full[s], SS);
-          tma_load_2d_mc(sm + s * SS + rank * (SA / CL), &ma, &full[s], kc * KC, m0 + rank * (TM / CL), (1u << CL) - 1);
-          tma_load_2d(sm + s * SS + SA, &mw, &full[s], kc * KC, n0);
+          // A: this tile's rows, a quarter from each of the CL CTAs that share them (same m-rank)
+          tma_load_2d_mc(sm + s * SS + nr * (SA / CL), &ma, &full[s], kc * KC, m0 + nr * (TM / CL),
+                         (uint16_t)(((1u << CL) - 1) << (mr * CL)));
+          // W: this n-rank's 192 columns, a 1/CM share from each of the CM CTAs that share them (same n-rank)
+          if (CM == 1) tma_load_2d(sm + s * SS + SA, &mw, &full[s], kc * KC, n0);
+          else tma_load_2d_mc(sm + s * SS + SA + mr * (SB / CM), &mw, &full[s], kc * KC, n0 + mr * (NC / CM),
+                              (uint16_t)((1u << nr) | (1u << (nr + CL))));
           // the x tile goes in as soon as its warpgroup has let go of the previous one, without holding up the ring
           if (!xdone && mbar_try_wait(&xfree[w], xph)) issue_x();
         }
-        if (!xdone) { mbar_wait(&xfree[w], xph); issue_x(); }
+        if (!EPIREG && !xdone) { mbar_wait(&xfree[w], xph); issue_x(); }
       }
     }
     __syncwarp();
@@ -169,7 +185,7 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
   const uint32_t sbase = smem_u32(sm);
   constexpr int NCH = TM * (NC / 8) / 128;                          // AdaLN: 12 chunks of 8 columns a thread
   for (int i = wg, j = 0; i < nloc; i += 2, ++j) {                  // j: this warpgroup's use count
-    const int m0 = (cid + i * ncl) * TM, t0 = m0 % L;
+    const int m0 = ((cid + i * ncl) * CM + mr) * TM, t0 = m0 % L;
     float acc[3][32];
     PST(i, 0);
     if (i > 0) mbar_wait(&turn[wg], ((i - 1) >> 1) & 1);           // the other warpgroup is through tile i - 1's chunks
@@ -189,7 +205,7 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
       // still be in flight when the CTA exits (see the attention core's NODANGLE)
       if (kc > 0 && c - 1 + STAGES < total && lane == 0)
 #pragma unroll
-        for (int k = 0; k < CL; ++k) mbar_arrive_remote(&empty[(c - 1) % STAGES], k);
+        for (int k = 0; k < CLT; ++k) mbar_arrive_remote(&empty[(c - 1) % STAGES], k);
     }
     named_bar_sync(1 + wg, 128);                                    // every thread has waited on every chunk of this tile
     if (ti == 0 && i + 1 < nloc) mbar_arrive(&turn[wg ^ 1]);
@@ -200,12 +216,124 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
       const int c = i * nk + nk - 1;
       if (c + STAGES < total && lane == 0)
 #pragma unroll
-        for (int k = 0; k < CL; ++k) mbar_arrive_remote(&empty[c % STAGES], k);
+        for (int k = 0; k < CLT; ++k) mbar_arrive_remote(&empty[c % STAGES], k);
     }
 #pragma unroll
     for (int q = 0; q < 3; ++q) fence_regs(acc[q]);
 
     // ---- epilogue. Fragment of m64nN: warp w, lane l holds rows 16w + l/4 (+8), columns 8q + 2(l%4) + {0,1}.
+#if EPIREG
+    {
+      // x and gl one 64-column block ahead: a quad of lanes covers 32 contiguous bytes of an x row (a full sector)
+      const size_t ro[2] = {(size_t)(m0 + rr0) * D_ + n0 + cb, (size_t)(m0 + rr0 + 8) * D_ + n0 + cb};
+      const __nv_bfloat16* gr[2] = {GL + (size_t)(t0 + rr0) * sgl + n0 + cb, GL + (size_t)(t0 + rr0 + 8) * sgl + n0 + cb};
+      float2 xv[3][2][8]; uint32_t gv[3][2][8];
+      auto ld = [&](int q) {
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+#pragma unroll
+          for (int e = 0; e < 8; ++e) {
+            xv[q][h][e] = *reinterpret_cast<const float2*>(X + ro[h] + q * 64 + e * 8);   // written here: not .nc
+            gv[q][h][e] = __ldg(reinterpret_cast<const unsigned int*>(gr[h] + q * 64 + e * 8));
+          }
+      };
+      ld(0);
+      PST(i, 4);
+      float sum[2] = {0.f, 0.f};
+#pragma unroll
+      for (int q = 0; q < 3; ++q) {
+        if (q + 1 < 3) ld(q + 1);
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+#pragma unroll
+          for (int e = 0; e < 8; ++e) {
+            const float2 g = bf2f(gv[q][h][e]);
+            float& e0 = acc[q][4 * e + 2 * h];
+            float& e1 = acc[q][4 * e + 2 * h + 1];
+            e0 = xv[q][h][e].x + sigmoid_t(g.x) * e0;
+            e1 = xv[q][h][e].y + sigmoid_t(g.y) * e1;
+            sum[h] += e0 + e1;
+            *reinterpret_cast<float2*>(X + ro[h] + q * 64 + e * 8) = make_float2(e0, e1);
+          }
+      }
+      PST(i, 5);
+      if (ADALN) {
+        const int par = j & 1;
+        float2* st = stats + (wg * 2 + par) * CL * TM;
+        uint64_t* sb = &sbar[wg * 2 + par];
+        float mean[2], m2[2] = {0.f, 0.f};
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          sum[h] += __shfl_xor_sync(0xffffffffu, sum[h], 1);
+          sum[h] += __shfl_xor_sync(0xffffffffu, sum[h], 2);
+          mean[h] = sum[h] * (1.f / NC);
+#pragma unroll
+          for (int q = 0; q < 3; ++q)
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+              const float d0 = acc[q][4 * e + 2 * h] - mean[h], d1 = acc[q][4 * e + 2 * h + 1] - mean[h];
+              m2[h] += d0 * d0 + d1 * d1;
+            }
+          m2[h] += __shfl_xor_sync(0xffffffffu, m2[h], 1);
+          m2[h] += __shfl_xor_sync(0xffffffffu, m2[h], 2);
+        }
+        if ((lane & 3) == 0)
+#pragma unroll
+          for (int k = 0; k < CL; ++k) {                            // the CL CTAs that own these rows
+            st_async_f2(&st[nr * TM + rr0], sb, mr * CL + k, mean[0], m2[0]);
+            st_async_f2(&st[nr * TM + rr0 + 8], sb, mr * CL + k, mean[1], m2[1]);
+          }
+        // ms / mb in the fragment's own layout, under the peers' statistics
+        const __nv_bfloat16* sr[2] = {MS + (size_t)(t0 + rr0) * sms + n0 + cb, MS + (size_t)(t0 + rr0 + 8) * sms + n0 + cb};
+        const __nv_bfloat16* br[2] = {MB + (size_t)(t0 + rr0) * smb + n0 + cb, MB + (size_t)(t0 + rr0 + 8) * smb + n0 + cb};
+        uint32_t sv[3][2][8], bv[3][2][8];
+#pragma unroll
+        for (int q = 0; q < 3; ++q)
+#pragma unroll
+          for (int h = 0; h < 2; ++h)
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+              sv[q][h][e] = __ldg(reinterpret_cast<const unsigned int*>(sr[h] + q * 64 + e * 8));
+              bv[q][h][e] = __ldg(reinterpret_cast<const unsigned int*>(br[h] + q * 64 + e * 8));
+            }
+        mbar_wait(sb, (j >> 1) & 1);
+        PST(i, 6);
+        if ((lane & 3) == 0)
+#pragma unroll
+          for (int h = 0; h < 2; ++h) {
+            float2 p[CL];
+#pragma unroll
+            for (int k = 0; k < CL; ++k) p[k] = st[k * TM + rr0 + 8 * h];
+            float mu = 0.f;
+#pragma unroll
+            for (int k = 0; k < CL; ++k) mu += p[k].x;
+            mu *= 1.f / CL;
+            float M2 = 0.f;
+#pragma unroll
+            for (int k = 0; k < CL; ++k) { const float dm = p[k].x - mu; M2 += p[k].y + float(NC) * dm * dm; }
+            mrs[wg * TM + rr0 + 8 * h] = make_float2(mu, rsqrtf(M2 * (1.f / D_) + eps));
+          }
+        named_bar_sync(1 + wg, 128);
+        if (ti == 0) mbar_arrive_expect_tx(sb, STAT_BYTES);       // re-armed for this (wg, parity)'s next use
+        const float2 mv[2] = {mrs[wg * TM + rr0], mrs[wg * TM + rr0 + 8]};
+        const size_t xo[2] = {(size_t)(m0 + rr0) * D_ + n0 + cb, (size_t)(m0 + rr0 + 8) * D_ + n0 + cb};
+#pragma unroll
+        for (int q = 0; q < 3; ++q)
+#pragma unroll
+          for (int h = 0; h < 2; ++h)
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+              const float2 sc = bf2f(sv[q][h][e]), sh = bf2f(bv[q][h][e]);
+              const float o0 = (acc[q][4 * e + 2 * h] - mv[h].x) * mv[h].y * sigmoid_t(sc.x) + sh.x;
+              const float o1 = (acc[q][4 * e + 2 * h + 1] - mv[h].x) * mv[h].y * sigmoid_t(sc.y) + sh.y;
+              *reinterpret_cast<__nv_bfloat162*>(XA + xo[h] + q * 64 + e * 8) = __floats2bfloat162_rn(o0, o1);
+            }
+        // mrs is read again for this warpgroup's next tile: nobody may overwrite it before everyone has read it
+        named_bar_sync(1 + wg, 128);
+      }
+      PST(i, 7);
+    }
+#else
     // gl does not depend on anything this tile writes: fetch all of it now, under the x tile's landing, instead of one
     // round trip per 64-column block inside the residual loop
     uint32_t gv[3][2][8];
@@ -278,9 +406,9 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
       }
       if ((lane & 3) == 0)
 #pragma unroll
-        for (int k = 0; k < CL; ++k) {
-          st_async_f2(&st[rank * TM + rr0], sb, k, mean[0], m2[0]);
-          st_async_f2(&st[rank * TM + rr0 + 8], sb, k, mean[1], m2[1]);
+        for (int k = 0; k < CL; ++k) {                              // the CL CTAs that own these rows
+          st_async_f2(&st[nr * TM + rr0], sb, mr * CL + k, mean[0], m2[0]);
+          st_async_f2(&st[nr * TM + rr0 + 8], sb, mr * CL + k, mean[1], m2[1]);
         }
       uint4 msv[NCH], mbv[NCH];
 #pragma unroll
@@ -336,6 +464,7 @@ grapp_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
     if (ti == 0) tma_store_wait_read<0>();
     named_bar_sync(1 + wg, 128);
     if (ti == 0) mbar_arrive(&xfree[wg]);
+#endif
     PST(i, 8);
   }
   __syncwarp();
@@ -385,39 +514,39 @@ const CUtensorMap& tile_map(const torch::Tensor& t, uint32_t bi, uint32_t bo) {
 template <bool ADALN>
 void launch(const torch::Tensor& a, const torch::Tensor& w, torch::Tensor& x, const torch::Tensor& gl,
             const torch::Tensor* ms, const torch::Tensor* mb, torch::Tensor* xa, int64_t L, double eps, int64_t max_cl) {
-  const int M = a.size(0), K = a.size(1), ntiles = M / TM;
-  TORCH_CHECK(K % KC == 0 && M % TM == 0 && L % TM == 0 && M % L == 0, "shape: K % 64, M % 64, L % 64");
+  const int M = a.size(0), K = a.size(1), ntiles = M / TM, ngroups = ntiles / CM;
+  TORCH_CHECK(K % KC == 0 && M % (TM * CM) == 0 && L % TM == 0 && M % L == 0, "shape: K % 64, M % (64 CM), L % 64");
   auto kern = grapp_kernel<ADALN>;
   static int maxc = [&] {
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
     cudaLaunchConfig_t q{};
-    q.gridDim = dim3(CL * 64); q.blockDim = dim3(384); q.dynamicSmemBytes = SMEM_BYTES;
+    q.gridDim = dim3(CLT * 16); q.blockDim = dim3(384); q.dynamicSmemBytes = SMEM_BYTES;
     cudaLaunchAttribute a1[1];
     a1[0].id = cudaLaunchAttributeClusterDimension;
-    a1[0].val.clusterDim.x = CL; a1[0].val.clusterDim.y = 1; a1[0].val.clusterDim.z = 1;
+    a1[0].val.clusterDim.x = CLT; a1[0].val.clusterDim.y = 1; a1[0].val.clusterDim.z = 1;
     q.attrs = a1; q.numAttrs = 1;
     int n = 0;
     TORCH_CHECK(cudaOccupancyMaxActiveClusters(&n, kern, &q) == cudaSuccess && n > 0, "no cluster fits");
     return n;
   }();
-  int ncl = std::min(ntiles, maxc);
+  int ncl = std::min(ngroups, maxc);
   if (max_cl > 0) ncl = std::min<int>(ncl, max_cl);
   cudaLaunchConfig_t cfg{};
-  cfg.gridDim = dim3(CL * ncl);
+  cfg.gridDim = dim3(CLT * ncl);
   cfg.blockDim = dim3(384);
   cfg.dynamicSmemBytes = SMEM_BYTES;
   cfg.stream = at::cuda::getCurrentCUDAStream();
   cudaLaunchAttribute at[2];
   at[0].id = cudaLaunchAttributeClusterDimension;
-  at[0].val.clusterDim.x = CL; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  at[0].val.clusterDim.x = CLT; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
   at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
   at[1].val.programmaticStreamSerializationAllowed = PDL;
   cfg.attrs = at; cfg.numAttrs = 2;
   auto bp = [](const torch::Tensor* t) { return t ? reinterpret_cast<const __nv_bfloat16*>(t->data_ptr()) : nullptr; };
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, tile_map(a, 64, TM / CL), tile_map(w, 64, NC), tile_map(x, 32, TM),
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, tile_map(a, 64, TM / CL), tile_map(w, 64, NC / CM), tile_map(x, 32, TM),
                                  reinterpret_cast<const __nv_bfloat16*>(gl.data_ptr()), bp(ms), bp(mb),
                                  xa ? reinterpret_cast<__nv_bfloat16*>(xa->data_ptr()) : nullptr,
-                                 (int)L, K, ntiles, (int)gl.stride(0), ms ? (int)ms->stride(0) : 0,
+                                 reinterpret_cast<float*>(x.data_ptr()), (int)L, K, ntiles, (int)gl.stride(0), ms ? (int)ms->stride(0) : 0,
                                  mb ? (int)mb->stride(0) : 0, (float)eps) == cudaSuccess, "launch failed");
 }
 }  // namespace
