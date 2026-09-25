@@ -37,14 +37,18 @@ class FusedBwd:
             self.k((self.nsm, 1, 1), (512, 1, 1), *maps, rstd, c1, gamma, x, partab, parts, dgbw, int(tiles), int(ndw))
             self.red(((nred + 255) // 256, 1, 1), (256, 1, 1), partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, int(ndw), int(ndx * 4))
         run.keep = maps
+        run.bufs = (partab, parts, dgbw)
         return run, dict(dx=dx, dwa=dwa, dwb=dwb, dws=dws, dgamma=dgam, dbeta=dbeta)
 
 
 class FusedTrain:
     """One training step of the module: y = fused forward (saves xn, rstd, c1), then the fused backward for a given dy."""
-    def __init__(self, fwd, repl=9, cubin=None):
+    def __init__(self, fwd, repl=9, cubin=None, v2=False):
         self.f = fwd
-        self.b = FusedBwd(cubin, repl) if cubin else FusedBwd(repl=repl)
+        if v2:
+            self.b = FusedBwd2(cubin, repl) if cubin else FusedBwd2(repl=repl)
+        else:
+            self.b = FusedBwd(cubin, repl) if cubin else FusedBwd(repl=repl)
 
     def bind(self, x, gamma, beta, dy):
         wa, wb, ws = self.f.w
@@ -56,3 +60,29 @@ class FusedTrain:
         step.keep = (run_f, run_b)
         step.out, step.grads = out, grads
         return step
+
+
+class FusedBwd2(FusedBwd):
+    """tbwd2: DX writes [dA | dB | h] per (tile, chunk) to an L2-resident exchange buffer, DW only runs the weight gradients."""
+    def __init__(self, cubin=HERE / "build" / "tbwd2.cubin", repl=4):
+        self.k = drv.Kernel(str(cubin), "transition_bwd2_sm100", SMEM_BWD, cluster=2)
+        self.red = drv.Kernel(str(cubin), "transition_bwd_reduce", 0)
+        self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
+        self.repl = repl
+
+    def bind(self, dy, xn, x, rstd, c1, gamma, wa, wb, ws):
+        run0, grads = super().bind(dy, xn, x, rstd, c1, gamma, wa, wb, ws)
+        M = x.shape[0]; tiles = M // 128
+        gbuf = torch.empty(tiles * 8 * 3 * 128, 64, device=x.device, dtype=torch.bfloat16)
+        flags = torch.zeros(tiles * 8, device=x.device, dtype=torch.int32)
+        mg = drv.TensorMap(gbuf, [64, tiles * 8 * 3 * 128], 128, [64, 64])
+        maps, (partab, parts, dgbw) = run0.keep, run0.bufs
+        ndw = 8 * self.repl; ndx = self.nsm - ndw
+        nred = 3 * H * D + 256
+
+        def run():
+            self.k((self.nsm, 1, 1), (512, 1, 1), *maps, rstd, c1, gamma, x, partab, parts, dgbw, int(tiles), int(ndw), mg, gbuf, flags)
+            self.red(((nred + 255) // 256, 1, 1), (256, 1, 1), partab, parts, dgbw, grads["dwa"], grads["dwb"], grads["dws"],
+                     grads["dgamma"], grads["dbeta"], int(ndw), int(ndx * 4))
+        run.keep = (maps, mg, gbuf, flags)
+        return run, grads
