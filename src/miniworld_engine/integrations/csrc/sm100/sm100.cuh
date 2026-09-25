@@ -255,6 +255,9 @@ inline CUtensorMap make_map(const void* base, const uint64_t (&dims)[R], const u
   uint64_t gdim[R];
   uint32_t bdim[R];
   for (int i = 0; i < R; ++i) { gdim[i] = dims[i]; bdim[i] = box[i]; }
+  // the driver call needs a current context, which a fresh thread (autograd's backward thread) may not have yet
+  static thread_local bool ctx_ok = false;
+  if (!ctx_ok) { C10_CUDA_CHECK(cudaFree(nullptr)); ctx_ok = true; }
   CUresult r = tma_encode()(&m, dt, R, const_cast<void*>(base), gdim, gstride, bdim, estride,
                             CU_TENSOR_MAP_INTERLEAVE_NONE, sw, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
                             CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
