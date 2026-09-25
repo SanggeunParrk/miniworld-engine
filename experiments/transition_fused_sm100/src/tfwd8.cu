@@ -194,10 +194,12 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
         tmem_wait_ld();
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
+#ifndef FABL_TLD
           if (q < 3) {
             tmem_ld16(trow + T_AB + s * 128 + (q + 1) * 16, a[(q + 1) & 1]);
             tmem_ld16(trow + T_AB + s * 128 + 64 + (q + 1) * 16, b[(q + 1) & 1]);
           }
+#endif
 #pragma unroll
           for (int k = 0; k < 4; ++k) {                      // 4 units -> one word of e4m3 h
             f2 hv[2];
@@ -205,7 +207,11 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
             for (int e = 0; e < 2; ++e) {
               const int x = 4 * k + 2 * e;
               const f2 A = mul2(mk2u(a[q & 1][x], a[q & 1][x + 1]), CA), Bv = mul2(mk2u(b[q & 1][x], b[q & 1][x + 1]), CB);
+#ifdef FABL_SW
+              hv[e] = mul2(A, Bv);                             // ablation: no sigmoid / silu
+#else
               hv[e] = mul2(mul2(A, sigmoid2(A)), Bv);
+#endif
             }
             hq[q * 4 + k] = e4m3x4(hv[0], hv[1]);
           }
@@ -247,28 +253,28 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           const uint4 t = lds128(xb + cb * 16384 + sw128(r, q));
           v[cb * 32 + q * 4 + 0] = t.x; v[cb * 32 + q * 4 + 1] = t.y; v[cb * 32 + q * 4 + 2] = t.z; v[cb * 32 + q * 4 + 3] = t.w;
         }
-      float p[32];                                             // the sm_90a reduction tree (see tfwd.cu)
+      // mean and variance in fp32x2 (relaxed-precision path: summation order differs from the sm_90a tree)
+      f2 s2[8];
 #pragma unroll
-      for (int l = 0; l < 32; ++l) p[l] = (bf16lo(v[2 * l]) + bf16hi(v[2 * l])) + (bf16lo(v[2 * l + 1]) + bf16hi(v[2 * l + 1]));
+      for (int l = 0; l < 8; ++l) s2[l] = mk2(0.f, 0.f);
 #pragma unroll
-      for (int k = 16; k; k >>= 1)
+      for (int l = 0; l < 64; ++l) s2[l & 7] = add2(s2[l & 7], mk2(bf16lo(v[l]), bf16hi(v[l])));
 #pragma unroll
-        for (int l = 0; l < k; ++l) p[l] = p[l] + p[l + k];
-      const float mean = p[0] * (1.f / D_);
+      for (int k = 4; k; k >>= 1)
 #pragma unroll
-      for (int l = 0; l < 32; ++l) {
-        float acc = 0.f, d;
-        d = bf16lo(v[2 * l]) - mean; acc += d * d;
-        d = bf16hi(v[2 * l]) - mean; acc += d * d;
-        d = bf16lo(v[2 * l + 1]) - mean; acc += d * d;
-        d = bf16hi(v[2 * l + 1]) - mean; acc += d * d;
-        p[l] = acc;
-      }
+        for (int l = 0; l < k; ++l) s2[l] = add2(s2[l], s2[l + k]);
+      const float mean = (lo2(s2[0]) + hi2(s2[0])) * (1.f / D_);
+      const f2 NMN = mk2(-mean, -mean);
 #pragma unroll
-      for (int k = 16; k; k >>= 1)
+      for (int l = 0; l < 8; ++l) s2[l] = mk2(0.f, 0.f);
 #pragma unroll
-        for (int l = 0; l < k; ++l) p[l] = p[l] + p[l + k];
-      const float rs = rsqrtf(p[0] * (1.f / D_) + eps);
+      for (int l = 0; l < 64; ++l) { const f2 d = add2(mk2(bf16lo(v[l]), bf16hi(v[l])), NMN); s2[l & 7] = fma2(d, d, s2[l & 7]); }
+#pragma unroll
+      for (int k = 4; k; k >>= 1)
+#pragma unroll
+        for (int l = 0; l < k; ++l) s2[l] = add2(s2[l], s2[l + k]);
+      const float rs = rsqrtf((lo2(s2[0]) + hi2(s2[0])) * (1.f / D_) + eps);
+      const f2 RS2 = mk2(rs, rs), NMR = mk2(-mean * rs, -mean * rs);
 #pragma unroll
       for (int q = 0; q < 8; ++q) {                              // 16 columns -> one 16-byte chunk of e4m3 xn
         uint32_t o[4];
@@ -280,7 +286,12 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
             const int col = q * 16 + 4 * k + 2 * e;
             const uint32_t w = v[col >> 1];
             const float2 g2 = lds64f(gb_u + col * 4), b2 = lds64f(gb_u + 512 + col * 4);
-            pr[e] = mk2((bf16lo(w) - mean) * rs * g2.x + b2.x, (bf16hi(w) - mean) * rs * g2.y + b2.y);
+#ifdef FABL_LN
+            pr[e] = mk2(bf16lo(w), bf16hi(w)); (void)g2; (void)b2;
+#else
+            const f2 A = mul2(mk2(g2.x, g2.y), RS2);           // x (rs g) + (b - mean rs g)
+            pr[e] = fma2(mk2(bf16lo(w), bf16hi(w)), A, fma2(mk2(g2.x, g2.y), NMR, mk2(b2.x, b2.y)));
+#endif
           }
           o[k] = e4m3x4(pr[0], pr[1]);
         }
@@ -320,7 +331,10 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           uint32_t o[4];
 #pragma unroll
           for (int k = 0; k < 4; ++k)
-            o[k] = pack_bf16(fmaf(__uint_as_float(acc[qq * 8 + 2 * k]), co, bf16lo(xw[k])), fmaf(__uint_as_float(acc[qq * 8 + 2 * k + 1]), co, bf16hi(xw[k])));
+          {
+            const f2 yv = fma2(mk2u(acc[qq * 8 + 2 * k], acc[qq * 8 + 2 * k + 1]), mk2(co, co), mk2(bf16lo(xw[k]), bf16hi(xw[k])));
+            o[k] = pack_bf16(lo2(yv), hi2(yv));
+          }
           sts128(ad, make_uint4(o[0], o[1], o[2], o[3]));
         }
       }

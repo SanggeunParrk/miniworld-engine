@@ -35,7 +35,7 @@ class Train8:
     Scales: delayed-scaling emulation, computed once at bind from the step's own tensors."""
     def __init__(self, repl=7, fcubin=HERE / "build" / "tfwd8.cubin", bcubin=HERE / "build" / "tbwd8.cubin"):
         self.f = FusedFwd8(fcubin); self.q = Quant8(bcubin)
-        self.b = FusedBwd8x(bcubin, repl) if "tbwd8x" in str(bcubin) or "b8x" in str(bcubin) else FusedBwd8(bcubin, repl)
+        self.b = FusedBwd8x(bcubin, repl) if "tbwd8x" in str(bcubin) or "b8x" in str(bcubin) or "8x" in str(bcubin) else FusedBwd8(bcubin, repl)
 
     def bind(self, x, wa, wb, ws, gamma, beta, dy):
         sc = scales_for(x, wa, wb, ws, gamma, beta, dy)

@@ -333,3 +333,20 @@ DEVI f2 sigmoid2(f2 a) {
   return fma2(t, mk2(0.5f, 0.5f), mk2(0.5f, 0.5f));
 }
 }  // namespace s100
+
+// ------------------------------------------------------------------ L2 cache-policy hints for TMA
+namespace s100 {
+DEVI uint64_t pol_evict_last() { uint64_t p; asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(p)); return p; }
+DEVI uint64_t pol_evict_first() { uint64_t p; asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(p)); return p; }
+DEVI void tma_load_2d_h(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, uint64_t pol) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%3, %4}], [%2], %5;"
+               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "l"(pol) : "memory");
+}
+DEVI void tma_load_2d_mc_h(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, uint16_t mask, uint64_t pol) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster.L2::cache_hint [%0], [%1, {%3, %4}], [%2], %5, %6;"
+               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask), "l"(pol) : "memory");
+}
+DEVI void tma_store_2d_h(const CUtensorMap* m, uint32_t src, int c0, int c1, uint64_t pol) {
+  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group.L2::cache_hint [%0, {%2, %3}], [%1], %4;" :: "l"(m), "r"(src), "r"(c0), "r"(c1), "l"(pol) : "memory");
+}
+}  // namespace s100

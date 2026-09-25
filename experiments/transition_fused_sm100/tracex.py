@@ -22,3 +22,8 @@ print(f"  mma wait for dab_full: median {md(mw):.0f} mean {mw.mean():.0f}; issue
 for i in range(min(nt, 6)):
     print(f"  tile {i}: first flag seen {t[1][8*i] - t0}, last flag seen {t[1][8*i+7] - t0}, last mma {t[3][8*i+7] - t0}, epi dxn seen {t[4][i] - t0}, pre-store {t[5][i] - t0}, done {t[6][i] - t0}, conv done {t[7][i] - t0}")
 print("  epi durations (dxn seen -> done):", [int(t[6][i] - t[4][i]) for i in range(min(nt, 12))])
+print("  last tiles:")
+for i in range(max(0, nt - 4), nt):
+    print(f"  tile {i}: first flag wait start {t[0][8*i] - t0}, first flag seen {t[1][8*i] - t0}, last flag seen {t[1][8*i+7] - t0}, last mma {t[3][8*i+7] - t0}, epi dxn seen {t[4][i] - t0}, done {t[6][i] - t0}")
+lag = [t[4][i] - t[3][8*i+7] for i in range(nt)]
+print("  mma done -> epi sees dxn (backlog):", [int(v) for v in lag[-8:]])

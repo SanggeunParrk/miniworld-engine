@@ -62,7 +62,7 @@ class FusedBwd8:
         dx = torch.empty_like(x)
         partab = torch.empty(ndw, 128, 128, device=dev, dtype=torch.float32)
         parts = torch.empty(ndw, 128, 64, device=dev, dtype=torch.float32)
-        dgbw = torch.empty(ndx * 4, 256, device=dev, dtype=torch.float32)
+        dgbw = torch.zeros(self.nsm * 4, 256, device=dev, dtype=torch.float32)   # rows by block (DYN) or DX index
         dwa = torch.empty_like(wa); dwb = torch.empty_like(wb); dws = torch.empty_like(ws)
         dgam = torch.empty(D, device=dev, dtype=torch.float32); dbeta = torch.empty_like(dgam)
         maps = (tm(dy, [D, M], D * 2, [64, 64]), tm(xq, [D, M], D, [128, 64], dtype="u8"), tm(x, [D, M], D * 2, [64, 64]),
@@ -86,7 +86,8 @@ class FusedBwd8x(FusedBwd8):
     """tbwd8x: the DW slices publish e4m3 [dA | dB] blocks; the DX CTAs only run d_xn + the LayerNorm backward (no recompute, one gate)."""
     def __init__(self, cubin=HERE / "build" / "tbwd8x.cubin", repl=14, pdl=None):
         pdl = ("pdl" in str(cubin)) if pdl is None else pdl
-        self.k = drv.Kernel(str(cubin), "transition_bwd8x_sm100", 217088, cluster=2, pdl=pdl)
+        self.cubin = cubin
+        self.k = drv.Kernel(str(cubin), "transition_bwd8x_sm100", 232448, cluster=2, pdl=pdl)
         self.red = drv.Kernel(str(cubin), "transition_bwd8_reduce", 0, pdl=pdl)
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
         self.repl = repl
@@ -95,19 +96,22 @@ class FusedBwd8x(FusedBwd8):
         run0, grads = super().bind(dy, xq, x, rstd, c1, gamma, wab_q, wst_q, sc, wa, wb, ws)
         M = x.shape[0]; tiles = M // 128
         maps, (dyq, flags, epoch) = list(run0.keep[:8]), run0.keep[8:]
-        maps[3] = drv.TensorMap(ws, [H, D], H * 2, [64, 64])       # the DW role's Ws slice: bf16, MN-major
+        if "dyq" not in str(self.cubin):
+            maps[3] = drv.TensorMap(ws, [H, D], H * 2, [64, 64])   # the DW role's Ws slice: bf16, MN-major
         maps = tuple(maps)
         dab = torch.zeros(tiles * 8 * 128, D, device=x.device, dtype=torch.uint8)
         dflags = torch.zeros(tiles * 8, device=x.device, dtype=torch.int32)
         mdab = drv.TensorMap(dab, [D, tiles * 8 * 128], D, [128, 64], dtype="u8")
         ndw = 8 * self.repl; ndx = self.nsm - ndw
         partab, parts, dgbw = run0.bufs
+        ctr = torch.zeros(1, device=x.device, dtype=torch.int32)
+        nrows = self.nsm * 4 if "dyn" in str(self.cubin) else ndx * 4
         nred = 3 * H * D + 256
 
         def run():
             self.k((self.nsm, 1, 1), (512, 1, 1), *maps, rstd, c1, gamma, sc, partab, parts, dgbw, dyq, flags, epoch, int(tiles), int(ndw),
-                   mdab, dab, dflags, dy)
+                   mdab, dab, dflags, dy, ctr)
             self.red((800, 1, 1), (256, 1, 1), partab, parts, dgbw, sc, grads["dwa"], grads["dwb"], grads["dws"],
-                     grads["dgamma"], grads["dbeta"], int(ndw), int(ndx * 4), epoch)
-        run.keep = maps + (dyq, flags, epoch, mdab, dab, dflags)
+                     grads["dgamma"], grads["dbeta"], int(ndw), int(nrows), epoch, ctr)
+        run.keep = maps + (dyq, flags, epoch, mdab, dab, dflags, ctr)
         return run, grads
