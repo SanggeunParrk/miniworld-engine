@@ -1,0 +1,3 @@
+mn_ts128: 512 clk per 8-MMA chain (ideal 512), 8189 FLOP/clk
+mn_ss64: 439 clk per 8-MMA chain (ideal 256), 4775 FLOP/clk
+mn_ss128: 557 clk per 8-MMA chain (ideal 512), 7527 FLOP/clk

@@ -42,6 +42,14 @@ r = slice(8, nch)
 print(f"  warp1 (dh+ab): wait in {md((m1[1::8]-m1[0::8])[r]):.0f}  w_full {md((m1[2::8]-m1[1::8])[r]):.0f}  ab_free {md((m1[3::8]-m1[2::8])[r]):.0f}  issue {md((m1[4::8]-m1[3::8])[r]):.0f}  period {md(np.diff(m1[0::8][:nch])[8:]):.0f}")
 print(f"  warp2 (dxn): wait g_full {md((m2[1::8]-m2[0::8])[r]):.0f}  dxn_empty {md((m2[2::8]-m2[1::8])[r]):.0f}  issue {md((m2[3::8]-m2[2::8])[r]):.0f}")
 print(f"  gate: wait abdh {md((g[1::4]-g[0::4])[r]):.0f}  ld+compute {md((g[2::4]-g[1::4])[r]):.0f}  store+arrive {md((g[3::4]-g[2::4])[r]):.0f}  period {md(np.diff(g[0::4][:nch])[8:]):.0f}")
+wp = e[1024:]
+rr = range(8, nch - 3)
+print(f"  WAB chain: dxn(c) issued -> WAB(c+2) load issued {md([wp[c+2] - m2[8*c+3] for c in rr]):.0f}  load issued -> ab(c+2) sees it {md([m1[8*(c+2)+2] - wp[c+2] for c in rr]):.0f}")
+print(f"  gate(c) done -> dxn(c) issued {md([m2[8*c+3] - g[4*c+3] for c in rr]):.0f}   ab(c) issued -> gate sees abdh(c) {md([g[4*c+1] - m1[8*c+4] for c in rr]):.0f}")
+gB = g[1024:]
+print(f"  gate WG B done - WG A done {md([gB[c] - g[4*c+3] for c in rr]):.0f}   WG B done -> dxn issued {md([m2[8*c+3] - gB[c] for c in rr]):.0f}   dxn wait g_full end -> issued {md([m2[8*c+3] - m2[8*c+2] for c in rr]):.0f}")
+print(f"  dxn: wait g_full end -> all issued {md([m2[8*c+3] - m2[8*c+2] for c in rr]):.0f}   all issued -> complete {md([m2[8*c+4] - m2[8*c+3] for c in rr]):.0f}")
+print(f"  ab(c+1) issued (warp1 stamp) relative to dxn(c) issue start: {md([m1[8*(c+1)+4] - m2[8*c+2] for c in rr]):.0f}")
 for i in range(min(nt, 3)):
     q = e[8*i:8*i+7] - m1[0]
     print(f"  epi tile {i}: wait dxn {q[1]-q[0]}  dn ld {q[2]-q[1]}  wait x {q[3]-q[2]}  pass1 {q[4]-q[3]}  pass2 {q[5]-q[4]}  store {q[6]-q[5]}")

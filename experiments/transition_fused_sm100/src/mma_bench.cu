@@ -127,3 +127,38 @@ extern "C" __global__ void ind64(unsigned long long* o, int n) { indep<64, 1>(o,
 extern "C" __global__ void ind128(unsigned long long* o, int n) { indep<128, 1>(o, n); }
 extern "C" __global__ void ind32w2(unsigned long long* o, int n) { indep<32, 2>(o, n); }
 extern "C" __global__ void ind64w2(unsigned long long* o, int n) { indep<64, 2>(o, n); }
+// the backward's d_xn product: A from TMEM, B MN-major (N = 128 over two 64-wide atoms 16 KB apart), and the dh product (SS, N = 64, B MN-major)
+template <int MODE>
+__device__ void body_mn(unsigned long long* out, int iters) {
+  extern __shared__ __align__(1024) uint8_t sm[];
+  __shared__ uint64_t bar; __shared__ uint32_t tm;
+  const uint32_t su = smem_u32(sm);
+  if (threadIdx.x < 32) { tmem_alloc(smem_u32(&tm), 512); tmem_relinquish(); }
+  if (threadIdx.x == 0) { mbar_init(&bar, 1); fence_barrier_init(); }
+  for (int i = threadIdx.x; i < 65536 / 4; i += blockDim.x) reinterpret_cast<uint32_t*>(sm)[i] = 0x3c003c00u;
+  fence_proxy_async();
+  tc_fence_before(); __syncthreads(); tc_fence_after();
+  if (threadIdx.x < 32) {
+    const unsigned long long t0 = clock64();
+    for (int it = 0; it < iters; ++it) {
+      if (elect_one()) {
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks) {
+          if (MODE == 0) umma_ts(tm + 384, tm + ks * 8, desc_mn128(su + 32768 + ks * 2048, 16384), idesc_bf16(128, 128, 0, 1), 1);
+          if (MODE == 1) umma_ss(tm + 256, desc_k128(su + (ks >> 2) * 16384 + (ks & 3) * 32), desc_mn128(su + 32768 + ks * 2048, 16384), idesc_bf16(128, 64, 0, 1), ks > 0);
+          if (MODE == 2) umma_ss(tm + 256, desc_k128(su + (ks >> 2) * 16384 + (ks & 3) * 32), desc_mn128(su + 32768 + ks * 2048, 16384), idesc_bf16(128, 128, 0, 1), ks > 0);
+        }
+      }
+      __syncwarp();
+    }
+    if (elect_one()) tc_commit(&bar);
+    __syncwarp();
+    mbar_wait(&bar, 0);
+    if (threadIdx.x == 0) out[blockIdx.x] = clock64() - t0;
+  }
+  tc_fence_before(); __syncthreads();
+  if (threadIdx.x < 32) { tc_fence_after(); tmem_dealloc(tm, 512); }
+}
+extern "C" __global__ void mn_ts128(unsigned long long* o, int n) { body_mn<0>(o, n); }
+extern "C" __global__ void mn_ss64(unsigned long long* o, int n) { body_mn<1>(o, n); }
+extern "C" __global__ void mn_ss128(unsigned long long* o, int n) { body_mn<2>(o, n); }
