@@ -21,7 +21,7 @@ using namespace tmn; using namespace tmn::sm90;
 #define STAGES 4
 #endif
 #ifndef NWG
-#define NWG 2                    // consumer warpgroups: query rows per CTA = 64 NWG
+#define NWG 3                    // consumer warpgroups: query rows per CTA = 64 NWG
 #endif
 #ifndef BLKSM
 #define BLKSM 1
@@ -36,10 +36,13 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef FCLS
 #define FCLS 1                    // samples per cluster: the bias tile is multicast to the FCLS CTAs that share it
 #endif
+#ifndef QWID
+#define QWID 48                  // TMA box width for q / k / v / dO: 48 loads exactly the head (the 128-B swizzled smem
+#endif                           // image keeps its 128-B row pitch), 64 also pulls 16 columns of the next head
 #ifndef FLOOR
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
-constexpr int BN = 64, DH = 48, QW = 64, QM = 64 * NWG, DM = 768;
+constexpr int BN = 64, DH = 48, QW = QWID, QM = 64 * NWG, DM = 768;
 constexpr float LOG2E = 1.4426950408889634f;
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
@@ -122,7 +125,7 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
     if (iss == 0) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mv); tma_prefetch_desc(&mdo);
       tma_prefetch_desc(&mbias);
-      mbar_arrive_expect_tx(qbar, 2 * QM * 128);
+      mbar_arrive_expect_tx(qbar, 2 * QM * QW * 2);
       tma_load_2d(sm + QSTAGE, &mq, qbar, qcol, row0);
       tma_load_2d(sm + DOSTAGE, &mdo, qbar, qcol, row0);
     }
@@ -133,10 +136,10 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
         mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
         uint8_t* slot = sm + s * ST_BYTES;
         if (iss == 0) {
-          mbar_arrive_expect_tx(&full[s], SKV);
+          mbar_arrive_expect_tx(&full[s], BN * QW * 2);
           tma_load_2d(slot, &mk, &full[s], qcol, samp * L + n * BN);
         } else if (iss == 1) {
-          mbar_arrive_expect_tx(&full[s], SKV);
+          mbar_arrive_expect_tx(&full[s], BN * QW * 2);
           tma_load_2d(slot + SKV, &mv, &full[s], qcol, samp * L + n * BN);
         } else {
           mbar_arrive_expect_tx(&full[s], SB);
@@ -186,6 +189,7 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
   float sc[32], dp[32];
   uint32_t pa[BN / 16][4];
   const uint32_t sbase = smem_u32(sm);
+  const uint64_t dK0 = dsw(sbase), dM0 = dmn(sbase, 0);          // descriptors: base + (offset >> 4)
   for (int n = 0; n < nblocks; ++n) {
     const int sn = n % STAGES;
     const uint32_t slot = sbase + sn * ST_BYTES;
@@ -213,9 +217,9 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
       }
       wgmma_fence();
 #pragma unroll
-      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(sc, qr[ks], dsw(slot + ks * 32), 1);
+      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(sc, qr[ks], dK0 + ((sn * ST_BYTES + ks * 32) >> 4), 1);
 #pragma unroll
-      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(dp, dor[ks], dsw(slot + SKV + ks * 32), ks != 0);
+      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(dp, dor[ks], dK0 + ((sn * ST_BYTES + SKV + ks * 32) >> 4), ks != 0);
       wgmma_commit();
       wgmma_wait<0>();
 #pragma unroll
@@ -233,7 +237,7 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
 #pragma unroll
       for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #pragma unroll
-      for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dmn(slot, ks));     // B = K, keys are the k dimension
+      for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dM0 + ((sn * ST_BYTES + ks * 2048) >> 4));     // B = K, keys are the k dimension
       wgmma_commit();
       wgmma_wait<0>();
     } else {

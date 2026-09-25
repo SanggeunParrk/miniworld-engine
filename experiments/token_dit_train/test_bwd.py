@@ -6,10 +6,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from token_dit_train.ref import make, reference_grads, rel, LOG2E  # noqa: E402
 from token_dit_train.fwd import prep, attn_fwd  # noqa: E402
-from token_dit_train.bwd import bwd_prep, attn_dq, attn_dkv, attn_dkv2  # noqa: E402
+from token_dit_train.bwd import bwd_prep, attn_dq, attn_dkv, attn_dkv2, attn_dqb, attn_dkv_nobias  # noqa: E402
 
 ok = True
-for L, A, bs, mf in ((384, 4, 1.0, 0.0), (768, 8, 1.0, 0.0), (384, 8, 4.0, 0.0), (384, 8, 1.0, 0.2)):
+for L, A, bs, mf in ((384, 6, 1.0, 0.0), (768, 6, 1.0, 0.0), (384, 6, 4.0, 0.0), (384, 6, 1.0, 0.2)):
     q, k, v, bias, mask = make(A, L, bias_scale=bs, mask_frac=mf, seed=L + A)
     do = torch.randn_like(q)
     o_ref, dq_ref, dk_ref, dv_ref, db_ref = reference_grads(q, k, v, bias, do, mask)
@@ -23,11 +23,14 @@ for L, A, bs, mf in ((384, 4, 1.0, 0.0), (768, 8, 1.0, 0.0), (384, 8, 4.0, 0.0),
     dq = attn_dq(qs, kb, vb, dob, bb, km, lse, dd, A, L)
     dk, dv, db = attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, A, L)
     dk2, dv2, db2 = attn_dkv2(qs, kb, vb, dob, bb, km, lse, dd, A, L)
+    dq3, db3 = attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, A, L)
+    dk3, dv3 = attn_dkv_nobias(qs, kb, vb, dob, bb, km, lse, dd, A, L)
     torch.cuda.synchronize()
     row = f"bwd: L{L} A{A} bias*{bs} mask{mf}:"
     for nm, got, ref, bref in (("dq", dq, dq_ref, dq_b), ("dk", dk, dk_ref, dk_b), ("dv", dv, dv_ref, dv_b),
                                ("dbias", db, db_ref, db_b), ("dk2", dk2, dk_ref, dk_b), ("dv2", dv2, dv_ref, dv_b),
-                               ("dbias2", db2, db_ref, db_b)):
+                               ("dbias2", db2, db_ref, db_b), ("dq3", dq3, dq_ref, dq_b), ("dbias3", db3, db_ref, db_b),
+                               ("dk3", dk3, dk_ref, dk_b), ("dv3", dv3, dv_ref, dv_b)):
         e, eb = rel(got, ref), rel(bref, ref)
         good = e < 2 * eb + 2e-3 and math.isfinite(e)
         ok &= good

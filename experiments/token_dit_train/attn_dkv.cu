@@ -37,15 +37,21 @@ using namespace tmn; using namespace tmn::sm90;
 #define QROT 1                   // start each CTA's query loop at a sample-dependent block, so the CTAs of different
 #endif                           // samples do not hit the same dbias addresses at the same time
 #ifndef RV4
-#define RV4 1                    // 1: v4 reds (a quad shuffle gives each thread 4 adjacent queries), 0: v2
+#define RV4 0                    // 1: v4 reds (a quad shuffle gives each thread 4 adjacent queries), 0: v2 (faster)
 #endif
+#ifndef DBC
+#define DBC 1                    // samples per cluster that pre-sum dbias on chip: query block n is owned by rank n % DBC,
+#endif                           // the others st.async their bf16 dS tile to it, and only the owner issues the L2 reds
 #ifndef DBIAS
 #define DBIAS 1                  // 0: skip the dbias atomics (to price them)
 #endif
+#ifndef QWID
+#define QWID 48                  // TMA box width for q / k / v / dO: 48 loads exactly the head (the 128-B swizzled smem
+#endif                           // image keeps its 128-B row pitch), 64 also pulls 16 columns of the next head
 #ifndef FLOOR
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
-constexpr int BN = 64, DH = 48, QW = 64, QM = 64 * NWG, DM = 768;
+constexpr int BN = 64, DH = 48, QW = QWID, QM = 64 * NWG, DM = 768;
 constexpr float LOG2E = 1.4426950408889634f;
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
@@ -90,6 +96,20 @@ TMN_DEVI float qsum(float v) {
 TMN_DEVI void red_v2(float* p, float a, float b) {
   asm volatile("red.global.add.v2.f32 [%0], {%1, %2};" :: "l"(p), "f"(a), "f"(b) : "memory");
 }
+TMN_DEVI void st_async_v4(uint32_t caddr, uint4 v, uint32_t cbar) {
+  asm volatile("st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.b32 [%0], {%1, %2, %3, %4}, [%5];"
+               :: "r"(caddr), "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w), "r"(cbar) : "memory");
+}
+TMN_DEVI void arrive_remote(uint64_t* bar, uint32_t rank) {
+  asm volatile("mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];" :: "r"(mapa(smem_u32(bar), rank)) : "memory");
+}
+TMN_DEVI void wait_acq_cl(uint64_t* bar, uint32_t phase) {
+  uint32_t ok;
+  do {
+    asm volatile("{ .reg .pred P; mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P, [%1], %2; selp.u32 %0, 1, 0, P; }"
+                 : "=r"(ok) : "r"(smem_u32(bar)), "r"(phase) : "memory");
+  } while (!ok);
+}
 TMN_DEVI void red_v4(float* p, float a, float b, float c, float d) {
   asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(p), "f"(a), "f"(b), "f"(c), "f"(d) : "memory");
 }
@@ -100,6 +120,8 @@ constexpr int OFF_QT = 0, OFF_DOT = SQT, OFF_BT = 2 * SQT, OFF_LD = OFF_BT + NWG
 constexpr int ST_BYTES = (OFF_LD + 2 * QB * 4 + 1023) / 1024 * 1024;   // 128-B swizzled tiles need 1 KB slots
 constexpr int OFF_KV = STAGES * ST_BYTES;                            // K and V tiles (64 NWG keys each), read once
 constexpr int SKV = 64 * NWG * 128;
+constexpr int SRX = 128 * NWG * 16 * 4;                              // one sender's bf16 dS tile: 16 words a thread
+constexpr int OFF_RX = OFF_KV + 2 * SKV, OFF_BARS = OFF_RX + (DBC - 1) * SRX;
 
 template <bool HASM>
 __global__ void __launch_bounds__(128 * NWG + 32, BLKSM)
@@ -110,9 +132,11 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
                 int L, int H, int A, int nt) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
-  uint64_t* full = reinterpret_cast<uint64_t*>(sm + OFF_KV + 2 * SKV);
+  uint64_t* full = reinterpret_cast<uint64_t*>(sm + OFF_BARS);
   uint64_t* empty = full + STAGES;
   uint64_t* kvbar = empty + STAGES;
+  uint64_t* rfull = kvbar + 1;                                      // the other ranks' tiles of my owned block are in
+  uint64_t* bfree = rfull + 1;                                      // [DBC]: owner r has read what I sent it
 
   const int tid = threadIdx.x;
   const int samp = blockIdx.x % A, cid = blockIdx.x / A;
@@ -124,23 +148,28 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 1); mbar_init(&empty[s], 4 * NWG); }
     mbar_init(kvbar, 1);
+    mbar_init(rfull, 1);
+    for (int r = 0; r < DBC; ++r) mbar_init(&bfree[r], 4 * NWG);
     fence_barrier_init();
   }
   __syncthreads();
+  if (DBC > 1) cluster_sync_all();
+  const uint32_t rank = DBC > 1 ? cluster_rank() : 0;
+  const int rot = DBC > 1 ? samp / DBC : samp;                      // the ranks of a cluster walk the same block order
 
   if (tid >= 128 * NWG) {                                           // producer: one thread issues everything
     if (tid == 128 * NWG) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mv); tma_prefetch_desc(&mdo);
       tma_prefetch_desc(&mbias);
-      mbar_arrive_expect_tx(kvbar, 2 * SKV);
+      mbar_arrive_expect_tx(kvbar, 2 * 64 * NWG * QW * 2);
       tma_load_2d(sm + OFF_KV, &mk, kvbar, qcol, samp * L + k0);
       tma_load_2d(sm + OFF_KV + SKV, &mv, kvbar, qcol, samp * L + k0);
       for (int n = 0; n < nblocks; ++n) {
         const int s = n % STAGES;
-        const int nb = QROT ? (n + samp) % nblocks : n;              // the query block this stage carries
+        const int nb = QROT ? (n + rot) % nblocks : n;               // the query block this stage carries
         mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
         uint8_t* slot = sm + s * ST_BYTES;
-        mbar_arrive_expect_tx(&full[s], OFF_LD + 2 * QB * 4);
+        mbar_arrive_expect_tx(&full[s], 2 * QB * QW * 2 + NWG * SBT + 2 * QB * 4);
         tma_load_2d(slot + OFF_QT, &mq, &full[s], qcol, samp * L + nb * QB);
         tma_load_2d(slot + OFF_DOT, &mdo, &full[s], qcol, samp * L + nb * QB);
         for (int w = 0; w < NWG; ++w)
@@ -152,10 +181,12 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
                      :: "r"(smem_u32(slot + OFF_LD + QB * 4)), "l"(DD + li), "r"(QB * 4), "r"(smem_u32(&full[s])) : "memory");
       }
     }
+    __syncwarp();
+    if (DBC > 1) cluster_sync_all();
     return;
   }
 
-  const int lane = tid & 31, warp = (tid >> 5) & 3;
+  const int lane = tid & 31, warp = (tid >> 5) & 3, wt = tid & 127;
   const int r0 = warp * 16 + (lane >> 2), cb = 2 * (lane & 3);
   float dk[24], dv[24];
 #pragma unroll
@@ -179,11 +210,12 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   float dsv[2][16];
   uint32_t pp[QB / 16][4], dsr[QB / 16][4];
   const uint32_t sbase = smem_u32(sm);
+  const uint64_t dK0 = dsw(sbase), dM0 = dmn(sbase, 0);          // descriptors: base + (offset >> 4)
   for (int n = 0; n < nblocks; ++n) {
     const int sn = n % STAGES;
     const uint32_t slot = sbase + sn * ST_BYTES;
     mbar_wait(&full[sn], (n / STAGES) & 1);
-    const int nb = QROT ? (n + samp) % nblocks : n;
+    const int nb = QROT ? (n + rot) % nblocks : n;
     if (!FLOOR) {
       const float* ld = reinterpret_cast<const float*>(sm + sn * ST_BYTES + OFF_LD);
       float lse[16], dd[16];
@@ -210,9 +242,9 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       }
       wgmma_fence();
 #pragma unroll
-      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(sc, kr[ks], dsw(slot + OFF_QT + ks * 32), 1);
+      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(sc, kr[ks], dK0 + ((sn * ST_BYTES + OFF_QT + ks * 32) >> 4), 1);
 #pragma unroll
-      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(dp, vr[ks], dsw(slot + OFF_DOT + ks * 32), ks != 0);
+      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(dp, vr[ks], dK0 + ((sn * ST_BYTES + OFF_DOT + ks * 32) >> 4), ks != 0);
       wgmma_commit();
       wgmma_wait<0>();
 #pragma unroll
@@ -226,10 +258,48 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
           const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1), sk = __floats2bfloat162_rn(s0, s1);
           pp[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
           dsr[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&sk);
-          if (DBIAS && !RV4) red_v2(dbt + (size_t)(8 * h) * L + nb * QB + j * 8 + cb, s0, s1);
-          if (DBIAS && RV4) { dsv[h][2 * j] = s0; dsv[h][2 * j + 1] = s1; }
+          if (DBIAS && !RV4 && DBC == 1) red_v2(dbt + (size_t)(8 * h) * L + nb * QB + j * 8 + cb, s0, s1);
+          if (DBIAS && (RV4 || DBC > 1)) { dsv[h][2 * j] = s0; dsv[h][2 * j + 1] = s1; }
         }
-      if (DBIAS && RV4) {
+      if (DBIAS && DBC > 1) {
+        const uint32_t own = n % DBC;
+        const uint32_t* dw = &dsr[0][0];                            // this thread's 16 bf16 pairs of dS
+        if (own != rank) {                                          // send the tile to its owner
+          wait_acq_cl(&bfree[own], ((n / DBC) & 1) ^ 1);         // the owner has read my previous tile
+          const int idx = (int)((rank - own - 1 + DBC) % DBC);
+          const uint32_t dst = mapa(sbase + OFF_RX + idx * SRX + (wg * 4 * 128 + wt) * 16, own);
+          const uint32_t cb_ = mapa(smem_u32(rfull), own);
+#pragma unroll
+          for (int k = 0; k < 4; ++k)
+            st_async_v4(dst + k * 128 * 16, make_uint4(dw[4 * k], dw[4 * k + 1], dw[4 * k + 2], dw[4 * k + 3]), cb_);
+        } else {                                                    // owner: add the others' tiles, then the L2 reds
+          if (tid == 0) mbar_arrive_expect_tx(rfull, (DBC - 1) * SRX);
+          mbar_wait(rfull, (n / DBC) & 1);
+#pragma unroll
+          for (int r = 0; r < DBC - 1; ++r) {
+            const uint4* src = reinterpret_cast<const uint4*>(sm + OFF_RX + r * SRX) + wg * 4 * 128 + wt;
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+              const uint4 u = src[k * 128];
+              const uint32_t w4[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+              for (int e = 0; e < 4; ++e) {
+                const int flat = 4 * k + e, jj = 2 * (flat >> 2) + ((flat >> 1) & 1), hh = flat & 1;   // dsr[j>>1][2(j&1)+h]
+                const float2 f = bf2f(w4[e]);
+                dsv[hh][2 * jj] += f.x; dsv[hh][2 * jj + 1] += f.y;
+              }
+            }
+          }
+          __syncwarp();
+          if (lane == 0)
+            for (int r = 0; r < DBC; ++r) if (r != (int)rank) arrive_remote(&bfree[rank], r);
+#pragma unroll
+          for (int h = 0; h < 2; ++h)
+#pragma unroll
+            for (int j = 0; j < 8; ++j) red_v2(dbt + (size_t)(8 * h) * L + nb * QB + j * 8 + cb, dsv[h][2 * j], dsv[h][2 * j + 1]);
+        }
+      }
+      if (DBIAS && RV4 && DBC == 1) {
         // lanes c and c^1 of a quad hold queries 2c, 2c+1 and 2(c^1), 2(c^1)+1 for key rows r0 and r0 + 8: the even
         // lane keeps row r0 and takes its partner's pair of it, the odd lane keeps row r0 + 8 -> 4 adjacent queries
         const bool odd = lane & 1;
@@ -246,9 +316,9 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 #pragma unroll
       for (int i = 0; i < 24; ++i) { fence_reg(dk[i]); fence_reg(dv[i]); }
 #pragma unroll
-      for (int ks = 0; ks < QB / 16; ++ks) mma_o(dv, pp[ks], dmn(slot + OFF_DOT, ks));
+      for (int ks = 0; ks < QB / 16; ++ks) mma_o(dv, pp[ks], dM0 + ((sn * ST_BYTES + OFF_DOT + ks * 2048) >> 4));
 #pragma unroll
-      for (int ks = 0; ks < QB / 16; ++ks) mma_o(dk, dsr[ks], dmn(slot + OFF_QT, ks));
+      for (int ks = 0; ks < QB / 16; ++ks) mma_o(dk, dsr[ks], dM0 + ((sn * ST_BYTES + OFF_QT + ks * 2048) >> 4));
       wgmma_commit();
       wgmma_wait<0>();
     } else {
@@ -270,6 +340,7 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       *reinterpret_cast<float2*>(pv + j * 8 + cb) = make_float2(dv[4 * j + 2 * h], dv[4 * j + 2 * h + 1]);
     }
   }
+  if (DBC > 1) { __syncwarp(); cluster_sync_all(); }
 }
 
 // ------------------------------------------------------------------------------------------------ host
@@ -316,7 +387,8 @@ void attn_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
   for (auto* t : {&DK, &DV, &DBT}) TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kFloat32, "out layout");
   TORCH_CHECK(L % (64 * NWG) == 0 && L % QB == 0, "shape");
-  const size_t smem = 1024 + OFF_KV + 2 * SKV + 256;
+  const size_t smem = 1024 + OFF_BARS + 256;
+  TORCH_CHECK(A % DBC == 0, "A must be a multiple of the dbias cluster");
   const bool hasm = kmask.has_value() && kmask->defined();
   auto kern = hasm ? attn_dkv_kernel<true> : attn_dkv_kernel<false>;
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -326,10 +398,18 @@ void attn_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, DM, QW, 64 * NWG);
   auto mdo = tile_map(dO.data_ptr(), (uint64_t)A * L, DM, DM, QW, QB);
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, 64, QB);
-  kern<<<A * H * nt, 128 * NWG + 32, smem, at::cuda::getCurrentCUDAStream()>>>(
-      mq, mk, mv, mdo, mb, hasm ? kmask->data_ptr<float>() : nullptr, LSE.data_ptr<float>(), Dd.data_ptr<float>(),
-      DK.data_ptr<float>(), DV.data_ptr<float>(), DBT.data_ptr<float>(), L, H, A, nt);
-  TORCH_CHECK(cudaGetLastError() == cudaSuccess, "launch failed");
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3(A * H * nt);
+  cfg.blockDim = dim3(128 * NWG + 32);
+  cfg.dynamicSmemBytes = smem;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = DBC; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mdo, mb, hasm ? kmask->data_ptr<float>() : nullptr,
+                                 LSE.data_ptr<float>(), Dd.data_ptr<float>(), DK.data_ptr<float>(), DV.data_ptr<float>(),
+                                 DBT.data_ptr<float>(), L, H, A, nt) == cudaSuccess, "launch failed");
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("attn_dkv", &attn_dkv); }

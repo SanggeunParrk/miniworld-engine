@@ -38,10 +38,13 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef LAZY
 #define LAZY 8.0f                // running-max slack in log2 units (0: exact running max)
 #endif
+#ifndef QWID
+#define QWID 48                  // TMA box width for q / k / v / dO: 48 loads exactly the head (the 128-B swizzled smem
+#endif                           // image keeps its 128-B row pitch), 64 also pulls 16 columns of the next head
 #ifndef FLOOR
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
-constexpr int BN = 64, DH = 48, QW = 64, QM = 64 * NWG, DM = 768;
+constexpr int BN = 64, DH = 48, QW = QWID, QM = 64 * NWG, DM = 768;
 constexpr float LOG2E = 1.4426950408889634f;
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
@@ -127,7 +130,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     const int iss = tid - 128 * NWG;                                // 0 = k, 1 = v, 2 = bias
     if (iss == 0) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mv); tma_prefetch_desc(&mbias);
-      mbar_arrive_expect_tx(qbar, QM * 128);
+      mbar_arrive_expect_tx(qbar, QM * QW * 2);
       tma_load_2d(sm + QSTAGE, &mq, qbar, qcol, row0);
     }
     if (iss < NISS) mbar_wait(qdone, 0);
@@ -137,10 +140,10 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
         uint8_t* slot = sm + s * ST_BYTES;
         if (iss == 0) {
-          mbar_arrive_expect_tx(&full[s], SKV);
+          mbar_arrive_expect_tx(&full[s], BN * QW * 2);
           tma_load_2d(slot, &mk, &full[s], qcol, samp * L + n * BN);
         } else if (iss == 1) {
-          mbar_arrive_expect_tx(&full[s], SKV);
+          mbar_arrive_expect_tx(&full[s], BN * QW * 2);
           tma_load_2d(slot + SKV, &mv, &full[s], qcol, samp * L + n * BN);
         } else {
           if (NOBIAS) { mbar_arrive(&full[s]); continue; }
@@ -183,6 +186,9 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   float sc[32];
   uint32_t pa[BN / 16][4];
   const uint32_t sbase = smem_u32(sm);
+  // Descriptors are built once and moved by adding (byte offset >> 4) to the 14-bit address field (shared addresses
+  // stay under 256 KB, so it never carries): smem_desc per k-step cost ~1.8 uniform-datapath instructions a pair.
+  const uint64_t dK0 = dsw(sbase), dV0 = dmn(sbase + SKV, 0);
   for (int n = 0; n < nblocks; ++n) {
     const int sn = n % STAGES;
     const uint32_t slot = sbase + sn * ST_BYTES;
@@ -205,13 +211,13 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
           const float2 b = bf2f(bm[j >> 2][j & 3]);
-          sc[4 * j + 2 * h] = b.x + (mk[2 * j]);
-          sc[4 * j + 2 * h + 1] = b.y + (mk[2 * j + 1]);
+          sc[4 * j + 2 * h] = HASM ? b.x + mk[2 * j] : b.x;          // x + 0.f is not foldable (signed zero)
+          sc[4 * j + 2 * h + 1] = HASM ? b.y + mk[2 * j + 1] : b.y;
         }
       }
       wgmma_fence();
 #pragma unroll
-      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(sc, qr[ks], dsw(slot + ks * 32), 1);
+      for (int ks = 0; ks < DH / 16; ++ks) mma_s_rs(sc, qr[ks], dK0 + ((sn * ST_BYTES + ks * 32) >> 4), 1);
       wgmma_commit();
       wgmma_wait<0>();
 #pragma unroll
@@ -255,7 +261,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 #pragma unroll
       for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #pragma unroll
-      for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dmn(slot + SKV, ks));
+      for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dV0 + ((sn * ST_BYTES + ks * 2048) >> 4));
       wgmma_commit();
       wgmma_wait<0>();
     } else {

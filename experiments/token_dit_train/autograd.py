@@ -10,7 +10,7 @@ import os
 import torch
 from .ref import LOG2E, D
 from .fwd import attn_fwd
-from .bwd import attn_dq, attn_dkv, attn_dkv2
+from .bwd import attn_dq, attn_dkv, attn_dkv2, attn_dqb, attn_dkv_nobias
 from .prep import prep_qkv, prep_do, bias_prep
 
 
@@ -38,9 +38,13 @@ class _TdtAttention(torch.autograd.Function):
         km = km if ctx.has_mask else None
         A, L, H, Dh = ctx.shape
         dob, dd = prep_do(do, o, A, L, H)
-        dq = attn_dq(qs, kb, vb, dob, bb, km, lse, dd, A, L)
-        dkv = attn_dkv2 if os.environ.get("TDT_DKV", "1") == "2" else attn_dkv
-        dk, dv, db = dkv(qs, kb, vb, dob, bb, km, lse, dd, A, L)
+        mode = os.environ.get("TDT_BWD", "dqb" if A % 3 == 0 else "atomic")
+        if mode == "dqb":                   # dbias in the dQ pass, 3 samples summed on chip before the L2 reds
+            dq, db = attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, A, L)
+            dk, dv = attn_dkv_nobias(qs, kb, vb, dob, bb, km, lse, dd, A, L)
+        else:                               # dbias by L2 atomics per sample in the dK / dV pass
+            dq = attn_dq(qs, kb, vb, dob, bb, km, lse, dd, A, L)
+            dk, dv, db = attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, A, L)
         shp = (A, 1, L, H, Dh)
         db = db.unsqueeze(1) if ctx.head_major else db.permute(1, 2, 0).unsqueeze(0)   # views: the hoist's cat copies
         return dq.view(shp), dk.view(shp), dv.view(shp), db, None

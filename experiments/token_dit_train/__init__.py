@@ -12,11 +12,11 @@ def _defs(var):
 
 
 @functools.lru_cache(maxsize=None)
-def ext(name):
-    """Build ``<name>.cu``; ``<NAME>_DEFS="A=1 B=2"`` adds defines (each variant its own module)."""
+def ext(name, extra=()):
+    """Build ``<name>.cu``; ``<NAME>_DEFS="A=1 B=2"`` and ``extra`` add defines (each variant its own module)."""
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
     ensure_cuda_home()
-    defs = _defs(name.upper() + "_DEFS")
+    defs = [*_defs(name.upper() + "_DEFS"), *extra]
     return load_extension(
         name="tdt_" + name + "".join("_" + d.replace("=", "") for d in defs),
         sources=[str(_dir / f"{name}.cu")],
