@@ -432,6 +432,9 @@ __global__ void __launch_bounds__(256) opm_norm_sm100(const uint32_t* __restrict
 // 128-column chunks into a ring of three TMEM accumulators, and the drain applies 1/n in fp32 before the
 // single bf16 rounding (the H100 kernel rounded dz/n first) and stores each chunk as one 4-D TMA box of
 // dO.  dbias is a second tensor-core product, dz^T . 1, accumulated in TMEM across the CTA's tiles.
+// dz/n leaves at the START of a tile, straight from registers (a warp's 32 rows are 8 KiB contiguous), so the dz stage
+// is free as soon as its GEMMs retire; the dz tiles and the Wo chunks have one producer thread each, so the next
+// tile's dz is never queued behind this tile's Wo chunks (it was: a ~10K-cycle bubble at every tile start).
 namespace dg {
 constexpr int BI = 4, BJ = 32, NP = BI * BJ;
 constexpr int NC = 128;                                   // output columns per chunk: 4 c values
@@ -441,7 +444,7 @@ constexpr int WOT = CZ * NC;                              // one Wo chunk [2 n b
 constexpr int OUT = NP * NC;                              // one dO box [4 i][4 c][32 j][32 e], 64B swizzle
 constexpr int NDZ = 2, NWO = 2, NACC = 3, NOUT = 2;
 constexpr int ONES = 16 * NP;                             // [2 k blocks][16][64]
-constexpr int THREADS = 192;
+constexpr int THREADS = 352;                              // warp 0: Wo chunks, warp 1: MMA, warps 2-9: drain, warp 10: dz tiles
 constexpr int SMEM = 1024 + (NDZ * DZT + NWO * WOT + NOUT * OUT + ONES) * 2 + 512;
 constexpr uint32_t IDESC = idesc_bf16(128, NC, 0, 1);     // A = dz K-major, B = Wo MN-major
 constexpr uint32_t IDESC_BO = idesc_bf16(128, 16, 1, 0);  // A = dz^T (MN-major), B = ones K-major
@@ -454,7 +457,7 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
     const __grid_constant__ CUtensorMap dzmap,    // dz  as (64 z, NJ j, 2 halves, NI i), box (64, BJ, 1, BI), 128B swizzle
     const __grid_constant__ CUtensorMap womap,    // Wo  [CZ][NCH], box (64 n, 128 z), 128B swizzle
     const __grid_constant__ CUtensorMap domap,    // dO  as (32 e, NJ j, 32 c, NI i), box (32, BJ, 4, BI), 64B swizzle
-    const __grid_constant__ CUtensorMap dzpmap,   // dz/n, same layout as dzmap
+    __nv_bfloat16* __restrict__ DZP,              // dz/n [NI][NJ][CZ]
     const uint32_t* __restrict__ BITS, int W, float* __restrict__ DBO) {
   using namespace dg;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -465,19 +468,18 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
   __nv_bfloat16* sONE = sOUT + NOUT * OUT;
   uint64_t* bars = reinterpret_cast<uint64_t*>(sONE + ONES);
   uint64_t* dzf = bars;              // [NDZ] dz landed
-  uint64_t* dzd = dzf + NDZ;         // [NDZ] every GEMM reading dz retired (commit)
-  uint64_t* dze = dzd + NDZ;         // [NDZ] dz/n stored: the stage may be refilled
+  uint64_t* dze = dzf + NDZ;         // [NDZ] count 9: every GEMM reading dz retired (commit) and the 8 drain warps read it
   uint64_t* wof = dze + NDZ;         // [NWO]
   uint64_t* woe = wof + NWO;         // [NWO]
   uint64_t* accf = woe + NWO;        // [NACC]
-  uint64_t* acce = accf + NACC;      // [NACC] count 4
+  uint64_t* acce = accf + NACC;      // [NACC] count 8
   uint64_t* bod = acce + NACC;       // [1] the last dbias GEMM retired
   uint32_t* tslot = reinterpret_cast<uint32_t*>(bod + 1);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int k = 0; k < NDZ; ++k) { bar_init(dzf + k, 1); bar_init(dzd + k, 1); bar_init(dze + k, 1); }
+    for (int k = 0; k < NDZ; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); }
     for (int k = 0; k < NWO; ++k) { bar_init(wof + k, 1); bar_init(woe + k, 1); }
-    for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 4); }
+    for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 8); }
     bar_init(bod, 1);
     bar_init_fence();
   }
@@ -496,21 +498,26 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
   const uint32_t tmem = *tslot;
   const int njb = NJ / BJ;
 
-  if (warp == 0) {
-    if (lane == 0) {
-      int lt = 0, g = 0;
+  if (warp == 10) {
+    if (lane == 0) {                             // the dz tiles (their own warp: two producer loops in one warp starve each other)
+      int lt = 0;
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
         const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ, d = lt % NDZ;
         if (lt >= NDZ) wait(dze + d, ((lt / NDZ) - 1) & 1);
         expect_tx(dzf + d, DZT * 2);
         for (int h = 0; h < 2; ++h) load_4d(&dzmap, sDZ + d * DZT + h * NP * 64, dzf + d, 0, j0, h, i0);
+      }
+    }
+  } else if (warp == 0) {
+    if (lane == 0) {                             // the Wo chunks (L2-resident)
+      int g = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x)
         for (int k = 0; k < NCK; ++k, ++g) {
           const int w = g % NWO;
           if (g >= NWO) wait(woe + w, ((g / NWO) - 1) & 1);
           expect_tx(wof + w, WOT * 2);
           for (int b = 0; b < 2; ++b) load_2d(&womap, sWO + w * WOT + b * CZ * 64, wof + w, k * NC + b * 64, 0);
         }
-      }
     }
   } else if (warp == 1) {
     if (lane == 0) {
@@ -538,12 +545,14 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
         for (int kk = 0; kk < NP / 16; ++kk)
           mma_ss(tmem + BO_COL, desc_mn128(dz + kk * 16 * 64, NP * 64 * 2),
                  desc_k128(sONE + (kk >> 2) * 16 * 64 + (kk & 3) * 16), IDESC_BO, (lt | kk) ? 1u : 0u);
-        mma_commit(dzd + d);
+        mma_commit(dze + d);
       }
       mma_commit(bod);
     }
   } else {
-    const int q = warp & 3;
+    // eight drain warps: warps q and q + 4 read the same TMEM lanes (pairs), each taking half of every chunk's columns
+    // (and half of dz/n); they meet on one 256-thread barrier per TMA store.  Four warps were the kernel's bottleneck.
+    const int q = warp & 3, grp = (warp - 2) >> 2;
     const int p = q * 32 + lane, il = p / BJ, jl = p % BJ;
     const bool leader = (warp == 2 && lane == 0);
     int lt = 0, g = 0;
@@ -558,19 +567,38 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
       }
       const float inv = 1.0f / (float)max(cnt, 1);
       const float2 inv2 = make_float2(inv, inv);
+      {                                          // dz/n for dWo: this pair's 128 z, straight to global
+        wait(dzf + d, (lt / NDZ) & 1);
+        const __nv_bfloat16* dz = sDZ + d * DZT;
+        uint4* dst = reinterpret_cast<uint4*>(DZP + ((size_t)(i0 + il) * NJ + j0 + jl) * CZ);
+        {
+          const int h = grp;                     // this warp's 64 of the pair's 128 z
+          const __nv_bfloat16* rp = dz + h * NP * 64 + p * 64;
+#pragma unroll
+          for (int c8 = 0; c8 < 8; ++c8) {
+            uint4 u = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
+            const float2 x0 = mul2(bf2f(u.x), inv2), x1 = mul2(bf2f(u.y), inv2), x2 = mul2(bf2f(u.z), inv2), x3 = mul2(bf2f(u.w), inv2);
+            u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
+            dst[h * 8 + c8] = u;
+          }
+        }
+        __syncwarp();
+        if (lane == 0) arrive(dze + d);
+      }
       for (int k = 0; k < NCK; ++k, ++g) {
         const int a = g % NACC, ob = g % NOUT;
         wait(accf + a, (g / NACC) & 1);
         tc_fence_after();
         if (leader) bulk_wait_read<NOUT - 1>();  // the store of chunk g - NOUT has left staging buffer ob
-        named_sync(1, 128);
+        named_sync(1, 256);
         __nv_bfloat16* box = sOUT + ob * OUT;
 #pragma unroll
-        for (int cl = 0; cl < 4; ++cl) {         // one c value = 32 e per pass
+        for (int cc = 0; cc < 2; ++cc) {         // one c value = 32 e per pass; this warp's two of the chunk's four
+          const int cl = grp * 2 + cc;
           float v[32];
           tmem_ld32(tmem_at(tmem + a * NC, q * 32, cl * 32), v);
           tmem_wait_ld();
-          if (cl == 3) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + a); }
+          if (cc == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + a); }
           const int row = (il * 4 + cl) * BJ + jl;             // box [i][c][j][32 e], 64-byte rows
           __nv_bfloat16* rp = box + row * 32;
 #pragma unroll
@@ -583,30 +611,8 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
           }
         }
         fence_proxy_async();
-        named_sync(1, 128);
+        named_sync(1, 256);
         if (leader) { store_4d(&domap, box, 0, j0, k * 4, i0); bulk_commit(); }
-      }
-      // dz/n for dWo, over the dz tile in place once every GEMM reading it has retired
-      wait(dzd + d, (lt / NDZ) & 1);
-      __nv_bfloat16* dz = sDZ + d * DZT;
-#pragma unroll
-      for (int h = 0; h < 2; ++h) {
-        __nv_bfloat16* rp = dz + h * NP * 64 + p * 64;
-#pragma unroll
-        for (int c8 = 0; c8 < 8; ++c8) {
-          uint4 u = *reinterpret_cast<const uint4*>(rp + c8 * 8);   // any chunk order: the same swizzle out
-          const float2 x0 = mul2(bf2f(u.x), inv2), x1 = mul2(bf2f(u.y), inv2), x2 = mul2(bf2f(u.z), inv2), x3 = mul2(bf2f(u.w), inv2);
-          u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
-          *reinterpret_cast<uint4*>(rp + c8 * 8) = u;
-        }
-      }
-      fence_proxy_async();
-      named_sync(1, 128);
-      if (leader) {
-        for (int h = 0; h < 2; ++h) store_4d(&dzpmap, dz + h * NP * 64, 0, j0, h, i0);
-        bulk_commit();
-        bulk_wait_read<0>();                     // then the producer may refill the stage
-        arrive(dze + d);
       }
     }
     // this CTA's dbias partial: TMEM lane = z, column BO_COL
@@ -615,7 +621,7 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
     float v[8];
     tmem_ld8(tmem_at(tmem + BO_COL, q * 32, 0), v);
     tmem_wait_ld();
-    DBO[(size_t)blockIdx.x * CZ + q * 32 + lane] = v[0];
+    if (grp == 0) DBO[(size_t)blockIdx.x * CZ + q * 32 + lane] = v[0];
     if (leader) bulk_wait<0>();
   }
   tc_fence_before();
@@ -1052,12 +1058,12 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch
   auto dbo_part = torch::empty({grid, (long)CZ}, dz.options().dtype(torch::kFloat32));
   const uint64_t M = (uint64_t)nj * CH;
   CUtensorMap dzm = make_map<4>(dz.data_ptr(), {64, (uint64_t)nj, 2, (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ}, {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dz");
-  CUtensorMap dzpm = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, 2, (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ}, {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dzp");
   CUtensorMap wom = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, CZ}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
   CUtensorMap dom = make_map<4>(dO.data_ptr(), {32, (uint64_t)nj, 32, (uint64_t)ni}, {32, M, 32 * M}, {32, BJ, 4, BI}, CU_TENSOR_MAP_SWIZZLE_64B, "dO");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dgrad_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  opm_dgrad_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, dzm, wom, dom, dzpm,
+  opm_dgrad_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, dzm, wom, dom,
+      reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()),
       reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)bits.size(1), dbo_part.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dzp, colsum(dbo_part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32)};

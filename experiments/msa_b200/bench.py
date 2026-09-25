@@ -22,7 +22,12 @@ import torch
 D_MSA, D_PAIR, D_HID, HEADS = 64, 128, 32, 8
 
 
+MIN_MODE = os.environ.get("BENCH_MIN") == "1"      # shared GPU: the minimum of many short rounds approximates an idle card
+
+
 def timeit(fn, reps=50, rounds=7, warm=3):
+    if MIN_MODE:
+        reps, rounds = 5, 60
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
@@ -45,7 +50,7 @@ def timeit(fn, reps=50, rounds=7, warm=3):
         b.record()
         torch.cuda.synchronize()
         out.append(a.elapsed_time(b) / reps)
-    return statistics.median(out)
+    return min(out) if MIN_MODE else statistics.median(out)
 
 
 def make_inputs(op, L, S, seed=0):

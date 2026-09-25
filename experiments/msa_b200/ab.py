@@ -1,0 +1,54 @@
+"""Interleaved A/B timing of two builds of one extension source (the B200 is shared: absolute times are inflated,
+the ratio is what this measures).  python ab.py <old.cu> <new.cu> <case>"""
+import os, pathlib, statistics, sys, torch
+from torch.utils.cpp_extension import load
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from bench import timeit
+src_inc = pathlib.Path(__file__).parent.parent / "src/miniworld_engine/integrations/csrc/sm100"
+root = pathlib.Path(os.environ["MINIWORLD_ENGINE_JIT_ROOT"])
+def build(path, tag):
+    d = root / f"ab_{tag}"; d.mkdir(parents=True, exist_ok=True)
+    return load(f"ab_{tag}", [path], extra_include_paths=[str(src_inc)], build_directory=str(d),
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a", "--use_fast_math"], verbose=False)
+old, new, case = sys.argv[1], sys.argv[2], sys.argv[3]
+A, B = build(old, "old_" + case), build(new, "new_" + case)
+bf = torch.bfloat16; N, S = 384, 1024; torch.manual_seed(0)
+if case == "dgrad":
+    CZ, CH = 128, 32
+    mask = torch.rand(S, N, device="cuda") > 0.1
+    bits = torch.zeros(N, S // 32, dtype=torch.int64, device="cuda")
+    for w in range(32): bits |= (mask.t().reshape(N, S // 32, 32)[..., w].long() << w)
+    bits = (bits - ((bits >> 31) & 1) * (1 << 32)).to(torch.int32)
+    dz = torch.randn(N, N, CZ, device="cuda", dtype=bf); wo = (torch.randn(CZ, CH * CH, device="cuda") * 0.03).to(bf)
+    fa = lambda: A.opm_dgrad(dz, bits, wo, N, N, 0); fb = lambda: B.opm_dgrad(dz, bits, wo, N, N, 0)
+    ra, rb = fa(), fb()
+    print("max |old - new| dO", (ra[0].float() - rb[0].float()).abs().max().item(), "dzp", (ra[1].float() - rb[1].float()).abs().max().item(),
+          "dbo", (ra[2] - rb[2]).abs().max().item())
+elif case == "glue":
+    H, C, D = 8, 32, 64
+    o = torch.randn(S, N, H * C, device="cuda", dtype=bf); y = torch.randn(S, N, D, device="cuda", dtype=bf); dres = torch.randn(S, N, D, device="cuda", dtype=bf)
+    wg = (torch.randn(H * C, D, device="cuda") * 0.2).to(bf); wot = (torch.randn(D, H * C, device="cuda") * 0.05).to(bf).t().contiguous()
+    dmask = (torch.rand(N, D, device="cuda") > 0.15).to(bf)
+    ga, gb = torch.zeros(S, N, 2 * H * C, device="cuda", dtype=bf), torch.zeros(S, N, 2 * H * C, device="cuda", dtype=bf)
+    fa = lambda: A.pwa_glue(o, y, dres, wg, wot, ga, dmask, 1 / 0.85); fb = lambda: B.pwa_glue(o, y, dres, wg, wot, gb, dmask, 1 / 0.85)
+    ra, rb = fa(), fb()
+    print("max |old - new| do", (ra[0].float() - rb[0].float()).abs().max().item(), "dWo", (ra[1] - rb[1]).abs().max().item(), "dgp", (ga.float() - gb.float()).abs().max().item())
+elif case == "plain":
+    H, C = 8, 32
+    w = torch.softmax(torch.randn(H, N, N, device="cuda") * 2, -1).to(bf); dO = torch.randn(H, N, S * C, device="cuda", dtype=bf)
+    ga, gb = torch.zeros(S, N, 2 * H * C, device="cuda", dtype=bf), torch.zeros(S, N, 2 * H * C, device="cuda", dtype=bf)
+    fa = lambda: A.pwa_plain(w, dO, ga); fb = lambda: B.pwa_plain(w, dO, gb)
+    fa(); fb()
+    print("max |old - new| dv", (ga.float() - gb.float()).abs().max().item())
+elif case == "dgv":
+    H, C, D = 8, 32, 64; M = S * N
+    dgv = torch.randn(M, 2 * H * C, device="cuda", dtype=bf); x = torch.randn(M, D, device="cuda", dtype=bf)
+    lnw = 1 + 0.1 * torch.randn(D, device="cuda"); y = torch.nn.functional.layer_norm(x.float(), (D,), lnw, None, 1e-5).to(bf)
+    dout = torch.randn(M, D, device="cuda", dtype=bf); wgvT = (torch.randn(2 * H * C, D, device="cuda") * 0.05).to(bf).t().contiguous()
+    fa = lambda: A.dgv_bwd(dgv, y, x, dout, wgvT, lnw, 1e-5); fb = lambda: B.dgv_bwd(dgv, y, x, dout, wgvT, lnw, 1e-5)
+    ra, rb = fa(), fb()
+    print("max |old - new|", [(a.float() - b.float()).abs().max().item() for a, b in zip(ra, rb)])
+ta, tb = [], []
+for _ in range(9):
+    ta.append(timeit(fa, rounds=3)); tb.append(timeit(fb, rounds=3))
+print(f"A/B {case}: old {statistics.median(ta)*1e3:.1f} us  new {statistics.median(tb)*1e3:.1f} us  ratio {statistics.median(ta)/statistics.median(tb):.2f}x")
