@@ -750,6 +750,7 @@ static_assert(STAGE_B % 1024 == 0, "stage alignment");
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace pb
 
+template <typename WT_>
 __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
     int N, int S, int ntiles,
     const __grid_constant__ CUtensorMap damap,    // dA [S][N*32] as (32, N, S), box (32, 1, 128), 64B swizzle
@@ -757,7 +758,7 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
     const __grid_constant__ CUtensorMap xmap,     // m [S][N][64] as (64, N, S), box (64, 1, 128), 128B swizzle
     const __grid_constant__ CUtensorMap smap,     // stats [N][S][2] fp32 as (2S, N), box (256, 1)
     const __grid_constant__ CUtensorMap mmap,     // mask [S][N] bytes, box (16, 128)
-    const __grid_constant__ CUtensorMap wfmap,    // Wf [64][64] bf16, box (64, 64), 128B swizzle
+    const __nv_bfloat16* __restrict__ WA, const __nv_bfloat16* __restrict__ WB, const WT_* __restrict__ GAM,
     const __grid_constant__ CUtensorMap dmmap,    // dm, same layout as m
     float* __restrict__ PART) {                   // [grid][65][64]: rows k = R^T, row 64 = ssa
   using namespace pb;
@@ -775,15 +776,22 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
   uint64_t* d1e = d1f + 2;           // [2]    count 4
   uint64_t* a2f = d1e + 2;           // [2]    count 4: group gr wrote (mask . xh)
   uint64_t* a2e = a2f + 2;           // [2]    the dW GEMM reading it retired
-  uint64_t* wff = a2e + 2;           // [1]
-  uint64_t* done = wff + 1;          // [1]
+  uint64_t* done = a2e + 2;          // [1]
   uint32_t* tslot = reinterpret_cast<uint32_t*>(done + 1);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
     for (int k = 0; k < NST; ++k) { bar_init(full + k, 1); bar_init(empty + k, 1); }
     for (int k = 0; k < 2; ++k) { bar_init(d1f + k, 1); bar_init(d1e + k, 4); bar_init(a2f + k, 4); bar_init(a2e + k, 1); }
-    bar_init(wff, 1); bar_init(done, 1);
+    bar_init(done, 1);
     bar_init_fence();
+  }
+  // Wf = [gamma . Wa ; gamma . Wb] in bf16 (the projection backward then hands back g = dout . gamma = dL/dxh),
+  // built here rather than by four host ops per call: [64 (c|e) rows][64 k], 128B swizzle, the dy GEMM's MN-major B
+  for (int v = tid; v < CM * CM / 2; v += THREADS) {
+    const int row = v / (CM / 2), k = (v % (CM / 2)) * 2;
+    const __nv_bfloat16* w = row < CH ? WA + row * CM : WB + (row - CH) * CM;
+    const float2 wv = bf2f(*reinterpret_cast<const uint32_t*>(w + k));
+    *reinterpret_cast<uint32_t*>(sWF + sw128(row, k)) = pack2(wv.x * to_f(GAM[k]), wv.y * to_f(GAM[k + 1]));
   }
   // the mask-column blocks: zero once; each tile rewrites only the chunk holding column 0 of its rows
   for (int v = tid; v < 2 * XT / 8; v += THREADS) {
@@ -801,8 +809,6 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
 
   if (warp == 0) {
     if (lane == 0) {
-      expect_tx(wff, CM * CM * 2);
-      load_2d(&wfmap, sWF, wff, 0, 0);
       int g = 0;
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++g) {
         const int i = t / NSB, s0 = (t % NSB) * BS, st = g % NST;
@@ -818,7 +824,6 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
     }
   } else if (warp == 1) {
     if (lane == 0) {
-      wait(wff, 0);
       auto dw_gemm = [&](int lt) {             // dW += (mask . xh | mask)^T-block . [da db] for tile lt
         const int gr = lt & 1, st = lt % NST;
         wait(a2f + gr, (lt >> 1) & 1);
@@ -1034,7 +1039,7 @@ std::vector<torch::Tensor> opm_prologue(torch::Tensor m, torch::Tensor mask, tor
   return {A2, BT, norm, stats, bits};
 }
 
-std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch::Tensor wo, int64_t ni, int64_t nj) {
+std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch::Tensor wo, int64_t ni, int64_t nj, int64_t grad_bf16) {
   using namespace dg;
   TORCH_CHECK(dz.is_cuda() && dz.scalar_type() == torch::kBFloat16 && dz.is_contiguous() && dz.numel() == ni * nj * CZ, "dz: contiguous bf16 [ni, nj, 128]");
   TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(1) % 4 == 0, "bits: int32 [N, S/32]");
@@ -1055,10 +1060,10 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch
   opm_dgrad_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, dzm, wom, dom, dzpm,
       reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)bits.size(1), dbo_part.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {dO, dzp, dbo_part.sum(0)};
+  return {dO, dzp, colsum(dbo_part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32)};
 }
 
-torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj) {
+torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj, int64_t grad_bf16) {
   using namespace dw;
   TORCH_CHECK(dzp.is_contiguous() && dzp.scalar_type() == torch::kBFloat16 && dzp.numel() == ni * nj * CZ, "dzp: bf16 [ni, nj, 128]");
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kBFloat16 && O.size(0) == ni * CH && O.size(1) == nj * CH, "O: bf16 [ni*32, nj*32]");
@@ -1073,13 +1078,44 @@ torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dwo_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   opm_dwo_sm100<<<dim3(nsplit, 2), THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, part.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  // fold the splits in split order: a GEMV (torch's dim-0 reduce of a tall, thin buffer runs at a fraction of bandwidth)
-  auto ones = torch::ones({1, (long)nsplit}, part.options());
-  return torch::mm(ones, part.view({nsplit, -1})).view({(long)CZ, (long)NCH});
+  return colsum(part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32);                 // the splits, in split order
 }
 
+
+namespace {
+// dWa = gamma . R_a + ssa_a (x) beta, dWb likewise, dgamma = sum_k Wf . R / gamma, dbeta = Wf^T ssa / gamma
+// (R = [da db]^T (mask . xh): 64 x 64, ssa = the masked column sums): the H100 host formulas, in one launch
+template <typename GT, typename OT>
+__global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict__ RED, const __nv_bfloat16* __restrict__ WA,
+                                                         const __nv_bfloat16* __restrict__ WB, const GT* __restrict__ GAM,
+                                                         const GT* __restrict__ BET, OT* __restrict__ DWA, OT* __restrict__ DWB,
+                                                         GT* __restrict__ DGAM, GT* __restrict__ DBET) {
+  constexpr int CM = 64;
+  const int t = threadIdx.x;
+  // RED rows 0..63: R^T [k][ce]; row 64: ssa[ce]
+  for (int v = t; v < 2 * CH * CM; v += 256) {
+    const int ce = v / CM, k = v % CM;
+    const float r = RED[k * CM + ce], ss = RED[CM * CM + ce];
+    const float val = to_f(GAM[k]) * r + ss * to_f(BET[k]);
+    if (ce < CH) DWA[ce * CM + k] = from_f<OT>(val); else DWB[(ce - CH) * CM + k] = from_f<OT>(val);
+  }
+  if (t < CM) {
+    const int k = t;
+    const float g = to_f(GAM[k]);
+    float dg = 0.f, db = 0.f;
+    for (int ce = 0; ce < 2 * CH; ++ce) {
+      const __nv_bfloat16 wraw = ce < CH ? WA[ce * CM + k] : WB[(ce - CH) * CM + k];
+      const float wf = __bfloat162float(__float2bfloat16_rn(__bfloat162float(wraw) * g));   // exactly the bf16 Wf the kernel multiplied by
+      dg += wf * RED[k * CM + ce];
+      db += wf * RED[CM * CM + ce];
+    }
+    DGAM[k] = from_f<GT>(dg / g); DBET[k] = from_f<GT>(db / g);
+  }
+}
+}  // namespace
+
 // dA, dB: [S, N*32] (a row's channels contiguous); m: [S, N, 64]; stats: [N, S, 2] from the forward prologue;
-// mask: bool [S, N].  Returns dm [1, S, N, 64] and dWa, dWb [32, 64], dgamma, dbeta [64] (fp32).
+// mask: bool [S, N].  Returns dm [1, S, N, 64] and dWa, dWb [32, 64] (in wa's dtype), dgamma, dbeta [64] (in gamma's dtype).
 std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m, torch::Tensor stats, torch::Tensor mask,
                                             torch::Tensor gamma, torch::Tensor beta, torch::Tensor wa, torch::Tensor wb) {
   using namespace pb;
@@ -1089,9 +1125,9 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
   TORCH_CHECK(dA.is_contiguous() && dB.is_contiguous() && dA.numel() == S * N * CH && dB.numel() == S * N * CH, "dA, dB: [S, N*32]");
   TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == torch::kFloat32 && stats.numel() == S * N * 2, "stats: fp32 [N, S, 2]");
   TORCH_CHECK(mask.is_contiguous() && mask.scalar_type() == torch::kBool && mask.numel() == S * N, "mask: bool [S, N]");
-  auto g = gamma.detach().to(torch::kFloat32), bta = beta.detach().to(torch::kFloat32);
-  // Wf = [gamma . Wa ; gamma . Wb]: the projection backward hands back g = dout . gamma = dL/dxh directly
-  auto wf = torch::cat({wa.detach().to(torch::kFloat32) * g.view({1, CM}), wb.detach().to(torch::kFloat32) * g.view({1, CM})}, 0).to(torch::kBFloat16).contiguous();
+  TORCH_CHECK(wa.scalar_type() == torch::kBFloat16 && wb.scalar_type() == torch::kBFloat16 && wa.is_contiguous() && wb.is_contiguous(), "wa, wb: bf16 [32, 64]");
+  TORCH_CHECK(gamma.scalar_type() == beta.scalar_type() && gamma.is_contiguous() && beta.is_contiguous(), "gamma, beta");
+  const bool gf = gamma.scalar_type() == torch::kFloat32;
   auto dm = torch::empty({1, S, N, (long)CM}, m.options());
   const int ntiles = (int)(N * (S / BS));
   const int grid = std::min(ntiles, num_sms(m.device().index()));
@@ -1104,29 +1140,41 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
                                CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   CUtensorMap mm = make_map<2>(mask.data_ptr(), {(uint64_t)N, (uint64_t)S}, {(uint64_t)N}, {16, BS}, CU_TENSOR_MAP_SWIZZLE_NONE, "mask",
                                CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
-  CUtensorMap wfm = make_map<2>(wf.data_ptr(), {(uint64_t)CM, (uint64_t)CM}, {(uint64_t)CM}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "wf");
-  static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_bwd_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  opm_prologue_bwd_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, dam, dbm, xm, sm, mm, wfm, dmm, part.data_ptr<float>());
+  auto st = at::cuda::getCurrentCUDAStream();
+  const auto* wap = reinterpret_cast<const __nv_bfloat16*>(wa.data_ptr<at::BFloat16>());
+  const auto* wbp = reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>());
+  auto dwa = torch::empty({(long)CH, (long)CM}, wa.options()), dwb = torch::empty({(long)CH, (long)CM}, wb.options());
+  auto dgam = torch::empty({(long)CM}, gamma.options()), dbet = torch::empty({(long)CM}, beta.options());
+  if (gf) {
+    static bool attr = false;
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_bwd_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+    opm_prologue_bwd_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, dam, dbm, xm, sm, mm, wap, wbp, gamma.data_ptr<float>(), dmm, part.data_ptr<float>());
+  } else {
+    static bool attr = false;
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_bwd_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+    opm_prologue_bwd_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, dam, dbm, xm, sm, mm, wap, wbp,
+        reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), dmm, part.data_ptr<float>());
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto red = torch::mm(torch::ones({1, (long)grid}, part.options()), part.view({grid, -1})).view({(long)CM + 1, (long)CM});
-  auto R = red.slice(0, 0, CM).t();                     // [da db]^T (mask . xh): [64 (c|e)][64 k]
-  auto ssa = red[CM];                                   // sum_r mask_r [da db]: [64 (c|e)]
-  auto dwa = R.slice(0, 0, CH) * g.view({1, CM}) + ssa.slice(0, 0, CH).view({CH, 1}) * bta.view({1, CM});
-  auto dwb = R.slice(0, CH, 2 * CH) * g.view({1, CM}) + ssa.slice(0, CH, 2 * CH).view({CH, 1}) * bta.view({1, CM});
-  auto wff = wf.to(torch::kFloat32);                    // exactly what the kernel multiplied by
-  auto dgamma = (wff * R).sum(0) / g;
-  auto dbeta = wff.t().matmul(ssa) / g;
-  return {dm, dwa, dwb, dgamma, dbeta};
+  auto red = colsum(part);                                           // [65, 64] fp32, in split order
+  auto* dwap = reinterpret_cast<__nv_bfloat16*>(dwa.data_ptr<at::BFloat16>());
+  auto* dwbp = reinterpret_cast<__nv_bfloat16*>(dwb.data_ptr<at::BFloat16>());
+  if (gf) opm_pbwd_finalize<float, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp, gamma.data_ptr<float>(), beta.data_ptr<float>(),
+                                                                     dwap, dwbp, dgam.data_ptr<float>(), dbet.data_ptr<float>());
+  else opm_pbwd_finalize<__nv_bfloat16, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp,
+      reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(beta.data_ptr<at::BFloat16>()), dwap, dwbp,
+      reinterpret_cast<__nv_bfloat16*>(dgam.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dbet.data_ptr<at::BFloat16>()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dm, dwa, dwb, dgam, dbet};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "sm100 fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
         py::arg("O"), py::arg("norm"), py::arg("wo"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none());
   m.def("opm_dgrad", &opm_dgrad, "sm100 fused OPM dO: (dz @ Wo) / n straight into the grouped layout, dz/n and dbias alongside",
-        py::arg("dz"), py::arg("bits"), py::arg("wo"), py::arg("ni"), py::arg("nj"));
+        py::arg("dz"), py::arg("bits"), py::arg("wo"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
   m.def("opm_prologue_bwd", &opm_prologue_bwd, "sm100 fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");
-  m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"));
+  m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
   m.def("opm_prologue", &opm_prologue, "sm100 fused OPM prologue: LN + both projections + mask -> A2, BT (grouped layouts), mask count, LN stats [N][S]",
         py::arg("m"), py::arg("mask"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wa"), py::arg("wb"), py::arg("save_stats") = true, py::arg("want_norm") = false);
 }

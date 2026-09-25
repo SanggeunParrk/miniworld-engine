@@ -6,6 +6,10 @@ from bench import timeit
 here = pathlib.Path(__file__).parent
 src = here.parent / "src/miniworld_engine/integrations/csrc/sm100"
 build = pathlib.Path(os.environ["MINIWORLD_ENGINE_JIT_ROOT"]) / "pwa_sm100_dev"; build.mkdir(parents=True, exist_ok=True)
+if os.environ.get("AB_OLD"):
+    import shutil; old_dir = pathlib.Path(os.environ["MINIWORLD_ENGINE_JIT_ROOT"]) / "pwa_sm100_old"; old_dir.mkdir(parents=True, exist_ok=True)
+    ext_old = load("pwa_sm100_old", [os.environ["AB_OLD"]], extra_include_paths=[str(src)], build_directory=str(old_dir),
+                   extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a", "-lineinfo", "--use_fast_math"], verbose=False)
 ext = load("pwa_sm100_dev", [str(src / "pwa_sm100.cu")], extra_include_paths=[str(src)], build_directory=str(build),
            extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a", "-lineinfo", "--use_fast_math"], verbose=False)
 torch.manual_seed(0)
@@ -99,3 +103,15 @@ if "dgv" in what:
     t = timeit(lambda: ext.dgv_bwd(dgv, y, x, dout, wgv.t().contiguous(), lnw, 1e-5))
     byts = (dgv.numel() + 4 * x.numel()) * 2
     print(f"dgv_bwd: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
+
+
+if "abfwd" in what:
+    m = torch.randn(S, N, D, device="cuda", dtype=bf); y = torch.randn(S, N, D, device="cuda", dtype=bf)
+    w = torch.softmax(torch.randn(H, N, N, device="cuda") * 2, -1).to(bf); v = torch.randn(H, N, S * C, device="cuda", dtype=bf)
+    wg = (torch.randn(H * C, D, device="cuda") * 0.2).to(bf); wo = (torch.randn(D, H * C, device="cuda") * 0.05).to(bf)
+    import statistics
+    ta, tb = [], []
+    for _ in range(7):
+        ta.append(timeit(lambda: ext_old.pwa_fwd(w, v, y, wg, wo, m, False, None, 1.0), rounds=3))
+        tb.append(timeit(lambda: ext.pwa_fwd(w, v, y, wg, wo, m, False, None, 1.0), rounds=3))
+    print(f"A/B pwa_fwd: old {statistics.median(ta)*1e3:.1f} us  new {statistics.median(tb)*1e3:.1f} us  (interleaved, shared GPU)", flush=True)

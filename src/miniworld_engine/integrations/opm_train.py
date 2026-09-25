@@ -243,15 +243,16 @@ class _OpmMath(torch.autograd.Function):
         s, n = m.shape[0], m.shape[1]
         if torch.cuda.get_device_capability(dz.device) == (10, 0):
             # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
-            dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, wo.detach().to(bf).contiguous(), n, n)
+            dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, wo.detach().to(bf).contiguous(), n, n, int(bo.dtype == bf))
             dA = torch.mm(bt.t(), dO.t())                                            # [s, (i,c)]
             dB = torch.mm(a2.t(), dO)                                                # [s, (j,e)]
             del dO
             if o is None:
                 o = torch.matmul(a2, bt.t())
-            dWo = ext.opm_dwo(dzp, o, n, n)
+            dWo = ext.opm_dwo(dzp, o, n, n, int(wo.dtype == bf))                      # gradients come back in the parameters' dtype
             del o
-            dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(dA, dB, m, stats, mask16, lnw, lnb, wa, wb)
+            dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(dA, dB, m, stats, mask16, lnw.detach(), lnb.detach(),
+                                                            wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous())
             return (dm, None, dgam.to(lnw.dtype), dbet.to(lnb.dtype), dWa.to(wa.dtype), dWb.to(wb.dtype),
                     dWo.to(wo.dtype), dbo.to(bo.dtype), None, None)
         bw = wo.detach().t().contiguous().to(bf)                                     # Wo^T [CH*CH, CZ]: wgmma wants k = z contiguous

@@ -189,6 +189,9 @@ __device__ __forceinline__ float2 fma2(float2 a, float2 b, float2 c) {
 // bf16 pair (one 32-bit word) -> two fp32: the low half is the first element
 __device__ __forceinline__ float2 bf2f(uint32_t u) { return make_float2(__uint_as_float(u << 16), __uint_as_float(u & 0xffff0000u)); }
 __device__ __forceinline__ float to_f(float x) { return x; }
+template <typename T> __device__ __forceinline__ T from_f(float x);
+template <> __device__ __forceinline__ float from_f<float>(float x) { return x; }
+template <> __device__ __forceinline__ __nv_bfloat16 from_f<__nv_bfloat16>(float x) { return __float2bfloat16_rn(x); }
 __device__ __forceinline__ float to_f(__nv_bfloat16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ uint32_t pack2(float a, float b) {
   const __nv_bfloat162 h = __float22bfloat162_rn(make_float2(a, b));
@@ -197,6 +200,28 @@ __device__ __forceinline__ uint32_t pack2(float a, float b) {
 // element offset of (row, col) inside a [rows][64] bf16 tile with the 128-byte XOR swizzle
 __device__ __forceinline__ int sw128(int row, int col) { return row * 64 + ((((col >> 3) ^ (row & 7))) << 3) + (col & 7); }
 
+
+// ---------------------------------------------------------------- deterministic split reduction
+// out[w] = sum_k part[k][w] in split order (two passes: chunks of splits, then the chunk sums), written as OutT.
+// torch's dim-0 reduce of a tall, thin buffer and cuBLAS's GEMV both run far below bandwidth on these shapes.
+template <typename OutT>
+__global__ void __launch_bounds__(256) colsum_kernel(const float* __restrict__ P, OutT* __restrict__ OUT, float* __restrict__ TMP,
+                                                     int splits, int chunk, int G, long width, int final_pass) {
+  const long vcols = width >> 2;
+  const long t = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  const long v4 = t % vcols; const int g = (int)(t / vcols);
+  if (g >= G) return;
+  const int k0 = g * chunk, k1 = min(k0 + chunk, splits);
+  float4 s = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll 4
+  for (int k = k0; k < k1; ++k) {
+    const float4 q = __ldg(reinterpret_cast<const float4*>(P + (long)k * width) + v4);
+    s.x += q.x; s.y += q.y; s.z += q.z; s.w += q.w;
+  }
+  if (!final_pass) { reinterpret_cast<float4*>(TMP + (long)g * width)[v4] = s; return; }
+  OutT* o = OUT + v4 * 4;
+  o[0] = from_f<OutT>(s.x); o[1] = from_f<OutT>(s.y); o[2] = from_f<OutT>(s.z); o[3] = from_f<OutT>(s.w);
+}
 }  // namespace sm100
 
 // ---------------------------------------------------------------- host: tensor maps
@@ -235,6 +260,33 @@ inline CUtensorMap make_map(const void* base, const uint64_t (&dims)[R], const u
                             CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled(", what, ") failed: ", (int)r);
   return m;
+}
+
+// sum a [splits, ...] fp32 buffer over dim 0 -> dtype (fp32 or bf16), deterministic
+inline torch::Tensor colsum(const torch::Tensor& part, torch::ScalarType dtype = torch::kFloat32) {
+  TORCH_CHECK(part.scalar_type() == torch::kFloat32 && part.is_contiguous(), "colsum: contiguous fp32 partials");
+  const int splits = (int)part.size(0);
+  const long width = part.numel() / splits;
+  TORCH_CHECK(width % 4 == 0, "colsum: width must be a multiple of 4");
+  auto out = torch::empty(part.sizes().slice(1), part.options().dtype(dtype));
+  const long vcols = width / 4;
+  long G = 16384 / std::max<long>(vcols, 1);
+  G = std::max<long>(1, std::min<long>({G, 64, (long)splits / 4}));
+  const int chunk = (int)((splits + G - 1) / G);
+  G = (splits + chunk - 1) / chunk;
+  auto st = at::cuda::getCurrentCUDAStream();
+  auto launch = [&](const float* src, int s_, int c_, int g_, float* tmp, int fin) {
+    const long threads = vcols * g_;
+    const int blocks = (int)((threads + 255) / 256);
+    if (dtype == torch::kFloat32) colsum_kernel<float><<<blocks, 256, 0, st>>>(src, out.data_ptr<float>(), tmp, s_, c_, g_, width, fin);
+    else colsum_kernel<__nv_bfloat16><<<blocks, 256, 0, st>>>(src, reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), tmp, s_, c_, g_, width, fin);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  };
+  if (G == 1) { launch(part.data_ptr<float>(), splits, splits, 1, nullptr, 1); return out; }
+  auto tmp = torch::empty({G, width}, part.options());
+  launch(part.data_ptr<float>(), splits, chunk, (int)G, tmp.data_ptr<float>(), 0);
+  launch(tmp.data_ptr<float>(), (int)G, (int)G, 1, nullptr, 1);
+  return out;
 }
 inline int num_sms(int dev) {
   static int sms[16] = {0};
