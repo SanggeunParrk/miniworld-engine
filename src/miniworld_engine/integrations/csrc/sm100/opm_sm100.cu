@@ -754,19 +754,23 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
 // column sums ssa are row 64 of the same accumulator.  Two compute groups take alternate tiles.
 namespace pb {
 constexpr int CM = 64, BS = 128;
-constexpr int NST = 3;                                     // the tile loads are latency-bound: ring depth is throughput
+// The tile loads are latency-bound, so what matters is how long a stage is held.  Two rings: da | db are the dW GEMM's
+// operand and stay until it retires (a tile later), but x, the stats and the mask are read once at the start of the
+// compute and leave at once -- in one ring they were all held for the dW GEMM.
+constexpr int NSA = 4, NSX = 2;
 constexpr int DAT = BS * CH;                               // da or db tile [128 s][32]
 constexpr int XT = BS * CM;                                // x tile [128 s][64]
 constexpr int STAT = BS * 2;                               // (mean, rstd) per row, fp32
 constexpr int MKT = BS * 16;                               // mask bytes [128 s][16 tokens]
-constexpr int STAGE_B = (2 * DAT + XT) * 2 + STAT * 4 + MKT;   // bytes
+constexpr int STAGE_A = 2 * DAT * 2;                       // bytes: da | db
+constexpr int STAGE_X = 20480;                             // bytes: x | stats | mask, padded to 1 KiB
 constexpr int A2T = 2 * XT;                                // [mask . xh | mask column block], [2][128 s][64]
-constexpr int THREADS = 320;                               // producer, MMA, two groups of 4 compute warps
-constexpr int SMEM = 1024 + NST * STAGE_B + (2 * A2T + 2 * XT + CM * CM) * 2 + 256;
+constexpr int THREADS = 352;                               // warp 0: da/db, warp 1: MMA, warps 2-9: two compute groups, warp 10: x
+constexpr int SMEM = 1024 + NSA * STAGE_A + NSX * STAGE_X + (2 * A2T + 2 * XT + CM * CM) * 2 + 256;
+static_assert(XT * 2 + STAT * 4 + MKT <= STAGE_X && STAGE_A % 1024 == 0, "stage layout");
 constexpr uint32_t IDESC_DY = idesc_bf16(128, CM, 0, 1);   // A = [da|db] K-major, B = Wf MN-major
 constexpr uint32_t IDESC_DW = idesc_bf16(128, CM, 1, 1);   // A = (mask . xh)^T MN-major, B = [da db] MN-major
 constexpr int D2 = 128;                                    // TMEM column of the dW accumulator (dy: 0 and 64)
-static_assert(STAGE_B % 1024 == 0, "stage alignment");
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace pb
 
@@ -785,14 +789,17 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
   const int NSB = S / BS;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
-  unsigned char* sStage = smb;
-  __nv_bfloat16* sA2 = reinterpret_cast<__nv_bfloat16*>(smb + NST * STAGE_B);   // [2 groups][A2T]
+  unsigned char* sStage = smb;                                                    // [NSA][da | db]
+  unsigned char* sXs = smb + NSA * STAGE_A;                                        // [NSX][x | stats | mask]
+  __nv_bfloat16* sA2 = reinterpret_cast<__nv_bfloat16*>(sXs + NSX * STAGE_X);     // [2 groups][A2T]
   __nv_bfloat16* sDM = sA2 + 2 * A2T;                                             // [2 groups][XT]
   __nv_bfloat16* sWF = sDM + 2 * XT;                                              // [64][64]
   uint64_t* bars = reinterpret_cast<uint64_t*>(sWF + CM * CM);
-  uint64_t* full = bars;             // [NST]
-  uint64_t* empty = full + NST;      // [NST]  the dW GEMM of the stage's tile retired
-  uint64_t* d1f = empty + NST;       // [2]    dy accumulator of group gr
+  uint64_t* full = bars;             // [NSA]
+  uint64_t* empty = full + NSA;      // [NSA]  the dW GEMM of the stage's tile retired
+  uint64_t* xfull = empty + NSA;     // [NSX]
+  uint64_t* xempty = xfull + NSX;    // [NSX]  count 4: the compute group has x / stats / mask in registers
+  uint64_t* d1f = xempty + NSX;      // [2]    dy accumulator of group gr
   uint64_t* d1e = d1f + 2;           // [2]    count 4
   uint64_t* a2f = d1e + 2;           // [2]    count 4: group gr wrote (mask . xh)
   uint64_t* a2e = a2f + 2;           // [2]    the dW GEMM reading it retired
@@ -800,7 +807,8 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
   uint32_t* tslot = reinterpret_cast<uint32_t*>(done + 1);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int k = 0; k < NST; ++k) { bar_init(full + k, 1); bar_init(empty + k, 1); }
+    for (int k = 0; k < NSA; ++k) { bar_init(full + k, 1); bar_init(empty + k, 1); }
+    for (int k = 0; k < NSX; ++k) { bar_init(xfull + k, 1); bar_init(xempty + k, 4); }
     for (int k = 0; k < 2; ++k) { bar_init(d1f + k, 1); bar_init(d1e + k, 4); bar_init(a2f + k, 4); bar_init(a2e + k, 1); }
     bar_init(done, 1);
     bar_init_fence();
@@ -824,28 +832,39 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = *tslot;
-  auto stage_ptr = [&](int st) { return sStage + st * STAGE_B; };
-  // stage layout: da [128][32] | db [128][32] | x [128][64] | stats [128][2] fp32 | mask [128][16] bytes
+  auto stage_ptr = [&](int st) { return sStage + st * STAGE_A; };
+  auto xstage_ptr = [&](int st) { return sXs + st * STAGE_X; };
+  // stage layouts: da [128][32] | db [128][32];  x [128][64] | stats [128][2] fp32 | mask [128][16] bytes
 
   if (warp == 0) {
     if (lane == 0) {
       int g = 0;
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++g) {
-        const int i = t / NSB, s0 = (t % NSB) * BS, st = g % NST;
-        if (g >= NST) wait(empty + st, ((g / NST) - 1) & 1);
+        const int i = t / NSB, s0 = (t % NSB) * BS, st = g % NSA;
+        if (g >= NSA) wait(empty + st, ((g / NSA) - 1) & 1);
         unsigned char* p = stage_ptr(st);
-        expect_tx(full + st, STAGE_B);
+        expect_tx(full + st, STAGE_A);
         load_3d(&damap, p, full + st, 0, i, s0);
         load_3d(&dbmap, p + DAT * 2, full + st, 0, i, s0);
-        load_3d(&xmap, p + 2 * DAT * 2, full + st, 0, i, s0);
-        load_2d(&smap, p + (2 * DAT + XT) * 2, full + st, 2 * s0, i);
-        load_2d(&mmap, p + (2 * DAT + XT) * 2 + STAT * 4, full + st, i & ~15, s0);
+      }
+    }
+  } else if (warp == 10) {
+    if (lane == 0) {
+      int g = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++g) {
+        const int i = t / NSB, s0 = (t % NSB) * BS, st = g % NSX;
+        if (g >= NSX) wait(xempty + st, ((g / NSX) - 1) & 1);
+        unsigned char* p = xstage_ptr(st);
+        expect_tx(xfull + st, XT * 2 + STAT * 4 + MKT);
+        load_3d(&xmap, p, xfull + st, 0, i, s0);
+        load_2d(&smap, p + XT * 2, xfull + st, 2 * s0, i);
+        load_2d(&mmap, p + XT * 2 + STAT * 4, xfull + st, i & ~15, s0);
       }
     }
   } else if (warp == 1) {
     if (lane == 0) {
       auto dw_gemm = [&](int lt) {             // dW += (mask . xh | mask)^T-block . [da db] for tile lt
-        const int gr = lt & 1, st = lt % NST;
+        const int gr = lt & 1, st = lt % NSA;
         wait(a2f + gr, (lt >> 1) & 1);
         tc_fence_after();
         const __nv_bfloat16* a2 = sA2 + gr * A2T;
@@ -858,8 +877,8 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
       };
       int lt = 0;
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
-        const int st = lt % NST, gr = lt & 1;
-        wait(full + st, (lt / NST) & 1);
+        const int st = lt % NSA, gr = lt & 1;
+        wait(full + st, (lt / NSA) & 1);
         if (lt >= 2) wait(d1e + gr, ((lt >> 1) - 1) & 1);
         tc_fence_after();
         const __nv_bfloat16* dab = reinterpret_cast<const __nv_bfloat16*>(stage_ptr(st));
@@ -879,7 +898,18 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
     const int bar_id = 1 + gr;
     int lt = gr;
     for (int t = blockIdx.x + gr * gridDim.x; t < ntiles; t += 2 * gridDim.x, lt += 2) {
-      const int i = t / NSB, s0 = (t % NSB) * BS, st = lt % NST;
+      const int i = t / NSB, s0 = (t % NSB) * BS, sx = lt % NSX;
+      // x, the stats and the mask first (they do not wait for the tensor core), then their stage is free
+      wait(xfull + sx, (lt / NSX) & 1);
+      const unsigned char* px = xstage_ptr(sx);
+      const __nv_bfloat16* xr = reinterpret_cast<const __nv_bfloat16*>(px) + r * 64;
+      const float2 stt = reinterpret_cast<const float2*>(px + XT * 2)[r];
+      const float mk = px[XT * 2 + STAT * 4 + r * 16 + (i & 15)] ? 1.f : 0.f;
+      uint4 xu[8];
+#pragma unroll
+      for (int c8 = 0; c8 < 8; ++c8) xu[c8] = *reinterpret_cast<const uint4*>(xr + ((c8 ^ (r & 7)) << 3));
+      __syncwarp();
+      if (lane == 0) arrive(xempty + sx);
       wait(d1f + gr, (lt >> 1) & 1);
       tc_fence_after();
       float gv[CM];
@@ -889,17 +919,13 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
       tc_fence_before();
       __syncwarp();
       if (lane == 0) arrive(d1e + gr);
-      const unsigned char* p = stage_ptr(st);
-      const __nv_bfloat16* xr = reinterpret_cast<const __nv_bfloat16*>(p + 2 * DAT * 2) + r * 64;
-      const float2 stt = reinterpret_cast<const float2*>(p + (2 * DAT + XT) * 2)[r];
-      const float mk = p[(2 * DAT + XT) * 2 + STAT * 4 + r * 16 + (i & 15)] ? 1.f : 0.f;
       const float mean = stt.x, rstd = stt.y;
       // xh, and the two row sums of g = mask . dy
       float xh[CM];
       float gs = 0.f, gx = 0.f;
 #pragma unroll
       for (int c8 = 0; c8 < 8; ++c8) {
-        const uint4 u = *reinterpret_cast<const uint4*>(xr + ((c8 ^ (r & 7)) << 3));
+        const uint4 u = xu[c8];
         const float2 f0 = bf2f(u.x), f1 = bf2f(u.y), f2 = bf2f(u.z), f3 = bf2f(u.w);
         const float xs[8] = {f0.x, f0.y, f1.x, f1.y, f2.x, f2.y, f3.x, f3.y};
 #pragma unroll
