@@ -1478,8 +1478,7 @@ std::vector<torch::Tensor> pwa_glue(torch::Tensor o, torch::Tensor y, torch::Ten
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_glue_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   pwa_glue_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, om, rm, ym, gm, wtm, dom, dgm, dmp, (float)dscale, dwo.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto ones = torch::ones({1, (long)grid}, dwo.options());
-  return {dO, torch::mm(ones, dwo.view({grid, -1})).view({(long)D, (long)HC})};
+  return {dO, colsum(dwo)};                                          // [64, HC], the CTAs' slabs in split order
 }
 
 // dv[h][j][(s,c)] = sum_i w16[h][i][j] do[h][i][(s,c)] into dgv[..., 256:] (natural [S][N][512])
@@ -1533,8 +1532,8 @@ std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Te
         reinterpret_cast<const __nv_bfloat16*>(lnw.data_ptr<at::BFloat16>()), dw.data_ptr<float>(), dln.data_ptr<float>());
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto dwt = torch::mm(torch::ones({1, (long)grid}, dw.options()), dw.view({grid, -1})).view({(long)D, (long)KD});
-  auto ln = torch::mm(torch::ones({1, (long)grid * 4}, dln.options()), dln.view({grid * 4, -1})).view({2, (long)D});
+  auto dwt = colsum(dw);
+  auto ln = colsum(dln).view({2, (long)D});
   return {dm, dwt.t(), ln[0], ln[1]};
 }
 
