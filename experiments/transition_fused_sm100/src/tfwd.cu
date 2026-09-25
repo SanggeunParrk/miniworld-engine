@@ -29,6 +29,11 @@ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 // tensor memory columns
 constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;           // [a|b] x2 (128 cols each), h x2 (32 packed cols each), acc (128)
 constexpr uint32_t IDESC = idesc_bf16(128, 128);
+#ifdef SWIGLU_SPLIT
+constexpr int SW_ARRIVALS = 8;                                 // both SwiGLU warpgroups work on every chunk (column halves)
+#else
+constexpr int SW_ARRIVALS = 4;                                 // the two warpgroups alternate chunks
+#endif
 #ifdef TRACE
 // clock64 stamps for the first TRACE_CTAS CTAs: trace[cta][role][event]; role 0 MMA, 1 SwiGLU (warp 4), 2 LN/epi (warp 8)
 constexpr int TR_N = 1024;
@@ -67,8 +72,8 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
     for (int s = 0; s < 2; ++s) {
       mbar_init(&B.wab_full[s], 1); mbar_init(&B.ws_full[s], 1);
       mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1);
-      mbar_init(&B.xn_full[s], 1); mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.ab_empty[s], 4);
-      mbar_init(&B.h_full[s], 4); mbar_init(&B.sq_done[s], 1);
+      mbar_init(&B.xn_full[s], 1); mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.ab_empty[s], SW_ARRIVALS);
+      mbar_init(&B.h_full[s], SW_ARRIVALS); mbar_init(&B.sq_done[s], 1);
     }
     mbar_init(&B.out_full, 1); mbar_init(&B.out_empty, 4);
     fence_barrier_init();
@@ -188,6 +193,53 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
       else { for (int c = 0; c < nch; ++c) squeeze(c); }
     }
   } else if ((warp >= 4 && warp < 8) || warp >= 12) {
+#ifdef SWIGLU_SPLIT
+    // ------------------------------------------------------------------------------------------ SwiGLU: both warpgroups on every chunk,
+    // split by columns (warps 4-7 hidden units 0..31 -> h columns 0..15, warps 12-15 units 32..63 -> h columns 16..31), each in two
+    // 16-column steps with the second step's TMEM loads in flight while the first is computed
+    setmaxnreg_inc<152>();
+    const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
+    const int half = warp >= 12 ? 1 : 0;
+    for (int c = 0; c < nch; ++c) {
+      const int s = c & 1, u = c >> 1;
+      if (lane == 0 && warp == 4) TR(1, 4 * c);
+      mbar_wait(&B.ex_done[s], u & 1);
+      if (lane == 0 && warp == 4) TR(1, 4 * c + 1);
+      tc_fence_after();
+      uint32_t hp[16];
+      {
+        uint32_t a[2][16], b[2][16];
+        const uint32_t base = trow + T_AB + s * 128 + half * 32;
+        tmem_ld16(base, a[0]);
+        tmem_ld16(base + 64, b[0]);
+        tmem_wait_ld();
+        tmem_ld16(base + 16, a[1]);
+        tmem_ld16(base + 64 + 16, b[1]);
+#pragma unroll
+        for (int q = 0; q < 2; ++q) {
+#pragma unroll
+          for (int k = 0; k < 8; ++k) {
+            const float a0 = __uint_as_float(a[q][2 * k]), a1 = __uint_as_float(a[q][2 * k + 1]);
+            const float b0 = __uint_as_float(b[q][2 * k]), b1 = __uint_as_float(b[q][2 * k + 1]);
+            hp[q * 8 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+          }
+          if (q == 0) tmem_wait_ld();
+        }
+      }
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) mbar_arrive(&B.ab_empty[s]);
+      if (lane == 0 && warp == 4) TR(1, 4 * c + 2);
+      if (c >= 2) mbar_wait(&B.sq_done[s], (u - 1) & 1);
+      tc_fence_after();
+      tmem_st16(trow + T_H + s * 32 + half * 16, hp);
+      tmem_wait_st();
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) mbar_arrive(&B.h_full[s]);
+      if (lane == 0 && warp == 4) TR(1, 4 * c + 3);
+    }
+#else
     // ------------------------------------------------------------------------------------------ SwiGLU, two warpgroups in ping-pong:
     // warps 4-7 take the even chunks ([a|b] / h buffer 0), warps 12-15 the odd ones (buffer 1)
     setmaxnreg_inc<152>();
@@ -273,6 +325,7 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
       if (lane == 0) mbar_arrive(&B.h_full[s]);
       if (lane == 0 && (warp == 4 || warp == 12)) TR(1, 4 * c + 3);
     }
+#endif
   } else if (warp >= 8) {
     // ------------------------------------------------------------------------------------------ LayerNorm + residual epilogue
     setmaxnreg_inc<152>();
