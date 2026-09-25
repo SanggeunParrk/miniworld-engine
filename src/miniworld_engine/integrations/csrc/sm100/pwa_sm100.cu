@@ -440,13 +440,23 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
       }
       wait(outf, lt & 1);
       tc_fence_after();
-#pragma unroll 1
+      // the whole accumulator leaves TMEM first (as bf16: the update is rounded there anyway), so the next tile's out
+      // GEMMs are not held behind this tile's residual loads
+      uint32_t pk[BS][D / 2];
+#pragma unroll
       for (int si = 0; si < BS; ++si) {
         float v[D];
         tmem_ld32(tmem_at(tmem + COL_OUT + si * D, q * 32, 0), v);
         tmem_ld32(tmem_at(tmem + COL_OUT + si * D, q * 32, 32), v + 32);
         tmem_wait_ld();
-        if (si == BS - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(oute); }
+#pragma unroll
+        for (int c = 0; c < D / 2; ++c) pk[si][c] = pack2(v[2 * c], v[2 * c + 1]);
+      }
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) arrive(oute);
+#pragma unroll
+      for (int si = 0; si < BS; ++si) {
         if (s0 + si >= S) continue;
         const size_t rowoff = ((size_t)(s0 + si) * N + i0 + r) * D;
         const uint4* rp = reinterpret_cast<const uint4*>(MSA + rowoff);
@@ -459,7 +469,8 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
           for (int k = 0; k < 4; ++k) {
             const int c = c8 * 8 + 2 * k;
             // the stock module rounds the update to bf16 before the (dropout and the) residual add
-            float u0 = __bfloat162float(__float2bfloat16(v[c])), u1 = __bfloat162float(__float2bfloat16(v[c + 1]));
+            const float2 uu = bf2f(pk[si][c8 * 4 + k]);
+            float u0 = uu.x, u1 = uu.y;
             if (DMASK != nullptr) { u0 = __bfloat162float(__float2bfloat16(u0 * dm[c])); u1 = __bfloat162float(__float2bfloat16(u1 * dm[c + 1])); }
             const float2 res = bf2f(rw[k]);
             rw[k] = pack2(res.x + u0, res.y + u1);
