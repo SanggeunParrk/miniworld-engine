@@ -1,0 +1,4 @@
+gate_ldst: 365 clk per chunk (ld/st + trivial math)
+gate_dx: 1492 clk per chunk (MUFU floor 1024 clk/chunk)
+gate_pipe: 1349 clk per chunk (pipelined, MUFU floor 1024)
+swiglu_fwd: 1151 clk per chunk (MUFU floor 1024 clk/chunk)

@@ -199,6 +199,29 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
       if (lane == 0 && (warp == 4 || warp == 12)) TR(1, 4 * c + 1);
       tc_fence_after();
       uint32_t hp[32];
+#ifndef SWIGLU_NOPIPE
+      // four 16-column steps; the TMEM loads of step q + 1 are in flight while step q is computed
+      {
+        uint32_t a[2][16], b[2][16];
+        tmem_ld16(trow + T_AB + s * 128, a[0]);
+        tmem_ld16(trow + T_AB + s * 128 + 64, b[0]);
+        tmem_wait_ld();
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          if (q < 3) {
+            tmem_ld16(trow + T_AB + s * 128 + (q + 1) * 16, a[(q + 1) & 1]);
+            tmem_ld16(trow + T_AB + s * 128 + 64 + (q + 1) * 16, b[(q + 1) & 1]);
+          }
+#pragma unroll
+          for (int k = 0; k < 8; ++k) {
+            const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
+            const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
+            hp[q * 8 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+          }
+          if (q < 3) tmem_wait_ld();
+        }
+      }
+#else
 #pragma unroll
       for (int half = 0; half < 2; ++half) {
         uint32_t a[32], b[32];
@@ -228,6 +251,7 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
 #endif
         }
       }
+#endif
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.ab_empty[s]);
