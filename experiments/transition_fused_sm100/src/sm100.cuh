@@ -38,9 +38,22 @@ DEVI bool mbar_try_wait(uint64_t* b, uint32_t parity) {
                : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");
   return ok != 0;
 }
+DEVI bool mbar_test(uint64_t* b, uint32_t parity) {
+  uint32_t ok;
+  asm volatile("{ .reg .pred p; mbarrier.test_wait.parity.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
+               : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");
+  return ok != 0;
+}
 DEVI void mbar_wait(uint64_t* b, uint32_t parity) { while (!mbar_try_wait(b, parity)) { } }
 
 DEVI void fence_proxy_async() { asm volatile("fence.proxy.async.shared::cta;" ::: "memory"); }
+template <int N> DEVI void setmaxnreg_inc() { asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" :: "n"(N)); }
+template <int N> DEVI void setmaxnreg_dec() { asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;" :: "n"(N)); }
+DEVI bool elect_one() {
+  uint32_t pred;
+  asm volatile("{ .reg .pred p; .reg .b32 r; elect.sync r|p, 0xffffffff; selp.u32 %0, 1, 0, p; }" : "=r"(pred));
+  return pred != 0;
+}
 DEVI void named_bar_sync(int id, int n) { asm volatile("bar.sync %0, %1;" :: "r"(id), "r"(n) : "memory"); }
 
 // ------------------------------------------------------------------ TMA

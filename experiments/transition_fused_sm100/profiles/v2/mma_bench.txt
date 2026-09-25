@@ -1,0 +1,14 @@
+mma_ss16: 364 clk per K=128 chain, 1440 FLOP/clk/SM (peak 8192)
+mma_ss32: 364 clk per K=128 chain, 2881 FLOP/clk/SM (peak 8192)
+mma_ss64: 384 clk per K=128 chain, 5458 FLOP/clk/SM (peak 8192)
+mma_ss128: 512 clk per K=128 chain, 8188 FLOP/clk/SM (peak 8192)
+mma_ts128: 512 clk per K=128 chain, 8190 FLOP/clk/SM (peak 8192)
+mma_ss128_busy: 512 clk per K=128 chain, 8189 FLOP/clk/SM (peak 8192)
+pat0: issue 768 clk per chunk (tensor work 768)
+pat1: issue 977 clk per chunk (tensor work 768)
+pat2: issue 852 clk per chunk (tensor work 768)
+ind32: 46.6 clk per MMA (tensor time 16), 2812 FLOP/clk
+ind64: 54.0 clk per MMA (tensor time 32), 4850 FLOP/clk
+ind128: 66.0 clk per MMA (tensor time 64), 7945 FLOP/clk
+ind32w2: 42.6 clk per MMA (tensor time 16), 3076 FLOP/clk
+ind64w2: 48.2 clk per MMA (tensor time 32), 5444 FLOP/clk

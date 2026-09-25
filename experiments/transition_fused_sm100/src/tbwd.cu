@@ -90,44 +90,53 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
       }
     }
   } else if (warp == 1) {
-    if (lane == 0) {
-      auto wgrad = [&](int k) {
-        const int b = k & 1;
-        mbar_wait(&B.g_full, k & 1);
-        tc_fence_after();
-        const uint32_t inb = su + W_IN + b * INB;
-#pragma unroll
-        for (int ks = 0; ks < 8; ++ks)       // [dWa_s; dWb_s] += [dA | dB]^T xn    (K = the tile's 128 rows)
-          umma_ss(tmem + T_DWAB, desc_mn128(su + W_DAB + ks * 2048, KB), desc_mn128(inb + IN_XN + ks * 2048, KB), I_DWAB, (k > 0 || ks > 0) ? 1u : 0u);
-#pragma unroll
-        for (int ks = 0; ks < 8; ++ks)       // dWs_s += dy^T h
-          umma_ss(tmem + T_DWS, desc_mn128(inb + ks * 2048, KB), desc_mn128(su + W_H + ks * 2048, KB), I_DWS, (k > 0 || ks > 0) ? 1u : 0u);
-        tc_commit(&B.g_empty);
-        tc_commit(&B.in_empty[b]);
-      };
-      mbar_wait(&B.w_full, 0);
-      for (int i = 0; i < n_local; ++i) {
-        const int b = i & 1;
-        mbar_wait(&B.in_full[b], (i >> 1) & 1);
-        if (i >= 1) mbar_wait(&B.gate_read, (i - 1) & 1);
-        tc_fence_after();
-        const uint32_t inb = su + W_IN + b * INB;
+    // dh and [a|b] of each tile (converged warp, one elected lane issues: descriptors stay in uniform registers)
+    mbar_wait(&B.w_full, 0);
+    const uint64_t dws = desc_mn128(su + W_WS, KB), dwab = desc_k128(su + W_WAB);
+    for (int i = 0; i < n_local; ++i) {
+      const int b = i & 1;
+      mbar_wait(&B.in_full[b], (i >> 1) & 1);
+      if (i >= 1) mbar_wait(&B.gate_read, (i - 1) & 1);
+      tc_fence_after();
+      const uint64_t ddy = desc_k128(su + W_IN + b * INB), dxn = desc_k128(su + W_IN + b * INB + IN_XN);
+      if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
-          const uint32_t off = (ks >> 2) * KB + (ks & 3) * 32;
-          umma_ss(tmem + T_DH, desc_k128(inb + off), desc_mn128(su + W_WS + ks * 2048, KB), I_DH, ks > 0 ? 1u : 0u);
+          const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+          umma_ss(tmem + T_DH, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
         }
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
-          const uint32_t off = (ks >> 2) * KB + (ks & 3) * 32;
-          umma_ss(tmem + T_AB, desc_k128(inb + IN_XN + off), desc_k128(su + W_WAB + off), I_AB, ks > 0 ? 1u : 0u);
+          const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+          umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
         }
         tc_commit(&B.dhab_full);
-        if (i >= 1) wgrad(i - 1);
       }
-      if (n_local > 0) wgrad(n_local - 1);
-      tc_commit(&B.wg_done);
+      __syncwarp();
     }
+  } else if (warp == 2) {
+    // the weight gradients of each tile
+    const uint64_t ddab = desc_mn128(su + W_DAB, KB), dh_ = desc_mn128(su + W_H, KB);
+    for (int k = 0; k < n_local; ++k) {
+      const int b = k & 1;
+      mbar_wait(&B.g_full, k & 1);
+      tc_fence_after();
+      const uint64_t ddy = desc_mn128(su + W_IN + b * INB, KB), dxn = desc_mn128(su + W_IN + b * INB + IN_XN, KB);
+      if (elect_one()) {
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks)       // [dWa_s; dWb_s] += [dA | dB]^T xn    (K = the tile's 128 rows)
+          umma_ss(tmem + T_DWAB, ddab + (uint64_t)(ks * 2048 >> 4), dxn + (uint64_t)(ks * 2048 >> 4), I_DWAB, (k > 0 || ks > 0) ? 1u : 0u);
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks)       // dWs_s += dy^T h
+          umma_ss(tmem + T_DWS, ddy + (uint64_t)(ks * 2048 >> 4), dh_ + (uint64_t)(ks * 2048 >> 4), I_DWS, (k > 0 || ks > 0) ? 1u : 0u);
+        tc_commit(&B.g_empty);
+        tc_commit(&B.in_empty[b]);
+        if (k == n_local - 1) tc_commit(&B.wg_done);
+      }
+      __syncwarp();
+    }
+    if (n_local == 0 && elect_one()) mbar_arrive(&B.wg_done);
+    __syncwarp();
   } else if (warp >= 4 && warp < 8) {
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     for (int i = 0; i < n_local; ++i) {
@@ -273,42 +282,48 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       }
     }
   } else if (warp == 1) {
-    if (lane == 0) {
-      auto dxn = [&](int q) {
-        const int i = q >> 3, j = q & (NCH - 1), s = q & 1, u = q >> 1;
-        mbar_wait(&B.g_full[s], u & 1);
-        if (j == 0 && i >= 1) mbar_wait(&B.dxn_empty, (i - 1) & 1);
-        tc_fence_after();
-        const uint32_t wab = su + s * X_SLOT + X_WAB;
-#pragma unroll
-        for (int ks = 0; ks < 8; ++ks)
-          umma_ts(tmem + T_DXN, tmem + T_AB + s * 128 + ks * 8, desc_mn128(wab + ks * 2048, KB), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
-        tc_commit(&B.ab_free[s]);
-        tc_commit(&B.w_empty[s]);
-        if (j == NCH - 1) tc_commit(&B.dxn_full);
-      };
-      for (int c = 0; c < nch; ++c) {
-        const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1;
-        if (j == 0) mbar_wait(&B.in_full[i & 1], (i >> 1) & 1);
-        mbar_wait(&B.w_full[s], u & 1);
-        if (c >= 2) mbar_wait(&B.ab_free[s], (u - 1) & 1);
-        tc_fence_after();
-        const uint32_t inb = su + X_IN + (i & 1) * INB, slot = su + s * X_SLOT;
+    // dh_j and [a|b]_j (converged warp, elected issue)
+    for (int c = 0; c < nch; ++c) {
+      const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1;
+      if (j == 0) mbar_wait(&B.in_full[i & 1], (i >> 1) & 1);
+      mbar_wait(&B.w_full[s], u & 1);
+      if (c >= 2) mbar_wait(&B.ab_free[s], (u - 1) & 1);
+      tc_fence_after();
+      const uint32_t inb = su + X_IN + (i & 1) * INB, slot = su + s * X_SLOT;
+      const uint64_t ddy = desc_k128(inb), dxn = desc_k128(inb + IN_XN), dws = desc_mn128(slot, KB), dwab = desc_k128(slot + X_WAB);
+      if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
-          const uint32_t off = (ks >> 2) * KB + (ks & 3) * 32;
-          umma_ss(tmem + T_DH + s * 64, desc_k128(inb + off), desc_mn128(slot + ks * 2048, KB), I_DH, ks > 0 ? 1u : 0u);
+          const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+          umma_ss(tmem + T_DH + s * 64, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
         }
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
-          const uint32_t off = (ks >> 2) * KB + (ks & 3) * 32;
-          umma_ss(tmem + T_AB + s * 128, desc_k128(inb + IN_XN + off), desc_k128(slot + X_WAB + off), I_AB, ks > 0 ? 1u : 0u);
+          const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+          umma_ss(tmem + T_AB + s * 128, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
         }
         tc_commit(&B.abdh_full[s]);
         if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
-        if (c > 0) dxn(c - 1);
       }
-      if (nch > 0) dxn(nch - 1);
+      __syncwarp();
+    }
+  } else if (warp == 2) {
+    // d_xn += [dA | dB] [Wa_j; Wb_j]  (A from TMEM)
+    for (int q = 0; q < nch; ++q) {
+      const int i = q >> 3, j = q & (NCH - 1), s = q & 1, u = q >> 1;
+      mbar_wait(&B.g_full[s], u & 1);
+      if (j == 0 && i >= 1) mbar_wait(&B.dxn_empty, (i - 1) & 1);
+      tc_fence_after();
+      const uint64_t dwab = desc_mn128(su + s * X_SLOT + X_WAB, KB);
+      if (elect_one()) {
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks)
+          umma_ts(tmem + T_DXN, tmem + T_AB + s * 128 + ks * 8, dwab + (uint64_t)(ks * 2048 >> 4), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
+        tc_commit(&B.ab_free[s]);
+        tc_commit(&B.w_empty[s]);
+        if (j == NCH - 1) tc_commit(&B.dxn_full);
+      }
+      __syncwarp();
     }
   } else if (warp >= 4 && warp < 8) {
     // ------------------------------------------------------------------------------------ gate: [dA | dB] back into TMEM

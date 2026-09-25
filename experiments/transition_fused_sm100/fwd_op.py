@@ -9,7 +9,8 @@ SMEM = 2 * 49152 + 4 * 32768 + 1024 + 256
 
 
 class FusedFwd:
-    def __init__(self, cubin=HERE / "build" / "tfwd.cubin", name="transition_fwd_sm100", smem=SMEM):
+    def __init__(self, cubin=HERE / "build" / "tfwd.cubin", name="transition_fwd_sm100", smem=SMEM, threads=512):
+        self.threads = threads
         self.k = drv.Kernel(str(cubin), name, smem)
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
         self._wmaps = None
@@ -32,6 +33,6 @@ class FusedFwd:
         keep = (mx, mo, mxn)
 
         def run():
-            self.k(grid, (384, 1, 1), mx, *self._wmaps, mo, mxn, gamma, beta, rstd, c1, int(tiles), float(eps), int(bool(save)))
+            self.k(grid, (self.threads, 1, 1), mx, *self._wmaps, mo, mxn, gamma, beta, rstd, c1, int(tiles), float(eps), int(bool(save)))
         run.keep = keep
         return run, out, xn, rstd, c1

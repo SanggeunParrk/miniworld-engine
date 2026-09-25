@@ -9,7 +9,7 @@ SMEM_BWD = 230656
 
 
 class FusedBwd:
-    def __init__(self, cubin=HERE / "build" / "tbwd.cubin", repl=9):
+    def __init__(self, cubin=HERE / "build" / "tbwd.cubin", repl=10):
         self.k = drv.Kernel(str(cubin), "transition_bwd_sm100", SMEM_BWD)
         self.red = drv.Kernel(str(cubin), "transition_bwd_reduce", 0)
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
@@ -42,7 +42,7 @@ class FusedBwd:
 
 class FusedTrain:
     """One training step of the module: y = fused forward (saves xn, rstd, c1), then the fused backward for a given dy."""
-    def __init__(self, fwd, repl=9, cubin=None):
+    def __init__(self, fwd, repl=10, cubin=None):
         self.f = fwd
         self.b = FusedBwd(cubin, repl) if cubin else FusedBwd(repl=repl)
 

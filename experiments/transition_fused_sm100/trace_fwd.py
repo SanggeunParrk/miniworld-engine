@@ -17,7 +17,7 @@ torch.cuda.synchronize()
 dptr, size = drv._chk(cu.cuModuleGetGlobal(f.k.module, b"g_trace"), "global")
 buf = torch.empty(size // 8, dtype=torch.int64, device="cuda")
 drv._chk(cu.cuMemcpyDtoD(buf.data_ptr(), dptr, size), "copy")
-t = buf.cpu().numpy().reshape(4, 3, 512).astype(np.int64)
+t = buf.cpu().numpy().reshape(4, 4, 1024).astype(np.int64)
 for cta in range(2):
     m, sw, ln = t[cta, 0], t[cta, 1], t[cta, 2]
     t0 = min(v for v in (m[0], sw[0], ln[0]) if v > 0)
@@ -29,6 +29,15 @@ for cta in range(2):
     print(f"  SwiGLU chunk period {np.median(np.diff([sw[4*c] for c in range(nch)])):.0f}")
     ex = [m[2*c] for c in range(nch)]; sq = [m[2*c+1] for c in range(nch)]
     print(f"  MMA expand period {np.median(np.diff(ex)):.0f}, squeeze period {np.median(np.diff(sq)):.0f}")
+    w = t[cta, 3]
+    br = lambda a_, b_: np.median([w[8*c+b_] - w[8*c+a_] for c in range(8, nch)])
+    print(f"  MMA waits (median clk): xn_full {br(0,1):.0f}  wab_full {br(1,2):.0f}  ab_empty {m[16]-w[8*2+2] if False else np.median([m[2*c]-w[8*c+2] for c in range(8,nch)]):.0f}  |  ws_full {br(3,4):.0f}  h_full {br(4,5):.0f}  out_empty {np.median([m[2*c+1]-w[8*c+5] for c in range(8,nch)]):.0f}")
+    print(f"  MMA issue (stamped): expand {np.median([w[8*c+6]-m[2*c] for c in range(8,nch)]):.0f}  squeeze {np.median([w[8*c+7]-m[2*c+1] for c in range(8,nch)]):.0f}")
+    print(f"  MMA issue time: expand {np.median([w[8*c+3]-m[2*c] for c in range(8,nch)]):.0f}  squeeze {np.median([w[8*(c+2)+0]-m[2*c+1] for c in range(8,nch-2)]):.0f}")
     for i in range(min(ntiles, 3)):
         e = ln[8*i:8*i+8] - t0
         print(f"  tile {i}: LN wait {e[1]-e[0]} LN {e[2]-e[1]} | epi wait {e[4]-e[3]} epi {e[5]-e[4]} store {e[6]-e[5]}  (start {e[0]})")
+m = t[0, 0]
+ex = np.array([m[2 * c] for c in range(64)]); sq = np.array([m[2 * c + 1] for c in range(64)])
+print("expand issue gaps (chunks 0..31):", np.diff(ex)[:31].tolist())
+print("squeeze issue gaps (chunks 0..31):", np.diff(sq)[:31].tolist())

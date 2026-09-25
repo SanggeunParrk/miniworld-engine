@@ -1,0 +1,22 @@
+CTA 0: tiles 8, total 110343 clk
+  SwiGLU per chunk: wait ab 508  ld+compute 1802  wait h_empty+st 306  (median clk)
+  SwiGLU chunk period 1434
+  MMA expand period 1440, squeeze period 1396
+  MMA waits (median clk): xn_full 52  wab_full 92  ab_empty 344  |  ws_full 110  h_full 431  out_empty 54
+  MMA issue (stamped): expand 686  squeeze 376
+  MMA issue time: expand 2654  squeeze -1306
+  tile 0: LN wait 3024 LN 3111 | epi wait 8464 epi 2210 store 1795  (start 0)
+  tile 1: LN wait 155 LN 5032 | epi wait 138 epi 1821 store 1054  (start 6359)
+  tile 2: LN wait 3888 LN 3179 | epi wait 5699 epi 2347 store 1630  (start 24366)
+CTA 1: tiles 8, total 109643 clk
+  SwiGLU per chunk: wait ab 520  ld+compute 1802  wait h_empty+st 302  (median clk)
+  SwiGLU chunk period 1406
+  MMA expand period 1560, squeeze period 1403
+  MMA waits (median clk): xn_full 51  wab_full 87  ab_empty 300  |  ws_full 104  h_full 476  out_empty 54
+  MMA issue (stamped): expand 698  squeeze 380
+  MMA issue time: expand 2783  squeeze -1365
+  tile 0: LN wait 3190 LN 2896 | epi wait 8738 epi 2233 store 1825  (start 0)
+  tile 1: LN wait 150 LN 4983 | epi wait 1144 epi 1861 store 1319  (start 6311)
+  tile 2: LN wait 2940 LN 3463 | epi wait 4367 epi 2433 store 1420  (start 24543)
+expand issue gaps (chunks 0..31): [864, 2246, 1319, 1572, 1343, 1309, 1434, 1335, 1322, 1444, 1483, 1440, 1379, 1371, 1416, 4049, 1027, 1764, 1084, 2038, 1409, 1678, 1497, 1330, 1390, 1640, 1362, 1517, 1319, 1316, 1989]
+squeeze issue gaps (chunks 0..31): [821, 1859, 1280, 1353, 1448, 1337, 1325, 2795, 922, 1856, 1016, 627, 1308, 1774, 1402, 3696, 1297, 1974, 1325, 1586, 1250, 1396, 1576, 2888, 912, 1677, 697, 940, 2095, 1430, 2023]
