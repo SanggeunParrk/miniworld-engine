@@ -151,16 +151,9 @@ def run_case(op, impl, mode, L, S):
 HBM, TC = 6.9e12, 1.73e15
 
 
-def sol_floor(op, mode, L, S, hbm=None, tc=None, energy=None):
-    """energy = (J per HBM byte, J per FLOP, dynamic power budget W): on a power-capped card a kernel also needs
-    (bytes e_b + FLOPs e_f) / (P_cap - P_idle) -- bytes and FLOPs share one power budget, so they add."""
-    hbm, tc = hbm or HBM, tc or TC
-    def k(byts, flops=0.0):
-        t = max(byts / hbm, flops / tc)
-        if energy is not None:
-            eb, ef, pdyn = energy
-            t = max(t, (byts * eb + flops * ef) / pdyn)
-        return t
+def kernels(op, mode, L, S):
+    """(name, bytes read, bytes written, FLOPs) of each kernel of THIS fusion algorithm (the H100 kernel boundaries):
+    the minimum DRAM traffic of every kernel and its tensor FLOPs."""
     n2, bf = L * L, 2
     m = S * L * 64 * bf                                  # an [S, N, 64] bf16 tensor
     if op == "opm":
@@ -168,30 +161,36 @@ def sol_floor(op, mode, L, S, hbm=None, tc=None, energy=None):
         o = (L * 32) ** 2 * bf                           # the grouped outer product O
         z = n2 * 128 * bf
         gemm = 2 * (L * 32) ** 2 * S
-        fwd = [k(m + S * L + 2 * a + (S * L * 8 if mode == "train" else 0)),   # prologue (+ LN stats)
-               k(2 * a + o, gemm),                                         # grouped GEMM
-               k(o + 2 * z, 2 * n2 * 1024 * 128)]                          # epilogue (+ residual)
-        if mode == "infer":
-            return sum(fwd)
-        bwd = [k(z + o + z, 2 * n2 * 128 * 1024),       # dgrad: dz -> dO (grouped) + dz/n
-               k(o + 2 * a, gemm), k(o + 2 * a, gemm),   # dA, dB
-               k(o + z, 2 * n2 * 1024 * 128),            # dWo
-               k(2 * a + m + S * L * 8 + S * L + m)]     # prologue backward
-        return sum(fwd) + sum(bwd)
+        st = S * L * 8 if mode == "train" else 0
+        ks = [("prologue", m + S * L, 2 * a + st, 0), ("gemm O", 2 * a, o, gemm),
+              ("epilogue", o + z, z, 2 * n2 * 1024 * 128)]
+        if mode == "train":
+            ks += [("dgrad", z, o + z, 2 * n2 * 128 * 1024), ("gemm dA", o + a, a, gemm), ("gemm dB", o + a, a, gemm),
+                   ("dWo", o + z, 0, 2 * n2 * 1024 * 128), ("prologue bwd", 2 * a + m + S * L * 9, m, 0)]
+        return ks
     H, C = 8, 32
     v = S * L * H * C * bf
     zp = n2 * 128 * bf
-    fwd = [k(zp + H * n2 * bf),                          # pair3: LN_z -> proj_z -> softmax
-           k(m + m + v),                                 # ln_vg: y and head-major v
-           k(v + 3 * m + (v if mode == "train" else 0), 2 * H * n2 * S * C + 2 * 2 * S * L * 64 * H * C)]   # fwd (+ o)
-    if mode == "infer":
-        return sum(fwd)
-    bwd = [k(v + 2 * m + 2 * v),                         # glue: o, y, dres -> do, dgp
-           k(2 * v, 2 * H * n2 * S * C),                 # plain: dv
-           k(2 * v, 2 * H * n2 * S * C),                 # dw bmm
-           k(2 * v + 4 * m),                             # dgv backward
-           k(2 * zp + H * n2 * (2 + 4))]                 # pair backward
-    return sum(fwd) + sum(bwd)
+    ks = [("pair", zp, H * n2 * bf, 0), ("ln_vg", m, m + v, 0),
+          ("fwd", v + 2 * m, m + (v if mode == "train" else 0), 2 * H * n2 * S * C + 2 * 2 * S * L * 64 * H * C)]
+    if mode == "train":
+        ks += [("glue", v + 2 * m, 2 * v, 0), ("plain", v, v, 2 * H * n2 * S * C), ("dw bmm", 2 * v, 0, 2 * H * n2 * S * C),
+               ("dgv bwd", 2 * v + 3 * m, m, 0), ("pair bwd", zp + 4 * H * n2, zp + 2 * H * n2, 0)]
+    return ks
+
+
+def sol_floor(op, mode, L, S, hbm=None, tc=None, energy=None):
+    """Sum over the kernels of max(bytes / HBM, FLOPs / TC) -- and with energy = (J/byte read, J/byte written, J/FLOP,
+    dynamic power W), also of (R e_r + W e_w + F e_f) / P_dyn: on a power-capped card bytes and FLOPs share one budget."""
+    hbm, tc = hbm or HBM, tc or TC
+    t = 0.0
+    for _, r, w, f in kernels(op, mode, L, S):
+        tk = max((r + w) / hbm, f / tc)
+        if energy is not None:
+            er, ew, ef, pdyn = energy
+            tk = max(tk, (r * er + w * ew + f * ef) / pdyn)
+        t += tk
+    return t
 
 
 def calibrate():

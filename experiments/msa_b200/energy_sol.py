@@ -40,10 +40,15 @@ def sustained(fn, secs=3.0, target_ms=float(os.environ.get("ESOL_GRAPH_MS", "20"
 
 def ceilings(L, S):
     bf = torch.bfloat16
+    torch.cuda.synchronize(); e0 = energy_j(); time.sleep(3.0); idle = (energy_j() - e0) / 3.0
     x = torch.randn(512 * 1024 * 1024, device="cuda", dtype=bf); y = torch.empty_like(x)
     r = sustained(lambda: torch.mul(x, 1.0, out=y)); hbm = 2 * x.numel() * 2 / (r["ms"] * 1e-3)
+    out = {"idle_W": idle, "hbm_Bps": hbm, "hbm_W": r["W"]}
+    nb = x.numel() * 2
+    r = sustained(lambda: torch.sum(x, dtype=torch.float32)); out["read_Bps"] = nb / (r["ms"] * 1e-3); out["e_read"] = (r["J"] - idle * r["ms"] * 1e-3) / nb
+    r = sustained(lambda: y.fill_(1.0)); out["write_Bps"] = nb / (r["ms"] * 1e-3); out["e_write"] = (r["J"] - idle * r["ms"] * 1e-3) / nb
+    out["pmax_W"] = max(out["hbm_W"], r["W"])
     del x, y; torch.cuda.empty_cache()
-    out = {"hbm_Bps": hbm, "hbm_W": r["W"]}
     with torch.no_grad():
         # OPM: the grouped outer product A2 [(i,c), s] @ BT^T, from the module's own prologue math
         mod = make_module("opm", "pytorch"); msa, pair, mask = make_inputs("opm", L, S)
@@ -52,6 +57,10 @@ def ceilings(L, S):
         A2 = a.permute(1, 2, 0).reshape(L * 32, S).contiguous(); BT = b.permute(1, 2, 0).reshape(L * 32, S).contiguous()
         O = torch.empty(L * 32, L * 32, device="cuda", dtype=bf)
         r = sustained(lambda: torch.mm(A2, BT.t(), out=O)); out["tc_opm"] = 2 * (L * 32) ** 2 * S / (r["ms"] * 1e-3); out["tc_opm_W"] = r["W"]
+        # J/FLOP: the GEMM's dynamic energy less its own DRAM traffic (A2, BT read, O written)
+        fl = 2 * (L * 32) ** 2 * S
+        out["e_flop"] = (r["J"] - idle * r["ms"] * 1e-3 - 2 * A2.numel() * 2 * out["e_read"] - O.numel() * 2 * out["e_write"]) / fl
+        out["pmax_W"] = max(out["pmax_W"], r["W"])
         del A2, BT, O, a, b, yl, mod; torch.cuda.empty_cache()
         # PWA: the per-head contraction w [H, N, N] @ v [H, N, S*C], from the module's own pair softmax and value projection
         mod = make_module("pwa", "pytorch"); msa, pair, mask = make_inputs("pwa", L, S)
@@ -91,7 +100,7 @@ def main():
         for mode in ("infer", "train"):
             floor_cap = sol_floor(op, mode, a.L, a.S, hbm=cal["hbm_Bps"], tc=tc) * 1e3
             floor_clk = sol_floor(op, mode, a.L, a.S) * 1e3
-            en = (float(os.environ.get("ESOL_EB", "104e-12")), float(os.environ.get("ESOL_EF", "0.578e-12")), float(os.environ.get("ESOL_PDYN", "752")))
+            en = (cal["e_read"], cal["e_write"], cal["e_flop"], cal["pmax_W"] - cal["idle_W"]) if "e_flop" in cal else None
             floor_en = sol_floor(op, mode, a.L, a.S, hbm=cal["hbm_Bps"], tc=tc, energy=en) * 1e3
             for impl in ("pytorch", "anthropic", "ours"):
                 if a.only and f"{op}:{mode}:{impl}" not in a.only:
