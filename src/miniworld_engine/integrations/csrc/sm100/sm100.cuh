@@ -159,6 +159,12 @@ __device__ __forceinline__ void tmem_st8(uint32_t taddr, const uint32_t* r) {
 }
 __device__ __forceinline__ void tmem_wait_st() { asm volatile("tcgen05.wait::st.sync.aligned;\n" ::: "memory"); }
 // the TMEM address of (lane = row, column): a warp's sub-partition owns lanes 32 * (warp % 4) ...
+// one lane of the warp (elect.sync): the warp-converged way to issue a single-thread instruction
+__device__ __forceinline__ bool elect_one() {
+  uint32_t pred = 0;
+  asm volatile("{\n.reg .pred P;\nelect.sync _|P, 0xffffffff;\nselp.u32 %0, 1, 0, P;\n}\n" : "=r"(pred));
+  return pred != 0;
+}
 __device__ __forceinline__ uint32_t tmem_at(uint32_t base, int lane, int col) { return base + ((uint32_t)lane << 16) + (uint32_t)col; }
 
 // packed fp32 pairs (sm_100: FADD2 / FMUL2 / FFMA2 issue two fp32 lanes per instruction)

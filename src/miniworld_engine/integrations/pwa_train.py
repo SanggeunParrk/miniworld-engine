@@ -61,8 +61,11 @@ def refusal(msa: torch.Tensor, pair: torch.Tensor, d_msa: int, d_pair: int, n_he
             return f"the kernels are bf16, got {msa.dtype} / {pair.dtype}"
         if not msa.is_cuda:
             return "the input is not on a CUDA device"
-        if torch.cuda.get_device_capability(msa.device) != (9, 0):
-            return "the kernels are built for sm_90a"
+        cap = torch.cuda.get_device_capability(msa.device)
+        if cap not in ((9, 0), (10, 0)):
+            return "the kernels are built for sm_90a and sm_100a"
+        if cap == (10, 0) and torch.is_grad_enabled() and not _SM100_TRAIN:
+            return "the sm_100a backward kernels are not built yet"
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         n, s = msa.shape[2], msa.shape[1]
@@ -101,6 +104,28 @@ def _build(name: str, src_name: str):
     _EXT[name] = load(name=name, sources=[str(src)], build_directory=str(build),
                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math"], extra_cflags=["-O3"])
     return _EXT[name]
+
+
+_SM100_TRAIN = False       # the sm_100a backward kernels (csrc/sm100/pwa_sm100.cu) serve grad-enabled calls once True
+
+
+def _k100():
+    """B200: `csrc/sm100/pwa_sm100.cu` (ln_vg and the forward on tcgen05 / TMEM) and the H100 `pair3.cu` as it is
+    (mma.sync + ldmatrix + cp.async, all valid on sm_100a), built for sm_100a."""
+    if "sm100" not in _EXT:
+        from miniworld_engine.kernels._nvcc import load_extension as load
+        root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+        csrc = Path(__file__).with_name("csrc")
+        flags = ["-O3", "-gencode=arch=compute_100a,code=sm_100a", "--use_fast_math"]
+        k = {}
+        for name, src, inc in (("miniworld_pwa_sm100", csrc / "sm100" / "pwa_sm100.cu", [str(csrc / "sm100")]),
+                               ("miniworld_pwa_pair3_sm100", csrc / "pair3.cu", [])):
+            build = root / name
+            build.mkdir(parents=True, exist_ok=True)
+            k[name] = load(name=name, sources=[str(src)], build_directory=str(build), extra_include_paths=inc,
+                           extra_cuda_cflags=flags, extra_cflags=["-O3"])
+        _EXT["sm100"] = {"pwa": k["miniworld_pwa_sm100"], "pair3": k["miniworld_pwa_pair3_sm100"]}
+    return _EXT["sm100"]
 
 
 def _k():
@@ -320,11 +345,20 @@ class _PwaMath(torch.autograd.Function):
 @torch.autocast("cuda", enabled=False)
 def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """msa + PWA(msa, pair, key mask) for a grad-free call: the same three forward kernels, o not kept, no dropout."""
-    k = _k(); bf = torch.bfloat16
+    bf = torch.bfloat16
     m = msa[0].contiguous(); z = pair[0].contiguous(); n = m.shape[1]
     pm = torch.ones(n, n, dtype=bf, device=m.device) if mask is None else mask[0].to(bf)[None, :].expand(n, n).contiguous()
     lnz_w = module.ln_pair.weight.detach().float().contiguous(); lnz_b = module.ln_pair.bias.detach().float().contiguous()
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5)); eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
+    if torch.cuda.get_device_capability(m.device) == (10, 0):
+        k = _k100()
+        w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, lnz_b, eps_z, module.to_bias.weight.detach())
+        v, y = k["pwa"].ln_vg(m, module.ln_msa.weight.detach().contiguous(), module.ln_msa.bias.detach().contiguous(),
+                              module.to_value.weight.detach().to(bf).contiguous(), eps_m)
+        out, _ = k["pwa"].pwa_fwd(w16, v, y, module.to_gate.weight.detach().to(bf).contiguous(),
+                                  module.to_out.weight.detach().to(bf).contiguous(), m, False, None, 1.0)
+        return out[None]
+    k = _k()
     if k["pair3"] is not None and n % 16 == 0 and n <= 1024:
         w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, lnz_b, eps_z, module.to_bias.weight.detach())
     else:
