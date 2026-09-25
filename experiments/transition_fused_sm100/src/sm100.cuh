@@ -79,8 +79,10 @@ DEVI bool mbar_test(uint64_t* b, uint32_t parity) {
 }
 DEVI void mbar_wait_spin(uint64_t* b, uint32_t parity);
 DEVI void mbar_wait(uint64_t* b, uint32_t parity) {
-#ifdef MBAR_SPIN
+#if defined(MBAR_SPIN)
   while (!mbar_test(b, parity)) { }
+#elif defined(MBAR_SLEEP)
+  while (!mbar_try_wait(b, parity)) { __nanosleep(MBAR_SLEEP); }   // back off: idle warps draw less power under the cap
 #else
   while (!mbar_try_wait(b, parity)) { }
 #endif
