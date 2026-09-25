@@ -408,7 +408,8 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
               const int c = c8 * 8 + 2 * k;
-              uw[k] = pack2(o[c] * gt[si * C + c], o[c + 1] * gt[si * C + c + 1]);
+              const float2 u2 = mul2(make_float2(o[c], o[c + 1]), make_float2(gt[si * C + c], gt[si * C + c + 1]));
+              uw[k] = pack2(u2.x, u2.y);
               ow[k] = pack2(o[c], o[c + 1]);
             }
             *reinterpret_cast<uint4*>(ur + ((c8 ^ ((r >> 1) & 3)) << 3)) = uu;
@@ -488,7 +489,7 @@ constexpr int DT = BI * NO;                                // do tile [128 i][64
 constexpr int RT = BS * BI * D;                            // dres / y tile [2 s][128 i][64], 128B swizzle
 constexpr int WH = 2 * C * D;                              // Wg_h | WoT_h, each [32 c][64 d], 128B swizzle
 constexpr int NST = 3;
-constexpr int THREADS = 192;
+constexpr int THREADS = 320;                               // warp 0 producer, warp 1 MMA, warps 2-9 drain (warps q and q + 4: one s each)
 constexpr int SMEM = 1024 + (NST * OT + 2 * DT + 2 * OT + 2 * OT + 2 * RT + 2 * WH) * 2 + 512;
 constexpr int COL_G = 0, COL_DU = 2 * NO, COL_W = 4 * NO;  // g[2] 0/64, du[2] 128/192, dWo 256..383 (two lane halves)
 constexpr uint32_t ID_GD = idesc_bf16(128, C, 0, 0);
@@ -520,24 +521,24 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
   __nv_bfloat16* sWH = sY + RT;                                  // [2][WH]
   uint64_t* bars = reinterpret_cast<uint64_t*>(sWH + 2 * WH);
   uint64_t* of = bars;               // [NST] o tile landed
-  uint64_t* oe = of + NST;           // [NST] count 4: drain read it
+  uint64_t* oe = of + NST;           // [NST] count 8: drain read it
   uint64_t* whf = oe + NST;          // [2]
   uint64_t* whe = whf + 2;           // [2]  the head's gate / du GEMMs retired
   uint64_t* tf = whe + 2;            // [1]  dres and y of the tile landed
-  uint64_t* tr = tf + 1;             // [1]  count 4: dres masked (ready for the GEMMs)
+  uint64_t* tr = tf + 1;             // [1]  count 8: dres masked (ready for the GEMMs)
   uint64_t* te = tr + 1;             // [1]  every GEMM reading the tile's dres / y retired
   uint64_t* accf = te + 1;           // [2]  g_h, du_h complete
-  uint64_t* acce = accf + 2;         // [2]  count 4: drained
-  uint64_t* gof = acce + 2;          // [2]  count 4: go_h written
+  uint64_t* acce = accf + 2;         // [2]  count 8: drained
+  uint64_t* gof = acce + 2;          // [2]  count 8: go_h written
   uint64_t* goe = gof + 2;           // [2]  the dWo GEMM reading go_h retired
   uint64_t* wdone = goe + 2;         // [1]  the CTA's last dWo GEMM retired
   uint32_t* tslot = reinterpret_cast<uint32_t*>(wdone + 1);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int k = 0; k < NST; ++k) { bar_init(of + k, 1); bar_init(oe + k, 4); }
-    for (int k = 0; k < 2; ++k) { bar_init(whf + k, 1); bar_init(whe + k, 1); bar_init(accf + k, 1); bar_init(acce + k, 4);
-                                  bar_init(gof + k, 4); bar_init(goe + k, 1); }
-    bar_init(tf, 1); bar_init(tr, 4); bar_init(te, 1); bar_init(wdone, 1);
+    for (int k = 0; k < NST; ++k) { bar_init(of + k, 1); bar_init(oe + k, 8); }
+    for (int k = 0; k < 2; ++k) { bar_init(whf + k, 1); bar_init(whe + k, 1); bar_init(accf + k, 1); bar_init(acce + k, 8);
+                                  bar_init(gof + k, 8); bar_init(goe + k, 1); }
+    bar_init(tf, 1); bar_init(tr, 8); bar_init(te, 1); bar_init(wdone, 1);
     bar_init_fence();
   }
   if (warp == 1) tmem_alloc(tslot, 512);
@@ -622,23 +623,23 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
     }
   } else {
     const int q = warp & 3, r = q * 32 + lane;   // TMEM lane = i row of the tile
+    const int si = (warp - 2) >> 2;              // this warp's s of the tile's two: half of every head's elementwise work
     const bool leader = (warp == 2 && lane == 0);
     // clear the dWo accumulator (lanes of this warp's sub-partition, all 128 columns)
-    {
+    if (si == 0) {
       uint32_t z[8] = {0, 0, 0, 0, 0, 0, 0, 0};
       for (int c0 = 0; c0 < 4 * C; c0 += 8) tmem_st8(tmem_at(tmem + COL_W, q * 32, c0), z);
       tmem_wait_st();
     }
     tc_fence_before();
-    named_sync(1, 128);
+    named_sync(1, 256);
     int gh = 0, lt = 0;
     for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
       const int i0 = (t % NIB) * BI, s0 = (t / NIB) * BS;
       wait(tf, lt & 1);
-      if (DMASK != nullptr) {                    // dres' = dres . keep / (1 - p), once, in place (row r, both s)
+      if (DMASK != nullptr) {                    // dres' = dres . keep / (1 - p), once, in place (row r, this warp's s)
         const __nv_bfloat16* dr = DMASK + (size_t)(i0 + r) * D;
-#pragma unroll
-        for (int si = 0; si < BS; ++si) {
+        {
           __nv_bfloat16* row = sR + (si * BI + r) * D;
 #pragma unroll
           for (int c8 = 0; c8 < 8; ++c8) {
@@ -665,11 +666,9 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
         const int b = gh & 1, st = gh % NST;
         wait(accf + b, (gh >> 1) & 1);
         tc_fence_after();
-        float gt[NO], du[NO];
-        tmem_ld32(tmem_at(tmem + COL_G + b * NO, q * 32, 0), gt);
-        tmem_ld32(tmem_at(tmem + COL_G + b * NO, q * 32, 32), gt + 32);
-        tmem_ld32(tmem_at(tmem + COL_DU + b * NO, q * 32, 0), du);
-        tmem_ld32(tmem_at(tmem + COL_DU + b * NO, q * 32, 32), du + 32);
+        float gt[C], du[C];                      // this warp's s: 32 channels of gate and du
+        tmem_ld32(tmem_at(tmem + COL_G + b * NO, q * 32, si * C), gt);
+        tmem_ld32(tmem_at(tmem + COL_DU + b * NO, q * 32, si * C), du);
         tmem_wait_ld();
         tc_fence_before();
         __syncwarp();
@@ -677,13 +676,12 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
         wait(of + st, (gh / NST) & 1);
         if (gh >= 2) wait(goe + b, ((gh >> 1) - 1) & 1);        // the dWo GEMM of head gh - 2 has read go buffer b
         if (leader) bulk_wait_read<1>();                         // the do / dgp stores of head gh - 2 have read staging b
-        named_sync(1, 128);
+        named_sync(1, 256);
         __nv_bfloat16* dob = sDO + b * DT;
         __nv_bfloat16* dgb = sDGP + b * OT;
         __nv_bfloat16* gob = sGO + b * OT;
         const __nv_bfloat16* ob = sO + st * OT;
-#pragma unroll
-        for (int si = 0; si < BS; ++si) {
+        {
           const int orow = (si * BI + r) * C;
 #pragma unroll
           for (int c8 = 0; c8 < 4; ++c8) {
@@ -695,14 +693,16 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
             uint32_t* wdg = reinterpret_cast<uint32_t*>(&vdg);
             uint32_t* wgo = reinterpret_cast<uint32_t*>(&vgo);
 #pragma unroll
-            for (int k = 0; k < 4; ++k) {
-              const int c = si * C + c8 * 8 + 2 * k;
+            for (int k = 0; k < 4; ++k) {             // packed pairs: do = du g, dgp = du o g (1 - g), go = g o
+              const int c = c8 * 8 + 2 * k;
               const float2 o2 = bf2f(ow[k]);
-              const float g0 = 1.f / (1.f + __expf(-gt[c])), g1 = 1.f / (1.f + __expf(-gt[c + 1]));
-              const float d0 = du[c], d1 = du[c + 1];
-              wdo[k] = pack2(d0 * g0, d1 * g1);                                                   // do
-              wdg[k] = pack2(d0 * o2.x * g0 * (1.f - g0), d1 * o2.y * g1 * (1.f - g1));           // dgp
-              wgo[k] = pack2(g0 * o2.x, g1 * o2.y);                                               // go
+              const float2 g2 = make_float2(1.f / (1.f + __expf(-gt[c])), 1.f / (1.f + __expf(-gt[c + 1])));
+              const float2 d2 = make_float2(du[c], du[c + 1]);
+              const float2 do2 = mul2(d2, g2);
+              const float2 gg = fma2(g2, make_float2(-g2.x, -g2.y), g2);                           // g - g^2
+              const float2 dg2 = mul2(mul2(d2, o2), gg);
+              const float2 go2 = mul2(g2, o2);
+              wdo[k] = pack2(do2.x, do2.y); wdg[k] = pack2(dg2.x, dg2.y); wgo[k] = pack2(go2.x, go2.y);
             }
             *reinterpret_cast<uint4*>(dgb + orow + off64) = vdg;
             *reinterpret_cast<uint4*>(gob + orow + off64) = vgo;
@@ -713,7 +713,7 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
         fence_proxy_async();
         __syncwarp();
         if (lane == 0) { arrive(gof + b); arrive(oe + st); }
-        named_sync(1, 128);
+        named_sync(1, 256);
         if (leader) {
           store_2d(&domap, dob, s0 * C, h * N + i0);
           store_3d(&dgpmap, dgb, h * C, i0, s0);
@@ -723,6 +723,7 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
     }
     if (leader) bulk_wait<0>();
     // this CTA's dWo slab: lane half 0 = heads 0-3, half 1 = heads 4-7; row d = q * 16 + (lane & 15)
+    if (si == 0) {
     wait(wdone, 0);
     tc_fence_after();
     const int half = lane >> 4, d = q * 16 + (lane & 15);
@@ -734,6 +735,7 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
       tmem_wait_ld();
 #pragma unroll
       for (int k = 0; k < 32; k += 4) *reinterpret_cast<float4*>(slab + c0 + k) = make_float4(v[k], v[k + 1], v[k + 2], v[k + 3]);
+    }
     }
   }
   tc_fence_before();
