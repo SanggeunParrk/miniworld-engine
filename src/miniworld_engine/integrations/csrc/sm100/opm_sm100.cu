@@ -1140,10 +1140,10 @@ namespace {
 // dWa = gamma . R_a + ssa_a (x) beta, dWb likewise, dgamma = sum_k Wf . R / gamma, dbeta = Wf^T ssa / gamma
 // (R = [da db]^T (mask . xh): 64 x 64, ssa = the masked column sums): the H100 host formulas, in one launch
 template <typename GT, typename OT>
-__global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict__ RED, const __nv_bfloat16* __restrict__ WA,
-                                                         const __nv_bfloat16* __restrict__ WB, const GT* __restrict__ GAM,
-                                                         const GT* __restrict__ BET, OT* __restrict__ DWA, OT* __restrict__ DWB,
-                                                         GT* __restrict__ DGAM, GT* __restrict__ DBET) {
+__device__ __forceinline__ void pbwd_finalize_body(const float* __restrict__ RED, const __nv_bfloat16* __restrict__ WA,
+                                                   const __nv_bfloat16* __restrict__ WB, const GT* __restrict__ GAM,
+                                                   const GT* __restrict__ BET, OT* __restrict__ DWA, OT* __restrict__ DWB,
+                                                   GT* __restrict__ DGAM, GT* __restrict__ DBET) {
   constexpr int CM = 64, NR = (CM + 1) * CM;
   __shared__ float sR[NR], sG[CM], sB[CM];
   __shared__ __nv_bfloat16 sW[2 * CH * CM];
@@ -1152,7 +1152,7 @@ __global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict
   {
     float r[(NR + 255) / 256];
 #pragma unroll
-    for (int u = 0; u < (NR + 255) / 256; ++u) { const int v = t + u * 256; r[u] = v < NR ? RED[v] : 0.f; }
+    for (int u = 0; u < (NR + 255) / 256; ++u) { const int v = t + u * 256; r[u] = v < NR ? __ldcg(RED + v) : 0.f; }   // other blocks wrote it
     __nv_bfloat16 w[2 * CH * CM / 256];
 #pragma unroll
     for (int u = 0; u < CH * CM / 256; ++u) { w[u] = WA[t + u * 256]; w[CH * CM / 256 + u] = WB[t + u * 256]; }
@@ -1182,6 +1182,44 @@ __global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict
     }
     DGAM[k] = from_f<GT>(dg / g); DBET[k] = from_f<GT>(db / g);
   }
+}
+
+// The prologue backward's tail in ONE launch: column blocks sum the per-CTA partials [splits][65][64] in a fixed order
+// (8 split groups, then the groups in order: deterministic), and the last block to finish runs the finalize.  Three
+// serial latency-bound launches (a two-pass column sum and a one-block finalize) were ~15 us of the training step.
+template <typename GT, typename OT>
+__global__ void __launch_bounds__(256) opm_pbwd_reduce(const float* __restrict__ PART, int splits, float* __restrict__ RED, int* __restrict__ CNT,
+                                                       const __nv_bfloat16* __restrict__ WA, const __nv_bfloat16* __restrict__ WB,
+                                                       const GT* __restrict__ GAM, const GT* __restrict__ BET, OT* __restrict__ DWA,
+                                                       OT* __restrict__ DWB, GT* __restrict__ DGAM, GT* __restrict__ DBET) {
+  constexpr int W = 65 * 64, VC = W / 4;
+  __shared__ float4 red[8][32];
+  __shared__ int last;
+  const int v4 = blockIdx.x * 32 + (threadIdx.x & 31), g = threadIdx.x >> 5;
+  float4 s = make_float4(0.f, 0.f, 0.f, 0.f);
+  if (v4 < VC) {
+#pragma unroll 4
+    for (int k = g; k < splits; k += 8) {
+      const float4 q = __ldg(reinterpret_cast<const float4*>(PART + (size_t)k * W) + v4);
+      s.x += q.x; s.y += q.y; s.z += q.z; s.w += q.w;
+    }
+  }
+  red[g][threadIdx.x & 31] = s;
+  __syncthreads();
+  if (g == 0 && v4 < VC) {
+    float4 t = red[0][threadIdx.x];
+#pragma unroll
+    for (int k = 1; k < 8; ++k) { const float4 q = red[k][threadIdx.x]; t.x += q.x; t.y += q.y; t.z += q.z; t.w += q.w; }
+    reinterpret_cast<float4*>(RED)[v4] = t;
+  }
+  __threadfence();
+  __syncthreads();
+  if (threadIdx.x == 0) last = atomicAdd(CNT, 1) == (int)gridDim.x - 1;
+  __syncthreads();
+  if (!last) return;
+  __threadfence();
+  pbwd_finalize_body<GT, OT>(RED, WA, WB, GAM, BET, DWA, DWB, DGAM, DBET);
+  if (threadIdx.x == 0) *CNT = 0;              // ready for the next call (and the next graph replay)
 }
 }  // namespace
 
@@ -1227,12 +1265,16 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
         reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), dmm, part.data_ptr<float>());
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto red = colsum(part);                                           // [65, 64] fp32, in split order
+  auto red = torch::empty({(long)CM + 1, (long)CM}, m.options().dtype(torch::kFloat32));
+  static torch::Tensor cnt[16];                                      // the last-block ticket, one per device (self-resetting)
+  const int dev = m.device().index();
+  if (!cnt[dev].defined()) cnt[dev] = torch::zeros({1}, m.options().dtype(torch::kInt32));
   auto* dwap = reinterpret_cast<__nv_bfloat16*>(dwa.data_ptr<at::BFloat16>());
   auto* dwbp = reinterpret_cast<__nv_bfloat16*>(dwb.data_ptr<at::BFloat16>());
-  if (gf) opm_pbwd_finalize<float, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp, gamma.data_ptr<float>(), beta.data_ptr<float>(),
-                                                                     dwap, dwbp, dgam.data_ptr<float>(), dbet.data_ptr<float>());
-  else opm_pbwd_finalize<__nv_bfloat16, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp,
+  const int rblocks = ((CM + 1) * CM / 4 + 31) / 32;
+  if (gf) opm_pbwd_reduce<float, __nv_bfloat16><<<rblocks, 256, 0, st>>>(part.data_ptr<float>(), grid, red.data_ptr<float>(), cnt[dev].data_ptr<int>(),
+      wap, wbp, gamma.data_ptr<float>(), beta.data_ptr<float>(), dwap, dwbp, dgam.data_ptr<float>(), dbet.data_ptr<float>());
+  else opm_pbwd_reduce<__nv_bfloat16, __nv_bfloat16><<<rblocks, 256, 0, st>>>(part.data_ptr<float>(), grid, red.data_ptr<float>(), cnt[dev].data_ptr<int>(), wap, wbp,
       reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(beta.data_ptr<at::BFloat16>()), dwap, dwbp,
       reinterpret_cast<__nv_bfloat16*>(dgam.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dbet.data_ptr<at::BFloat16>()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
