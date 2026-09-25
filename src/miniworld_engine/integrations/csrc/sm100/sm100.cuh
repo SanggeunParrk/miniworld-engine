@@ -299,7 +299,7 @@ inline torch::Tensor colsum(const torch::Tensor& part, torch::ScalarType dtype =
   TORCH_CHECK(width % 4 == 0, "colsum: width must be a multiple of 4");
   auto out = torch::empty(part.sizes().slice(1), part.options().dtype(dtype));
   const long vcols = width / 4;
-  {
+  if ((vcols + 31) / 32 >= 128) {                // wide: one launch has the parallelism; narrow ones take the split groups below
     auto st1 = at::cuda::getCurrentCUDAStream();
     const int blocks = (int)((vcols + 31) / 32);
     if (dtype == torch::kFloat32) colsum1_kernel<float><<<blocks, 256, 0, st1>>>(part.data_ptr<float>(), out.data_ptr<float>(), splits, width);
