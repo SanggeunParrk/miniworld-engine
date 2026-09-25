@@ -653,7 +653,7 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
     int NI, int NJ, int ntiles, int nsplit,
     const __grid_constant__ CUtensorMap amap,     // dz/n as (64 z, NJ j, NI i, 2 halves), box (64, BJ, BI, 2), 128B swizzle
     const __grid_constant__ CUtensorMap bmap,     // O    as (32 e, NJ j, NI i, 32 c), box (32, BJ, BI, 16), 64B swizzle
-    float* __restrict__ PART) {                   // [nsplit][CZ][NCH]
+    const __grid_constant__ CUtensorMap pmap) {   // the partials [nsplit * CZ][NCH] fp32, box (32, 128), 128B swizzle
   using namespace dw;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -708,21 +708,35 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
       mma_commit(done);
     }
   } else {
-    // drain: TMEM lane = z; 512 columns = this CTA's half of (c,e)
+    // drain: TMEM lane = z; 512 columns = this CTA's half of (c,e).  The partial leaves by TMA from 128B-swizzled
+    // [128 z][32] fp32 tiles in the (now idle) stage buffers: per-thread row stores of it were slow partial-line writes.
     const int q = warp & 3, z = q * 32 + lane;
+    const bool leader = (warp == 2 && lane == 0);
     wait(done, 0);
     tc_fence_after();
-    float* out = PART + ((size_t)split * CZ + z) * NCH + half * NHALF;
     const bool any = k1 > k0;
+    float* stg = reinterpret_cast<float*>(sStage);                 // 4 tiles of [128][32] fp32 (16 KiB each)
 #pragma unroll 1
     for (int c0 = 0; c0 < NHALF; c0 += 32) {
+      const int bufi = (c0 / 32) & 3;
+      if (bufi == 0) { if (leader) bulk_wait_read<0>(); named_sync(1, 128); }
       float v[32];
       tmem_ld32(tmem_at(tmem, q * 32, c0), v);
       tmem_wait_ld();
+      float* row = stg + bufi * 128 * 32 + z * 32;
 #pragma unroll
-      for (int k = 0; k < 32; k += 4)
-        *reinterpret_cast<float4*>(out + c0 + k) = any ? make_float4(v[k], v[k + 1], v[k + 2], v[k + 3]) : make_float4(0.f, 0.f, 0.f, 0.f);
+      for (int k = 0; k < 8; ++k)
+        *reinterpret_cast<float4*>(row + ((k ^ (z & 7)) << 2)) = any ? make_float4(v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]) : make_float4(0.f, 0.f, 0.f, 0.f);
+      if (bufi == 3) {
+        fence_proxy_async();
+        named_sync(1, 128);
+        if (leader) {
+          for (int bb = 0; bb < 4; ++bb) store_2d(&pmap, stg + bb * 128 * 32, half * NHALF + c0 - 96 + bb * 32, split * CZ);
+          bulk_commit();
+        }
+      }
     }
+    if (leader) bulk_wait<0>();
   }
   tc_fence_before();
   __syncthreads();
@@ -1082,7 +1096,9 @@ torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj
   CUtensorMap bm = make_map<4>(O.data_ptr(), {32, (uint64_t)nj, (uint64_t)ni, 32}, {32, 32 * M, M}, {32, BJ, BI, 16}, CU_TENSOR_MAP_SWIZZLE_64B, "O");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dwo_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  opm_dwo_sm100<<<dim3(nsplit, 2), THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, part.data_ptr<float>());
+  CUtensorMap pm = make_map<2>(part.data_ptr(), {(uint64_t)NCH, (uint64_t)nsplit * CZ}, {(uint64_t)NCH}, {32, CZ}, CU_TENSOR_MAP_SWIZZLE_128B, "part",
+                               CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
+  opm_dwo_sm100<<<dim3(nsplit, 2), THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, pm);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return colsum(part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32);                 // the splits, in split order
 }

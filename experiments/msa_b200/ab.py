@@ -24,6 +24,12 @@ if case == "dgrad":
     ra, rb = fa(), fb()
     print("max |old - new| dO", (ra[0].float() - rb[0].float()).abs().max().item(), "dzp", (ra[1].float() - rb[1].float()).abs().max().item(),
           "dbo", (ra[2] - rb[2]).abs().max().item())
+elif case == "dwo":
+    CZ, CH = 128, 32
+    dzp = (torch.randn(N, N, CZ, device="cuda") * 0.01).to(bf); O = torch.randn(N * CH, N * CH, device="cuda", dtype=bf)
+    fa = lambda: A.opm_dwo(dzp, O, N, N, 0); fb = lambda: B.opm_dwo(dzp, O, N, N, 0)
+    ra, rb = fa(), fb()
+    print("max |old - new| dWo", (ra - rb).abs().max().item())
 elif case == "glue":
     H, C, D = 8, 32, 64
     o = torch.randn(S, N, H * C, device="cuda", dtype=bf); y = torch.randn(S, N, D, device="cuda", dtype=bf); dres = torch.randn(S, N, D, device="cuda", dtype=bf)

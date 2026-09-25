@@ -144,6 +144,50 @@ def run_case(op, impl, mode, L, S):
     return timeit(step)
 
 
+# ---- speed-of-light floors of THIS fusion algorithm (the H100 kernel boundaries, B200 kernels) ----
+# per kernel: max(minimum DRAM bytes / HBM ceiling, FLOPs / tensor ceiling), summed over the module's kernels.
+# Ceilings = the best rates measured on this B200: 6.9 TB/s (in-place read+write stream) and 1.73 PFLOP/s
+# (cuBLAS on the module's own 12288^2 x 1024 GEMM).  Launch gaps are not in the floor.
+HBM, TC = 6.9e12, 1.73e15
+
+
+def sol_floor(op, mode, L, S):
+    MB = lambda x: x * 1e6
+    def k(byts, flops=0.0):
+        return max(byts / HBM, flops / TC)
+    n2, bf = L * L, 2
+    m = S * L * 64 * bf                                  # an [S, N, 64] bf16 tensor
+    if op == "opm":
+        a = L * 32 * S * bf                              # A2 / BT
+        o = (L * 32) ** 2 * bf                           # the grouped outer product O
+        z = n2 * 128 * bf
+        gemm = 2 * (L * 32) ** 2 * S
+        fwd = [k(m + S * L + 2 * a + (S * L * 8 if mode == "train" else 0)),   # prologue (+ LN stats)
+               k(2 * a + o, gemm),                                         # grouped GEMM
+               k(o + 2 * z, 2 * n2 * 1024 * 128)]                          # epilogue (+ residual)
+        if mode == "infer":
+            return sum(fwd)
+        bwd = [k(z + o + z, 2 * n2 * 128 * 1024),       # dgrad: dz -> dO (grouped) + dz/n
+               k(o + 2 * a, gemm), k(o + 2 * a, gemm),   # dA, dB
+               k(o + z, 2 * n2 * 1024 * 128),            # dWo
+               k(2 * a + m + S * L * 8 + S * L + m)]     # prologue backward
+        return sum(fwd) + sum(bwd)
+    H, C = 8, 32
+    v = S * L * H * C * bf
+    zp = n2 * 128 * bf
+    fwd = [k(zp + H * n2 * bf),                          # pair3: LN_z -> proj_z -> softmax
+           k(m + m + v),                                 # ln_vg: y and head-major v
+           k(v + 3 * m + (v if mode == "train" else 0), 2 * H * n2 * S * C + 2 * 2 * S * L * 64 * H * C)]   # fwd (+ o)
+    if mode == "infer":
+        return sum(fwd)
+    bwd = [k(v + 2 * m + 2 * v),                         # glue: o, y, dres -> do, dgp
+           k(2 * v, 2 * H * n2 * S * C),                 # plain: dv
+           k(2 * v, 2 * H * n2 * S * C),                 # dw bmm
+           k(2 * v + 4 * m),                             # dgv backward
+           k(2 * zp + H * n2 * (2 + 4))]                 # pair backward
+    return sum(fwd) + sum(bwd)
+
+
 def calibrate():
     bf = torch.bfloat16
     x = torch.empty(2 * 1024 ** 3 // 2, dtype=bf, device="cuda")
@@ -182,8 +226,10 @@ def main():
                             err = None
                         except Exception as exc:                     # a column that cannot run is reported, not fatal
                             ms, err = None, f"{type(exc).__name__}: {str(exc)[:300]}"
-                        rows.append(dict(op=op, L=L, S=S, mode=mode, impl=impl, ms=ms, err=err))
-                        print(f"{op} L{L} S{S} {mode:5s} {impl:9s} " + (f"{ms:.4f} ms" if ms is not None else f"n/a {err or ''}"), flush=True)
+                        floor = sol_floor(op, mode, L, S) * 1e3
+                        rows.append(dict(op=op, L=L, S=S, mode=mode, impl=impl, ms=ms, err=err, sol_floor_ms=floor))
+                        sol = f"  SoL {100 * floor / ms:5.1f}% (floor {floor:.3f} ms)" if ms is not None and impl == "ours" else ""
+                        print(f"{op} L{L} S{S} {mode:5s} {impl:9s} " + (f"{ms:.4f} ms" if ms is not None else f"n/a {err or ''}") + sol, flush=True)
                         torch.cuda.empty_cache()
     res["rows"] = rows
     if a.out:
