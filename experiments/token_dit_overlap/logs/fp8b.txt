@@ -1,0 +1,24 @@
+## start 17:54:29 restart=0
+#### fp8gemm
+  quack fp8: no config ran (KeyError: torch.float8_e4m3fn)
+M=3840 N=3072 K=768  (18.1 GFLOP)
+  bf16 quack (128, 192, 1, 1, True)            do_bench  33.54 us   graph  26.37 us   rel err vs fp32 1.66e-03
+  scaled_mm rowwise                            do_bench  35.10 us   graph  28.97 us   rel err vs fp32 3.73e-02
+  quack fp8: no config ran (KeyError: torch.float8_e4m3fn)
+M=1920 N=3072 K=768  (9.1 GFLOP)
+  bf16 quack (128, 192, 1, 1, True)            do_bench  21.06 us   graph  14.66 us   rel err vs fp32 1.66e-03
+  scaled_mm rowwise                            do_bench  21.82 us   graph  16.24 us   rel err vs fp32 3.73e-02
+#### fp8gemm done
+#### emul768
+L=768: bf16 as shipped rel_rms 4.40e-03   (engine bf16 path is 1.1e-2)
+  fp8 expand                         rel_rms 3.05e-02  (x6.93)
+  fp8 squeeze                        rel_rms 2.12e-02  (x4.81)
+  fp8 expand+squeeze                 rel_rms 3.69e-02  (x8.38)
+  fp8 q|k|v|g                        rel_rms 4.86e-03  (x1.10)
+  fp8 Wo                             rel_rms 4.51e-03  (x1.02)
+  fp8 q|k|v|g+Wo                     rel_rms 4.95e-03  (x1.12)
+  fp8 q|k|v|g+Wo+expand+squeeze      rel_rms 3.69e-02  (x8.39)
+  fp8 per-tensor q|k|v|g             rel_rms 4.86e-03  (x1.10)
+  fp8 per-tensor q|k|v|g+Wo          rel_rms 4.96e-03  (x1.13)
+#### emul768 done
+## all done 17:55:58

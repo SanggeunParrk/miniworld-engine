@@ -249,7 +249,8 @@ def _rows_cfgs():
 
 @triton.autotune(configs=_rows_cfgs(), key=["M", "L"])
 @triton.jit
-def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, D: tl.constexpr, DP: tl.constexpr, BR: tl.constexpr):
+def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, inv_s, D: tl.constexpr, DP: tl.constexpr,
+                       OUT_F8: tl.constexpr, BR: tl.constexpr):
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
     rm = rows < M
     tok = rows % L
@@ -263,21 +264,27 @@ def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, D: tl.constexpr,
     rstd = 1.0 / tl.sqrt(tl.sum(d * d, 1) / D + eps)
     ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
     mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
-    tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
+    xa = d * rstd[:, None] * ms + mb
+    if OUT_F8:                                                        # e4m3 with a static scale; clamp so an overflow
+        xa = tl.clamp(xa * inv_s, -448.0, 448.0)                      # saturates instead of becoming NaN
+    tl.store(OUT + r64 * D + cs[None, :], xa.to(OUT.dtype.element_ty), mask=mk)
 
 
-def adaln_rows(x, ms, mb, out, L, eps=1e-5):
+def adaln_rows(x, ms, mb, out, L, eps=1e-5, inv_s=1.0):
+    """out = AdaLN(x); an fp8 (e4m3) ``out`` is written as AdaLN(x) * inv_s."""
     M, D = x.shape
     _adaln_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](x, ms, mb, out, M, L, x.stride(0), ms.stride(0), mb.stride(0),
-                                                             eps, D=D, DP=triton.next_power_of_2(D))
+                                                             eps, inv_s, D=D, DP=triton.next_power_of_2(D),
+                                                             OUT_F8=out.dtype == torch.float8_e4m3fn)
 
 
 # restore_value: X is the residual, updated in place; without it every config the autotuner benches would add again.
 @triton.autotune(configs=_rows_cfgs(), key=["M", "L", "HAS_ADALN"], restore_value=["X"])
 @triton.jit
-def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, smb, eps,
+def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, smb, eps, inv_s,
                                D: tl.constexpr, DP: tl.constexpr, HAS_ADALN: tl.constexpr, PDL: tl.constexpr,
-                               EARLY: tl.constexpr, TRIG_START: tl.constexpr, BR: tl.constexpr):
+                               EARLY: tl.constexpr, TRIG_START: tl.constexpr, OUT_F8: tl.constexpr,
+                               BR: tl.constexpr):
     if TRIG_START:
         gdc_launch_dependents()
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
@@ -312,20 +319,24 @@ def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, sm
         if not EARLY:
             ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
             mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
-        tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
+        xa = d * rstd[:, None] * ms + mb
+        if OUT_F8:
+            xa = tl.clamp(xa * inv_s, -448.0, 448.0)
+        tl.store(OUT + r64 * D + cs[None, :], xa.to(OUT.dtype.element_ty), mask=mk)
     if PDL and not TRIG_START:
         gdc_launch_dependents()
 
 
-def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5):
-    """x += gl * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
+def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5, inv_s=1.0):
+    """x += gl * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block (an fp8 ``out`` is
+    written as AdaLN(x) * inv_s)."""
     M, D = x.shape
     has = ms is not None
     _resgate_adaln_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](
         x, y, gl, ms if has else gl, mb if has else gl, out if has else y, M, L, x.stride(0), y.stride(0), gl.stride(0),
-        (ms if has else gl).stride(0), (mb if has else gl).stride(0), eps, D=D, DP=triton.next_power_of_2(D),
+        (ms if has else gl).stride(0), (mb if has else gl).stride(0), eps, inv_s, D=D, DP=triton.next_power_of_2(D),
         HAS_ADALN=has, PDL=PDL, EARLY=PDL and EARLY,
-        TRIG_START=PDL and TRIG_START, launch_pdl=PDL)
+        TRIG_START=PDL and TRIG_START, OUT_F8=has and out.dtype == torch.float8_e4m3fn, launch_pdl=PDL)
 
 
 @triton.autotune(configs=_rows_cfgs(), key=["M"])

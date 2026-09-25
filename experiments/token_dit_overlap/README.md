@@ -426,3 +426,42 @@ test_core passes, 0/600 kernel runs and 13/13 step runs bit-identical.
   pick would break the chain on both sides. But the race no longer picks it at either length (tile_M 64 quack configs
   take Wo and squeeze at M = 1920 too): identical picks, 78.82 vs 78.79 us/block at L384. The picks do vary between
   processes within noise (an earlier NCU run had squeeze on cuBLAS at L768).
+
+## fp8 for q|k|v|g (opt-in, `TDIT_FP8_QKVG=1`)
+
+The GEMMs are 58 % of the step and at 60-77 % of the bf16 roof, so the one large lever left on them is fp8 (2x the
+tensor rate). Accuracy first, by fake-quant emulation (`fp8_emul.py`: e4m3 quantize -> dequantize at a GEMM's inputs,
+against the IEEE fp32 reference):
+
+| GEMMs in fp8 | L768 rel_rms | L384 |
+|---|---:|---:|
+| none (bf16 as shipped) | 4.40e-3 | 4.42e-3 |
+| expand / squeeze / both | 3.05e-2 / 2.12e-2 / 3.69e-2 | same |
+| **q\|k\|v\|g** | **4.86e-3 (x1.10)** | **5.09e-3 (x1.15)** |
+| Wo / q\|k\|v\|g + Wo | 4.51e-3 / 4.95e-3 | 4.58e-3 / 5.23e-3 |
+
+The transition GEMMs cannot take fp8 (7-8x the error, past the engine's 1.1e-2). q|k|v|g can; per-tensor scales cost
+the same as per-row.
+
+Kernels at the q|k|v|g shape (`fp8_gemm.py`, graph replay): bf16 quack 25.99 / 14.41 us (M = 3840 / 1920);
+`torch._scaled_mm` rowwise fp8 28.71 / 16.16 (slower: short K, the bf16 output write and prologue dominate); quack
+fp8 with a per-tensor `alpha` 21.51 / 11.91. quack's sm90 GEMM accepts e4m3 but its torch -> CuTe dtype map has no fp8
+entry (registered in `_quack_gemm()`), and only `quack.gemm.gemm` takes `alpha` (`gemm_act` does not).
+
+**Static activation scale.** The q|k|v|g input is an AdaLN output, LN(x) sigmoid(ms) + mb: |LN(x)| <= sqrt(d - 1) =
+27.7 by construction, and e4m3 keeps full relative precision over ~2^14.8. One static scale (`TDIT_FP8_XA_BOUND` / 448,
+default 128) therefore costs nothing -- rel_rms is identical for bounds 32, 64, 128 and 256 -- so there is no amax pass
+and no delayed scaling. The row pass that feeds q|k|v|g writes `xa8` (e4m3, clamped to +-448 so an overflow saturates);
+the one that feeds the transition stays bf16. Weights get one scale per block at pack time.
+
+Measured (`ab_fp8.py`, in one process, interleaved; `bench.py` both ways on node02):
+
+| | bf16 | fp8 q\|k\|v\|g | saving | rel_rms |
+|---|---:|---:|---:|---:|
+| L768, A/B (14 rounds) | 154.14 us/block | 147.57 | +6.57 (4.3 %) | 4.40e-3 -> 4.86e-3 |
+| L768, bench.py | 147.4 | **142.9** | +4.5 (3.1 %) | |
+| L384, A/B | 76.31 | 75.16 | +1.15 (1.5 %) | 4.42e-3 -> 5.09e-3 |
+| L384, bench.py | 76.2 | **73.7** | +2.5 (3.3 %) | |
+
+Deterministic. Off by default: it is an accuracy trade (x1.10-1.15, still 2.2x better than the engine's bf16 path),
+which is the caller's to make.

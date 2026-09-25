@@ -47,6 +47,61 @@ def attention_in_place(q, k, v, bias, mask, m, key):
 
 
 _QUACK = []
+_QUACK_GEMM = []
+
+
+def _quack_gemm():
+    """quack.gemm.gemm: the plain sm90 GEMM, which takes a scalar ``alpha`` (gemm_act does not). quack's torch -> CuTe
+    dtype map has no fp8 entry although its sm90 GEMM accepts Float8E4M3FN, so it is registered here."""
+    if not _QUACK_GEMM:
+        try:
+            import cutlass
+            from quack import cute_dsl_utils
+            from quack.gemm import gemm
+            cute_dsl_utils.torch2cute_dtype_map.setdefault(torch.float8_e4m3fn, cutlass.Float8E4M3FN)
+            _QUACK_GEMM.append(gemm)
+        except Exception:  # noqa: BLE001
+            _QUACK_GEMM.append(None)
+    return _QUACK_GEMM[0]
+
+
+def _replay_ms(run):
+    """GPU time of a graph replay. Two measurement regimes were compared against the step itself (the A/B in
+    experiments/token_dit_overlap/ab_mm.py): triton's do_bench, which evicts L2 between iterations and is the
+    engine's convention for benchmarking a kernel on its own, and a captured replay. The replay predicts the
+    step better here (L384: 2.58 vs 1.92 us a block saved), because that is how these GEMMs actually run --
+    captured, back to back, on data the previous kernel just left in L2. Eager launches are wrong for both:
+    quack's python wrapper then costs more than these 9-15 us kernels differ by."""
+    for _ in range(3):                            # warm up: a quack config JIT-compiles on its first call
+        run()
+    torch.cuda.synchronize()
+    if torch.cuda.is_current_stream_capturing():  # already inside a capture: fall back to eager
+        st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        st.record()
+        for _ in range(20):
+            run()
+        en.record()
+        torch.cuda.synchronize()
+        return st.elapsed_time(en)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        run()
+    torch.cuda.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g, stream=side):
+        for _ in range(20):
+            run()
+    torch.cuda.synchronize()
+    best = float("inf")
+    for _ in range(3):                            # min of three rounds: the node is shared
+        st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        st.record()
+        g.replay()
+        en.record()
+        torch.cuda.synchronize()
+        best = min(best, st.elapsed_time(en))
+    return best
 
 
 def _quack_gemm_act():
@@ -73,6 +128,10 @@ GATED_CFGS = ((128, 192, 2, 1, True), (128, 192, 1, 1, True), (128, 128, 2, 1, T
 PLAIN_CFGS = ((128, 192, 1, 1, True), (128, 192, 2, 1, True), (128, 192, 1, 4, False), (128, 192, 1, 2, False),
               (64, 192, 1, 1, True), (64, 192, 1, 2, True), (64, 192, 1, 4, True), (128, 192, 1, 4, True),
               (128, 128, 1, 1, True), (128, 256, 1, 1, False))
+
+# Extra candidates for the fp8 q|k|v|g race: fp8 halves the operand bytes, which moves the best tile (the standalone
+# sweep in experiments/token_dit_overlap/fp8_gemm.py picked (128, 192, 1, 4, no pingpong) at M = 3840).
+FP8_EXTRA_CFGS = ((128, 256, 1, 1, True), (128, 256, 2, 1, True), (128, 128, 2, 1, True))
 
 
 class FusedTokenDiT:
@@ -146,6 +205,20 @@ class FusedTokenDiT:
         self.mm_cublas = os.environ.get("TDIT_MM_CUBLAS", "1") != "0"
         self._cond_buf = {}
         self._cuda_core = None
+        # q|k|v|g in fp8 (e4m3), opt-in: TDIT_FP8_QKVG=1. Its input is an AdaLN output, LN(x) sigmoid(ms) + mb, whose
+        # range is bounded by construction (|LN(x)| <= sqrt(d - 1) = 27.7), and e4m3 keeps full relative precision over
+        # ~2^14.8, so one static scale (TDIT_FP8_XA_BOUND / 448) is enough -- no amax pass, no delayed scaling. The
+        # weights get one scale per block. The transition GEMMs stay bf16: in fp8 they cost 7-8x the error.
+        self.fp8_qkvg = (dtype == torch.bfloat16 and os.environ.get("TDIT_FP8_QKVG", "0") == "1"
+                         and _quack_gemm() is not None)
+        self._mm8_cfg = {}
+        if self.fp8_qkvg:
+            self.xa_scale = float(os.environ.get("TDIT_FP8_XA_BOUND", "128")) / 448.0
+            for p in self.per:
+                w = p["wqkvg"].float()
+                sw = float(w.abs().max().clamp_min(1e-12)) / 448.0
+                p["w8"] = (w / sw).clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
+                p["alpha8"] = self.xa_scale * sw
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -176,6 +249,7 @@ class FusedTokenDiT:
                 qkvg2=torch.empty(M, 4 * self.d, device=dev, dtype=self.dtype),
                 a=torch.empty(M, self.d, device=dev, dtype=self.dtype),
                 y=torch.empty(M, self.d, device=dev, dtype=self.dtype),
+                xa8=torch.empty(M, self.d, device=dev, dtype=torch.float8_e4m3fn),
                 ab=torch.empty(M, 2 * self.per[0]["wa_t"].shape[1], device=dev, dtype=self.dtype))
         return self._buf[key]
 
@@ -229,7 +303,9 @@ class FusedTokenDiT:
         x, xa, qkvg, a, y, ab, h = (buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h"))
         g1, g2 = self._cond(cond, L, D)
         x.copy_(single.reshape(M, D))
-        K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, L, self.eps)
+        fp8, xa8 = self.fp8_qkvg, buf["xa8"]
+        inv_s = 1.0 / self.xa_scale if fp8 else 1.0
+        K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa8 if fp8 else xa, L, self.eps, inv_s)
         # q, k, v, g as strided views of ONE [M, 4D] GEMM output; the core launcher honours strides
         q, k, v = (qkvg.view(S, 1, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(3))
         key = atom_key(L)
@@ -247,7 +323,10 @@ class FusedTokenDiT:
                 self._bdesc, self._bdesc_key = bias_descriptor(bias), key_d
             bdesc = self._bdesc
         for b, p in enumerate(self.per):
-            self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
+            if fp8:
+                self._mm8(xa8, p["w8"], qkvg, p["bqkvg"], p["alpha8"])
+            else:
+                self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
             if use_cuda_core:
                 self._cuda_core(qkvg, bias, b, S, H)                  # sigmoid(g)*o over q, one sm_90a kernel
                 self._mm(qkvg[:, :D], p["wo"], y)
@@ -270,7 +349,7 @@ class FusedTokenDiT:
             self._mm(h, p["ws"], y)
             last = b + 1 == self.nb
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
-                                 None if last else g1[:, b + 1, 1], xa, L, self.eps)
+                                 None if last else g1[:, b + 1, 1], xa8 if fp8 else xa, L, self.eps, inv_s)
         return x.view(S, 1, L, D).to(out_dtype or single.dtype)
 
     def _cuda_core_ok(self, L, D, H):
@@ -306,43 +385,7 @@ class FusedTokenDiT:
                           pingpong=c[4], rowvec_bias=None if bias is None else bias[None])
 
     def _pick_mm(self, A, W, out, bias):
-        def timed(run):
-            """GPU time of a graph replay. Two measurement regimes were compared against the step itself (the A/B in
-            experiments/token_dit_overlap/ab_mm.py): triton's do_bench, which evicts L2 between iterations and is the
-            engine's convention for benchmarking a kernel on its own, and a captured replay. The replay predicts the
-            step better here (L384: 2.58 vs 1.92 us a block saved), because that is how these GEMMs actually run --
-            captured, back to back, on data the previous kernel just left in L2. Eager launches are wrong for both:
-            quack's python wrapper then costs more than these 9-15 us kernels differ by."""
-            for _ in range(3):                            # warm up: a quack config JIT-compiles on its first call
-                run()
-            torch.cuda.synchronize()
-            if torch.cuda.is_current_stream_capturing():  # already inside a capture: fall back to eager
-                st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-                st.record()
-                for _ in range(20):
-                    run()
-                en.record()
-                torch.cuda.synchronize()
-                return st.elapsed_time(en)
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
-                run()
-            torch.cuda.synchronize()
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, stream=side):
-                for _ in range(20):
-                    run()
-            torch.cuda.synchronize()
-            best = float("inf")
-            for _ in range(3):                            # min of three rounds: the node is shared
-                st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-                st.record()
-                g.replay()
-                en.record()
-                torch.cuda.synchronize()
-                best = min(best, st.elapsed_time(en))
-            return best
+        timed = _replay_ms
 
         best = (timed(lambda: torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out))
                 if self.mm_cublas else float("inf"), "cublas")      # "cublas" stays the fallback if no config runs
@@ -355,6 +398,27 @@ class FusedTokenDiT:
                 if t < best[0]:
                     best = (t, c)
         return best[1]
+
+    def _mm8(self, A8, W8, out, bias, alpha):
+        """out = alpha * (A8 @ W8^T) + bias, e4m3 operands, bf16 out, quack sm90 (PDL like the bf16 GEMMs). The config is
+        raced on the first call per (M, N, K), timed the way the bf16 picker times (a captured replay)."""
+        key = (A8.shape[0], W8.shape[0], A8.shape[1])
+        cfg = self._mm8_cfg.get(key)
+        run = lambda c: _quack_gemm()(A8[None], W8[None], out[None], None, None, c[0], c[1], c[2], c[3],
+                                      pingpong=c[4], rowvec_bias=bias[None], alpha=alpha)
+        if cfg is None:
+            best = None
+            for c in PLAIN_CFGS + FP8_EXTRA_CFGS:
+                try:
+                    t = _replay_ms(lambda c=c: run(c))
+                except Exception:  # noqa: BLE001 -- a config this shape or card cannot take
+                    continue
+                if best is None or t < best[0]:
+                    best = (t, c)
+            if best is None:
+                raise RuntimeError("no quack fp8 config runs for this shape")
+            cfg = self._mm8_cfg[key] = best[1]
+        run(cfg)
 
     def _expand_swiglu(self, xa, wab_i, h):
         """h = silu(xa @ Wa^T) * (xa @ Wb^T) with the SwiGLU in the GEMM epilogue: ab never reaches HBM."""
