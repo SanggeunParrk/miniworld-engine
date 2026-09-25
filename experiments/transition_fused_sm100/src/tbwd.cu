@@ -187,6 +187,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
       tc_fence_after();
       if (i >= 1) mbar_wait(&B.g_empty, (i - 1) & 1);
       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
+#ifndef ABL_BGATE
       {
         uint32_t dh[32], av[32], bv[32];
         tmem_ld32(trow + T_DH + half * 32, dh);
@@ -215,6 +216,9 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
           sts128(su + W_DAB + KB + off, make_uint4(dbp[0], dbp[1], dbp[2], dbp[3]));
         }
       }
+#else
+      tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
+#endif
       fence_proxy_async();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.g_full);
@@ -414,6 +418,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       tc_fence_after();
       // [dA | dB] is written back half by half: columns 0..15 dA(hs 0..31), 16..31 dB(hs 0..31), 32..47 dA(hs 32..63), 48..63 dB(hs 32..63),
       // so each half lands only on columns it has already read; the d_xn product pairs each 8-column block with the matching B rows
+#ifndef ABL_BGATE
       {
         uint32_t dh[32], av[32], bv[32];
         tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
@@ -435,6 +440,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
         tmem_st16(trow + T_AB + s * 128 + half * 32, da);
         tmem_st16(trow + T_AB + s * 128 + half * 32 + 16, db);
       }
+#endif
       tmem_wait_st();
       tc_fence_before();
       __syncwarp();
@@ -455,6 +461,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       mbar_wait(&B.dxn_full, i & 1);
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 1);
       tc_fence_after();
+#ifndef ABL_BEPI
       uint32_t dn[64];                                     // d_xn rounded once to bf16
 #pragma unroll
       for (int cc = 0; cc < 4; ++cc) {
@@ -525,6 +532,11 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           }
           sts128(dyb + off, make_uint4(o[0], o[1], o[2], o[3]));
         }
+#else
+      tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.dxn_empty);
+      mbar_wait(&B.x_full[b], (i >> 1) & 1);
+      const uint32_t dyb = su + X_IN + b * INB; (void)grow; (void)real;
+#endif
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 5);
       fence_proxy_async();
       named_bar_sync(1, 128);

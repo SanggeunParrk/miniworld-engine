@@ -1,0 +1,12 @@
+tbwd       R9: bwd sustained  241.2 us   1013 W  1.149 pJ/FLOP   graph20  234.1 us
+tbwd       R10: bwd sustained  252.0 us   1011 W  1.199 pJ/FLOP   graph20  240.2 us
+tbwd       R11: bwd sustained  276.5 us    962 W  1.251 pJ/FLOP   graph20  272.2 us
+babl_gate  R9: bwd sustained  188.3 us   1017 W  0.901 pJ/FLOP   graph20  181.6 us
+babl_gate  R10: bwd sustained  195.4 us    985 W  0.906 pJ/FLOP   graph20  186.5 us
+babl_gate  R11: bwd sustained  207.2 us   1005 W  0.980 pJ/FLOP   graph20  206.1 us
+babl_epi   R9: bwd sustained  240.0 us   1015 W  1.146 pJ/FLOP   graph20  230.2 us
+babl_epi   R10: bwd sustained  232.8 us    980 W  1.073 pJ/FLOP   graph20  232.0 us
+babl_epi   R11: bwd sustained  254.6 us    988 W  1.183 pJ/FLOP   graph20  245.6 us
+babl_both  R9: bwd sustained  183.7 us    989 W  0.854 pJ/FLOP   graph20  183.1 us
+babl_both  R10: bwd sustained  175.1 us    985 W  0.811 pJ/FLOP   graph20  175.8 us
+babl_both  R11: bwd sustained  182.8 us    973 W  0.837 pJ/FLOP   graph20  180.2 us
