@@ -32,3 +32,21 @@ def gemm_resgate_adaln(a, w, x, gl, ms, mb, xa, L, eps=1e-5, nwg=None):
     if nwg is None:
         nwg = 2 if a.shape[0] >= 3072 else 1
     _ext().gemm_resgate_adaln(a, w, x, gl, ms, mb, xa, L, eps, nwg)
+
+
+@functools.lru_cache(maxsize=1)
+def _ext_pp():
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    ensure_cuda_home()
+    return load_extension(
+        name="tdit_gemm_resgate_adaln_pp" + "".join("_" + d.replace("=", "") for d in _defs()),
+        sources=[str(_dir / "gemm_resgate_adaln_pp.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), f"-I{_v5}", "--expt-relaxed-constexpr",
+                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                           "-U__CUDA_NO_BFLOAT162_OPERATORS__", "-Xptxas=-v", *("-D" + d for d in _defs())],
+        extra_cflags=["-std=c++17"], verbose=True)
+
+
+def gemm_resgate_adaln_pp(a, w, x, gl, ms, mb, xa, L, eps=1e-5, max_clusters=0):
+    """Persistent, ping-ponged version: same contract as gemm_resgate_adaln."""
+    _ext_pp().gemm_resgate_adaln_pp(a, w, x, gl, ms, mb, xa, L, eps, max_clusters)

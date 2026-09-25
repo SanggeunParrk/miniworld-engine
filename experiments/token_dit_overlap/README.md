@@ -465,3 +465,42 @@ Measured (`ab_fp8.py`, in one process, interleaved; `bench.py` both ways on node
 
 Deterministic. Off by default: it is an accuracy trade (x1.10-1.15, still 2.2x better than the engine's bf16 path),
 which is the caller's to make.
+
+## The fused residual GEMM, persistent and ping-ponged (`gra/gemm_resgate_adaln_pp.cu`): correct, still slower
+
+v4 lost because it was one tile per CTA in one wave: every CTA ran its epilogue (x read-modify-write + xa, ~30 MB)
+after its mainloop, with nothing to hide under. v5 is persistent: each 4-CTA cluster walks a list of 64-row tiles,
+and two consumer warpgroups take alternate tiles, so one tile's epilogue runs under the next tile's mainloop.
+x never goes through bf16 (`y` does not exist), so x is 1.9-2.3e-6 against fp32 where mm + rows is 1.7e-3; xa is
+the same 1.7e-3. `gra/test_pp.py` passes for L 128 / 384 / 768, K 768 / 1536, with and without AdaLN, and persistent
+grids of 1 to 30 clusters; every run bit-identical.
+
+Two bugs on the way, both found with tools rather than by reading:
+- **Parity-wait ABA across the two warpgroups** (compute-sanitizer synccheck, "missing wait", on the producer's
+  `arrive.expect_tx`): the warpgroup taking tile i + 1 waited on its first chunk's `full` barrier while the other
+  warpgroup was still two phases behind on it; a parity wait passes on an older phase with the same parity, so it
+  read a stale slot and released it early, and peers multicast into a slot still in use. Fix: a `turn` handoff --
+  a warpgroup starts its mainloop only after the other has waited on every chunk of its tile. A waiter must never
+  be more than one phase ahead of the barrier; with several consumers of one ring, that has to be enforced.
+- **Register spill** (`cuobjdump -res-usage`: REG 168, STACK 576): the launch cap for 384 threads, and the AdaLN's
+  ms / mb prefetch spilled. A 288-thread block (one producer warp) does not raise ptxas's budget; `setmaxnreg`
+  40 / 232 does (stack 576 -> 264), and took the epilogue from ~25 to ~12 us a tile.
+
+Per-phase `%globaltimer` stamps (`gra/times_pp.py`, build with `GRA_DEFS=PP_TIMES`), L768 Wo, after both fixes:
+mainloop 6.7 / 9.0 us (tile 0 / tile 1), epilogue ~12 / ~10, kernel span 30.1 us.
+
+| graph replay | mm + rows | fused v5 |
+|---|---:|---:|
+| L384 Wo | 11.7 us | 16.0 |
+| L384 squeeze | 14.5 | 21.8 |
+| L768 Wo | 21.3 | 32.2 |
+| L768 squeeze | 28.4 | 49.5 |
+
+**Why it cannot win at these shapes.** A block's residual GEMM is about one wave of work (M = 3840 or 1920, N = 768).
+Hiding an epilogue needs several tiles per SM, which needs small (64-row) tiles, and then each tile re-reads its
+W slice from L2: the mainloop runs at ~0.65 us a 32 KB chunk, ~3x its tensor time, L2- and TMA-latency-bound. The
+epilogue's x tiles (2 x 48 KB) take the shared memory the ring would use for a fourth and fifth stage. squeeze
+(K = 1536) doubles the W traffic and loses most. Meanwhile the baseline's row pass already runs at the HBM roof and
+overlaps its neighbours under PDL. The remaining levers (a 2-D 4 N x 2 M cluster multicasting W over M, halving the
+W traffic; streaming x through 64-column chunks to free a ring stage) are estimated at best to reach parity on Wo
+and to still lose on squeeze. Not pursued further.
