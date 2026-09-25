@@ -53,3 +53,12 @@ print(f"  ab(c+1) issued (warp1 stamp) relative to dxn(c) issue start: {md([m1[8
 for i in range(min(nt, 3)):
     q = e[8*i:8*i+7] - m1[0]
     print(f"  epi tile {i}: wait dxn {q[1]-q[0]}  dn ld {q[2]-q[1]}  wait x {q[3]-q[2]}  pass1 {q[4]-q[3]}  pass2 {q[5]-q[4]}  store {q[6]-q[5]}")
+base = m1[8 * 40]
+print("gate A: loads done (ab_free arrive) - gate start:", md([g[1536 + c] - g[4*c+1] for c in rr]))
+print("raw DX timeline (clk rel. to chunk 40 start): c | ab wait-end | ab/dh issued | gateA start | gateA done | gateB done | dxn start | dxn issued | dxn done")
+for c in range(40, 46):
+    print(c, 'ldA', g[1536+c]-base, m1[8*c+3]-base, m1[8*c+4]-base, g[4*c+1]-base, g[4*c+3]-base, g[1024+c]-base, m2[8*c+2]-base, m2[8*c+3]-base, m2[8*c+4]-base)
+gs = np.array([g[4*c+1] for c in range(nch)])
+d = np.diff(gs)
+print("gate-start gaps within tiles (median):", md([d[c] for c in range(8, nch-1) if (c + 1) % 8 != 0]), " at tile boundaries (median):", md([d[c] for c in range(8, nch-1) if (c + 1) % 8 == 0]))
+print("boundary gaps:", [int(d[c]) for c in range(8, nch-1) if (c + 1) % 8 == 0][:8])

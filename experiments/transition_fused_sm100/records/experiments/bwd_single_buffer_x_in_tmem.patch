@@ -1,0 +1,312 @@
+--- /dev/fd/63	2026-09-25 19:28:22.852749098 +0900
++++ /tmp/claude-1002/-home-psk6950-practice-MiniWorld/ca840ff8-0135-4822-828e-e31c0c0969e5/scratchpad/tbwd_single.cu	2026-09-25 19:26:43.957491341 +0900
+@@ -22,10 +22,11 @@
+ constexpr int W_WS = 0, W_WAB = 16384, W_IN = 49152, INB = 65536, IN_XN = 32768;
+ constexpr int W_H = W_IN + 2 * INB, W_DAB = W_H + KB, W_BAR = W_DAB + 2 * KB;
+ // ---- DX role shared memory
+-// Ws ring 2 x 16 KB (released by dh_j), [Wa;Wb] ring 2 x 32 KB (released by d_xn_j), inputs 2 x (dy 32 KB + xn 32 KB); once a tile's
+-// last [a|b] is done its xn half is reloaded with x for the LayerNorm backward
+-constexpr int X_WS = 0, X_WAB = 32768, NWAB = 2, X_IN = X_WAB + NWAB * 32768;
+-constexpr int X_GAM = X_IN + 2 * INB, X_BAR = X_GAM + 512;
++// Ws ring 2 x 16 KB (released by dh_j), [Wa;Wb] ring 3 x 32 KB (released by d_xn_j), dy 2 x 32 KB, xn 1 x 32 KB. Once a tile's last
++// [a|b] is done, x is loaded into the xn buffer and copied to tensor memory (tcgen05.cp) for the LayerNorm backward, which frees the
++// buffer for the next tile's xn -- that single xn buffer is what pays for the third weight slot.
++constexpr int X_WS = 0, X_WAB = 32768, NWAB = 3, X_DY = X_WAB + NWAB * 32768, X_XN = X_DY + 2 * 32768;
++constexpr int X_GAM = X_XN + 32768, X_BAR = X_GAM + 512;
+ constexpr int SMEM_BYTES = (W_BAR > X_BAR ? W_BAR : X_BAR) + 512;
+ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
+ 
+@@ -53,8 +54,8 @@
+ 
+ struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full, g_empty, wg_done; uint32_t tmem; };
+ struct BarsX {
+-  uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], abdh_full[2], g_full[2], ab_free[2];
+-  uint64_t dxn_full, dxn_empty; uint32_t tmem;
++  uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], dy_full[2], dy_empty[2], abdh_full[2], g_full[2];
++  uint64_t xn_full, xn_dead, x_full, x_cp, x_free, ab_free, dh_free, dab_free, dxn_full, dxn_empty; uint32_t tmem;
+ };
+ 
+ // the 16-row block of the packed [Wa_j; Wb_j] tile matching A-operand block ks of the half-by-half [dA | dB] layout
+@@ -272,16 +273,18 @@
+   const int nch = n_local * NCH;
+   auto tile_of = [&](int i) { return i < n_valid ? cta + i * ndx : (n_valid > 0 ? cta + (n_valid - 1) * ndx : 0); };
+   const int crank = (int)cluster_rank();
+-  constexpr uint32_t T_AB = 0, T_DH = 256, T_DXN = 384;          // AB x2 (128 each; [dA|dB] is written back over its first 64), DH x2 (64 each)
++  // every accumulator is single-buffered and released at the earliest point: [a|b] and dh as soon as the gate has READ them, [dA|dB]
++  // once d_xn has read it, x once the epilogue has read it; d_xn accumulates over the tile
++  constexpr uint32_t T_AB = 0, T_DH = 128, T_DAB = 192, T_X = 256, T_DXN = 384;
+   const uint32_t tid = threadIdx.x;
+   if (tid == 0) {
+     for (int s = 0; s < 2; ++s) {
+-      mbar_init(&B.ws_full[s], 1); mbar_init(&B.ws_empty[s], CL); mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], 1);
+-      mbar_init(&B.x_full[s], 1); mbar_init(&B.xn_dead[s], 1);
+-      mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 8); mbar_init(&B.ab_free[s], 1);
++      mbar_init(&B.ws_full[s], 1); mbar_init(&B.ws_empty[s], CL); mbar_init(&B.dy_full[s], 1); mbar_init(&B.dy_empty[s], 1);
++      mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 8);
+     }
+     for (int s = 0; s < NWAB; ++s) { mbar_init(&B.wab_full[s], 1); mbar_init(&B.wab_empty[s], CL); }
+-    mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4);
++    mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4); mbar_init(&B.dh_free, 8); mbar_init(&B.dab_free, 1); mbar_init(&B.ab_free, 8);
++    mbar_init(&B.xn_full, 1); mbar_init(&B.xn_dead, 1); mbar_init(&B.x_full, 1); mbar_init(&B.x_cp, 1); mbar_init(&B.x_free, 4);
+     fence_barrier_init();
+   }
+   if (tid < 128) reinterpret_cast<float*>(sm + X_GAM)[tid] = p.gamma[tid];
+@@ -294,32 +297,32 @@
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+-      auto issue_in = [&](int i) {
+-        const int b = i & 1, row = tile_of(i) * ROWS;
+-        if (i >= 2) mbar_wait(&B.in_empty[b], ((i >> 1) - 1) & 1);
+-        mbar_expect_tx(&B.in_full[b], INB);
+-        const uint32_t dst = su + X_IN + b * INB;
+-#pragma unroll
+-        for (int cb = 0; cb < 2; ++cb)
+-#pragma unroll
+-          for (int h = 0; h < 2; ++h) {
+-            tma_load_2d(dst + cb * KB + h * 8192, p.dy, &B.in_full[b], cb * 64, row + h * 64);
+-            tma_load_2d(dst + IN_XN + cb * KB + h * 8192, p.xn, &B.in_full[b], cb * 64, row + h * 64);
++      // two streams polled by one thread: dy (double-buffered, freed by the epilogue's dx store) and the xn buffer, which alternates
++      // xn(i) (after x(i-1) has been copied to TMEM) and x(i) (after tile i's last [a|b])
++      int id = 0, ix = 0;                                  // ix: step 2i loads xn(i), step 2i + 1 loads x(i)
++      while (id < n_local || ix < 2 * n_local) {
++        if (id < n_local && (id < 2 || mbar_test(&B.dy_empty[id & 1], ((id >> 1) - 1) & 1))) {
++          const int b = id & 1, row = tile_of(id) * ROWS;
++          mbar_expect_tx(&B.dy_full[b], 32768);
++#pragma unroll
++          for (int cb = 0; cb < 2; ++cb)
++#pragma unroll
++            for (int h = 0; h < 2; ++h) tma_load_2d(su + X_DY + b * 32768 + cb * KB + h * 8192, p.dy, &B.dy_full[b], cb * 64, row + h * 64);
++          ++id;
++        }
++        if (ix < 2 * n_local) {
++          const int i = ix >> 1, row = tile_of(i) * ROWS;
++          const bool isx = ix & 1;
++          if (isx ? mbar_test(&B.xn_dead, i & 1) : (i == 0 || mbar_test(&B.x_cp, (i - 1) & 1))) {
++            uint64_t* bar = isx ? &B.x_full : &B.xn_full;
++            mbar_expect_tx(bar, 32768);
++#pragma unroll
++            for (int cb = 0; cb < 2; ++cb)
++#pragma unroll
++              for (int h = 0; h < 2; ++h) tma_load_2d(su + X_XN + cb * KB + h * 8192, isx ? p.x : p.xn, bar, cb * 64, row + h * 64);
++            ++ix;
+           }
+-      };
+-      auto issue_x = [&](int i) {                         // the tile's xn is dead: reload that half with x for the epilogue
+-        const int b = i & 1, row = tile_of(i) * ROWS;
+-        mbar_wait(&B.xn_dead[b], (i >> 1) & 1);
+-        mbar_expect_tx(&B.x_full[b], 32768);
+-        const uint32_t dst = su + X_IN + b * INB + IN_XN;
+-#pragma unroll
+-        for (int cb = 0; cb < 2; ++cb)
+-#pragma unroll
+-          for (int h = 0; h < 2; ++h) tma_load_2d(dst + cb * KB + h * 8192, p.x, &B.x_full[b], cb * 64, row + h * 64);
+-      };
+-      for (int i = 0; i <= n_local; ++i) {
+-        if (i < n_local) issue_in(i);
+-        if (i >= 1) issue_x(i - 1);
++        }
+       }
+     }
+   } else if (warp == 3) {
+@@ -337,6 +340,7 @@
+         if (ca < nch && (ca < NWAB || mbar_test(&B.wab_empty[ca % NWAB], ((ca / NWAB) - 1) & 1))) {
+           const int s = ca % NWAB, j = ca & (NCH - 1);
+           const uint32_t slot = su + X_WAB + s * 32768;
++          if (cta == 0) TRB(1, 3, 1024 + ca);
+           mbar_expect_tx(&B.wab_full[s], 32768);             // K-block `crank` of [Wa_j; Wb_j] from this CTA, multicast to both
+           tma_load_2d_mc(slot + crank * KB, p.wa, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
+           tma_load_2d_mc(slot + crank * KB + 8192, p.wb, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
+@@ -345,39 +349,61 @@
+       }
+     }
+   } else if (warp == 1) {
+-    // dh_j and [a|b]_j (converged warp, elected issue)
++    // [a|b]_j, dh_j and the x copies (converged warp, elected issue)
++    auto copy_x = [&](int k) {                           // x(k): xn buffer -> TMEM, once the previous epilogue is done with TMEM x
++      mbar_wait(&B.x_full, k & 1);
++      if (k >= 1) mbar_wait(&B.x_free, (k - 1) & 1);
++      tc_fence_after();
++      const uint64_t dx0 = desc_k128(su + X_XN);
++      if (elect_one()) {
++#pragma unroll
++        for (int k8 = 0; k8 < 8; ++k8) tmem_cp_128x256b(tmem + T_X + k8 * 8, dx0 + (uint64_t)(((k8 >> 2) * KB + (k8 & 3) * 32) >> 4));
++        tc_commit(&B.x_cp);                                // x is in TMEM and the xn buffer is free
++      }
++      __syncwarp();
++    };
+     for (int c = 0; c < nch; ++c) {
+       const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1;
+-      if (cta == 0 && lane == 0) TRB(1, 0, 8 * c);
+       const int sw = c % NWAB;
+-      if (j == 0) mbar_wait(&B.in_full[i & 1], (i >> 1) & 1);
++      if (cta == 0 && lane == 0) TRB(1, 0, 8 * c);
++      if (j == 0) {
++        if (i >= 1) copy_x(i - 1);
++        mbar_wait(&B.xn_full, i & 1);
++        mbar_wait(&B.dy_full[i & 1], (i >> 1) & 1);
++      }
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 1);
+-      mbar_wait(&B.ws_full[s], u & 1);
+       mbar_wait(&B.wab_full[sw], (c / NWAB) & 1);
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 2);
+-      if (c >= 2) mbar_wait(&B.ab_free[s], (u - 1) & 1);
++      if (c >= 1) mbar_wait(&B.ab_free, (c - 1) & 1);      // the gate has read [a|b] of chunk c - 1
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 3);
+       tc_fence_after();
+-      const uint64_t ddy = desc_k128(su + X_IN + (i & 1) * INB), dxn = desc_k128(su + X_IN + (i & 1) * INB + IN_XN);
++      const uint64_t ddy = desc_k128(su + X_DY + (i & 1) * 32768), dxn = desc_k128(su + X_XN);
+       const uint64_t dws = desc_mn128(su + X_WS + s * 16384, KB), dwab = desc_k128(su + X_WAB + sw * 32768);
+       if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < 8; ++ks) {
+           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+-          umma_ss(tmem + T_DH + s * 64, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
++          umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
+         }
+-        tc_commit_mc(&B.ws_empty[s], CL_MASK);             // Ws_j is dead here once dh_j is done (counted in both CTAs)
++        if (j == NCH - 1) tc_commit(&B.xn_dead);           // the tile's last [a|b]: the xn buffer may take x
++      }
++      __syncwarp();
++      mbar_wait(&B.ws_full[s], u & 1);
++      if (c >= 1) mbar_wait(&B.dh_free, (c - 1) & 1);      // the gate has read dh of chunk c - 1
++      tc_fence_after();
++      if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < 8; ++ks) {
+           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+-          umma_ss(tmem + T_AB + s * 128, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
++          umma_ss(tmem + T_DH, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
+         }
++        tc_commit_mc(&B.ws_empty[s], CL_MASK);             // Ws_j is dead here once dh_j is done (counted in both CTAs)
+         tc_commit(&B.abdh_full[s]);
+-        if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
+       }
+       __syncwarp();
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 4);
+     }
++    if (n_local > 0) copy_x(n_local - 1);
+   } else if (warp == 2) {
+     // d_xn += [dA | dB] [Wa_j; Wb_j]  (A from TMEM)
+     for (int q = 0; q < nch; ++q) {
+@@ -392,13 +418,16 @@
+       if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < 8; ++ks)
+-          umma_ts(tmem + T_DXN, tmem + T_AB + s * 128 + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
+-        tc_commit(&B.ab_free[s]);
++          umma_ts(tmem + T_DXN, tmem + T_DAB + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
++        tc_commit(&B.dab_free);                            // the [dA|dB] buffer may take the next chunk
+         tc_commit_mc(&B.wab_empty[q % NWAB], CL_MASK);
+         if (j == NCH - 1) tc_commit(&B.dxn_full);
+       }
+       __syncwarp();
+       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 3);
++#ifdef TRACE
++      if (cta == 0) { mbar_wait(&B.dab_free, q & 1); if (lane == 0) TRB(1, 1, 8 * q + 4); }   // trace only: d_xn(q) completion
++#endif
+     }
+   } else if ((warp >= 4 && warp < 8) || warp >= 12) {
+     // ------------------------------------------------------------------------------------ gate: [dA | dB] back into TMEM; the two
+@@ -416,10 +445,14 @@
+       // so each half lands only on columns it has already read; the d_xn product pairs each 8-column block with the matching B rows
+       {
+         uint32_t dh[32], av[32], bv[32];
+-        tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
+-        tmem_ld32(trow + T_AB + s * 128 + half * 32, av);
+-        tmem_ld32(trow + T_AB + s * 128 + 64 + half * 32, bv);
++        tmem_ld32(trow + T_DH + half * 32, dh);
++        tmem_ld32(trow + T_AB + half * 32, av);
++        tmem_ld32(trow + T_AB + 64 + half * 32, bv);
+         tmem_wait_ld();
++        tc_fence_before();
++        __syncwarp();
++        if (lane == 0) { mbar_arrive(&B.dh_free); mbar_arrive(&B.ab_free); }
++        if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 1536 + c);   // both accumulators are read: release them now
+         uint32_t da[16], db[16];
+ #pragma unroll
+         for (int k = 0; k < 16; ++k) {
+@@ -432,14 +465,17 @@
+           db[k] = pack_bf16(g0 * l0, g1 * l1);
+         }
+         if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 2);
+-        tmem_st16(trow + T_AB + s * 128 + half * 32, da);
+-        tmem_st16(trow + T_AB + s * 128 + half * 32 + 16, db);
++        if (c >= 1) mbar_wait(&B.dab_free, (c - 1) & 1);   // d_xn of chunk c - 1 has read the [dA|dB] buffer
++        tc_fence_after();
++        tmem_st16(trow + T_DAB + half * 32, da);
++        tmem_st16(trow + T_DAB + half * 32 + 16, db);
+       }
+       tmem_wait_st();
+       tc_fence_before();
+       __syncwarp();
+       if (lane == 0) mbar_arrive(&B.g_full[s]);
+       if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 3);
++      if (cta == 0 && warp == 12 && lane == 0) TRB(1, 2, 1024 + c);
+     }
+   } else if (warp >= 8) {
+     // ------------------------------------------------------------------------------------ LayerNorm backward + residual
+@@ -469,19 +505,22 @@
+       if (lane == 0) mbar_arrive(&B.dxn_empty);
+       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 2);
+       const float rs = p.rstd[grow], mean = p.c1[grow] / rs;
+-      mbar_wait(&B.x_full[b], (i >> 1) & 1);
++      mbar_wait(&B.x_cp, i & 1);                           // x of this tile is in TMEM
++      tc_fence_after();
+       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 3);
+-      const uint32_t dyb = su + X_IN + b * INB, xb = dyb + IN_XN;
++      const uint32_t dyb = su + X_DY + b * 32768;
+       // pass 1, 32 columns at a time: the two row sums (the sm_90a quad order: partial l over columns with (col >> 1) & 3 == l) and the
+       // dgamma / dbeta terms, each reduced over the warp's 32 rows with one reusable 32-register work array
+       float pca[4] = {0.f, 0.f, 0.f, 0.f}, pcb[4] = {0.f, 0.f, 0.f, 0.f};
+ #pragma unroll
+       for (int g = 0; g < 4; ++g) {
+         float work[32];
++        uint32_t xg[16];                                   // 32 columns of x, packed, from TMEM
++        tmem_ld16(trow + T_X + g * 16, xg);
++        tmem_wait_ld();
+ #pragma unroll
+         for (int qq = 0; qq < 4; ++qq) {
+-          const uint4 xv = lds128(xb + (g >> 1) * KB + sw128(r, (g & 1) * 4 + qq));   // 8 columns of x at a time
+-          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
++          const uint32_t xw[4] = {xg[4 * qq], xg[4 * qq + 1], xg[4 * qq + 2], xg[4 * qq + 3]};
+ #pragma unroll
+           for (int kk = 0; kk < 4; ++kk) {
+             const int e = qq * 4 + kk, col = g * 32 + 2 * e;
+@@ -506,12 +545,16 @@
+       const float cbv = ((pcb[0] + pcb[1]) + (pcb[2] + pcb[3])) * (1.f / D_);
+       // pass 2: dx = bf16(bf16((w - xhat ca - cb) rstd) + dy), written in place over dy for the TMA store
+ #pragma unroll
+-      for (int cb = 0; cb < 2; ++cb)
++      for (int cb = 0; cb < 2; ++cb) {
++        uint32_t xc[32];                                   // 64 columns of x, packed, from TMEM
++        tmem_ld32(trow + T_X + cb * 32, xc);
++        tmem_wait_ld();
++        if (cb == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.x_free); }
+ #pragma unroll
+         for (int q = 0; q < 8; ++q) {
+           const uint32_t off = cb * KB + sw128(r, q);
+-          const uint4 xv = lds128(xb + off), dv = lds128(dyb + off);
+-          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w}, dw[4] = {dv.x, dv.y, dv.z, dv.w};
++          const uint4 dv = lds128(dyb + off);
++          const uint32_t xw[4] = {xc[4 * q], xc[4 * q + 1], xc[4 * q + 2], xc[4 * q + 3]}, dw[4] = {dv.x, dv.y, dv.z, dv.w};
+           uint32_t o[4];
+ #pragma unroll
+           for (int k = 0; k < 4; ++k) {
+@@ -525,6 +568,7 @@
+           }
+           sts128(dyb + off, make_uint4(o[0], o[1], o[2], o[3]));
+         }
++      }
+       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 5);
+       fence_proxy_async();
+       named_bar_sync(1, 128);
+@@ -538,7 +582,7 @@
+           tma_store_commit();
+           tma_store_wait_read0();
+         }
+-        mbar_arrive(&B.in_empty[b]);
++        mbar_arrive(&B.dy_empty[b]);
+         if (cta == 0) TRB(1, 3, 8 * i + 6);
+       }
+     }

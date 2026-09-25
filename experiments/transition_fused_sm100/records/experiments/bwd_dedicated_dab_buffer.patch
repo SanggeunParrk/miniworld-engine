@@ -1,0 +1,130 @@
+--- /dev/fd/63	2026-09-25 19:28:22.845749080 +0900
++++ /tmp/claude-1002/-home-psk6950-practice-MiniWorld/ca840ff8-0135-4822-828e-e31c0c0969e5/scratchpad/tbwd_dab.cu	2026-09-25 19:23:39.973011809 +0900
+@@ -54,7 +54,7 @@
+ struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full, g_empty, wg_done; uint32_t tmem; };
+ struct BarsX {
+   uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], abdh_full[2], g_full[2], ab_free[2];
+-  uint64_t dxn_full, dxn_empty; uint32_t tmem;
++  uint64_t dxn_full, dxn_empty, dh_free, dab_free; uint32_t tmem;
+ };
+ 
+ // the 16-row block of the packed [Wa_j; Wb_j] tile matching A-operand block ks of the half-by-half [dA | dB] layout
+@@ -272,16 +272,17 @@
+   const int nch = n_local * NCH;
+   auto tile_of = [&](int i) { return i < n_valid ? cta + i * ndx : (n_valid > 0 ? cta + (n_valid - 1) * ndx : 0); };
+   const int crank = (int)cluster_rank();
+-  constexpr uint32_t T_AB = 0, T_DH = 256, T_DXN = 384;          // AB x2 (128 each; [dA|dB] is written back over its first 64), DH x2 (64 each)
++  // [a|b] x2 (released as soon as the gate has READ it), dh (single, likewise), [dA|dB] (single, released by d_xn), d_xn
++  constexpr uint32_t T_AB = 0, T_DH = 256, T_DAB = 320, T_DXN = 384;
+   const uint32_t tid = threadIdx.x;
+   if (tid == 0) {
+     for (int s = 0; s < 2; ++s) {
+       mbar_init(&B.ws_full[s], 1); mbar_init(&B.ws_empty[s], CL); mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], 1);
+       mbar_init(&B.x_full[s], 1); mbar_init(&B.xn_dead[s], 1);
+-      mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 8); mbar_init(&B.ab_free[s], 1);
++      mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 8); mbar_init(&B.ab_free[s], 8);
+     }
+     for (int s = 0; s < NWAB; ++s) { mbar_init(&B.wab_full[s], 1); mbar_init(&B.wab_empty[s], CL); }
+-    mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4);
++    mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4); mbar_init(&B.dh_free, 8); mbar_init(&B.dab_free, 1);
+     fence_barrier_init();
+   }
+   if (tid < 128) reinterpret_cast<float*>(sm + X_GAM)[tid] = p.gamma[tid];
+@@ -337,6 +338,7 @@
+         if (ca < nch && (ca < NWAB || mbar_test(&B.wab_empty[ca % NWAB], ((ca / NWAB) - 1) & 1))) {
+           const int s = ca % NWAB, j = ca & (NCH - 1);
+           const uint32_t slot = su + X_WAB + s * 32768;
++          if (cta == 0) TRB(1, 3, 1024 + ca);
+           mbar_expect_tx(&B.wab_full[s], 32768);             // K-block `crank` of [Wa_j; Wb_j] from this CTA, multicast to both
+           tma_load_2d_mc(slot + crank * KB, p.wa, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
+           tma_load_2d_mc(slot + crank * KB + 8192, p.wb, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
+@@ -352,10 +354,9 @@
+       const int sw = c % NWAB;
+       if (j == 0) mbar_wait(&B.in_full[i & 1], (i >> 1) & 1);
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 1);
+-      mbar_wait(&B.ws_full[s], u & 1);
+       mbar_wait(&B.wab_full[sw], (c / NWAB) & 1);
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 2);
+-      if (c >= 2) mbar_wait(&B.ab_free[s], (u - 1) & 1);
++      if (c >= 2) mbar_wait(&B.ab_free[s], (u - 1) & 1);   // the gate has read [a|b] of chunk c - 2
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 3);
+       tc_fence_after();
+       const uint64_t ddy = desc_k128(su + X_IN + (i & 1) * INB), dxn = desc_k128(su + X_IN + (i & 1) * INB + IN_XN);
+@@ -364,14 +365,20 @@
+ #pragma unroll
+         for (int ks = 0; ks < 8; ++ks) {
+           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+-          umma_ss(tmem + T_DH + s * 64, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
++          umma_ss(tmem + T_AB + s * 128, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
+         }
+-        tc_commit_mc(&B.ws_empty[s], CL_MASK);             // Ws_j is dead here once dh_j is done (counted in both CTAs)
++      }
++      __syncwarp();
++      mbar_wait(&B.ws_full[s], u & 1);
++      if (c >= 1) mbar_wait(&B.dh_free, (c - 1) & 1);      // the gate has read dh of chunk c - 1
++      tc_fence_after();
++      if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < 8; ++ks) {
+           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+-          umma_ss(tmem + T_AB + s * 128, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
++          umma_ss(tmem + T_DH, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
+         }
++        tc_commit_mc(&B.ws_empty[s], CL_MASK);             // Ws_j is dead here once dh_j is done (counted in both CTAs)
+         tc_commit(&B.abdh_full[s]);
+         if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
+       }
+@@ -392,13 +399,16 @@
+       if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < 8; ++ks)
+-          umma_ts(tmem + T_DXN, tmem + T_AB + s * 128 + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
+-        tc_commit(&B.ab_free[s]);
++          umma_ts(tmem + T_DXN, tmem + T_DAB + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
++        tc_commit(&B.dab_free);                            // the [dA|dB] buffer may take the next chunk
+         tc_commit_mc(&B.wab_empty[q % NWAB], CL_MASK);
+         if (j == NCH - 1) tc_commit(&B.dxn_full);
+       }
+       __syncwarp();
+       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 3);
++#ifdef TRACE
++      if (cta == 0) { mbar_wait(&B.dab_free, q & 1); if (lane == 0) TRB(1, 1, 8 * q + 4); }   // trace only: d_xn(q) completion
++#endif
+     }
+   } else if ((warp >= 4 && warp < 8) || warp >= 12) {
+     // ------------------------------------------------------------------------------------ gate: [dA | dB] back into TMEM; the two
+@@ -416,10 +426,13 @@
+       // so each half lands only on columns it has already read; the d_xn product pairs each 8-column block with the matching B rows
+       {
+         uint32_t dh[32], av[32], bv[32];
+-        tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
++        tmem_ld32(trow + T_DH + half * 32, dh);
+         tmem_ld32(trow + T_AB + s * 128 + half * 32, av);
+         tmem_ld32(trow + T_AB + s * 128 + 64 + half * 32, bv);
+         tmem_wait_ld();
++        tc_fence_before();
++        __syncwarp();
++        if (lane == 0) { mbar_arrive(&B.dh_free); mbar_arrive(&B.ab_free[s]); }   // both accumulators are read: release them now
+         uint32_t da[16], db[16];
+ #pragma unroll
+         for (int k = 0; k < 16; ++k) {
+@@ -432,14 +445,17 @@
+           db[k] = pack_bf16(g0 * l0, g1 * l1);
+         }
+         if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 2);
+-        tmem_st16(trow + T_AB + s * 128 + half * 32, da);
+-        tmem_st16(trow + T_AB + s * 128 + half * 32 + 16, db);
++        if (c >= 1) mbar_wait(&B.dab_free, (c - 1) & 1);   // d_xn of chunk c - 1 has read the [dA|dB] buffer
++        tc_fence_after();
++        tmem_st16(trow + T_DAB + half * 32, da);
++        tmem_st16(trow + T_DAB + half * 32 + 16, db);
+       }
+       tmem_wait_st();
+       tc_fence_before();
+       __syncwarp();
+       if (lane == 0) mbar_arrive(&B.g_full[s]);
+       if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 3);
++      if (cta == 0 && warp == 12 && lane == 0) TRB(1, 2, 1024 + c);
+     }
+   } else if (warp >= 8) {
+     // ------------------------------------------------------------------------------------ LayerNorm backward + residual
