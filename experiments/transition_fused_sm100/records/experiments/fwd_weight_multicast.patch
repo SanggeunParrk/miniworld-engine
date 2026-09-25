@@ -1,0 +1,183 @@
+diff --git a/experiments/transition_fused_sm100/fwd_op.py b/experiments/transition_fused_sm100/fwd_op.py
+index 4d6ee56e..e20f3a5c 100644
+--- a/experiments/transition_fused_sm100/fwd_op.py
++++ b/experiments/transition_fused_sm100/fwd_op.py
+@@ -11,7 +11,7 @@ SMEM = 2 * 49152 + 4 * 32768 + 1024 + 256
+ class FusedFwd:
+     def __init__(self, cubin=HERE / "build" / "tfwd.cubin", name="transition_fwd_sm100", smem=SMEM, threads=512):
+         self.threads = threads
+-        self.k = drv.Kernel(str(cubin), name, smem)
++        self.k = drv.Kernel(str(cubin), name, smem, cluster=2)
+         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
+         self._wmaps = None
+ 
+@@ -29,7 +29,7 @@ class FusedFwd:
+         tm = drv.TensorMap
+         mx, mo, mxn = (tm(t, [D, M], D * 2, [64, 64]) for t in (x, out, xn))
+         tiles = M // 128
+-        grid = (min(self.nsm, tiles), 1, 1)
++        grid = (max(2, min(self.nsm, tiles) & ~1), 1, 1)       # 2-CTA clusters
+         keep = (mx, mo, mxn)
+ 
+         def run():
+diff --git a/experiments/transition_fused_sm100/src/tfwd.cu b/experiments/transition_fused_sm100/src/tfwd.cu
+index d4625fb5..278c4300 100644
+--- a/experiments/transition_fused_sm100/src/tfwd.cu
++++ b/experiments/transition_fused_sm100/src/tfwd.cu
+@@ -41,6 +41,7 @@ __device__ unsigned long long g_span[256][3];          // per CTA: globaltimer a
+ 
+ struct Bars {
+   uint64_t wab_full[2], ws_full[2], x_full[2], x_empty[2], xn_full[2], xn_empty[2], ex_done[2], ab_empty[2], h_full[2], sq_done[2];
++  uint64_t wab_empty[2], ws_empty[2];                    // weight slots: released by both CTAs of the cluster (multicast commits)
+   uint64_t out_full, out_empty;
+   uint32_t tmem;
+ };
+@@ -60,15 +61,20 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+ #endif
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int cta = blockIdx.x, G = gridDim.x;
+-  const int n_local = (tiles > cta) ? (tiles - cta + G - 1) / G : 0;
++  // the two CTAs of a cluster share every weight chunk (each requests half, multicast to both), so both walk the pair's larger tile
++  // count; a CTA one tile short repeats its last tile as a dummy whose results are not stored
++  auto count = [&](int k) { return (tiles > k) ? (tiles - k + G - 1) / G : 0; };
++  const int n_valid = count(cta), n_local = count(cta & ~1);
+   const int nch = n_local * NCH;
++  auto tile_of = [&](int i) { return i < n_valid ? cta + i * G : (n_valid > 0 ? cta + (n_valid - 1) * G : 0); };
++  const int crank = (int)cluster_rank();
+ 
+   if (tid == 0) {
+     for (int s = 0; s < 2; ++s) {
+       mbar_init(&B.wab_full[s], 1); mbar_init(&B.ws_full[s], 1);
+       mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1);
+       mbar_init(&B.xn_full[s], 1); mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.ab_empty[s], 4);
+-      mbar_init(&B.h_full[s], 4); mbar_init(&B.sq_done[s], 1);
++      mbar_init(&B.h_full[s], 4); mbar_init(&B.sq_done[s], 1); mbar_init(&B.wab_empty[s], 2); mbar_init(&B.ws_empty[s], 2);
+     }
+     mbar_init(&B.out_full, 1); mbar_init(&B.out_empty, 4);
+     fence_barrier_init();
+@@ -78,6 +84,7 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
++  cluster_sync();                                        // both CTAs' barriers exist before any multicast or remote commit
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
+ #ifdef TRACE
+@@ -89,7 +96,7 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+     // ------------------------------------------------------------------------------------------ x producer
+     if (lane == 0) {
+       for (int i = 0; i < n_local; ++i) {
+-        const int b = i & 1, row = (cta + i * G) * ROWS;
++        const int b = i & 1, row = tile_of(i) * ROWS;
+         if (i >= 2) mbar_wait(&B.x_empty[b], ((i >> 1) - 1) & 1);
+         mbar_expect_tx(&B.x_full[b], TILE);
+         const uint32_t dst = su + O_X + b * TILE;
+@@ -105,29 +112,25 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+     if (lane == 0) {
+       int ca = 0, cs = 0;                                // next chunk to load into the [Wa;Wb] ring / the Ws ring
+       while (ca < nch || cs < nch) {
+-        if (ca < nch && (ca < 2 || mbar_test(&B.ex_done[ca & 1], ((ca >> 1) - 1) & 1))) {
++        if (ca < nch && (ca < 2 || mbar_test(&B.wab_empty[ca & 1], ((ca >> 1) - 1) & 1))) {
+           const int s = ca & 1, j = ca & (NCH - 1);
+ #ifdef ABL_NOW
+           if (ca >= 2) { mbar_arrive(&B.wab_full[s]); ++ca; continue; }
+ #endif
+-          mbar_expect_tx(&B.wab_full[s], WAB_SLOT);
++          mbar_expect_tx(&B.wab_full[s], WAB_SLOT);         // K-block `crank` of [Wa_j; Wb_j] from this CTA, multicast to both
+           const uint32_t slot = su + O_WAB + s * WAB_SLOT;
+-#pragma unroll
+-          for (int cb = 0; cb < 2; ++cb) {
+-            tma_load_2d(slot + cb * 16384, &mwa, &B.wab_full[s], cb * 64, j * HS);
+-            tma_load_2d(slot + cb * 16384 + 8192, &mwb, &B.wab_full[s], cb * 64, j * HS);
+-          }
++          tma_load_2d_mc(slot + crank * 16384, &mwa, &B.wab_full[s], crank * 64, j * HS, 3);
++          tma_load_2d_mc(slot + crank * 16384 + 8192, &mwb, &B.wab_full[s], crank * 64, j * HS, 3);
+           ++ca;
+         }
+-        if (cs < nch && (cs < 2 || mbar_test(&B.sq_done[cs & 1], ((cs >> 1) - 1) & 1))) {
++        if (cs < nch && (cs < 2 || mbar_test(&B.ws_empty[cs & 1], ((cs >> 1) - 1) & 1))) {
+           const int s = cs & 1, j = cs & (NCH - 1);
+ #ifdef ABL_NOW
+           if (cs >= 2) { mbar_arrive(&B.ws_full[s]); ++cs; continue; }
+ #endif
+           mbar_expect_tx(&B.ws_full[s], WS_SLOT);
+           const uint32_t slot = su + O_WS + s * WS_SLOT;
+-          tma_load_2d(slot, &mws, &B.ws_full[s], j * HS, 0);
+-          tma_load_2d(slot + 8192, &mws, &B.ws_full[s], j * HS, 64);
++          tma_load_2d_mc(slot + crank * 8192, &mws, &B.ws_full[s], j * HS, crank * 64, 3);   // half of Ws_j, multicast
+           ++cs;
+         }
+       }
+@@ -151,7 +154,8 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+ #pragma unroll
+           for (int ks = 0; ks < 4; ++ks)
+             umma_ts(tmem + T_OUT, tmem + T_H + s * 32 + ks * 8, bd + (uint64_t)(ks * 2), IDESC, (j > 0 || ks > 0) ? 1u : 0u);
+-          tc_commit(&B.sq_done[s]);                  // h buffer and Ws slot both free
++          tc_commit(&B.sq_done[s]);                  // h buffer free
++          tc_commit_mc(&B.ws_empty[s], 3);           // this CTA is done with the Ws slot (counted in both CTAs)
+           if (j == NCH - 1) tc_commit(&B.out_full);
+         }
+         __syncwarp();
+@@ -174,7 +178,8 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+             const uint64_t off = (uint64_t)(((ks >> 2) * 16384 + (ks & 3) * 32) >> 4);
+             umma_ss(tmem + T_AB + s * 128, ad + off, bdw + off, IDESC, ks > 0 ? 1u : 0u);
+           }
+-          tc_commit(&B.ex_done[s]);                  // [a|b] ready and the [Wa;Wb] slot free
++          tc_commit(&B.ex_done[s]);                  // [a|b] ready
++          tc_commit_mc(&B.wab_empty[s], 3);          // this CTA is done with the [Wa;Wb] slot (counted in both CTAs)
+           if (j == NCH - 1) tc_commit(&B.xn_empty[i & 1]);
+         }
+         __syncwarp();
+@@ -256,7 +261,8 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+     const uint32_t gb_u = su + O_GB;
+     auto ln = [&](int i) {
+-      const int b = i & 1, grow = (cta + i * G) * ROWS + (int)r;
++      const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
++      const bool real = i < n_valid;
+       if (t2 == 0) TR(2, 8 * i);
+       mbar_wait(&B.x_full[b], (i >> 1) & 1);
+       if (i >= 2) mbar_wait(&B.xn_empty[b], ((i >> 1) - 1) & 1);
+@@ -312,14 +318,14 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+           }
+           sts128(xnb + cb * 16384 + sw128(r, q), make_uint4(o[0], o[1], o[2], o[3]));
+         }
+-      if (save) { rstd[grow] = rs; c1[grow] = mean * rs; }
++      if (save && real) { rstd[grow] = rs; c1[grow] = mean * rs; }
+       fence_proxy_async();
+       named_bar_sync(1, 128);
+       if (t2 == 0) {
+         TR(2, 8 * i + 2);
+         mbar_arrive(&B.xn_full[b]);
+-        if (save) {
+-          const int row0 = (cta + i * G) * ROWS;
++        if (save && real) {
++          const int row0 = tile_of(i) * ROWS;
+ #pragma unroll
+           for (int cb = 0; cb < 2; ++cb)
+ #pragma unroll
+@@ -360,11 +366,13 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+       fence_proxy_async();
+       named_bar_sync(1, 128);
+       if (t2 == 0) {
+-        const int row0 = (cta + i * G) * ROWS;
++        const int row0 = tile_of(i) * ROWS;
++        if (i < n_valid) {
+ #pragma unroll
+-        for (int cb = 0; cb < 2; ++cb)
++          for (int cb = 0; cb < 2; ++cb)
+ #pragma unroll
+-          for (int h = 0; h < 2; ++h) tma_store_2d(&mout, xb + cb * 16384 + h * 8192, cb * 64, row0 + h * 64);
++            for (int h = 0; h < 2; ++h) tma_store_2d(&mout, xb + cb * 16384 + h * 8192, cb * 64, row0 + h * 64);
++        }
+         TR(2, 8 * i + 5);
+         tma_store_commit();
+         tma_store_wait_read0();
+@@ -381,6 +389,7 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
+   }
+   tc_fence_before();
+   __syncthreads();
++  cluster_sync();                                        // no CTA leaves while its peer may still multicast into it
+ #ifdef TRACE
+   if (threadIdx.x == 0) g_span[blockIdx.x][2] = gtime();
+ #endif

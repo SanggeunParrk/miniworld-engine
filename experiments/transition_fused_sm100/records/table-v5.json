@@ -1,0 +1,171 @@
+{
+ "device": "NVIDIA B200",
+ "rows": {
+  "PyTorch eager": {
+   "inference_L384": {
+    "us": 428.8479804992676,
+    "rel_vs_fp32": 0.003291866509243846,
+    "note": null
+   },
+   "training_L384": {
+    "us": 1079.094409942627,
+    "rel_vs_fp32": null,
+    "note": null
+   },
+   "inference_L768": {
+    "us": 1653.5295486450195,
+    "rel_vs_fp32": 0.003434283658862114,
+    "note": null
+   },
+   "training_L768": {
+    "us": 3929.01611328125,
+    "rel_vs_fp32": null,
+    "note": null
+   }
+  },
+  "torch.compile": {
+   "inference_L384": {
+    "us": 202.97598838806152,
+    "rel_vs_fp32": 0.0031692450866103172,
+    "note": null
+   },
+   "training_L384": {
+    "us": 611.2720012664795,
+    "rel_vs_fp32": null,
+    "note": null
+   },
+   "inference_L768": {
+    "us": 737.6351833343506,
+    "rel_vs_fp32": 0.003292845329269767,
+    "note": null
+   },
+   "training_L768": {
+    "us": 2196.9663619995117,
+    "rel_vs_fp32": null,
+    "note": null
+   }
+  },
+  "Anthropic v2": {
+   "inference_L384": {
+    "us": 108.51360559463501,
+    "rel_vs_fp32": 0.0031692450866103172,
+    "note": null
+   },
+   "training_L384": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   },
+   "inference_L768": {
+    "us": 507.5039863586426,
+    "rel_vs_fp32": 0.003292845329269767,
+    "note": null
+   },
+   "training_L768": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   }
+  },
+  "Anthropic af3_fused": {
+   "inference_L384": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "Refusal('af3_fused:no_launch_pin:10.0|bf16|c128|h512|res1 (row=af3_fused, fallback=torch_swiglu)')"
+   },
+   "inference_L768": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "Refusal('af3_fused:no_launch_pin:10.0|bf16|c128|h512|res1 (row=af3_fused, fallback=torch_swiglu)')"
+   }
+  },
+  "Anthropic pf": {
+   "inference_L384": {
+    "us": 129.7760009765625,
+    "rel_vs_fp32": 0.0032918499782681465,
+    "note": null
+   },
+   "training_L384": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   },
+   "inference_L768": {
+    "us": 507.5456142425537,
+    "rel_vs_fp32": 0.0034342699218541384,
+    "note": null
+   },
+   "training_L768": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   }
+  },
+  "Anthropic lnl": {
+   "inference_L384": {
+    "us": 136.4367961883545,
+    "rel_vs_fp32": 0.0029814846348017454,
+    "note": null
+   },
+   "training_L384": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   },
+   "inference_L768": {
+    "us": 543.3472156524658,
+    "rel_vs_fp32": 0.003068487159907818,
+    "note": null
+   },
+   "training_L768": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   }
+  },
+  "Anthropic v1": {
+   "inference_L384": {
+    "us": 380.19840717315674,
+    "rel_vs_fp32": 0.002981454599648714,
+    "note": null
+   },
+   "training_L384": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   },
+   "inference_L768": {
+    "us": 1502.2015571594238,
+    "rel_vs_fp32": 0.003068480407819152,
+    "note": null
+   },
+   "training_L768": {
+    "us": null,
+    "rel_vs_fp32": null,
+    "note": "no backward in the Anthropic provider"
+   }
+  },
+  "fused sm_100a (this work)": {
+   "inference_L384": {
+    "us": 61.982399225234985,
+    "rel_vs_fp32": 0.0022537619806826115,
+    "note": null
+   },
+   "training_L384": {
+    "us": 312.64960765838623,
+    "rel_vs_fp32": null,
+    "note": null
+   },
+   "inference_L768": {
+    "us": 227.2495985031128,
+    "rel_vs_fp32": 0.002298609120771289,
+    "note": null
+   },
+   "training_L768": {
+    "us": 1208.1439971923828,
+    "rel_vs_fp32": null,
+    "note": null
+   }
+  }
+ }
+}

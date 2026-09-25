@@ -4,7 +4,7 @@ from fwd_op import FusedFwd
 from bwd_op import FusedTrain
 what = sys.argv[1]
 x, wa, wb, ws, g, b = make_inputs(768)
-f = FusedFwd(); f.set_weights(wa, wb, ws)
+f = FusedFwd(sys.argv[2]) if len(sys.argv) > 2 else FusedFwd(); f.set_weights(wa, wb, ws)
 if what == "fwd":
     run, *_ = f.bind(x, g, b, save=False)
 elif what == "train":
