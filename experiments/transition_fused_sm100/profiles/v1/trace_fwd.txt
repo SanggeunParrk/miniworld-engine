@@ -1,0 +1,14 @@
+CTA 0: tiles 8, total 159347 clk
+  SwiGLU per chunk: wait ab 416  ld+compute 1341  wait h_empty+st 250  (median clk)
+  SwiGLU chunk period 2222
+  MMA expand period 2223, squeeze period 2233
+  tile 0: LN wait 2767 LN 2780 | epi wait 13964 epi 1994 store 1178  (start 0)
+  tile 1: LN wait 146 LN 5131 | epi wait 10549 epi 1716 store 1051  (start 5735)
+  tile 2: LN wait 2638 LN 2692 | epi wait 9605 epi 2011 store 1177  (start 28434)
+CTA 1: tiles 8, total 159323 clk
+  SwiGLU per chunk: wait ab 388  ld+compute 1333  wait h_empty+st 248  (median clk)
+  SwiGLU chunk period 2211
+  MMA expand period 2221, squeeze period 2215
+  tile 0: LN wait 2958 LN 2605 | epi wait 13520 epi 2067 store 1177  (start 0)
+  tile 1: LN wait 143 LN 5159 | epi wait 10170 epi 1667 store 1051  (start 5752)
+  tile 2: LN wait 2761 LN 2932 | epi wait 9501 epi 1986 store 1181  (start 28091)

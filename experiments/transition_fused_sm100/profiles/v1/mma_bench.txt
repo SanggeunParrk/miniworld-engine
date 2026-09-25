@@ -1,0 +1,3 @@
+mma_ss64: 384 clk per K=128 chain, 5458 FLOP/clk/SM (peak 8192)
+mma_ss128: 512 clk per K=128 chain, 8188 FLOP/clk/SM (peak 8192)
+mma_ts128: 512 clk per K=128 chain, 8190 FLOP/clk/SM (peak 8192)

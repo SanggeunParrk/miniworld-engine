@@ -65,6 +65,7 @@ experiments/*
 !experiments/trimul_b7b12/
 !experiments/trimul_k1k3_inference/
 !experiments/transition_fused/
+!experiments/transition_fused_sm100/
 !experiments/token_dit_fused/
 !experiments/token_dit_overlap/
 # dev/ holds development scratch, research probes, ncu harnesses (never shipped: the wheel is
