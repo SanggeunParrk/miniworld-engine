@@ -495,7 +495,7 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
 // out GEMM takes u in two K halves, so the drain warps never wait on a GEMM round trip.
 namespace go {
 constexpr int BM = 128;
-constexpr int OT = BM * HC;                                // o tile [4 k-blocks][128 rows][64], 128B swizzle
+constexpr int OT = BM * HC;                                // o tile [8 heads][128 rows][32], 64B swizzle
 constexpr int YT = BM * D;                                 // y tile [128][64]
 constexpr int STAGE = OT + YT;                             // 80 KiB
 constexpr int NST = 2;
@@ -511,7 +511,7 @@ static_assert(SMEM <= 232448, "one CTA per SM");
 
 __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
     int N, int ntiles,
-    const __grid_constant__ CUtensorMap omap,     // o [M][256], box (64, 128), 128B swizzle
+    const __grid_constant__ CUtensorMap omap,     // o head-major [H*N][S*C], box (32, 128), 64B swizzle
     const __grid_constant__ CUtensorMap ymap,     // y [M][64], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap gmap,     // Wg [256][64], box (64, 256), 128B swizzle
     const __grid_constant__ CUtensorMap wmap,     // Wo [64][256], box (64, 64), 128B swizzle
@@ -560,7 +560,8 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
         if (lt >= NST) wait(empty + st, ((lt / NST) - 1) & 1);
         __nv_bfloat16* p = stage(lt);
         expect_tx(full + st, STAGE * 2);
-        for (int kb = 0; kb < 4; ++kb) load_2d(&omap, p + kb * BM * 64, full + st, kb * 64, m0);
+        const int s = m0 / N, i0 = m0 % N;       // a tile is 128 i of one s
+        for (int h = 0; h < H; ++h) load_2d(&omap, p + h * BM * C, full + st, s * C, h * N + i0);
         load_2d(&ymap, p + OT, full + st, 0, m0);
       }
     }
@@ -612,16 +613,17 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
       wait(full + st, (lt / NST) & 1);
       if (k >= 2) wait(ue + hf, ((k >> 1) - 1) & 1);
       tc_fence_after();
-      const __nv_bfloat16* ob = stage(lt) + (2 * hf + pp) * BM * 64 + r * 64;
+      const __nv_bfloat16* ob0 = stage(lt) + r * C;
 #pragma unroll
       for (int ch = 0; ch < 2; ++ch) {
         float g[32];
         tmem_ld32(tmem_at(tmem + COL_G, q * 32, hf * 128 + pp * 64 + ch * 32), g);
         tmem_wait_ld();
         uint32_t up[16];
+        const __nv_bfloat16* ob = ob0 + (hf * 4 + pp * 2 + ch) * BM * C;   // this chunk's head
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
-          const uint4 u4 = *reinterpret_cast<const uint4*>(ob + (((ch * 4 + e) ^ (r & 7)) << 3));
+          const uint4 u4 = *reinterpret_cast<const uint4*>(ob + ((e ^ ((r >> 1) & 3)) << 3));
           const uint32_t ow[4] = {u4.x, u4.y, u4.z, u4.w};
 #pragma unroll
           for (int w2 = 0; w2 < 4; ++w2) {
@@ -712,7 +714,7 @@ static_assert(SMEM <= 232448, "one CTA per SM");
 
 __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
     int N, int S, int ntiles,
-    const __grid_constant__ CUtensorMap omap,     // o [S][N][HC] as (32 c, N, S), box (32, 128, 2), 64B swizzle
+    const __grid_constant__ CUtensorMap omap,     // o head-major as (32 c, H*N, S), box (32, 128, 2), 64B swizzle
     const __grid_constant__ CUtensorMap rmap,     // dres [S][N][64] as (64, N, S), box (64, 128, 1), 128B swizzle
     const __grid_constant__ CUtensorMap ymap,     // y, same
     const __grid_constant__ CUtensorMap gmap,     // Wg [HC][64], box (64, 32)
@@ -779,7 +781,7 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
           load_2d(&wotmap, sWH + wb * WH + C * D, whf + wb, 0, h * C);
           if (gh >= NST) wait(oe + st, ((gh / NST) - 1) & 1);
           expect_tx(of + st, OT * 2);
-          load_3d(&omap, sO + st * OT, of + st, h * C, i0, s0);
+          load_3d(&omap, sO + st * OT, of + st, 0, h * N + i0, s0);
         }
       }
     }
@@ -1078,7 +1080,12 @@ __global__ void __launch_bounds__(pl::THREADS, 1) pwa_plain_sm100(
         if ((si & (BS / 2 - 1)) == BS / 2 - 1) {
           fence_proxy_async();
           named_sync(1, 128);
-          if (leader) { store_3d(&vmap, sOut, cbase + h * C, j0, s0 + si - (BS / 2 - 1)); bulk_commit(); }
+          if (leader) {
+            if (cbase >= 0) store_3d(&vmap, sOut, cbase + h * C, j0, s0 + si - (BS / 2 - 1));
+            else for (int q4 = 0; q4 < BS / 2; ++q4)          // head-major o [H*N][S*C]: one [128 i][32 c] box per s
+              store_2d(&vmap, sOut + q4 * BJ * C, (s0 + si - (BS / 2 - 1) + q4) * C, h * N + j0);
+            bulk_commit();
+          }
         }
       }
     }
@@ -1674,14 +1681,15 @@ std::vector<torch::Tensor> pwa_glue(torch::Tensor o, torch::Tensor y, torch::Ten
   TORCH_CHECK(y.is_contiguous() && y.dim() == 3 && y.size(2) == D && dres.is_contiguous() && dres.sizes() == y.sizes(), "y, dres: [S, N, 64]");
   const long S = y.size(0), N = y.size(1);
   TORCH_CHECK(N % BI == 0 && S % BS == 0, "N must be a multiple of 128 and S even");
-  TORCH_CHECK(o.is_contiguous() && o.sizes() == torch::IntArrayRef({S, N, HC}), "o: [S, N, 256]");
+  TORCH_CHECK(o.is_contiguous() && o.sizes() == torch::IntArrayRef({H, N, S * C}), "o: head-major [H, N, S*C] (pwa_fwd2)");
   TORCH_CHECK(dgv.is_contiguous() && dgv.sizes() == torch::IntArrayRef({S, N, 2 * HC}), "dgv: [S, N, 512]");
   TORCH_CHECK(wgw.is_contiguous() && wgw.sizes() == torch::IntArrayRef({HC, D}) && wot.is_contiguous() && wot.sizes() == torch::IntArrayRef({HC, D}), "wg, wot: [256, 64]");
   auto dO = torch::empty({H, N, S * C}, y.options());
   const int ntiles = (int)((N / BI) * (S / BS));
   const int grid = std::min(ntiles, num_sms(y.device().index()));
   auto dwo = torch::empty({grid, (long)D, (long)HC}, y.options().dtype(torch::kFloat32));
-  CUtensorMap om = make_map<3>(o.data_ptr(), {(uint64_t)HC, (uint64_t)N, (uint64_t)S}, {(uint64_t)HC, (uint64_t)N * HC}, {C, BI, BS}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
+  // head-major o as (32 c, H*N rows, S): the box (32, 128, 2) lands as the same [2 s][128 i][32 c] tile
+  CUtensorMap om = make_map<3>(o.data_ptr(), {(uint64_t)C, (uint64_t)(H * N), (uint64_t)S}, {(uint64_t)(S * C), (uint64_t)C}, {C, BI, BS}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
   auto nat = [&](void* p, const char* w) { return make_map<3>(p, {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, BI, 1}, CU_TENSOR_MAP_SWIZZLE_128B, w); };
   CUtensorMap rm = nat(dres.data_ptr(), "dres"), ym = nat(y.data_ptr(), "y");
   CUtensorMap gm = make_map<2>(wgw.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, C}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
@@ -1720,7 +1728,8 @@ void pwa_plain(torch::Tensor w16, torch::Tensor dO, torch::Tensor dgv) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// the forward contraction alone: w16 [H, N, N], v [H, N, S*C] -> o [S, N, HC]
+// the forward contraction alone: w16 [H, N, N], v [H, N, S*C] -> o head-major [H, N, S*C] (the layout the tensor core
+// produces it in: whole 64-byte rows per (h, i, s); the natural [S, N, 256] layout cost ~10% more energy in scattered stores)
 torch::Tensor pwa_ctr(torch::Tensor w16, torch::Tensor vhm) {
   using namespace pl;
   TORCH_CHECK(w16.is_contiguous() && w16.dim() == 3 && w16.size(0) == H, "w16: [H, N, N]");
@@ -1728,15 +1737,15 @@ torch::Tensor pwa_ctr(torch::Tensor w16, torch::Tensor vhm) {
   TORCH_CHECK(vhm.is_contiguous() && vhm.size(0) == H && vhm.size(1) == N && vhm.size(2) % C == 0, "v: [H, N, S*C]");
   const long S = vhm.size(2) / C;
   TORCH_CHECK(N % BJ == 0, "N must be a multiple of 128");
-  auto o = torch::empty({S, N, HC}, vhm.options());
+  auto o = torch::empty({H, N, S * C}, vhm.options());
   CUtensorMap wm = make_map<2>(w16.data_ptr(), {(uint64_t)N, (uint64_t)(H * N)}, {(uint64_t)N}, {64, BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "w");
   CUtensorMap dm = make_map<2>(vhm.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {64, KC}, CU_TENSOR_MAP_SWIZZLE_128B, "v");
-  CUtensorMap om = make_map<3>(o.data_ptr(), {(uint64_t)HC, (uint64_t)N, (uint64_t)S}, {(uint64_t)HC, (uint64_t)N * HC}, {C, BJ, BS / 2}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
+  CUtensorMap om = make_map<2>(o.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {C, BJ}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
   const int ntiles = (int)(H * (N / BJ) * ((S + BS - 1) / BS));
   const int grid = std::min(ntiles, num_sms(w16.device().index()));
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_plain_sm100<1>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  pwa_plain_sm100<1><<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, 0, wm, dm, om);
+  pwa_plain_sm100<1><<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, -1, wm, dm, om);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return o;
 }
@@ -1823,13 +1832,14 @@ std::vector<torch::Tensor> pair_bwd(torch::Tensor z, torch::Tensor w16, torch::T
 std::vector<torch::Tensor> pwa_fwd2(torch::Tensor w16, torch::Tensor vhm, torch::Tensor y, torch::Tensor wgw, torch::Tensor wow, torch::Tensor msa,
                                     bool save_o, c10::optional<torch::Tensor> dmask, double dscale) {
   using namespace go;
-  auto o = pwa_ctr(w16, vhm);
-  const long S = o.size(0), N = o.size(1), M = S * N;
+  auto o = pwa_ctr(w16, vhm);                                    // head-major [H, N, S*C]
+  const long N = o.size(1), S = o.size(2) / C, M = S * N;
   TORCH_CHECK(M % BM == 0, "S * N must be a multiple of 128");
   TORCH_CHECK(y.is_contiguous() && y.numel() == M * D && msa.is_contiguous() && msa.numel() == M * D, "y, msa: [S, N, 64]");
   TORCH_CHECK(wgw.is_contiguous() && wgw.sizes() == torch::IntArrayRef({HC, D}) && wow.is_contiguous() && wow.sizes() == torch::IntArrayRef({D, HC}), "wg [256, 64], wo [64, 256]");
   auto out = torch::empty({S, N, D}, y.options());
-  CUtensorMap om = make_map<2>(o.data_ptr(), {(uint64_t)HC, (uint64_t)M}, {(uint64_t)HC}, {64, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "o");
+  TORCH_CHECK(N % BM == 0, "N must be a multiple of 128");
+  CUtensorMap om = make_map<2>(o.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {C, BM}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
   CUtensorMap ym = make_map<2>(y.data_ptr(), {(uint64_t)D, (uint64_t)M}, {(uint64_t)D}, {64, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "y");
   CUtensorMap gm = make_map<2>(wgw.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
   CUtensorMap wm = make_map<2>(wow.data_ptr(), {(uint64_t)HC, (uint64_t)D}, {(uint64_t)HC}, {64, D}, CU_TENSOR_MAP_SWIZZLE_128B, "wo");
@@ -1860,7 +1870,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dgv"), py::arg("y"), py::arg("x"), py::arg("dout"), py::arg("wgvT"), py::arg("lnw"), py::arg("eps") = 1e-5);
   m.def("pwa_fwd2", &pwa_fwd2, "sm100 PWA forward, split: pwa_ctr then the gate / out-projection / residual pass",
         py::arg("w16"), py::arg("v"), py::arg("y"), py::arg("wg"), py::arg("wo"), py::arg("msa"), py::arg("save_o"), py::arg("dmask"), py::arg("dscale"));
-  m.def("pwa_ctr", &pwa_ctr, "sm100 PWA forward contraction o = w . v -> [S, N, 256]", py::arg("w16"), py::arg("v"));
+  m.def("pwa_ctr", &pwa_ctr, "sm100 PWA forward contraction o = w . v -> head-major [H, N, S*C]", py::arg("w16"), py::arg("v"));
   m.def("pwa_plain", &pwa_plain, "sm100 PWA dv = w^T . do into dgv[..., 256:]", py::arg("w16"), py::arg("do"), py::arg("dgv"));
   m.def("pwa_glue", &pwa_glue, "sm100 PWA backward glue from the saved o: (do head-major, dWo fp32 [64][256]); dgp into dgv[..., :256]",
         py::arg("o"), py::arg("y"), py::arg("dres"), py::arg("wg"), py::arg("wot"), py::arg("dgv"), py::arg("dmask") = py::none(), py::arg("dscale") = 1.0);

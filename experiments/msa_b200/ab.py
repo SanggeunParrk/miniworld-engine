@@ -82,7 +82,7 @@ elif case in ("fwd2", "fwd2save"):              # old = the fused pwa_fwd, new =
     ref_u = (m.float() - ra[0].float())
     print("out: max |old - new|", (ra[0].float() - rb[0].float()).abs().max().item(),
           " rel(update)", ((ra[0].float() - rb[0].float()).norm() / ref_u.norm()).item(),
-          " o max", (ra[1].float() - rb[1].float()).abs().max().item() if so else 0)
+          " o max", (ra[1].float() - rb[1].view(H, N, S, C).permute(2, 1, 0, 3).reshape(S, N, H * C).float()).abs().max().item() if so else 0)
 elif case in ("fwdsave", "fwd"):
     H, C, D = 8, 32, 64
     m = torch.randn(S, N, D, device="cuda", dtype=bf); y = torch.randn(S, N, D, device="cuda", dtype=bf)
