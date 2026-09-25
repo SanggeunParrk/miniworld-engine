@@ -29,6 +29,10 @@ n = int((w1[3::4] > 0).sum())
 print(f"DW CTA 0: tiles {n}, span {w2[4*(n-1)+2]-w1[0]} clk, per tile {(w2[4*(n-1)+2]-w1[0])/n:.0f}")
 print(f"  warp1 (dh+ab): wait in_full {md(w1[1::4][:n]-w1[0::4][:n]):.0f}  wait gate_read {md(w1[2::4][:n]-w1[1::4][:n]):.0f}  issue {md(w1[3::4][:n]-w1[2::4][:n]):.0f}  period {md(np.diff(w1[0::4][:n])):.0f}")
 print(f"  warp2 (wgrad): wait g_full {md(w2[1::4][:n]-w2[0::4][:n]):.0f}  issue {md(w2[2::4][:n]-w2[1::4][:n]):.0f}")
+pr = t[0, 3]
+rr = range(4, n - 2)
+print(f"  input chain: wgrad(i) issued -> in(i+2) load issued {md([pr[i+2] - w2[4*i+2] for i in rr]):.0f}  load issued -> dh+ab(i+2) may start {md([w1[4*(i+2)+1] - pr[i+2] for i in rr]):.0f}")
+print(f"  per tile: dhab issue done -> gate sees dhab {md([g[4*i+1] - w1[4*i+3] for i in rr]):.0f}  gate done -> wgrad issued {md([w2[4*i+2] - g[4*i+3] for i in rr]):.0f}")
 print(f"  gate: wait dhab {md(g[1::4][:n]-g[0::4][:n]):.0f}  wait g_empty {md(g[2::4][:n]-g[1::4][:n]):.0f}  compute+store {md(g[3::4][:n]-g[2::4][:n]):.0f}")
 # ---- DX
 m1, m2, g, e = t[1, 0], t[1, 1], t[1, 2], t[1, 3]

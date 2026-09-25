@@ -7,7 +7,7 @@ from bwd_op import FusedTrain
 
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=384)
-p.add_argument("--repl", type=int, default=10)
+p.add_argument("--repl", type=int, default=9)
 p.add_argument("--no-time", action="store_true")
 a = p.parse_args()
 torch.backends.cuda.matmul.allow_tf32 = False

@@ -51,7 +51,7 @@ struct Par {
   int tiles, ndw;
 };
 
-struct BarsW { uint64_t w_full, in_full[2], in_empty[2], dhab_full, gate_read, g_full, g_empty, wg_done; uint32_t tmem; };
+struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full, g_empty, wg_done; uint32_t tmem; };
 struct BarsX {
   uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], abdh_full[2], g_full[2], ab_free[2];
   uint64_t dxn_full, dxn_empty; uint32_t tmem;
@@ -72,7 +72,9 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
   const uint32_t tid = threadIdx.x;
   if (tid == 0) {
     mbar_init(&B.w_full, 1);
-    for (int s = 0; s < 2; ++s) { mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], CL); }   // freed by all CL slices of the cluster
+    for (int s = 0; s < 2; ++s) {                        // xn and dy of a tile travel separately; each is freed by all CL slices
+      mbar_init(&B.xn_full[s], 1); mbar_init(&B.dy_full[s], 1); mbar_init(&B.xn_empty[s], CL); mbar_init(&B.dy_empty[s], CL);
+    }
     mbar_init(&B.dhab_full, 1); mbar_init(&B.gate_read, 8); mbar_init(&B.g_full, 8); mbar_init(&B.g_empty, 1); mbar_init(&B.wg_done, 1);
     fence_barrier_init();
   }
@@ -93,16 +95,22 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
         tma_load_2d(su + W_WAB + cb * KB, p.wa, &B.w_full, cb * 64, slice * HS);
         tma_load_2d(su + W_WAB + cb * KB + 8192, p.wb, &B.w_full, cb * 64, slice * HS);
       }
+      // xn first (it is freed first, by the dWab product), then dy (freed by dWs); the CL slices share each tile, each requesting
+      // 4 / CL of the four 8 KB boxes of each half and multicasting them
       for (int i = 0; i < n_local; ++i) {
         const int b = i & 1, row = (repl + i * R) * ROWS;
-        if (i >= 2) mbar_wait(&B.in_empty[b], ((i >> 1) - 1) & 1);
-        mbar_expect_tx(&B.in_full[b], INB);
         const uint32_t dst = su + W_IN + b * INB;
-        // the CL slices of this replica share the tile: each requests 8 / CL of its eight 8 KB boxes and multicasts them to all
 #pragma unroll
-        for (int k = 0; k < 8 / CL; ++k) {
-          const int bx = crank * (8 / CL) + k, src = bx >> 2, cb = (bx >> 1) & 1, h = bx & 1;
-          tma_load_2d_mc(dst + src * IN_XN + cb * KB + h * 8192, src ? p.xn : p.dy, &B.in_full[b], cb * 64, row + h * 64, CL_MASK);
+        for (int src = 1; src >= 0; --src) {
+          uint64_t* full = src ? &B.xn_full[b] : &B.dy_full[b];
+          if (i >= 2) mbar_wait(src ? &B.xn_empty[b] : &B.dy_empty[b], ((i >> 1) - 1) & 1);
+          if (cta == 0 && src == 1) TRB(0, 3, i);
+          mbar_expect_tx(full, INB / 2);
+#pragma unroll
+          for (int k = 0; k < 4 / CL; ++k) {
+            const int bx = crank * (4 / CL) + k, cb = bx >> 1, h = bx & 1;
+            tma_load_2d_mc(dst + src * IN_XN + cb * KB + h * 8192, src ? p.xn : p.dy, full, cb * 64, row + h * 64, CL_MASK);
+          }
         }
       }
     }
@@ -113,7 +121,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
     for (int i = 0; i < n_local; ++i) {
       const int b = i & 1;
       if (cta == 0 && lane == 0) TRB(0, 0, 4 * i);
-      mbar_wait(&B.in_full[b], (i >> 1) & 1);
+      mbar_wait(&B.xn_full[b], (i >> 1) & 1);
       if (cta == 0 && lane == 0) TRB(0, 0, 4 * i + 1);
       if (i >= 1) mbar_wait(&B.gate_read, (i - 1) & 1);
       if (cta == 0 && lane == 0) TRB(0, 0, 4 * i + 2);
@@ -123,12 +131,17 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
-          umma_ss(tmem + T_DH, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
+          umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
         }
+      }
+      __syncwarp();
+      mbar_wait(&B.dy_full[b], (i >> 1) & 1);
+      tc_fence_after();
+      if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
-          umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
+          umma_ss(tmem + T_DH, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
         }
         tc_commit(&B.dhab_full);
       }
@@ -149,11 +162,12 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks)       // [dWa_s; dWb_s] += [dA | dB]^T xn    (K = the tile's 128 rows)
           umma_ss(tmem + T_DWAB, ddab + (uint64_t)(ks * 2048 >> 4), dxn + (uint64_t)(ks * 2048 >> 4), I_DWAB, (k > 0 || ks > 0) ? 1u : 0u);
+        tc_commit_mc(&B.xn_empty[b], CL_MASK);             // xn of this tile is dead in this slice (counted in every slice)
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks)       // dWs_s += dy^T h
           umma_ss(tmem + T_DWS, ddy + (uint64_t)(ks * 2048 >> 4), dh_ + (uint64_t)(ks * 2048 >> 4), I_DWS, (k > 0 || ks > 0) ? 1u : 0u);
         tc_commit(&B.g_empty);
-        tc_commit_mc(&B.in_empty[b], CL_MASK);             // this slice is done with the shared tile (counted in every slice)
+        tc_commit_mc(&B.dy_empty[b], CL_MASK);             // so is dy
         if (k == n_local - 1) tc_commit(&B.wg_done);
       }
       __syncwarp();
