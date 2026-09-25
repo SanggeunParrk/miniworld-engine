@@ -533,3 +533,47 @@ epilogue's loads (x 48 KB + gl / ms / mb 72 KB); at pp's ~72-79 GB/s that is ~6.
 CTA at L768, plus one exposed tail. Best case ~16 vs 21.6 us (Wo), ~27 vs 28.4 (squeeze) at L768, and ~parity at
 L384 -- about 4-5 % of a block at L768, if the epilogue is fully taken off the MMA warpgroups (a warp-specialised
 epilogue fed through shared memory, which then has to fit next to a five-stage ring).
+
+### Round 3: a warp-specialised epilogue reaches standalone parity on Wo -- and still loses in the step
+
+`gra/gemm_resgate_adaln_ws.cu`: two MMA warpgroups ping-pong at pp's 64 x 192 tile and hand y (bf16, the rounding
+mm + rows has) to a separate epilogue through shared memory, then go straight on. The epilogue reads rows with
+16-byte accesses, double-buffered over 4-row groups, on seven warps (the epilogue warpgroup plus the producer
+warpgroup's three idle warps). Correct at every shape and grid size, bit-identical across runs.
+
+Traps on the way:
+- 640 threads with `setmaxnreg` (producer 24 / MMA 136 / epilogue 88) spilled 656 bytes and took the mainloop to
+  59 us a tile: ptxas budgets every region by the launch cap (96 at 640 threads), not by `setmaxnreg.inc`. At 512
+  threads (cap 128) the 96-register accumulator fits with no `setmaxnreg` at all.
+- Releasing `ybuf` as soon as the epilogue's residual pass had read y let the MMA warpgroups run a tile ahead, and
+  peers' statistics for tile t + 2 could land in the buffer the epilogue was still reading for tile t (same
+  parity). The MMA warpgroup now starts a tile only after the epilogue finished its previous one.
+- One warpgroup, one row group at a time: ~10 us a tile of exposed latency, twice the mainloop. Double-buffering
+  the row groups halved it; adding the three idle producer warps took off ~1 us more.
+
+| graph replay, us | mm + rows | ws (final) |
+|---|---:|---:|
+| L384 Wo | 11.7 | 12.9 |
+| L384 squeeze | 14.5 | 17.5 |
+| L768 Wo | 21.2 | 21.6 |
+| L768 squeeze | 28.4 | 30.5 |
+
+**In the step** (`ab_fused.py`: the runner's `_mm` is intercepted for the Wo / squeeze weights and the following
+`resgate_adaln_rows` runs the fused kernel; one process, interleaved, 8 rounds):
+
+| per block | mm + rows | Wo fused | Wo + squeeze fused |
+|---|---:|---:|---:|
+| L768 | 155.72 us | 158.24 (-2.52) | 165.24 (-9.52) |
+| L384 | 77.37 | 78.40 (-1.03) | 81.01 (-3.64) |
+
+rel_rms unchanged (4.40-4.42e-3). Even Wo, at standalone parity, loses in the step: the unfused pair already
+overlaps under PDL (quack triggers early, the row pass starts at the GEMM's tail and triggers at its own start), so
+the fusion gives up an overlap that the baseline has for free. squeeze loses outright: with 64-row tiles its
+mainloop ingests twice the W bytes quack's 128-row tiles do.
+
+**Verdict.** At these shapes -- one wave of GEMM work, a row pass already at the HBM roof, and PDL between the
+kernels -- fusing the residual + AdaLN into the residual GEMMs does not pay, in any of the five designs built here
+(one-wave v4, persistent ping-pong, 2-D cluster, three rotating warpgroups, warp-specialised epilogue). The
+fused kernels stay in `gra/` as the record. What would change the verdict is more rows per launch: several samples'
+worth of M, or the atom-level transformer's much larger M, where tiles a SM are plentiful and the mainloop can
+keep 128-row tiles.

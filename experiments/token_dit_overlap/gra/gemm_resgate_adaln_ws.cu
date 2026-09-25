@@ -11,7 +11,8 @@
 // go straight on to their next mainloop. The epilogue reads y from shared memory and x / gl / ms / mb / xa with
 // 16-byte accesses along rows (8 lanes a row, 4 rows at a time), not in the wgmma fragment's scattered layout.
 //
-// Warpgroups: 0, 1 MMA; 2 epilogue (takes both MMA warpgroups' tiles, in order); 3 producer. 512 threads, so ptxas's
+// Warpgroups: 0, 1 MMA; 2 epilogue (takes both MMA warpgroups' tiles, in order); 3: warp 0 the producer, warps 1-3
+// three more epilogue warps (seven in all; the producer needs one thread). 512 threads, so ptxas's
 // own budget is 128 registers: the MMA warpgroups' 96-register accumulator fits without setmaxnreg. (With a second
 // epilogue warpgroup -- 640 threads, a 96-register budget -- the accumulator spilled 656 bytes of stack and the
 // mainloop took 59 us a tile: ptxas did not budget the MMA region by setmaxnreg.inc.)
@@ -112,7 +113,7 @@ graws_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
 #endif
 
   const int lane = tid & 31, warp = (tid >> 5) & 3, ti = tid & 127;
-  if (wg == 3) {                                                    // ---- producer: one thread
+  if (wg == 3 && warp == 0) {                                       // ---- producer: one thread
     if (tid == 384) {
       tma_prefetch_desc(&ma); tma_prefetch_desc(&mw);
       for (int i = 0; i < nloc; ++i) {
@@ -189,8 +190,13 @@ graws_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
       if (ti == 0) mbar_arrive(&yfull[e]);
       PST(i, 4);
     }
-  } else {                                                          // ---- epilogue warpgroup: every tile, in order
-    const int rl = lane >> 3, cl = lane & 7;                        // 8 lanes a row, 4 rows a pass; chunks cl, cl+8, cl+16
+  } else {                                                          // ---- epilogue: 7 warps, every tile, in order
+    // A tile is 16 groups of 4 rows; epilogue warp ew takes groups ew, ew + 7, ew + 14. 8 lanes a row: chunks cl,
+    // cl + 8, cl + 16 of 8 columns.
+    constexpr int NEW = 7, NGRP = TM / 4, NPASS = (NGRP + NEW - 1) / NEW;
+    const int ew = wg == 2 ? warp : 3 + warp;
+    const bool lead = ew == 0 && lane == 0;
+    const int rl = lane >> 3, cl = lane & 7;
     for (int i = 0; i < nloc; ++i) {
       const int m0 = (cid + i * ncl) * TM, t0 = m0 % L;
       const int e = i & 1, j = i >> 1;                              // from MMA e, its j-th tile
@@ -204,7 +210,7 @@ graws_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
       // mainloop, with a single epilogue warpgroup serving both MMA warpgroups).
       float4 xb[2][3][2]; uint4 gb[2][3];
       auto ld_res = [&](int p, int bf) {
-        const int r = warp * 16 + p * 4 + rl;
+        const int r = (ew + NEW * p) * 4 + rl;
         const float* xr = X + (size_t)(m0 + r) * D_ + n0;
         const __nv_bfloat16* gr = GL + (size_t)(t0 + r) * sgl + n0;
 #pragma unroll
@@ -217,10 +223,11 @@ graws_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
       };
       ld_res(0, 0);
 #pragma unroll
-      for (int p = 0; p < 4; ++p) {                                 // residual, 4 rows of this warp at a time
+      for (int p = 0; p < NPASS; ++p) {                             // residual, 4 rows of this warp at a time
+        if (ew + NEW * p >= NGRP) break;                            // warp-uniform
         const int bf = p & 1;
-        if (p + 1 < 4) ld_res(p + 1, bf ^ 1);
-        const int r = warp * 16 + p * 4 + rl;
+        if (p + 1 < NPASS && ew + NEW * (p + 1) < NGRP) ld_res(p + 1, bf ^ 1);
+        const int r = (ew + NEW * p) * 4 + rl;
         float* xr = X + (size_t)(m0 + r) * D_ + n0;
         float v[3][8];
         float s = 0.f;
@@ -263,7 +270,7 @@ graws_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
       if (ADALN) {
         uint4 sbv[2][3], bbv[2][3];
         auto ld_ada = [&](int p, int bf) {                          // x again (this thread's own stores), ms, mb
-          const int r = warp * 16 + p * 4 + rl;
+          const int r = (ew + NEW * p) * 4 + rl;
           const float* xr = X + (size_t)(m0 + r) * D_ + n0;
           const __nv_bfloat16* sr = MS + (size_t)(t0 + r) * sms + n0;
           const __nv_bfloat16* br = MB + (size_t)(t0 + r) * smb + n0;
@@ -280,10 +287,11 @@ graws_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
         mbar_wait(sb, j & 1);
         PST(i, 7);
 #pragma unroll
-        for (int p = 0; p < 4; ++p) {
+        for (int p = 0; p < NPASS; ++p) {
+          if (ew + NEW * p >= NGRP) break;
           const int bf = p & 1;
-          if (p + 1 < 4) ld_ada(p + 1, bf ^ 1);
-          const int r = warp * 16 + p * 4 + rl;
+          if (p + 1 < NPASS && ew + NEW * (p + 1) < NGRP) ld_ada(p + 1, bf ^ 1);
+          const int r = (ew + NEW * p) * 4 + rl;
           float2 pp[CL];
 #pragma unroll
           for (int k = 0; k < CL; ++k) pp[k] = st[k * TM + r];
@@ -315,8 +323,8 @@ graws_kernel(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUt
           }
         }
       }
-      named_bar_sync(3, 128);                                       // every thread is past y and past the stats
-      if (ti == 0) {
+      named_bar_sync(3, 32 * NEW);                                  // every thread is past y and past the stats
+      if (lead) {
         if (ADALN) mbar_arrive_expect_tx(sb, STAT_BYTES);         // re-armed for this parity's next tile
         mbar_arrive(&yfree[e]);                                     // MMA e may start its next tile
       }
