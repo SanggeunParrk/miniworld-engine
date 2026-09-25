@@ -29,6 +29,8 @@ constexpr int X_GAM = X_IN + 2 * INB, X_BAR = X_GAM + 512;
 constexpr int SMEM_BYTES = (W_BAR > X_BAR ? W_BAR : X_BAR) + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 
+constexpr int CL = 2;                                          // cluster size (launch attribute): DW input tiles are multicast across it
+constexpr uint16_t CL_MASK = (1u << CL) - 1;
 constexpr uint32_t I_DH = idesc_bf16(128, 64, 0, 1), I_AB = idesc_bf16(128, 128), I_DXN = idesc_bf16(128, 128, 0, 1);
 constexpr uint32_t I_DWAB = idesc_bf16(128, 128, 1, 1), I_DWS = idesc_bf16(128, 64, 1, 1);
 
@@ -64,18 +66,20 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
   const uint32_t su = smem_u32(sm);
   BarsW& B = *reinterpret_cast<BarsW*>(sm + W_BAR);
   const int slice = cta & 7, repl = cta >> 3, R = p.ndw >> 3;
+  const int crank = (int)cluster_rank();                   // == slice % CL: the CL consecutive CTAs of a cluster are slices of one replica
   const int n_local = (p.tiles > repl) ? (p.tiles - repl + R - 1) / R : 0;
   constexpr uint32_t T_DH = 0, T_AB = 64, T_DWAB = 256, T_DWS = 384;
   const uint32_t tid = threadIdx.x;
   if (tid == 0) {
     mbar_init(&B.w_full, 1);
-    for (int s = 0; s < 2; ++s) { mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], 1); }
+    for (int s = 0; s < 2; ++s) { mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], CL); }   // freed by all CL slices of the cluster
     mbar_init(&B.dhab_full, 1); mbar_init(&B.gate_read, 8); mbar_init(&B.g_full, 8); mbar_init(&B.g_empty, 1); mbar_init(&B.wg_done, 1);
     fence_barrier_init();
   }
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
   __syncthreads();
+  cluster_sync();                                          // every CTA's barriers exist before any multicast or remote arrive
   tc_fence_after();
   const uint32_t tmem = B.tmem;
 
@@ -94,13 +98,12 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
         if (i >= 2) mbar_wait(&B.in_empty[b], ((i >> 1) - 1) & 1);
         mbar_expect_tx(&B.in_full[b], INB);
         const uint32_t dst = su + W_IN + b * INB;
+        // the CL slices of this replica share the tile: each requests 8 / CL of its eight 8 KB boxes and multicasts them to all
 #pragma unroll
-        for (int cb = 0; cb < 2; ++cb)
-#pragma unroll
-          for (int h = 0; h < 2; ++h) {
-            tma_load_2d(dst + cb * KB + h * 8192, p.dy, &B.in_full[b], cb * 64, row + h * 64);
-            tma_load_2d(dst + IN_XN + cb * KB + h * 8192, p.xn, &B.in_full[b], cb * 64, row + h * 64);
-          }
+        for (int k = 0; k < 8 / CL; ++k) {
+          const int bx = crank * (8 / CL) + k, src = bx >> 2, cb = (bx >> 1) & 1, h = bx & 1;
+          tma_load_2d_mc(dst + src * IN_XN + cb * KB + h * 8192, src ? p.xn : p.dy, &B.in_full[b], cb * 64, row + h * 64, CL_MASK);
+        }
       }
     }
   } else if (warp == 1) {
@@ -150,7 +153,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
         for (int ks = 0; ks < 8; ++ks)       // dWs_s += dy^T h
           umma_ss(tmem + T_DWS, ddy + (uint64_t)(ks * 2048 >> 4), dh_ + (uint64_t)(ks * 2048 >> 4), I_DWS, (k > 0 || ks > 0) ? 1u : 0u);
         tc_commit(&B.g_empty);
-        tc_commit(&B.in_empty[b]);
+        tc_commit_mc(&B.in_empty[b], CL_MASK);             // this slice is done with the shared tile (counted in every slice)
         if (k == n_local - 1) tc_commit(&B.wg_done);
       }
       __syncwarp();
@@ -223,6 +226,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
   }
   tc_fence_before();
   __syncthreads();
+  cluster_sync();                                          // no CTA leaves while a peer may still multicast into it
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
 
@@ -247,17 +251,22 @@ DEVI float reduce_scatter32(float (&v)[32], int lane) {
 DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int lane) {
   const uint32_t su = smem_u32(sm);
   BarsX& B = *reinterpret_cast<BarsX*>(sm + X_BAR);
-  const int n_local = (p.tiles > cta) ? (p.tiles - cta + ndx - 1) / ndx : 0;
+  // the two CTAs of a cluster share (multicast) the weight chunks, so they must walk the same chunk sequence: both run the pair's
+  // larger tile count, and a CTA short of one tile repeats its last tile as a dummy whose results are not stored
+  auto count = [&](int k) { return (p.tiles > k) ? (p.tiles - k + ndx - 1) / ndx : 0; };
+  const int n_valid = count(cta), n_local = count(cta & ~1);
   const int nch = n_local * NCH;
+  auto tile_of = [&](int i) { return i < n_valid ? cta + i * ndx : (n_valid > 0 ? cta + (n_valid - 1) * ndx : 0); };
+  const int crank = (int)cluster_rank();
   constexpr uint32_t T_AB = 0, T_DH = 256, T_DXN = 384;          // AB x2 (128 each; [dA|dB] is written back over its first 64), DH x2 (64 each)
   const uint32_t tid = threadIdx.x;
   if (tid == 0) {
     for (int s = 0; s < 2; ++s) {
-      mbar_init(&B.ws_full[s], 1); mbar_init(&B.ws_empty[s], 1); mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], 1);
+      mbar_init(&B.ws_full[s], 1); mbar_init(&B.ws_empty[s], CL); mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], 1);
       mbar_init(&B.x_full[s], 1); mbar_init(&B.xn_dead[s], 1);
-      mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 4); mbar_init(&B.ab_free[s], 1);
+      mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 8); mbar_init(&B.ab_free[s], 1);
     }
-    for (int s = 0; s < NWAB; ++s) { mbar_init(&B.wab_full[s], 1); mbar_init(&B.wab_empty[s], 1); }
+    for (int s = 0; s < NWAB; ++s) { mbar_init(&B.wab_full[s], 1); mbar_init(&B.wab_empty[s], CL); }
     mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4);
     fence_barrier_init();
   }
@@ -265,13 +274,14 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
   __syncthreads();
+  cluster_sync();                                          // every CTA's barriers exist before any multicast or remote arrive
   tc_fence_after();
   const uint32_t tmem = B.tmem;
 
   if (warp == 0) {
     if (lane == 0) {
       auto issue_in = [&](int i) {
-        const int b = i & 1, row = (cta + i * ndx) * ROWS;
+        const int b = i & 1, row = tile_of(i) * ROWS;
         if (i >= 2) mbar_wait(&B.in_empty[b], ((i >> 1) - 1) & 1);
         mbar_expect_tx(&B.in_full[b], INB);
         const uint32_t dst = su + X_IN + b * INB;
@@ -284,7 +294,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           }
       };
       auto issue_x = [&](int i) {                         // the tile's xn is dead: reload that half with x for the epilogue
-        const int b = i & 1, row = (cta + i * ndx) * ROWS;
+        const int b = i & 1, row = tile_of(i) * ROWS;
         mbar_wait(&B.xn_dead[b], (i >> 1) & 1);
         mbar_expect_tx(&B.x_full[b], 32768);
         const uint32_t dst = su + X_IN + b * INB + IN_XN;
@@ -306,20 +316,16 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
         if (cs < nch && (cs < 2 || mbar_test(&B.ws_empty[cs & 1], ((cs >> 1) - 1) & 1))) {
           const int s = cs & 1, j = cs & (NCH - 1);
           const uint32_t slot = su + X_WS + s * 16384;
-          mbar_expect_tx(&B.ws_full[s], 16384);
-          tma_load_2d(slot, p.ws, &B.ws_full[s], j * HS, 0);
-          tma_load_2d(slot + 8192, p.ws, &B.ws_full[s], j * HS, 64);
+          mbar_expect_tx(&B.ws_full[s], 16384);             // this CTA requests one of the two halves, multicast to both
+          tma_load_2d_mc(slot + crank * 8192, p.ws, &B.ws_full[s], j * HS, crank * 64, CL_MASK);
           ++cs;
         }
         if (ca < nch && (ca < NWAB || mbar_test(&B.wab_empty[ca % NWAB], ((ca / NWAB) - 1) & 1))) {
           const int s = ca % NWAB, j = ca & (NCH - 1);
           const uint32_t slot = su + X_WAB + s * 32768;
-          mbar_expect_tx(&B.wab_full[s], 32768);
-#pragma unroll
-          for (int cb = 0; cb < 2; ++cb) {
-            tma_load_2d(slot + cb * KB, p.wa, &B.wab_full[s], cb * 64, j * HS);
-            tma_load_2d(slot + cb * KB + 8192, p.wb, &B.wab_full[s], cb * 64, j * HS);
-          }
+          mbar_expect_tx(&B.wab_full[s], 32768);             // K-block `crank` of [Wa_j; Wb_j] from this CTA, multicast to both
+          tma_load_2d_mc(slot + crank * KB, p.wa, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
+          tma_load_2d_mc(slot + crank * KB + 8192, p.wb, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
           ++ca;
         }
       }
@@ -346,7 +352,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
           umma_ss(tmem + T_DH + s * 64, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
         }
-        tc_commit(&B.ws_empty[s]);                         // Ws_j is dead once dh_j is done
+        tc_commit_mc(&B.ws_empty[s], CL_MASK);             // Ws_j is dead here once dh_j is done (counted in both CTAs)
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
@@ -374,18 +380,19 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
         for (int ks = 0; ks < 8; ++ks)
           umma_ts(tmem + T_DXN, tmem + T_AB + s * 128 + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
         tc_commit(&B.ab_free[s]);
-        tc_commit(&B.wab_empty[q % NWAB]);
+        tc_commit_mc(&B.wab_empty[q % NWAB], CL_MASK);
         if (j == NCH - 1) tc_commit(&B.dxn_full);
       }
       __syncwarp();
       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 3);
     }
   } else if ((warp >= 4 && warp < 8) || warp >= 12) {
-    // ------------------------------------------------------------------------------------ gate: [dA | dB] back into TMEM; two
-    // warpgroups in ping-pong (warps 4-7 even chunks, 12-15 odd)
+    // ------------------------------------------------------------------------------------ gate: [dA | dB] back into TMEM; the two
+    // warpgroups split every chunk by columns (warps 4-7 hidden units 0..31, warps 12-15 units 32..63), halving the gate's latency
     const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
     setmaxnreg_inc<152>();
-    for (int c = (warp >= 12 ? 1 : 0); c < nch; c += 2) {
+    const int half = warp >= 12 ? 1 : 0;
+    for (int c = 0; c < nch; ++c) {
       const int s = c & 1, u = c >> 1;
       if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c);
       mbar_wait(&B.abdh_full[s], u & 1);
@@ -393,8 +400,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       tc_fence_after();
       // [dA | dB] is written back half by half: columns 0..15 dA(hs 0..31), 16..31 dB(hs 0..31), 32..47 dA(hs 32..63), 48..63 dB(hs 32..63),
       // so each half lands only on columns it has already read; the d_xn product pairs each 8-column block with the matching B rows
-#pragma unroll
-      for (int half = 0; half < 2; ++half) {
+      {
         uint32_t dh[32], av[32], bv[32];
         tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
         tmem_ld32(trow + T_AB + s * 128 + half * 32, av);
@@ -411,7 +417,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           da[k] = pack_bf16(gate_da(g0, b0, s0, l0), gate_da(g1, b1, s1, l1));
           db[k] = pack_bf16(g0 * l0, g1 * l1);
         }
-        if (half == 1 && cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 2);
+        if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 2);
         tmem_st16(trow + T_AB + s * 128 + half * 32, da);
         tmem_st16(trow + T_AB + s * 128 + half * 32 + 16, db);
       }
@@ -429,7 +435,8 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
     const uint32_t gam_u = su + X_GAM;
     float accg[4] = {0.f, 0.f, 0.f, 0.f}, accb[4] = {0.f, 0.f, 0.f, 0.f};
     for (int i = 0; i < n_local; ++i) {
-      const int b = i & 1, grow = (cta + i * ndx) * ROWS + (int)r;
+      const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
+      const bool real = i < n_valid;
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i);
       mbar_wait(&B.dxn_full, i & 1);
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 1);
@@ -473,10 +480,12 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
             work[2 * e] = n0 * x0; work[2 * e + 1] = n1 * x1;
           }
         }
-        accg[g] += reduce_scatter32(work, lane);
+        const float sg = reduce_scatter32(work, lane);
+        if (real) accg[g] += sg;
 #pragma unroll
         for (int e = 0; e < 16; ++e) { const uint32_t n = dn[(g * 32 + 2 * e) >> 1]; work[2 * e] = bf16lo(n); work[2 * e + 1] = bf16hi(n); }
-        accb[g] += reduce_scatter32(work, lane);
+        const float sb = reduce_scatter32(work, lane);
+        if (real) accb[g] += sb;
       }
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 4);
       const float ca = ((pca[0] + pca[1]) + (pca[2] + pca[3])) * (1.f / D_);
@@ -506,13 +515,15 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       fence_proxy_async();
       named_bar_sync(1, 128);
       if (t2 == 0) {
-        const int row0 = (cta + i * ndx) * ROWS;
+        const int row0 = tile_of(i) * ROWS;
+        if (real) {
 #pragma unroll
-        for (int cb = 0; cb < 2; ++cb)
+          for (int cb = 0; cb < 2; ++cb)
 #pragma unroll
-          for (int h = 0; h < 2; ++h) tma_store_2d(p.dx, dyb + cb * KB + h * 8192, cb * 64, row0 + h * 64);
-        tma_store_commit();
-        tma_store_wait_read0();
+            for (int h = 0; h < 2; ++h) tma_store_2d(p.dx, dyb + cb * KB + h * 8192, cb * 64, row0 + h * 64);
+          tma_store_commit();
+          tma_store_wait_read0();
+        }
         mbar_arrive(&B.in_empty[b]);
         if (cta == 0) TRB(1, 3, 8 * i + 6);
       }
@@ -524,6 +535,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
   }
   tc_fence_before();
   __syncthreads();
+  cluster_sync();                                          // no CTA leaves while a peer may still multicast into it
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
 

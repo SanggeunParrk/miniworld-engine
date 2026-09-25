@@ -64,6 +64,14 @@ DEVI void tma_load_2d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0,
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];"
                :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1) : "memory");
 }
+// cluster helpers: rank, full cluster barrier, TMA multicast to the CTAs in `mask`, tcgen05.commit arriving on the same barrier offset
+// in every CTA of `mask`
+DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
+DEVI void cluster_sync() { asm volatile("barrier.cluster.arrive.aligned; barrier.cluster.wait.aligned;" ::: "memory"); }
+DEVI void tma_load_2d_mc(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, uint16_t mask) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
+               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask) : "memory");
+}
 DEVI void tma_store_2d(const CUtensorMap* m, uint32_t src, int c0, int c1) {
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%2, %3}], [%1];" :: "l"(m), "r"(src), "r"(c0), "r"(c1) : "memory");
 }
@@ -101,6 +109,10 @@ DEVI void tc_fence_before() { asm volatile("tcgen05.fence::before_thread_sync;" 
 DEVI void tc_fence_after() { asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory"); }
 DEVI void tc_commit(uint64_t* bar) {
   asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];" :: "r"(smem_u32(bar)) : "memory");
+}
+DEVI void tc_commit_mc(uint64_t* bar, uint16_t mask) {
+  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;"
+               :: "r"(smem_u32(bar)), "h"(mask) : "memory");
 }
 // D[tmem] (+)= A[smem] B[smem]
 DEVI void umma_ss(uint32_t d_tmem, uint64_t a, uint64_t b, uint32_t idesc, uint32_t accumulate) {

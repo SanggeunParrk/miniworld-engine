@@ -10,7 +10,7 @@ SMEM_BWD = 230656
 
 class FusedBwd:
     def __init__(self, cubin=HERE / "build" / "tbwd.cubin", repl=10):
-        self.k = drv.Kernel(str(cubin), "transition_bwd_sm100", SMEM_BWD)
+        self.k = drv.Kernel(str(cubin), "transition_bwd_sm100", SMEM_BWD, cluster=2)
         self.red = drv.Kernel(str(cubin), "transition_bwd_reduce", 0)
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
         self.repl = repl
