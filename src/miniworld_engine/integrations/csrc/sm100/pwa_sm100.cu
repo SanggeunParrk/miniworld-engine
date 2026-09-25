@@ -19,6 +19,14 @@ constexpr int H = 8, C = 32, D = 64, HC = H * C;
 // v = y . Wv^T (M = 128 s, N = 256 = all heads, K = 64) into one of two TMEM accumulators; warps 10-13 drain
 // it: TMEM lane = s, so a thread holds one row's 256 values = eight 64-byte head rows, which go into eight
 // 64B-swizzled [128 s][32 c] tiles -- exactly the head-major v boxes -- with no transposition at all.
+// sigmoid(x) = 0.5 + 0.5 tanh(x / 2): one MUFU op (tanh.approx, ~2^-11 relative) where ex2 + rcp took two -- the gate
+// passes evaluate 256 sigmoids per row and were bound on the special-function units
+__device__ __forceinline__ float sigmoid_t(float x) {
+  float t;
+  asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(0.5f * x));
+  return fmaf(0.5f, t, 0.5f);
+}
+
 namespace lv {
 constexpr int BS = 128;
 constexpr int NST = 3;
@@ -638,7 +646,7 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
           for (int w2 = 0; w2 < 4; ++w2) {
             const int c = e * 8 + w2 * 2;
             const float2 o2 = bf2f(ow[w2]);
-            up[e * 4 + w2] = pack2(o2.x / (1.f + __expf(-g[c])), o2.y / (1.f + __expf(-g[c + 1])));
+            up[e * 4 + w2] = pack2(o2.x * sigmoid_t(g[c]), o2.y * sigmoid_t(g[c + 1]));
           }
         }
         tmem_st8(tmem_at(tmem + COL_U, q * 32, hf * 64 + pp * 32 + ch * 16), up);
@@ -981,7 +989,7 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
             for (int k = 0; k < 4; ++k) {             // packed pairs: do = du g, dgp = du o g (1 - g), go = g o
               const int c = c8 * 8 + 2 * k;
               const float2 o2 = bf2f(ow[k]);
-              const float2 g2 = make_float2(1.f / (1.f + __expf(-gt[c])), 1.f / (1.f + __expf(-gt[c + 1])));
+              const float2 g2 = make_float2(sigmoid_t(gt[c]), sigmoid_t(gt[c + 1]));
               const float2 d2 = make_float2(du[c], du[c + 1]);
               const float2 do2 = mul2(d2, g2);
               const float2 gg = fma2(g2, make_float2(-g2.x, -g2.y), g2);                           // g - g^2
