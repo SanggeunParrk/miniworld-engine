@@ -9,8 +9,10 @@ x, wa, wb, ws, g, b = make_inputs(384)
 M, D, H = 384 * 384, 128, 512
 f = FusedFwd(); f.set_weights(wa, wb, ws)
 dy = torch.randn_like(x) * 0.1
-for name in ("tbwd", "babl_gate", "babl_epi", "babl_both"):
-    for R in (9, 10, 11):
+import os
+NAMES = os.environ.get("NAMES", "tbwd,babl_gate,babl_epi,babl_both").split(",")
+for name in NAMES:
+    for R in (9,):
         st = FusedTrain(f, repl=R, cubin=f"build/{name}.cubin").bind(x, g, b, dy)
         st(); torch.cuda.synchronize()
         rb = st.keep[1]

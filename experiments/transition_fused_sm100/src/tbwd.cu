@@ -105,6 +105,9 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
           uint64_t* full = src ? &B.xn_full[b] : &B.dy_full[b];
           if (i >= 2) mbar_wait(src ? &B.xn_empty[b] : &B.dy_empty[b], ((i >> 1) - 1) & 1);
           if (cta == 0 && src == 1) TRB(0, 3, i);
+#ifdef ABL_BIN
+          if (i >= 2) { mbar_arrive(full); continue; }       // ablation: keep the first two tiles' inputs, reload nothing
+#endif
           mbar_expect_tx(full, INB / 2);
 #pragma unroll
           for (int k = 0; k < 4 / CL; ++k) {
@@ -187,7 +190,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
       tc_fence_after();
       if (i >= 1) mbar_wait(&B.g_empty, (i - 1) & 1);
       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
-#ifndef ABL_BGATE
+#if !defined(ABL_BGATE) && !defined(ABL_DWGATE)
       {
         uint32_t dh[32], av[32], bv[32];
         tmem_ld32(trow + T_DH + half * 32, dh);
@@ -334,6 +337,9 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
         if (cs < nch && (cs < 2 || mbar_test(&B.ws_empty[cs & 1], ((cs >> 1) - 1) & 1))) {
           const int s = cs & 1, j = cs & (NCH - 1);
           const uint32_t slot = su + X_WS + s * 16384;
+#ifdef ABL_BW
+          if (cs >= 2) { mbar_arrive(&B.ws_full[s]); ++cs; continue; }   // ablation: keep the first two chunks' weights
+#endif
           mbar_expect_tx(&B.ws_full[s], 16384);             // this CTA requests one of the two halves, multicast to both
           tma_load_2d_mc(slot + crank * 8192, p.ws, &B.ws_full[s], j * HS, crank * 64, CL_MASK);
           ++cs;
@@ -341,6 +347,9 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
         if (ca < nch && (ca < NWAB || mbar_test(&B.wab_empty[ca % NWAB], ((ca / NWAB) - 1) & 1))) {
           const int s = ca % NWAB, j = ca & (NCH - 1);
           const uint32_t slot = su + X_WAB + s * 32768;
+#ifdef ABL_BW
+          if (ca >= NWAB) { mbar_arrive(&B.wab_full[s]); ++ca; continue; }
+#endif
           mbar_expect_tx(&B.wab_full[s], 32768);             // K-block `crank` of [Wa_j; Wb_j] from this CTA, multicast to both
           tma_load_2d_mc(slot + crank * KB, p.wa, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
           tma_load_2d_mc(slot + crank * KB + 8192, p.wb, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
@@ -418,7 +427,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       tc_fence_after();
       // [dA | dB] is written back half by half: columns 0..15 dA(hs 0..31), 16..31 dB(hs 0..31), 32..47 dA(hs 32..63), 48..63 dB(hs 32..63),
       // so each half lands only on columns it has already read; the d_xn product pairs each 8-column block with the matching B rows
-#ifndef ABL_BGATE
+#if !defined(ABL_BGATE) && !defined(ABL_DXGATE)
       {
         uint32_t dh[32], av[32], bv[32];
         tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
