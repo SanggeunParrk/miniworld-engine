@@ -1425,6 +1425,7 @@ constexpr int SMEM = 1024 + (2 * ZT + 2 * ZT + 2 * DBT + ZT + WBT) * 2 + 2 * WDB
 constexpr uint32_t ID_DZN = idesc_bf16(128, DZ, 1, 1);     // A = db (db^T read MN-major), B = Wb (MN-major)
 constexpr uint32_t ID_DWB = idesc_bf16(128, HP, 1, 0);     // A = zn^T (MN-major), B = db^T (K-major)
 constexpr int COL_DZN = 0, COL_DWB = 256;                  // dzn[2] 0 / 128, dWb^T 256..271
+constexpr int PSTRIDE = H * DZ + 8 * 2 * DZ;                // a CTA's partials: dWb [8][128] | 8 warps x (dgamma, dbeta) [2][128]
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace pb2
 
@@ -1456,8 +1457,7 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
     const __grid_constant__ CUtensorMap sdmap,    // the row sums [N][H] fp32, box (8, 1)
     const float* __restrict__ LNW, const float* __restrict__ LNB,
     const WT_* __restrict__ WB,                   // proj_z weight [H][128]
-    float* __restrict__ PWB,                      // [grid][H][128]
-    float* __restrict__ PLN) {                    // [grid][8 warps][2][128]
+    float* __restrict__ PART) {                   // [grid][H * 128 (dWb) + 8 warps * 2 * 128 (dgamma, dbeta)]: one column sum
   using namespace pb2;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -1665,8 +1665,10 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
     // this warp's dgamma / dbeta partials: columns hf * 64 + lane * 2 + k (the reduce-scatter's order), one writer each
     {
       const int c0 = hf * 64 + ((lane >> 4) & 1) * 32 + ((lane >> 3) & 1) * 16 + ((lane >> 2) & 1) * 8 + ((lane >> 1) & 1) * 4 + (lane & 1) * 2;
-      float* pl = PLN + ((size_t)blockIdx.x * 8 + warp) * 2 * DZ;
+      float* pl = PART + (size_t)blockIdx.x * PSTRIDE + H * DZ + warp * 2 * DZ;
+      const int o0 = (hf ^ 1) * 64 + (c0 - hf * 64);      // the other channel half of this warp's slot is zero (no memset)
       pl[c0] = ag[0]; pl[c0 + 1] = ag[1]; pl[DZ + c0] = ab[0]; pl[DZ + c0 + 1] = ab[1];
+      pl[o0] = 0.f; pl[o0 + 1] = 0.f; pl[DZ + o0] = 0.f; pl[DZ + o0 + 1] = 0.f;
     }
     // this CTA's dWb partial: TMEM lane = d, columns = heads
     if (hf == 0) {
@@ -1676,7 +1678,7 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
       tmem_ld8(tmem_at(tmem + COL_DWB, q * 32, 0), v);
       tmem_wait_ld();
 #pragma unroll
-      for (int h = 0; h < H; ++h) PWB[((size_t)blockIdx.x * H + h) * DZ + q * 32 + lane] = v[h];
+      for (int h = 0; h < H; ++h) PART[(size_t)blockIdx.x * PSTRIDE + h * DZ + q * 32 + lane] = v[h];
     }
   }
   tc_fence_before();
@@ -1876,8 +1878,7 @@ std::vector<torch::Tensor> pair_bwd(torch::Tensor z, torch::Tensor w16, torch::T
   auto dz = torch::empty_like(z);
   const int ntiles = (int)(N * (N / BJ));
   const int grid = std::min(ntiles, num_sms(z.device().index()));
-  auto pwb = torch::empty({grid, (long)H, (long)DZ}, z.options().dtype(torch::kFloat32));
-  auto pln = torch::zeros({grid * 8, 2, (long)DZ}, z.options().dtype(torch::kFloat32));   // a warp writes only its channel half
+  auto part = torch::empty({grid, (long)PSTRIDE}, z.options().dtype(torch::kFloat32));
   CUtensorMap zm = make_map<2>(z.data_ptr(), {(uint64_t)DZ, (uint64_t)(N * N)}, {(uint64_t)DZ}, {64, BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
   CUtensorMap dzm = make_map<2>(dz.data_ptr(), {(uint64_t)DZ, (uint64_t)(N * N)}, {(uint64_t)DZ}, {64, BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "dz");
   auto st = at::cuda::getCurrentCUDAStream();
@@ -1893,16 +1894,17 @@ std::vector<torch::Tensor> pair_bwd(torch::Tensor z, torch::Tensor w16, torch::T
     static bool a = false;
     if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
     pair_bwd_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps, zm, dzm, wm, dwm, sdm, lnw.data_ptr<float>(), lnb.data_ptr<float>(),
-        wb.data_ptr<float>(), pwb.data_ptr<float>(), pln.data_ptr<float>());
+        wb.data_ptr<float>(), part.data_ptr<float>());
   } else {
     static bool a = false;
     if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
     pair_bwd_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps, zm, dzm, wm, dwm, sdm, lnw.data_ptr<float>(), lnb.data_ptr<float>(),
-        reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>()), pwb.data_ptr<float>(), pln.data_ptr<float>());
+        reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>()), part.data_ptr<float>());
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto ln = colsum(pln).view({2, (long)DZ});
-  return {dz, colsum(pwb), ln[0], ln[1]};
+  auto red = colsum(part);                                          // [PSTRIDE]: dWb, then the 8 warps' (dgamma, dbeta)
+  auto ln = red.narrow(0, H * DZ, 8 * 2 * DZ).view({8, 2, (long)DZ}).sum(0);
+  return {dz, red.narrow(0, 0, H * DZ).view({(long)H, (long)DZ}), ln[0], ln[1]};
 }
 
 
