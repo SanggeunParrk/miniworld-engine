@@ -77,7 +77,9 @@ elif case in ("fwd2", "fwd2save"):              # old = the fused pwa_fwd, new =
     wg = (torch.randn(H * C, D, device="cuda") * 0.2).to(bf); wo = (torch.randn(D, H * C, device="cuda") * 0.05).to(bf)
     dmk = (torch.rand(N, D, device="cuda") > 0.15).to(bf) if os.environ.get("AB_DMASK") else None
     so = case == "fwd2save"
-    fa = lambda: A.pwa_fwd(w, v, y, wg, wo, m, so, dmk, 1 / 0.85); fb = lambda: B.pwa_fwd2(w, v, y, wg, wo, m, so, dmk, 1 / 0.85)
+    fa = lambda: A.pwa_fwd(w, v, y, wg, wo, m, so, dmk, 1 / 0.85); lnw_ = 1 + 0.1 * torch.randn(D, device="cuda"); lnb_ = 0.1 * torch.randn(D, device="cuda")
+    y = torch.nn.functional.layer_norm(m.float(), (D,), lnw_, lnb_, 1e-5).to(bf)
+    fb = lambda: B.pwa_fwd2(w, v, m, lnw_, lnb_, 1e-5, wg, wo, so, dmk, 1 / 0.85)
     ra, rb = fa(), fb()
     ref_u = (m.float() - ra[0].float())
     print("out: max |old - new|", (ra[0].float() - rb[0].float()).abs().max().item(),
