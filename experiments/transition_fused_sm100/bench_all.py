@@ -18,6 +18,7 @@ p.add_argument("--anthropic-rows", nargs="+", default=["v2", "af3_fused", "pf", 
 p.add_argument("--no-compile", action="store_true")
 p.add_argument("--save", default=None)
 p.add_argument("--repl8", type=int, default=14)
+p.add_argument("--e4m3", action="store_true", help="also time the recorded relaxed-precision e4m3 path (not the default; rounds/v16-v18)")
 a = p.parse_args()
 torch.backends.cuda.matmul.allow_tf32 = False
 
@@ -103,16 +104,17 @@ for L in a.lengths:
         traceback.print_exc()
         put("fused sm_100a (this work)", "inference", None, note=repr(exc)[:120])
 
-    # ---------------- this experiment, relaxed precision (e4m3 operands; exchange backward)
-    try:
-        from fwd8_op import Train8
-        st8 = Train8(a.repl8, bcubin="build/tbwd8x.cubin").bind(x, wa, wb, ws, gamma, beta, dy)
-        st8(); st8.infer(); torch.cuda.synchronize()
-        name = "fused sm_100a e4m3 (relaxed precision)"
-        put(name, "inference", graph_time(st8.infer), rel(st8.infer_out, ref), note="weights pre-quantized")
-        put(name, "training", graph_time(st8), note="incl. weight quantization")
-    except Exception as exc:  # noqa: BLE001
-        traceback.print_exc()
+    # ---------------- recorded experiment, relaxed precision (e4m3 operands; exchange backward) — opt-in only
+    if a.e4m3:
+        try:
+          from fwd8_op import Train8
+          st8 = Train8(a.repl8, bcubin="build/tbwd8x.cubin").bind(x, wa, wb, ws, gamma, beta, dy)
+          st8(); st8.infer(); torch.cuda.synchronize()
+          name = "fused sm_100a e4m3 (relaxed precision)"
+          put(name, "inference", graph_time(st8.infer), rel(st8.infer_out, ref), note="weights pre-quantized")
+          put(name, "training", graph_time(st8), note="incl. weight quantization")
+      except Exception as exc:  # noqa: BLE001
+          traceback.print_exc()
 
 if a.save:
     with open(a.save, "w") as fh:
