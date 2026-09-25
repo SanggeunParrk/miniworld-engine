@@ -106,7 +106,7 @@ def _build(name: str, src_name: str):
     return _EXT[name]
 
 
-_SM100_TRAIN = False       # the sm_100a backward kernels (csrc/sm100/pwa_sm100.cu) serve grad-enabled calls once True
+_SM100_TRAIN = True        # the sm_100a backward kernels (csrc/sm100/pwa_sm100.cu) serve grad-enabled calls
 
 
 def _k100():
@@ -288,23 +288,30 @@ class _PwaMath(torch.autograd.Function):
     @staticmethod
     @torch.autocast("cuda", enabled=False)
     def forward(ctx, msa, pair, pm, lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo, eps_m, eps_z, p_drop):
-        k = _k()
         m = msa[0].contiguous(); z = pair[0].contiguous()
         N = m.shape[1]
         bf = torch.bfloat16
         wv16 = wv.detach().to(bf).contiguous(); wg16 = wg.detach().to(bf).contiguous(); wo16 = wo.detach().to(bf).contiguous()
+        sm100 = torch.cuda.get_device_capability(m.device) == (10, 0)
+        k = _k100() if sm100 else _k()
         if k["pair3"] is not None and N % 16 == 0 and N <= 1024:
             w16 = k["pair3"].pair_fwd3(z, pm, lnz_w.detach().float().contiguous(), lnz_b.detach().float().contiguous(), eps_z, wb.detach())
         else:
             w16 = pair_fwd(z, pm, lnz_w.detach().float().contiguous(), lnz_b.detach().float().contiguous(), eps_z, wb.detach(), H, BJ=64)
-        v, y = k["lnvg"].ln_vg(m, lnm_w.detach().float().contiguous(), lnm_b.detach().float().contiguous(), wv16, eps_m, 2, 3, 1)
+        if sm100:
+            v, y = k["pwa"].ln_vg(m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), wv16, eps_m)
+        else:
+            v, y = k["lnvg"].ln_vg(m, lnm_w.detach().float().contiguous(), lnm_b.detach().float().contiguous(), wv16, eps_m, 2, 3, 1)
         # the module's drop_msa (Dropout(broadcast_dim=1)): one keep-mask per (token, channel) shared over the MSA rows,
         # x * mask / (1 - p); applied to the bf16 update inside the kernel's residual epilogue
         dmask, dscale = None, 1.0
         if p_drop > 0:
             dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
-        out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)           # residual fused; o kept for the backward
+        if sm100:
+            out, o = k["pwa"].pwa_fwd(w16, v, y, wg16, wo16, m, True, dmask, dscale)
+        else:
+            out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)       # residual fused; o kept for the backward
         ctx.save_for_backward(m, z, w16, v, y, o, lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo, *((dmask,) if dmask is not None else ()))
         ctx.eps = (eps_m, eps_z); ctx.dscale = dscale
         return out[None]
@@ -312,7 +319,7 @@ class _PwaMath(torch.autograd.Function):
     @staticmethod
     @torch.autocast("cuda", enabled=False)
     def backward(ctx, dres):
-        k = _k()
+        k = None if torch.cuda.get_device_capability(dres.device) == (10, 0) else _k()
         saved = ctx.saved_tensors
         m, z, w16, v, y, o, lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo = saved[:14]
         dmask = saved[14] if len(saved) > 14 else None
@@ -323,6 +330,18 @@ class _PwaMath(torch.autograd.Function):
         # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
         wv16 = wv.to(bf).contiguous(); wg16 = wg.to(bf).contiguous(); wo16 = wo.to(bf).contiguous()
         dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)               # dgp | dv: one [S,N,512] buffer
+        if torch.cuda.get_device_capability(m.device) == (10, 0):
+            k = _k100()["pwa"]
+            d_o, dWo = k.pwa_glue(o, y, dres0, wg16, wo16.t().contiguous(), dgv, dmask, ctx.dscale)
+            k.pwa_plain(w16, d_o, dgv)                                               # dv -> dgv[..., HC:]
+            dw = torch.bmm(d_o, v.transpose(1, 2)).float()                          # [H][N][N], K = S*C
+            wgvT = torch.cat([wg16, wv16], 0).t().contiguous()
+            dm, dWgv, dlw, dlb = k.dgv_bwd(dgv.view(S * N, 2 * HC), y.view(S * N, D), m.view(S * N, D), dres0.view(S * N, D),
+                                           wgvT, lnm_w.detach().contiguous(), eps_m)
+            dWg, dWv = dWgv[:HC], dWgv[HC:]
+            dz, dWb, dzw, dzb = pair_bwd(z, w16, dw, lnz_w.float().contiguous(), lnz_b.float().contiguous(), eps_z, wb, BJ=32)
+            return (dm.view(S, N, D)[None], dz[None], None, dlw.to(lnm_w.dtype, copy=True), dlb.to(lnm_b.dtype, copy=True), dWv.to(wv.dtype, copy=True), dWg.to(wg.dtype, copy=True),
+                    dzw.to(lnz_w.dtype, copy=True), dzb.to(lnz_b.dtype, copy=True), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
         if k["glue3"] is not None:                                                  # dWo partials fused: go never touches memory
             d_o, _, dWo = k["glue3"].pwa_glue3(o, y, dres0, wg16, wo16.t().contiguous(), dgv, 2, 1, dmask, ctx.dscale)
         else:

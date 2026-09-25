@@ -51,3 +51,51 @@ if "fwd" in what:
         t = timeit(lambda: ext.pwa_fwd(w, v, y, wg, wo, m, so, dmask, dsc))
         byts = (v.numel() + 3 * m.numel() + (o.numel() if so else 0)) * 2
         print(f"pwa_fwd save_o={so}: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
+
+if "glue" in what:
+    o = torch.randn(S, N, H * C, device="cuda", dtype=bf)
+    y = torch.randn(S, N, D, device="cuda", dtype=bf)
+    dres = torch.randn(S, N, D, device="cuda", dtype=bf)
+    wg = (torch.randn(H * C, D, device="cuda") * 0.2).to(bf); wo = (torch.randn(D, H * C, device="cuda") * 0.05).to(bf)
+    dmask = (torch.rand(N, D, device="cuda") > 0.15).to(bf); dsc = 1 / 0.85
+    dgv = torch.zeros(S, N, 2 * H * C, device="cuda", dtype=bf)
+    dO, dwo = ext.pwa_glue(o, y, dres, wg, wo.t().contiguous(), dgv, dmask, dsc)
+    dr = (dres.float() * dmask.float() * dsc).to(bf).float()
+    g = torch.sigmoid(y.float() @ wg.float().t())                      # [S, N, HC]
+    du = dr @ wo.float()                                               # [S, N, HC]
+    do_ref = (du * g).view(S, N, H, C).permute(2, 1, 0, 3).reshape(H, N, S * C)
+    dgp_ref = du * o.float() * g * (1 - g)
+    dwo_ref = dr.reshape(-1, D).t() @ (g * o.float()).to(bf).float().reshape(-1, H * C)
+    print(f"glue: do {rel(dO, do_ref):.2e}  dgp {rel(dgv[..., :H * C], dgp_ref):.2e}  dWo {rel(dwo, dwo_ref):.2e}  (dgv second half untouched: {dgv[..., H * C:].abs().max().item()})", flush=True)
+    t = timeit(lambda: ext.pwa_glue(o, y, dres, wg, wo.t().contiguous(), dgv, dmask, dsc))
+    byts = (o.numel() * 3 + 2 * y.numel()) * 2
+    print(f"glue: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
+
+if "plain" in what:
+    w = torch.softmax(torch.randn(H, N, N, device="cuda") * 2, -1).to(bf)
+    dO = torch.randn(H, N, S * C, device="cuda", dtype=bf)
+    dgv = torch.zeros(S, N, 2 * H * C, device="cuda", dtype=bf)
+    ext.pwa_plain(w, dO, dgv)
+    dv = torch.einsum("hij,his->hjs", w.float(), dO.float()).view(H, N, S, C).permute(2, 1, 0, 3).reshape(S, N, H * C)
+    print(f"plain: dv {rel(dgv[..., H * C:], dv):.2e}  (dgp half untouched: {dgv[..., :H * C].abs().max().item()})", flush=True)
+    t = timeit(lambda: ext.pwa_plain(w, dO, dgv))
+    byts = 2 * dO.numel() * 2
+    print(f"plain: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB), {2*H*N*N*S*C/t/1e9:.0f} TFLOP/s", flush=True)
+
+if "dgv" in what:
+    M = S * N
+    dgv = torch.randn(M, 2 * H * C, device="cuda", dtype=bf)
+    x = torch.randn(M, D, device="cuda", dtype=bf)
+    lnw = 1 + 0.1 * torch.randn(D, device="cuda"); lnb = 0.1 * torch.randn(D, device="cuda")
+    y = torch.nn.functional.layer_norm(x.float(), (D,), lnw, lnb, 1e-5).to(bf)
+    dout = torch.randn(M, D, device="cuda", dtype=bf)
+    wgv = (torch.randn(2 * H * C, D, device="cuda") * 0.05).to(bf)
+    dm, dW, dgam, dbet = ext.dgv_bwd(dgv, y, x, dout, wgv.t().contiguous(), lnw, 1e-5)
+    dy = dgv.float() @ wgv.float()
+    xr = x.float().requires_grad_(True); g_ = lnw.clone().requires_grad_(True); b_ = lnb.clone().requires_grad_(True)
+    yy = torch.nn.functional.layer_norm(xr, (D,), g_, b_, 1e-5)
+    yy.backward(dy)
+    print(f"dgv_bwd: dm {rel(dm, xr.grad + dout.float()):.2e}  dWgv {rel(dW, dgv.float().t() @ y.float()):.2e}  dgamma {rel(dgam, g_.grad):.2e}  dbeta {rel(dbet, b_.grad):.2e}", flush=True)
+    t = timeit(lambda: ext.dgv_bwd(dgv, y, x, dout, wgv.t().contiguous(), lnw, 1e-5))
+    byts = (dgv.numel() + 4 * x.numel()) * 2
+    print(f"dgv_bwd: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
