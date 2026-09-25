@@ -339,7 +339,7 @@ class _PwaMath(torch.autograd.Function):
             dm, dWgv, dlw, dlb = k.dgv_bwd(dgv.view(S * N, 2 * HC), y.view(S * N, D), m.view(S * N, D), dres0.view(S * N, D),
                                            wgvT, lnm_w.detach().contiguous(), eps_m)
             dWg, dWv = dWgv[:HC], dWgv[HC:]
-            dz, dWb, dzw, dzb = pair_bwd(z, w16, dw, lnz_w.float().contiguous(), lnz_b.float().contiguous(), eps_z, wb, BJ=32)
+            dz, dWb, dzw, dzb = k.pair_bwd(z, w16, dw, lnz_w.float().contiguous(), lnz_b.float().contiguous(), eps_z, wb.detach().contiguous())
             return (dm.view(S, N, D)[None], dz[None], None, dlw.to(lnm_w.dtype, copy=True), dlb.to(lnm_b.dtype, copy=True), dWv.to(wv.dtype, copy=True), dWg.to(wg.dtype, copy=True),
                     dzw.to(lnz_w.dtype, copy=True), dzb.to(lnz_b.dtype, copy=True), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
         if k["glue3"] is not None:                                                  # dWo partials fused: go never touches memory

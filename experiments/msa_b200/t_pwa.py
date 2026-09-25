@@ -115,3 +115,27 @@ if "abfwd" in what:
         ta.append(timeit(lambda: ext_old.pwa_fwd(w, v, y, wg, wo, m, False, None, 1.0), rounds=3))
         tb.append(timeit(lambda: ext.pwa_fwd(w, v, y, wg, wo, m, False, None, 1.0), rounds=3))
     print(f"A/B pwa_fwd: old {statistics.median(ta)*1e3:.1f} us  new {statistics.median(tb)*1e3:.1f} us  (interleaved, shared GPU)", flush=True)
+
+if "pbwd" in what:
+    from miniworld_engine.integrations import pwa_train as P
+    DZ = 128
+    z = torch.randn(N, N, DZ, device="cuda", dtype=bf)
+    lnw = 1 + 0.1 * torch.randn(DZ, device="cuda"); lnb = 0.1 * torch.randn(DZ, device="cuda")
+    wb = (torch.randn(H, DZ, device="cuda") * 0.1).to(bf)
+    zn = torch.nn.functional.layer_norm(z.float(), (DZ,), lnw, lnb, 1e-5).to(bf)
+    w16 = torch.softmax((zn.float() @ wb.float().t()).permute(2, 0, 1), -1).to(bf)
+    dw = torch.randn(H, N, N, device="cuda")
+    # fp32 autograd reference of the same statements, with the forward's w as the softmax output
+    zr = z.float().requires_grad_(True); lr = lnw.clone().requires_grad_(True); br = lnb.clone().requires_grad_(True); wr = wb.float().requires_grad_(True)
+    b = (torch.nn.functional.layer_norm(zr, (DZ,), lr, br, 1e-5) @ wr.t()).permute(2, 0, 1)
+    wv = w16.float()
+    db = wv * (dw - (wv * dw).sum(-1, keepdim=True))             # softmax backward with the given w
+    b.backward(db)
+    ours = ext.pair_bwd(z, w16, dw, lnw, lnb, 1e-5, wb)
+    tri = P.pair_bwd(z, w16, dw, lnw, lnb, 1e-5, wb, BJ=32)
+    names = ("dz", "dWb", "dgamma", "dbeta")
+    refs = (zr.grad, wr.grad, lr.grad, br.grad)
+    print("pair_bwd vs fp32:", "  ".join(f"{n} ours {rel(o, r):.1e} triton {rel(t, r):.1e}" for n, o, t, r in zip(names, ours, tri, refs)), flush=True)
+    t = timeit(lambda: ext.pair_bwd(z, w16, dw, lnw, lnb, 1e-5, wb))
+    t2 = timeit(lambda: P.pair_bwd(z, w16, dw, lnw, lnb, 1e-5, wb, BJ=32))
+    print(f"pair_bwd: ours {t*1e3:.1f} us  triton {t2*1e3:.1f} us (shared GPU)", flush=True)
