@@ -768,6 +768,9 @@ constexpr int A2T = 2 * XT;                                // [mask . xh | mask 
 constexpr int THREADS = 352;                               // warp 0: da/db, warp 1: MMA, warps 2-9: two compute groups, warp 10: x
 constexpr int SMEM = 1024 + NSA * STAGE_A + NSX * STAGE_X + (2 * A2T + 2 * XT + CM * CM) * 2 + 256;
 static_assert(XT * 2 + STAT * 4 + MKT <= STAGE_X && STAGE_A % 1024 == 0, "stage layout");
+// the two compute groups take alternate tiles: an x slot must belong to one group, or a group can reach a slot's
+// barrier two phases ahead and its parity wait passes on stale data
+static_assert(NSX % 2 == 0, "x ring depth: a multiple of the two compute groups");
 constexpr uint32_t IDESC_DY = idesc_bf16(128, CM, 0, 1);   // A = [da|db] K-major, B = Wf MN-major
 constexpr uint32_t IDESC_DW = idesc_bf16(128, CM, 1, 1);   // A = (mask . xh)^T MN-major, B = [da db] MN-major
 constexpr int D2 = 128;                                    // TMEM column of the dW accumulator (dy: 0 and 64)
