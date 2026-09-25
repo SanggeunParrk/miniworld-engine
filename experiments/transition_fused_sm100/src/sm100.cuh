@@ -49,6 +49,8 @@ DEVI float sigmoid_nr(float a) { return rcp_nr(__fadd_rn(1.f, ex2f(__fmul_rn(-1.
 DEVI float sigmoid_poly(float a) { return rcpf(__fadd_rn(1.f, ex2_poly(__fmul_rn(-1.4426950408889634f, a)))); }
 DEVI float sigmoid_kit(float a) { return rcpf(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, a)))); }
 
+DEVI uint32_t lds32(uint32_t a) { uint32_t v; asm volatile("ld.shared.b32 %0, [%1];" : "=r"(v) : "r"(a) : "memory"); return v; }
+DEVI void sts32(uint32_t a, uint32_t v) { asm volatile("st.shared.b32 [%0], %1;" :: "r"(a), "r"(v) : "memory"); }
 DEVI uint4 lds128(uint32_t a) { uint4 v; asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "r"(a) : "memory"); return v; }
 DEVI void sts128(uint32_t a, uint4 v) { asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(a), "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w) : "memory"); }
 // volatile shared loads for small per-column parameter vectors: plain C++ reads of them get hoisted into 128+ registers
@@ -75,8 +77,16 @@ DEVI bool mbar_test(uint64_t* b, uint32_t parity) {
                : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");
   return ok != 0;
 }
-DEVI void mbar_wait(uint64_t* b, uint32_t parity) { while (!mbar_try_wait(b, parity)) { } }
+DEVI void mbar_wait_spin(uint64_t* b, uint32_t parity);
+DEVI void mbar_wait(uint64_t* b, uint32_t parity) {
+#ifdef MBAR_SPIN
+  while (!mbar_test(b, parity)) { }
+#else
+  while (!mbar_try_wait(b, parity)) { }
+#endif
+}
 
+DEVI void mbar_wait_spin(uint64_t* b, uint32_t parity) { while (!mbar_test(b, parity)) { } }   // no suspend
 DEVI void fence_proxy_async() { asm volatile("fence.proxy.async.shared::cta;" ::: "memory"); }
 template <int N> DEVI void setmaxnreg_inc() { asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" :: "n"(N)); }
 template <int N> DEVI void setmaxnreg_dec() { asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;" :: "n"(N)); }

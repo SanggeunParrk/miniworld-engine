@@ -1,0 +1,218 @@
+diff --git a/experiments/transition_fused_sm100/src/tbwd.cu b/experiments/transition_fused_sm100/src/tbwd.cu
+index 3d3f7ba1..5ba5fdba 100644
+--- a/experiments/transition_fused_sm100/src/tbwd.cu
++++ b/experiments/transition_fused_sm100/src/tbwd.cu
+@@ -38,6 +38,7 @@ constexpr uint32_t I_DWAB = idesc_bf16(128, 128, 1, 1), I_DWS = idesc_bf16(128,
+ // clock64 stamps: slot 0 = DW CTA 0, slot 1 = the first DX CTA; roles 0 = MMA warp 1, 1 = MMA warp 2, 2 = gate warp 4, 3 = epilogue
+ constexpr int TR_N = 2048;
+ __device__ unsigned long long g_trace[2][4][TR_N];
++__device__ unsigned long long g_spanb[256][2];
+ #define TRB(slot, role, idx) do { if ((idx) < TR_N) g_trace[slot][role][(idx)] = clock64(); } while (0)
+ #else
+ #define TRB(slot, role, idx) do { } while (0)
+@@ -442,89 +443,92 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+       if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 3);
+     }
+   } else if (warp >= 8) {
+-    // ------------------------------------------------------------------------------------ LayerNorm backward + residual
++    // ------------------------------------------------------------------------------------ LayerNorm backward + residual, in the
++    // sm_90a kernel's fragment layout: tcgen05.ld.16x256b hands each thread rows (lane / 4, + 8) of a 16-lane half and columns
++    // 8 g + 2 (lane & 3), + 1 -- exactly the wgmma C fragment -- so a quad holds a row (two shuffles per row sum) and each thread keeps
++    // its 32 columns' dgamma / dbeta partials in registers across all tiles (reduced once at the end).
+     setmaxnreg_inc<152>();
+-    const int t2 = (int)tid - 256;
+-    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
++    const int t2 = (int)tid - 256, l4 = lane & 3;
++    const uint32_t lb = (uint32_t)(warp & 3) * 32;
+     const uint32_t gam_u = su + X_GAM;
+-    float accg[4] = {0.f, 0.f, 0.f, 0.f}, accb[4] = {0.f, 0.f, 0.f, 0.f};
++    float dgp[32], dbp[32];
++#pragma unroll
++    for (int e = 0; e < 32; ++e) { dgp[e] = 0.f; dbp[e] = 0.f; }
++    auto ld_half = [&](int h, uint32_t (&dn)[32]) {        // d_xn rows of half h, rounded once to bf16: dn[2g] row lo, dn[2g+1] row hi
++      uint32_t v[64];
++      asm volatile("tcgen05.ld.sync.aligned.16x256b.x16.b32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,"
++                   "%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,"
++                   "%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63}, [%64];"
++                   : "=r"(v[0]), "=r"(v[1]), "=r"(v[2]), "=r"(v[3]), "=r"(v[4]), "=r"(v[5]), "=r"(v[6]), "=r"(v[7]), "=r"(v[8]), "=r"(v[9]),
++                     "=r"(v[10]), "=r"(v[11]), "=r"(v[12]), "=r"(v[13]), "=r"(v[14]), "=r"(v[15]), "=r"(v[16]), "=r"(v[17]), "=r"(v[18]),
++                     "=r"(v[19]), "=r"(v[20]), "=r"(v[21]), "=r"(v[22]), "=r"(v[23]), "=r"(v[24]), "=r"(v[25]), "=r"(v[26]), "=r"(v[27]),
++                     "=r"(v[28]), "=r"(v[29]), "=r"(v[30]), "=r"(v[31]), "=r"(v[32]), "=r"(v[33]), "=r"(v[34]), "=r"(v[35]), "=r"(v[36]),
++                     "=r"(v[37]), "=r"(v[38]), "=r"(v[39]), "=r"(v[40]), "=r"(v[41]), "=r"(v[42]), "=r"(v[43]), "=r"(v[44]), "=r"(v[45]),
++                     "=r"(v[46]), "=r"(v[47]), "=r"(v[48]), "=r"(v[49]), "=r"(v[50]), "=r"(v[51]), "=r"(v[52]), "=r"(v[53]), "=r"(v[54]),
++                     "=r"(v[55]), "=r"(v[56]), "=r"(v[57]), "=r"(v[58]), "=r"(v[59]), "=r"(v[60]), "=r"(v[61]), "=r"(v[62]), "=r"(v[63])
++                   : "r"(tmem + ((lb + 16u * h) << 16) + T_DXN) : "memory");
++      tmem_wait_ld();
++#pragma unroll
++      for (int g = 0; g < 16; ++g) {
++        dn[2 * g] = pack_bf16(__uint_as_float(v[4 * g]), __uint_as_float(v[4 * g + 1]));
++        dn[2 * g + 1] = pack_bf16(__uint_as_float(v[4 * g + 2]), __uint_as_float(v[4 * g + 3]));
++      }
++    };
+     for (int i = 0; i < n_local; ++i) {
+-      const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
++      const int b = i & 1;
+       const bool real = i < n_valid;
+       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i);
+       mbar_wait(&B.dxn_full, i & 1);
+       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 1);
+       tc_fence_after();
+-      uint32_t dn[64];                                     // d_xn rounded once to bf16
+-#pragma unroll
+-      for (int cc = 0; cc < 4; ++cc) {
+-        uint32_t v[32];
+-        tmem_ld32(trow + T_DXN + cc * 32, v);
+-        tmem_wait_ld();
+-#pragma unroll
+-        for (int k = 0; k < 16; ++k) dn[cc * 16 + k] = pack_bf16(__uint_as_float(v[2 * k]), __uint_as_float(v[2 * k + 1]));
+-      }
+-      tc_fence_before();
+-      __syncwarp();
+-      if (lane == 0) mbar_arrive(&B.dxn_empty);
+-      if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 2);
+-      const float rs = p.rstd[grow], mean = p.c1[grow] / rs;
+       mbar_wait(&B.x_full[b], (i >> 1) & 1);
+-      if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 3);
+       const uint32_t dyb = su + X_IN + b * INB, xb = dyb + IN_XN;
+-      // pass 1, 32 columns at a time: the two row sums (the sm_90a quad order: partial l over columns with (col >> 1) & 3 == l) and the
+-      // dgamma / dbeta terms, each reduced over the warp's 32 rows with one reusable 32-register work array
+-      float pca[4] = {0.f, 0.f, 0.f, 0.f}, pcb[4] = {0.f, 0.f, 0.f, 0.f};
+-#pragma unroll
+-      for (int g = 0; g < 4; ++g) {
+-        float work[32];
++      uint32_t dn[32];
++      ld_half(0, dn);
++      if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 2);
++#pragma unroll 1
++      for (int h = 0; h < 2; ++h) {
++        if (h == 1) {
++          ld_half(1, dn);
++          tc_fence_before();
++          __syncwarp();
++          if (lane == 0) mbar_arrive(&B.dxn_empty);        // d_xn fully read: the next tile may accumulate
++        }
+ #pragma unroll
+-        for (int qq = 0; qq < 4; ++qq) {
+-          const uint4 xv = lds128(xb + (g >> 1) * KB + sw128(r, (g & 1) * 4 + qq));   // 8 columns of x at a time
+-          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
++        for (int rr = 0; rr < 2; ++rr) {
++          const uint32_t r = lb + 16u * h + (uint32_t)(lane >> 2) + 8u * rr;
++          const int grow = tile_of(i) * ROWS + (int)r;
++          const float rs = p.rstd[grow], mean = p.c1[grow] / rs;
++          float ca = 0.f, cbs = 0.f;
+ #pragma unroll
+-          for (int kk = 0; kk < 4; ++kk) {
+-            const int e = qq * 4 + kk, col = g * 32 + 2 * e;
+-            const uint32_t n = dn[col >> 1];
++          for (int g = 0; g < 16; ++g) {                   // pass 1: the row sums and the dgamma / dbeta terms
++            const int col = 8 * g + 2 * l4;
++            const uint32_t xv = lds32(xb + (g >> 3) * KB + sw128(r, g & 7) + 4 * l4);
++            const uint32_t n = dn[2 * g + rr];
+             const float n0 = bf16lo(n), n1 = bf16hi(n);
+-            const float x0 = (bf16lo(xw[kk]) - mean) * rs, x1 = (bf16hi(xw[kk]) - mean) * rs;
++            const float x0 = (bf16lo(xv) - mean) * rs, x1 = (bf16hi(xv) - mean) * rs;
+             const float2 gg = lds64f(gam_u + col * 4);
+             const float w0 = gg.x * n0, w1 = gg.y * n1;
+-            pca[kk] += x0 * w0 + x1 * w1; pcb[kk] += w0 + w1;
+-            work[2 * e] = n0 * x0; work[2 * e + 1] = n1 * x1;
++            ca += x0 * w0 + x1 * w1; cbs += w0 + w1;
++            if (real) { dgp[2 * g] += n0 * x0; dgp[2 * g + 1] += n1 * x1; dbp[2 * g] += n0; dbp[2 * g + 1] += n1; }
+           }
+-        }
+-        const float sg = reduce_scatter32(work, lane);
+-        if (real) accg[g] += sg;
+-#pragma unroll
+-        for (int e = 0; e < 16; ++e) { const uint32_t n = dn[(g * 32 + 2 * e) >> 1]; work[2 * e] = bf16lo(n); work[2 * e + 1] = bf16hi(n); }
+-        const float sb = reduce_scatter32(work, lane);
+-        if (real) accb[g] += sb;
+-      }
+-      if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 4);
+-      const float ca = ((pca[0] + pca[1]) + (pca[2] + pca[3])) * (1.f / D_);
+-      const float cbv = ((pcb[0] + pcb[1]) + (pcb[2] + pcb[3])) * (1.f / D_);
+-      // pass 2: dx = bf16(bf16((w - xhat ca - cb) rstd) + dy), written in place over dy for the TMA store
+-#pragma unroll
+-      for (int cb = 0; cb < 2; ++cb)
+-#pragma unroll
+-        for (int q = 0; q < 8; ++q) {
+-          const uint32_t off = cb * KB + sw128(r, q);
+-          const uint4 xv = lds128(xb + off), dv = lds128(dyb + off);
+-          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w}, dw[4] = {dv.x, dv.y, dv.z, dv.w};
+-          uint32_t o[4];
+-#pragma unroll
+-          for (int k = 0; k < 4; ++k) {
+-            const int col = cb * 64 + q * 8 + 2 * k;
+-            const uint32_t n = dn[col >> 1];
+-            const float x0 = (bf16lo(xw[k]) - mean) * rs, x1 = (bf16hi(xw[k]) - mean) * rs;
++          ca += __shfl_xor_sync(0xffffffffu, ca, 1); ca += __shfl_xor_sync(0xffffffffu, ca, 2);
++          cbs += __shfl_xor_sync(0xffffffffu, cbs, 1); cbs += __shfl_xor_sync(0xffffffffu, cbs, 2);
++          ca *= (1.f / D_); cbs *= (1.f / D_);
++#pragma unroll
++          for (int g = 0; g < 16; ++g) {                   // pass 2: dx = bf16(bf16((w - xhat ca - cb) rstd) + dy), in place over dy
++            const int col = 8 * g + 2 * l4;
++            const uint32_t off = (g >> 3) * KB + sw128(r, g & 7) + 4 * l4;
++            const uint32_t xv = lds32(xb + off), dyv = lds32(dyb + off);
++            const uint32_t n = dn[2 * g + rr];
++            const float x0 = (bf16lo(xv) - mean) * rs, x1 = (bf16hi(xv) - mean) * rs;
+             const float2 gg = lds64f(gam_u + col * 4);
+             const float w0 = gg.x * bf16lo(n), w1 = gg.y * bf16hi(n);
+-            const uint32_t t = pack_bf16((w0 - (x0 * ca + cbv)) * rs, (w1 - (x1 * ca + cbv)) * rs);
+-            o[k] = pack_bf16(bf16lo(t) + bf16lo(dw[k]), bf16hi(t) + bf16hi(dw[k]));
++            const uint32_t t = pack_bf16((w0 - (x0 * ca + cbs)) * rs, (w1 - (x1 * ca + cbs)) * rs);
++            sts32(dyb + off, pack_bf16(bf16lo(t) + bf16lo(dyv), bf16hi(t) + bf16hi(dyv)));
+           }
+-          sts128(dyb + off, make_uint4(o[0], o[1], o[2], o[3]));
+         }
++      }
+       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 5);
+       fence_proxy_async();
+       named_bar_sync(1, 128);
+@@ -534,7 +538,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+ #pragma unroll
+           for (int cb = 0; cb < 2; ++cb)
+ #pragma unroll
+-            for (int h = 0; h < 2; ++h) tma_store_2d(p.dx, dyb + cb * KB + h * 8192, cb * 64, row0 + h * 64);
++            for (int hh = 0; hh < 2; ++hh) tma_store_2d(p.dx, dyb + cb * KB + hh * 8192, cb * 64, row0 + hh * 64);
+           tma_store_commit();
+           tma_store_wait_read0();
+         }
+@@ -542,9 +546,20 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+         if (cta == 0) TRB(1, 3, 8 * i + 6);
+       }
+     }
+-    float* row = p.dgbw + ((size_t)cta * 4 + (warp & 3)) * 256;
++    // dgamma / dbeta: sum the eight row groups (lanes with equal lane & 3), lanes 0..3 write this warp's private row
++#pragma unroll
++    for (int sh = 4; sh < 32; sh <<= 1)
+ #pragma unroll
+-    for (int g = 0; g < 4; ++g) { row[g * 32 + lane] = accg[g]; row[128 + g * 32 + lane] = accb[g]; }
++      for (int e = 0; e < 32; ++e) { dgp[e] += __shfl_xor_sync(0xffffffffu, dgp[e], sh); dbp[e] += __shfl_xor_sync(0xffffffffu, dbp[e], sh); }
++    if (lane < 4) {
++      float* row = p.dgbw + ((size_t)cta * 4 + (warp & 3)) * 256;
++#pragma unroll
++      for (int g = 0; g < 16; ++g) {
++        const int col = 8 * g + 2 * lane;
++        row[col] = dgp[2 * g]; row[col + 1] = dgp[2 * g + 1];
++        row[128 + col] = dbp[2 * g]; row[128 + col + 1] = dbp[2 * g + 1];
++      }
++    }
+     if (t2 == 0) tma_store_wait0();
+   }
+   tc_fence_before();
+@@ -562,11 +577,17 @@ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_const
+   const Par p{&mdy, &mxn, &mx, &mws, &mwa, &mwb, &mdx, rstd, c1, gamma, xg, partab, parts, dgbw, tiles, ndw};
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
++#ifdef TRACE
++  if (threadIdx.x == 0) { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); g_spanb[blockIdx.x][0] = t; }
++#endif
+   // the producer / MMA warpgroup gives registers to the math warpgroups. The increase is issued INSIDE each math role's branch: an
+   // if / else around both would merge the two limits and ptxas would compile everything after it at the lower one (56).
+   if (warp < 4) setmaxnreg_dec<56>();
+   if ((int)blockIdx.x < ndw) weight_role(p, sm, blockIdx.x, warp, lane);
+   else input_role(p, sm, blockIdx.x - ndw, gridDim.x - ndw, warp, lane);
++#ifdef TRACE
++  if (threadIdx.x == 0) { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); g_spanb[blockIdx.x][1] = t; }
++#endif
+ }
+ 
+ // partab [NDW][128][128] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][128 d][64 hs] -> bf16 dWa, dWb [512][128], dWs [128][512];
