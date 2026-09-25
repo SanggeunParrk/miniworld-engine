@@ -15,6 +15,8 @@ __device__ void body(float* out, int iters) {
       if (OP == 1) v[k] = a * sigmoid_kit(a) * 0.999f;            // kit sigmoid: 2 MUFU
       if (OP == 2) v[k] = a * sigmoid_poly(a) * 0.999f;           // 1 MUFU + poly
       if (OP == 3) v[k] = fmaf(a, 0.999f, 0.0001f);               // 1 FMA
+      if (OP == 4) v[k] = a * sigmoid_nr(a) * 0.999f;             // 1 MUFU + Newton rcp
+      if (OP == 5) v[k] = a * ((k & 1) ? sigmoid_nr(a) : sigmoid_kit(a)) * 0.999f;   // half and half
     }
   }
   const unsigned long long t1 = clock64();
@@ -26,3 +28,5 @@ extern "C" __global__ void op_ex2(float* o, int n) { body<0>(o, n); }
 extern "C" __global__ void op_sig(float* o, int n) { body<1>(o, n); }
 extern "C" __global__ void op_sigp(float* o, int n) { body<2>(o, n); }
 extern "C" __global__ void op_fma(float* o, int n) { body<3>(o, n); }
+extern "C" __global__ void op_signr(float* o, int n) { body<4>(o, n); }
+extern "C" __global__ void op_sigmix(float* o, int n) { body<5>(o, n); }

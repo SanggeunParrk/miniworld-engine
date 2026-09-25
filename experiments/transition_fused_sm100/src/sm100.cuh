@@ -34,6 +34,17 @@ DEVI float ex2_poly(float x) {
   p = fmaf(p, f, 1.0f);
   return __int_as_float(__float_as_int(p) + (__float_as_int(j) << 23));
 }
+// 1/d on the FMA pipe: bit-trick seed (relative error <= ~12 %) three Newton steps r <- r (2 - d r) (error squares each step) and a residual correction, for
+// the sigmoid's denominator d = 1 + 2^x in [1, 2^125]
+DEVI float rcp_nr(float d) {
+  float r = __int_as_float(0x7EF311C3 - __float_as_int(d));
+  r = r * fmaf(-d, r, 2.f);
+  r = r * fmaf(-d, r, 2.f);
+  r = r * fmaf(-d, r, 2.f);
+  return fmaf(r, fmaf(-d, r, 1.f), r);                         // final residual correction: ~0.5 ulp
+}
+// the kit sigmoid with its reciprocal on the FMA pipe (ex2 stays on MUFU)
+DEVI float sigmoid_nr(float a) { return rcp_nr(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, a)))); }
 // the kit sigmoid with the exponential on the FMA pipe instead of MUFU (same formula: rcp.approx(1 + 2^(-a log2 e)))
 DEVI float sigmoid_poly(float a) { return rcpf(__fadd_rn(1.f, ex2_poly(__fmul_rn(-1.4426950408889634f, a)))); }
 DEVI float sigmoid_kit(float a) { return rcpf(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, a)))); }

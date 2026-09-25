@@ -1,0 +1,5 @@
+rcp_nr: max rel err 5.960e-08 mean 2.192e-08
+rcp.approx: max rel err 9.740e-08 mean 2.419e-08
+sigmoid_nr: max rel err 3.485e-06
+sigmoid_kit: max rel err 3.514e-06
+h-level bf16 equal fraction nr vs kit: 0.9999990463256836

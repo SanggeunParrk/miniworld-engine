@@ -1,6 +1,6 @@
 import torch, drv
 for thr in (256, 512, 1024):
-    for n in ("op_ex2", "op_sig", "op_sigp", "op_fma"):
+    for n in ("op_sig", "op_signr", "op_sigmix", "op_fma"):
         k = drv.Kernel("build/sfu_bench.cubin", n, 0)
         o = torch.zeros(148 * thr + 148, device="cuda")
         it = 2000
