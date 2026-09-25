@@ -85,7 +85,7 @@ def serves(*a, **kw) -> bool:
     return False
 
 
-_SM100_TRAIN = False       # the sm_100a backward kernels (csrc/sm100/opm_sm100.cu) serve grad-enabled calls once True
+_SM100_TRAIN = True        # the sm_100a backward kernels (csrc/sm100/opm_sm100.cu) serve grad-enabled calls
 
 
 def _ext(device=None):
@@ -241,6 +241,19 @@ class _OpmMath(torch.autograd.Function):
         m, mask16, norm, a2, bt, stats, lnw, lnb, wa, wb, wo, bo = saved[:12]
         o = saved[12] if ctx.save_o else None
         s, n = m.shape[0], m.shape[1]
+        if torch.cuda.get_device_capability(dz.device) == (10, 0):
+            # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
+            dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, wo.detach().to(bf).contiguous(), n, n)
+            dA = torch.mm(bt.t(), dO.t())                                            # [s, (i,c)]
+            dB = torch.mm(a2.t(), dO)                                                # [s, (j,e)]
+            del dO
+            if o is None:
+                o = torch.matmul(a2, bt.t())
+            dWo = ext.opm_dwo(dzp, o, n, n)
+            del o
+            dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(dA, dB, m, stats, mask16, lnw, lnb, wa, wb)
+            return (dm, None, dgam.to(lnw.dtype), dbet.to(lnb.dtype), dWa.to(wa.dtype), dWb.to(wb.dtype),
+                    dWo.to(wo.dtype), dbo.to(bo.dtype), None, None)
         bw = wo.detach().t().contiguous().to(bf)                                     # Wo^T [CH*CH, CZ]: wgmma wants k = z contiguous
         dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, bw, n, n)             # (dz / norm) . Wo in the grouped layout; dbo falls out
         dA = torch.mm(bt.t(), dO.t())                                                # [s, (i,c)]: the prologue backward wants a row's channels contiguous
@@ -292,7 +305,9 @@ from miniworld_engine.kernels._compile import opaque
 @opaque(fake=_forward_fake,name="opm_h100_fwd")
 def _forward_op(args:list[torch.Tensor],eps:float,save_o:bool)->list[torch.Tensor]:
     ctx=_SavedContext();out=_OpmMath.forward(ctx,*args[:8],eps,save_o, residual=args[8] if args[8].numel() else None);sv=ctx.saved_tensors
-    return [out,*sv[1:6],sv[12] if save_o else args[0].new_empty((0,))]
+    kept=list(sv[1:6])
+    if sv[1].dtype==torch.bool:kept[0]=args[0].new_empty((0,))   # sm_100a keeps the bool mask itself, a view of an input: re-derived in the backward
+    return [out,*kept,sv[12] if save_o else args[0].new_empty((0,))]
 
 
 def _backward_fake(args, kept, dz, eps, save_o):return [torch.empty_like(args[i]) for i in (0,2,3,4,5,6,7)]
@@ -301,7 +316,9 @@ def _backward_fake(args, kept, dz, eps, save_o):return [torch.empty_like(args[i]
 @opaque(fake=_backward_fake,name="opm_h100_bwd")
 def _backward_op(args:list[torch.Tensor],kept:list[torch.Tensor],dz:torch.Tensor,eps:float,save_o:bool)->list[torch.Tensor]:
     ctx=_SavedContext();ctx.eps=eps;ctx.save_o=save_o
-    ctx.saved_tensors=(args[0][0],*kept[:5],*args[2:8],*((kept[5],) if save_o else ()))
+    k5=list(kept[:5])
+    if k5[0].numel()==0:k5[0]=args[1][0] if args[1].dtype==torch.bool else args[1][0]!=0
+    ctx.saved_tensors=(args[0][0],*k5,*args[2:8],*((kept[5],) if save_o else ()))
     gradients=_OpmMath.backward(ctx,dz)
     return [gradients[i] for i in (0,2,3,4,5,6,7)]
 
@@ -329,23 +346,7 @@ def _inference_fake(args, eps):
 def _inference_op(args: list[torch.Tensor], eps: float) -> torch.Tensor:
     # No training activations or LN statistics escape the inference boundary.
     if torch.cuda.get_device_capability(args[0].device) == (10, 0):
-        return _sm100_forward(args, eps, save=False)[0]
+        return _forward_sm100(_ext(args[0].device), *args[:8], eps, args[8] if args[8].numel() else None, False)[0]
     return _OpmMath.forward(_SavedContext(), *args[:8], eps, False,
                             residual=args[8] if args[8].numel() else None, save_stats=False)
 
-
-def _sm100_forward(args: list[torch.Tensor], eps: float, save: bool):
-    """B200: the same three-stage fusion -- fused prologue (CUDA, tcgen05) -> cuBLAS grouped outer product ->
-    fused epilogue -- with the mask count taken per pair from the prologue's bit mask inside the epilogue.
-    Returns (z, A2, BT, stats, bits)."""
-    ext = _ext(args[0].device)
-    bf = torch.bfloat16
-    msa, mask, lnw, lnb, wa, wb, wo, bo, res = args
-    m = msa[0]
-    mk = mask[0] if mask.dtype == torch.bool else (mask[0] != 0)
-    a2, bt, _, stats, bits = ext.opm_prologue(m, mk.contiguous(), lnw.detach(), lnb.detach(), eps,
-                                              wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous(), save, False)
-    o = torch.matmul(a2, bt.t())                                                # the grouped outer product [(i,c), (j,e)], cuBLAS NT
-    n = m.shape[1]
-    z = ext.opm_epilogue(o, bits, wo.detach().to(bf).contiguous(), bo.detach().float(), n, n, res if res.numel() else None)
-    return z, a2, bt, stats, bits, o

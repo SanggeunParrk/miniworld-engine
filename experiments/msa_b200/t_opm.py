@@ -77,3 +77,35 @@ if "dgrad" in what:
     t = timeit(lambda: ext.opm_dgrad(dz[0], bits, wo, N, N))
     byts = dO.numel() * 2 + 2 * dz.numel() * 2
     print(f"dgrad: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
+
+if "dwo" in what:
+    dzp = (torch.randn(N, N, CZ, device="cuda") * 0.01).to(bf)
+    O = torch.randn(N * CH, N * CH, device="cuda", dtype=bf)
+    P = O.view(N, CH, N, CH).permute(0, 2, 1, 3).reshape(N * N, CH * CH).float()
+    ref = dzp.float().reshape(N * N, CZ).t() @ P
+    dwo = ext.opm_dwo(dzp, O, N, N)
+    print(f"dwo: rel err {rel(dwo, ref):.2e}", flush=True)
+    t = timeit(lambda: ext.opm_dwo(dzp, O, N, N))
+    byts = O.numel() * 2 + 2 * dzp.numel() * 2
+    print(f"dwo: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
+
+if "pbwd" in what:
+    S = int(os.environ.get("S", 1024)); CM = 64
+    m = torch.randn(S, N, CM, device="cuda", dtype=bf)
+    mask = torch.rand(S, N, device="cuda") > 0.1
+    lnw = (1 + 0.1 * torch.randn(CM, device="cuda")); lnb = 0.1 * torch.randn(CM, device="cuda")
+    wa = (torch.randn(CH, CM, device="cuda") * 0.1).to(bf); wb = (torch.randn(CH, CM, device="cuda") * 0.1).to(bf)
+    _, _, _, stats, _ = ext.opm_prologue(m, mask, lnw, lnb, 1e-5, wa, wb, True, False)
+    dA = torch.randn(S, N * CH, device="cuda", dtype=bf); dB = torch.randn(S, N * CH, device="cuda", dtype=bf)
+    # reference: autograd of the forward statements a = (LN(m) Wa^T) * mask (A2 in [s, (i,c)] orientation)
+    mr = m.float().requires_grad_(True); g_ = lnw.clone().requires_grad_(True); b_ = lnb.clone().requires_grad_(True)
+    wa_ = wa.float().requires_grad_(True); wb_ = wb.float().requires_grad_(True)
+    y = torch.nn.functional.layer_norm(mr, (CM,), g_, b_, 1e-5)
+    a = (y @ wa_.t()) * mask[..., None]; b = (y @ wb_.t()) * mask[..., None]
+    torch.autograd.backward([a, b], [dA.float().view(S, N, CH), dB.float().view(S, N, CH)])
+    dm, dwa, dwb, dgam, dbet = ext.opm_prologue_bwd(dA, dB, m, stats, mask, lnw, lnb, wa, wb)
+    print(f"prologue_bwd: dm {rel(dm[0], mr.grad):.2e} dWa {rel(dwa, wa_.grad):.2e} dWb {rel(dwb, wb_.grad):.2e} "
+          f"dgamma {rel(dgam, g_.grad):.2e} dbeta {rel(dbet, b_.grad):.2e}", flush=True)
+    t = timeit(lambda: ext.opm_prologue_bwd(dA, dB, m, stats, mask, lnw, lnb, wa, wb))
+    byts = (dA.numel() + dB.numel() + 2 * m.numel()) * 2 + stats.numel() * 4 + mask.numel()
+    print(f"prologue_bwd: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
