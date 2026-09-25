@@ -424,6 +424,204 @@ __global__ void __launch_bounds__(256) opm_norm_sm100(const uint32_t* __restrict
     NORM[(size_t)(i0 + il) * N + j0 + jl] = (float)max(c, 1);
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// BACKWARD, dgrad: dO[(i,c),(j,e)] = (sum_z dz[i,j,z] Wo[z,(c,e)]) / n[i,j] straight into the GROUPED layout
+// (so the [N,N,c_hidden^2] permute never exists), dz/n alongside it for dWo, and dbias = sum_(i,j) dz.
+// The H100 kernel's roles, on tcgen05: a tile is 128 (i,j) pairs; the tensor core runs dz . Wo in eight
+// 128-column chunks into a ring of three TMEM accumulators, and the drain applies 1/n in fp32 before the
+// single bf16 rounding (the H100 kernel rounded dz/n first) and stores each chunk as one 4-D TMA box of
+// dO.  dbias is a second tensor-core product, dz^T . 1, accumulated in TMEM across the CTA's tiles.
+namespace dg {
+constexpr int BI = 4, BJ = 32, NP = BI * BJ;
+constexpr int NC = 128;                                   // output columns per chunk: 4 c values
+constexpr int NCK = NCH / NC;                             // 8 chunks per tile
+constexpr int DZT = NP * CZ;                              // dz tile [2 z halves][128 pairs][64], swizzled
+constexpr int WOT = CZ * NC;                              // one Wo chunk [2 n blocks][128 z][64 n]
+constexpr int OUT = NP * NC;                              // one dO box [4 i][4 c][32 j][32 e], 64B swizzle
+constexpr int NDZ = 2, NWO = 2, NACC = 3, NOUT = 2;
+constexpr int ONES = 16 * NP;                             // [2 k blocks][16][64]
+constexpr int THREADS = 192;
+constexpr int SMEM = 1024 + (NDZ * DZT + NWO * WOT + NOUT * OUT + ONES) * 2 + 512;
+constexpr uint32_t IDESC = idesc_bf16(128, NC, 0, 1);     // A = dz K-major, B = Wo MN-major
+constexpr uint32_t IDESC_BO = idesc_bf16(128, 16, 1, 0);  // A = dz^T (MN-major), B = ones K-major
+constexpr int BO_COL = NACC * NC;
+static_assert(SMEM <= 232448, "one CTA per SM");
+}  // namespace dg
+
+__global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
+    int NI, int NJ, int ntiles,
+    const __grid_constant__ CUtensorMap dzmap,    // dz  as (64 z, NJ j, 2 halves, NI i), box (64, BJ, 1, BI), 128B swizzle
+    const __grid_constant__ CUtensorMap womap,    // Wo  [CZ][NCH], box (64 n, 128 z), 128B swizzle
+    const __grid_constant__ CUtensorMap domap,    // dO  as (32 e, NJ j, 32 c, NI i), box (32, BJ, 4, BI), 64B swizzle
+    const __grid_constant__ CUtensorMap dzpmap,   // dz/n, same layout as dzmap
+    const uint32_t* __restrict__ BITS, int W, float* __restrict__ DBO) {
+  using namespace dg;
+  extern __shared__ __align__(1024) unsigned char raw[];
+  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+  __nv_bfloat16* sDZ = reinterpret_cast<__nv_bfloat16*>(smb);
+  __nv_bfloat16* sWO = sDZ + NDZ * DZT;
+  __nv_bfloat16* sOUT = sWO + NWO * WOT;
+  __nv_bfloat16* sONE = sOUT + NOUT * OUT;
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sONE + ONES);
+  uint64_t* dzf = bars;              // [NDZ] dz landed
+  uint64_t* dzd = dzf + NDZ;         // [NDZ] every GEMM reading dz retired (commit)
+  uint64_t* dze = dzd + NDZ;         // [NDZ] dz/n stored: the stage may be refilled
+  uint64_t* wof = dze + NDZ;         // [NWO]
+  uint64_t* woe = wof + NWO;         // [NWO]
+  uint64_t* accf = woe + NWO;        // [NACC]
+  uint64_t* acce = accf + NACC;      // [NACC] count 4
+  uint64_t* bod = acce + NACC;       // [1] the last dbias GEMM retired
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(bod + 1);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  if (tid == 0) {
+    for (int k = 0; k < NDZ; ++k) { bar_init(dzf + k, 1); bar_init(dzd + k, 1); bar_init(dze + k, 1); }
+    for (int k = 0; k < NWO; ++k) { bar_init(wof + k, 1); bar_init(woe + k, 1); }
+    for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 4); }
+    bar_init(bod, 1);
+    bar_init_fence();
+  }
+  // the ones operand of the dbias GEMM: B[n][k] = 1 for n == 0 (the other 15 columns are zero), K-major swizzled
+  for (int v = tid; v < ONES / 8; v += THREADS) {
+    const int row = (v / 8) % 16;
+    uint4 o = make_uint4(0u, 0u, 0u, 0u);
+    if (row == 0) o = make_uint4(0x3f803f80u, 0x3f803f80u, 0x3f803f80u, 0x3f803f80u);
+    reinterpret_cast<uint4*>(sONE)[v] = o;       // row 0 is all ones, so the swizzle of its chunks is irrelevant
+  }
+  if (warp == 1) tmem_alloc(tslot, 512);
+  fence_proxy_async();
+  tc_fence_before();
+  __syncthreads();
+  tc_fence_after();
+  const uint32_t tmem = *tslot;
+  const int njb = NJ / BJ;
+
+  if (warp == 0) {
+    if (lane == 0) {
+      int lt = 0, g = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+        const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ, d = lt % NDZ;
+        if (lt >= NDZ) wait(dze + d, ((lt / NDZ) - 1) & 1);
+        expect_tx(dzf + d, DZT * 2);
+        for (int h = 0; h < 2; ++h) load_4d(&dzmap, sDZ + d * DZT + h * NP * 64, dzf + d, 0, j0, h, i0);
+        for (int k = 0; k < NCK; ++k, ++g) {
+          const int w = g % NWO;
+          if (g >= NWO) wait(woe + w, ((g / NWO) - 1) & 1);
+          expect_tx(wof + w, WOT * 2);
+          for (int b = 0; b < 2; ++b) load_2d(&womap, sWO + w * WOT + b * CZ * 64, wof + w, k * NC + b * 64, 0);
+        }
+      }
+    }
+  } else if (warp == 1) {
+    if (lane == 0) {
+      int lt = 0, g = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+        const int d = lt % NDZ;
+        wait(dzf + d, (lt / NDZ) & 1);
+        tc_fence_after();
+        const __nv_bfloat16* dz = sDZ + d * DZT;
+        for (int k = 0; k < NCK; ++k, ++g) {
+          const int w = g % NWO, a = g % NACC;
+          wait(wof + w, (g / NWO) & 1);
+          if (g >= NACC) wait(acce + a, ((g / NACC) - 1) & 1);
+          tc_fence_after();
+          const __nv_bfloat16* wo = sWO + w * WOT;
+#pragma unroll
+          for (int kk = 0; kk < CZ / 16; ++kk)
+            mma_ss(tmem + a * NC, desc_k128(dz + (kk >> 2) * NP * 64 + (kk & 3) * 16),
+                   desc_mn128(wo + kk * 16 * 64, CZ * 64 * 2), IDESC, kk ? 1u : 0u);
+          mma_commit(woe + w);
+          mma_commit(accf + a);
+        }
+        // dbias += dz^T . 1 over this tile's 128 pairs (raw dz, before the mask count divides it)
+#pragma unroll
+        for (int kk = 0; kk < NP / 16; ++kk)
+          mma_ss(tmem + BO_COL, desc_mn128(dz + kk * 16 * 64, NP * 64 * 2),
+                 desc_k128(sONE + (kk >> 2) * 16 * 64 + (kk & 3) * 16), IDESC_BO, (lt | kk) ? 1u : 0u);
+        mma_commit(dzd + d);
+      }
+      mma_commit(bod);
+    }
+  } else {
+    const int q = warp & 3;
+    const int p = q * 32 + lane, il = p / BJ, jl = p % BJ;
+    const bool leader = (warp == 2 && lane == 0);
+    int lt = 0, g = 0;
+    for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+      const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ, d = lt % NDZ;
+      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)(i0 + il) * W);
+      const uint4* bj = reinterpret_cast<const uint4*>(BITS + (size_t)(j0 + jl) * W);
+      int cnt = 0;
+      for (int w = 0; w < W / 4; ++w) {
+        const uint4 x = __ldg(bi + w), y = __ldg(bj + w);
+        cnt += __popc(x.x & y.x) + __popc(x.y & y.y) + __popc(x.z & y.z) + __popc(x.w & y.w);
+      }
+      const float inv = 1.0f / (float)max(cnt, 1);
+      const float2 inv2 = make_float2(inv, inv);
+      for (int k = 0; k < NCK; ++k, ++g) {
+        const int a = g % NACC, ob = g % NOUT;
+        wait(accf + a, (g / NACC) & 1);
+        tc_fence_after();
+        if (leader) bulk_wait_read<NOUT - 1>();  // the store of chunk g - NOUT has left staging buffer ob
+        named_sync(1, 128);
+        __nv_bfloat16* box = sOUT + ob * OUT;
+#pragma unroll
+        for (int cl = 0; cl < 4; ++cl) {         // one c value = 32 e per pass
+          float v[32];
+          tmem_ld32(tmem_at(tmem + a * NC, q * 32, cl * 32), v);
+          tmem_wait_ld();
+          if (cl == 3) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + a); }
+          const int row = (il * 4 + cl) * BJ + jl;             // box [i][c][j][32 e], 64-byte rows
+          __nv_bfloat16* rp = box + row * 32;
+#pragma unroll
+          for (int c8 = 0; c8 < 4; ++c8) {
+            const float2 x0 = mul2(make_float2(v[c8 * 8 + 0], v[c8 * 8 + 1]), inv2), x1 = mul2(make_float2(v[c8 * 8 + 2], v[c8 * 8 + 3]), inv2);
+            const float2 x2 = mul2(make_float2(v[c8 * 8 + 4], v[c8 * 8 + 5]), inv2), x3 = mul2(make_float2(v[c8 * 8 + 6], v[c8 * 8 + 7]), inv2);
+            uint4 o;
+            o.x = pack2(x0.x, x0.y); o.y = pack2(x1.x, x1.y); o.z = pack2(x2.x, x2.y); o.w = pack2(x3.x, x3.y);
+            *reinterpret_cast<uint4*>(rp + ((c8 ^ ((row >> 1) & 3)) << 3)) = o;
+          }
+        }
+        fence_proxy_async();
+        named_sync(1, 128);
+        if (leader) { store_4d(&domap, box, 0, j0, k * 4, i0); bulk_commit(); }
+      }
+      // dz/n for dWo, over the dz tile in place once every GEMM reading it has retired
+      wait(dzd + d, (lt / NDZ) & 1);
+      __nv_bfloat16* dz = sDZ + d * DZT;
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        __nv_bfloat16* rp = dz + h * NP * 64 + p * 64;
+#pragma unroll
+        for (int c8 = 0; c8 < 8; ++c8) {
+          uint4 u = *reinterpret_cast<const uint4*>(rp + c8 * 8);   // any chunk order: the same swizzle out
+          const float2 x0 = mul2(bf2f(u.x), inv2), x1 = mul2(bf2f(u.y), inv2), x2 = mul2(bf2f(u.z), inv2), x3 = mul2(bf2f(u.w), inv2);
+          u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
+          *reinterpret_cast<uint4*>(rp + c8 * 8) = u;
+        }
+      }
+      fence_proxy_async();
+      named_sync(1, 128);
+      if (leader) {
+        for (int h = 0; h < 2; ++h) store_4d(&dzpmap, dz + h * NP * 64, 0, j0, h, i0);
+        bulk_commit();
+        bulk_wait_read<0>();                     // then the producer may refill the stage
+        arrive(dze + d);
+      }
+    }
+    // this CTA's dbias partial: TMEM lane = z, column BO_COL
+    wait(bod, 0);
+    tc_fence_after();
+    float v[8];
+    tmem_ld8(tmem_at(tmem + BO_COL, q * 32, 0), v);
+    tmem_wait_ld();
+    DBO[(size_t)blockIdx.x * CZ + q * 32 + lane] = v[0];
+    if (leader) bulk_wait<0>();
+  }
+  tc_fence_before();
+  __syncthreads();
+  if (warp == 1) tmem_dealloc(tmem, 512);
+}
 }  // namespace
 
 // `norm`: fp32 [ni, nj] mask counts, or int32 [N, S/32] -- the prologue's bit mask, counted per pair in-kernel
@@ -519,9 +717,35 @@ std::vector<torch::Tensor> opm_prologue(torch::Tensor m, torch::Tensor mask, tor
   return {A2, BT, norm, stats, bits};
 }
 
+std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch::Tensor wo, int64_t ni, int64_t nj) {
+  using namespace dg;
+  TORCH_CHECK(dz.is_cuda() && dz.scalar_type() == torch::kBFloat16 && dz.is_contiguous() && dz.numel() == ni * nj * CZ, "dz: contiguous bf16 [ni, nj, 128]");
+  TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(1) % 4 == 0, "bits: int32 [N, S/32]");
+  TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.numel() == CZ * NCH, "wo: bf16 [128, 1024]");
+  TORCH_CHECK(ni % BI == 0 && nj % BJ == 0, "the kernel tiles ", BI, " x ", BJ, " tokens");
+  auto dO = torch::empty({ni * CH, nj * CH}, dz.options());
+  auto dzp = torch::empty({ni, nj, (long)CZ}, dz.options());
+  const int ntiles = (int)((ni / BI) * (nj / BJ));
+  const int grid = std::min(ntiles, num_sms(dz.device().index()));
+  auto dbo_part = torch::empty({grid, (long)CZ}, dz.options().dtype(torch::kFloat32));
+  const uint64_t M = (uint64_t)nj * CH;
+  CUtensorMap dzm = make_map<4>(dz.data_ptr(), {64, (uint64_t)nj, 2, (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ}, {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dz");
+  CUtensorMap dzpm = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, 2, (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ}, {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dzp");
+  CUtensorMap wom = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, CZ}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
+  CUtensorMap dom = make_map<4>(dO.data_ptr(), {32, (uint64_t)nj, 32, (uint64_t)ni}, {32, M, 32 * M}, {32, BJ, 4, BI}, CU_TENSOR_MAP_SWIZZLE_64B, "dO");
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dgrad_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+  opm_dgrad_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, dzm, wom, dom, dzpm,
+      reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)bits.size(1), dbo_part.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dO, dzp, dbo_part.sum(0)};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "sm100 fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
         py::arg("O"), py::arg("norm"), py::arg("wo"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none());
+  m.def("opm_dgrad", &opm_dgrad, "sm100 fused OPM dO: (dz @ Wo) / n straight into the grouped layout, dz/n and dbias alongside",
+        py::arg("dz"), py::arg("bits"), py::arg("wo"), py::arg("ni"), py::arg("nj"));
   m.def("opm_prologue", &opm_prologue, "sm100 fused OPM prologue: LN + both projections + mask -> A2, BT (grouped layouts), mask count, LN stats [N][S]",
         py::arg("m"), py::arg("mask"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wa"), py::arg("wb"), py::arg("save_stats") = true, py::arg("want_norm") = false);
 }

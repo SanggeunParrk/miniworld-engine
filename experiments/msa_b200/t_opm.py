@@ -60,3 +60,20 @@ if "pro" in what:
         for _ in range(5): ext.opm_prologue(m, mask, lnw, lnb, 1e-5, wa, wb, False); ext.opm_epilogue(O, bits, wo, bias, N, N, None)
         torch.cuda.synchronize()
     for e in p.key_averages(): print(f"   {e.key[:60]:60s} {e.device_time:.1f} us")
+
+if "dgrad" in what:
+    S = int(os.environ.get("S", 1024))
+    mask = torch.rand(S, N, device="cuda") > 0.1
+    mf = mask.float(); normr = (mf.t() @ mf).clamp(min=1)
+    bits = torch.zeros(N, S // 32, dtype=torch.int64, device="cuda")
+    for w in range(32): bits |= (mask.t().reshape(N, S // 32, 32)[..., w].long() << w)
+    bits = bits.to(torch.int32) if False else (bits - ((bits >> 31) & 1) * (1 << 32)).to(torch.int32)
+    dz = torch.randn(1, N, N, CZ, device="cuda", dtype=bf)
+    wo = (torch.randn(CZ, CH * CH, device="cuda") * 0.03).to(bf)
+    dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), bits, wo, N, N)
+    ref = (dz[0].float().reshape(N * N, CZ) @ wo.float()) / normr.reshape(-1, 1)          # [(i,j), (c,e)]
+    ref = ref.view(N, N, CH, CH).permute(0, 2, 1, 3).reshape(N * CH, N * CH)
+    print(f"dgrad: dO {rel(dO, ref):.2e}  dzp {rel(dzp, dz[0].float() / normr[..., None]):.2e}  dbo {rel(dbo, dz[0].float().sum((0, 1))):.2e}", flush=True)
+    t = timeit(lambda: ext.opm_dgrad(dz[0], bits, wo, N, N))
+    byts = dO.numel() * 2 + 2 * dz.numel() * 2
+    print(f"dgrad: {t*1e3:.1f} us  {byts / t / 1e9:.2f} TB/s ({byts/1e6:.0f} MB)", flush=True)
