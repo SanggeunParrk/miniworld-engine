@@ -504,3 +504,32 @@ epilogue's x tiles (2 x 48 KB) take the shared memory the ring would use for a f
 overlaps its neighbours under PDL. The remaining levers (a 2-D 4 N x 2 M cluster multicasting W over M, halving the
 W traffic; streaming x through 64-column chunks to free a ring stage) are estimated at best to reach parity on Wo
 and to still lose on squeeze. Not pursued further.
+
+### Round 2: register epilogue (kept), 3 warpgroups over 96 columns (lost), and what bounds the mainloop
+
+| graph replay, us | mm + rows | pp, x staged, 3 stages | pp, register epilogue, 6 stages | pp3 (3 WGs, 8 x 96 cols) |
+|---|---:|---:|---:|---:|
+| L384 Wo | 11.6 | 15.5 | **16.1** | 16.5 |
+| L384 squeeze | 14.3 | 21.1 | **21.1** | 23.7 |
+| L768 Wo | 21.6 | 31.2 | **25.9** | 27.8 |
+| L768 squeeze | 28.4 | 49.6 | **34.2** | 43.7 |
+
+- **Register epilogue** (`EPIREG=1`, kept): x in and out and xa out straight from the wgmma fragment; the two 48 KB x
+  tiles become a six-stage ring. Mainloop per tile 6.7/9.0 -> 5.6/5.1 us (Wo), 14.6/17.4 -> 11.3/10.8 (squeeze).
+- **4 N x 2 M cluster** (`CM=2`, W multicast over M): ~0.5-1 us. It halves W's L2 reads, not what an SM ingests.
+- **pp3** (8 CTAs over N, 96 columns each, three consumer warpgroups in rotation): the epilogue now hides (5-8 us a
+  tile, overlapped), but a 96-column tile's mainloop is barely cheaper than a 192-column one (4.9 vs 5.3 us), so four
+  of them in series cost twice pp's two.
+
+**What bounds the mainloop: SM ingest.** Per SM, pp's mainloop pulls 32 KB chunks at ~72 GB/s, pp3's 20 KB chunks at
+~49 GB/s, quack's standalone Wo ~79 GB/s -- close to the TMA/L2 roof measured here (6.75 TB/s / 132 = 51 GB/s per
+SM at the attention core's tile shape). A GEMM tile ingests 2 (M + N) K bytes for M N K MACs, so smaller tiles pay
+more bytes a MAC: 64 x 96 needs 25 % more than 64 x 192 and twice what 128 x 192 does. Overlapping the epilogue wants
+many small tiles a SM; mainloop efficiency wants few large ones. At one wave of work (M = 3840 / 1920, N = 768)
+there is no tile size that gives both.
+
+**Ceiling of the fusion, from that.** Fused, a tile must ingest its mainloop (384 KB Wo, 768 KB squeeze) plus its
+epilogue's loads (x 48 KB + gl / ms / mb 72 KB); at pp's ~72-79 GB/s that is ~6.5 / ~11.5 us a tile, two tiles a
+CTA at L768, plus one exposed tail. Best case ~16 vs 21.6 us (Wo), ~27 vs 28.4 (squeeze) at L768, and ~parity at
+L384 -- about 4-5 % of a block at L768, if the epilogue is fully taken off the MMA warpgroups (a warp-specialised
+epilogue fed through shared memory, which then has to fit next to a five-stage ring).

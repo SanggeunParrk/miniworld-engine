@@ -6,7 +6,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "token_dit_fused"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tdit import kernels as K  # noqa
-from gra import gemm_resgate_adaln_pp  # noqa
+from gra import fused  # noqa
+gemm_resgate_adaln_pp = fused()[0]
 
 torch.manual_seed(0)
 dev, bf, D = "cuda", torch.bfloat16, 768

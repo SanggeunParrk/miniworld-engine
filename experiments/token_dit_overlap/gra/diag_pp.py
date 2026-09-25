@@ -4,7 +4,8 @@ from pathlib import Path
 import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "token_dit_fused"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gra import gemm_resgate_adaln_pp  # noqa
+from gra import fused  # noqa
+gemm_resgate_adaln_pp = fused()[0]
 p = argparse.ArgumentParser()
 p.add_argument("--L", type=int, default=384); p.add_argument("--K", type=int, default=768)
 p.add_argument("--adaln", type=int, default=1); p.add_argument("--mc", type=int, default=0)

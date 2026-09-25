@@ -6,7 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "token_dit_fused"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench import us as t_us  # noqa
 from tdit import kernels as K  # noqa
-from gra import gemm_resgate_adaln_pp  # noqa
+from gra import fused  # noqa
+gemm_resgate_adaln_pp = fused()[0]
 
 
 def graph_us(fn, n=20):

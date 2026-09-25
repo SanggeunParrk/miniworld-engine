@@ -6,7 +6,7 @@ os.environ["GRA_DEFS"] = "PP_TIMES"
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "token_dit_fused"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import gra  # noqa
-from gra import gemm_resgate_adaln_pp  # noqa
+gemm_resgate_adaln_pp, _ext = gra.fused()
 
 dev, bf, D = "cuda", torch.bfloat16, 768
 NAMES = ["turn wait", "mainloop", "acc drain", "x wait", "residual", "stats", "adaln", "free"]
@@ -17,12 +17,12 @@ for L, Kd, nm in ((768, 768, "Wo"), (768, 1536, "squeeze"), (384, 768, "Wo")):
     g = torch.randn(L, 4, D, device=dev, dtype=bf); gl, ms, mb = g[:, 0], g[:, 1], g[:, 2]
     for _ in range(3): gemm_resgate_adaln_pp(a, w, x, gl, ms, mb, xa, L)
     torch.cuda.synchronize()
-    t = gra._ext_pp().debug_times()
+    t = _ext().debug_times()
     ncta = int((t[:, 15, 0] > 0).sum())
     t0 = int(t[:ncta, 15, 0].min())
     ends = t[:ncta, :15, 8]; span = (int(ends[ends > 0].max()) - t0) / 1e3
     print(f"L{L} {nm}: {ncta} CTAs, kernel span {span:.1f} us (first CTA start -> last tile freed)", flush=True)
-    for tile in range(4):
+    for tile in range(6):
         row = t[:ncta, tile]
         ok = row[:, 8] > 0
         if int(ok.sum()) == 0: break
