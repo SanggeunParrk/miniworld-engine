@@ -1,0 +1,87 @@
+diff --git a/experiments/transition_fused_sm100/src/tbwd.cu b/experiments/transition_fused_sm100/src/tbwd.cu
+index 116dfedb..122d6436 100644
+--- a/experiments/transition_fused_sm100/src/tbwd.cu
++++ b/experiments/transition_fused_sm100/src/tbwd.cu
+@@ -32,6 +32,7 @@ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
+ constexpr int CL = 2;                                          // cluster size (launch attribute): DW input tiles are multicast across it
+ constexpr uint16_t CL_MASK = (1u << CL) - 1;
+ constexpr uint32_t I_DH = idesc_bf16(128, 64, 0, 1), I_AB = idesc_bf16(128, 128), I_DXN = idesc_bf16(128, 128, 0, 1);
++constexpr uint32_t I_DH2 = idesc_bf16(128, 128, 0, 1);      // two chunks' dh in one N = 128 product (DH_PAIR)
+ constexpr uint32_t I_DWAB = idesc_bf16(128, 128, 1, 1), I_DWS = idesc_bf16(128, 64, 1, 1);
+ 
+ #ifdef TRACE
+@@ -54,7 +55,7 @@ struct Par {
+ struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full, g_empty, wg_done; uint32_t tmem; };
+ struct BarsX {
+   uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], abdh_full[2], g_full[2], ab_free[2];
+-  uint64_t dxn_full, dxn_empty; uint32_t tmem;
++  uint64_t dxn_full, dxn_empty, dh_read[2]; uint32_t tmem;
+ };
+ 
+ // the 16-row block of the packed [Wa_j; Wb_j] tile matching A-operand block ks of the half-by-half [dA | dB] layout
+@@ -285,7 +286,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+       mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 8); mbar_init(&B.ab_free[s], 1);
+     }
+     for (int s = 0; s < NWAB; ++s) { mbar_init(&B.wab_full[s], 1); mbar_init(&B.wab_empty[s], CL); }
+-    mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4);
++    mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4); mbar_init(&B.dh_read[0], 8); mbar_init(&B.dh_read[1], 8);
+     fence_barrier_init();
+   }
+   if (tid < 128) reinterpret_cast<float*>(sm + X_GAM)[tid] = p.gamma[tid];
+@@ -364,6 +365,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+       tc_fence_after();
+       const uint64_t ddy = desc_k128(su + X_IN + (i & 1) * INB), dxn = desc_k128(su + X_IN + (i & 1) * INB + IN_XN);
+       const uint64_t dws = desc_mn128(su + X_WS + s * 16384, KB), dwab = desc_k128(su + X_WAB + sw * 32768);
++#ifndef DH_PAIR
+       if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < 8; ++ks) {
+@@ -379,6 +381,38 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+         tc_commit(&B.abdh_full[s]);
+         if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
+       }
++#else
++      // [a|b]_c first; on even chunks, dh of chunks c and c + 1 as ONE N = 128 product over the two adjacent Ws slots (the N = 64 dh
++      // runs at 58 % of peak), once the gate has READ dh of chunks c - 2 and c - 1
++      if (elect_one()) {
++#pragma unroll
++        for (int ks = 0; ks < 8; ++ks) {
++          const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
++          umma_ss(tmem + T_AB + s * 128, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
++        }
++      }
++      __syncwarp();
++      if (s == 0) {
++        mbar_wait(&B.ws_full[1], u & 1);
++        if (c >= 2) { mbar_wait(&B.dh_read[0], (u - 1) & 1); mbar_wait(&B.dh_read[1], (u - 1) & 1); }
++        tc_fence_after();
++        const uint64_t dws2 = desc_mn128(su + X_WS, KB);
++        if (elect_one()) {
++#pragma unroll
++          for (int ks = 0; ks < 8; ++ks) {
++            const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
++            umma_ss(tmem + T_DH, ddy + off, dws2 + (uint64_t)(ks * 2048 >> 4), I_DH2, ks > 0 ? 1u : 0u);
++          }
++          tc_commit_mc(&B.ws_empty[0], CL_MASK);
++          tc_commit_mc(&B.ws_empty[1], CL_MASK);
++        }
++        __syncwarp();
++      }
++      if (elect_one()) {
++        tc_commit(&B.abdh_full[s]);
++        if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
++      }
++#endif
+       __syncwarp();
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 4);
+     }
+@@ -425,6 +459,9 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+         tmem_ld32(trow + T_AB + s * 128 + half * 32, av);
+         tmem_ld32(trow + T_AB + s * 128 + 64 + half * 32, bv);
+         tmem_wait_ld();
++#ifdef DH_PAIR
++        tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.dh_read[s]);
++#endif
+         uint32_t da[16], db[16];
+ #pragma unroll
+         for (int k = 0; k < 16; ++k) {
