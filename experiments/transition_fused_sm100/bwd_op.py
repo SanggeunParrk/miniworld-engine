@@ -34,7 +34,7 @@ class FusedBwd:
         nred = 3 * H * D + 256
 
         def run():
-            self.k((self.nsm, 1, 1), (384, 1, 1), *maps, rstd, c1, gamma, partab, parts, dgbw, int(tiles), int(ndw))
+            self.k((self.nsm, 1, 1), (512, 1, 1), *maps, rstd, c1, gamma, x, partab, parts, dgbw, int(tiles), int(ndw))
             self.red(((nred + 255) // 256, 1, 1), (256, 1, 1), partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, int(ndw), int(ndx * 4))
         run.keep = maps
         return run, dict(dx=dx, dwa=dwa, dwb=dwb, dws=dws, dgamma=dgam, dbeta=dbeta)

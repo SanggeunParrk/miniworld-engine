@@ -1,0 +1,12 @@
+src 1 MB l2s2 ctas 148: 78.0 B/clk/SM, aggregate 22.70 TB/s, per-tile 420 clk
+src 1 MB l2s2 ctas 74: 79.8 B/clk/SM, aggregate 11.60 TB/s, per-tile 411 clk
+src 1 MB l2s4 ctas 148: 79.1 B/clk/SM, aggregate 23.02 TB/s, per-tile 414 clk
+src 1 MB l2s4 ctas 74: 79.4 B/clk/SM, aggregate 11.55 TB/s, per-tile 412 clk
+src 1 MB l2s6 ctas 148: 79.6 B/clk/SM, aggregate 23.14 TB/s, per-tile 412 clk
+src 1 MB l2s6 ctas 74: 79.8 B/clk/SM, aggregate 11.61 TB/s, per-tile 411 clk
+src 16 MB l2s2 ctas 148: 73.2 B/clk/SM, aggregate 21.30 TB/s, per-tile 447 clk
+src 16 MB l2s2 ctas 74: 79.8 B/clk/SM, aggregate 11.60 TB/s, per-tile 411 clk
+src 16 MB l2s4 ctas 148: 74.9 B/clk/SM, aggregate 21.77 TB/s, per-tile 438 clk
+src 16 MB l2s4 ctas 74: 79.4 B/clk/SM, aggregate 11.55 TB/s, per-tile 412 clk
+src 16 MB l2s6 ctas 148: 78.0 B/clk/SM, aggregate 22.68 TB/s, per-tile 420 clk
+src 16 MB l2s6 ctas 74: 79.8 B/clk/SM, aggregate 11.61 TB/s, per-tile 411 clk

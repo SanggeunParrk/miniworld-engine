@@ -238,7 +238,7 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
     setmaxnreg_inc<152>();
     const int t2 = tid - 256;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
-    const float* gb = reinterpret_cast<const float*>(sm + O_GB);
+    const uint32_t gb_u = su + O_GB;
     auto ln = [&](int i) {
       const int b = i & 1, grow = (cta + i * G) * ROWS + (int)r;
       if (t2 == 0) TR(2, 8 * i);
@@ -291,7 +291,8 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
           for (int k = 0; k < 4; ++k) {
             const int col = cb * 64 + q * 8 + 2 * k;
             const uint32_t w = v[cb * 32 + q * 4 + k];
-            o[k] = pack_bf16((bf16lo(w) - mean) * rs * gb[col] + gb[128 + col], (bf16hi(w) - mean) * rs * gb[col + 1] + gb[129 + col]);
+            const float2 g2 = lds64f(gb_u + col * 4), b2 = lds64f(gb_u + 512 + col * 4);
+            o[k] = pack_bf16((bf16lo(w) - mean) * rs * g2.x + b2.x, (bf16hi(w) - mean) * rs * g2.y + b2.y);
           }
           sts128(xnb + cb * 16384 + sw128(r, q), make_uint4(o[0], o[1], o[2], o[3]));
         }

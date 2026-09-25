@@ -1,0 +1,43 @@
+"""Clock64 stage breakdown of the fused backward (TRACE build): DW CTA 0 and the first DX CTA."""
+import argparse
+import numpy as np, torch
+from cuda.bindings import driver as cu
+import drv
+from common import make_inputs
+from fwd_op import FusedFwd
+from bwd_op import FusedTrain
+
+p = argparse.ArgumentParser(); p.add_argument("--length", type=int, default=384); p.add_argument("--cubin", default="build/tbwd_trace.cubin")
+p.add_argument("--repl", type=int, default=10)
+a = p.parse_args()
+x, wa, wb, ws, gamma, beta = make_inputs(a.length)
+dy = torch.randn_like(x) * 0.1
+f = FusedFwd(); f.set_weights(wa, wb, ws)
+tr = FusedTrain(f, repl=a.repl, cubin=a.cubin)
+step = tr.bind(x, gamma, beta, dy)
+for _ in range(3):
+    step()
+torch.cuda.synchronize()
+dptr, size = drv._chk(cu.cuModuleGetGlobal(tr.b.k.module, b"g_trace"), "global")
+buf = torch.empty(size // 8, dtype=torch.int64, device="cuda")
+drv._chk(cu.cuMemcpyDtoD(buf.data_ptr(), dptr, size), "copy")
+t = buf.cpu().numpy().reshape(2, 4, 2048).astype(np.int64)
+md = lambda v: float(np.median(v)) if len(v) else float("nan")
+# ---- DW
+w1, w2, g = t[0, 0], t[0, 1], t[0, 2]
+n = int((w1[3::4] > 0).sum())
+print(f"DW CTA 0: tiles {n}, span {w2[4*(n-1)+2]-w1[0]} clk, per tile {(w2[4*(n-1)+2]-w1[0])/n:.0f}")
+print(f"  warp1 (dh+ab): wait in_full {md(w1[1::4][:n]-w1[0::4][:n]):.0f}  wait gate_read {md(w1[2::4][:n]-w1[1::4][:n]):.0f}  issue {md(w1[3::4][:n]-w1[2::4][:n]):.0f}  period {md(np.diff(w1[0::4][:n])):.0f}")
+print(f"  warp2 (wgrad): wait g_full {md(w2[1::4][:n]-w2[0::4][:n]):.0f}  issue {md(w2[2::4][:n]-w2[1::4][:n]):.0f}")
+print(f"  gate: wait dhab {md(g[1::4][:n]-g[0::4][:n]):.0f}  wait g_empty {md(g[2::4][:n]-g[1::4][:n]):.0f}  compute+store {md(g[3::4][:n]-g[2::4][:n]):.0f}")
+# ---- DX
+m1, m2, g, e = t[1, 0], t[1, 1], t[1, 2], t[1, 3]
+nch = int((m1[4::8] > 0).sum()); nt = nch // 8
+print(f"DX CTA 0: tiles {nt}, chunks {nch}, span {e[8*(nt-1)+6]-m1[0]} clk, per chunk {(e[8*(nt-1)+6]-m1[0])/nch:.0f}")
+r = slice(8, nch)
+print(f"  warp1 (dh+ab): wait in {md((m1[1::8]-m1[0::8])[r]):.0f}  w_full {md((m1[2::8]-m1[1::8])[r]):.0f}  ab_free {md((m1[3::8]-m1[2::8])[r]):.0f}  issue {md((m1[4::8]-m1[3::8])[r]):.0f}  period {md(np.diff(m1[0::8][:nch])[8:]):.0f}")
+print(f"  warp2 (dxn): wait g_full {md((m2[1::8]-m2[0::8])[r]):.0f}  dxn_empty {md((m2[2::8]-m2[1::8])[r]):.0f}  issue {md((m2[3::8]-m2[2::8])[r]):.0f}")
+print(f"  gate: wait abdh {md((g[1::4]-g[0::4])[r]):.0f}  ld+compute {md((g[2::4]-g[1::4])[r]):.0f}  store+arrive {md((g[3::4]-g[2::4])[r]):.0f}  period {md(np.diff(g[0::4][:nch])[8:]):.0f}")
+for i in range(min(nt, 3)):
+    q = e[8*i:8*i+7] - m1[0]
+    print(f"  epi tile {i}: wait dxn {q[1]-q[0]}  dn ld {q[2]-q[1]}  wait x {q[3]-q[2]}  pass1 {q[4]-q[3]}  pass2 {q[5]-q[4]}  store {q[6]-q[5]}")

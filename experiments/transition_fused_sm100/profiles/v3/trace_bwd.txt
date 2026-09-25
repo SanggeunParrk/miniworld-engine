@@ -1,0 +1,11 @@
+DW CTA 0: tiles 116, span 427639 clk, per tile 3687
+  warp1 (dh+ab): wait in_full 1748  wait gate_read 139  issue 1633  period 3759
+  warp2 (wgrad): wait g_full 1808  issue 1778
+  gate: wait dhab 1860  wait g_empty 138  compute+store 1552
+DX CTA 0: tiles 17, chunks 136, span 457162 clk, per chunk 3361
+  warp1 (dh+ab): wait in 100  w_full 1302  ab_free 125  issue 1174  period 3232
+  warp2 (dxn): wait g_full 1934  dxn_empty 76  issue 690
+  gate: wait abdh 1306  ld+compute 930  store+arrive 31  period -1036550023136
+  epi tile 0: wait dxn 26241  dn ld 294  wait x 1260  pass1 23086  pass2 20133  store 1330
+  epi tile 1: wait dxn 155  dn ld 307  wait x 1867  pass1 8020  pass2 4517  store 1407
+  epi tile 2: wait dxn 9198  dn ld 291  wait x 1382  pass1 8310  pass2 4316  store 2681
