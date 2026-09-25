@@ -2,17 +2,18 @@
 import argparse, json
 import torch
 from common import make_inputs, contract_fwd, fp32_fwd, rel, graph_time
-from fwd_op import FusedFwd, FusedFwd2
+from fwd_op import FusedFwd, FusedFwd2, FusedFwd3
 
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=384)
 p.add_argument("--cubin", default=None)
 p.add_argument("--no-time", action="store_true")
 p.add_argument("--v2", action="store_true", help="the 2-CTA forward (tfwd2)")
+p.add_argument("--v3", action="store_true", help="tfwd3: three [a|b] buffers")
 a = p.parse_args()
 torch.backends.cuda.matmul.allow_tf32 = False
 x, wa, wb, ws, gamma, beta = make_inputs(a.length)
-f = FusedFwd2() if a.v2 else (FusedFwd(a.cubin) if a.cubin else FusedFwd())
+f = FusedFwd3() if a.v3 else FusedFwd2() if a.v2 else (FusedFwd(a.cubin) if a.cubin else FusedFwd())
 print(f"regs {f.k.regs} lmem {f.k.lmem}")
 f.set_weights(wa, wb, ws)
 run, out, xn, rstd, c1 = f.bind(x, gamma, beta, save=True)

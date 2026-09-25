@@ -44,3 +44,8 @@ class FusedFwd:
 def FusedFwd2(cubin=HERE / "build" / "tfwd2.cubin"):
     """The 2-CTA (cta_group::2) forward: same host contract, launched as 2-CTA clusters."""
     return FusedFwd(cubin, "transition_fwd2_sm100", 230912, cluster=2)
+
+
+def FusedFwd3(cubin=HERE / "build" / "tfwd3.cubin"):
+    """tfwd2 with three [a|b] accumulators (h in place over its own buffer)."""
+    return FusedFwd(cubin, "transition_fwd3_sm100", 230912, cluster=2)
