@@ -151,10 +151,10 @@ def run_case(op, impl, mode, L, S):
 HBM, TC = 6.9e12, 1.73e15
 
 
-def sol_floor(op, mode, L, S):
-    MB = lambda x: x * 1e6
+def sol_floor(op, mode, L, S, hbm=None, tc=None):
+    hbm, tc = hbm or HBM, tc or TC
     def k(byts, flops=0.0):
-        return max(byts / HBM, flops / TC)
+        return max(byts / hbm, flops / tc)
     n2, bf = L * L, 2
     m = S * L * 64 * bf                                  # an [S, N, 64] bf16 tensor
     if op == "opm":

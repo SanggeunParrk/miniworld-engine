@@ -1112,24 +1112,41 @@ __global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict
                                                          const __nv_bfloat16* __restrict__ WB, const GT* __restrict__ GAM,
                                                          const GT* __restrict__ BET, OT* __restrict__ DWA, OT* __restrict__ DWB,
                                                          GT* __restrict__ DGAM, GT* __restrict__ DBET) {
-  constexpr int CM = 64;
+  constexpr int CM = 64, NR = (CM + 1) * CM;
+  __shared__ float sR[NR], sG[CM], sB[CM];
+  __shared__ __nv_bfloat16 sW[2 * CH * CM];
   const int t = threadIdx.x;
+  // stage the inputs with every load in flight at once: the loops below chained one L2 round trip per step (~16 us)
+  {
+    float r[(NR + 255) / 256];
+#pragma unroll
+    for (int u = 0; u < (NR + 255) / 256; ++u) { const int v = t + u * 256; r[u] = v < NR ? RED[v] : 0.f; }
+    __nv_bfloat16 w[2 * CH * CM / 256];
+#pragma unroll
+    for (int u = 0; u < CH * CM / 256; ++u) { w[u] = WA[t + u * 256]; w[CH * CM / 256 + u] = WB[t + u * 256]; }
+    const float gg = t < CM ? to_f(GAM[t]) : 0.f, bb = t < CM ? to_f(BET[t]) : 0.f;
+#pragma unroll
+    for (int u = 0; u < (NR + 255) / 256; ++u) { const int v = t + u * 256; if (v < NR) sR[v] = r[u]; }
+#pragma unroll
+    for (int u = 0; u < CH * CM / 256; ++u) { sW[t + u * 256] = w[u]; sW[CH * CM + t + u * 256] = w[CH * CM / 256 + u]; }
+    if (t < CM) { sG[t] = gg; sB[t] = bb; }
+  }
+  __syncthreads();
   // RED rows 0..63: R^T [k][ce]; row 64: ssa[ce]
   for (int v = t; v < 2 * CH * CM; v += 256) {
     const int ce = v / CM, k = v % CM;
-    const float r = RED[k * CM + ce], ss = RED[CM * CM + ce];
-    const float val = to_f(GAM[k]) * r + ss * to_f(BET[k]);
+    const float r = sR[k * CM + ce], ss = sR[CM * CM + ce];
+    const float val = sG[k] * r + ss * sB[k];
     if (ce < CH) DWA[ce * CM + k] = from_f<OT>(val); else DWB[(ce - CH) * CM + k] = from_f<OT>(val);
   }
   if (t < CM) {
     const int k = t;
-    const float g = to_f(GAM[k]);
+    const float g = sG[k];
     float dg = 0.f, db = 0.f;
-    for (int ce = 0; ce < 2 * CH; ++ce) {
-      const __nv_bfloat16 wraw = ce < CH ? WA[ce * CM + k] : WB[(ce - CH) * CM + k];
-      const float wf = __bfloat162float(__float2bfloat16_rn(__bfloat162float(wraw) * g));   // exactly the bf16 Wf the kernel multiplied by
-      dg += wf * RED[k * CM + ce];
-      db += wf * RED[CM * CM + ce];
+    for (int ce = 0; ce < 2 * CH; ++ce) {                // the same serial order as before: bit-identical
+      const float wf = __bfloat162float(__float2bfloat16_rn(__bfloat162float(sW[ce * CM + k]) * g));   // exactly the bf16 Wf the kernel multiplied by
+      dg += wf * sR[k * CM + ce];
+      db += wf * sR[CM * CM + ce];
     }
     DGAM[k] = from_f<GT>(dg / g); DBET[k] = from_f<GT>(db / g);
   }
