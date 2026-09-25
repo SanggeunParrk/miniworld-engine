@@ -34,11 +34,23 @@ def measure(fn, flop, secs=3.0, reps=20):
 
 torch.backends.cuda.matmul.allow_tf32 = False
 res = {}
+import sys
+ONLY_FWD = '--fwd' in sys.argv
 L = 384; M = L * L; D, H = 128, 512
 x, wa, wb, ws, g, b = make_inputs(L)
 f = FusedFwd(); f.set_weights(wa, wb, ws)
 run_i, *_ = f.bind(x, g, b, save=False)
 res["fused_fwd_inference_L384"] = measure(run_i, 6 * M * D * H)
+from fwd_op import FusedFwd2
+for LL in (384, 768):
+    xx, wa2, wb2, ws2, g2, b2 = make_inputs(LL)
+    for tag, ff in (("v1", FusedFwd()), ("v2", FusedFwd2())):
+        ff.set_weights(wa2, wb2, ws2)
+        for save in (False, True):
+            rr, *_ = ff.bind(xx, g2, b2, save=save)
+            res[f"fwd_{tag}_{'train' if save else 'infer'}_L{LL}"] = measure(rr, 6 * LL * LL * D * H)
+if ONLY_FWD:
+    print(json.dumps({k: {kk: round(vv, 4) for kk, vv in v.items()} for k, v in res.items()}, indent=1)); raise SystemExit
 step = FusedTrain(f).bind(x, g, b, torch.randn_like(x) * 0.1)
 res["fused_training_step_L384"] = measure(step, 6 * M * D * H + 22 * M * D * H)
 for (m, n, k) in [(8192, 8192, 8192), (147456, 1024, 128)]:

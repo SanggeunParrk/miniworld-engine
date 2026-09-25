@@ -1,0 +1,6 @@
+leader expand: wait wab 128  wait ab_empty 641  period 1950
+leader squeeze: wait ws 85  wait h_full 938  period 1856
+CTA0 even WG: wait ex_done 440  compute 1899  wait sq+st 244
+CTA0 odd WG: wait ex_done 498  compute 1870  wait sq+st 227
+CTA1 even WG: wait ex_done 444  compute 1870  wait sq+st 242
+CTA1 odd WG: wait ex_done 500  compute 1911  wait sq+st 228

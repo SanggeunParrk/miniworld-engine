@@ -182,3 +182,54 @@ DEVI void tmem_st16(uint32_t taddr, const uint32_t (&r)[16]) {
 }
 
 }  // namespace s100
+
+// ------------------------------------------------------------------ 2-CTA (cta_group::2) variants: a pair of CTAs in a cluster, the
+// leader (rank 0) issues M = 256 products whose A rows and D rows are split 128 / 128 across the pair and whose B is split by N
+namespace s100 {
+DEVI void tmem_alloc2(uint32_t smem_dst, uint32_t ncols) {
+  asm volatile("tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;" :: "r"(smem_dst), "r"(ncols) : "memory");
+}
+DEVI void tmem_relinquish2() { asm volatile("tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned;" ::: "memory"); }
+DEVI void tmem_dealloc2(uint32_t taddr, uint32_t ncols) {
+  asm volatile("tcgen05.dealloc.cta_group::2.sync.aligned.b32 %0, %1;" :: "r"(taddr), "r"(ncols) : "memory");
+}
+DEVI void umma_ss2(uint32_t d_tmem, uint64_t a, uint64_t b, uint32_t idesc, uint32_t accumulate) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, p; }"
+               :: "r"(d_tmem), "l"(a), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
+}
+DEVI void umma_ts2(uint32_t d_tmem, uint32_t a_tmem, uint64_t b, uint32_t idesc, uint32_t accumulate) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::f16 [%0], [%1], %2, %3, p; }"
+               :: "r"(d_tmem), "r"(a_tmem), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
+}
+// arrive on the barrier at the same offset in every CTA of `mask` once the leader's prior tcgen05 ops are complete
+DEVI void tc_commit2_mc(uint64_t* bar, uint16_t mask) {
+  asm volatile("tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;"
+               :: "r"(smem_u32(bar)), "h"(mask) : "memory");
+}
+// TMA into this CTA's shared memory, completing the transaction on the LEADER's barrier (peer bit cleared)
+DEVI void tma_load_2d_2sm(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];"
+               :: "r"(dst), "l"(m), "r"(smem_u32(bar) & 0xFEFFFFFFu), "r"(c0), "r"(c1) : "memory");
+}
+// arrive (release, cluster scope) on the barrier at the same offset in CTA `rank` of the cluster
+DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
+  uint32_t r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(smem_u32(bar)), "r"(rank));
+  asm volatile("mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];" :: "r"(r) : "memory");
+}
+// relaxed variant: for signals whose data ordering is already carried by tcgen05.fence::before_thread_sync (TMEM reads/writes done)
+DEVI void mbar_arrive_remote_relaxed(uint64_t* bar, uint32_t rank) {
+  uint32_t r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(smem_u32(bar)), "r"(rank));
+  asm volatile("mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [%0];" :: "r"(r) : "memory");
+}
+DEVI void mbar_wait_cl(uint64_t* b, uint32_t parity) {      // acquire at cluster scope (arrivals come from the peer CTA)
+#ifdef WAIT_CL_AS_CTA
+  mbar_wait(b, parity); return;
+#endif
+  uint32_t ok = 0;
+  while (!ok)
+    asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
+                 : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");
+}
+}  // namespace s100

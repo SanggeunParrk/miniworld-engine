@@ -9,9 +9,10 @@ SMEM = 2 * 49152 + 4 * 32768 + 1024 + 256
 
 
 class FusedFwd:
-    def __init__(self, cubin=HERE / "build" / "tfwd.cubin", name="transition_fwd_sm100", smem=SMEM, threads=512):
+    def __init__(self, cubin=HERE / "build" / "tfwd.cubin", name="transition_fwd_sm100", smem=SMEM, threads=512, cluster=None):
         self.threads = threads
-        self.k = drv.Kernel(str(cubin), name, smem)
+        self.cluster = cluster
+        self.k = drv.Kernel(str(cubin), name, smem, cluster=cluster)
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
         self._wmaps = None
 
@@ -30,9 +31,16 @@ class FusedFwd:
         mx, mo, mxn = (tm(t, [D, M], D * 2, [64, 64]) for t in (x, out, xn))
         tiles = M // 128
         grid = (min(self.nsm, tiles), 1, 1)
+        if self.cluster:
+            grid = (max(self.cluster, grid[0] - grid[0] % self.cluster), 1, 1)
         keep = (mx, mo, mxn)
 
         def run():
             self.k(grid, (self.threads, 1, 1), mx, *self._wmaps, mo, mxn, gamma, beta, rstd, c1, int(tiles), float(eps), int(bool(save)))
         run.keep = keep
         return run, out, xn, rstd, c1
+
+
+def FusedFwd2(cubin=HERE / "build" / "tfwd2.cubin"):
+    """The 2-CTA (cta_group::2) forward: same host contract, launched as 2-CTA clusters."""
+    return FusedFwd(cubin, "transition_fwd2_sm100", 230912, cluster=2)

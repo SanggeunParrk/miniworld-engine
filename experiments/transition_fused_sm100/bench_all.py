@@ -84,8 +84,8 @@ for L in a.lengths:
 
     # ---------------- this experiment
     try:
-        from fwd_op import FusedFwd
-        f = FusedFwd()
+        from fwd_op import FusedFwd2
+        f = FusedFwd2()            # v8: the 2-CTA forward
         f.set_weights(wa, wb, ws)
         run_i, out, *_ = f.bind(x, gamma, beta, save=False)
         run_i(); torch.cuda.synchronize()

@@ -1,0 +1,3 @@
+mma2_ss128: 512 clk per 8-MMA chain -> 8187 FLOP/clk per SM (peak 8192)
+mma2_ss256: 1024 clk per 8-MMA chain -> 8190 FLOP/clk per SM (peak 8192)
+mma2_ts128: 512 clk per 8-MMA chain -> 8189 FLOP/clk per SM (peak 8192)
