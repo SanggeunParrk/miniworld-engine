@@ -222,6 +222,32 @@ __global__ void __launch_bounds__(256) colsum_kernel(const float* __restrict__ P
   OutT* o = OUT + v4 * 4;
   o[0] = from_f<OutT>(s.x); o[1] = from_f<OutT>(s.y); o[2] = from_f<OutT>(s.z); o[3] = from_f<OutT>(s.w);
 }
+// One launch: block = 32 float4 columns x 8 split groups; group g sums splits g, g + 8, ... (four loads in flight), then
+// group 0 adds the 8 group sums in order.  Deterministic; the two-pass version paid two latency-bound launches.
+template <typename OutT>
+__global__ void __launch_bounds__(256) colsum1_kernel(const float* __restrict__ P, OutT* __restrict__ OUT, int splits, long width) {
+  __shared__ float4 red[8][32];
+  const long v4 = (long)blockIdx.x * 32 + (threadIdx.x & 31);
+  const int g = threadIdx.x >> 5;
+  const long vcols = width >> 2;
+  float4 s = make_float4(0.f, 0.f, 0.f, 0.f);
+  if (v4 < vcols) {
+#pragma unroll 4
+    for (int k = g; k < splits; k += 8) {
+      const float4 q = __ldg(reinterpret_cast<const float4*>(P + (long)k * width) + v4);
+      s.x += q.x; s.y += q.y; s.z += q.z; s.w += q.w;
+    }
+  }
+  red[g][threadIdx.x & 31] = s;
+  __syncthreads();
+  if (g == 0 && v4 < vcols) {
+    float4 t = red[0][threadIdx.x];
+#pragma unroll
+    for (int k = 1; k < 8; ++k) { const float4 q = red[k][threadIdx.x]; t.x += q.x; t.y += q.y; t.z += q.z; t.w += q.w; }
+    OutT* o = OUT + v4 * 4;
+    o[0] = from_f<OutT>(t.x); o[1] = from_f<OutT>(t.y); o[2] = from_f<OutT>(t.z); o[3] = from_f<OutT>(t.w);
+  }
+}
 }  // namespace sm100
 
 // ---------------------------------------------------------------- host: tensor maps
@@ -273,6 +299,14 @@ inline torch::Tensor colsum(const torch::Tensor& part, torch::ScalarType dtype =
   TORCH_CHECK(width % 4 == 0, "colsum: width must be a multiple of 4");
   auto out = torch::empty(part.sizes().slice(1), part.options().dtype(dtype));
   const long vcols = width / 4;
+  {
+    auto st1 = at::cuda::getCurrentCUDAStream();
+    const int blocks = (int)((vcols + 31) / 32);
+    if (dtype == torch::kFloat32) colsum1_kernel<float><<<blocks, 256, 0, st1>>>(part.data_ptr<float>(), out.data_ptr<float>(), splits, width);
+    else colsum1_kernel<__nv_bfloat16><<<blocks, 256, 0, st1>>>(part.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), splits, width);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+  }
   long G = 16384 / std::max<long>(vcols, 1);
   G = std::max<long>(1, std::min<long>({G, 64, (long)splits / 4}));
   const int chunk = (int)((splits + G - 1) / G);
