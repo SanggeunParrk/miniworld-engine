@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 
 class FusedFwd8:
     def __init__(self, cubin=HERE / "build" / "tfwd8.cubin"):
-        self.k = drv.Kernel(str(cubin), "transition_fwd8_sm100", 149504, cluster=2, pdl="pdl" in str(cubin))
+        self.k = drv.Kernel(str(cubin), "transition_fwd8_sm100", 232448, cluster=2, pdl="pdl" in str(cubin))
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
 
     def bind(self, x, gamma, beta, sc, wab_q, ws_q, eps=1e-5, save=True):

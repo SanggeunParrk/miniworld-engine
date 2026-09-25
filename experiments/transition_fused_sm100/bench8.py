@@ -6,8 +6,8 @@ from fwd_op import FusedFwd2
 from bwd_op import FusedTrain
 from fwd8_op import Train8
 
-p = argparse.ArgumentParser(); p.add_argument("--length", type=int, default=384); p.add_argument("--repl", type=int, default=7)
-p.add_argument("--fcubin", default="build/tfwd8.cubin"); p.add_argument("--bcubin", default="build/tbwd8.cubin")
+p = argparse.ArgumentParser(); p.add_argument("--length", type=int, default=384); p.add_argument("--repl", type=int, default=14)
+p.add_argument("--fcubin", default="build/tfwd8.cubin"); p.add_argument("--bcubin", default="build/tbwd8x.cubin")
 p.add_argument("--no-time", action="store_true")
 a = p.parse_args()
 torch.backends.cuda.matmul.allow_tf32 = False

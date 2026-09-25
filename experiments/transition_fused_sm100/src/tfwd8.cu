@@ -7,7 +7,11 @@
 using namespace s100;
 
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128;
+#ifdef STREAMW
 constexpr int NW = 4;                                          // weight ring depth (both rings)
+#else
+constexpr int NW = 8;                                          // resident weights: one slot per chunk, loaded once per CTA
+#endif
 constexpr int WAB_SLOT = 8192, WS_SLOT = 4096;                 // this CTA's half: e4m3 [64 n][128 k] (128-B swizzle); Ws [64 d][64 k] (64-B)
 constexpr int O_WAB = 0, O_WS = NW * WAB_SLOT;
 constexpr int O_X = O_WS + NW * WS_SLOT, TILE = 32768, XQT = 16384;
@@ -107,7 +111,17 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
 #ifdef PDL
       pdl_wait();                                                // the e4m3 weights come from the quantization kernel
 #endif
+#ifndef STREAMW
+      for (int j = 0; j < NCH; ++j) {
+        if (leader) mbar_expect_tx(&B.wab_full[j], 2 * WAB_SLOT);
+        tma_load_2d_2sm(su + O_WAB + j * WAB_SLOT, &mwab, &B.wab_full[j], 0, crank * H_ + j * HS);
+        if (leader) mbar_expect_tx(&B.ws_full[j], 2 * WS_SLOT);
+        tma_load_2d_2sm(su + O_WS + j * WS_SLOT, &mws, &B.ws_full[j], j * HS, crank * 64);
+      }
+      int ca = nch, cs = nch;
+#else
       int ca = 0, cs = 0;
+#endif
       while (ca < nch || cs < nch) {
         if (ca < nch && (ca < NW || mbar_test(&B.wab_empty[ca % NW], ((ca / NW) - 1) & 1))) {
           const int s = ca % NW, j = ca & (NCH - 1);
@@ -130,10 +144,14 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     if (leader) {
       if (warp == 1) {
         for (int c = 0; c < nch; ++c) {
-          const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1, sw = c % NW;
+#ifdef STREAMW
+          const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1, sw = c % NW, wph = (c / NW) & 1;
+#else
+          const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1, sw = j, wph = 0;
+#endif
           if (lane == 0) TR2(0, 4 * c);
           if (j == 0) mbar_wait_cl(&B.xn_full[i & 1], (i >> 1) & 1);
-          mbar_wait(&B.wab_full[sw], (c / NW) & 1);
+          mbar_wait(&B.wab_full[sw], wph);
           if (lane == 0) TR2(0, 4 * c + 1);
           if (c >= 2) mbar_wait_cl(&B.ab_empty[s], (u - 1) & 1);
           if (lane == 0) TR2(0, 4 * c + 2);
@@ -144,16 +162,22 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
             for (int ks = 0; ks < 4; ++ks)
               umma8_ss2(tmem + T_AB + s * 128, ad + (uint64_t)(ks * 2), bd + (uint64_t)(ks * 2), IDESC2, ks > 0 ? 1u : 0u);
             tc_commit2_mc(&B.ex_done[s], 3);
+#ifdef STREAMW
             tc_commit2_mc(&B.wab_empty[sw], 3);
+#endif
             if (j == NCH - 1) tc_commit2_mc(&B.xn_empty[i & 1], 3);
           }
           __syncwarp();
         }
       } else {
         for (int q = 0; q < nch; ++q) {
-          const int i = q >> 3, j = q & (NCH - 1), s = q & 1, u = q >> 1, sw = q % NW;
+#ifdef STREAMW
+          const int i = q >> 3, j = q & (NCH - 1), s = q & 1, u = q >> 1, sw = q % NW, wph = (q / NW) & 1;
+#else
+          const int i = q >> 3, j = q & (NCH - 1), s = q & 1, u = q >> 1, sw = j, wph = 0;
+#endif
           if (lane == 0) TR2(1, 4 * q);
-          mbar_wait(&B.ws_full[sw], (q / NW) & 1);
+          mbar_wait(&B.ws_full[sw], wph);
           if (lane == 0) TR2(1, 4 * q + 1);
           mbar_wait_cl(&B.h_full[s], u & 1);
           if (lane == 0) TR2(1, 4 * q + 2);
@@ -165,7 +189,9 @@ transition_fwd8_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
             for (int ks = 0; ks < 2; ++ks)
               umma8_ts2(tmem + T_OUT, tmem + T_H + s * 16 + ks * 8, bd + (uint64_t)(ks * 2), IDESC2, (j > 0 || ks > 0) ? 1u : 0u);
             tc_commit2_mc(&B.sq_done[s], 3);
+#ifdef STREAMW
             tc_commit2_mc(&B.ws_empty[sw], 3);
+#endif
             if (j == NCH - 1) tc_commit2_mc(&B.out_full, 3);
           }
           __syncwarp();

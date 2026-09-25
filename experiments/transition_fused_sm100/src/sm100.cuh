@@ -91,6 +91,9 @@ DEVI uint4 lds128(uint32_t a) { uint4 v; asm volatile("ld.shared.v4.b32 {%0,%1,%
 DEVI void sts128(uint32_t a, uint4 v) { asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(a), "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w) : "memory"); }
 // volatile shared loads for small per-column parameter vectors: plain C++ reads of them get hoisted into 128+ registers
 DEVI float2 lds64f(uint32_t a) { float2 v; asm volatile("ld.shared.v2.f32 {%0,%1}, [%2];" : "=f"(v.x), "=f"(v.y) : "r"(a) : "memory"); return v; }
+// non-volatile shared loads without a memory clobber: the compiler may overlap them (use only for data no concurrent store touches)
+DEVI float2 lds64f_nv(uint32_t a) { float2 v; asm("ld.shared.v2.f32 {%0,%1}, [%2];" : "=f"(v.x), "=f"(v.y) : "r"(a)); return v; }
+DEVI uint4 lds128_nv(uint32_t a) { uint4 v; asm("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "r"(a)); return v; }
 DEVI uint4 ldg128(const void* p) { uint4 v; asm volatile("ld.global.nc.v4.b32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p)); return v; }
 DEVI void stg128(void* p, uint4 v) { asm volatile("st.global.v4.b32 [%0], {%1,%2,%3,%4};" :: "l"(p), "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w) : "memory"); }
 

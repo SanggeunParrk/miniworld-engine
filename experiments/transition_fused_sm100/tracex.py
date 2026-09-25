@@ -10,7 +10,7 @@ for _ in range(3): st()
 torch.cuda.synchronize()
 dptr, size = drv._chk(cu.cuModuleGetGlobal(tr.b.k.module, b"g_trx"), "g")
 buf = torch.empty(size // 8, dtype=torch.int64, device="cuda"); drv._chk(cu.cuMemcpyDtoD(buf.data_ptr(), dptr, size), "c")
-t = buf.cpu().numpy().reshape(9, 1024).astype(np.int64)
+t = buf.cpu().numpy().reshape(16, 1024).astype(np.int64)
 nch = int((t[3] > 0).sum()); nt = nch // 8
 t0 = t[2][0]
 md = lambda v: float(np.median(v))
@@ -27,3 +27,7 @@ for i in range(max(0, nt - 4), nt):
     print(f"  tile {i}: first flag wait start {t[0][8*i] - t0}, first flag seen {t[1][8*i] - t0}, last flag seen {t[1][8*i+7] - t0}, last mma {t[3][8*i+7] - t0}, epi dxn seen {t[4][i] - t0}, done {t[6][i] - t0}")
 lag = [t[4][i] - t[3][8*i+7] for i in range(nt)]
 print("  mma done -> epi sees dxn (backlog):", [int(v) for v in lag[-8:]])
+rr = range(2, nt - 1)
+print("  epi phases (median clk): tmem+arrive %.0f | rstd+in_full %.0f | pass1 %.0f | exchange barrier %.0f | pass2+store %.0f" % (
+    md([t[9][i] - t[4][i] for i in rr]), md([t[10][i] - t[9][i] for i in rr]), md([t[11][i] - t[10][i] for i in rr]),
+    md([t[12][i] - t[11][i] for i in rr]), md([t[6][i] - t[12][i] for i in rr])))

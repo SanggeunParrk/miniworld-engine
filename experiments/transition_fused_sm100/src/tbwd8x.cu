@@ -7,6 +7,13 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
+#ifdef EPI_VOLATILE
+#define LDS128E lds128
+#define LDS64E lds64f
+#else
+#define LDS128E lds128_nv
+#define LDS64E lds64f_nv
+#endif
 #ifndef EPI1
 #define EPI2                                                   // the fp32x2 LayerNorm-backward epilogue (EPI1: the scalar one)
 #endif
@@ -35,7 +42,12 @@ constexpr int W_H = W_IN + NIN * INS, W_DAB = W_H + 2 * KB, W_BAR = W_DAB + 2 * 
 #endif
 constexpr int NWAB = NWAB_, NDAB = NDAB_;
 constexpr int X_WAB = 0, X_DAB = NWAB * KB, X_IN = X_DAB + NDAB * KB, XIS = 65536, XI_X = 32768;
+#ifdef EPI3
+constexpr int X_SCR = X_IN + 2 * XIS;                          // 8 warps x [32 rows][32 fp32] transpose scratch (XOR-swizzled 16-B chunks)
+constexpr int X_GAM = X_SCR + 8 * 4096, X_RED = X_GAM + 512, X_BAR = X_RED + 2048;
+#else
 constexpr int X_GAM = X_IN + 2 * XIS, X_RED = X_GAM + 512, X_BAR = X_RED + 2048;   // X_RED: per-row partial sums of the 2 groups
+#endif
 constexpr int SMEM_BYTES = (W_BAR > X_BAR ? W_BAR : X_BAR) + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 
@@ -61,7 +73,7 @@ __device__ unsigned long long g_tr8[12][1024];
 #define TR8(ev, i) do { if (cta == 0 && (i) < 1024) g_tr8[ev][i] = clock64(); } while (0)
 // first DX CTA: [event][chunk or tile]: 0 dab flag wait start, 1 flag seen, 2 mma chunk wait start, 3 mma chunk issued,
 // 4 epi dxn_full seen (tile), 5 epi pre-store (tile), 6 epi in_empty arrived (tile), 7 converter tile done, 8 wait dab_full done (mma)
-__device__ unsigned long long g_trx[9][1024];
+__device__ unsigned long long g_trx[16][1024];
 #define TRX(ev, i) do { if (cta == 0 && (i) < 1024) g_trx[ev][i] = clock64(); } while (0)
 #else
 #define TR8(ev, i) do { } while (0)
@@ -127,6 +139,19 @@ DEVI void convert_row(uint32_t src, uint32_t dst, uint32_t r, f2 inv, uint8_t* g
 
 // SwiGLU backward of one pair of hidden units, all in packed fp32x2: returns h (h units), dA, dB (dA / dB units)
 struct GateK { f2 ca, cg, ih; };
+// the same SwiGLU backward with the dequantization scales folded into constants (raw accumulators in, e4m3 units out):
+//   s = sigmoid(ca a'), l' = a' s (l = ca l'), h = l' b' (ca^2 ih), dB = (cg ca g') l', dA = (cg ca g') b' (s + ca l' (1 - s))
+struct GateF { f2 hca, ca, chh, cgc; };
+DEVI void gate_pair_f(const GateF& K, uint32_t g0, uint32_t g1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, f2& h, f2& da, f2& db) {
+  const f2 A = mk2u(a0, a1), B = mk2u(b0, b1);
+  const f2 hx = mul2(A, K.hca);
+  const f2 t = mk2(tanhf_approx(lo2(hx)), tanhf_approx(hi2(hx)));
+  const f2 s = fma2(t, mk2(0.5f, 0.5f), mk2(0.5f, 0.5f)), oms = fma2(t, mk2(-0.5f, -0.5f), mk2(0.5f, 0.5f));
+  const f2 l = mul2(A, s), G = mul2(mk2u(g0, g1), K.cgc);
+  h = mul2(mul2(l, B), K.chh);
+  db = mul2(G, l);
+  da = mul2(mul2(G, B), fma2(mul2(l, K.ca), oms, s));
+}
 DEVI void gate_pair(const GateK& K, uint32_t g0, uint32_t g1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, f2& h, f2& da, f2& db) {
   const f2 A = mul2(mk2u(a0, a1), K.ca), B = mul2(mk2u(b0, b1), K.ca), G = mul2(mk2u(g0, g1), K.cg);
   const f2 s = sigmoid2(A), l = mul2(A, s);
@@ -313,11 +338,13 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
     setmaxnreg_inc<152>();
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const int half = warp >= 12 ? 1 : 0;
-    GateK K;
+    GateK K; GateF KF;
     {
 #ifdef DW_DYQ
       const float s_x = p.sc[0], s_wab = p.sc[1], s_ws = p.sc[2], s_dy = p.sc[3], s_h = p.sc[4], s_dab = p.sc[5];
       K.ca = mk2(s_x * s_wab, s_x * s_wab); K.cg = mk2(s_dy * s_ws / s_dab, s_dy * s_ws / s_dab); K.ih = mk2(1.f / s_h, 1.f / s_h);
+      const float ca = s_x * s_wab, cg = s_dy * s_ws / s_dab;
+      KF.hca = mk2(0.5f * ca, 0.5f * ca); KF.ca = mk2(ca, ca); KF.chh = mk2(ca * ca / s_h, ca * ca / s_h); KF.cgc = mk2(cg * ca, cg * ca);
 #else
       const float s_x = p.sc[0], s_wab = p.sc[1], s_dab = p.sc[5];
       K.ca = mk2(s_x * s_wab, s_x * s_wab); K.cg = mk2(1.f / s_dab, 1.f / s_dab); K.ih = mk2(1.f, 1.f);
@@ -345,8 +372,13 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
         for (int w = 0; w < 4; ++w) {
           f2 h0, a0, b0, h1, a1, b1;
           const int k = c * 8 + w * 2;
+#ifdef GATE_FOLD1
           gate_pair(K, dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], h0, a0, b0);
           gate_pair(K, dh[2 * k + 2], dh[2 * k + 3], av[2 * k + 2], av[2 * k + 3], bv[2 * k + 2], bv[2 * k + 3], h1, a1, b1);
+#else
+          gate_pair_f(KF, dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], h0, a0, b0);
+          gate_pair_f(KF, dh[2 * k + 2], dh[2 * k + 3], av[2 * k + 2], av[2 * k + 3], bv[2 * k + 2], bv[2 * k + 3], h1, a1, b1);
+#endif
           hw[w] = e4m3x4(h0, h1); aw[w] = e4m3x4(a0, a1); bw[w] = e4m3x4(b0, b1);
         }
         const int q = half * 2 + c;
@@ -397,7 +429,9 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
         const int b = i & 1;
         mbar_wait(&B.stg_full[b], (i >> 1) & 1);
         if (i >= NIN) mbar_wait(&B.in_empty[b], ((i / NIN) - 1) & 1);
+#ifndef BABL_CONV
         convert_row(su + W_STG + b * 32768, su + W_IN + b * INS + IN_DY, r, inv);
+#endif
         fence_proxy_async();
         named_bar_sync(2, 128);
         if (r == 0) {
@@ -472,6 +506,23 @@ DEVI float reduce_scatter32(float (&v)[32], int lane) {
     for (int k = 0; k < off; ++k) v[k] += __shfl_xor_sync(0xffffffffu, v[k + off], off);
   }
   return v[0];
+}
+
+// sum over the warp's 32 rows of work[c] (c = 0..31) through shared memory; lane c returns column c (fixed order: deterministic)
+DEVI float col_sum32(uint32_t scr, const float (&work)[32], int lane) {
+  __syncwarp();
+#pragma unroll
+  for (int q = 0; q < 8; ++q)
+    asm volatile("st.shared.v4.f32 [%0], {%1, %2, %3, %4};" :: "r"(scr + lane * 128 + ((q ^ (lane & 7)) << 4)),
+                 "f"(work[4 * q]), "f"(work[4 * q + 1]), "f"(work[4 * q + 2]), "f"(work[4 * q + 3]) : "memory");
+  __syncwarp();
+  float acc[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+  for (int rho = 0; rho < 32; ++rho) {
+    float v; asm volatile("ld.shared.f32 %0, [%1];" : "=f"(v) : "r"(scr + rho * 128 + (((lane >> 2) ^ (rho & 7)) << 4) + (lane & 3) * 4) : "memory");
+    acc[rho & 3] += v;
+  }
+  return (acc[0] + acc[1]) + (acc[2] + acc[3]);
 }
 
 // ================================================================================================ DX role
@@ -654,8 +705,10 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.dxn_empty[e]);
+      if (r == 0 && G == 0) TRX(9, i);
       const float rs = p.rstd[grow], mean = p.c1[grow] / rs;
       mbar_wait(&B.in_full[b], (i >> 1) & 1);
+      if (r == 0 && G == 0) TRX(10, i);
       const uint32_t dyb = su + X_IN + b * XIS + G * KB, xb = su + X_IN + b * XIS + XI_X + G * KB;
       const f2 RS = mk2(rs, rs), NM = mk2(-mean * rs, -mean * rs);
       f2 pa2 = mk2(0.f, 0.f), pb2 = mk2(0.f, 0.f);
@@ -664,27 +717,36 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
         float work[32];
 #pragma unroll
         for (int qq = 0; qq < 4; ++qq) {
-          const uint4 xv = lds128(xb + sw128(r, g * 4 + qq));
+          const uint4 xv = LDS128E(xb + sw128(r, g * 4 + qq));
           const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
 #pragma unroll
           for (int kk = 0; kk < 4; ++kk) {
             const int e2 = qq * 4 + kk, pr = g * 16 + e2;     // column pair index (0..31)
             const f2 xh = fma2(mk2(bf16lo(xw[kk]), bf16hi(xw[kk])), RS, NM);
-            const float2 gg = lds64f(gam_u + pr * 8);
+            const float2 gg = LDS64E(gam_u + pr * 8);
             const f2 w = mul2(mk2(gg.x, gg.y), dn[pr]);
             pa2 = fma2(xh, w, pa2); pb2 = add2(pb2, w);
             const f2 nx = mul2(dn[pr], xh);
             work[2 * e2] = lo2(nx); work[2 * e2 + 1] = hi2(nx);
           }
         }
+#ifdef EPI3
+        { const float sg = col_sum32(su + X_SCR + (warp - 8) * 4096, work, lane); if (real) accg[g] += sg; }
+#pragma unroll
+        for (int e2 = 0; e2 < 16; ++e2) { work[2 * e2] = lo2(dn[g * 16 + e2]); work[2 * e2 + 1] = hi2(dn[g * 16 + e2]); }
+        { const float sb = col_sum32(su + X_SCR + (warp - 8) * 4096, work, lane); if (real) accb[g] += sb; }
+#else
         { const float sg = reduce_scatter32(work, lane); if (real) accg[g] += sg; }
 #pragma unroll
         for (int e2 = 0; e2 < 16; ++e2) { work[2 * e2] = lo2(dn[g * 16 + e2]); work[2 * e2 + 1] = hi2(dn[g * 16 + e2]); }
         { const float sb = reduce_scatter32(work, lane); if (real) accb[g] += sb; }
+#endif
       }
       const float sa = lo2(pa2) + hi2(pa2), sbv = lo2(pb2) + hi2(pb2);
+      if (r == 0 && G == 0) TRX(11, i);
       asm volatile("st.shared.v2.f32 [%0], {%1, %2};" :: "r"(red + (G * 128 + r) * 8), "f"(sa), "f"(sbv) : "memory");
       named_bar_sync(1, 256);
+      if (r == 0 && G == 0) TRX(12, i);
       const float2 o2 = lds64f(red + ((G ^ 1) * 128 + r) * 8);
       const float ca = (G == 0 ? sa + o2.x : o2.x + sa) * (1.f / D_), cbv = (G == 0 ? sbv + o2.y : o2.y + sbv) * (1.f / D_);
       const f2 NCA = mk2(-ca, -ca), NCB = mk2(-cbv, -cbv);
@@ -785,6 +847,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       if (t2 == 0) {
         const int row0 = tile_of(i) * ROWS;
         const uint32_t base = su + X_IN + b * XIS;
+#ifndef STORE_ASYNC
         if (real) {
 #pragma unroll
           for (int cb = 0; cb < 2; ++cb)
@@ -794,6 +857,17 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           tma_store_wait_read0();
         }
         mbar_arrive(&B.in_empty[b]);
+#else
+        // one bulk group per tile (empty for a dummy tile); the stage of the previous tile is released once its store has read it
+        if (real) {
+#pragma unroll
+          for (int cb = 0; cb < 2; ++cb)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) tma_store_2d(p.dx, base + cb * KB + h * 8192, cb * 64, row0 + h * 64);
+        }
+        tma_store_commit();
+        if (i >= 1) { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); mbar_arrive(&B.in_empty[b ^ 1]); }
+#endif
         TRX(6, i);
       }
     }
