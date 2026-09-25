@@ -1,0 +1,12 @@
+threads 256 op_ex2: 15.9 elements/clk/SM
+threads 256 op_sig: 7.9 elements/clk/SM
+threads 256 op_sigp: 5.0 elements/clk/SM
+threads 256 op_fma: 122.6 elements/clk/SM
+threads 512 op_ex2: 16.0 elements/clk/SM
+threads 512 op_sig: 8.0 elements/clk/SM
+threads 512 op_sigp: 6.9 elements/clk/SM
+threads 512 op_fma: 122.5 elements/clk/SM
+threads 1024 op_ex2: 16.0 elements/clk/SM
+threads 1024 op_sig: 8.0 elements/clk/SM
+threads 1024 op_sigp: 7.2 elements/clk/SM
+threads 1024 op_fma: 123.3 elements/clk/SM

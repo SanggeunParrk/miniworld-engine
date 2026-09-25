@@ -33,6 +33,7 @@ constexpr uint32_t IDESC = idesc_bf16(128, 128);
 // clock64 stamps for the first TRACE_CTAS CTAs: trace[cta][role][event]; role 0 MMA, 1 SwiGLU (warp 4), 2 LN/epi (warp 8)
 constexpr int TR_N = 1024;
 __device__ unsigned long long g_trace[4][4][TR_N];   // role 3: MMA wait breakdown
+__device__ unsigned long long g_span[256][3];          // per CTA: globaltimer at entry, after setup, at exit
 #define TR(role, idx) do { if (cta < 4 && (idx) < TR_N) g_trace[cta][role][(idx)] = clock64(); } while (0)
 #else
 #define TR(role, idx) do { } while (0)
@@ -53,6 +54,10 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+#ifdef TRACE
+  auto gtime = [] { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; };
+  if (threadIdx.x == 0) g_span[blockIdx.x][0] = gtime();
+#endif
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int cta = blockIdx.x, G = gridDim.x;
   const int n_local = (tiles > cta) ? (tiles - cta + G - 1) / G : 0;
@@ -75,6 +80,9 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+#ifdef TRACE
+  if (threadIdx.x == 0) { uint32_t sid; asm volatile("mov.u32 %0, %%smid;" : "=r"(sid)); g_span[blockIdx.x][1] = (gtime() & ~0xFFull) | sid; }
+#endif
 
   if (warp < 4) setmaxnreg_dec<56>();
   if (warp == 0) {
@@ -206,7 +214,15 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
           const float a0 = __uint_as_float(a[2 * k]), a1 = __uint_as_float(a[2 * k + 1]);
           const float b0 = __uint_as_float(b[2 * k]), b1 = __uint_as_float(b[2 * k + 1]);
 #ifndef ABL_NOMATH
+#if defined(SIG_POLY_QUARTER)
+          // opt-in: one exponential in four on the FMA pipe
+          hp[half * 16 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * ((k & 1) ? sigmoid_poly(a1) : sigmoid_kit(a1)) * b1);
+#elif defined(SIG_POLY_HALF)
+          // opt-in experiment: half of the exponentials on the FMA pipe (ex2_poly, more accurate than ex2.approx) -- measured slower
+          hp[half * 16 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_poly(a1) * b1);
+#else
           hp[half * 16 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+#endif
 #else
           hp[half * 16 + k] = pack_bf16(a0 * b0, a1 * b1);
 #endif
@@ -365,5 +381,8 @@ transition_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_consta
   }
   tc_fence_before();
   __syncthreads();
+#ifdef TRACE
+  if (threadIdx.x == 0) g_span[blockIdx.x][2] = gtime();
+#endif
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }

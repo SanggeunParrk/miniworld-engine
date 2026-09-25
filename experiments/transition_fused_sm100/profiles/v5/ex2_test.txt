@@ -1,0 +1,5 @@
+ex2_poly: max rel err 7.860e-08, mean 2.243e-08
+ex2.approx: max rel err 1.449e-07, mean 4.323e-08
+sigmoid_poly: max rel err 3.526e-06
+sigmoid_kit: max rel err 3.514e-06
+sigmoid_poly vs kit: bitwise equal fraction 0.8253185749053955  h-level bf16 equal fraction 0.9999980330467224

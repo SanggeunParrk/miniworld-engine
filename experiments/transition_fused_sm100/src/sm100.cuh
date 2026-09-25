@@ -19,6 +19,23 @@ DEVI uint32_t pack_bf16(float lo, float hi) { uint32_t r; asm("cvt.rn.bf16x2.f32
 DEVI float bf16lo(uint32_t v) { return __uint_as_float(v << 16); }
 DEVI float bf16hi(uint32_t v) { return __uint_as_float(v & 0xffff0000u); }
 // math::sigmoid of the Anthropic kit, exactly as the sm_90a kernels evaluate it: rcp.approx(1 + ex2.approx(-a log2 e))
+// 2^x on the FMA pipe (no MUFU): x = n + f with n = round(x), f in [-0.5, 0.5], 2^f by a degree-6 fit (max relative error 1.9e-9
+// before rounding; measured 7.9e-8 in fp32 against ex2.approx's 1.4e-7), exponent added in the integer domain. x is clamped to [-125, 125], where 1 + 2^x and its
+// reciprocal behave exactly as with ex2.approx.ftz for the sigmoid (both ends round to 1 or to a value below bf16 resolution).
+DEVI float ex2_poly(float x) {
+  x = fminf(fmaxf(x, -125.f), 125.f);
+  const float j = __fadd_rn(x, 12582912.f);                  // 1.5 * 2^23: round(x) lands in the low mantissa bits
+  const float f = __fsub_rn(x, __fsub_rn(j, 12582912.f));
+  float p = fmaf(0.0001533770700916648f, f, 0.0013399861054494977f);
+  p = fmaf(p, f, 0.009618518874049187f);
+  p = fmaf(p, f, 0.05550329014658928f);
+  p = fmaf(p, f, 0.24022646248340607f);
+  p = fmaf(p, f, 0.6931471824645996f);
+  p = fmaf(p, f, 1.0f);
+  return __int_as_float(__float_as_int(p) + (__float_as_int(j) << 23));
+}
+// the kit sigmoid with the exponential on the FMA pipe instead of MUFU (same formula: rcp.approx(1 + 2^(-a log2 e)))
+DEVI float sigmoid_poly(float a) { return rcpf(__fadd_rn(1.f, ex2_poly(__fmul_rn(-1.4426950408889634f, a)))); }
 DEVI float sigmoid_kit(float a) { return rcpf(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, a)))); }
 
 DEVI uint4 lds128(uint32_t a) { uint4 v; asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "r"(a) : "memory"); return v; }
@@ -123,6 +140,10 @@ DEVI void umma_ss(uint32_t d_tmem, uint64_t a, uint64_t b, uint32_t idesc, uint3
 DEVI void umma_ts(uint32_t d_tmem, uint32_t a_tmem, uint64_t b, uint32_t idesc, uint32_t accumulate) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p; }"
                :: "r"(d_tmem), "r"(a_tmem), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
+}
+// smem (matrix descriptor, same format as an MMA operand) -> TMEM: 128 rows x 32 bytes -> 128 lanes x 8 columns
+DEVI void tmem_cp_128x256b(uint32_t taddr, uint64_t sdesc) {
+  asm volatile("tcgen05.cp.cta_group::1.128x256b [%0], %1;" :: "r"(taddr), "l"(sdesc) : "memory");
 }
 DEVI void tmem_wait_ld() { asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory"); }
 DEVI void tmem_wait_st() { asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory"); }
