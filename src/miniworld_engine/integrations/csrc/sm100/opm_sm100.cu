@@ -638,14 +638,17 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
 // leave fp32 partials that one column-sum GEMV folds in split order: deterministic.
 namespace dw {
 constexpr int BI = 2, BJ = 32, NP = BI * BJ;              // 64 pairs per k-step
-constexpr int NHALF = NCH / 2;                            // 512 columns per CTA
+constexpr int NPART = 4;                                  // column parts per K split: fewer, longer splits halve the fp32
+constexpr int NHALF = NCH / NPART;                        // partials (their HBM round trip); dz/n re-reads are L2 hits
+constexpr int NCB = NHALF / 32;                           // c blocks per CTA
 constexpr int AT = NP * CZ;                               // dz/n tile [2 z blocks][64 pairs][64 z]
-constexpr int BT = NP * NHALF;                            // O tile [16 c][64 pairs][32 e]
+constexpr int BT = NP * NHALF;                            // O tile [NCB c][64 pairs][32 e]
 constexpr int STAGE = AT + BT;
-constexpr int NST = 2;
+constexpr int NST = 3;
 constexpr int THREADS = 192;
 constexpr int SMEM = 1024 + NST * STAGE * 2 + 256;
-constexpr uint32_t IDESC = idesc_bf16(128, 256, 1, 1);
+constexpr int MN = NHALF < 256 ? NHALF : 256;               // MMA N
+constexpr uint32_t IDESC = idesc_bf16(128, MN, 1, 1);
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace dw
 
@@ -672,7 +675,7 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
     bar_init(done, 1);
     bar_init_fence();
   }
-  if (warp == 1) tmem_alloc(tslot, 512);
+  if (warp == 1) tmem_alloc(tslot, NHALF < 32 ? 32 : NHALF);
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
@@ -686,7 +689,7 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
         __nv_bfloat16* st = sStage + s * STAGE;
         expect_tx(full + s, STAGE * 2);
         load_4d(&amap, st, full + s, 0, j0, i0, 0);
-        load_4d(&bmap, st + AT, full + s, 0, j0, i0, half * 16);
+        load_4d(&bmap, st + AT, full + s, 0, j0, i0, half * NCB);
       }
     }
   } else if (warp == 1) {
@@ -700,9 +703,9 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
 #pragma unroll
         for (int ks = 0; ks < NP / 16; ++ks)
 #pragma unroll
-          for (int h = 0; h < 2; ++h)            // 256 columns = 8 c blocks of 32 e
-            mma_ss(tmem + h * 256, desc_mn128(a + ks * 16 * 64, NP * 64 * 2),
-                   sdesc(sa(b + h * 8 * NP * 32 + ks * 16 * 32), NP * 32 * 2, 512, 4), IDESC, (g | ks) ? 1u : 0u);
+          for (int h = 0; h < NHALF / MN; ++h)   // MN columns = MN / 32 c blocks of 32 e
+            mma_ss(tmem + h * MN, desc_mn128(a + ks * 16 * 64, NP * 64 * 2),
+                   sdesc(sa(b + h * (MN / 32) * NP * 32 + ks * 16 * 32), NP * 32 * 2, 512, 4), IDESC, (g | ks) ? 1u : 0u);
         mma_commit(empty + s);
       }
       mma_commit(done);
@@ -740,7 +743,7 @@ __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
   }
   tc_fence_before();
   __syncthreads();
-  if (warp == 1) tmem_dealloc(tmem, 512);
+  if (warp == 1) tmem_dealloc(tmem, NHALF < 32 ? 32 : NHALF);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1118,16 +1121,16 @@ torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kBFloat16 && O.size(0) == ni * CH && O.size(1) == nj * CH, "O: bf16 [ni*32, nj*32]");
   TORCH_CHECK(ni % BI == 0 && nj % BJ == 0, "the kernel steps ", BI, " x ", BJ, " tokens");
   const int ntiles = (int)((ni / BI) * (nj / BJ));
-  const int nsplit = std::max(1, std::min(ntiles, num_sms(O.device().index()) / 2));
+  const int nsplit = std::max(1, std::min(ntiles, num_sms(O.device().index()) / NPART));
   auto part = torch::empty({nsplit, (long)CZ, (long)NCH}, O.options().dtype(torch::kFloat32));
   const uint64_t M = (uint64_t)nj * CH;
   CUtensorMap am = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, (uint64_t)ni, 2}, {(uint64_t)CZ, (uint64_t)nj * CZ, 64}, {64, BJ, BI, 2}, CU_TENSOR_MAP_SWIZZLE_128B, "dzp");
-  CUtensorMap bm = make_map<4>(O.data_ptr(), {32, (uint64_t)nj, (uint64_t)ni, 32}, {32, 32 * M, M}, {32, BJ, BI, 16}, CU_TENSOR_MAP_SWIZZLE_64B, "O");
+  CUtensorMap bm = make_map<4>(O.data_ptr(), {32, (uint64_t)nj, (uint64_t)ni, 32}, {32, 32 * M, M}, {32, BJ, BI, NCB}, CU_TENSOR_MAP_SWIZZLE_64B, "O");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dwo_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   CUtensorMap pm = make_map<2>(part.data_ptr(), {(uint64_t)NCH, (uint64_t)nsplit * CZ}, {(uint64_t)NCH}, {32, CZ}, CU_TENSOR_MAP_SWIZZLE_128B, "part",
                                CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
-  opm_dwo_sm100<<<dim3(nsplit, 2), THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, pm);
+  opm_dwo_sm100<<<dim3(nsplit, NPART), THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, pm);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return colsum(part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32);                 // the splits, in split order
 }
