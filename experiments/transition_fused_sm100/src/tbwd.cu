@@ -15,6 +15,9 @@
 //     from TMEM, one row per thread.
 #include "sm100.cuh"
 using namespace s100;
+#ifndef GATE1
+#define GATE2                                                  // fp32x2 gate arithmetic, bit-identical to the scalar form (GATE1)
+#endif
 
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128;
 constexpr int KB = 16384;                                      // one K-block: [128 rows][64 bf16], 128-B swizzled
@@ -73,6 +76,18 @@ struct BarsX {
 // the 16-row block of the packed [Wa_j; Wb_j] tile matching A-operand block ks of the half-by-half [dA | dB] layout
 __device__ constexpr int kRowBlk[8] = {0, 1, 4, 5, 2, 3, 6, 7};
 DEVI float gate_da(float g, float b, float s, float l) { return (g * b) * (s + l * (1.f - s)); }
+// the same gate arithmetic on pairs of units in fp32x2 (FMUL2 / FFMA2 round like FMUL / FFMA; s + l (1 - s) contracted as ptxas
+// does in the scalar form): h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and the kit sigmoid per unit
+DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, uint32_t& hp, uint32_t& dap, uint32_t& dbp) {
+  const uint32_t gp = pack_bf16(__uint_as_float(dh0), __uint_as_float(dh1));
+  const f2 G = mk2(bf16lo(gp), bf16hi(gp)), A = mk2u(a0, a1), Bv = mk2u(b0, b1);
+  const f2 S = mk2(sigmoid_kit(__uint_as_float(a0)), sigmoid_kit(__uint_as_float(a1)));
+  const f2 L = mul2(A, S);
+  const f2 H = mul2(L, Bv), DB = mul2(G, L);
+  const f2 U = fma2(L, fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);
+  const f2 DA = mul2(mul2(G, Bv), U);
+  hp = pack_bf16(lo2(H), hi2(H)); dap = pack_bf16(lo2(DA), hi2(DA)); dbp = pack_bf16(lo2(DB), hi2(DB));
+}
 
 // ================================================================================================ DW role
 DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
@@ -249,6 +264,10 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
 #ifdef GATE_H2
             gate_h2(f2h2(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1])), f2h2(__uint_as_float(av[2 * k]), __uint_as_float(av[2 * k + 1])),
                     f2h2(__uint_as_float(bv[2 * k]), __uint_as_float(bv[2 * k + 1])), hp[kk], dap[kk], dbp[kk]);
+            continue;
+#endif
+#ifdef GATE2
+            gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[kk], dap[kk], dbp[kk]);
             continue;
 #endif
             const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
@@ -533,6 +552,10 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           uint32_t hh;
           gate_h2(f2h2(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1])), f2h2(__uint_as_float(av[2 * k]), __uint_as_float(av[2 * k + 1])),
                   f2h2(__uint_as_float(bv[2 * k]), __uint_as_float(bv[2 * k + 1])), hh, da[k], db[k]);
+          continue;
+#endif
+#ifdef GATE2
+          { uint32_t hh; gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hh, da[k], db[k]); (void)hh; }
           continue;
 #endif
           const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
