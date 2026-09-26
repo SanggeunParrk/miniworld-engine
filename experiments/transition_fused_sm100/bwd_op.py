@@ -49,9 +49,11 @@ class FusedBwd:
 
 class FusedTrain:
     """One training step of the module: y = fused forward (saves xn, rstd, c1), then the fused backward for a given dy."""
-    def __init__(self, fwd, repl=9, cubin=None, v2=False):
+    def __init__(self, fwd, repl=9, cubin=None, v2=False, x=False):
         self.f = fwd
-        if v2:
+        if x:
+            self.b = FusedBwdX(cubin, repl) if cubin else FusedBwdX(repl=repl)
+        elif v2:
             self.b = FusedBwd2(cubin, repl) if cubin else FusedBwd2(repl=repl)
         else:
             self.b = FusedBwd(cubin, repl) if cubin else FusedBwd(repl=repl)
@@ -92,3 +94,37 @@ class FusedBwd2(FusedBwd):
                      grads["dgamma"], grads["dbeta"], int(ndw), int(ndx * 4))
         run.keep = (maps, mg, gbuf, flags)
         return run, grads
+
+
+class FusedBwdX(FusedBwd):
+    """tbwdx: bf16 exchange backward — DW slices publish bf16 [dA | dB] blocks, DX CTAs run only d_xn + the LayerNorm backward."""
+    def __init__(self, cubin=HERE / "build" / "tbwdx.cubin", repl=14):
+        self.k = drv.Kernel(str(cubin), "transition_bwdx_sm100", 232448, cluster=2)
+        self.red = drv.Kernel(str(cubin), "transition_bwdx_reduce", 0)
+        self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
+        self.repl = repl
+
+    def bind(self, dy, xn, x, rstd, c1, gamma, wa, wb, ws):
+        M = x.shape[0]; tiles = M // 128
+        tm = drv.TensorMap
+        ndw = 8 * self.repl; ndx = self.nsm - ndw
+        dev = x.device
+        dx = torch.empty_like(x)
+        partab = torch.empty(ndw, 128, 128, device=dev, dtype=torch.float32)
+        parts = torch.empty(ndw, 128, 64, device=dev, dtype=torch.float32)
+        dgbw = torch.zeros(ndx * 4, 256, device=dev, dtype=torch.float32)
+        dwa = torch.empty_like(wa); dwb = torch.empty_like(wb); dws = torch.empty_like(ws)
+        dgam = torch.empty(D, device=dev, dtype=torch.float32); dbeta = torch.empty_like(dgam)
+        dab = torch.zeros(tiles * 8 * 128, D, device=dev, dtype=torch.bfloat16)
+        dflags = torch.zeros(tiles * 8, device=dev, dtype=torch.int32)
+        epoch = torch.ones(1, device=dev, dtype=torch.int32)
+        maps = (tm(dy, [D, M], D * 2, [64, 64]), tm(xn, [D, M], D * 2, [64, 64]), tm(x, [D, M], D * 2, [64, 64]),
+                tm(ws, [H, D], H * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]), tm(wb, [D, H], D * 2, [64, 64]),
+                tm(dx, [D, M], D * 2, [64, 64]), tm(dab, [D, tiles * 8 * 128], D * 2, [64, 64]))
+
+        def run():
+            self.k((self.nsm, 1, 1), (512, 1, 1), *maps, rstd, c1, gamma, partab, parts, dgbw, dab, dflags, epoch, int(tiles), int(ndw))
+            self.red((800, 1, 1), (256, 1, 1), partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, int(ndw), int(ndx * 4), epoch)
+        run.keep = maps + (dab, dflags, epoch)
+        run.bufs = (partab, parts, dgbw)
+        return run, dict(dx=dx, dwa=dwa, dwb=dwb, dws=dws, dgamma=dgam, dbeta=dbeta)
