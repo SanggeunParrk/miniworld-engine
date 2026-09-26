@@ -330,19 +330,18 @@ class _PwaMath(torch.autograd.Function):
         dres0 = dres[0].contiguous()
         # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
         wv16 = wv.to(bf).contiguous(); wg16 = wg.to(bf).contiguous(); wo16 = wo.to(bf).contiguous()
-        dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)               # dgp | dv: one [S,N,512] buffer
         if torch.cuda.get_device_capability(m.device) == (10, 0):
             k = _k100()["pwa"]
-            d_o, dWo = k.pwa_glue(o, y, dres0, wg16, wo16.t().contiguous(), dgv, dmask, ctx.dscale)
-            k.pwa_plain(w16, d_o, dgv)                                               # dv -> dgv[..., HC:]
+            d_o, dgp, dWo = k.pwa_glue(o, y, dres0, wg16, wo16.t().contiguous(), dmask, ctx.dscale)   # do, dgp head-major
+            dv = k.pwa_plain(w16, d_o)                                               # head-major [H, N, S*C]
             dw = torch.bmm(d_o, v.transpose(1, 2)).float()                          # [H][N][N], K = S*C
             wgvT = torch.cat([wg16, wv16], 0).t().contiguous()
-            dm, dWgv, dlw, dlb = k.dgv_bwd(dgv.view(S * N, 2 * HC), y.view(S * N, D), m.view(S * N, D), dres0.view(S * N, D),
-                                           wgvT, lnm_w.detach().contiguous(), eps_m)
+            dm, dWgv, dlw, dlb = k.dgv_bwd(dgp, dv, y, m, dres0, wgvT, lnm_w.detach().contiguous(), eps_m)
             dWg, dWv = dWgv[:HC], dWgv[HC:]
             dz, dWb, dzw, dzb = k.pair_bwd(z, w16, dw, lnz_w.float().contiguous(), lnz_b.float().contiguous(), eps_z, wb.detach().contiguous())
             return (dm.view(S, N, D)[None], dz[None], None, dlw.to(lnm_w.dtype, copy=True), dlb.to(lnm_b.dtype, copy=True), dWv.to(wv.dtype, copy=True), dWg.to(wg.dtype, copy=True),
                     dzw.to(lnz_w.dtype, copy=True), dzb.to(lnz_b.dtype, copy=True), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
+        dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)               # dgp | dv: one [S,N,512] buffer
         if k["glue3"] is not None:                                                  # dWo partials fused: go never touches memory
             d_o, _, dWo = k["glue3"].pwa_glue3(o, y, dres0, wg16, wo16.t().contiguous(), dgv, 2, 1, dmask, ctx.dscale)
         else:

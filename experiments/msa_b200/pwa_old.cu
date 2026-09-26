@@ -19,6 +19,14 @@ constexpr int H = 8, C = 32, D = 64, HC = H * C;
 // v = y . Wv^T (M = 128 s, N = 256 = all heads, K = 64) into one of two TMEM accumulators; warps 10-13 drain
 // it: TMEM lane = s, so a thread holds one row's 256 values = eight 64-byte head rows, which go into eight
 // 64B-swizzled [128 s][32 c] tiles -- exactly the head-major v boxes -- with no transposition at all.
+// sigmoid(x) = 0.5 + 0.5 tanh(x / 2): one MUFU op (tanh.approx, ~2^-11 relative) where ex2 + rcp took two -- the gate
+// passes evaluate 256 sigmoids per row and were bound on the special-function units
+__device__ __forceinline__ float sigmoid_t(float x) {
+  float t;
+  asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(0.5f * x));
+  return fmaf(0.5f, t, 0.5f);
+}
+
 namespace lv {
 constexpr int BS = 128;
 constexpr int NST = 3;
@@ -33,9 +41,9 @@ static_assert(SMEM <= 232448, "one CTA per SM (TMEM: 2 x 256 columns)");
 
 template <typename WT_>
 __global__ void __launch_bounds__(lv::THREADS, 1) ln_vg_sm100(
-    int N, int S, int ntiles, float eps,
+    int N, int S, int ntiles, float eps, int want_y,
     const __grid_constant__ CUtensorMap xmap,     // m [S][N][64]: (64, N, S), box (64, 1, 128), 128B swizzle
-    const __grid_constant__ CUtensorMap ymap,     // y, same
+    const __grid_constant__ CUtensorMap ymap,     // y, same (written only if want_y: inference recomputes it downstream)
     const __grid_constant__ CUtensorMap wmap,     // Wv [256][64], box (64, 256), 128B swizzle
     const __grid_constant__ CUtensorMap vmap,     // v [H*N][S*C] as (32 c, S, H*N), box (32, 128, 1), 64B swizzle
     const WT_* __restrict__ LNW, const WT_* __restrict__ LNB) {
@@ -88,8 +96,12 @@ __global__ void __launch_bounds__(lv::THREADS, 1) ln_vg_sm100(
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
         const int n = t / NSB, s0 = (t % NSB) * BS, st = lt % NST, b = lt & 1;
         wait(yfull + st, (lt / NST) & 1);
-        store_3d(&ymap, sX + st * XT, 0, n, s0);  // y leaves from the stage it was written in
-        bulk_commit();
+        if (want_y) {
+          store_3d(&ymap, sX + st * XT, 0, n, s0);  // y leaves from the stage it was written in
+          bulk_commit();
+        } else {
+          arrive(xempty + st);                   // no y store: the GEMM's commit is the stage's only other reader
+        }
         if (lt >= 2) wait(acce + b, ((lt >> 1) - 1) & 1);
         tc_fence_after();
         const __nv_bfloat16* y = sX + st * XT;
@@ -98,7 +110,7 @@ __global__ void __launch_bounds__(lv::THREADS, 1) ln_vg_sm100(
           mma_ss(tmem + b * HC, desc_k128(y + ks * 16), desc_k128(sW + ks * 16), IDESC, ks ? 1u : 0u);
         mma_commit(accf + b);
         mma_commit(xempty + st);
-        if (lt >= 1) {                           // the previous tile's y store has read its stage: its second release
+        if (want_y && lt >= 1) {                 // the previous tile's y store has read its stage: its second release
           bulk_wait_read<1>();
           arrive(xempty + (lt - 1) % NST);
         }
@@ -485,6 +497,276 @@ __global__ void __launch_bounds__(pf::THREADS, 1) pwa_fwd_sm100(
   if (warp == 1) tmem_dealloc(tmem, 512);
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// PWA forward, second half (the split fusion): with o = w . v already in global memory (pwa_ctr), per 128-row tile of
+// the (s, i) rows:  g = sigmoid(y Wg^T) [128 x 256],  u = g . o,  out = msa + drop(bf16(u Wo^T)).
+//   warp 0: o | y tiles (2-stage ring) and the resident Wg, Wo;  warp 1: tcgen05 issue;  warps 2-9: the gate drain
+//   (u back to TMEM, packed, as the out GEMM's A);  warps 10-13: the output epilogue.
+// The work goes in half-tile steps (heads 0-3 / 4-7): the gate GEMM of the next half runs while this half drains, and the
+// out GEMM takes u in two K halves, so the drain warps never wait on a GEMM round trip.
+namespace go {
+constexpr int BM = 128;
+constexpr int OT = BM * HC;                                // o tile [8 heads][128 rows][32], 64B swizzle
+constexpr int YT = BM * D;                                 // msa tile [128][64] -> y in place (the gate GEMM's A)
+constexpr int STAGE = OT + YT;                             // 80 KiB
+constexpr int NST = 2;
+constexpr int WGT = HC * D;                                // Wg [256][64]
+constexpr int WOT = D * HC;                                // Wo [4 k-blocks][64 d][64 k]
+constexpr int THREADS = 576;                               // + warps 14-17: the LayerNorm (y = LN(msa) in place)
+constexpr int SMEM = 1024 + (NST * STAGE + WGT + WOT) * 2 + 1024;
+constexpr int COL_G = 0, COL_U = 256, COL_OUT = 384;       // gate [256] fp32 | u [128] packed bf16 | out [2][64]
+constexpr uint32_t ID_G = idesc_bf16(128, 128, 0, 0);
+constexpr uint32_t ID_OUT = idesc_bf16(128, D, 0, 0);
+static_assert(SMEM <= 232448, "one CTA per SM");
+}  // namespace go
+
+template <typename WT_>
+__global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
+    int N, int ntiles, float eps, const WT_* __restrict__ LNW, const WT_* __restrict__ LNB,
+    const __grid_constant__ CUtensorMap omap,     // o head-major [H*N][S*C], box (32, 128), 64B swizzle
+    const __grid_constant__ CUtensorMap ymap,     // msa [M][64], box (64, 128), 128B swizzle: y = LN(msa) is recomputed here
+    const __grid_constant__ CUtensorMap gmap,     // Wg [256][64], box (64, 256), 128B swizzle
+    const __grid_constant__ CUtensorMap wmap,     // Wo [64][256], box (64, 64), 128B swizzle
+    const __nv_bfloat16* __restrict__ MSA, __nv_bfloat16* __restrict__ OUT,
+    const __nv_bfloat16* __restrict__ DMASK, float dscale) {
+  using namespace go;
+  extern __shared__ __align__(1024) unsigned char raw[];
+  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+  __nv_bfloat16* sStage = reinterpret_cast<__nv_bfloat16*>(smb);
+  __nv_bfloat16* sWg = sStage + NST * STAGE;
+  __nv_bfloat16* sWo = sWg + WGT;
+  float* sLN = reinterpret_cast<float*>(sWo + WOT);                // gamma[64], beta[64] (16-byte aligned: float4 reads)
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sLN + 2 * D);
+  uint64_t* full = bars;             // [NST]
+  uint64_t* empty = full + NST;      // [NST] count 9: the gate GEMMs' commit (y) and the 8 drain warps (o)
+  uint64_t* gf = empty + NST;        // [2]   gate half ready
+  uint64_t* ge = gf + 2;             // [2]   count 8: gate half drained
+  uint64_t* uf = ge + 2;             // [2]   count 8: u half written
+  uint64_t* ue = uf + 2;             // [2]   the out GEMM read u half
+  uint64_t* outf = ue + 2;           // [2]
+  uint64_t* oute = outf + 2;         // [2]   count 4
+  uint64_t* wf = oute + 2;           // [1]
+  uint64_t* yrdy = wf + 1;           // [NST] count 4: the LayerNorm wrote y over the stage's msa tile
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(yrdy + NST);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  if (tid == 0) {
+    for (int k = 0; k < NST; ++k) { bar_init(full + k, 1); bar_init(empty + k, 9); }
+    for (int k = 0; k < 2; ++k) { bar_init(gf + k, 1); bar_init(ge + k, 8); bar_init(uf + k, 8); bar_init(ue + k, 1);
+                                  bar_init(outf + k, 1); bar_init(oute + k, 4); }
+    bar_init(wf, 1);
+    for (int k2 = 0; k2 < NST; ++k2) bar_init(yrdy + k2, 4);
+    bar_init_fence();
+  }
+  if (tid < D) { sLN[tid] = to_f(LNW[tid]); sLN[D + tid] = to_f(LNB[tid]); }
+  if (warp == 1) tmem_alloc(tslot, 512);
+  tc_fence_before();
+  __syncthreads();
+  tc_fence_after();
+  const uint32_t tmem = *tslot;
+  const int nt = (int)blockIdx.x < ntiles ? (ntiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
+  auto stage = [&](int lt) { return sStage + (lt % NST) * STAGE; };
+
+  if (warp == 0) {
+    if (lane == 0) {
+      expect_tx(wf, (WGT + WOT) * 2);
+      load_2d(&gmap, sWg, wf, 0, 0);
+      for (int kb = 0; kb < 4; ++kb) load_2d(&wmap, sWo + kb * D * 64, wf, kb * 64, 0);
+      for (int lt = 0; lt < nt; ++lt) {
+        const int m0 = ((int)blockIdx.x + lt * (int)gridDim.x) * BM, st = lt % NST;
+        if (lt >= NST) wait(empty + st, ((lt / NST) - 1) & 1);
+        __nv_bfloat16* p = stage(lt);
+        expect_tx(full + st, STAGE * 2);
+        const int s = m0 / N, i0 = m0 % N;       // a tile is 128 i of one s
+        for (int h = 0; h < H; ++h) load_2d(&omap, p + h * BM * C, full + st, s * C, h * N + i0);
+        load_2d(&ymap, p + OT, full + st, 0, m0);
+      }
+    }
+  } else if (warp == 1) {
+    wait(wf, 0);
+    auto gate = [&](int k) {                     // gate half hf of tile lt: g[:, 128 hf + ...] = y . Wg[128 hf ...]^T
+      const int lt = k >> 1, hf = k & 1, st = lt % NST;
+      if (hf == 0) wait(yrdy + st, (lt / NST) & 1);
+      if (k >= 2) wait(ge + hf, ((k >> 1) - 1) & 1);
+      tc_fence_after();
+      if (elect_one()) {
+        const __nv_bfloat16* y = stage(lt) + OT;
+#pragma unroll
+        for (int ks = 0; ks < D / 16; ++ks)
+          mma_ss(tmem + COL_G + hf * 128, desc_k128(y + ks * 16), desc_k128(sWg + hf * 128 * 64 + ks * 16), ID_G, ks ? 1u : 0u);
+        mma_commit(gf + hf);
+        if (hf == 1) mma_commit(empty + st);
+      }
+      __syncwarp();
+    };
+    auto outg = [&](int k) {                     // out += u[:, half hf] . Wo[:, half hf]^T  (A from TMEM)
+      const int lt = k >> 1, hf = k & 1, b = lt & 1;
+      wait(uf + hf, (k >> 1) & 1);
+      if (hf == 0 && lt >= 2) wait(oute + b, ((lt >> 1) - 1) & 1);
+      tc_fence_after();
+      if (elect_one()) {
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks) {
+          const int kk = hf * 128 + ks * 16;
+          mma_ts(tmem + COL_OUT + b * D, tmem + COL_U + hf * 64 + ks * 8, desc_k128(sWo + (kk >> 6) * D * 64 + ((kk & 63) >> 4) * 16),
+                 ID_OUT, (hf | ks) ? 1u : 0u);
+        }
+        mma_commit(ue + hf);
+        if (hf == 1) mma_commit(outf + b);
+      }
+      __syncwarp();
+    };
+    const int K = 2 * nt;
+    if (K > 0) gate(0);
+    for (int k = 0; k < K; ++k) {
+      if (k + 1 < K) gate(k + 1);
+      outg(k);
+    }
+  } else if (warp <= 9) {
+    const int q = warp & 3, pp = (warp - 2) >> 2, r = q * 32 + lane;   // TMEM lane = row; pp: which 64 of the half
+    for (int k = 0; k < 2 * nt; ++k) {
+      const int lt = k >> 1, hf = k & 1, st = lt % NST;
+      wait(gf + hf, (k >> 1) & 1);
+      wait(full + st, (lt / NST) & 1);
+      if (k >= 2) wait(ue + hf, ((k >> 1) - 1) & 1);
+      tc_fence_after();
+      const __nv_bfloat16* ob0 = stage(lt) + r * C;
+#pragma unroll
+      for (int ch = 0; ch < 2; ++ch) {
+        float g[32];
+        tmem_ld32(tmem_at(tmem + COL_G, q * 32, hf * 128 + pp * 64 + ch * 32), g);
+        tmem_wait_ld();
+        uint32_t up[16];
+        const __nv_bfloat16* ob = ob0 + (hf * 4 + pp * 2 + ch) * BM * C;   // this chunk's head
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const uint4 u4 = *reinterpret_cast<const uint4*>(ob + ((e ^ ((r >> 1) & 3)) << 3));
+          const uint32_t ow[4] = {u4.x, u4.y, u4.z, u4.w};
+#pragma unroll
+          for (int w2 = 0; w2 < 4; ++w2) {
+            const int c = e * 8 + w2 * 2;
+            const float2 o2 = bf2f(ow[w2]);
+            up[e * 4 + w2] = pack2(o2.x * sigmoid_t(g[c]), o2.y * sigmoid_t(g[c + 1]));
+          }
+        }
+        tmem_st8(tmem_at(tmem + COL_U, q * 32, hf * 64 + pp * 32 + ch * 16), up);
+        tmem_st8(tmem_at(tmem + COL_U, q * 32, hf * 64 + pp * 32 + ch * 16 + 8), up + 8);
+      }
+      tmem_wait_st();
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) { arrive(ge + hf); arrive(uf + hf); if (hf == 1) arrive(empty + st); }
+    }
+  } else {
+    // ---- output: bf16(update), dropout, + residual, straight to global (a warp's rows are 4 KiB contiguous) ----
+    const int q = warp & 3, r = q * 32 + lane;
+    // y = LN(msa) for tile lt, in place, one thread per row -- the same fp32 operations in the same order as ln_vg's two
+    // half-row threads (each half's sums, then the two halves), so y is bit-identical to the y ln_vg keeps for training
+    auto layernorm = [&](int lt) {
+      const int st = lt % NST;
+      wait(full + st, (lt / NST) & 1);
+      __nv_bfloat16* xr = stage(lt) + OT + r * 64;
+      float2 x[2][16];
+      float hs[2];
+#pragma unroll
+      for (int hf = 0; hf < 2; ++hf) {
+#pragma unroll
+        for (int k2 = 0; k2 < 4; ++k2) {
+          const int c8 = hf * 4 + k2;
+          const uint4 u = *reinterpret_cast<const uint4*>(xr + ((c8 ^ (r & 7)) << 3));
+          x[hf][k2 * 4 + 0] = bf2f(u.x); x[hf][k2 * 4 + 1] = bf2f(u.y); x[hf][k2 * 4 + 2] = bf2f(u.z); x[hf][k2 * 4 + 3] = bf2f(u.w);
+        }
+        float2 sa_ = make_float2(0.f, 0.f), sb = sa_;
+#pragma unroll
+        for (int k2 = 0; k2 < 16; k2 += 2) { sa_ = add2(sa_, x[hf][k2]); sb = add2(sb, x[hf][k2 + 1]); }
+        const float2 sm = add2(sa_, sb);
+        hs[hf] = sm.x + sm.y;
+      }
+      const float mean = (hs[0] + hs[1]) * (1.f / D);
+      const float2 nm = make_float2(-mean, -mean);
+      float hv[2];
+#pragma unroll
+      for (int hf = 0; hf < 2; ++hf) {
+        float2 va = make_float2(0.f, 0.f), vb = va;
+#pragma unroll
+        for (int k2 = 0; k2 < 16; k2 += 2) {
+          x[hf][k2] = add2(x[hf][k2], nm); x[hf][k2 + 1] = add2(x[hf][k2 + 1], nm);
+          va = fma2(x[hf][k2], x[hf][k2], va); vb = fma2(x[hf][k2 + 1], x[hf][k2 + 1], vb);
+        }
+        const float2 vs = add2(va, vb);
+        hv[hf] = vs.x + vs.y;
+      }
+      const float rstd = 1.f / sqrtf((hv[0] + hv[1]) * (1.f / D) + eps);
+      const float2 rs = make_float2(rstd, rstd);
+#pragma unroll
+      for (int hf = 0; hf < 2; ++hf)
+#pragma unroll
+        for (int k2 = 0; k2 < 4; ++k2) {
+          const int c8 = hf * 4 + k2;
+          const float4 g0 = *reinterpret_cast<const float4*>(sLN + c8 * 8), g1 = *reinterpret_cast<const float4*>(sLN + c8 * 8 + 4);
+          const float4 b0 = *reinterpret_cast<const float4*>(sLN + D + c8 * 8), b1 = *reinterpret_cast<const float4*>(sLN + D + c8 * 8 + 4);
+          const float2 y0 = fma2(mul2(x[hf][k2 * 4 + 0], rs), make_float2(g0.x, g0.y), make_float2(b0.x, b0.y));
+          const float2 y1 = fma2(mul2(x[hf][k2 * 4 + 1], rs), make_float2(g0.z, g0.w), make_float2(b0.z, b0.w));
+          const float2 y2 = fma2(mul2(x[hf][k2 * 4 + 2], rs), make_float2(g1.x, g1.y), make_float2(b1.x, b1.y));
+          const float2 y3 = fma2(mul2(x[hf][k2 * 4 + 3], rs), make_float2(g1.z, g1.w), make_float2(b1.z, b1.w));
+          uint4 o;
+          o.x = pack2(y0.x, y0.y); o.y = pack2(y1.x, y1.y); o.z = pack2(y2.x, y2.y); o.w = pack2(y3.x, y3.y);
+          *reinterpret_cast<uint4*>(xr + ((c8 ^ (r & 7)) << 3)) = o;
+        }
+      fence_proxy_async();
+      __syncwarp();
+      if (lane == 0) arrive(yrdy + st);
+    };
+    if (warp >= 14) {
+      for (int lt = 0; lt < nt; ++lt) layernorm(lt);
+    } else
+    for (int lt = 0; lt < nt; ++lt) {
+      const int row = ((int)blockIdx.x + lt * (int)gridDim.x) * BM + r, b = lt & 1;
+
+      wait(outf + b, (lt >> 1) & 1);
+      tc_fence_after();
+      uint32_t pk[D / 2];
+      {
+        float v[D];
+        tmem_ld32(tmem_at(tmem + COL_OUT + b * D, q * 32, 0), v);
+        tmem_ld32(tmem_at(tmem + COL_OUT + b * D, q * 32, 32), v + 32);
+        tmem_wait_ld();
+#pragma unroll
+        for (int c = 0; c < D / 2; ++c) pk[c] = pack2(v[2 * c], v[2 * c + 1]);
+      }
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) arrive(oute + b);
+      const uint4* rp = reinterpret_cast<const uint4*>(MSA + (size_t)row * D);
+      uint4* op = reinterpret_cast<uint4*>(OUT + (size_t)row * D);
+      const __nv_bfloat16* dr = DMASK != nullptr ? DMASK + (size_t)(row % N) * D : nullptr;
+#pragma unroll
+      for (int c8 = 0; c8 < 8; ++c8) {
+        uint4 rv = __ldg(rp + c8);
+        uint4 dmv = dr != nullptr ? *reinterpret_cast<const uint4*>(dr + c8 * 8) : make_uint4(0, 0, 0, 0);
+        uint32_t* rw = reinterpret_cast<uint32_t*>(&rv);
+        const uint32_t* dw = reinterpret_cast<const uint32_t*>(&dmv);
+#pragma unroll
+        for (int k2 = 0; k2 < 4; ++k2) {
+          // the stock module rounds the update to bf16 before the (dropout and the) residual add
+          const float2 uu = bf2f(pk[c8 * 4 + k2]);
+          float u0 = uu.x, u1 = uu.y;
+          if (dr != nullptr) {
+            const float2 m2 = bf2f(dw[k2]);
+            u0 = __bfloat162float(__float2bfloat16(u0 * (m2.x * dscale))); u1 = __bfloat162float(__float2bfloat16(u1 * (m2.y * dscale)));
+          }
+          const float2 res = bf2f(rw[k2]);
+          rw[k2] = pack2(res.x + u0, res.y + u1);
+        }
+        op[c8] = rv;
+      }
+    }
+  }
+  tc_fence_before();
+  __syncthreads();
+  if (warp == 1) tmem_dealloc(tmem, 512);
+}
+
 // ---------------------------------------------------------------------------------------------
 // PWA backward glue from the saved o (the H100 pwa_glue3 algorithm), per (128-row i tile, 2 s), per head:
 //   g = sigmoid(y Wg_h^T), du = dres' Wo_h (dres' = dres . drop keep-mask / (1-p), masked once in shared memory)
@@ -510,7 +792,7 @@ static_assert(SMEM <= 232448, "one CTA per SM");
 
 __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
     int N, int S, int ntiles,
-    const __grid_constant__ CUtensorMap omap,     // o [S][N][HC] as (32 c, N, S), box (32, 128, 2), 64B swizzle
+    const __grid_constant__ CUtensorMap omap,     // o head-major as (32 c, H*N, S), box (32, 128, 2), 64B swizzle
     const __grid_constant__ CUtensorMap rmap,     // dres [S][N][64] as (64, N, S), box (64, 128, 1), 128B swizzle
     const __grid_constant__ CUtensorMap ymap,     // y, same
     const __grid_constant__ CUtensorMap gmap,     // Wg [HC][64], box (64, 32)
@@ -577,7 +859,7 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
           load_2d(&wotmap, sWH + wb * WH + C * D, whf + wb, 0, h * C);
           if (gh >= NST) wait(oe + st, ((gh / NST) - 1) & 1);
           expect_tx(of + st, OT * 2);
-          load_3d(&omap, sO + st * OT, of + st, h * C, i0, s0);
+          load_3d(&omap, sO + st * OT, of + st, 0, h * N + i0, s0);
         }
       }
     }
@@ -707,7 +989,7 @@ __global__ void __launch_bounds__(gl::THREADS, 1) pwa_glue_sm100(
             for (int k = 0; k < 4; ++k) {             // packed pairs: do = du g, dgp = du o g (1 - g), go = g o
               const int c = c8 * 8 + 2 * k;
               const float2 o2 = bf2f(ow[k]);
-              const float2 g2 = make_float2(1.f / (1.f + __expf(-gt[c])), 1.f / (1.f + __expf(-gt[c + 1])));
+              const float2 g2 = make_float2(sigmoid_t(gt[c]), sigmoid_t(gt[c + 1]));
               const float2 d2 = make_float2(du[c], du[c + 1]);
               const float2 do2 = mul2(d2, g2);
               const float2 gg = fma2(g2, make_float2(-g2.x, -g2.y), g2);                           // g - g^2
@@ -768,16 +1050,20 @@ constexpr int NST = 4;                                     // the stage loads ar
 constexpr int OUTT = BS / 2 * BJ * C;                      // natural staging for half the tile [4 s][128 j][32], 64B swizzle (32 KiB)
 constexpr int THREADS = 192;
 constexpr int SMEM = 1024 + (NST * STAGE + OUTT) * 2 + 256;
-constexpr uint32_t IDESC = idesc_bf16(128, NN, 1, 1);
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace pl
 
+// MODE 0 (plain, backward): dv[s, j, h, c] = sum_i w[h,i,j] do[h,i,(s,c)]   A = w^T (MN-major), out -> dgv[..., 256 + h*32]
+// MODE 1 (ctr, forward):    o[s, i, h, c]  = sum_j w[h,i,j] v[h,j,(s,c)]    A = w   (K-major),  out -> o[..., h*32]
+// The same pipeline: the K operand rows (i or j) of the head-major B stream with the matching w chunk.
+template <int MODE>
 __global__ void __launch_bounds__(pl::THREADS, 1) pwa_plain_sm100(
-    int N, int S, int ntiles,
-    const __grid_constant__ CUtensorMap wmap,     // w16 [H*N][N], box (64 j, 64 i), 128B swizzle
-    const __grid_constant__ CUtensorMap dmap,     // do [H*N][S*C], box (64, 64 i), 128B swizzle
-    const __grid_constant__ CUtensorMap vmap) {   // dgv as (32 c, N, S) at column offset 256 + h*32, row stride 512, box (32, 128, 8)
+    int N, int S, int ntiles, int cbase,
+    const __grid_constant__ CUtensorMap wmap,     // w16 [H*N][N]: MODE 0 box (64 j, 64 i), MODE 1 box (64 j, 128 i); 128B swizzle
+    const __grid_constant__ CUtensorMap dmap,     // do / v [H*N][S*C], box (64, 64 k rows), 128B swizzle
+    const __grid_constant__ CUtensorMap vmap) {   // out as (32 c, N, S) at column cbase + h*32, box (32, 128, 4)
   using namespace pl;
+  constexpr uint32_t IDESC = idesc_bf16(128, NN, MODE == 0 ? 1 : 0, 1);
   const int NJB = N / BJ, NSB = (S + BS - 1) / BS;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -814,7 +1100,8 @@ __global__ void __launch_bounds__(pl::THREADS, 1) pwa_plain_sm100(
           if (g >= NST) wait(empty + st, ((g / NST) - 1) & 1);
           __nv_bfloat16* p = sStage + st * STAGE;
           expect_tx(full + st, STAGE * 2);
-          for (int b = 0; b < 2; ++b) load_2d(&wmap, p + b * KC * 64, full + st, j0 + b * 64, h * N + kc * KC);
+          if (MODE == 0) for (int b = 0; b < 2; ++b) load_2d(&wmap, p + b * KC * 64, full + st, j0 + b * 64, h * N + kc * KC);
+          else load_2d(&wmap, p, full + st, kc * KC, h * N + j0);          // [128 i][64 j], K-major
           for (int b = 0; b < 4; ++b) load_2d(&dmap, p + AT + b * KC * 64, full + st, s0 * C + b * 64, h * N + kc * KC);
         }
       }
@@ -833,7 +1120,8 @@ __global__ void __launch_bounds__(pl::THREADS, 1) pwa_plain_sm100(
           const __nv_bfloat16* p = sStage + st * STAGE;
 #pragma unroll
           for (int ks = 0; ks < KC / 16; ++ks)
-            mma_ss(tmem + b * NN, desc_mn128(p + ks * 16 * 64, KC * 64 * 2), desc_mn128(p + AT + ks * 16 * 64, KC * 64 * 2), IDESC, (kc | ks) ? 1u : 0u);
+            mma_ss(tmem + b * NN, MODE == 0 ? desc_mn128(p + ks * 16 * 64, KC * 64 * 2) : desc_k128(p + ks * 16),
+                   desc_mn128(p + AT + ks * 16 * 64, KC * 64 * 2), IDESC, (kc | ks) ? 1u : 0u);
           mma_commit(empty + st);
           if (kc == NKC - 1) mma_commit(accf + b);
         }
@@ -870,7 +1158,12 @@ __global__ void __launch_bounds__(pl::THREADS, 1) pwa_plain_sm100(
         if ((si & (BS / 2 - 1)) == BS / 2 - 1) {
           fence_proxy_async();
           named_sync(1, 128);
-          if (leader) { store_3d(&vmap, sOut, HC + h * C, j0, s0 + si - (BS / 2 - 1)); bulk_commit(); }
+          if (leader) {
+            if (cbase >= 0) store_3d(&vmap, sOut, cbase + h * C, j0, s0 + si - (BS / 2 - 1));
+            else for (int q4 = 0; q4 < BS / 2; ++q4)          // head-major o [H*N][S*C]: one [128 i][32 c] box per s
+              store_2d(&vmap, sOut + q4 * BJ * C, (s0 + si - (BS / 2 - 1) + q4) * C, h * N + j0);
+            bulk_commit();
+          }
         }
       }
     }
@@ -1132,6 +1425,7 @@ constexpr int SMEM = 1024 + (2 * ZT + 2 * ZT + 2 * DBT + ZT + WBT) * 2 + 2 * WDB
 constexpr uint32_t ID_DZN = idesc_bf16(128, DZ, 1, 1);     // A = db (db^T read MN-major), B = Wb (MN-major)
 constexpr uint32_t ID_DWB = idesc_bf16(128, HP, 1, 0);     // A = zn^T (MN-major), B = db^T (K-major)
 constexpr int COL_DZN = 0, COL_DWB = 256;                  // dzn[2] 0 / 128, dWb^T 256..271
+constexpr int PSTRIDE = H * DZ + 8 * 2 * DZ;                // a CTA's partials: dWb [8][128] | 8 warps x (dgamma, dbeta) [2][128]
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace pb2
 
@@ -1163,8 +1457,7 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
     const __grid_constant__ CUtensorMap sdmap,    // the row sums [N][H] fp32, box (8, 1)
     const float* __restrict__ LNW, const float* __restrict__ LNB,
     const WT_* __restrict__ WB,                   // proj_z weight [H][128]
-    float* __restrict__ PWB,                      // [grid][H][128]
-    float* __restrict__ PLN) {                    // [grid][8 warps][2][128]
+    float* __restrict__ PART) {                   // [grid][H * 128 (dWb) + 8 warps * 2 * 128 (dgamma, dbeta)]: one column sum
   using namespace pb2;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -1372,8 +1665,10 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
     // this warp's dgamma / dbeta partials: columns hf * 64 + lane * 2 + k (the reduce-scatter's order), one writer each
     {
       const int c0 = hf * 64 + ((lane >> 4) & 1) * 32 + ((lane >> 3) & 1) * 16 + ((lane >> 2) & 1) * 8 + ((lane >> 1) & 1) * 4 + (lane & 1) * 2;
-      float* pl = PLN + ((size_t)blockIdx.x * 8 + warp) * 2 * DZ;
+      float* pl = PART + (size_t)blockIdx.x * PSTRIDE + H * DZ + warp * 2 * DZ;
+      const int o0 = (hf ^ 1) * 64 + (c0 - hf * 64);      // the other channel half of this warp's slot is zero (no memset)
       pl[c0] = ag[0]; pl[c0 + 1] = ag[1]; pl[DZ + c0] = ab[0]; pl[DZ + c0 + 1] = ab[1];
+      pl[o0] = 0.f; pl[o0 + 1] = 0.f; pl[DZ + o0] = 0.f; pl[DZ + o0 + 1] = 0.f;
     }
     // this CTA's dWb partial: TMEM lane = d, columns = heads
     if (hf == 0) {
@@ -1383,7 +1678,7 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
       tmem_ld8(tmem_at(tmem + COL_DWB, q * 32, 0), v);
       tmem_wait_ld();
 #pragma unroll
-      for (int h = 0; h < H; ++h) PWB[((size_t)blockIdx.x * H + h) * DZ + q * 32 + lane] = v[h];
+      for (int h = 0; h < H; ++h) PART[(size_t)blockIdx.x * PSTRIDE + h * DZ + q * 32 + lane] = v[h];
     }
   }
   tc_fence_before();
@@ -1393,17 +1688,17 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
 }  // namespace
 
 // m [S, N, 64] bf16 -> (v head-major [H, N, S*C], y [S, N, 64])
-std::vector<torch::Tensor> ln_vg(torch::Tensor m, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps) {
+std::vector<torch::Tensor> ln_vg(torch::Tensor m, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps, bool want_y) {
   using namespace lv;
   TORCH_CHECK(m.is_cuda() && m.scalar_type() == torch::kBFloat16 && m.is_contiguous() && m.dim() == 3 && m.size(2) == D, "m: [S, N, 64] bf16");
   TORCH_CHECK(wv.scalar_type() == torch::kBFloat16 && wv.is_contiguous() && wv.size(0) == HC && wv.size(1) == D, "wv: [256, 64] bf16");
   TORCH_CHECK(lnw.scalar_type() == lnb.scalar_type() && lnw.is_contiguous() && lnb.is_contiguous() && lnw.numel() == D, "LN affine [64]");
   const long S = m.size(0), N = m.size(1);
   TORCH_CHECK(S % BS == 0, "S must be a multiple of ", BS);
-  auto y = torch::empty_like(m);
+  auto y = want_y ? torch::empty_like(m) : torch::empty({0}, m.options());
   auto v = torch::empty({H, N, S * C}, m.options());
   CUtensorMap xm = make_map<3>(m.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, 1, BS}, CU_TENSOR_MAP_SWIZZLE_128B, "m");
-  CUtensorMap ym = make_map<3>(y.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, 1, BS}, CU_TENSOR_MAP_SWIZZLE_128B, "y");
+  CUtensorMap ym = make_map<3>(want_y ? y.data_ptr() : m.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, 1, BS}, CU_TENSOR_MAP_SWIZZLE_128B, "y");
   CUtensorMap wm = make_map<2>(wv.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wv");
   CUtensorMap vm = make_map<3>(v.data_ptr(), {(uint64_t)C, (uint64_t)S, (uint64_t)H * N}, {(uint64_t)C, (uint64_t)S * C}, {C, BS, 1}, CU_TENSOR_MAP_SWIZZLE_64B, "v");
   const int ntiles = (int)(N * (S / BS));
@@ -1412,12 +1707,12 @@ std::vector<torch::Tensor> ln_vg(torch::Tensor m, torch::Tensor lnw, torch::Tens
   if (lnw.scalar_type() == torch::kFloat32) {
     static bool a = false;
     if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(ln_vg_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
-    ln_vg_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, xm, ym, wm, vm, lnw.data_ptr<float>(), lnb.data_ptr<float>());
+    ln_vg_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, want_y ? 1 : 0, xm, ym, wm, vm, lnw.data_ptr<float>(), lnb.data_ptr<float>());
   } else {
     TORCH_CHECK(lnw.scalar_type() == torch::kBFloat16, "LN affine: fp32 or bf16");
     static bool a = false;
     if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(ln_vg_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
-    ln_vg_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, xm, ym, wm, vm,
+    ln_vg_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, want_y ? 1 : 0, xm, ym, wm, vm,
         reinterpret_cast<const __nv_bfloat16*>(lnw.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(lnb.data_ptr<at::BFloat16>()));
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1466,14 +1761,15 @@ std::vector<torch::Tensor> pwa_glue(torch::Tensor o, torch::Tensor y, torch::Ten
   TORCH_CHECK(y.is_contiguous() && y.dim() == 3 && y.size(2) == D && dres.is_contiguous() && dres.sizes() == y.sizes(), "y, dres: [S, N, 64]");
   const long S = y.size(0), N = y.size(1);
   TORCH_CHECK(N % BI == 0 && S % BS == 0, "N must be a multiple of 128 and S even");
-  TORCH_CHECK(o.is_contiguous() && o.sizes() == torch::IntArrayRef({S, N, HC}), "o: [S, N, 256]");
+  TORCH_CHECK(o.is_contiguous() && o.sizes() == torch::IntArrayRef({H, N, S * C}), "o: head-major [H, N, S*C] (pwa_fwd2)");
   TORCH_CHECK(dgv.is_contiguous() && dgv.sizes() == torch::IntArrayRef({S, N, 2 * HC}), "dgv: [S, N, 512]");
   TORCH_CHECK(wgw.is_contiguous() && wgw.sizes() == torch::IntArrayRef({HC, D}) && wot.is_contiguous() && wot.sizes() == torch::IntArrayRef({HC, D}), "wg, wot: [256, 64]");
   auto dO = torch::empty({H, N, S * C}, y.options());
   const int ntiles = (int)((N / BI) * (S / BS));
   const int grid = std::min(ntiles, num_sms(y.device().index()));
   auto dwo = torch::empty({grid, (long)D, (long)HC}, y.options().dtype(torch::kFloat32));
-  CUtensorMap om = make_map<3>(o.data_ptr(), {(uint64_t)HC, (uint64_t)N, (uint64_t)S}, {(uint64_t)HC, (uint64_t)N * HC}, {C, BI, BS}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
+  // head-major o as (32 c, H*N rows, S): the box (32, 128, 2) lands as the same [2 s][128 i][32 c] tile
+  CUtensorMap om = make_map<3>(o.data_ptr(), {(uint64_t)C, (uint64_t)(H * N), (uint64_t)S}, {(uint64_t)(S * C), (uint64_t)C}, {C, BI, BS}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
   auto nat = [&](void* p, const char* w) { return make_map<3>(p, {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, BI, 1}, CU_TENSOR_MAP_SWIZZLE_128B, w); };
   CUtensorMap rm = nat(dres.data_ptr(), "dres"), ym = nat(y.data_ptr(), "y");
   CUtensorMap gm = make_map<2>(wgw.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, C}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
@@ -1507,9 +1803,46 @@ void pwa_plain(torch::Tensor w16, torch::Tensor dO, torch::Tensor dgv) {
   const int ntiles = (int)(H * (N / BJ) * ((S + BS - 1) / BS));
   const int grid = std::min(ntiles, num_sms(w16.device().index()));
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_plain_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  pwa_plain_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, wm, dm, vm);
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_plain_sm100<0>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+  pwa_plain_sm100<0><<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, HC, wm, dm, vm);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// probe: dv = w^T . do written head-major [H, N, S*C] (the MODE 0 kernel with the head-major store)
+torch::Tensor pwa_plain_hm(torch::Tensor w16, torch::Tensor dO) {
+  using namespace pl;
+  const long N = w16.size(1), S = dO.size(2) / C;
+  auto dv = torch::empty({H, N, S * C}, dO.options());
+  CUtensorMap wm = make_map<2>(w16.data_ptr(), {(uint64_t)N, (uint64_t)(H * N)}, {(uint64_t)N}, {64, KC}, CU_TENSOR_MAP_SWIZZLE_128B, "w");
+  CUtensorMap dm = make_map<2>(dO.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {64, KC}, CU_TENSOR_MAP_SWIZZLE_128B, "do");
+  CUtensorMap vm = make_map<2>(dv.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {C, BJ}, CU_TENSOR_MAP_SWIZZLE_64B, "dv_hm");
+  const int ntiles = (int)(H * (N / BJ) * ((S + BS - 1) / BS));
+  const int grid = std::min(ntiles, num_sms(w16.device().index()));
+  pwa_plain_sm100<0><<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, -1, wm, dm, vm);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return dv;
+}
+
+// the forward contraction alone: w16 [H, N, N], v [H, N, S*C] -> o head-major [H, N, S*C] (the layout the tensor core
+// produces it in: whole 64-byte rows per (h, i, s); the natural [S, N, 256] layout cost ~10% more energy in scattered stores)
+torch::Tensor pwa_ctr(torch::Tensor w16, torch::Tensor vhm) {
+  using namespace pl;
+  TORCH_CHECK(w16.is_contiguous() && w16.dim() == 3 && w16.size(0) == H, "w16: [H, N, N]");
+  const long N = w16.size(1);
+  TORCH_CHECK(vhm.is_contiguous() && vhm.size(0) == H && vhm.size(1) == N && vhm.size(2) % C == 0, "v: [H, N, S*C]");
+  const long S = vhm.size(2) / C;
+  TORCH_CHECK(N % BJ == 0, "N must be a multiple of 128");
+  auto o = torch::empty({H, N, S * C}, vhm.options());
+  CUtensorMap wm = make_map<2>(w16.data_ptr(), {(uint64_t)N, (uint64_t)(H * N)}, {(uint64_t)N}, {64, BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "w");
+  CUtensorMap dm = make_map<2>(vhm.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {64, KC}, CU_TENSOR_MAP_SWIZZLE_128B, "v");
+  CUtensorMap om = make_map<2>(o.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {C, BJ}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
+  const int ntiles = (int)(H * (N / BJ) * ((S + BS - 1) / BS));
+  const int grid = std::min(ntiles, num_sms(w16.device().index()));
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_plain_sm100<1>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+  pwa_plain_sm100<1><<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)S, ntiles, -1, wm, dm, om);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return o;
 }
 
 // dgv [M, 512] (dgp | dv), y, x, dout [M, 64], wgvT = [Wg; Wv]^T [64, 512] -> (dm, dWgv [512, 64], dgamma, dbeta) fp32 weights
@@ -1560,8 +1893,7 @@ std::vector<torch::Tensor> pair_bwd(torch::Tensor z, torch::Tensor w16, torch::T
   auto dz = torch::empty_like(z);
   const int ntiles = (int)(N * (N / BJ));
   const int grid = std::min(ntiles, num_sms(z.device().index()));
-  auto pwb = torch::empty({grid, (long)H, (long)DZ}, z.options().dtype(torch::kFloat32));
-  auto pln = torch::zeros({grid * 8, 2, (long)DZ}, z.options().dtype(torch::kFloat32));   // a warp writes only its channel half
+  auto part = torch::empty({grid, (long)PSTRIDE}, z.options().dtype(torch::kFloat32));
   CUtensorMap zm = make_map<2>(z.data_ptr(), {(uint64_t)DZ, (uint64_t)(N * N)}, {(uint64_t)DZ}, {64, BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
   CUtensorMap dzm = make_map<2>(dz.data_ptr(), {(uint64_t)DZ, (uint64_t)(N * N)}, {(uint64_t)DZ}, {64, BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "dz");
   auto st = at::cuda::getCurrentCUDAStream();
@@ -1577,21 +1909,66 @@ std::vector<torch::Tensor> pair_bwd(torch::Tensor z, torch::Tensor w16, torch::T
     static bool a = false;
     if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
     pair_bwd_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps, zm, dzm, wm, dwm, sdm, lnw.data_ptr<float>(), lnb.data_ptr<float>(),
-        wb.data_ptr<float>(), pwb.data_ptr<float>(), pln.data_ptr<float>());
+        wb.data_ptr<float>(), part.data_ptr<float>());
   } else {
     static bool a = false;
     if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
     pair_bwd_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps, zm, dzm, wm, dwm, sdm, lnw.data_ptr<float>(), lnb.data_ptr<float>(),
-        reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>()), pwb.data_ptr<float>(), pln.data_ptr<float>());
+        reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>()), part.data_ptr<float>());
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto ln = colsum(pln).view({2, (long)DZ});
-  return {dz, colsum(pwb), ln[0], ln[1]};
+  auto red = colsum(part);                                          // [PSTRIDE]: dWb, then the 8 warps' (dgamma, dbeta)
+  auto ln = red.narrow(0, H * DZ, 8 * 2 * DZ).view({8, 2, (long)DZ}).sum(0);
+  return {dz, red.narrow(0, 0, H * DZ).view({(long)H, (long)DZ}), ln[0], ln[1]};
+}
+
+
+// the split forward: o = pwa_ctr(w, v), then the gate / out-projection / residual pass over o
+// y = LN(msa) is recomputed in the second pass (bit-identical to ln_vg's), so inference never writes or reads y
+std::vector<torch::Tensor> pwa_fwd2(torch::Tensor w16, torch::Tensor vhm, torch::Tensor msa, torch::Tensor lnw, torch::Tensor lnb, double eps,
+                                    torch::Tensor wgw, torch::Tensor wow, bool save_o, c10::optional<torch::Tensor> dmask, double dscale) {
+  using namespace go;
+  auto o = pwa_ctr(w16, vhm);                                    // head-major [H, N, S*C]
+  const long N = o.size(1), S = o.size(2) / C, M = S * N;
+  TORCH_CHECK(M % BM == 0, "S * N must be a multiple of 128");
+  TORCH_CHECK(msa.is_contiguous() && msa.numel() == M * D, "msa: [S, N, 64]");
+  TORCH_CHECK(lnw.scalar_type() == lnb.scalar_type() && lnw.is_contiguous() && lnb.is_contiguous() && lnw.numel() == D, "LayerNorm affine [64]");
+  TORCH_CHECK(wgw.is_contiguous() && wgw.sizes() == torch::IntArrayRef({HC, D}) && wow.is_contiguous() && wow.sizes() == torch::IntArrayRef({D, HC}), "wg [256, 64], wo [64, 256]");
+  auto out = torch::empty({S, N, D}, msa.options());
+  TORCH_CHECK(N % BM == 0, "N must be a multiple of 128");
+  CUtensorMap om = make_map<2>(o.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {C, BM}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
+  CUtensorMap ym = make_map<2>(msa.data_ptr(), {(uint64_t)D, (uint64_t)M}, {(uint64_t)D}, {64, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "msa");
+  CUtensorMap gm = make_map<2>(wgw.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
+  CUtensorMap wm = make_map<2>(wow.data_ptr(), {(uint64_t)HC, (uint64_t)D}, {(uint64_t)HC}, {64, D}, CU_TENSOR_MAP_SWIZZLE_128B, "wo");
+  const __nv_bfloat16* dmp = nullptr;
+  if (dmask.has_value() && dmask->numel()) {
+    TORCH_CHECK(dmask->scalar_type() == torch::kBFloat16 && dmask->is_contiguous() && dmask->numel() == N * D, "dmask: [N, 64] bf16");
+    dmp = reinterpret_cast<const __nv_bfloat16*>(dmask->data_ptr<at::BFloat16>());
+  }
+  const int ntiles = (int)(M / BM);
+  const int grid = std::min(ntiles, num_sms(msa.device().index()));
+  auto st = at::cuda::getCurrentCUDAStream();
+  const auto* mp = reinterpret_cast<const __nv_bfloat16*>(msa.data_ptr<at::BFloat16>());
+  auto* outp = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
+  if (lnw.scalar_type() == torch::kFloat32) {
+    static bool attr = false;
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_gate_out_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+    pwa_gate_out_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps, lnw.data_ptr<float>(), lnb.data_ptr<float>(), om, ym, gm, wm, mp, outp, dmp, (float)dscale);
+  } else {
+    TORCH_CHECK(lnw.scalar_type() == torch::kBFloat16, "LayerNorm affine: fp32 or bf16");
+    static bool attr = false;
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_gate_out_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+    pwa_gate_out_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps,
+        reinterpret_cast<const __nv_bfloat16*>(lnw.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(lnb.data_ptr<at::BFloat16>()),
+        om, ym, gm, wm, mp, outp, dmp, (float)dscale);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {out, save_o ? o : torch::empty({0}, msa.options())};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_vg", &ln_vg, "sm100 LayerNorm + value projection: (v head-major [H,N,S*C], y [S,N,64])",
-        py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps") = 1e-5);
+        py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps") = 1e-5, py::arg("want_y") = true);
   m.def("pwa_fwd", &pwa_fwd, "sm100 PWA forward: contraction + gate + out-projection + residual (+ dropout), optionally keeping o",
         py::arg("w16"), py::arg("vhm"), py::arg("y"), py::arg("wg"), py::arg("wo"), py::arg("msa"), py::arg("save_o") = false,
         py::arg("dmask") = py::none(), py::arg("dscale") = 1.0);
@@ -1599,6 +1976,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("z"), py::arg("w16"), py::arg("dw"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wb"));
   m.def("dgv_bwd", &dgv_bwd, "sm100 fused dgv -> (dm = LN_bwd(dgv . Wgv) + dout, dWgv, dgamma, dbeta)",
         py::arg("dgv"), py::arg("y"), py::arg("x"), py::arg("dout"), py::arg("wgvT"), py::arg("lnw"), py::arg("eps") = 1e-5);
+  m.def("pwa_fwd2", &pwa_fwd2, "sm100 PWA forward, split: pwa_ctr then the gate / out-projection / residual pass",
+        py::arg("w16"), py::arg("v"), py::arg("msa"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wg"), py::arg("wo"),
+        py::arg("save_o"), py::arg("dmask"), py::arg("dscale"));
+  m.def("pwa_plain_hm", &pwa_plain_hm, "probe: dv head-major");
+  m.def("pwa_ctr", &pwa_ctr, "sm100 PWA forward contraction o = w . v -> head-major [H, N, S*C]", py::arg("w16"), py::arg("v"));
   m.def("pwa_plain", &pwa_plain, "sm100 PWA dv = w^T . do into dgv[..., 256:]", py::arg("w16"), py::arg("do"), py::arg("dgv"));
   m.def("pwa_glue", &pwa_glue, "sm100 PWA backward glue from the saved o: (do head-major, dWo fp32 [64][256]); dgp into dgv[..., :256]",
         py::arg("o"), py::arg("y"), py::arg("dres"), py::arg("wg"), py::arg("wot"), py::arg("dgv"), py::arg("dmask") = py::none(), py::arg("dscale") = 1.0);
