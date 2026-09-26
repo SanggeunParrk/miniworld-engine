@@ -17,17 +17,21 @@ using namespace s100;
 #ifndef LAZY
 #define LAZY 5.545177444479562f          // natural units (8 in log2 units)
 #endif
+#ifndef TST
+#define TST 1                            // O leaves through smem-staged TMA bulk stores (coalesced) instead of per-row st.v4
+#endif
 #ifndef ST
 #define ST 3
 #endif
 #ifndef QR
-#define QR 2                             // q ring slots
+#define QR 1                             // q ring slots
 #endif
 constexpr int BN = 64, DH = 48, QM = 128, DM = 768;
 constexpr int TQ = QM * 128, TK = BN * 128, TB = QM * BN * 2;
 constexpr int STB = 4 * TK + TB;                                           // 48 KB
 constexpr int O_Q = 0, O_ST = QR * 2 * TQ, O_BAR = O_ST + ST * STB;        // q ring: QR slots x (q0 | q1)
-constexpr int SMEM_BYTES = O_BAR + 512;
+constexpr int XA = 128 * 32 * 4, XB = 128 * 16 * 4;                        // O staging per warpgroup: cols 0-31 (SW128), 32-47 (SW64)
+constexpr int O_X = O_BAR + 1024, SMEM_BYTES = O_X + (TST ? 2 * (XA + XB) : 0);
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 constexpr uint32_t T_S = 0, T_P = 256, T_O = 320;
 constexpr uint32_t I_QK = idesc_bf16(128, BN), I_PV = idesc_bf16(128, DH, 0, 1);
@@ -65,7 +69,8 @@ DEVI float max3f(float a, float b, float c) { float d; asm("max.f32 %0, %1, %2, 
 
 extern "C" __global__ void __launch_bounds__(384, 1)
 augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
-                   const __grid_constant__ CUtensorMap mb, float* __restrict__ O, float* __restrict__ LSE, int L, int A) {
+                   const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap moa, const __grid_constant__ CUtensorMap mob,
+                   float* __restrict__ O, float* __restrict__ LSE, int L, int A) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -122,8 +127,8 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
   } else if (warp == 1 || warp == 2) {
     // one MMA warp per softmax warpgroup (warp 1: sample a0, warp 2: a0 + 1); QK(G + 2) follows PV(G): S double-buffered, P single
     const int w = warp - 1;
-    auto qk = [&](int G) {
-      const int li = G / nb, n = G % nb, s = G % ST, qs = li % QR;
+    auto qk = [&](int G, int li, int n) {                                  // QK of block G (item li, key block n)
+      const int s = G % ST, qs = li % QR;
       if (n == 0) mbar_wait(&B.q_full[qs], (li / QR) & 1);
       mbar_wait(&B.kv_full[s], (G / ST) & 1);
       tc_fence_after();
@@ -137,9 +142,10 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
       __syncwarp();
       if (w == 0 && lane == 0) TR(1, G);
     };
-    for (int G = 0; G < 2 && G < nblk; ++G) qk(G);
-    for (int G = 0; G < nblk; ++G) {
-      const int li = G / nb, n = G % nb, s = G % ST;
+    auto step2 = [&](int li, int n, int& li2, int& n2) { li2 = li; n2 = n + 2; while (n2 >= nb) { n2 -= nb; ++li2; } };
+    for (int G = 0; G < 2 && G < nblk; ++G) qk(G, G / nb, G % nb);
+    for (int G = 0, li = 0, n = 0; G < nblk; ++G) {                        // (li, n) advance incrementally
+      const int s = G % ST;
       mbar_wait(&B.p_full[w], G & 1);
       if (n == 0 && li >= 1) mbar_wait(&B.o_free[w], (li - 1) & 1);        // the previous item's O has been read out
       tc_fence_after();
@@ -153,7 +159,8 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
       }
       __syncwarp();
       if (w == 0 && lane == 0) TR(6, G);
-      if (G + 2 < nblk) qk(G + 2);
+      if (G + 2 < nblk) { int li2, n2; step2(li, n, li2, n2); qk(G + 2, li2, n2); }
+      if (++n == nb) { n = 0; ++li; }
     }
   } else if (warp >= 4) {
     // ------------------------------------------------------------------------------------ softmax of sample a0 + w, one query row per thread
@@ -162,8 +169,9 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const f2 CQ = mk2(0.14433756729740643f, 0.14433756729740643f), L2E = mk2(LOG2E, LOG2E);
     float m_i = -INFINITY, l_i = 0.f;
-    for (int G = 0; G < nblk; ++G) {
-      const int li = G / nb, n = G % nb, s = G % ST;
+    for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
+      if (n == nb) { n = 0; ++li; }
+      const int s = G % ST;
       if (n == 0) { m_i = -INFINITY; l_i = 0.f; }
       mbar_wait(&B.kv_full[s], (G / ST) & 1);                              // the bias tile of this block
       mbar_wait(&B.s_full[w][G & 1], (G >> 1) & 1);
@@ -243,22 +251,40 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
         const float inv = 1.f / l_i;
         const int row = m0 + (int)r, a = a0 + w;
         float* orow = O + ((size_t)a * L + row) * DM + head * DH;
+        uint32_t ov[48];
 #pragma unroll
-        for (int cc = 0; cc < 3; ++cc) {
-          uint32_t ov[16];
-          tmem_ld16(trow + T_O + w * 64 + cc * 16, ov);
-          tmem_wait_ld();
-#pragma unroll
-          for (int k = 0; k < 4; ++k)
-            *reinterpret_cast<float4*>(orow + cc * 16 + 4 * k) = make_float4(__uint_as_float(ov[4 * k]) * inv, __uint_as_float(ov[4 * k + 1]) * inv,
-                                                                              __uint_as_float(ov[4 * k + 2]) * inv, __uint_as_float(ov[4 * k + 3]) * inv);
-        }
+        for (int cc = 0; cc < 3; ++cc) tmem_ld16(trow + T_O + w * 64 + cc * 16, *reinterpret_cast<uint32_t(*)[16]>(ov + 16 * cc));
+        tmem_wait_ld();
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.o_free[w]);
+        if (TST) {
+          const uint32_t xa = su + O_X + w * (XA + XB), xb = xa + XA;
+          if (r == 0) tma_store_wait_read0();                              // the previous item's store has left the staging buffer
+          named_bar_sync(1 + w, 128);
+#pragma unroll
+          for (int q = 0; q < 12; ++q) {
+            const uint4 u = make_uint4(__float_as_uint(__uint_as_float(ov[4 * q]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 1]) * inv),
+                                       __float_as_uint(__uint_as_float(ov[4 * q + 2]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 3]) * inv));
+            if (q < 8) sts128(xa + sw128(r, q), u); else sts128(xb + sw64(r, q - 8), u);
+          }
+          fence_proxy_async();
+          named_bar_sync(1 + w, 128);
+          if (r == 0) {
+            tma_store_2d(&moa, xa, head * DH, a * L + m0);
+            tma_store_2d(&mob, xb, head * DH + 32, a * L + m0);
+            tma_store_commit();
+          }
+        } else {
+#pragma unroll
+          for (int k = 0; k < 12; ++k)
+            *reinterpret_cast<float4*>(orow + 4 * k) = make_float4(__uint_as_float(ov[4 * k]) * inv, __uint_as_float(ov[4 * k + 1]) * inv,
+                                                                   __uint_as_float(ov[4 * k + 2]) * inv, __uint_as_float(ov[4 * k + 3]) * inv);
+        }
         LSE[((size_t)a * 16 + head) * L + row] = m_i * LOG2E + __log2f(l_i);
       }
     }
+    if (TST && r == 0) tma_store_wait0();
   }
   tc_fence_before();
   __syncthreads();

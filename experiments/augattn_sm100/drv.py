@@ -31,7 +31,8 @@ class TensorMap:
         self.keep = tensor
         sw = {0: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_NONE, 32: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_32B,
               64: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_64B, 128: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_128B}[swizzle]
-        dt = {"bf16": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, "u8": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8}[dtype]
+        dt = {"bf16": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, "u8": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8,
+              "f32": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT32}[dtype]
         self.tm = _chk(cu.cuTensorMapEncodeTiled(dt, 2, tensor.data_ptr(),
                                                  [cu.cuuint64_t(d) for d in dims], [cu.cuuint64_t(stride_bytes)], [cu.cuuint32_t(b) for b in box],
                                                  [cu.cuuint32_t(1), cu.cuuint32_t(1)], cu.CUtensorMapInterleave.CU_TENSOR_MAP_INTERLEAVE_NONE, sw,

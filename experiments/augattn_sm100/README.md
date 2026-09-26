@@ -6,6 +6,8 @@ sharing one pair bias per head):
 
     o[a, :, i, h] = softmax_j( q[a, i, h] . k[a, j, h] / sqrt(48) + bias[h, i, j] ) v[a, j, h]      H = 16, D = 48, A = 48
 
-Files: `src/attn_fwd.cu` (v1, one CTA per (head, q-tile, sample pair)), `src/attn_fwd2.cu` (persistent, current), `ops.py` (hosts),
-`bench_base.py` (baselines), `test_fwd.py`, `trace_fwd*.py`, `prof_fwd.py` (ncu via gcsudo), `src/n48_test.cu` (layout unit test).
-Rounds in `rounds/`.
+Files: `src/attn_fwd2.cu` (forward, persistent), `src/attn_dqb.cu` (backward dQ + dbias), `src/attn_dkv.cu` (backward dK + dV),
+`attn_op.py` (autograd op + backward glue), `ops.py` (cubin hosts), `bench_train.py` (fp64 check + inference / training
+latency), `bench_base.py` (baselines), `test_fwd.py`, `test_bwd.py`, `trace_*.py`, `prof_*.py` (ncu via gcsudo), `energy.py`.
+Older / rejected: `src/attn_fwd.cu` (v1), `src/attn_dkv4.cu`. Probes: `src/n48_test.cu`, `src/mufu_bench.cu`, `src/mma_lat.cu`.
+Build: `./build.sh attn_fwd2 && ./build.sh attn_dqb && ./build.sh attn_dkv` on the B200 box. Rounds in `rounds/`.
