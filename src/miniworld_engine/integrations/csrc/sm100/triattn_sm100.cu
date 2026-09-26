@@ -189,7 +189,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
           float mr = m[rr], lr = 0.f;
           const float2 sc2 = make_float2(scl, scl), l2 = make_float2(L2E, L2E);
           // x = S * scale*log2e + bias * log2e for chunk c (32 keys), bias from the staged tile
-          auto logits = [&](int c, float* s32) {
+          auto logits = [&](int c, float* s32, float2 nm0) {   // x = S * scale*log2e + bias * log2e + nm0 (two FFMA2 a pair)
             const __nv_bfloat16* bp = brow + (c >> 1) * BM * 64;
 #pragma unroll
             for (int e = 0; e < 4; ++e) {
@@ -198,7 +198,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
 #pragma unroll
               for (int k2 = 0; k2 < 4; ++k2) {
                 const int i2 = e * 8 + k2 * 2;
-                const float2 xx = fma2(bf2f(w[k2]), l2, mul2(make_float2(s32[i2], s32[i2 + 1]), sc2));
+                const float2 xx = fma2(bf2f(w[k2]), l2, fma2(make_float2(s32[i2], s32[i2 + 1]), sc2, nm0));
                 s32[i2] = xx.x; s32[i2 + 1] = xx.y;
               }
             }
@@ -212,18 +212,21 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
             for (int c = 0; c < 4; ++c) {
               if (c + 1 < 4) tmem_ld32(sb + (c + 1) * 32, s32[(c + 1) & 1]);
               float* sc = s32[c & 1];
-              logits(c, sc);
               if (j == 0 && c == 0) {            // the row's offset: the first 32 keys' maximum, fixed for the task (overflow
-                float m0 = sc[0], m1 = sc[1];    // needs a later logit ~125 log2 units above it; the epilogue counts any)
+                logits(c, sc, make_float2(0.f, 0.f));   // needs a later logit ~125 log2 units above it; the epilogue counts any)
+                float m0 = sc[0], m1 = sc[1];
 #pragma unroll
                 for (int i2 = 2; i2 < 32; i2 += 2) { m0 = fmaxf(m0, sc[i2]); m1 = fmaxf(m1, sc[i2 + 1]); }
                 mr = fmaxf(m0, m1);
+#pragma unroll
+                for (int i2 = 0; i2 < 32; ++i2) sc[i2] -= mr;
+              } else {
+                logits(c, sc, make_float2(-mr, -mr));
               }
-              const float2 nm = make_float2(-mr, -mr);
               uint32_t pk[16];
 #pragma unroll
               for (int k2 = 0; k2 < 16; ++k2) {
-                const float2 xx = add2(make_float2(sc[k2 * 2], sc[k2 * 2 + 1]), nm);
+                const float2 xx = make_float2(sc[k2 * 2], sc[k2 * 2 + 1]);
                 float2 pv;
                 if (TA_POLY && (k2 & 1)) pv = ex2_poly2(xx);
                 else pv = make_float2(ex2f(xx.x), ex2f(xx.y));
