@@ -100,10 +100,16 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef FLOOR
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
+#ifndef QWID
+#define QWID 48                  // TMA box width for q / k / v: 48 loads exactly the head (the 128-B swizzled smem image
+#endif                           // keeps its pitch); 64 also pulled 16 columns of the next field. From attn_fwd.cu.
+#ifndef DESCB
+#define DESCB 1                  // wgmma descriptors as base + (byte offset >> 4) instead of smem_desc per k-step
+#endif
 #ifndef PIPE
 #define PIPE 0                   // 1: software-pipelined (softmax of one key block under the previous block's PV)
 #endif
-constexpr int BN = 64, DH = 48, QW = 64, QM = 64 * NWG;    // key block, head dim, load width, query rows
+constexpr int BN = 64, DH = 48, QW = QWID, QM = 64 * NWG;    // key block, head dim, load width, query rows
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
 TMN_DEVI uint64_t dmn(uint32_t base, int ks) { return smem_desc(base + ks * 2048, 16, 1024, 1); }   // MN-major, k-step = 16 rows
@@ -252,7 +258,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     const int iss = tid - 128 * NWG;                                // 0 = k, 1 = v, 2 = bias
     if (iss == 0) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mkv); tma_prefetch_desc(&mbias);
-      mbar_arrive_expect_tx(qbar, QM * 128);
+      mbar_arrive_expect_tx(qbar, QM * QW * 2);
       tma_load_2d(QREG ? sm + OFF_ST + QSTAGE : sm, &mq, qbar, qcol, row0);   // q tile: QM rows
     }
     if (QREG && iss < NISS) mbar_wait(qdone, 0);                    // q is out of slot 0 and in the consumers' registers
@@ -262,7 +268,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
         mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
         uint8_t* slot = sm + OFF_ST + s * ST_BYTES;
         if (NISS == 1) {                                            // one thread issues all three
-          mbar_arrive_expect_tx(&full[s], ST_BYTES);
+          mbar_arrive_expect_tx(&full[s], 2 * BN * QW * 2 + SB);
           tma_load_2d(slot, &mkv, &full[s], 768 + qcol, samp * L + n * BN);                        // k
           tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v
           if (CLS == 1 && !MCBIAS)
@@ -270,10 +276,10 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
           else if (rank == (uint32_t)(n % CLS))                     // rotate the issuer: one CTA issuing every block's
             tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow0 + head * L + m0, (1u << CLS) - 1);
         } else if (iss == 0) {
-          mbar_arrive_expect_tx(&full[s], SKV);
+          mbar_arrive_expect_tx(&full[s], BN * QW * 2);
           tma_load_2d(slot, &mkv, &full[s], 768 + qcol, samp * L + n * BN);                        // k: BN rows
         } else if (iss == 1) {
-          mbar_arrive_expect_tx(&full[s], SKV);
+          mbar_arrive_expect_tx(&full[s], BN * QW * 2);
           tma_load_2d(slot + SKV, &mkv, &full[s], 1536 + qcol, samp * L + n * BN);                 // v: BN rows
         } else {
           mbar_arrive_expect_tx(&full[s], SB);                      // the bias bytes arrive from rank 0's multicast
@@ -352,6 +358,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     dK[i] = dsw(sbase + i * ST_BYTES);
     dV[i] = dmn(sbase + i * ST_BYTES + SKV, 0);
   }
+  const uint64_t dK0 = dsw(sbase), dV0 = dmn(sbase + SKV, 0);
 
   auto qk_into = [&](float* dst, int n) {                           // wait for block n's tiles, issue its QK
     const int sn = n % STAGES;
@@ -376,7 +383,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
     wgmma_fence();
 #pragma unroll
     for (int ks = 0; ks < DH / 16; ++ks) {
-      const uint64_t bk = DHOIST ? dK[sn] + ks * 2 : dsw(sbase + sn * ST_BYTES + ks * 32);
+      const uint64_t bk = DHOIST ? dK[sn] + ks * 2 : DESCB ? dK0 + ((sn * ST_BYTES + ks * 32) >> 4) : dsw(sbase + sn * ST_BYTES + ks * 32);
       if (QREG) mma_s_rs(dst, qr[ks], bk, BACC || ks != 0);
       else mma_s(dst, dsw(sq + ks * 32), bk, BACC || ks != 0);
     }
@@ -517,7 +524,7 @@ attn_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUte
       for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #pragma unroll
       for (int ks = 0; ks < BN / 16; ++ks) {
-        mma_o(acc, pa[ks], DHOIST ? dV[sl] + ks * 128 : dmn(slot + SKV, ks));
+        mma_o(acc, pa[ks], DHOIST ? dV[sl] + ks * 128 : DESCB ? dV0 + ((sl * ST_BYTES + ks * 2048) >> 4) : dmn(slot + SKV, ks));
         if (LSUM) mma_l(lacc, pa[ks], dOnes + ks * 128);
       }
       wgmma_commit();
