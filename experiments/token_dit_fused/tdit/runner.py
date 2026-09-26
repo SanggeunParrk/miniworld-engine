@@ -243,7 +243,6 @@ class FusedTokenDiT:
                 h=torch.empty(M, self.per[0]["wa_t"].shape[1], device=dev, dtype=self.dtype),
                 # the attention core allocates and fills an all-true mask per call when handed None
                 keep=torch.ones(S, 1, L, device=dev, dtype=torch.bool),
-                lse=torch.empty(S, 1, self.h, L, device=dev, dtype=torch.float32),
                 # v2
                 xa=torch.empty(M, self.d, device=dev, dtype=self.dtype),
                 qkvg2=torch.empty(M, 4 * self.d, device=dev, dtype=self.dtype),
@@ -337,6 +336,8 @@ class FusedTokenDiT:
                 attention_gated_in_place(q4, k4, v4, g4, bias[b * H:(b + 1) * H], keep2, self.prescale, self.core_precision)   # sigmoid(g)*o over q
                 torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
             else:
+                if "lse" not in buf:                                    # only this fallback core writes an LSE
+                    buf["lse"] = torch.empty(S, 1, H, L, device=x.device, dtype=torch.float32)
                 attention_in_place(q, k, v, bias[b * H:(b + 1) * H].unsqueeze(0), buf["keep"], buf["lse"], key)
                 K.gate_rows(qkvg[:, :D], qkvg[:, 3 * D:], a)            # o sits where q was
                 torch.mm(a, p["wo"].t(), out=y)
