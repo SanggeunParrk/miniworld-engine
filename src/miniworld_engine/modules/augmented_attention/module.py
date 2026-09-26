@@ -22,6 +22,13 @@ from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
 
 
+def _bf16_sm90_enabled() -> bool:
+    """Whether a bf16 attention core on sm_90 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm90)."""
+    from miniworld_engine import settings
+
+    return settings.current().augmented_attention_bf16_sm90 and settings.current().engine_backend != "triton"
+
+
 class AugmentedAttentionPairBias(nn.Module):
     """Augmented attention with pair bias and adaptive conditioning.
 
@@ -119,6 +126,13 @@ class AugmentedAttentionPairBias(nn.Module):
         kernel actually received (``tensor_dtype_of("Q")``), so casting here is what makes a bf16
         run and an fp32 run land in different cache buckets instead of overwriting each other.
         """
+        if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.TRITON
+                and _bf16_sm90_enabled()):
+            from miniworld_engine.kernels.augmented_attention import cuda_sm90
+
+            if cuda_sm90.available(query, bias):
+                # Takes the fp32 (or bf16) tensors as they are: the bf16 cast happens in the kernels' one prep pass.
+                return cuda_sm90.augmented_attention_bf16_sm90(query, key, value, bias, mask)
         if compute_dtype is not None:
             query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
 
