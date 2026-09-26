@@ -1,4 +1,4 @@
-"""The sm_90 bf16 pair-bias attention core (kernels/augmented_attention/cuda_sm90) against an fp64 truth, and its
+"""The sm_90 bf16 pair-bias attention core (kernels/augmented_attention/cuda) against an fp64 truth, and its
 module wiring.
 
 The kernels round their operands to bf16, so the bar is not "close to fp64" but "no worse than the same math on the
@@ -45,7 +45,7 @@ def _rel(a, b):
 
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
 def test_gate_rejects_what_the_tiles_cannot_take():
-    from miniworld_engine.kernels.augmented_attention import cuda_sm90
+    from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
 
     q, _, _, bias, _ = _inputs(3, 128)
     assert cuda_sm90.supported(q, bias) is HOPPER
@@ -66,7 +66,7 @@ def test_gate_rejects_what_the_tiles_cannot_take():
     (6, 256, 4.0, 0.0, False),    # wide logits; L % 192 != 0 takes the 2-warpgroup dQ build on the fallback
 ])
 def test_matches_fp64_at_the_bf16_input_floor(A, L, bias_scale, mask_frac, head_major):
-    from miniworld_engine.kernels.augmented_attention import cuda_sm90
+    from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
 
     q, k, v, bias, mask = _inputs(A, L, seed=A * 1000 + L, bias_scale=bias_scale, mask_frac=mask_frac)
     do = torch.randn(A, 1, L, 16, 48, device="cuda")
@@ -89,7 +89,7 @@ def test_matches_fp64_at_the_bf16_input_floor(A, L, bias_scale, mask_frac, head_
 
 @needs_hopper
 def test_no_grad_keeps_nothing():
-    from miniworld_engine.kernels.augmented_attention import cuda_sm90
+    from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
 
     q, k, v, bias, _ = _inputs(6, 256)
     with torch.no_grad():
@@ -133,7 +133,7 @@ def test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error():
 
     truth = run(ref)
     calls = []
-    from miniworld_engine.kernels.augmented_attention import cuda_sm90
+    from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
     orig = cuda_sm90.augmented_attention_bf16_sm90
     cuda_sm90.augmented_attention_bf16_sm90 = lambda *a, **k: calls.append(1) or orig(*a, **k)
     try:
@@ -149,3 +149,38 @@ def test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error():
     for name, a, b, t in zip(("out", "dsingle", "dcond", "dpair"), sm90, tri, truth):
         es, et = _rel(a, t), _rel(b, t)
         assert es < 1.5 * et + 1e-4, f"{name}: sm90 {es:.2e} vs triton bf16 {et:.2e}"
+
+
+@needs_hopper
+def test_checkpoint_keeping_attention_skips_the_recompute_and_changes_nothing():
+    """Per-block checkpointing with checkpoint_context_keeping_attention(): the backward's recompute reuses O and the
+    LSE instead of launching the forward kernel again, and every gradient is bitwise what plain checkpointing gives
+    (the kernel is deterministic, so the kept O is the O a recompute would produce)."""
+    from torch.utils.checkpoint import checkpoint
+
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
+    A, L, NB = 3, 256, 3
+    torch.manual_seed(0)
+    ws = [torch.randn(768, 768, device="cuda") * 768 ** -0.5 for _ in range(3 * NB)]
+    x0 = torch.randn(A, 1, L, 768, device="cuda")
+    bias = torch.randn(1, L, L, 16, device="cuda")
+
+    def block(x, i):
+        q, k, v = ((x @ ws[3 * i + j]).view(A, 1, L, 16, 48) for j in range(3))
+        return x + sm90.augmented_attention_bf16_sm90(q, k, v, bias).reshape(A, 1, L, 768)
+
+    def run(keep):
+        x = x0.clone().requires_grad_()
+        y = x
+        for i in range(NB):
+            kw = {"context_fn": sm90.checkpoint_context_keeping_attention} if keep else {}
+            y = checkpoint(block, y, i, use_reentrant=False, **kw)
+        before = sm90.FWD_LAUNCHES[0]
+        y.square().mean().backward()
+        return x.grad, sm90.FWD_LAUNCHES[0] - before
+
+    g_plain, recomputes_plain = run(False)
+    g_keep, recomputes_keep = run(True)
+    assert recomputes_plain == NB and recomputes_keep == 0
+    assert torch.equal(g_plain, g_keep)

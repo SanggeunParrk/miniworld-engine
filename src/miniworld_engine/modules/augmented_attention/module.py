@@ -128,7 +128,7 @@ class AugmentedAttentionPairBias(nn.Module):
         """
         if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.TRITON
                 and _bf16_sm90_enabled()):
-            from miniworld_engine.kernels.augmented_attention import cuda_sm90
+            from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
 
             if cuda_sm90.available(query, bias):
                 # Takes the fp32 (or bf16) tensors as they are: the bf16 cast happens in the kernels' one prep pass.

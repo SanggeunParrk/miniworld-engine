@@ -29,7 +29,8 @@ floor (O 4.7e-3 against a floor of 4.4e-3 at unit-variance inputs); in the token
 engine's bf16 Triton core (tests/numerics/test_augmented_attention_bf16_sm90_gpu.py).
 
 ``supported()`` is the whole gate: sm_90, 16 heads x 48, B == 1, L a multiple of 128. Everything else keeps the
-Triton path.
+Triton path, and so do fake tensors and torch.compile tracing (``available()``): the op is a plain autograd Function
+around native extensions, with no fake implementation.
 """
 
 from __future__ import annotations
@@ -94,6 +95,11 @@ def available(q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
     global _BUILD_FAILED
     if _BUILD_FAILED or not supported(q, bias, bias_head_major):
         return False
+    # Under FakeTensorMode (``dev derive``) or while torch.compile traces, keep the Triton path: a native extension
+    # cannot run on fake tensors, and the Triton path is the one with fakes and autotune keys to record.
+    from torch._subclasses.fake_tensor import FakeTensor
+    if torch.compiler.is_compiling() or isinstance(q, FakeTensor) or isinstance(bias, FakeTensor):
+        return False
     try:
         _ext("attn_fwd")
     except Exception as exc:  # noqa: BLE001
@@ -118,7 +124,7 @@ def _prep_qkv(q, k, v, scale):
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     n = q.numel()
     qs, kb, vb = (torch.empty(n, device=q.device, dtype=torch.bfloat16) for _ in range(3))
-    _prep_qkv_kernel[(triton.cdiv(n, 4096),)](q, k, v, qs, kb, vb, n, scale, BLOCK=4096, num_warps=8)
+    _prep_qkv_kernel[(triton.cdiv(n, 4096),)](q, k, v, qs, kb, vb, n, scale, BLOCK=4096)
     return qs.view(-1, H * D), kb.view(-1, H * D), vb.view(-1, H * D)
 
 
@@ -141,7 +147,7 @@ def _prep_do(do, o, A, L):
     do = do.reshape(A * L, H * D).contiguous()
     dob = torch.empty(A * L, H * D, device=do.device, dtype=torch.bfloat16)
     dd = torch.empty(A, H, L, device=do.device, dtype=torch.float32)
-    _prep_do_kernel[((A * L) // 8,)](do, o.reshape(A * L, H * D), dob, dd, L, NH=H, DH=D, DP=64, ROWS=8, num_warps=8)
+    _prep_do_kernel[((A * L) // 8,)](do, o.reshape(A * L, H * D), dob, dd, L, NH=H, DH=D, DP=64, ROWS=8)
     return dob, dd
 
 
@@ -157,8 +163,55 @@ def _bias_prep(bias_hll):
     bias_hll = bias_hll.contiguous()
     out = torch.empty(bias_hll.shape, device=bias_hll.device, dtype=torch.bfloat16)
     n = bias_hll.numel()
-    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](bias_hll, out, n, LOG2E, BLOCK=4096, num_warps=8)
+    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](bias_hll, out, n, LOG2E, BLOCK=4096)
     return out
+
+
+# --------------------------------------------------------------------------------------------------- forward op
+# The forward kernel is a torch.library op so selective activation checkpointing can name it: with
+# ``checkpoint_context_keeping_attention()`` a checkpointed block keeps O and the LSE from its first forward and the
+# recompute skips the kernel (see that function).
+#: Forward kernel launches in this process (tests use it to see a checkpoint recompute skip the kernel).
+FWD_LAUNCHES = [0]
+
+
+def _fwd_impl(qs: torch.Tensor, kb: torch.Tensor, vb: torch.Tensor, bb: torch.Tensor,
+              km: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+    FWD_LAUNCHES[0] += 1
+    L = bb.shape[1]
+    A = qs.shape[0] // L
+    o = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
+    lse = torch.empty(A, H, L, device=qs.device, dtype=torch.float32)
+    _ext("attn_fwd").attn_fwd(qs, kb, vb, bb, km, o, lse)
+    return o, lse
+
+
+def _fwd_fake(qs, kb, vb, bb, km):
+    L = bb.shape[1]
+    return (qs.new_empty(qs.shape, dtype=torch.float32),
+            qs.new_empty((qs.shape[0] // L, H, L), dtype=torch.float32))
+
+
+_FWD_NAME = "miniworld_engine::augattn_bf16_sm90_fwd"
+try:
+    _fwd_op = torch.library.custom_op(_FWD_NAME, _fwd_impl, mutates_args=())
+    _fwd_op.register_fake(_fwd_fake)
+except RuntimeError:                        # already registered in this process (module reloaded)
+    pass
+FWD_OP = torch.ops.miniworld_engine.augattn_bf16_sm90_fwd.default
+
+
+def checkpoint_context_keeping_attention():
+    """``context_fn`` for ``torch.utils.checkpoint`` (non-reentrant): keep this core's forward outputs (O fp32 and the
+    LSE, 115 MB a call at L768 / A48) and recompute everything else. Under per-block checkpointing the backward's
+    recompute then skips the attention forward (334 us a block at L768); the cost is O and LSE held from the forward
+    to the backward for every checkpointed block."""
+    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+
+    def policy(ctx, op, *args, **kwargs):
+        return CheckpointPolicy.MUST_SAVE if op == FWD_OP else CheckpointPolicy.PREFER_RECOMPUTE
+
+    return create_selective_checkpoint_contexts(policy)
 
 
 # --------------------------------------------------------------------------------------------------- op
@@ -171,9 +224,7 @@ class _AttentionBf16Sm90(torch.autograd.Function):
         km = None
         if mask is not None:
             km = torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
-        o = torch.empty(A * L, H * D, device=q.device, dtype=torch.float32)
-        lse = torch.empty(A, H, L, device=q.device, dtype=torch.float32)
-        _ext("attn_fwd").attn_fwd(qs, kb, vb, bb, km, o, lse)
+        o, lse = FWD_OP(qs, kb, vb, bb, km)
         if torch.is_grad_enabled() or any(ctx.needs_input_grad):
             ctx.save_for_backward(qs, kb, vb, bb, km if km is not None else torch.empty(0, device=q.device), o, lse)
         ctx.has_mask, ctx.head_major, ctx.dims = km is not None, bias_head_major, (A, L)
@@ -212,4 +263,4 @@ def augmented_attention_bf16_sm90(q, k, v, bias, mask=None, *, bias_head_major: 
     return _AttentionBf16Sm90.apply(q, k, v, bias, mask, bias_head_major)
 
 
-__all__ = ["augmented_attention_bf16_sm90", "available", "supported"]
+__all__ = ["FWD_OP", "augmented_attention_bf16_sm90", "available", "checkpoint_context_keeping_attention", "supported"]
