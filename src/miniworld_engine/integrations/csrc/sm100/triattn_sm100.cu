@@ -11,7 +11,9 @@
 // The softmax offset m_r is the row maximum of the first key tile and is never moved afterwards (no running maximum, no O rescale):
 // a later logit would have to exceed it by ~100 log2 units to overflow, which a guard counts (FLAGS) -- the H100 kernel's max-free
 // softmax, with its offset fixed at the first tile.
-// Warps: 0 = TMA producer (Q of the task's rows, K|V per sub-step, the bias tile per key tile), 1 = MMA issue, 2-5 = softmax + epilogue.
+// Warps: 0 = TMA producer (Q of the task's rows, K|V per sub-step, the bias tile per key tile), 1 = MMA issue, 2-5 / 6-9 = two softmax
+// groups (rows 0, 2 / 1, 3 of the task: sub-step x uses S buffer x & 1 = r & 1) + their rows' epilogue.  A task always has R rows
+// (rows past N are computed on row N-1 and not stored), so the sub-step parity is the row parity.
 #include <torch/extension.h>
 #include "sm100.cuh"
 using namespace sm100;
@@ -22,7 +24,7 @@ constexpr int QT = BM * D;                                 // Q tile [128 q][32]
 constexpr int KVT = BN * D;                                // K or V tile [128 k][32], 64B swizzle (8 KiB)
 constexpr int BT = BM * BN;                                // bias tile [2 key halves][128 q][64], 128B swizzle, bf16 (32 KiB)
 constexpr int NKV = 5, NB = 2;
-constexpr int THREADS = 192;
+constexpr int THREADS = 320;                               // 0 TMA, 1 MMA, 2-5 softmax group 0 (even rows), 6-9 group 1 (odd rows)
 constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT) * 2 + 512;
 constexpr int COL_S = 0, COL_O = 256;                      // S/P [2][128] | O [2 tasks][R rows][32]
 constexpr uint32_t ID_S = idesc_bf16(128, BN, 0, 0);       // A = Q K-major, B = K K-major
@@ -52,17 +54,17 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
   uint64_t* kvf = qe + 2;            // [NKV]
   uint64_t* kve = kvf + NKV;         // [NKV] the PV GEMM of the stage retired
   uint64_t* bf = kve + NKV;          // [NB]
-  uint64_t* be = bf + NB;            // [NB]  count 4: the softmax is done with the bias tile (all R rows)
+  uint64_t* be = bf + NB;            // [NB]  count 8: both softmax groups are done with the bias tile
   uint64_t* sf = be + NB;            // [2]   S of the sub-step ready
   uint64_t* pf = sf + 2;             // [2]   count 4: P written (over S)
   uint64_t* of = pf + 2;             // [2]   the task's O complete
-  uint64_t* oe = of + 2;             // [2]   count 4: drained
+  uint64_t* oe = of + 2;             // [2]   count 8: both groups drained their rows
   uint32_t* tslot = reinterpret_cast<uint32_t*>(oe + 2);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int k = 0; k < 2; ++k) { bar_init(qf + k, 1); bar_init(qe + k, 1); bar_init(sf + k, 1); bar_init(pf + k, 4); bar_init(of + k, 1); bar_init(oe + k, 4); }
+    for (int k = 0; k < 2; ++k) { bar_init(qf + k, 1); bar_init(qe + k, 1); bar_init(sf + k, 1); bar_init(pf + k, 4); bar_init(of + k, 1); bar_init(oe + k, 8); }
     for (int k = 0; k < NKV; ++k) { bar_init(kvf + k, 1); bar_init(kve + k, 1); }
-    for (int k = 0; k < NB; ++k) { bar_init(bf + k, 1); bar_init(be + k, 4); }
+    for (int k = 0; k < NB; ++k) { bar_init(bf + k, 1); bar_init(be + k, 8); }
     bar_init_fence();
   }
   if (warp == 1) tmem_alloc(tslot, 512);
@@ -72,14 +74,14 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
   const uint32_t tmem = *tslot;
   // task t: q tile fastest (the CTAs sharing a row group's K / V run together), then the row group, then (b, h)
   auto decode = [&](int t, int& bh, int& qt, int& g) { qt = t % QTILES; const int r = t / QTILES; g = r % NG; bh = r / NG; };
-  auto row0 = [&](int bh, int n) -> int { const int b = bh / H, h = bh % H; return ((b * N + n) * H + h) * S; };   // first (b,n,h) row
+  auto row0 = [&](int bh, int n) -> int { const int b = bh / H, h = bh % H; n = min(n, N - 1); return ((b * N + n) * H + h) * S; };   // first (b,n,h) row
 
   if (warp == 0) {
     if (lane == 0) {
       int lt = 0, x = 0, jb = 0;
       for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
         int bh, qt, g; decode(t, bh, qt, g);
-        const int nr = min(R, N - g * R), qb = lt & 1;
+        const int nr = R, qb = lt & 1;
         if (lt >= 2) wait(qe + qb, ((lt >> 1) - 1) & 1);
         expect_tx(qf + qb, nr * QT * 2);
         for (int r = 0; r < nr; ++r) load_2d(&qmap, sQ + (qb * R + r) * QT, qf + qb, 0, row0(bh, g * R + r) + qt * BM);
@@ -121,7 +123,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
     };
     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
       int bh, qt, g; decode(t, bh, qt, g);
-      const int nr = min(R, N - g * R), qb = lt & 1, ob = lt & 1;
+      const int nr = R, qb = lt & 1, ob = lt & 1;
       wait(qf + qb, (lt >> 1) & 1);
       if (lt >= 2) wait(oe + ob, ((lt >> 1) - 1) & 1);   // the task two back has been drained from O buffer ob
       tc_fence_after();
@@ -148,23 +150,24 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
     if (pend >= 0) pv();
   } else {
     const int q = warp & 3, row = q * 32 + lane;   // TMEM lane = query row of the tile
+    const int gi = (warp - 2) >> 2;                // this group's rows: gi, gi + 2
     int lt = 0, x = 0, jb = 0;
     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
       int bh, qt, g; decode(t, bh, qt, g);
-      const int nr = min(R, N - g * R), ob = lt & 1;
-      float m[R], l[R];
+      const int ob = lt & 1;
+      float m[R / 2], l[R / 2];
 #pragma unroll
-      for (int r = 0; r < R; ++r) { m[r] = 0.f; l[r] = 0.f; }
+      for (int r = 0; r < R / 2; ++r) { m[r] = 0.f; l[r] = 0.f; }
       for (int j = 0; j < NK; ++j, ++jb) {
         const int bs = jb % NB;
         wait(bf + bs, (jb / NB) & 1);
         const __nv_bfloat16* brow = sB + bs * BT + row * 64;
-        for (int r = 0; r < nr; ++r, ++x) {
-          const int b = x & 1;
-          wait(sf + b, (x >> 1) & 1);
+        for (int rr = 0; rr < R / 2; ++rr) {
+          const int r = gi + 2 * rr, xs = x + r, b = xs & 1;   // b == gi
+          wait(sf + b, (xs >> 1) & 1);
           tc_fence_after();
           const uint32_t sb = tmem_at(tmem + COL_S + b * BN, q * 32, 0);
-          float mr = m[r], lr = 0.f;
+          float mr = m[rr], lr = 0.f;
           if (j == 0) {                          // the row's offset: the first key tile's maximum
             float mx = -INFINITY;
 #pragma unroll 1
@@ -217,8 +220,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
           tc_fence_before();
           __syncwarp();
           if (lane == 0) arrive(pf + b);
-          m[r] = mr; l[r] += lr;
+          m[rr] = mr; l[rr] += lr;
         }
+        x += R;
         __syncwarp();
         if (lane == 0) arrive(be + bs);
       }
@@ -226,12 +230,14 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
       wait(of + ob, (lt >> 1) & 1);
       tc_fence_after();
       int bad = 0;
-      for (int r = 0; r < nr; ++r) {
+      for (int rr = 0; rr < R / 2; ++rr) {
+        const int r = gi + 2 * rr;
         float o[32];
         tmem_ld32(tmem_at(tmem + COL_O + (ob * R + r) * D, q * 32, 0), o);
         tmem_wait_ld();
-        const float inv = 1.f / l[r];
-        bad |= !(l[r] > 0.f) || !(l[r] < 3.0e38f);
+        if (g * R + r >= N) continue;          // a padding row
+        const float inv = 1.f / l[rr];
+        bad |= !(l[rr] > 0.f) || !(l[rr] < 3.0e38f);
         uint4* dst = reinterpret_cast<uint4*>(OUT + ((size_t)row0(bh, g * R + r) + qt * BM + row) * D);
 #pragma unroll
         for (int c8 = 0; c8 < 4; ++c8) {
