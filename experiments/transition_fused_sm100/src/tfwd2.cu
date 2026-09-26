@@ -204,7 +204,11 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           for (int k = 0; k < 8; ++k) {
             const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
             const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
+#ifdef FWD_F2
+            { const f2 H = mul2(mul2(mk2(a0, a1), mk2(sigmoid_kit(a0), sigmoid_kit(a1))), mk2(b0, b1)); hp[q * 8 + k] = pack_bf16(lo2(H), hi2(H)); }
+#else
             hp[q * 8 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+#endif
           }
           if (q < 3) tmem_wait_ld();
         }
@@ -319,7 +323,11 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           uint32_t o[4];
 #pragma unroll
           for (int k = 0; k < 4; ++k)
+#ifdef FWD_F2
+            { const f2 Y = add2(mk2(bf16lo(xw[k]), bf16hi(xw[k])), mk2u(acc[qq * 8 + 2 * k], acc[qq * 8 + 2 * k + 1])); o[k] = pack_bf16(lo2(Y), hi2(Y)); }
+#else
             o[k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(acc[qq * 8 + 2 * k]), bf16hi(xw[k]) + __uint_as_float(acc[qq * 8 + 2 * k + 1]));
+#endif
           sts128(ad, make_uint4(o[0], o[1], o[2], o[3]));
         }
       }

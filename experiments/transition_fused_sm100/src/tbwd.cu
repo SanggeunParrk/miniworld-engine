@@ -15,6 +15,22 @@
 //     from TMEM, one row per thread.
 #include "sm100.cuh"
 using namespace s100;
+#if defined(REGS_C)
+#define REG_LOW 40
+#define REG_GATE 152
+#define REG_EPI 160
+#elif defined(REGS_B)                                           // register split: producers / gates / epilogue (sum 4 x lo + 8 x g + 4 x e = 2048)
+#define REG_LOW 40
+#define REG_GATE 144
+#define REG_EPI 184
+#else
+#define REG_LOW 56
+#define REG_GATE 152
+#define REG_EPI 152
+#endif
+#ifndef EPI_SCALAR
+#define EPIF2                                                  // fp32x2 LayerNorm-backward epilogue in the DX role (EPI_SCALAR: v9)
+#endif
 #ifndef GATE1
 #define GATE2                                                  // fp32x2 gate arithmetic, bit-identical to the scalar form (GATE1)
 #endif
@@ -220,7 +236,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
     __syncwarp();
   } else if ((warp >= 4 && warp < 8) || warp >= 12) {
     // gate, split by columns over two warpgroups: warps 4-7 hidden units 0..31 of the slice, warps 12-15 units 32..63
-    setmaxnreg_inc<152>();
+    setmaxnreg_inc<REG_GATE>();
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const int half = warp >= 12 ? 1 : 0;
     for (int i = 0; i < n_local; ++i) {
@@ -228,7 +244,9 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
       mbar_wait(&B.dhab_full, i & 1);
       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 1);
       tc_fence_after();
+#ifndef GATE_LATEWAIT
       if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
+#endif
       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
 #if !defined(ABL_BGATE) && !defined(ABL_DWGATE)
       {
@@ -255,6 +273,22 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
 #endif
         tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
         if (cta == 0 && warp == 4 && lane == 0) TRB(0, 3, 1024 + i);
+#ifdef GATE_LATEWAIT
+        {                                                  // compute all 32 units first (overlapping the previous tile's wgrad), then wait, then store
+          uint32_t hq[16], aq[16], bq[16];
+#pragma unroll
+          for (int k = 0; k < 16; ++k) gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hq[k], aq[k], bq[k]);
+          if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
+#pragma unroll
+          for (int qq = 0; qq < 4; ++qq) {
+            const uint32_t off = sw128(r, half * 4 + qq);
+            sts128(su + W_H + off, make_uint4(hq[4 * qq], hq[4 * qq + 1], hq[4 * qq + 2], hq[4 * qq + 3]));
+            sts128(su + W_DAB + off, make_uint4(aq[4 * qq], aq[4 * qq + 1], aq[4 * qq + 2], aq[4 * qq + 3]));
+            sts128(su + W_DAB + KB + off, make_uint4(bq[4 * qq], bq[4 * qq + 1], bq[4 * qq + 2], bq[4 * qq + 3]));
+          }
+        }
+        if (false)
+#endif
 #pragma unroll
         for (int qq = 0; qq < 4; ++qq) {                   // 8 hidden units -> one 16-byte chunk of h, dA and dB each, stored right away
           uint32_t hp[4], dap[4], dbp[4];
@@ -302,7 +336,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
     }
   } else if (warp >= 8) {
     // the CTA's fp32 partials: [dWa_s; dWb_s] rows = TMEM lanes, dWs_s rows (d) = TMEM lanes
-    setmaxnreg_inc<152>();
+    setmaxnreg_inc<REG_EPI>();
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     mbar_wait(&B.wg_done, 0);
     tc_fence_after();
@@ -512,7 +546,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
     // ------------------------------------------------------------------------------------ gate: [dA | dB] back into TMEM; the two
     // warpgroups split every chunk by columns (warps 4-7 hidden units 0..31, warps 12-15 units 32..63), halving the gate's latency
     const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
-    setmaxnreg_inc<152>();
+    setmaxnreg_inc<REG_GATE>();
     const int half = warp >= 12 ? 1 : 0;
     for (int c = 0; c < nch; ++c) {
       const int s = c & 1, u = c >> 1;
@@ -579,7 +613,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
     }
   } else if (warp >= 8) {
     // ------------------------------------------------------------------------------------ LayerNorm backward + residual
-    setmaxnreg_inc<152>();
+    setmaxnreg_inc<REG_EPI>();
     const int t2 = (int)tid - 256;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const uint32_t gam_u = su + X_GAM;
@@ -609,6 +643,63 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       mbar_wait(&B.x_full[b], (i >> 1) & 1);
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 3);
       const uint32_t dyb = su + X_IN + b * INB, xb = dyb + IN_XN;
+#ifdef EPIF2
+      // fp32x2 form of the two passes (same formulas; x - mean times rstd as one fma, row sums in pair order)
+      const f2 RS = mk2(rs, rs), NMR = mk2(-mean * rs, -mean * rs);
+      f2 pa2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)}, pb2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)};
+#pragma unroll
+      for (int g = 0; g < 4; ++g) {
+        float work[32];
+#pragma unroll
+        for (int qq = 0; qq < 4; ++qq) {
+          const uint4 xv = lds128_nv(xb + (g >> 1) * KB + sw128(r, (g & 1) * 4 + qq));
+          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
+#pragma unroll
+          for (int kk = 0; kk < 4; ++kk) {
+            const int e = qq * 4 + kk, pr = g * 16 + e;           // column pair
+            const uint32_t n = dn[pr];
+            const f2 N = mk2(bf16lo(n), bf16hi(n));
+            const f2 XH = fma2(mk2(bf16lo(xw[kk]), bf16hi(xw[kk])), RS, NMR);
+            const float2 gg = lds64f_nv(gam_u + pr * 8);
+            const f2 W = mul2(mk2(gg.x, gg.y), N);
+            pa2[kk & 1] = fma2(XH, W, pa2[kk & 1]); pb2[kk & 1] = add2(pb2[kk & 1], W);
+            const f2 NX = mul2(N, XH);
+            work[2 * e] = lo2(NX); work[2 * e + 1] = hi2(NX);
+          }
+        }
+        const float sg = reduce_scatter32(work, lane);
+        if (real) accg[g] += sg;
+#pragma unroll
+        for (int e = 0; e < 16; ++e) { const uint32_t n = dn[g * 16 + e]; work[2 * e] = bf16lo(n); work[2 * e + 1] = bf16hi(n); }
+        const float sb = reduce_scatter32(work, lane);
+        if (real) accb[g] += sb;
+      }
+      if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 4);
+      const f2 PA = add2(pa2[0], pa2[1]), PB = add2(pb2[0], pb2[1]);
+      const float ca = (lo2(PA) + hi2(PA)) * (1.f / D_), cbv = (lo2(PB) + hi2(PB)) * (1.f / D_);
+      const f2 NCA = mk2(-ca, -ca), NCB = mk2(-cbv, -cbv);
+#pragma unroll
+      for (int cb = 0; cb < 2; ++cb)
+#pragma unroll
+        for (int q = 0; q < 8; ++q) {
+          const uint32_t off = cb * KB + sw128(r, q);
+          const uint4 xv = lds128(xb + off), dv = lds128(dyb + off);
+          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w}, dw[4] = {dv.x, dv.y, dv.z, dv.w};
+          uint32_t o[4];
+#pragma unroll
+          for (int k = 0; k < 4; ++k) {
+            const int pr = cb * 32 + q * 4 + k;
+            const uint32_t n = dn[pr];
+            const f2 XH = fma2(mk2(bf16lo(xw[k]), bf16hi(xw[k])), RS, NMR);
+            const float2 gg = lds64f(gam_u + pr * 8);
+            const f2 W = mul2(mk2(gg.x, gg.y), mk2(bf16lo(n), bf16hi(n)));
+            const f2 T = mul2(fma2(XH, NCA, add2(W, NCB)), RS);        // bf16((w - xhat ca - cb) rstd) + dy
+            const uint32_t t = pack_bf16(lo2(T), hi2(T));
+            o[k] = pack_bf16(bf16lo(t) + bf16lo(dw[k]), bf16hi(t) + bf16hi(dw[k]));
+          }
+          sts128(dyb + off, make_uint4(o[0], o[1], o[2], o[3]));
+        }
+#else
       // pass 1, 32 columns at a time: the two row sums (the sm_90a quad order: partial l over columns with (col >> 1) & 3 == l) and the
       // dgamma / dbeta terms, each reduced over the warp's 32 rows with one reusable 32-register work array
       float pca[4] = {0.f, 0.f, 0.f, 0.f}, pcb[4] = {0.f, 0.f, 0.f, 0.f};
@@ -662,6 +753,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           }
           sts128(dyb + off, make_uint4(o[0], o[1], o[2], o[3]));
         }
+#endif
 #else
       tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.dxn_empty);
       mbar_wait(&B.x_full[b], (i >> 1) & 1);
@@ -717,7 +809,7 @@ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_const
 #ifdef SPAN
   if (threadIdx.x == 0) { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); g_spanb[blockIdx.x][0] = t; }
 #endif
-  if (warp < 4) setmaxnreg_dec<56>();
+  if (warp < 4) setmaxnreg_dec<REG_LOW>();
   if ((int)blockIdx.x < ndw) weight_role(p, sm, blockIdx.x, warp, lane);
   else input_role(p, sm, blockIdx.x - ndw, gridDim.x - ndw, warp, lane);
 #ifdef SPAN
