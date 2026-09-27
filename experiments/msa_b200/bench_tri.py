@@ -7,7 +7,7 @@ import argparse, os, sys, pathlib, torch
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from bench import timeit
 from energy_sol import sustained
-from tri_b200 import TriangleAttentionB200
+from tri_b200 import TriangleAttentionB200, TriangleAttentionB200Fused
 from miniworld_engine.modules.triangle_attention.module import TriangleAttention
 from miniworld_engine.modules.exceptions import ImplementationType as IT
 sys.path.insert(0, os.environ["OPT_CORE_DIR"])
@@ -17,7 +17,7 @@ from einops import rearrange
 
 def make(impl, seed=0):
     torch.manual_seed(seed)
-    cls = TriangleAttentionB200 if impl == "ours" else TriangleAttention
+    cls = {"ours": TriangleAttentionB200Fused, "ours_core": TriangleAttentionB200}.get(impl, TriangleAttention)
     m = cls(128, 4, starting=True, implementation=IT.PYTORCH, p_drop=0.0)
     torch.nn.init.normal_(m.to_out.weight, std=0.02)                 # the zero init would hide the projections' gradients
     with torch.no_grad():
@@ -40,18 +40,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--L", type=int, nargs="+", default=[384])
     ap.add_argument("--check", type=int, default=1)
+    ap.add_argument("--impl", nargs="+", default=["pytorch", "anthropic", "ours_core", "ours"])
+    ap.add_argument("--mask", type=int, default=0)
     a = ap.parse_args()
     for L in a.L:
         g = torch.Generator(device="cuda").manual_seed(0)
         pair = torch.randn(1, L, L, 128, device="cuda", dtype=torch.bfloat16, generator=g)
         gout = torch.randn(1, L, L, 128, device="cuda", dtype=torch.bfloat16, generator=g)
-        mods = {"pytorch": make("pytorch"), "ours": make("ours")}
-        mods["ours"].load_state_dict(mods["pytorch"].state_dict())
+        mods = {"pytorch": make("pytorch"), "ours": make("ours"), "ours_core": make("ours_core")}
+        mods["ours"].load_state_dict(mods["pytorch"].state_dict()); mods["ours_core"].load_state_dict(mods["pytorch"].state_dict())
         if a.check:
             ref = make("pytorch").float(); ref.load_state_dict({k: v.float() for k, v in mods["pytorch"].state_dict().items()})
             x32 = pair.float().requires_grad_(True)
             y32 = ref(x32); gr = torch.autograd.grad(y32, [x32, *ref.parameters()], gout.float())
-            for name in ("pytorch", "ours"):
+            for name in ("pytorch", "ours_core", "ours"):
                 m = mods[name]; xb = pair.clone().requires_grad_(True)
                 y = m(xb); gg = torch.autograd.grad(y, [xb, *m.parameters()], gout)
                 rel = lambda u, w: ((u.float() - w.float()).norm() / w.float().norm()).item()
@@ -60,8 +62,8 @@ def main():
                 print(f"L={L} {name:8s} rel err vs fp32 module: out(sans residual) {ey:.2e}  worst grad {eg:.2e}", flush=True)
             del ref, x32, y32, gr
         rows = []
-        for name in ("pytorch", "anthropic", "ours"):
-            m = mods["ours" if name == "ours" else "pytorch"]
+        for name in [n for n in ("pytorch", "anthropic", "ours_core", "ours") if n in a.impl]:
+            m = mods["pytorch" if name == "anthropic" else name]
             m.eval()
             with torch.no_grad():
                 f = (lambda m=m: anthropic_forward(m, pair, "k2b")) if name == "anthropic" else (lambda m=m: m(pair))
