@@ -17,17 +17,7 @@ for _ in range(3): ext.triattn_bwd(qn, kn, vn, bias, don, lse, delta, sc)
 torch.cuda.synchronize()
 t = ext.triattn_tl()
 t0 = t[0, 0].item()
-names = ["mma:stt", "mma:qf", "mma:grd", "mma:pf", "g:start", "g:sf", "g:ld", "g:cmp", "g:pf", "tma:y", "tma:qe"]
-t0 = t[0, 0].item() if t[9, 0].item() == 0 else min(t[0, 0].item(), t[9, 0].item())
+names = os.environ.get("TL_NAMES", "mma:stt,mma:qf,mma:grd,mma:pf,g0:start,g0:bias,g0:sf,g0:cmp,g0:pf,-,g1:start,g1:bias,g1:sf,g1:cmp,g1:pf").split(",")
 print("y  " + " ".join(f"{n:>8s}" for n in names))
 for y in range(int(os.environ.get("TL_N", "24"))):
-    print(f"{y:2d} " + " ".join(f"{(t[e, y].item() - t0):8d}" for e in range(len(names))))
-
-print("task: g:copy-start  g:af  g:at-arrived  g:drain-start  g:df  g:ld-done  g:stores-done")
-for lt in range(4):
-    print(lt, " ".join(f"{(t[e, lt].item() - t0):8d}" for e in (11, 12, 13, 14, 15, 16, 17)))
-
-print("grad issue per stage: pf-seen, after dV0, dV1, dV2, dV3, all 8, commits  (deltas)")
-for y in range(1, 11):
-    ev = [t[3, y].item()] + [t[e, y].item() for e in (18, 19, 20, 21, 22, 23)]
-    print(y, " ".join(f"{ev[i] - ev[i - 1]:6d}" for i in range(1, len(ev))))
+    print(f"{y:2d} " + " ".join(f"{(t[e, y].item() - t0) if t[e, y].item() else 0:8d}" for e in range(len(names))))

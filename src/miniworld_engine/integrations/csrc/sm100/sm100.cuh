@@ -42,6 +42,24 @@ __device__ __forceinline__ void wait_sleep(uint64_t* b, uint32_t parity) {
   asm volatile("{\n.reg .pred p;\nWAITS_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1, %2;\n@!p bra WAITS_%=;\n}\n"
                :: "r"(sa(b)), "r"(parity), "r"(1000000u) : "memory");
 }
+// The same operations on 32-bit shared-window addresses: sa() of a generic pointer is an S2R SR_CgaCtaId (tens of clk) each time,
+// which on a single-thread issue loop (MMA / TMA warps) sits on the critical path.  Compute a base once and add offsets.
+__device__ __forceinline__ void arrive(uint32_t b) { asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(b) : "memory"); }
+__device__ __forceinline__ void expect_tx(uint32_t b, uint32_t bytes) {
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" :: "r"(b), "r"(bytes) : "memory");
+}
+__device__ __forceinline__ void wait(uint32_t b, uint32_t parity) {
+  asm volatile("{\n.reg .pred p;\nWAITA_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra WAITA_%=;\n}\n"
+               :: "r"(b), "r"(parity) : "memory");
+}
+// One probe of a phase, no spin: independent probes issue back to back and their ~90 clk round trips overlap; spin (wait) only on the
+// ones that were not ready.
+__device__ __forceinline__ uint32_t probe(uint32_t b, uint32_t parity) {
+  uint32_t ok;
+  asm volatile("{\n.reg .pred p;\nmbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\nselp.u32 %0, 1, 0, p;\n}\n"
+               : "=r"(ok) : "r"(b), "r"(parity) : "memory");
+  return ok;
+}
 __device__ __forceinline__ void fence_proxy_async() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
 __device__ __forceinline__ void named_sync(int id, int n) { asm volatile("bar.sync %0, %1;\n" :: "r"(id), "r"(n) : "memory"); }
 
@@ -58,6 +76,14 @@ __device__ __forceinline__ void load_3d(const void* map, void* dst, uint64_t* ba
 __device__ __forceinline__ void load_4d(const void* map, void* dst, uint64_t* bar, int c0, int c1, int c2, int c3) {
   asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];\n"
                :: "r"(sa(dst)), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
+}
+__device__ __forceinline__ void load_2d(const void* map, uint32_t dst, uint32_t bar, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];\n"
+               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(c1) : "memory");
+}
+__device__ __forceinline__ void store_2d(const void* map, uint32_t src, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group [%0, {%2, %3}], [%1];\n"
+               :: "l"(map), "r"(src), "r"(c0), "r"(c1) : "memory");
 }
 __device__ __forceinline__ void store_2d(const void* map, const void* src, int c0, int c1) {
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group [%0, {%2, %3}], [%1];\n"
@@ -99,8 +125,22 @@ __device__ __forceinline__ void mma_ts(uint32_t d_tmem, uint32_t a_tmem, uint64_
                "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p;\n}\n"
                :: "r"(d_tmem), "r"(a_tmem), "l"(b_desc), "r"(idesc), "r"(accumulate) : "memory");
 }
+// Predicated forms for a converged issue loop: every lane runs the loop, `leader` (one elected lane) issues -- no branch, so no
+// BSSY / BSYNC / WARPSYNC per MMA group.
+__device__ __forceinline__ void mma_ts_if(uint32_t leader, uint32_t d_tmem, uint32_t a_tmem, uint64_t b_desc, uint32_t idesc, uint32_t accumulate) {
+  asm volatile("{\n.reg .pred p, q;\nsetp.ne.b32 p, %4, 0;\nsetp.ne.b32 q, %5, 0;\n"
+               "@q tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p;\n}\n"
+               :: "r"(d_tmem), "r"(a_tmem), "l"(b_desc), "r"(idesc), "r"(accumulate), "r"(leader) : "memory");
+}
+__device__ __forceinline__ void mma_commit_if(uint32_t leader, uint32_t bar) {
+  asm volatile("{\n.reg .pred q;\nsetp.ne.b32 q, %1, 0;\n@q tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\n}\n"
+               :: "r"(bar), "r"(leader) : "memory");
+}
 // Every tcgen05.mma this thread issued before it arrives on `bar` once they have completed (their
 // shared-memory operands are free and the accumulator is final).
+__device__ __forceinline__ void mma_commit(uint32_t bar) {
+  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\n" :: "r"(bar) : "memory");
+}
 __device__ __forceinline__ void mma_commit(uint64_t* bar) {
   asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\n" :: "r"(sa(bar)) : "memory");
 }

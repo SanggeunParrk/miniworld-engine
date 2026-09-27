@@ -349,6 +349,14 @@ __device__ long long g_tl[24][256];
 #define TL(e, y) do {} while (0)
 #endif
 
+__device__ __forceinline__ void bulk_load(uint32_t dst, const void* src, uint32_t bytes, uint32_t bar) {
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
+               :: "r"(dst), "l"(src), "r"(bytes), "r"(bar) : "memory");
+}
+__device__ __forceinline__ void reduce_add_2d(const void* map, uint32_t src, int c0, int c1) {
+  asm volatile("cp.reduce.async.bulk.tensor.2d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3}], [%1];\n"
+               :: "l"(map), "r"(src), "r"(c0), "r"(c1) : "memory");
+}
 __device__ __forceinline__ void bulk_load(void* dst, const void* src, uint32_t bytes, uint64_t* bar) {
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
                :: "r"(sa(dst)), "l"(src), "r"(bytes), "r"(sa(bar)) : "memory");
@@ -390,24 +398,32 @@ __global__ void __launch_bounds__(256) triattn_biasT(const __nv_bfloat16* __rest
   for (int i = ty; i < 32; i += 8) dst[(size_t)(k0 + i) * S + q0 + tx] = t[tx][i];
 }
 
-// ---- kernel 1: dK, dV.  Task = (b, h, 128-key tile) x KR pair rows, all queries in 64-wide sub-tiles (stage = (sub-tile, row)).
-//   MMA:   S^T = K_r . Q^T, dP^T = V_r . dO^T   (ts: A = K_r / V_r from TMEM, B = Q / dO K-major; M = 128 k, N = 64 q, K = 32)
-//   grad:  P^T, dS^T (bf16) over S^T / dP^T     (group gi: query columns 32 gi .. 32 gi + 31 of the stage)
-//   MMA:   dV_r += P^T . dO, dK_r += dS^T . Q   (ts: A from TMEM, B MN-major; N = 32)
+// ---- kernel 1: dK, dV.  Task = (b, h, 128-key tile) x KR = 2 pair rows, all queries in 32-wide sub-tiles; stage y = (sub-tile, row),
+// y & 1 = the row = the grad group that owns it (the two groups alternate stages, as the forward's softmax groups do):
+//   MMA:   S^T = K_r . Q^T, dP^T = V_r . dO^T   (ts: A = K_r / V_r from TMEM, B = Q / dO K-major; M = 128 k, N = 32 q, K = 32)
+//   grad:  P^T, dS^T (bf16) over S^T / dP^T
+//   MMA:   dV_r += P^T . dO, dK_r += dS^T . Q   (ts: A from TMEM, B MN-major; N = 32, K = 32)
+// TMEM: three fp32 S^T | dP^T buffers, released by the grad group as soon as it has loaded them (the S^T issuer reuses one for
+// stage y + 3 without waiting for stage y's gradient GEMMs), and one compact bf16 P^T | dS^T buffer per group, which the gradient
+// GEMMs read (a group rewrites it two stages later, long after they retired).  Every hand-off costs ~100-300 clk (barrier round
+// trip, issue); this split keeps all of them off the per-stage critical path.  K / V are double-buffered in TMEM and each
+// group stages its row's next-task K / V itself, so a task's first S^T GEMMs run while the groups drain the previous task's dK / dV
+// (only the row's first gradient GEMM waits for its drain).
 constexpr int KR = 2;
-constexpr int KB_QW = 64, KB_QT = KB_QW * D, KB_BT = KB_QW * BN;   // Q / dO sub-tile [64][32] (4 KiB), bias^T [2][128 k][32 q] fp32 (32 KiB)
-constexpr int KB_NQ = 8, KB_NB = 2, KB_NS = 2, KB_THREADS = 320;  // rings deep enough to cover ~2K clk of L2 / HBM latency  // 0 TMA, 1 MMA, 2-5 / 6-9 grad groups
-constexpr int KB_COL_G = KB_NS * 128;                               // dV_r at 256 + 64 r, dK_r at +32
-constexpr int KB_COL_A = KB_COL_G + KR * 64;                        // K_r at 384 + 16 r, V_r at 384 + 16 KR + 16 r (bf16 pairs)
-constexpr int KB_SMEM = 1024 + (2 * KR * 2 * KVT + KB_NQ * 2 * KB_QT) * 2 + KB_NB * KB_BT * 4 + KB_NQ * 2 * KB_QW * 4 + 256;   // + dK / dV out tiles
+constexpr int KB_QW = 32, KB_QT = KB_QW * D, KB_BT = BN * KB_QW;   // Q / dO sub-tile [32][32] (2 KiB), bias^T [128 k][32 q] fp32 (16 KiB)
+constexpr int KB_NQ = 12, KB_NB = 4, KB_NS = 3, KB_THREADS = 352;  // 0 TMA, 1 S^T MMA, 2-5 / 6-9 grad groups (rows 0 / 1), 10 grad MMA
+constexpr int KB_COL_P = KB_NS * 64;                                // S^T | dP^T buffer j at 64 j (32 + 32) | P^T | dS^T of group g at 192 + 32 g
+constexpr int KB_COL_G = KB_COL_P + 2 * 32;                         // dV_r at 256 + 64 r, dK_r at +32
+constexpr int KB_COL_A = KB_COL_G + KR * 64;                        // K / V buffer kb: K_r at 384 + 64 kb + 16 r, V_r at +32
+constexpr int KB_SMEM = 1024 + (2 * KR * 2 * KVT + KB_NQ * 2 * KB_QT) * 2 + KB_NB * KB_BT * 4 + KB_NQ * 2 * KB_QW * 4 + 512;
 constexpr uint32_t ID_ST = idesc_bf16(128, KB_QW, 0, 0);
 constexpr uint32_t ID_G = idesc_bf16(128, D, 0, 1);
-static_assert(KB_COL_A + KR * 32 <= 512, "TMEM");
+static_assert(KB_COL_A + 2 * 64 <= 512, "TMEM");
 static_assert(KB_SMEM <= 232448, "smem");
 
 __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
     int N, int H, int S, int ntasks, float scl, float scale,
-    const __grid_constant__ CUtensorMap qmap,            // q / dO [B*N*S][H*32], box (32, 64), 64B swizzle
+    const __grid_constant__ CUtensorMap qmap,            // q / dO [B*N*S][H*32], box (32, 32), 64B swizzle
     const __grid_constant__ CUtensorMap dmap,
     const __grid_constant__ CUtensorMap kmap,            // k / v, box (32, 128), 64B swizzle
     const __grid_constant__ CUtensorMap vmap,
@@ -418,30 +434,33 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
   const int NK = S / BN, NG = (N + KR - 1) / KR, NQS = S / KB_QW, SPT = KR * NQS;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
-  __nv_bfloat16* sKV = reinterpret_cast<__nv_bfloat16*>(smb);   // [KR][K | V] staging for TMEM
-  __nv_bfloat16* sO = sKV + KR * 2 * KVT;                        // [KR][dV | dK] out tiles (TMA stores: a warp's row stores
-                                                                 // would be 32 lines per instruction, ~2K clk of LSU per task)
+  __nv_bfloat16* sKV = reinterpret_cast<__nv_bfloat16*>(smb);   // [KR][K | V] staging (row r: its group's next task)
+  __nv_bfloat16* sO = sKV + KR * 2 * KVT;                        // [KR][dV | dK] out tiles for the TMA stores
   __nv_bfloat16* sQ = sO + KR * 2 * KVT;                         // [NQ][Q | dO]
-  float* sB = reinterpret_cast<float*>(sQ + KB_NQ * 2 * KB_QT);  // [NB][2 q halves][128 k][32 q]
-  float* sLD = sB + KB_NB * KB_BT;                               // [NQ][lse 64 | delta 64]
+  float* sB = reinterpret_cast<float*>(sQ + KB_NQ * 2 * KB_QT);  // [NB][128 k][32 q]
+  float* sLD = sB + KB_NB * KB_BT;                               // [NQ][lse 32 | delta 32]
   uint64_t* bars = reinterpret_cast<uint64_t*>(sLD + KB_NQ * 2 * KB_QW);
-  uint64_t* af = bars;               // [1] K / V staging landed
-  uint64_t* ae = af + 1;             // [1] count 8: staging copied out
-  uint64_t* at = ae + 1;             // [1] count 8: K / V in TMEM (and the previous task's dK / dV drained)
-  uint64_t* df = at + 1;             // [1] the task's dK / dV final
-  uint64_t* qf = df + 1;             // [NQ]
+  uint64_t* af = bars;               // [KR] row r's staging landed
+  uint64_t* at = af + KR;            // [2]  count 8: K / V buffer kb written
+  uint64_t* dfr = at + 2;            // [KR] row r's dK / dV final
+  uint64_t* de = dfr + KR;           // [KR] count 4: row r drained
+  uint64_t* qf = de + KR;            // [NQ]
   uint64_t* qe = qf + KB_NQ;         // [NQ]
   uint64_t* bf = qe + KB_NQ;         // [NB]
   uint64_t* be = bf + KB_NB;         // [NB] count 8
-  uint64_t* sf = be + KB_NB;         // [NS]
-  uint64_t* pf = sf + KB_NS;         // [NS] count 8
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(pf + KB_NS);
+  uint64_t* sf = be + KB_NB;         // [NS] S^T | dP^T of the buffer ready
+  uint64_t* se = sf + KB_NS;         // [NS] count 4: the group loaded it (free for the next S^T)
+  uint64_t* pf = se + KB_NS;         // [2]  count 4: group g's P^T | dS^T written
+  uint64_t* ge = pf + 2;             // [2]  group g's gradient GEMMs retired (its P^T | dS^T buffer may be rewritten)
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(ge + 2);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    bar_init(af, 1); bar_init(ae, 8); bar_init(at, 8); bar_init(df, 1);
+    for (int r = 0; r < KR; ++r) { bar_init(af + r, 1); bar_init(dfr + r, 1); bar_init(de + r, 4); }
+    bar_init(at, 8); bar_init(at + 1, 8);
     for (int i = 0; i < KB_NQ; ++i) { bar_init(qf + i, 1); bar_init(qe + i, 1); }
     for (int i = 0; i < KB_NB; ++i) { bar_init(bf + i, 1); bar_init(be + i, 8); }
-    for (int i = 0; i < KB_NS; ++i) { bar_init(sf + i, 1); bar_init(pf + i, 8); }
+    for (int i = 0; i < KB_NS; ++i) { bar_init(sf + i, 1); bar_init(se + i, 4); }
+    for (int i = 0; i < 2; ++i) { bar_init(pf + i, 4); bar_init(ge + i, 1); }
     bar_init_fence();
   }
   if (warp == 1) tmem_alloc(tslot, 512);
@@ -449,162 +468,149 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = *tslot;
+  const uint32_t sbase = sa(smb);                  // shared-window address of p: sbase + (p - smb), no S2R per use
+  auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
   auto decode = [&](int t, int& kt, int& g, int& bh) { kt = t % NK; g = (t / NK) % NG; bh = t / (NK * NG); };
   auto nrow = [&](int g, int r) { return min(g * KR + r, N - 1); };   // rows past N compute on row N-1 and store nothing
 
-  auto wait = [&](uint64_t* bar, uint32_t par) { if (TA_SLEEP && warp != 1) wait_sleep(bar, par); else sm100::wait(bar, par); };
   if (warp == 0) {
     if (lane == 0) {
-      auto staging = [&](int t) {                // K / V rows of task t -> the staging tile (copied into TMEM by the grad warps)
-        int kt, g, bh; decode(t, kt, g, bh);
-        expect_tx(af, KR * 2 * KVT * 2);
-        for (int r = 0; r < KR; ++r) {
-          const int rw = ((bh / H) * N + nrow(g, r)) * S + kt * BN;
-          load_2d(&kmap, sKV + r * 2 * KVT, af, (bh % H) * D, rw);
-          load_2d(&vmap, sKV + r * 2 * KVT + KVT, af, (bh % H) * D, rw);
-        }
-      };
-      if ((int)blockIdx.x < ntasks) staging(blockIdx.x);
-      const int st_at = min(SPT, KB_NQ) - 1;     // the next task's staging goes out once this task's was copied out
       int lt = 0, y = 0;
       for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
         int kt, g, bh; decode(t, kt, g, bh);
         const int b_ = bh / H, h_ = bh % H;
         for (int w = 0; w < SPT; ++w, ++y) {
-          if (w == st_at && t + (int)gridDim.x < ntasks) { wait(ae, lt & 1); staging(t + gridDim.x); }
-          const int qs = w / KR, r = w % KR, sl = y % KB_NQ;
+          const int qs = w >> 1, r = w & 1, sl = y % KB_NQ;
           if (r == 0) {
             const int jb = lt * NQS + qs, bs = jb % KB_NB;
-            if (jb >= KB_NB) wait(be + bs, ((jb / KB_NB) - 1) & 1);
-            if (TA_BIAS1 && jb >= KB_NB) arrive(bf + bs);   // timing only: tiles loaded once per CTA
-            else {
-            expect_tx(bf + bs, KB_BT * 4);
-            for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, sB + bs * KB_BT + hh * BN * 32, bf + bs, qs * KB_QW + hh * 32, bh * S + kt * BN);
-            }
+            if (jb >= KB_NB) wait(A(be + bs), ((jb / KB_NB) - 1) & 1);
+            expect_tx(A(bf + bs), KB_BT * 4);
+            load_2d(&bmap, A(sB + bs * KB_BT), A(bf + bs), qs * KB_QW, bh * S + kt * BN);
           }
-          TL(9, y);
-          if (y >= KB_NQ) wait(qe + sl, ((y / KB_NQ) - 1) & 1);
-          TL(10, y);
-          if (TA_QD1 && y >= KB_NQ) { arrive(qf + sl); continue; }   // timing only
-          expect_tx(qf + sl, 2 * KB_QT * 2 + 2 * KB_QW * 4);
+          if (y >= KB_NQ) wait(A(qe + sl), ((y / KB_NQ) - 1) & 1);
+          expect_tx(A(qf + sl), 2 * KB_QT * 2 + 2 * KB_QW * 4);
           const int rw = (b_ * N + nrow(g, r)) * S + qs * KB_QW;
-          load_2d(&qmap, sQ + sl * 2 * KB_QT, qf + sl, h_ * D, rw);
-          load_2d(&dmap, sQ + sl * 2 * KB_QT + KB_QT, qf + sl, h_ * D, rw);
+          load_2d(&qmap, A(sQ + sl * 2 * KB_QT), A(qf + sl), h_ * D, rw);
+          load_2d(&dmap, A(sQ + sl * 2 * KB_QT + KB_QT), A(qf + sl), h_ * D, rw);
           const size_t st = ((size_t)(b_ * N + nrow(g, r)) * H + h_) * S + qs * KB_QW;
-          bulk_load(sLD + sl * 2 * KB_QW, LSE + st, KB_QW * 4, qf + sl);
-          bulk_load(sLD + sl * 2 * KB_QW + KB_QW, DELTA + st, KB_QW * 4, qf + sl);
+          bulk_load(A(sLD + sl * 2 * KB_QW), LSE + st, KB_QW * 4, A(qf + sl));
+          bulk_load(A(sLD + sl * 2 * KB_QW + KB_QW), DELTA + st, KB_QW * 4, A(qf + sl));
         }
       }
     }
-  } else if (warp == 1) {
+  } else if (warp == 1 || warp == 10) {
+    // Two issuing warps: warp 1 the S^T / dP^T GEMMs, warp 10 the gradient GEMMs.  An issue loop is a serial instruction stream on
+    // an SMSP shared with two busy grad warps (~30 clk per UTCHMMA plus the barrier round trips), and one warp issuing all eight
+    // GEMMs of a 32-query stage took ~780 clk against the grad side's ~260.  Each loop is kept lean: the converged warp runs it and
+    // one elected lane's tcgen05 ops are predicated (no branch / warp sync per group), ring slots and phase bits are incremental
+    // counters (no divisions), barrier addresses and descriptor bases precomputed.  Stage buffer b takes S^T of y + 4 only after
+    // the gradient GEMMs of y retired (ge): the two warps' GEMMs are not ordered in the tensor pipe.
+    const uint32_t L = elect_one() ? 1u : 0u;
     const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
     const int total = mytasks * SPT;
-    // task-local counters instead of y / SPT: a runtime integer division is a MUFU.RCP, queued behind the grad warps' ex2
-    // descriptors = a base + constant offsets (address field, 16-byte units): the MMA warp shares its SMSP with two grad warps
-    // that issue nearly every cycle, so its per-stage instruction count is what paces the tensor pipe
     const uint64_t dK0 = desc_k64(sQ), dM0 = sdesc(sa(sQ), KB_QT * 2, 512, 4);
     constexpr uint64_t SLOT = 2 * KB_QT * 2 / 16, MAT = KB_QT * 2 / 16;
-    auto stt = [&](int y, int lt, int w) {
-      const int r = w % KR, sl = y % KB_NQ, b = y % KB_NS;
-      if (w == 0) wait(at, lt & 1);
-      TL(0, y);
-      wait(qf + sl, (y / KB_NQ) & 1);
-      TL(1, y);
-      tc_fence_after();
-      if (elect_one()) {
+    const uint32_t qfa = A(qf), qea = A(qe), sfa = A(sf), sea = A(se), pfa = A(pf), gea = A(ge), ata = A(at), dea = A(de), dfa = A(dfr);
+    const uint32_t tA = tmem + KB_COL_A, tG = tmem + KB_COL_G;
+    int sl = 0, slp = 0, b = 0, bp = 0, w = 0, lt = 0;   // ring slot / phase, stage buffer / phase, task-local stage, task
+    if (warp == 1) {
+      // S^T of a stage goes out only once its Q | dO | lse | delta slot and its bias tile landed, so the grad warps' S^T barrier
+      // implies both (release / acquire through this thread): one barrier round trip a stage for them instead of three
+      const uint32_t bfa = A(bf);
+      int bs = 0, bsp = 0;
+      for (int y = 0; y < total; ++y) {
+        TL(0, y);
+        const uint32_t okq = probe(qfa + sl * 8, slp);
+        const uint32_t okg = y >= KB_NS ? probe(sea + b * 8, bp ^ 1) : 1u;   // the group loaded S^T of y - 3
+        const uint32_t okb = (w & 1) == 0 ? probe(bfa + bs * 8, bsp) : 1u;
+        if (w == 0) wait(ata + (lt & 1) * 8, (lt >> 1) & 1);
+        if (!okq) wait(qfa + sl * 8, slp);
+        if (!okg) wait(sea + b * 8, bp ^ 1);
+        if (!okb) wait(bfa + bs * 8, bsp);
+        if ((w & 1) == 1 && ++bs == KB_NB) { bs = 0; bsp ^= 1; }
+        TL(1, y);
+        tc_fence_after();
         const uint64_t bq = dK0 + sl * SLOT;
-        const uint32_t d = tmem + b * 128, a = tmem + KB_COL_A + r * 16;
-        mma_ts(d, a, bq, ID_ST, 0u);
-        mma_ts(d, a + 8, bq + 2, ID_ST, 1u);
-        mma_ts(d + 64, a + KR * 16, bq + MAT, ID_ST, 0u);
-        mma_ts(d + 64, a + KR * 16 + 8, bq + MAT + 2, ID_ST, 1u);
-        mma_commit(sf + b);
+        const uint32_t d = tmem + b * 64, a = tA + (lt & 1) * 64 + (w & 1) * 16;
+        mma_ts_if(L, d, a, bq, ID_ST, 0u);
+        mma_ts_if(L, d, a + 8, bq + 2, ID_ST, 1u);
+        mma_ts_if(L, d + 32, a + 32, bq + MAT, ID_ST, 0u);
+        mma_ts_if(L, d + 32, a + 40, bq + MAT + 2, ID_ST, 1u);
+        mma_commit_if(L, sfa + b * 8);
+        TL(2, y);
+        if (++sl == KB_NQ) { sl = 0; slp ^= 1; }
+        if (++b == KB_NS) { b = 0; bp ^= 1; }
+        if (++w == SPT) { w = 0; ++lt; }
       }
-      __syncwarp();
-    };
-    auto grad = [&](int y, int w) {
-      const int qs = w / KR, r = w % KR, sl = y % KB_NQ, b = y % KB_NS;
-      TL(2, y);
-      if (!TA_NOPF) wait(pf + b, (y / KB_NS) & 1);
-      TL(3, y);
-      tc_fence_after();
-      if (elect_one()) {
-        const __nv_bfloat16* q = sQ + sl * 2 * KB_QT;
+    } else {
+      int pp = 0;                                          // phase of pf[r]: flips every two stages
+      for (int p = 0; p < total; ++p) {
+        const int r = w & 1;                               // = the group
+        const bool first = w < 2, last = w >= SPT - 2;
+        TL(3, p);
+        const uint32_t okp = probe(pfa + r * 8, pp);
+        if (first && lt >= 1) wait(dea + r * 8, (lt - 1) & 1);   // the row's accumulators of the previous task were drained
+        if (!okp) wait(pfa + r * 8, pp);
+        TL(16, p);
+        tc_fence_after();
         const uint64_t bm = dM0 + sl * SLOT;
-        const uint32_t acc = qs ? 1u : 0u;
-#if !TA_FAKEK
-#pragma unroll
-        for (int ks = 0; ks < KB_QW / 16; ++ks) {
-          const uint32_t a = tmem + b * 128 + (ks >> 1) * 32 + (ks & 1) * 8;   // group gi's packed columns sit at 32 gi
-          mma_ts(tmem + KB_COL_G + r * 64, a, bm + MAT + ks * 64, ID_G, (acc | ks) ? 1u : 0u);
-          if (TA_TL) { if (blockIdx.x == TA_TL && y < 256) g_tl[18 + ks][y] = clock64(); }
-          mma_ts(tmem + KB_COL_G + r * 64 + 32, a + 64, bm + ks * 64, ID_G, (acc | ks) ? 1u : 0u);
-        }
-        if (TA_TL) { if (blockIdx.x == TA_TL && y < 256) g_tl[22][y] = clock64(); }
-#else
-#pragma unroll
-        for (int ks = 0; ks < KB_QW / 16; ++ks) {
-          const uint32_t a = tmem + b * 128 + (ks >> 1) * 32 + (ks & 1) * 8;
-#if TA_FAKEK      // timing only: the gradient GEMMs' B read as a K-major tile (wrong values)
-          mma_ts(tmem + KB_COL_G + r * 64, a, desc_k64(q + KB_QT + (ks & 1) * 16), idesc_bf16(128, D, 0, 0), (qs | ks) ? 1u : 0u);
-          mma_ts(tmem + KB_COL_G + r * 64 + 32, a + 64, desc_k64(q + (ks & 1) * 16), idesc_bf16(128, D, 0, 0), (qs | ks) ? 1u : 0u);
-#else
-          mma_ts(tmem + KB_COL_G + r * 64, a, sdesc(sa(q + KB_QT + ks * 16 * D), KB_QT * 2, 512, 4), ID_G, (qs | ks) ? 1u : 0u);
-          mma_ts(tmem + KB_COL_G + r * 64 + 32, a + 64, sdesc(sa(q + ks * 16 * D), KB_QT * 2, 512, 4), ID_G, (qs | ks) ? 1u : 0u);
-#endif
-        }
-#endif
-        (void)q;
-        mma_commit(qe + sl);
-        if (w == SPT - 1) mma_commit(df);
-        if (TA_TL) { if (blockIdx.x == TA_TL && y < 256) g_tl[23][y] = clock64(); }
+        const uint32_t acc = first ? 0u : 1u, a = tmem + KB_COL_P + r * 32, g0 = tG + r * 64;
+        mma_ts_if(L, g0, a, bm + MAT, ID_G, acc);                 // dV_r += P^T dO
+        mma_ts_if(L, g0, a + 8, bm + MAT + 64, ID_G, 1u);
+        mma_ts_if(L, g0 + 32, a + 16, bm, ID_G, acc);             // dK_r += dS^T Q
+        mma_ts_if(L, g0 + 32, a + 24, bm + 64, ID_G, 1u);
+        mma_commit_if(L, qea + sl * 8);
+        mma_commit_if(L, gea + r * 8);
+        if (last) mma_commit_if(L, dfa + r * 8);
+        TL(17, p);
+        if (++sl == KB_NQ) { sl = 0; slp ^= 1; }
+        if (r == 1) pp ^= 1;
+        if (++w == SPT) { w = 0; ++lt; }
       }
-      __syncwarp();
-    };
-    int y = 0, ylt = 0, yw = 0, pw = 0;
-    for (int p = 0; p < total; ++p) {
-      // a task's first S waits for its TMEM operands, which the grad warps copy only after draining the previous task's
-      // accumulators: issue it after the previous task's last gradient GEMM
-      while (y < total && y < p + KB_NS && (yw != 0 || y == p)) {
-        stt(y, ylt, yw);
-        ++y;
-        if (++yw == SPT) { yw = 0; ++ylt; }
-      }
-      grad(p, pw);
-      if (++pw == SPT) pw = 0;
     }
-  } else {
+    __syncwarp();
+  } else if (warp < 10) {
     const int qq = warp & 3, k = qq * 32 + lane;   // TMEM lane = key row of the tile
-    const int gi = (warp - 2) >> 2, c0 = gi * 32;  // query columns of a stage; row gi's K / V copy and dK / dV drain
+    const int gi = (warp - 2) >> 2;                // this group's row
+    const bool lead = qq == 2 && lane == 0;        // warps 2 / 6: the group's TMA-issuing thread
     const float2 sc2 = make_float2(scl, scl), neg1 = make_float2(-1.f, -1.f);
+    const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
+    auto stage_kv = [&](int j) {                   // the group's row of local task j -> staging (issued by the lead)
+      int kt, g, bh; decode(blockIdx.x + j * gridDim.x, kt, g, bh);
+      const int rw = ((bh / H) * N + nrow(g, gi)) * S + kt * BN;
+      expect_tx(A(af + gi), 2 * KVT * 2);
+      load_2d(&kmap, A(sKV + gi * 2 * KVT), A(af + gi), (bh % H) * D, rw);
+      load_2d(&vmap, A(sKV + gi * 2 * KVT + KVT), A(af + gi), (bh % H) * D, rw);
+    };
+    auto copy_kv = [&](int j) {                    // staging (local task j) -> K / V buffer j & 1; then stage task j + 1
+      wait(A(af + gi), j & 1);
+      uint32_t wk[16], wv[16];
+      row_sw64(sKV + gi * 2 * KVT, k, wk);
+      row_sw64(sKV + gi * 2 * KVT + KVT, k, wv);
+      named_sync(1 + gi, 128);                     // every thread has read the staging tile
+      if (lead && j + 1 < mytasks) stage_kv(j + 1);
+      const uint32_t ta = tmem_at(tmem + KB_COL_A + (j & 1) * 64, qq * 32, 0);
+      tmem_st8(ta + gi * 16, wk); tmem_st8(ta + gi * 16 + 8, wk + 8);
+      tmem_st8(ta + 32 + gi * 16, wv); tmem_st8(ta + 32 + gi * 16 + 8, wv + 8);
+      tmem_wait_st();
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) arrive(A(at + (j & 1)));
+    };
+    if (lead && mytasks > 0) stage_kv(0);
+    if (mytasks > 0) copy_kv(0);
+    int yb = gi, ybp = 0, js = 0;                  // this group's next stage: its S^T buffer (y % 3) / phase, its stage count
     int lt = 0;
     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
       int kt, g, bh; decode(t, kt, g, bh);
       const int b_ = bh / H, h_ = bh % H;
-      {                                            // K_gi, V_gi -> TMEM (the previous task's MMAs retired: its S^T were all read)
-        if (tid == 64) TL(11, lt);
-        wait(af, lt & 1);
-        if (tid == 64) TL(12, lt);
-        uint32_t wk[16], wv[16];
-        row_sw64(sKV + gi * 2 * KVT, k, wk);
-        row_sw64(sKV + gi * 2 * KVT + KVT, k, wv);
-        __syncwarp();
-        if (lane == 0) arrive(ae);
-        const uint32_t ta = tmem_at(tmem + KB_COL_A, qq * 32, 0);
-        tmem_st8(ta + gi * 16, wk); tmem_st8(ta + gi * 16 + 8, wk + 8);
-        tmem_st8(ta + KR * 16 + gi * 16, wv); tmem_st8(ta + KR * 16 + gi * 16 + 8, wv + 8);
-        tmem_wait_st();
-        tc_fence_before();
-        __syncwarp();
-        if (lane == 0) arrive(at);
-        if (tid == 64) TL(13, lt);
-      }
       for (int qs = 0; qs < NQS; ++qs) {
-        const int jb = lt * NQS + qs, bs = jb % KB_NB;
-        wait(bf + bs, (jb / KB_NB) & 1);
-        float bl[32];                              // bias * log2e of (query c0 + i, key k)
+        const int jb = lt * NQS + qs, bs = jb % KB_NB, y = lt * SPT + qs * 2 + gi, b = yb, sl = y % KB_NQ;
+        if (lane == 0 && qq == 2) TL(4 + gi * 6, y);
+        wait(A(sf + b), ybp);                        // implies the bias tile and the lse / delta slot (see the S^T issuer)
+        float bl[32];                              // bias * log2e of (query 32 qs + i, key k)
         {
-          const float* bp = sB + bs * KB_BT + gi * BN * 32 + k * 32;
+          const float* bp = sB + bs * KB_BT + k * 32;
 #pragma unroll
           for (int c = 0; c < 8; ++c) {
             const float4 u = *reinterpret_cast<const float4*>(bp + ((c ^ (k & 7)) << 2));
@@ -612,79 +618,63 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
           }
         }
         __syncwarp();
-        if (lane == 0) arrive(be + bs);
-        for (int r = 0; r < KR; ++r) {
-          const int y = lt * SPT + qs * KR + r, b = y % KB_NS, sl = y % KB_NQ;
-          if (tid == 64) TL(4, y);
-          wait(qf + sl, (y / KB_NQ) & 1);
-          if (!TA_NOPF) wait(sf + b, (y / KB_NS) & 1);
-          if (tid == 64) TL(5, y);
-          tc_fence_after();
-          const uint32_t tb = tmem_at(tmem + b * 128, qq * 32, 0);
-          float sv[32], dp[32];
-#if TA_NOLD
+        if (lane == 0) arrive(A(be + bs));
+        if (lane == 0 && qq == 2) TL(5 + gi * 6, y);
+        if (lane == 0 && qq == 2) TL(6 + gi * 6, y);
+        tc_fence_after();
+        const uint32_t tb = tmem_at(tmem + b * 64, qq * 32, 0);
+        float sv[32], dp[32];
+        tmem_ld32(tb, sv);
+        tmem_ld32(tb + 32, dp);
+        const float* ld = sLD + sl * 2 * KB_QW;
+        tmem_wait_ld();
+        tc_fence_before();
+        __syncwarp();
+        if (lane == 0) arrive(A(se + b));           // loaded: the buffer takes the S^T of stage y + 3
+        yb += 2; if (yb >= KB_NS) { yb -= KB_NS; ybp ^= 1; }
+        uint32_t pk[16], dk[16];
 #pragma unroll
-          for (int i = 0; i < 32; ++i) { sv[i] = __int_as_float(tb + i); dp[i] = sv[i] * 0.5f; }
-#else
-          tmem_ld32(tb + c0, sv);
-          tmem_ld32(tb + 64 + c0, dp);
-#endif
-          const float* ld = sLD + sl * 2 * KB_QW + c0;
-          tmem_wait_ld();
-          if (tid == 64) TL(6, y);
-          uint32_t pk[16], dk[16];
-#if TA_NOMATH
+        for (int j = 0; j < 8; ++j) {
+          const float4 l4 = *reinterpret_cast<const float4*>(ld + 4 * j);
+          const float4 d4 = *reinterpret_cast<const float4*>(ld + KB_QW + 4 * j);
 #pragma unroll
-          for (int i = 0; i < 16; ++i) { pk[i] = __float_as_uint(sv[2 * i]); dk[i] = __float_as_uint(dp[2 * i + 1]); }
-          if (ld[0] == 1.2345f) pk[0] = 0;
-#else
-#pragma unroll
-          for (int j = 0; j < 8; ++j) {
-            const float4 l4 = *reinterpret_cast<const float4*>(ld + 4 * j);
-            const float4 d4 = *reinterpret_cast<const float4*>(ld + KB_QW + 4 * j);
-#pragma unroll
-            for (int h2 = 0; h2 < 2; ++h2) {
-              const int i = 4 * j + 2 * h2;
-              const float2 lm = h2 ? make_float2(l4.z, l4.w) : make_float2(l4.x, l4.y);
-              const float2 dm = h2 ? make_float2(d4.z, d4.w) : make_float2(d4.x, d4.y);
-              // FADD2 has no negate: the -lse / -delta go through FFMA2 with -1 (else 2 FADD negations a pair)
-              const float2 x = fma2(lm, neg1, fma2(make_float2(sv[i], sv[i + 1]), sc2, make_float2(bl[i], bl[i + 1])));
-              const float2 pp = make_float2(ex2f(x.x), ex2f(x.y));
-              const float2 ds = mul2(pp, fma2(dm, neg1, make_float2(dp[i], dp[i + 1])));
-              pk[i >> 1] = pack2(pp.x, pp.y);
-              dk[i >> 1] = pack2(ds.x, ds.y);
-            }
+          for (int h2 = 0; h2 < 2; ++h2) {
+            const int i = 4 * j + 2 * h2;
+            const float2 lm = h2 ? make_float2(l4.z, l4.w) : make_float2(l4.x, l4.y);
+            const float2 dm = h2 ? make_float2(d4.z, d4.w) : make_float2(d4.x, d4.y);
+            // FADD2 has no negate: -lse / -delta go through FFMA2 with -1 (else two FADD negations a pair)
+            const float2 x = fma2(lm, neg1, fma2(make_float2(sv[i], sv[i + 1]), sc2, make_float2(bl[i], bl[i + 1])));
+            const float2 pp = make_float2(ex2f(x.x), ex2f(x.y));
+            const float2 ds = mul2(pp, fma2(dm, neg1, make_float2(dp[i], dp[i + 1])));
+            pk[i >> 1] = pack2(pp.x, pp.y);
+            dk[i >> 1] = pack2(ds.x, ds.y);
           }
-#endif
-          if (tid == 64) TL(7, y);
-#if TA_NOST
-          if (pk[3] == 0x12345 && dk[5] == 0x777) {
-#endif
-          tmem_st8(tb + c0, pk); tmem_st8(tb + c0 + 8, pk + 8);
-          tmem_st8(tb + 64 + c0, dk); tmem_st8(tb + 64 + c0 + 8, dk + 8);
-#if TA_NOST
-          }
-#endif
-          tmem_wait_st();
-          tc_fence_before();
-          __syncwarp();
-          if (lane == 0) arrive(pf + b);
-          if (tid == 64) TL(8, y);
         }
+        if (lane == 0 && qq == 2) TL(7 + gi * 6, y);
+        if (js >= 1) wait(A(ge + gi), (js - 1) & 1);   // the gradient GEMMs of this group's previous stage read its P^T | dS^T
+        ++js;
+        tc_fence_after();
+        const uint32_t tp = tmem_at(tmem + KB_COL_P + gi * 32, qq * 32, 0);
+        tmem_st8(tp, pk); tmem_st8(tp + 8, pk + 8);
+        tmem_st8(tp + 16, dk); tmem_st8(tp + 24, dk + 8);
+        tmem_wait_st();
+        tc_fence_before();
+        __syncwarp();
+        if (lane == 0) arrive(A(pf + gi));
+        if (lane == 0 && qq == 2) TL(8 + gi * 6, y);
+        if (qs == 1 && lt + 1 < mytasks) copy_kv(lt + 1);   // the next task's K / V row, well before its first S^T
       }
       // ---- dK / dV of row gi ----
-      if (tid == 64) TL(14, lt);
-      wait(df, lt & 1);
-      if (tid == 64) TL(15, lt);
+      wait(A(dfr + gi), lt & 1);
       tc_fence_after();
       float v[32], kk[32];
       tmem_ld32(tmem_at(tmem + KB_COL_G + gi * 64, qq * 32, 0), v);
       tmem_ld32(tmem_at(tmem + KB_COL_G + gi * 64 + 32, qq * 32, 0), kk);
       tmem_wait_ld();
-      if (tid == 64) TL(16, lt);
       tc_fence_before();
-      const bool lead = (warp & 3) == 2 && lane == 0;   // one issuing thread per group (warps 2 / 6)
-      if (lead) bulk_wait_read<0>();                     // the previous task's stores have read the out tiles
+      __syncwarp();
+      if (lane == 0) arrive(A(de + gi));              // the accumulators are free for the next task
+      if (lead) bulk_wait_read<0>();               // the previous task's stores have read the out tiles
       named_sync(1 + gi, 128);
       {
         uint32_t wv[16], wk[16];
@@ -695,15 +685,14 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
       }
       fence_proxy_async();
       named_sync(1 + gi, 128);
-      if (lead && g * KR + gi < N && !TA_NODKST) {
+      if (lead && g * KR + gi < N) {
         const int rw = (b_ * N + g * KR + gi) * S + kt * BN;
-        store_2d(&dvmap, sO + gi * 2 * KVT, h_ * D, rw);
-        store_2d(&dkmap, sO + gi * 2 * KVT + KVT, h_ * D, rw);
+        store_2d(&dvmap, A(sO + gi * 2 * KVT), h_ * D, rw);
+        store_2d(&dkmap, A(sO + gi * 2 * KVT + KVT), h_ * D, rw);
         bulk_commit();
       }
-      if (tid == 64) TL(17, lt);
     }
-    if ((warp & 3) == 2 && lane == 0) bulk_wait<0>();
+    if (lead) bulk_wait<0>();
   }
   tc_fence_before();
   __syncthreads();
@@ -770,6 +759,8 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = *tslot;
+  const uint32_t sbase = sa(smb);                  // shared-window address of p: sbase + (p - smb), no S2R per use
+  auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
   auto decode = [&](int t, int& qt, int& g, int& bh) { qt = t % QTL; g = (t / QTL) % NG; bh = t / (QTL * NG); };
   auto nrow = [&](int g, int r) { return min(g * QR + r, N - 1); };
 
@@ -778,14 +769,14 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
       auto staging = [&](int t) {                // Q / dO rows, lse, delta of task t -> staging
         int qt, g, bh; decode(t, qt, g, bh);
         const int b_ = bh / H, h_ = bh % H;
-        expect_tx(af, QR * 2 * QT * 2 + QR * 2 * BM * 4);
+        expect_tx(A(af), QR * 2 * QT * 2 + QR * 2 * BM * 4);
         for (int r = 0; r < QR; ++r) {
           const int rw = (b_ * N + nrow(g, r)) * S + qt * BM;
-          load_2d(&qmap, sA + r * 2 * QT, af, h_ * D, rw);
-          load_2d(&dmap, sA + r * 2 * QT + QT, af, h_ * D, rw);
+          load_2d(&qmap, A(sA + r * 2 * QT), A(af), h_ * D, rw);
+          load_2d(&dmap, A(sA + r * 2 * QT + QT), A(af), h_ * D, rw);
           const size_t st = ((size_t)(b_ * N + nrow(g, r)) * H + h_) * S + qt * BM;
-          bulk_load(sLD + r * 2 * BM, LSE + st, BM * 4, af);
-          bulk_load(sLD + r * 2 * BM + BM, DELTA + st, BM * 4, af);
+          bulk_load(A(sLD + r * 2 * BM), LSE + st, BM * 4, A(af));
+          bulk_load(A(sLD + r * 2 * BM + BM), DELTA + st, BM * 4, A(af));
         }
       };
       if ((int)blockIdx.x < ntasks) staging(blockIdx.x);
@@ -795,19 +786,19 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
         int qt, g, bh; decode(t, qt, g, bh);
         const int b_ = bh / H, h_ = bh % H;
         for (int w = 0; w < SPT; ++w, ++y) {
-          if (w == st_at && t + (int)gridDim.x < ntasks) { wait(ae, lt & 1); staging(t + gridDim.x); }
+          if (w == st_at && t + (int)gridDim.x < ntasks) { wait(A(ae), lt & 1); staging(t + gridDim.x); }
           const int ks = w / QR, r = w % QR, sl = y % QB_NKV;
           if (r == 0) {
             const int jb = lt * NKS + ks, bs = jb % QB_NB;
-            if (jb >= QB_NB) wait(be + bs, ((jb / QB_NB) - 1) & 1);
-            expect_tx(bf + bs, QB_BT * 2);
-            load_2d(&bmap, sB + bs * QB_BT, bf + bs, ks * QB_KW, bh * S + qt * BM);
+            if (jb >= QB_NB) wait(A(be + bs), ((jb / QB_NB) - 1) & 1);
+            expect_tx(A(bf + bs), QB_BT * 2);
+            load_2d(&bmap, A(sB + bs * QB_BT), A(bf + bs), ks * QB_KW, bh * S + qt * BM);
           }
-          if (y >= QB_NKV) wait(kve + sl, ((y / QB_NKV) - 1) & 1);
-          expect_tx(kvf + sl, 2 * QB_KT * 2);
+          if (y >= QB_NKV) wait(A(kve + sl), ((y / QB_NKV) - 1) & 1);
+          expect_tx(A(kvf + sl), 2 * QB_KT * 2);
           const int rw = (b_ * N + nrow(g, r)) * S + ks * QB_KW;
-          load_2d(&kmap, sKV + sl * 2 * QB_KT, kvf + sl, h_ * D, rw);
-          load_2d(&vmap, sKV + sl * 2 * QB_KT + QB_KT, kvf + sl, h_ * D, rw);
+          load_2d(&kmap, A(sKV + sl * 2 * QB_KT), A(kvf + sl), h_ * D, rw);
+          load_2d(&vmap, A(sKV + sl * 2 * QB_KT + QB_KT), A(kvf + sl), h_ * D, rw);
         }
       }
     }
@@ -818,8 +809,8 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
     constexpr uint64_t SLOT = 2 * QB_KT * 2 / 16, MAT = QB_KT * 2 / 16;
     auto stt = [&](int y, int lt, int w) {
       const int r = w % QR, sl = y % QB_NKV, b = y % QB_NS;
-      if (w == 0) wait(at, lt & 1);
-      wait(kvf + sl, (y / QB_NKV) & 1);
+      if (w == 0) wait(A(at), lt & 1);
+      wait(A(kvf + sl), (y / QB_NKV) & 1);
       tc_fence_after();
       if (elect_one()) {
         const uint64_t bk = dK0 + sl * SLOT;
@@ -828,13 +819,13 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
         mma_ts(d, a + 8, bk + 2, ID_SQ, 1u);
         mma_ts(d + 64, a + QR * 16, bk + MAT, ID_SQ, 0u);
         mma_ts(d + 64, a + QR * 16 + 8, bk + MAT + 2, ID_SQ, 1u);
-        mma_commit(sf + b);
+        mma_commit(A(sf + b));
       }
       __syncwarp();
     };
     auto grad = [&](int y, int w) {
       const int kb = w / QR, r = w % QR, sl = y % QB_NKV, b = y % QB_NS;
-      wait(pf + b, (y / QB_NS) & 1);
+      wait(A(pf + b), (y / QB_NS) & 1);
       tc_fence_after();
       if (elect_one()) {
         const uint64_t bm = dM0 + sl * SLOT;
@@ -844,8 +835,8 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
           const uint32_t a = tmem + b * 128 + 64 + (ks >> 1) * 32 + (ks & 1) * 8;
           mma_ts(d, a, bm + ks * 64, ID_G, (acc | ks) ? 1u : 0u);
         }
-        mma_commit(kve + sl);
-        if (w == SPT - 1) mma_commit(df);
+        mma_commit(A(kve + sl));
+        if (w == SPT - 1) mma_commit(A(df));
       }
       __syncwarp();
     };
@@ -874,7 +865,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
       const int b_ = bh / H;
       float lse[QR], dl[QR];
       {
-        wait(af, lt & 1);
+        wait(A(af), lt & 1);
         const uint32_t ta = tmem_at(tmem + QB_COL_A, qq * 32, 0);
 #pragma unroll
         for (int rr = 0; rr < QR / 2; ++rr) {
@@ -888,15 +879,15 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
 #pragma unroll
         for (int r = 0; r < QR; ++r) { lse[r] = sLD[r * 2 * BM + row]; dl[r] = sLD[r * 2 * BM + BM + row]; }
         __syncwarp();
-        if (lane == 0) arrive(ae);
+        if (lane == 0) arrive(A(ae));
         tmem_wait_st();
         tc_fence_before();
         __syncwarp();
-        if (lane == 0) arrive(at);
+        if (lane == 0) arrive(A(at));
       }
       for (int kb = 0; kb < NKS; ++kb) {
         const int jb = lt * NKS + kb, bs = jb % QB_NB;
-        wait(bf + bs, (jb / QB_NB) & 1);
+        wait(A(bf + bs), (jb / QB_NB) & 1);
         float bl[32], dacc[32];
         {
           const __nv_bfloat16* brow = sB + bs * QB_BT + row * 64;
@@ -914,12 +905,12 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
           for (int i = 0; i < 32; ++i) dacc[i] = 0.f;
         }
         __syncwarp();
-        if (lane == 0) arrive(be + bs);
+        if (lane == 0) arrive(A(be + bs));
 #pragma unroll
         for (int r = 0; r < QR; ++r) {
           const int y = lt * SPT + kb * QR + r, b = y % QB_NS;
           const bool valid = g * QR + r < N;
-          wait(sf + b, (y / QB_NS) & 1);
+          wait(A(sf + b), (y / QB_NS) & 1);
           tc_fence_after();
           const uint32_t tb = tmem_at(tmem + b * 128, qq * 32, 0);
           float sv[32], dp[32];
@@ -943,7 +934,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
           tmem_wait_st();
           tc_fence_before();
           __syncwarp();
-          if (lane == 0) arrive(pf + b);
+          if (lane == 0) arrive(A(pf + b));
         }
         // the group's [128 q][32 k] partial -> shared -> one TMA reduce-add (per-thread 16-byte reductions touch 32 lines each)
         {
@@ -955,12 +946,12 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
             *reinterpret_cast<float4*>(buf + row * 32 + ((c ^ (row & 7)) << 2)) = make_float4(dacc[4 * c], dacc[4 * c + 1], dacc[4 * c + 2], dacc[4 * c + 3]);
           fence_proxy_async();
           named_sync(1 + gi, 128);
-          if (lead) { reduce_add_2d(&dbmap, buf, kb * QB_KW + c0, bh * S + qt * BM); bulk_commit(); }
+          if (lead) { reduce_add_2d(&dbmap, A(buf), kb * QB_KW + c0, bh * S + qt * BM); bulk_commit(); }
           ++nb;
         }
       }
       // ---- dQ of rows gi, gi + 2 ----
-      wait(df, lt & 1);
+      wait(A(df), lt & 1);
       tc_fence_after();
       float a[QR / 2][32];
 #pragma unroll
@@ -984,7 +975,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
 #pragma unroll
         for (int rr = 0; rr < QR / 2; ++rr) {
           const int r = gi + 2 * rr;
-          if (g * QR + r < N) store_2d(&dqmap, ob + rr * QT, (bh % H) * D, (b_ * N + g * QR + r) * S + qt * BM);
+          if (g * QR + r < N) store_2d(&dqmap, A(ob + rr * QT), (bh % H) * D, (b_ * N + g * QR + r) * S + qt * BM);
         }
         bulk_commit();
       }
@@ -1049,7 +1040,7 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
                                 CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   const uint64_t rows = (uint64_t)(B * N * S), cols = (uint64_t)(H * D);
   auto m2 = [&](const torch::Tensor& t, uint32_t box, const char* what) { return make_map<2>(t.data_ptr(), {cols, rows}, {cols}, {D, box}, CU_TENSOR_MAP_SWIZZLE_64B, what); };
-  CUtensorMap q64 = m2(q, 64, "q"), d64 = m2(dout, 64, "dout"), k128 = m2(k, 128, "k"), v128 = m2(v, 128, "v");
+  CUtensorMap q32 = m2(q, KB_QW, "q"), d32 = m2(dout, KB_QW, "dout"), k128 = m2(k, 128, "k"), v128 = m2(v, 128, "v");
   CUtensorMap q128 = m2(q, 128, "q"), d128 = m2(dout, 128, "dout"), k64 = m2(k, 64, "k"), v64 = m2(v, 64, "v");
   CUtensorMap dkm = m2(dk, 128, "dk"), dvm = m2(dv, 128, "dv"), dqm = m2(dq, 128, "dq");
   auto bT = torch::empty({B, H, S, S}, q.options().dtype(torch::kFloat32));
@@ -1068,7 +1059,7 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
   triattn_biasT<<<dim3(S / 32, S / 32, B * H), 256, 0, stream>>>(reinterpret_cast<const __nv_bfloat16*>(b16.data_ptr<at::BFloat16>()), bT.data_ptr<float>(), (int)S);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   const int n1 = (int)(B * H * (S / BN) * ((N + KR - 1) / KR));
-  triattn_bwd_kv_sm100<<<std::min(n1, sms), KB_THREADS, KB_SMEM, stream>>>((int)N, (int)H, (int)S, n1, scl, (float)scale, q64, d64, k128, v128, bkv,
+  triattn_bwd_kv_sm100<<<std::min(n1, sms), KB_THREADS, KB_SMEM, stream>>>((int)N, (int)H, (int)S, n1, scl, (float)scale, q32, d32, k128, v128, bkv,
       lse.data_ptr<float>(), delta.data_ptr<float>(), dkm, dvm);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   const int n2 = (int)(B * H * (S / BM) * ((N + QR - 1) / QR));
