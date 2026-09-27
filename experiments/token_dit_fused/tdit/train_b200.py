@@ -89,7 +89,7 @@ class _Block(torch.autograd.Function):
         M, L = x.shape[0], pair.shape[0]
         A, dev, bf = M // L, x.device, torch.bfloat16
         at, K = _core()
-        W = _weights_bf16(P)
+        W = _weights_cached(P, names)
         R = 8
         gr = T.grid(M, R)
         chat = torch.empty(M, 384, device=dev, dtype=bf); cbf = torch.empty_like(chat); cst = torch.empty(M, 2, device=dev)
@@ -138,7 +138,9 @@ class _Block(torch.autograd.Function):
         dout = dout.float().contiguous()
         dG = torch.empty(M, 4 * D, device=dev, dtype=bf); dGg = torch.empty(M, 2 * D, device=dev, dtype=bf)
         dz = torch.empty(M, D, device=dev, dtype=bf)
-        T._res_c_bwd[gr](dout, z, Gg, Gg.stride(0), P["bg2"], dz, dGg, dGg.stride(0), M, N=D, BN=1024, ROWS=R)
+        acc = torch.zeros(5 * D + 17 * 128 + 128, device=dev)             # atomic accumulators: bg2 bs2 bg1 bs1 bq | dWbias dwp | dnq dnk
+        pbias = acc[:5 * D].view(5, D)
+        T._res_c_bwd[gr](dout, z, Gg, Gg.stride(0), P["bg2"], dz, dGg, dGg.stride(0), pbias[0], M, N=D, BN=1024, ROWS=R)
         dh = torch.mm(dz, W["Wsq"])
         dWsq = _mmT(dz, h)
         dab = torch.empty(M, 4 * D, device=dev, dtype=bf)
@@ -147,7 +149,7 @@ class _Block(torch.autograd.Function):
         dWab = _mmT(dab, xt)
         dx1 = torch.empty_like(x); dy = torch.empty(M, D, device=dev, dtype=bf)
         T._res_adaln_b_bwd[gr](dout, dxt, x1, x1st, G, G.stride(0), P["bs2"], Gg, Gg.stride(0), P["bg1"], y, dx1, dy,
-                               dG, dG.stride(0), dGg, dGg.stride(0), M, N=D, BN=1024, ROWS=R)
+                               dG, dG.stride(0), dGg, dGg.stride(0), pbias[1], pbias[2], M, N=D, BN=1024, ROWS=R)
         dog = torch.mm(dy, W["Wo"])
         dWo = _mmT(dy, og)
         dqkvg = torch.empty(M, 4 * D, device=dev, dtype=bf)
@@ -159,14 +161,14 @@ class _Block(torch.autograd.Function):
         rk_, DK, DV = K.dkv.bind(qn.view(shp), kn.view(shp), vc.view(shp), dob.view(shp), bias_t, LSE, dd, dq_zero=DQ)
         rk_(); rq_()
         nprog = triton.cdiv(M, 4)
-        dwqk = torch.empty(nprog, 2, 64, device=dev)
-        T._qknorm_bwd[(nprog,)](DQ, DK, DV, qkvg, rqk, P["nq"], P["nk"], dqkvg, dwqk, M, ROWS=4)
-        dnq, dnk = dwqk[:, 0, :48].sum(0), dwqk[:, 1, :48].sum(0)
+        dwqk = acc[5 * D + 17 * 128:].view(2, 64)
+        T._qknorm_bwd[(nprog,)](DQ, DK, DV, qkvg, rqk, P["nq"], P["nk"], dqkvg, dwqk, pbias[4], M, ROWS=4)
+        dnq, dnk = dwqk[0, :48], dwqk[1, :48]
         dxa = torch.mm(dqkvg, W["Wqkvg"])
         dWqkvg = _mmT(dqkvg, xa)
-        dbq = T.colsum(dqkvg[:, :D])
+        dbq = pbias[4]
         dx = torch.empty_like(x)
-        T._adaln_a_bwd[gr](dxa, x, xst, G, G.stride(0), P["bs1"], dx1, dx, dG, dG.stride(0), M, N=D, BN=1024, ROWS=R)
+        T._adaln_a_bwd[gr](dxa, x, xst, G, G.stride(0), P["bs1"], dx1, dx, dG, dG.stride(0), pbias[3], M, N=D, BN=1024, ROWS=R)
         dchat = torch.mm(dG, W["Wn"])
         dWn = _mmT(dG, chat)
         dcg = torch.mm(dGg, W["Wg"])
@@ -176,21 +178,33 @@ class _Block(torch.autograd.Function):
         # pair bias backward: dbias [H, L, L] -> dpair, dWbias, dwp (one row kernel + a partial-sum reduction)
         R2 = L * L
         npb = triton.cdiv(R2, 64)
-        dpair = torch.empty_like(pair); part = torch.empty(npb, 17, 128, device=dev)
+        dpair = torch.empty_like(pair); part = acc[5 * D:5 * D + 17 * 128].view(17, 128)
         T._pair_bias_bwd[(npb,)](DB, pair, pst, P["wp"], P["Wbias"], dpair, part, R2, ROWS=64)
-        part = part.sum(0)
         dWbias, dwp = part[:16], part[16]
-        colsum = T.colsum
-        dWs1, dWb1, dWs2, dWb2 = dWn.split(D)
+        bsum = pbias                                                      # bg2, bs2, bg1, bs1
+        dWu = torch.empty_like(dWn); dw12 = torch.zeros(2, 384, device=dev)
+        T._unfold_lnw[(4 * D,)](dWn, P["Ws1"], P["Wb1"], P["Ws2"], P["Wb2"], P["w1"], P["w2"], dWu, dw12, K=384, BK=512)
+        dWs1, dWb1, dWs2, dWb2 = dWu.split(D)
         grads = dict(
-            Ws1=dWs1 * P["w1"], Wb1=dWb1 * P["w1"], Ws2=dWs2 * P["w2"], Wb2=dWb2 * P["w2"],
-            w1=(dWs1 * P["Ws1"]).sum(0) + (dWb1 * P["Wb1"]).sum(0), w2=(dWs2 * P["Ws2"]).sum(0) + (dWb2 * P["Wb2"]).sum(0),
-            bs1=colsum(dG[:, :D]), bs2=colsum(dG[:, 2 * D:3 * D]), Wg1=dWg[:D], Wg2=dWg[D:], bg1=colsum(dGg[:, :D]), bg2=colsum(dGg[:, D:]),
+            Ws1=dWs1, Wb1=dWb1, Ws2=dWs2, Wb2=dWb2, w1=dw12[0], w2=dw12[1],
+            bs1=bsum[3], bs2=bsum[1], Wg1=dWg[:D], Wg2=dWg[D:], bg1=bsum[2], bg2=bsum[0],
             Wq=dWqkvg[:D], bq=dbq, Wk=dWqkvg[D:2 * D], Wv=dWqkvg[2 * D:3 * D], Wgt=dWqkvg[3 * D:], nq=dnq, nk=dnk,
             wp=dwp, Wbias=dWbias, Wo=dWo, Wa=dWab[:2 * D], Wb=dWab[2 * D:], Wsq=dWsq,
         )
         pg = [grads.get(n) if ctx.P_dict[n].requires_grad else None for n in ctx.names]
         return (dx, dc, dpair, None, None, *pg)
+
+
+_WCACHE = {}
+
+
+def _weights_cached(P, names):
+    """The bf16 pack is rebuilt only when a parameter changed (optimizer steps bump ._version)."""
+    key = tuple((id(P[n]), P[n]._version) for n in names)
+    ent = _WCACHE.get(id(P["Wq"]))
+    if ent is None or ent[0] != key:
+        ent = _WCACHE[id(P["Wq"])] = (key, _weights_bf16(P))
+    return ent[1]
 
 
 def _weights_bf16(P):

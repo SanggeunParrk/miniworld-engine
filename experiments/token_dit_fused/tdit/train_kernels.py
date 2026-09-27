@@ -133,7 +133,7 @@ def _res_c(X1, Z, GG, sgg, BG, OUT, M, N: tl.constexpr, BN: tl.constexpr, ROWS: 
 
 # ----------------------------------------------------------------------------------------------------------- backward
 @triton.jit
-def _res_c_bwd(DOUT, Z, GG, sgg, BG, DZ, DGG, sdg, M, N: tl.constexpr, BN: tl.constexpr, ROWS: tl.constexpr):
+def _res_c_bwd(DOUT, Z, GG, sgg, BG, DZ, DGG, sdg, PG2, M, N: tl.constexpr, BN: tl.constexpr, ROWS: tl.constexpr):
     """out = x1 + s z, s = sigmoid(gg2): dz = dout s (bf16), dgg2 = dout z s (1 - s) (bf16, DGG[:, N:2N])."""
     r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     n = tl.arange(0, BN)
@@ -143,7 +143,9 @@ def _res_c_bwd(DOUT, Z, GG, sgg, BG, DZ, DGG, sdg, M, N: tl.constexpr, BN: tl.co
     z = tl.load(Z + r[:, None] * N + n[None, :], mask=msk, other=0.0).to(tl.float32)
     s = _sig(tl.load(GG + r[:, None] * sgg + N + n[None, :], mask=msk, other=0.0).to(tl.float32) + tl.load(BG + n, mask=nm, other=0.0)[None, :])
     tl.store(DZ + r[:, None] * N + n[None, :], (do * s).to(tl.bfloat16), mask=msk)
-    tl.store(DGG + r[:, None] * sdg + N + n[None, :], (do * z * s * (1 - s)).to(tl.bfloat16), mask=msk)
+    dg2 = (do * z * s * (1 - s)).to(tl.bfloat16)
+    tl.store(DGG + r[:, None] * sdg + N + n[None, :], dg2, mask=msk)
+    tl.atomic_add(PG2 + n, tl.sum(dg2.to(tl.float32), 0), mask=nm, sem="relaxed")
 
 
 @triton.jit
@@ -161,7 +163,7 @@ def _swiglu_bwd(DH_, AB, DAB, M, ROWS: tl.constexpr):
 
 
 @triton.jit
-def _res_adaln_b_bwd(DOUT, DXT, X1, XSTAT, G, sg, BS, GG, sgg, BG, Y, DX1, DY, DG, sdG, DGG, sdg, M,
+def _res_adaln_b_bwd(DOUT, DXT, X1, XSTAT, G, sg, BS, GG, sgg, BG, Y, DX1, DY, DG, sdG, DGG, sdg, PS2, PG1, M,
                      N: tl.constexpr, BN: tl.constexpr, ROWS: tl.constexpr):
     """Backward of x1 = x + sigmoid(gg1) y ; xt = sigmoid(s2) LN(x1) + sh2 ; out = x1 + ... (dout carried by the residual).
     Out: dx1 = dout + LN'(dxt sigmoid(s2)) (fp32), dy = dx1 sigmoid(gg1) (bf16), dgg1 (DGG[:, :N]), ds2 | dsh2 (DG[:, 2N:4N])."""
@@ -176,7 +178,9 @@ def _res_adaln_b_bwd(DOUT, DXT, X1, XSTAT, G, sg, BS, GG, sgg, BG, Y, DX1, DY, D
     xh = tl.where(msk, (x1 - mean[:, None]) * rstd[:, None], 0.0)
     s2 = _sig(tl.load(G + r[:, None] * sg + 2 * N + n[None, :], mask=msk, other=0.0).to(tl.float32) + tl.load(BS + n, mask=nm, other=0.0)[None, :])
     tl.store(DG + r[:, None] * sdG + 3 * N + n[None, :], dxt.to(tl.bfloat16), mask=msk)
-    tl.store(DG + r[:, None] * sdG + 2 * N + n[None, :], (dxt * xh * s2 * (1 - s2)).to(tl.bfloat16), mask=msk)
+    ds2 = (dxt * xh * s2 * (1 - s2)).to(tl.bfloat16)
+    tl.store(DG + r[:, None] * sdG + 2 * N + n[None, :], ds2, mask=msk)
+    tl.atomic_add(PS2 + n, tl.sum(ds2.to(tl.float32), 0), mask=nm, sem="relaxed")
     dxh = tl.where(msk, dxt * s2, 0.0)
     m1 = tl.sum(dxh, 1) / N
     m2 = tl.sum(dxh * xh, 1) / N
@@ -185,7 +189,9 @@ def _res_adaln_b_bwd(DOUT, DXT, X1, XSTAT, G, sg, BS, GG, sgg, BG, Y, DX1, DY, D
     y = tl.load(Y + r[:, None] * N + n[None, :], mask=msk, other=0.0).to(tl.float32)
     g1 = _sig(tl.load(GG + r[:, None] * sgg + n[None, :], mask=msk, other=0.0).to(tl.float32) + tl.load(BG + n, mask=nm, other=0.0)[None, :])
     tl.store(DY + r[:, None] * N + n[None, :], (dx1 * g1).to(tl.bfloat16), mask=msk)
-    tl.store(DGG + r[:, None] * sdg + n[None, :], (dx1 * y * g1 * (1 - g1)).to(tl.bfloat16), mask=msk)
+    dg1 = (dx1 * y * g1 * (1 - g1)).to(tl.bfloat16)
+    tl.store(DGG + r[:, None] * sdg + n[None, :], dg1, mask=msk)
+    tl.atomic_add(PG1 + n, tl.sum(dg1.to(tl.float32), 0), mask=nm, sem="relaxed")
 
 
 @triton.jit
@@ -213,7 +219,7 @@ def _gate_o_bwd(DOG, O, QKVG, DOB, DD, DQKVG, L, M, ROWS: tl.constexpr):
 
 
 @triton.jit
-def _qknorm_bwd(DQ, DK, DV, QKVG, RQK, WQ, WK, DQKVG, DWQK, M, ROWS: tl.constexpr):
+def _qknorm_bwd(DQ, DK, DV, QKVG, RQK, WQ, WK, DQKVG, DWQK, PBQ, M, ROWS: tl.constexpr):
     """qn = q rq wq (rq = rms(q)^-1): dq = rq (dqn wq - q rq mean(dqn wq q rq)); same for k; dv copied. bf16 into
     dqkvg[:, :2304]. Per-program partial sums of dwq, dwk (dqn * q rq summed over rows and heads) -> DWQK [programs, 2, 64]."""
     pid = tl.program_id(0)
@@ -232,14 +238,17 @@ def _qknorm_bwd(DQ, DK, DV, QKVG, RQK, WQ, WK, DQKVG, DWQK, M, ROWS: tl.constexp
         xh = x * rr[:, :, None]
         dxh = dn * w
         dx = rr[:, :, None] * (dxh - xh * (tl.sum(dxh * xh, 2) / 48)[:, :, None])
-        tl.store(DQKVG + r[:, None, None] * 3072 + t * 768 + col, dx.to(tl.bfloat16), mask=msk)
-        tl.store(DWQK + (pid * 2 + t) * 64 + dd, tl.sum(tl.sum(dn * xh, 0), 0), mask=dm)
+        dxb = dx.to(tl.bfloat16)
+        tl.store(DQKVG + r[:, None, None] * 3072 + t * 768 + col, dxb, mask=msk)
+        if t == 0:
+            tl.atomic_add(PBQ + hh[:, None] * 48 + dd[None, :], tl.sum(dxb.to(tl.float32), 0), mask=dm[None, :], sem="relaxed")
+        tl.atomic_add(DWQK + t * 64 + dd, tl.sum(tl.sum(dn * xh, 0), 0), mask=dm, sem="relaxed")
     dv = tl.load(DV + r[:, None, None] * 768 + col, mask=msk, other=0.0)
     tl.store(DQKVG + r[:, None, None] * 3072 + 1536 + col, dv.to(tl.bfloat16), mask=msk)
 
 
 @triton.jit
-def _adaln_a_bwd(DXA, X, XSTAT, G, sg, BS, DX1, DX, DG, sdG, M, N: tl.constexpr, BN: tl.constexpr, ROWS: tl.constexpr):
+def _adaln_a_bwd(DXA, X, XSTAT, G, sg, BS, DX1, DX, DG, sdG, PS1, M, N: tl.constexpr, BN: tl.constexpr, ROWS: tl.constexpr):
     """xa = sigmoid(s1) LN(x) + sh1: dsh1 = dxa, ds1 = dxa xh s (1 - s) (DG[:, :2N], bf16), dx = dx1 + LN'(dxa s) (fp32)."""
     r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     n = tl.arange(0, BN)
@@ -252,7 +261,9 @@ def _adaln_a_bwd(DXA, X, XSTAT, G, sg, BS, DX1, DX, DG, sdG, M, N: tl.constexpr,
     xh = tl.where(msk, (x - mean[:, None]) * rstd[:, None], 0.0)
     s = _sig(tl.load(G + r[:, None] * sg + n[None, :], mask=msk, other=0.0).to(tl.float32) + tl.load(BS + n, mask=nm, other=0.0)[None, :])
     tl.store(DG + r[:, None] * sdG + N + n[None, :], dxa.to(tl.bfloat16), mask=msk)
-    tl.store(DG + r[:, None] * sdG + n[None, :], (dxa * xh * s * (1 - s)).to(tl.bfloat16), mask=msk)
+    ds1 = (dxa * xh * s * (1 - s)).to(tl.bfloat16)
+    tl.store(DG + r[:, None] * sdG + n[None, :], ds1, mask=msk)
+    tl.atomic_add(PS1 + n, tl.sum(ds1.to(tl.float32), 0), mask=nm, sem="relaxed")
     dxh = tl.where(msk, dxa * s, 0.0)
     m1 = tl.sum(dxh, 1) / N
     m2 = tl.sum(dxh * xh, 1) / N
@@ -296,7 +307,7 @@ def _pair_bias_fwd(PAIR, WP, WB, BIAS, PST, R2, eps, ROWS: tl.constexpr):
     rstd = tl.rsqrt(tl.sum(xc * xc, 1) / 128 + eps)
     pn = xc * rstd[:, None] * tl.load(WP + c)[None, :]
     wbt = tl.load(WB + hh[None, :] * 128 + c[:, None])                      # [128, 16] = Wbias^T
-    b = tl.dot(pn, wbt, input_precision="ieee")                             # [ROWS, 16]
+    b = tl.dot(pn, wbt, input_precision="tf32")                             # [ROWS, 16]
     tl.store(BIAS + hh[None, :] * R2 + r[:, None], b.to(tl.bfloat16), mask=rm[:, None])
     tl.store(PST + r * 2, mean, mask=rm)
     tl.store(PST + r * 2 + 1, rstd, mask=rm)
@@ -312,15 +323,15 @@ def _pair_bias_bwd(DB, PAIR, PST, WP, WB, DPAIR, PART, R2, ROWS: tl.constexpr):
     rm = r < R2
     db = tl.load(DB + hh[None, :] * R2 + r[:, None], mask=rm[:, None], other=0.0)          # [ROWS, 16]
     wb = tl.load(WB + hh[:, None] * 128 + c[None, :])                                      # [16, 128]
-    dpn = tl.dot(db, wb, input_precision="ieee")                                           # [ROWS, 128]
+    dpn = tl.dot(db, wb, input_precision="tf32")                                           # [ROWS, 128]
     p = tl.load(PAIR + r[:, None] * 128 + c[None, :], mask=rm[:, None], other=0.0)
     mean = tl.load(PST + r * 2, mask=rm, other=0.0)
     rstd = tl.load(PST + r * 2 + 1, mask=rm, other=0.0)
     ph = tl.where(rm[:, None], (p - mean[:, None]) * rstd[:, None], 0.0)
     wp = tl.load(WP + c)
-    tl.store(PART + (pid * 17 + 16) * 128 + c, tl.sum(dpn * ph, 0))
-    dwb = tl.dot(tl.trans(db), ph * wp[None, :], input_precision="ieee")                   # [16, 128]
-    tl.store(PART + (pid * 17 + hh[:, None]) * 128 + c[None, :], dwb)
+    tl.atomic_add(PART + 16 * 128 + c, tl.sum(dpn * ph, 0), sem="relaxed")
+    dwb = tl.dot(tl.trans(db), ph * wp[None, :], input_precision="tf32")                   # [16, 128]
+    tl.atomic_add(PART + hh[:, None] * 128 + c[None, :], dwb, sem="relaxed")
     dxh = dpn * wp[None, :]
     m1 = tl.sum(dxh, 1) / 128
     m2 = tl.sum(dxh * ph, 1) / 128
@@ -346,3 +357,21 @@ def colsum(x, rows=64):
     part = torch.empty(np_, N, device=x.device, dtype=torch.float32)
     _colsum[(np_, triton.cdiv(N, 256))](x, x.stride(0), part, M, N=N, ROWS=rows, BN=256)
     return part.sum(0)
+
+
+@triton.jit
+def _unfold_lnw(DWN, WS1, WB1, WS2, WB2, W1, W2, DW, DW12, K: tl.constexpr, BK: tl.constexpr):
+    """The cond-LN weights are folded into the conditioning GEMM (Wn = W diag(w)). Per output row i of Wn (4 x 768 rows):
+    dW[i] = dWn[i] w, and dw += dWn[i] * W[i] (column sums over each group of 768 rows -> DW12 [2, K] via atomics)."""
+    i = tl.program_id(0)                                         # 0 .. 3071
+    k = tl.arange(0, BK)
+    km = k < K
+    grp = i // 768
+    row = i % 768
+    lw = tl.where(grp < 2, tl.load(W1 + k, mask=km, other=0.0), tl.load(W2 + k, mask=km, other=0.0))
+    d = tl.load(DWN + i * K + k, mask=km, other=0.0)
+    w = tl.where(grp == 0, tl.load(WS1 + row * K + k, mask=km, other=0.0),
+                 tl.where(grp == 1, tl.load(WB1 + row * K + k, mask=km, other=0.0),
+                          tl.where(grp == 2, tl.load(WS2 + row * K + k, mask=km, other=0.0), tl.load(WB2 + row * K + k, mask=km, other=0.0))))
+    tl.store(DW + i * K + k, d * lw, mask=km)
+    tl.atomic_add(DW12 + (grp // 2) * K + k, d * w, mask=km, sem="relaxed")
