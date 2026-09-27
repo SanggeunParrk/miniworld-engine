@@ -86,6 +86,7 @@ class _Block(torch.autograd.Function):
     def forward(ctx, x, c, pair, P, names, *params):
         ctx.P_dict, ctx.names = P, names
         from . import train_kernels as T
+        from . import qgemm as Q
         M, L = x.shape[0], pair.shape[0]
         A, dev, bf = M // L, x.device, torch.bfloat16
         at, K = _core()
@@ -113,22 +114,21 @@ class _Block(torch.autograd.Function):
         y = torch.mm(og, W["Wo"].t())
         x1 = torch.empty_like(x); xt = torch.empty(M, D, device=dev, dtype=bf); x1st = torch.empty(M, 2, device=dev)
         T._res_adaln_b[gr](x, y, Gg, Gg.stride(0), P["bg1"], G, G.stride(0), P["bs2"], x1, xt, x1st, M, N=D, BN=1024, ROWS=R, eps=EPS_LN)
-        ab = torch.mm(xt, W["Wab"].t())
-        h = torch.empty(M, 2 * D, device=dev, dtype=bf)
-        T._swiglu[T.grid(M, 4)](ab, h, M, ROWS=4)
+        ab, h = Q.swiglu_fwd(xt, W["Wab_i"])                              # one GEMM: pre-activation (saved) and h
         z = torch.mm(h, W["Wsq"].t())
         out = torch.empty_like(x)
         T._res_c[gr](x1, z, Gg, Gg.stride(0), P["bg2"], out, M, N=D, BN=1024, ROWS=R)
         ctx.save_for_backward(x, c, pair, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, pst, bias_hm,
-                              O, LSE, og, y, x1, x1st, xt, ab, h, z)
+                              O, LSE, og, y, x1, x1st, xt, ab, z)
         ctx.W, ctx.shape = W, (A, L)
         return out
 
     @staticmethod
     def backward(ctx, dout):
         (x, c, pair, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, pst, bias_hm,
-         O, LSE, og, y, x1, x1st, xt, ab, h, z) = ctx.saved_tensors
+         O, LSE, og, y, x1, x1st, xt, ab, z) = ctx.saved_tensors
         from . import train_kernels as T
+        from . import qgemm as Q
         P, W = ctx.P_dict, ctx.W
         A, L = ctx.shape
         M, dev, bf = x.shape[0], x.device, torch.bfloat16
@@ -141,12 +141,10 @@ class _Block(torch.autograd.Function):
         acc = torch.zeros(5 * D + 17 * 128 + 128, device=dev)             # atomic accumulators: bg2 bs2 bg1 bs1 bq | dWbias dwp | dnq dnk
         pbias = acc[:5 * D].view(5, D)
         T._res_c_bwd[gr](dout, z, Gg, Gg.stride(0), P["bg2"], dz, dGg, dGg.stride(0), pbias[0], M, N=D, BN=1024, ROWS=R)
-        dh = torch.mm(dz, W["Wsq"])
+        dab, h = Q.swiglu_bwd(dz, W["WsqT"], ab)                         # dh GEMM with the SwiGLU backward in its epilogue
         dWsq = _mmT(dz, h)
-        dab = torch.empty(M, 4 * D, device=dev, dtype=bf)
-        T._swiglu_bwd[T.grid(M, 4)](dh, ab, dab, M, ROWS=4)
-        dxt = torch.mm(dab, W["Wab"])
-        dWab = _mmT(dab, xt)
+        dxt = torch.mm(dab, W["Wab_i"])
+        dWab = _mmT(dab, xt)                                              # interleaved rows a0, b0, a1, b1, ...
         dx1 = torch.empty_like(x); dy = torch.empty(M, D, device=dev, dtype=bf)
         T._res_adaln_b_bwd[gr](dout, dxt, x1, x1st, G, G.stride(0), P["bs2"], Gg, Gg.stride(0), P["bg1"], y, dx1, dy,
                                dG, dG.stride(0), dGg, dGg.stride(0), pbias[1], pbias[2], M, N=D, BN=1024, ROWS=R)
@@ -189,7 +187,7 @@ class _Block(torch.autograd.Function):
             Ws1=dWs1, Wb1=dWb1, Ws2=dWs2, Wb2=dWb2, w1=dw12[0], w2=dw12[1],
             bs1=bsum[3], bs2=bsum[1], Wg1=dWg[:D], Wg2=dWg[D:], bg1=bsum[2], bg2=bsum[0],
             Wq=dWqkvg[:D], bq=dbq, Wk=dWqkvg[D:2 * D], Wv=dWqkvg[2 * D:3 * D], Wgt=dWqkvg[3 * D:], nq=dnq, nk=dnk,
-            wp=dwp, Wbias=dWbias, Wo=dWo, Wa=dWab[:2 * D], Wb=dWab[2 * D:], Wsq=dWsq,
+            wp=dwp, Wbias=dWbias, Wo=dWo, Wa=dWab[0::2], Wb=dWab[1::2], Wsq=dWsq,
         )
         pg = [grads.get(n) if ctx.P_dict[n].requires_grad else None for n in ctx.names]
         return (dx, dc, dpair, None, None, *pg)
@@ -214,7 +212,8 @@ def _weights_bf16(P):
         Wg=torch.cat([P["Wg1"], P["Wg2"]]).to(bf),
         Wqkvg=torch.cat([P["Wq"], P["Wk"], P["Wv"], P["Wgt"]]).to(bf),
         bqkvg=torch.cat([P["bq"], torch.zeros(3 * D, device=P["bq"].device)]).to(bf),
-        Wo=P["Wo"].to(bf), Wab=torch.cat([P["Wa"], P["Wb"]]).to(bf), Wsq=P["Wsq"].to(bf),
+        Wo=P["Wo"].to(bf), Wab_i=torch.stack([P["Wa"], P["Wb"]], 1).reshape(-1, D).to(bf), Wsq=P["Wsq"].to(bf),
+        WsqT=P["Wsq"].t().contiguous().to(bf),
     )
 
 
