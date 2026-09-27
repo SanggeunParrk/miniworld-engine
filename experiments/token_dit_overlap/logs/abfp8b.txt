@@ -1,0 +1,52 @@
+## start 18:00:40 restart=0
+#### fp8_768r
+L=768: bf16 rel_rms 4.40e-03   fp8 picks {(3840, 3072, 768): (128, 192, 1, 4, False)}
+  fp8 q|k|v|g, xa bound  32: rel_rms 4.86e-03 (x1.10)
+  fp8 q|k|v|g, xa bound  64: rel_rms 4.86e-03 (x1.10)
+  fp8 q|k|v|g, xa bound 128: rel_rms 4.86e-03 (x1.10)
+  fp8 q|k|v|g, xa bound 256: rel_rms 4.86e-03 (x1.10)
+  bf16       154.14 us/block (+0.00 saved)   runs 149.90 150.34 153.17 158.10 149.76 153.63 157.74 154.03 154.24 158.49 154.51 153.52 154.76 156.03
+  fp8 qkvg   147.57 us/block (+6.57 saved)   runs 147.22 147.48 150.73 147.61 147.05 147.25 148.58 147.06 146.99 148.21 148.45 147.52 149.19 148.13
+  fp8 deterministic: True
+#### fp8_768r done
+#### bench768_bf16
+  engine MINIWORLD                      13326.5 us/step    555.3 us/block  rel_rms vs fp32 1.11e-02
+  fused v6 (v5 + SwiGLU in expand GEMM)     3538.7 us/step    147.4 us/block  rel_rms vs fp32 4.40e-03
+  fused v5 (cuBLAS expand + swiglu_rows)     4002.3 us/step    166.8 us/block  rel_rms vs fp32 4.64e-03
+  fused v4 (v1 core, pre-scaled)         4347.5 us/step    181.1 us/block  rel_rms vs fp32 4.40e-03
+  fused v3, logits not pre-scaled        4481.3 us/step    186.7 us/block  rel_rms vs fp32 4.41e-03
+  fused v2, engine attention core        4597.1 us/step    191.5 us/block  rel_rms vs fp32 4.40e-03
+  fused v1 (AdaLN in Triton GEMM)        9344.6 us/step    389.4 us/block  rel_rms vs fp32 4.45e-03
+  once per sample: fused hoist (all blocks' pair bias)              262.1 us
+#### bench768_bf16 done
+#### bench768_fp8
+  engine MINIWORLD                      13308.7 us/step    554.5 us/block  rel_rms vs fp32 1.11e-02
+  fused v6 (v5 + SwiGLU in expand GEMM)     3428.5 us/step    142.9 us/block  rel_rms vs fp32 4.86e-03
+  fused v5 (cuBLAS expand + swiglu_rows)     3783.7 us/step    157.7 us/block  rel_rms vs fp32 5.07e-03
+  fused v4 (v1 core, pre-scaled)         3943.4 us/step    164.3 us/block  rel_rms vs fp32 4.86e-03
+  fused v3, logits not pre-scaled        4151.2 us/step    173.0 us/block  rel_rms vs fp32 4.86e-03
+  fused v2, engine attention core        4399.7 us/step    183.3 us/block  rel_rms vs fp32 4.86e-03
+  fused v1 (AdaLN in Triton GEMM)        9285.6 us/step    386.9 us/block  rel_rms vs fp32 4.45e-03
+  once per sample: fused hoist (all blocks' pair bias)              262.6 us
+#### bench768_fp8 done
+#### bench384_bf16
+  engine MINIWORLD                       6501.9 us/step    270.9 us/block  rel_rms vs fp32 1.13e-02
+  fused v6 (v5 + SwiGLU in expand GEMM)     1829.4 us/step     76.2 us/block  rel_rms vs fp32 4.42e-03
+  fused v5 (cuBLAS expand + swiglu_rows)     2019.7 us/step     84.2 us/block  rel_rms vs fp32 4.65e-03
+  fused v4 (v1 core, pre-scaled)         1999.7 us/step     83.3 us/block  rel_rms vs fp32 4.42e-03
+  fused v3, logits not pre-scaled        2056.7 us/step     85.7 us/block  rel_rms vs fp32 4.42e-03
+  fused v2, engine attention core        2128.7 us/step     88.7 us/block  rel_rms vs fp32 4.42e-03
+  fused v1 (AdaLN in Triton GEMM)        4261.3 us/step    177.6 us/block  rel_rms vs fp32 4.47e-03
+  once per sample: fused hoist (all blocks' pair bias)               74.7 us
+#### bench384_bf16 done
+#### bench384_fp8
+  engine MINIWORLD                       6519.2 us/step    271.6 us/block  rel_rms vs fp32 1.13e-02
+  fused v6 (v5 + SwiGLU in expand GEMM)     1768.2 us/step     73.7 us/block  rel_rms vs fp32 5.09e-03
+  fused v5 (cuBLAS expand + swiglu_rows)     1942.6 us/step     80.9 us/block  rel_rms vs fp32 5.30e-03
+  fused v4 (v1 core, pre-scaled)         1920.3 us/step     80.0 us/block  rel_rms vs fp32 5.09e-03
+  fused v3, logits not pre-scaled        1986.3 us/step     82.8 us/block  rel_rms vs fp32 5.09e-03
+  fused v2, engine attention core        2059.1 us/step     85.8 us/block  rel_rms vs fp32 5.09e-03
+  fused v1 (AdaLN in Triton GEMM)        4249.9 us/step    177.1 us/block  rel_rms vs fp32 4.47e-03
+  once per sample: fused hoist (all blocks' pair bias)               74.4 us
+#### bench384_fp8 done
+## all done 18:09:33

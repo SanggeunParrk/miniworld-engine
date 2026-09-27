@@ -18,9 +18,26 @@ modulation tensors are [L, *] and are read by all S samples.
   pair_bias_all     one pass over the pair: z -> LayerNorm -> [L*L, 128] @ [128, 24 * 16] -> head-major bias of
                     every block, [24 * 16, L, L]. Each block's LayerNorm weight is folded into its projection.
 """
+import os
+
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.cuda import gdc_launch_dependents, gdc_wait
+
+# Programmatic dependent launch. quack's sm90 GEMMs already wait before their TMA loads and trigger in their
+# epilogue (gemm_sm90.py, use_pdl=True by default), so the block's chain is broken only where OUR kernels sit
+# between them. These passes close it (on by default, TDIT_PDL=0 turns it off): they wait before reading the GEMM's
+# output and trigger once their stores are issued, which lets the next GEMM's preamble run under this pass's tail.
+# Triggering early is safe whatever follows: a kernel launched without the PDL attribute (cuBLAS, torch) still waits
+# for this one to finish. Step A/B with the CUDA core also on PDL: +3.09 us/block at L384, +1.76 at L768.
+PDL = bool(int(os.environ.get("TDIT_PDL", "1")))
+EARLY = bool(int(os.environ.get("TDIT_EARLY", "0")))
+# Where the pass triggers its dependent. The dependent can launch only once EVERY program has triggered, and with ~1000
+# programs over several waves a trigger after the stores is effectively completion: an nsys trace of the captured step
+# shows no overlap into the next GEMM (+0.1 us gap) where quack's own early trigger gives -0.5 to -3 us. At the start,
+# the dependent launches as soon as the last program starts; it still waits for completion before reading.
+TRIG_START = bool(int(os.environ.get("TDIT_TRIG_START", "1")))   # step A/B: +1.70 us/block L384, +1.40 L768   # loads that do not depend on the previous kernel go before the wait
 
 STAT_W = 128  # column width of one statistics partial; every producer and consumer agrees on it
 
@@ -232,7 +249,8 @@ def _rows_cfgs():
 
 @triton.autotune(configs=_rows_cfgs(), key=["M", "L"])
 @triton.jit
-def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, D: tl.constexpr, DP: tl.constexpr, BR: tl.constexpr):
+def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, inv_s, D: tl.constexpr, DP: tl.constexpr,
+                       OUT_F8: tl.constexpr, BR: tl.constexpr):
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
     rm = rows < M
     tok = rows % L
@@ -246,20 +264,29 @@ def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, D: tl.constexpr,
     rstd = 1.0 / tl.sqrt(tl.sum(d * d, 1) / D + eps)
     ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
     mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
-    tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
+    xa = d * rstd[:, None] * ms + mb
+    if OUT_F8:                                                        # e4m3 with a static scale; clamp so an overflow
+        xa = tl.clamp(xa * inv_s, -448.0, 448.0)                      # saturates instead of becoming NaN
+    tl.store(OUT + r64 * D + cs[None, :], xa.to(OUT.dtype.element_ty), mask=mk)
 
 
-def adaln_rows(x, ms, mb, out, L, eps=1e-5):
+def adaln_rows(x, ms, mb, out, L, eps=1e-5, inv_s=1.0):
+    """out = AdaLN(x); an fp8 (e4m3) ``out`` is written as AdaLN(x) * inv_s."""
     M, D = x.shape
     _adaln_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](x, ms, mb, out, M, L, x.stride(0), ms.stride(0), mb.stride(0),
-                                                             eps, D=D, DP=triton.next_power_of_2(D))
+                                                             eps, inv_s, D=D, DP=triton.next_power_of_2(D),
+                                                             OUT_F8=out.dtype == torch.float8_e4m3fn)
 
 
 # restore_value: X is the residual, updated in place; without it every config the autotuner benches would add again.
 @triton.autotune(configs=_rows_cfgs(), key=["M", "L", "HAS_ADALN"], restore_value=["X"])
 @triton.jit
-def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, smb, eps,
-                               D: tl.constexpr, DP: tl.constexpr, HAS_ADALN: tl.constexpr, BR: tl.constexpr):
+def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, smb, eps, inv_s,
+                               D: tl.constexpr, DP: tl.constexpr, HAS_ADALN: tl.constexpr, PDL: tl.constexpr,
+                               EARLY: tl.constexpr, TRIG_START: tl.constexpr, OUT_F8: tl.constexpr,
+                               BR: tl.constexpr):
+    if TRIG_START:
+        gdc_launch_dependents()
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
     rm = rows < M
     tok = rows % L
@@ -267,27 +294,49 @@ def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, sm
     cm = cs < D
     mk = rm[:, None] & cm[None, :]
     r64 = rows[:, None].to(tl.int64)
-    gl = tl.sigmoid(tl.load(GL + tok[:, None] * sgl + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
-    y = tl.load(Y + r64 * sy + cs[None, :], mask=mk, other=0.0).to(tl.float32)
     xp = X + r64 * sx + cs[None, :]
-    x = tl.load(xp, mask=mk, other=0.0) + gl * y
+    if EARLY:
+        # Only Y comes from the kernel this pass waits on. X was last written two kernels back (every kernel in the
+        # chain waits before its main work, so it is complete) and the conditioning rows are per-step constants: read
+        # them under the previous GEMM's tail.
+        x0 = tl.load(xp, mask=mk, other=0.0)
+        gl = tl.sigmoid(tl.load(GL + tok[:, None] * sgl + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
+        if HAS_ADALN:
+            ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
+            mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
+    if PDL:
+        gdc_wait()                                                   # Y is the previous GEMM's output
+    if not EARLY:
+        x0 = tl.load(xp, mask=mk, other=0.0)
+        gl = tl.sigmoid(tl.load(GL + tok[:, None] * sgl + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
+    y = tl.load(Y + r64 * sy + cs[None, :], mask=mk, other=0.0).to(tl.float32)
+    x = x0 + gl * y
     tl.store(xp, x, mask=mk)
     if HAS_ADALN:
         mean = tl.sum(x, 1) / D
         d = tl.where(cm[None, :], x - mean[:, None], 0.0)
         rstd = 1.0 / tl.sqrt(tl.sum(d * d, 1) / D + eps)
-        ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
-        mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
-        tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
+        if not EARLY:
+            ms = tl.sigmoid(tl.load(MS + tok[:, None] * sms + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32))
+            mb = tl.load(MB + tok[:, None] * smb + cs[None, :], mask=cm[None, :], other=0.0).to(tl.float32)
+        xa = d * rstd[:, None] * ms + mb
+        if OUT_F8:
+            xa = tl.clamp(xa * inv_s, -448.0, 448.0)
+        tl.store(OUT + r64 * D + cs[None, :], xa.to(OUT.dtype.element_ty), mask=mk)
+    if PDL and not TRIG_START:
+        gdc_launch_dependents()
 
 
-def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5):
-    """x += gl * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
+def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5, inv_s=1.0):
+    """x += gl * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block (an fp8 ``out`` is
+    written as AdaLN(x) * inv_s)."""
     M, D = x.shape
     has = ms is not None
     _resgate_adaln_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](
         x, y, gl, ms if has else gl, mb if has else gl, out if has else y, M, L, x.stride(0), y.stride(0), gl.stride(0),
-        (ms if has else gl).stride(0), (mb if has else gl).stride(0), eps, D=D, DP=triton.next_power_of_2(D), HAS_ADALN=has)
+        (ms if has else gl).stride(0), (mb if has else gl).stride(0), eps, inv_s, D=D, DP=triton.next_power_of_2(D),
+        HAS_ADALN=has, PDL=PDL, EARLY=PDL and EARLY,
+        TRIG_START=PDL and TRIG_START, OUT_F8=has and out.dtype == torch.float8_e4m3fn, launch_pdl=PDL)
 
 
 @triton.autotune(configs=_rows_cfgs(), key=["M"])

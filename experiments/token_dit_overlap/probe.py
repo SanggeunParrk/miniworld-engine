@@ -20,6 +20,27 @@ from tdit import FusedTokenDiT                                  # noqa: E402
 from tdit import kernels as K                                   # noqa: E402
 from tdit.attn import attention_gated_in_place2, bias_descriptor  # noqa: E402
 from gra import gemm_resgate_adaln               # noqa: E402
+import l2p                                          # noqa: E402
+from quack.gemm_act import gemm_act                  # noqa: E402
+
+# best (tile_N, cluster_M, cluster_N, pingpong) per shape from gemm_sweep.py at M = 3840 / 1920; cuBLAS loses to all of
+# them (qkvg 32.6 vs 26.4, Wo 9.4 vs 9.0, squeeze 15.1 vs 14.4 us at L768), and the packaged v7 sends only qkvg to quack.
+# per M, from gemm_sweep.py; None = cuBLAS wins there. cluster_N > 1 (A multicast) is what v7's candidate list misses.
+QCFG = {3840: {"qkvg": (192, 1, 1, True), "wo": (192, 1, 4, False), "sq": (192, 1, 4, False)},
+        1920: {"qkvg": (192, 1, 1, True), "wo": None, "sq": None}}
+
+
+def qmm(A, W, out, key, bias=None):
+    cfg = QCFG.get(A.shape[0], {}).get(key)
+    if cfg is None:
+        if bias is None:
+            torch.mm(A, W.t(), out=out)
+        else:
+            torch.addmm(bias, A, W.t(), out=out)
+        return
+    tn, cm, cn, pp = cfg
+    gemm_act(A[None], W[None], None, None, out[None], None, None, 128, tn, cm, cn, pingpong=pp,
+             rowvec_bias=None if bias is None else bias[None])
 
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=768)
@@ -54,13 +75,17 @@ bdesc = bias_descriptor(bias)
 
 
 def buffers(Sg):
+    """x, xa and y in one contiguous pool: an L2 persisting window is a single byte range per stream."""
     M = Sg * L
-    return dict(x=torch.empty(M, DS, device=dev), xa=torch.empty(M, DS, device=dev, dtype=bf),
-                qkvg=torch.empty(M, 4 * DS, device=dev, dtype=bf), y=torch.empty(M, DS, device=dev, dtype=bf),
-                h=torch.empty(M, 2 * DS, device=dev, dtype=bf))
+    pool = torch.empty(M * DS * 8, device=dev, dtype=torch.uint8)
+    x = pool[: M * DS * 4].view(torch.float32).view(M, DS)
+    xa = pool[M * DS * 4: M * DS * 6].view(bf).view(M, DS)
+    y = pool[M * DS * 6:].view(bf).view(M, DS)
+    return dict(pool=pool, x=x, xa=xa, y=y,
+                qkvg=torch.empty(M, 4 * DS, device=dev, dtype=bf), h=torch.empty(M, 2 * DS, device=dev, dtype=bf))
 
 
-def run_group(sg, s0, buf, g1, g2, rows=True, core=True, gra=False):
+def run_group(sg, s0, buf, g1, g2, rows=True, core=True, gra=False, one_w=False, qmm_on=False):
     """The v6 per-block schedule for samples [s0, s0 + sg)."""
     M = sg * L
     x, xa, qkvg, y, h = (buf[k] for k in ("x", "xa", "qkvg", "y", "h"))
@@ -68,8 +93,11 @@ def run_group(sg, s0, buf, g1, g2, rows=True, core=True, gra=False):
     if rows:
         K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, L, f.eps)
     q4, k4, v4, g4 = (qkvg.view(sg, L, 4 * DS)[..., i * DS:(i + 1) * DS].unflatten(-1, (H, DS // H)) for i in range(4))
-    for b, pk in enumerate(f.per):
-        torch.addmm(pk["bqkvg"], xa, pk["wqkvg"].t(), out=qkvg)
+    for b, pk in enumerate([f.per[0]] * NB if one_w else f.per):
+        if qmm_on:
+            qmm(xa, pk["wqkvg"], qkvg, "qkvg", pk["bqkvg"])
+        else:
+            torch.addmm(pk["bqkvg"], xa, pk["wqkvg"].t(), out=qkvg)
         if core:
             attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, f.core_precision)
         last = b + 1 == NB
@@ -79,11 +107,17 @@ def run_group(sg, s0, buf, g1, g2, rows=True, core=True, gra=False):
             gemm_resgate_adaln(h, pk["ws"], x, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                None if last else g1[:, b + 1, 1], None if last else xa, L, f.eps)
             continue
-        torch.mm(qkvg[:, :DS], pk["wo"].t(), out=y)
+        if qmm_on:
+            qmm(qkvg[:, :DS], pk["wo"], y, "wo")
+        else:
+            torch.mm(qkvg[:, :DS], pk["wo"].t(), out=y)
         if rows:
             K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, f.eps)
         f._expand_swiglu(xa, pk["wab_i"], h)
-        torch.mm(h, pk["ws"].t(), out=y)
+        if qmm_on:
+            qmm(h, pk["ws"], y, "sq")
+        else:
+            torch.mm(h, pk["ws"].t(), out=y)
         if rows:
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                  None if last else g1[:, b + 1, 1], xa, L, f.eps)
@@ -95,11 +129,11 @@ BUFS = {name: [buffers(sg) for sg in gs] for name, gs in GROUPS.items()}
 STREAMS = [torch.cuda.Stream() for _ in range(S)]
 
 
-def step(name, rows=True, core=True, gra=False):
+def step(name, rows=True, core=True, gra=False, one_w=False, l2=False, qmm_on=False):
     gs, bufs = GROUPS[name], BUFS[name]
     g1, g2 = f._cond(cond, L, DS)
     if len(gs) == 1:
-        return run_group(gs[0], 0, bufs[0], g1, g2, rows, core, gra)
+        return run_group(gs[0], 0, bufs[0], g1, g2, rows, core, gra, one_w, qmm_on)
     cur = torch.cuda.current_stream()
     s0 = 0
     for sg, buf, st in zip(gs, bufs, STREAMS):
@@ -143,9 +177,20 @@ with torch.no_grad():
     t_pkg = time_us(lambda: f.step(single, cond, bias))
     print(f"L={L} S={S} {NB} blocks bf16, per block")
     print(f"  FusedTokenDiT.step (v6)        {t_pkg / NB:7.1f} us")
-    for name, kw in (("base", {}), ("base", dict(gra=True)), ("base", dict(rows=False)), ("base", dict(core=False)),
+    for name, kw in (("base", {}), ("base", dict(rows=False)), ("base", dict(core=False)),
+                     ("base", dict(rows=False, core=False)), ("base", dict(rows=False, core=False, one_w=True)),
+                     ("base", dict(qmm_on=True)), ("base", dict(qmm_on=True, rows=False, core=False)),
+                     ("base", dict(gra=True)), ("base", dict(gra=True, qmm_on=True)),
                      ):
+        # the window is a stream attribute: set it before capture (cudaStreamSetAttribute is illegal while capturing),
+        # and the kernel nodes inherit it
+        l2_on = kw.pop("l2", False)
+        if l2_on:
+            l2p.set_window(BUFS[name][0][l2_on], float(kw.pop("hit", 1.0)))
+        else:
+            l2p.clear_window()
         out = step(name, **kw).clone().float()
-        tag = name + ("  -rows (upper bound)" if kw.get("rows") is False else "") + ("  -core" if kw.get("core") is False else "") + ("  +gemm_resgate_adaln" if kw.get("gra") else "")
+        l2tag = f"  +L2 persist({l2_on})" if l2_on else ""
+        tag = name + ("  -rows (upper bound)" if kw.get("rows") is False else "") + ("  -core" if kw.get("core") is False else "") + ("  +gemm_resgate_adaln" if kw.get("gra") else "") + ("  one weight set (L2-resident)" if kw.get("one_w") else "") + ("  all GEMMs via quack" if kw.get("qmm_on") else "") + l2tag
         d = float((out - ref).norm() / ref.norm())
         print(f"  {tag:<32s} {time_us(lambda: step(name, **kw)) / NB:7.1f} us   vs step {d:.1e}", flush=True)
