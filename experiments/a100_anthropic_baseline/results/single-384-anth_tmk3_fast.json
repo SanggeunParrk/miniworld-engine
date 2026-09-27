@@ -1,0 +1,63 @@
+{
+  "module": "single",
+  "L": 384,
+  "arm": "anth:tmk3_fast",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "e696edfd-a9aa-57a0-b706-fe91411e2f97",
+  "host": "gpu05",
+  "job": "51086",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0026532087940722704,
+      "finite": true,
+      "ms": 0.526110725402832,
+      "rounds_ms": [
+        0.5259468841552735,
+        0.5263155364990234,
+        0.5260492706298828,
+        0.526110725402832,
+        0.5264384078979493,
+        0.5257625579833984,
+        0.526295051574707
+      ],
+      "warm_replays": 609,
+      "kernels": {
+        "_k_proj9": [
+          1,
+          211.3
+        ],
+        "_k_out9": [
+          1,
+          124.7
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          90.2
+        ],
+        "_k_ln_cols_T": [
+          1,
+          51.3
+        ],
+        "_k_ln_rows": [
+          1,
+          50.7
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          4.4
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          3.5
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(row='tmk3_fast', word='tmk3_fast', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0156;relrms=0.000169)', exact_vs=None, backward=False, capture_safe=True, x_stock=2.034, fallback='v4', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)"
+}

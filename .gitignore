@@ -67,6 +67,13 @@ experiments/*
 !experiments/transition_fused/
 !experiments/token_dit_fused/
 !experiments/token_dit_overlap/
+!experiments/a100_anthropic_baseline/
+!experiments/a100_trimul_fwd/
+!experiments/a100_trimul_triton/
+!experiments/a100_transition_fwd/
+!experiments/a100_transition_bwd/
+!experiments/a100_msa_fwd/
+!experiments/msa_triton/
 # dev/ holds development scratch, research probes, ncu harnesses (never shipped: the wheel is
 # src/ only). dev/scratchpad_ncu/ is local scratch (ncu dumps, kernel .cu backups, optimizer
 # prompt logs) — kept ignored as it was under the old scratchpad_ncu/ path; a handful of files
@@ -108,6 +115,9 @@ benchmarks/*/*/results/*/plots/
 # scratch: one-off sbatch scripts and their logs (they belong in a scratchpad, not here)
 *.sbatch
 *.log
+# raw SASS dumps of experiment profiling (tens of MB each; the findings live in the experiment READMEs)
+experiments/*/logs/*.sass
+experiments/*/logs/sass-*.txt
 
 # and the two shapes of scratch that are NOT a .sbatch or a .log, both of which have been swept
 # into a commit by `git add -A` before. Probe OUTPUT (`bands_bf16_1.json` and friends: per-kernel

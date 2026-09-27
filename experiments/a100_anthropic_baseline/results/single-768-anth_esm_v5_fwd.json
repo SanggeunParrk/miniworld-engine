@@ -1,0 +1,55 @@
+{
+  "module": "single",
+  "L": 768,
+  "arm": "anth:esm_v5_fwd",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "4c63d63c-a522-9e93-68e5-93cee99e0cc5",
+  "host": "gpu05",
+  "job": "51085",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0028362239245325327,
+      "finite": true,
+      "ms": 1.7794866943359375,
+      "rounds_ms": [
+        1.7718272399902344,
+        1.7714381408691406,
+        1.7819442749023438,
+        1.7735270690917968,
+        1.7794866943359375,
+        1.8150810241699218,
+        1.8632908630371094
+      ],
+      "warm_replays": 189,
+      "kernels": {
+        "_k1x": [
+          1,
+          591.3
+        ],
+        "_k3x": [
+          1,
+          544.8
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          539.1
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          5.6
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          4.9
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(row='esm_v5_fwd', word='esm_v5_fwd', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0312;relrms=0.00524)', exact_vs=None, backward=False, capture_safe=True, x_stock=1.303, fallback='v4', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config={'k1': {'BM': 128, 'BN': 64, 'impl': 'tma', 'num_stages': 2, 'num_warps': 4}, 'k3': {'BM': 128, 'BN': 64, 'num_stages': 1, 'num_warps': 4}})"
+}

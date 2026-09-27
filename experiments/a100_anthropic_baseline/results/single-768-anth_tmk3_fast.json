@@ -1,0 +1,63 @@
+{
+  "module": "single",
+  "L": 768,
+  "arm": "anth:tmk3_fast",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "9cbd3c25-ff2b-5a93-c648-b015cc9a6b8c",
+  "host": "gpu05",
+  "job": "51083",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0026246849447488785,
+      "finite": true,
+      "ms": 2.2687744140625,
+      "rounds_ms": [
+        2.2687744140625,
+        2.268119049072266,
+        2.2682418823242188,
+        2.2675045776367186,
+        2.4125439453125,
+        2.320076751708984,
+        2.289152069091797
+      ],
+      "warm_replays": 146,
+      "kernels": {
+        "_k_proj9": [
+          1,
+          791.5
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          539.7
+        ],
+        "_k_out9": [
+          1,
+          453.2
+        ],
+        "_k_ln_cols_T": [
+          1,
+          186.9
+        ],
+        "_k_ln_rows": [
+          1,
+          186.0
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          5.5
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          4.6
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(row='tmk3_fast', word='tmk3_fast', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0156;relrms=0.000171)', exact_vs=None, backward=False, capture_safe=True, x_stock=1.003, fallback='v4', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)"
+}

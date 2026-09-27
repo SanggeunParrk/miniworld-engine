@@ -1,0 +1,106 @@
+{
+  "module": "trimul",
+  "L": 768,
+  "arm": "anth:native_bidir",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "489b77fc-38d7-5a3e-a6aa-04e2996c2c62",
+  "host": "gpu01",
+  "job": "51084",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0026399269700050354,
+      "finite": true,
+      "ms": 3.41712890625,
+      "rounds_ms": [
+        3.4160025024414065,
+        3.416494140625,
+        3.463168029785156,
+        3.5083877563476564,
+        3.4175588989257815,
+        3.416494140625,
+        3.41712890625
+      ],
+      "warm_replays": 97,
+      "kernels": {
+        "k1_bf16_c128_h256_bm128_bn32_wm32_s2_mb3": [
+          1,
+          1101.3
+        ],
+        "k3_bf16_c128_h256_bm64_bn16_wm32_s1_mb4": [
+          1,
+          1064.4
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          534.1
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": [
+          1,
+          501.9
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          5.2
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          4.5
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "native_gate": {
+    "n": 216,
+    "passed": 206,
+    "failed": [],
+    "skipped": [
+      {
+        "id": "c128x128_n32_in_bf16_res0_mnone_exact",
+        "why": "exact_small_n:32(the reference library takes a different path below 101 tokens; the fast variant serves this size)"
+      },
+      {
+        "id": "c64x128_n256_out_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_out_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_in_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_out_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_out_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_in_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c256x128_n403_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:256x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      }
+    ]
+  },
+  "selection": "sm80 native composed: k1_bf16_c128_h256_bm128_bn32_wm32_s2_mb3 | bmm NT(out half) + TN(in half) | k3_bf16_c128_h256_bm64_bn16_wm32_s1_mb4"
+}

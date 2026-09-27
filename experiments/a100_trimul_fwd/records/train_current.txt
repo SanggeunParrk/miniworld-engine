@@ -1,0 +1,7 @@
+# trainab-52591.log gpu05 2026-09-25 (default: A100_B1G=128, joint B7)
+bidir  L64: out 2.88e-03 | worst to_left_gate.weight 5.42e-03 (bf16 module worst 7.54e-03)
+bidir  L384: out 2.92e-03 | worst to_right_gate.weight 5.40e-03 (bf16 module worst 7.81e-03) | fwd+bwd 2.641 ms
+bidir  L768: out 2.95e-03 | worst to_right_gate.weight 5.37e-03 (bf16 module worst 7.48e-03) | fwd+bwd 11.333 ms
+single L64: out 2.86e-03 | worst ln_pair.weight 5.54e-03 (bf16 module worst 7.50e-03)
+single L384: out 2.90e-03 | worst to_left_gate.weight 5.42e-03 (bf16 module worst 7.55e-03) | fwd+bwd 1.584 ms
+single L768: out 2.93e-03 | worst to_left_gate.weight 5.37e-03 (bf16 module worst 7.56e-03) | fwd+bwd 6.622 ms

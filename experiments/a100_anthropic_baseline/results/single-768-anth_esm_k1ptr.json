@@ -1,0 +1,55 @@
+{
+  "module": "single",
+  "L": 768,
+  "arm": "anth:esm_k1ptr",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "e696edfd-a9aa-57a0-b706-fe91411e2f97",
+  "host": "gpu05",
+  "job": "51086",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0024654963053762913,
+      "finite": true,
+      "ms": 1.7755340576171874,
+      "rounds_ms": [
+        1.7756364440917969,
+        1.7755340576171874,
+        1.7753497314453126,
+        1.775308837890625,
+        1.7748377990722657,
+        1.8231910705566405,
+        1.8461286926269531
+      ],
+      "warm_replays": 190,
+      "kernels": {
+        "_k1s": [
+          1,
+          605.3
+        ],
+        "_k3s": [
+          1,
+          554.9
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          550.2
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          5.4
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          5.1
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(row='esm_k1ptr', word='esm_k1ptr', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='fast', exact_vs=None, backward=False, capture_safe=True, x_stock=None, fallback='v4 (c 128 | 256) / cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)"
+}

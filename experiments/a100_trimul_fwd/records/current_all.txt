@@ -1,0 +1,11 @@
+# both-52719.log gpu08 2026-09-25 (TRIMUL_ZST=1, A100_OVERLAP=1, joint B7, A100_B1G=128)
+bidir  L384:    614.0 us  (SoL 397 us -> 64.6%)  K1 225.0 (72%)  C 180.0 (79%)  K3 171.9 (55%)  rel 2.703e-03 (bf16 module 3.143e-03) max 3.528e-02
+bidir  L768:   2828.4 us  (SoL 1988 us -> 70.3%)  K1 946.2 (68%)  C 1116.1 (87%)  K3 712.0 (53%)  rel 2.733e-03 (bf16 module 3.181e-03) max 3.656e-02
+single L384:    365.4 us  (SoL 222 us -> 60.7%)  K1 142.5 (57%)  C 92.6 (76%)  K3 121.9 (58%)  rel 2.688e-03 (bf16 module 3.120e-03) max 3.595e-02
+single L768:   1626.4 us  (SoL 1088 us -> 66.9%)  K1 555.6 (58%)  C 586.0 (82%)  K3 463.5 (61%)  rel 2.715e-03 (bf16 module 3.159e-03) max 4.378e-02
+bidir  L64: out 2.88e-03 | worst to_left_gate.weight 5.43e-03 (bf16 module worst 7.54e-03)
+bidir  L384: out 2.92e-03 | worst to_right_gate.weight 5.40e-03 (bf16 module worst 7.81e-03) | fwd+bwd 2.552 ms
+bidir  L768: out 2.95e-03 | worst to_right_gate.weight 5.37e-03 (bf16 module worst 7.48e-03) | fwd+bwd 11.209 ms
+single L64: out 2.86e-03 | worst ln_pair.weight 5.53e-03 (bf16 module worst 7.50e-03)
+single L384: out 2.90e-03 | worst to_right_gate.weight 5.42e-03 (bf16 module worst 7.55e-03) | fwd+bwd 1.534 ms
+single L768: out 2.93e-03 | worst to_right_gate.weight 5.37e-03 (bf16 module worst 7.56e-03) | fwd+bwd 6.520 ms

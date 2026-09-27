@@ -1,0 +1,55 @@
+{
+  "module": "single",
+  "L": 768,
+  "arm": "anth:fast",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "4c63d63c-a522-9e93-68e5-93cee99e0cc5",
+  "host": "gpu05",
+  "job": "51085",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0028362239245325327,
+      "finite": true,
+      "ms": 1.7769267272949218,
+      "rounds_ms": [
+        1.7769267272949218,
+        1.7786265563964845,
+        1.7721548461914063,
+        1.772728271484375,
+        1.7818623352050782,
+        1.771479034423828,
+        1.8488525390625
+      ],
+      "warm_replays": 189,
+      "kernels": {
+        "_k1x": [
+          1,
+          588.7
+        ],
+        "_k3x": [
+          1,
+          544.2
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          537.3
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          5.2
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          4.7
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(row='esm_v5_fwd', word='fast', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0312;relrms=0.00524)', exact_vs=None, backward=False, capture_safe=True, x_stock=1.303, fallback='v4', reason='fast winner on A100:2.10.0+cu128/3.6.0/cueq0.10.0; column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; stepaside native', config={'k1': {'BM': 128, 'BN': 64, 'impl': 'tma', 'num_stages': 2, 'num_warps': 4}, 'k3': {'BM': 128, 'BN': 64, 'num_stages': 1, 'num_warps': 4}})"
+}

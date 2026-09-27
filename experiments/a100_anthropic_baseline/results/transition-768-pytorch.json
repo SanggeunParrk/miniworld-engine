@@ -1,0 +1,126 @@
+{
+  "module": "transition",
+  "L": 768,
+  "arm": "pytorch",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "4c63d63c-a522-9e93-68e5-93cee99e0cc5",
+  "host": "gpu05",
+  "job": "51085",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0028488889802247286,
+      "finite": true,
+      "ms": 3.778703308105469,
+      "rounds_ms": [
+        3.779154052734375,
+        3.778109436035156,
+        3.802767333984375,
+        3.7914419555664063,
+        3.77860107421875,
+        3.7776589965820313,
+        3.778703308105469
+      ],
+      "warm_replays": 81,
+      "kernels": {
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn": [
+          2,
+          1688.7
+        ],
+        "triton_poi_fused__unsafe_view_mul_sigmoid_1": [
+          1,
+          1060.7
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          486.6
+        ],
+        "triton_poi_fused__unsafe_view_add_2": [
+          1,
+          260.5
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_0": [
+          1,
+          172.5
+        ]
+      }
+    },
+    "training": {
+      "finite": true,
+      "ms": 9.36306640625,
+      "rounds_ms": [
+        9.36306640625,
+        9.371576538085938,
+        9.348392944335938,
+        9.380269775390625,
+        9.3501806640625,
+        9.388546142578125,
+        9.35679931640625
+      ],
+      "warm_replays": 31,
+      "kernels": {
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn": [
+          2,
+          1872.9
+        ],
+        "triton_poi_fused__unsafe_view_add_mul_sigmoid_sigmoid_backward_view_0": [
+          1,
+          1743.7
+        ],
+        "triton_poi_fused__unsafe_view_mul_sigmoid_1": [
+          1,
+          1050.2
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_64x3_nt": [
+          2,
+          944.8
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn": [
+          2,
+          923.8
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn": [
+          1,
+          908.4
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          487.7
+        ],
+        "triton_per_fused__to_copy_add_native_layer_norm_native_layer_norm_backward_view_1": [
+          1,
+          459.2
+        ],
+        "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_64x3_nt": [
+          1,
+          453.2
+        ],
+        "triton_poi_fused__unsafe_view_add_2": [
+          1,
+          258.8
+        ],
+        "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at": [
+          2,
+          33.1
+        ],
+        "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, fa": [
+          3,
+          16.8
+        ],
+        "Memset (Unknown)": [
+          2,
+          2.2
+        ]
+      }
+    }
+  },
+  "timing": "static torch.compile(fullgraph) captured in one CUDA graph",
+  "resolved_backends": {
+    "": "pytorch",
+    "ln_in": "pytorch"
+  }
+}

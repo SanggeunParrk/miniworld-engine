@@ -1,0 +1,246 @@
+{
+  "module": "pwa",
+  "L": 384,
+  "arm": "pytorch",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "9cbd3c25-ff2b-5a93-c648-b015cc9a6b8c",
+  "host": "gpu05",
+  "job": "51083",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": 1024,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0016893739812076092,
+      "finite": true,
+      "ms": 2.0617010498046877,
+      "rounds_ms": [
+        2.0617010498046877,
+        2.061639709472656,
+        2.0608204650878905,
+        2.060963897705078,
+        2.0655104064941407,
+        2.157998046875,
+        2.088468475341797
+      ],
+      "warm_replays": 149,
+      "kernels": {
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn": [
+          1,
+          445.7
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn": [
+          2,
+          441.8
+        ],
+        "triton_poi_fused__unsafe_view_clone_mul_permute_sigmoid_view_8": [
+          1,
+          400.5
+        ],
+        "triton_poi_fused__unsafe_view_clone_permute_unsqueeze_view_7": [
+          1,
+          260.9
+        ],
+        "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_tn_align8::": [
+          1,
+          175.1
+        ],
+        "triton_poi_fused__unsafe_view_add_9": [
+          1,
+          85.5
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_0": [
+          1,
+          59.0
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_1": [
+          1,
+          45.7
+        ],
+        "triton_red_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_4": [
+          1,
+          43.9
+        ],
+        "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::": [
+          1,
+          43.0
+        ],
+        "triton_red_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_2": [
+          1,
+          5.7
+        ],
+        "triton_poi_fused__softmax__unsafe_view_bitwise_not_exp_masked_fill_permute_sub_unsqueeze_6": [
+          1,
+          5.6
+        ],
+        "triton_per_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_3": [
+          1,
+          2.1
+        ],
+        "triton_per_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_5": [
+          1,
+          2.0
+        ]
+      }
+    },
+    "training": {
+      "finite": true,
+      "ms": 5.6281494140625,
+      "rounds_ms": [
+        5.5819329833984375,
+        5.709100952148438,
+        5.633798217773437,
+        5.6165228271484375,
+        5.615520629882813,
+        5.641968994140625,
+        5.6281494140625
+      ],
+      "warm_replays": 54,
+      "kernels": {
+        "triton_poi_fused__unsafe_view_clone_mul_permute_sigmoid_sigmoid_backward_view_1": [
+          1,
+          633.3
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x4_tn": [
+          1,
+          594.0
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn": [
+          2,
+          483.9
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn": [
+          1,
+          454.9
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": [
+          1,
+          444.9
+        ],
+        "triton_poi_fused__unsafe_view_clone_mul_permute_sigmoid_view_8": [
+          1,
+          411.1
+        ],
+        "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8::": [
+          2,
+          346.7
+        ],
+        "triton_poi_fused__unsafe_view_clone_permute_squeeze_view_4": [
+          1,
+          321.7
+        ],
+        "ampere_bf16_s16816gemm_bf16_64x128_ldg8_f2f_stages_64x4_nt": [
+          2,
+          310.5
+        ],
+        "triton_poi_fused__unsafe_view_clone_permute_unsqueeze_view_7": [
+          1,
+          247.4
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn": [
+          1,
+          235.8
+        ],
+        "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_tn_align8::": [
+          1,
+          176.7
+        ],
+        "triton_per_fused__to_copy_add_native_layer_norm_native_layer_norm_backward_view_5": [
+          1,
+          161.8
+        ],
+        "ampere_bf16_s16816gemm_bf16_256x64_ldg8_f2f_stages_64x3_nt": [
+          1,
+          159.1
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_native_layer_norm_backward_view_3": [
+          1,
+          107.7
+        ],
+        "triton_poi_fused__unsafe_view_add_div_mul_10": [
+          1,
+          85.0
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_0": [
+          1,
+          62.4
+        ],
+        "triton_poi_fused_div_mul_0": [
+          1,
+          59.7
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_1": [
+          1,
+          50.1
+        ],
+        "triton_red_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_4": [
+          1,
+          49.0
+        ],
+        "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at": [
+          4,
+          46.8
+        ],
+        "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::": [
+          1,
+          44.7
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nt": [
+          1,
+          38.0
+        ],
+        "ampere_bf16_s16816gemm_bf16_256x64_ldg8_f2f_stages_64x3_nn": [
+          1,
+          33.7
+        ],
+        "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, fa": [
+          4,
+          23.4
+        ],
+        "triton_per_fused__softmax_backward_data_bitwise_not_masked_fill_permute_squeeze_unsqueeze_view_2": [
+          1,
+          6.4
+        ],
+        "triton_red_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_2": [
+          1,
+          6.0
+        ],
+        "triton_poi_fused__softmax__unsafe_view_bitwise_not_exp_masked_fill_permute_sub_unsqueeze_6": [
+          1,
+          5.1
+        ],
+        "Memset (Unknown)": [
+          4,
+          4.8
+        ],
+        "void at::native::vectorized_elementwise_kernel<2, at::native::FillFunctor<long>, std::array<char*, 1ul> >(int, at::native::FillFunctor<long>, std::array<char*, ": [
+          2,
+          3.7
+        ],
+        "void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned long, 2, at::native::templates::cuda::random_from_to_kernel<at::CUD": [
+          1,
+          3.2
+        ],
+        "triton_poi_fused_gt_rand_9": [
+          1,
+          2.3
+        ],
+        "triton_per_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_3": [
+          1,
+          2.2
+        ],
+        "triton_per_fused__softmax__unsafe_view_bitwise_not_masked_fill_permute_prepare_softmax_online_unsqueeze_5": [
+          1,
+          2.0
+        ]
+      }
+    }
+  },
+  "timing": "static torch.compile(fullgraph) captured in one CUDA graph",
+  "resolved_backends": {
+    "ln_msa": "pytorch",
+    "ln_pair": "pytorch"
+  }
+}

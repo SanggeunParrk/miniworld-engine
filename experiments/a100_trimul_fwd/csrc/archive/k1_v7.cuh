@@ -1,0 +1,271 @@
+// k1_sm80.cuh -- TriMul K1 (input LayerNorm + gated projections + pair mask -> channel-major planes), A100 / sm_80.
+//
+//   ab[oc, t] = bf16( sigmoid(LN_in(z)[t] . Wg[oc]) * (LN_in(z)[t] . Wp[oc]) * m_i m_j ),  t = i L + j,  oc in [0, 2 CH)  (a | b planes)
+//
+// Ideas carried over from the sm_90 K1 (tmn_kernels.cuh): persistent CTAs, two CTAs per SM (the sm_90 64-token tile runs that way too), weight
+// blocks streamed through a ring (L2-resident after the first tile) while the tile's A operand stays in registers for every block, gate | proj
+// rows interleaved so one thread owns both factors of an output, and a transposing staging buffer so the channel-major plane store leaves in
+// 128 B rows.  sm_80 substitutions: cp.async (+ cp.async.mbarrier.arrive) for TMA, mma.sync m16n8k16 with ldmatrix B fragments for wgmma, and
+//   * two independent 4-warp CTAs per SM instead of producer / consumer warpgroups: one CTA's epilogue, LayerNorm and tile turnover run under the
+//     other's MMAs (with mma.sync a warp's own MMAs and epilogue do not overlap, and a 9th warp would cap registers at 168);
+//   * weight blocks stored granule-column-major ([16 B k-granule][64 rows]): the 8 rows of an ldmatrix are consecutive 16 B, conflict-free, and
+//     every k-step's address is the previous one plus an immediate;
+//   * the LayerNorm done once per element in shared memory (the warps would otherwise repeat it on their fragments);
+//   * sigmoid(g) p = 0.5 p (1 + tanh(g / 2)) with the 0.5 folded into both weight rows on the host (exact in bf16): one MUFU and one FFMA per
+//     output; the pair mask is an AND on the packed word.
+//
+// CTA = 4 warps (2 M-groups x 2 N-warps).  Tile = 128 consecutive tokens; warp (mg, nw) owns token rows [64 mg, 64 mg + 64) and, per weight block
+// (64 rows = 32 output channels in 4 groups of 8 gate rows | 8 proj rows), the groups 2 nw and 2 nw + 1.  Planes have Np = L, so plane offset = t
+// and one warp's 64 tokens of a channel are a single 128 B segment.
+#pragma once
+#include "sm80_common.cuh"
+
+namespace a100 {
+
+struct K1Params {
+  const __nv_bfloat16* z;      // [T][128]
+  const uint8_t* mask;         // [L] token mask or nullptr
+  const __nv_bfloat16* w;      // packed [NSTEP][16 granules][64 rows][8], 0.5-scaled
+  const float* gamma;          // [128]
+  const float* beta;           // [128]
+  __nv_bfloat16* ab;           // [2 CH][T]
+  int T, L, num_tiles;
+  float eps;
+};
+
+template <int CH_, int NST_ = 2>
+struct K1Cfg {
+  static constexpr int CH = CH_, CZ = 128, BM = 128, NST = NST_;
+  static constexpr int NTHR = 128, MINB = 2;
+  static constexpr int NSTEP = 4 * CH / 64;                // weight blocks per tile
+  static constexpr int SLOT = 64 * CZ * 2;                 // 16 KB, [16 granules][64 rows][16 B]
+  static constexpr int SMEM_Z = BM * CZ * 2;               // 32 KB
+  static constexpr int SMEM_W = NST * SLOT;
+  static constexpr int STG_PITCH = 144;                    // [8 ch][64 tok] staging rows padded to 36 words: conflict-free, additive addresses
+  static constexpr int STG_BUF = 8 * STG_PITCH;
+  static constexpr int SMEM_STG = 4 * 2 * STG_BUF;         // per warp: one buffer per channel group of the step
+  static constexpr int SMEM_GB = 2 * CZ * 4;
+  static constexpr int SMEM_MASK = BM;                     // per-token pair mask x validity of the current tile
+  static constexpr int NBAR = NST + 1;
+  static constexpr int SMEM = SMEM_Z + SMEM_W + SMEM_STG + SMEM_GB + SMEM_MASK + NBAR * 8;
+  static constexpr int LN_S0 = NSTEP / 2, LN_PER_STEP = 8 / (NSTEP - LN_S0);   // next tile's LayerNorm: 8 four-row passes per warp over the last half of the steps
+  static_assert(8 % (NSTEP - LN_S0) == 0, "LayerNorm spread");
+  static_assert(SMEM * MINB <= 166912 + 1024 - 2048, "sm_80 shared memory for two CTAs per SM");
+};
+
+template <class G>
+__global__ void __launch_bounds__(G::NTHR, G::MINB) k1_kernel(const K1Params p) {
+  constexpr int CZ = G::CZ, NST = G::NST, NSTEP = G::NSTEP, BM = G::BM, NT = G::NTHR;
+  extern __shared__ __align__(128) uint8_t smem[];
+  uint8_t* sZ = smem;
+  uint8_t* sW = sZ + G::SMEM_Z;
+  uint8_t* sStg = sW + G::SMEM_W;
+  float* sG = reinterpret_cast<float*>(sStg + G::SMEM_STG);
+  float* sB = sG + CZ;
+  uint8_t* sMask = reinterpret_cast<uint8_t*>(sB + CZ);
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sMask + G::SMEM_MASK);
+  const uint32_t sZ_u = smem_u32(sZ), sW_u = smem_u32(sW);
+  const uint32_t barW = smem_u32(bars), barZ = barW + 8 * NST;
+
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int n_iter = (p.num_tiles - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x;
+  const int total = n_iter * NSTEP;
+  for (int i = tid; i < CZ; i += NT) { sG[i] = p.gamma[i]; sB[i] = p.beta[i]; }
+  if (tid == 0) {
+    for (int s = 0; s < NST; ++s) mbar_init(barW + 8 * s, NT);
+    mbar_init(barZ, NT);
+  }
+  __syncthreads();
+
+  // ---- weight block blk -> slot s: every thread issues 8 of the 1024 granules (host packs each block granule-major: a straight 16 KB copy)
+  const __nv_bfloat16* w_src = p.w + tid * 8;
+  const uint32_t w_dst = sW_u + tid * 16;
+  auto issue_w = [&](int blk, int s) {
+    const __nv_bfloat16* src = w_src + (size_t)blk * 64 * CZ;
+    const uint32_t dst = w_dst + s * G::SLOT;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) cp_async16(dst + i * NT * 16, src + i * NT * 8);
+    cp_async_mbar_arrive(barW + 8 * s);
+  };
+  auto load_z = [&](int tile) {                 // 128 tokens x 256 B = 2048 granules, 16 per thread, zero-filled past T
+    const int t0 = tile * BM;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const int c = tid + NT * i, row = c >> 4, gr = c & 15;
+      const bool ok = t0 + row < p.T;
+      cp_async16(sZ_u + swz<256>(row, gr * 16), p.z + (size_t)(ok ? t0 + row : 0) * CZ + gr * 8, ok ? 16u : 0u);
+    }
+    cp_async_mbar_arrive(barZ);
+  };
+  if (n_iter > 0) load_z(blockIdx.x);
+  for (int u = 0; u < NST - 1 && u < total; ++u) issue_w(u % NSTEP, u);
+
+  const int mg = warp >> 1, nw = warp & 1;
+  const int g8 = lane >> 2, q = lane & 3, odd = g8 & 1;
+  const int lr = lane >> 3, lc = lane & 7;                  // LayerNorm pass: 8 lanes per row (granules lc, lc + 8), 4 rows per instruction
+  const uint32_t stg_u = smem_u32(sStg) + warp * 2 * G::STG_BUF;
+  const uint32_t st_off = (2 * q + odd) * G::STG_PITCH + (g8 >> 1) * 4;
+  const uint32_t sel = odd ? 0x3276u : 0x5410u;             // even: (my v0, partner v0); odd: (partner v1, my v1)
+  // B fragments of group gi (rows 16 gi .. 16 gi + 15 of the block): matrix mi = lane / 8 -> row (mi >> 1) * 8 + lane % 8, granule 2 ks + (mi & 1)
+  const uint32_t b_off = ((lane >> 3) & 1) * 1024 + (32 * nw + ((lane >> 4) & 1) * 8 + (lane & 7)) * 16;
+
+  // ---- LayerNorm, in place, of 4 rows (32 w + r0 + lr): 8 lanes per row, granules lc and lc + 8 (128 B per 8 lanes: conflict-free)
+  auto ln_pass = [&](int r0) {
+    const int row = 32 * warp + r0 + lr;
+    const uint32_t a0 = sZ_u + swz<256>(row, lc * 16), a1 = sZ_u + swz<256>(row, lc * 16 + 128);
+    const uint4 v0 = lds128(a0), v1 = lds128(a1);
+    const uint32_t w[8] = {v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w};
+    float x[16];
+#pragma unroll
+    for (int e = 0; e < 8; ++e) { x[2 * e] = bf16lo(w[e]); x[2 * e + 1] = bf16hi(w[e]); }
+    float sm = 0.f;
+#pragma unroll
+    for (int e = 0; e < 16; ++e) sm += x[e];
+    sm += __shfl_xor_sync(0xffffffffu, sm, 1); sm += __shfl_xor_sync(0xffffffffu, sm, 2); sm += __shfl_xor_sync(0xffffffffu, sm, 4);
+    const float mean = sm * (1.f / CZ);
+    float sq = 0.f;
+#pragma unroll
+    for (int e = 0; e < 16; ++e) { x[e] -= mean; sq = fmaf(x[e], x[e], sq); }
+    sq += __shfl_xor_sync(0xffffffffu, sq, 1); sq += __shfl_xor_sync(0xffffffffu, sq, 2); sq += __shfl_xor_sync(0xffffffffu, sq, 4);
+    const float rstd = rsqrtf(sq * (1.f / CZ) + p.eps);
+    uint32_t o[8];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {                // x[0..7] = channels 8 lc .., x[8..15] = channels 64 + 8 lc ..
+      const int c0 = (e < 2 ? 8 * lc : 64 + 8 * lc) + 4 * (e & 1);
+      const float4 g = *reinterpret_cast<const float4*>(sG + c0), b = *reinterpret_cast<const float4*>(sB + c0);
+      o[2 * e] = pack_bf16(fmaf(x[4 * e] * rstd, g.x, b.x), fmaf(x[4 * e + 1] * rstd, g.y, b.y));
+      o[2 * e + 1] = pack_bf16(fmaf(x[4 * e + 2] * rstd, g.z, b.z), fmaf(x[4 * e + 3] * rstd, g.w, b.w));
+    }
+    sts128(a0, make_uint4(o[0], o[1], o[2], o[3]));
+    sts128(a1, make_uint4(o[4], o[5], o[6], o[7]));
+  };
+  if (n_iter > 0) {                              // first tile: normalised up front; every later tile under the previous tile's steps
+    mbar_wait(barZ, 0);
+#pragma unroll 1
+    for (int r0 = 0; r0 < 32; r0 += 4) ln_pass(r0);
+  }
+
+  int u = 0, slot = 0;
+  uint32_t ph = 0;
+  const size_t T4 = (size_t)4 * p.T;
+  for (int it = 0; it < n_iter; ++it) {
+    const int tile = (int)blockIdx.x + it * (int)gridDim.x;
+    const int t0 = tile * BM;
+    const bool has_next = it + 1 < n_iter;
+    {                                            // this tile's pair mask x validity, one token per thread
+      const int t = t0 + tid;
+      bool m = t < p.T;
+      if (m && p.mask != nullptr) { const int i = t / p.L, j = t - i * p.L; m = __ldg(p.mask + i) && __ldg(p.mask + j); }
+      sMask[tid] = m ? 1 : 0;
+    }
+    bar_sync(1, NT);                             // the tile's rows are normalised (by every warp) and its mask is written
+    // ---- A fragments: 64 rows x 128 channels (4 m16 tiles x 8 k16 steps)
+    uint32_t fa[4][8][4];
+#pragma unroll
+    for (int mt = 0; mt < 4; ++mt)
+#pragma unroll
+      for (int ks = 0; ks < 8; ++ks) {
+        const int row = 64 * mg + 16 * mt + (lane & 7) + ((lane >> 3) & 1) * 8;
+        ldsm_x4(fa[mt][ks], sZ_u + swz<256>(row, (2 * ks + (lane >> 4)) * 16));
+      }
+    // ---- bf16-half masks of the packed words this lane stores: tokens (g8 & ~1) + {0, 1} of each (mt, h)
+    uint32_t mbits[4][2];
+#pragma unroll
+    for (int mt = 0; mt < 4; ++mt)
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const uint32_t two = *reinterpret_cast<const uint16_t*>(sMask + 64 * mg + 16 * mt + 8 * h + (g8 & ~1));
+        mbits[mt][h] = ((two & 0xffu) ? 0x0000ffffu : 0u) | ((two >> 8) ? 0xffff0000u : 0u);
+      }
+    bar_sync(1, NT);                             // every warp has its fragments and mask: the tile buffers take the next tile
+    if (has_next) load_z(tile + (int)gridDim.x);
+    __nv_bfloat16* gout = p.ab + (size_t)(16 * nw + (lane >> 3)) * p.T + t0 + 64 * mg + 8 * (lane & 7);
+    const bool st_ok = t0 + 64 * mg + 8 * (lane & 7) < p.T;
+    // ---- weight blocks, software-pipelined inside the warp: a step's two channel groups alternate with the other group's epilogue,
+    //      [MMA(s, g0) | EPI(s - 1, g1)] [MMA(s, g1) | EPI(s, g0)], interleaved k-step by k-step so the HMMA stream and the epilogue's
+    //      MUFU / shuffle / store chain are independent instructions of one block (the same 64 accumulator registers as unpipelined)
+    float acc0[4][2][4], acc1[4][2][4];         // [mt][gate, proj][4] of group 0 / group 1
+    auto zero = [&](float (&ac)[4][2][4]) {
+#pragma unroll
+      for (int mt = 0; mt < 4; ++mt)
+#pragma unroll
+        for (int n = 0; n < 2; ++n)
+#pragma unroll
+          for (int e = 0; e < 4; ++e) ac[mt][n][e] = 0.f;
+    };
+    auto mma_ks = [&](float (&ac)[4][2][4], uint32_t wb, int ks) {
+      uint32_t b[4];
+      ldsm_x4(b, wb + ks * 2048);
+#pragma unroll
+      for (int mt = 0; mt < 4; ++mt) { mma16816(ac[mt][0], fa[mt][ks], b[0], b[1]); mma16816(ac[mt][1], fa[mt][ks], b[2], b[3]); }
+    };
+    // epilogue chunk c = 2 mt + h in three stages, issued k-steps apart so each link of the dependent chain sits behind a k-step's 8 HMMAs
+    // (in-order issue: a chain link waiting on MUFU / SHFL results would otherwise hold the next HMMAs back):
+    //   A: v = p' (1 + tanh g') for the channel pair, packed;  B: exchange with lane ^ 4;  C: (tok, tok + 1) word, mask, staging store
+    auto epi_a = [&](float (&ac)[4][2][4], int c) -> uint32_t {
+      const int mt = c >> 1, h = c & 1;
+      const float p0 = ac[mt][1][2 * h], p1 = ac[mt][1][2 * h + 1];
+      return pack_bf16(fmaf(p0, tanh_approx(ac[mt][0][2 * h]), p0), fmaf(p1, tanh_approx(ac[mt][0][2 * h + 1]), p1));
+    };
+    auto epi_b = [&](uint32_t mine) -> uint32_t { return __shfl_xor_sync(0xffffffffu, mine, 4); };
+    auto epi_c = [&](uint32_t mine, uint32_t other, int gi, int c) {
+      const int mt = c >> 1, h = c & 1;
+      sts32(stg_u + gi * G::STG_BUF + st_off + (8 * mt + 4 * h) * 4, __byte_perm(mine, other, sel) & mbits[mt][h]);
+    };
+    // one group's 8 k-steps of MMAs (optional) with a group's 8 epilogue chunks pipelined A -> B -> C over them
+    auto group = [&](float (&acm)[4][2][4], uint32_t wb, bool do_mma, float (&ace)[4][2][4], int gi, bool do_epi) {
+      uint32_t ma[8], ob[8];
+#pragma unroll
+      for (int ks = 0; ks < 10; ++ks) {
+        if (do_mma && ks < 8) mma_ks(acm, wb, ks);
+        if (do_epi) {
+          if (ks >= 2) epi_c(ma[ks - 2], ob[ks - 2], gi, ks - 2);
+          if (ks >= 1 && ks <= 8) ob[ks - 1] = epi_b(ma[ks - 1]);
+          if (ks < 8) ma[ks] = epi_a(ace, ks);
+        }
+      }
+    };
+    auto epi_store = [&](int gi, int stp) {    // staged [8 ch][64 tok] -> two 128 B plane rows per 8 lanes
+      __syncwarp();
+#pragma unroll
+      for (int k = 0; k < 2; ++k) {
+        const uint4 v = lds128(stg_u + gi * G::STG_BUF + ((lane >> 3) + 4 * k) * G::STG_PITCH + (lane & 7) * 16);
+        if (st_ok) stg128(gout + (size_t)(8 * stp + 2 * gi + k) * T4, v);
+      }
+      __syncwarp();
+    };
+    auto next_block = [&]() -> uint32_t {      // CTA barrier (every warp retired the previous block: its slot takes block u + NST - 1), then wait block u
+      bar_sync(1, NT);
+      if (u + NST - 1 < total) issue_w((u + NST - 1) % NSTEP, (slot + NST - 1) % NST);
+      mbar_wait(barW + 8 * slot, ph);
+      return sW_u + slot * G::SLOT + b_off;
+    };
+    auto advance = [&]() { ++u; if (++slot == NST) { slot = 0; ph ^= 1u; } };
+    uint32_t wb = next_block();
+    zero(acc0);
+    group(acc0, wb, true, acc1, 1, false);
+#pragma unroll 1
+    for (int step = 0; step < NSTEP; ++step) {
+      zero(acc1);
+      group(acc1, wb + 256, true, acc0, 0, true);
+      epi_store(0, step);
+      advance();
+      if (step + 1 < NSTEP) {
+        wb = next_block();
+        zero(acc0);
+        group(acc0, wb, true, acc1, 1, true);
+      } else {
+        group(acc0, wb, false, acc1, 1, true);
+      }
+      epi_store(1, step);
+      if (has_next && step >= G::LN_S0) {       // the next tile's z (issued at this tile's start) -> LayerNorm, spread over the second half
+        if (step == G::LN_S0) mbar_wait(barZ, (it + 1) & 1);
+#pragma unroll
+        for (int k = 0; k < G::LN_PER_STEP; ++k) ln_pass(4 * ((step - G::LN_S0) * G::LN_PER_STEP + k));
+      }
+    }
+  }
+  cp_async_wait<0>();
+}
+
+}  // namespace a100

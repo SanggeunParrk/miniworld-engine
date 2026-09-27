@@ -1,0 +1,106 @@
+{
+  "module": "transition",
+  "L": 384,
+  "arm": "engine",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "4c63d63c-a522-9e93-68e5-93cee99e0cc5",
+  "host": "gpu05",
+  "job": "51085",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0025050691328942776,
+      "finite": true,
+      "ms": 0.5509939193725586,
+      "rounds_ms": [
+        0.5495398330688477,
+        0.5490483093261719,
+        0.5489459228515625,
+        0.5509939193725586,
+        0.5521612930297851,
+        0.5521817779541016,
+        0.5519155120849609
+      ],
+      "warm_replays": 605,
+      "kernels": {
+        "transition_fwd_kernel": [
+          1,
+          318.5
+        ],
+        "_squeeze_residual_kernel": [
+          1,
+          148.0
+        ],
+        "layer_norm_fwd_fused": [
+          1,
+          46.3
+        ]
+      }
+    },
+    "training": {
+      "finite": true,
+      "ms": 2.109372863769531,
+      "rounds_ms": [
+        2.109372863769531,
+        2.1086151123046877,
+        2.1082713317871096,
+        2.1087705993652346,
+        2.1244076538085936,
+        2.1375628662109376,
+        2.1101863098144533
+      ],
+      "warm_replays": 155,
+      "kernels": {
+        "_transition_expand_gatebwd_kernel": [
+          1,
+          582.7
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn": [
+          1,
+          238.2
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn": [
+          1,
+          235.1
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_64x3_nt": [
+          1,
+          209.0
+        ],
+        "_squeeze_residual_kernel": [
+          1,
+          162.0
+        ],
+        "_ln_bwd_residual_kernel": [
+          1,
+          140.9
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": [
+          1,
+          126.3
+        ],
+        "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, fa": [
+          2,
+          9.6
+        ],
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*": [
+          2,
+          3.2
+        ],
+        "triton_poi_fused_cat_0": [
+          1,
+          2.6
+        ]
+      }
+    }
+  },
+  "timing": "static torch.compile(fullgraph) captured in one CUDA graph",
+  "resolved_backends": {
+    "": "triton",
+    "ln_in": "cuda"
+  }
+}

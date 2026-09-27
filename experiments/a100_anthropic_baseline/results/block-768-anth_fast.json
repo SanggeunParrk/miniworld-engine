@@ -1,0 +1,110 @@
+{
+  "module": "block",
+  "L": 768,
+  "arm": "anth:fast",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "9cbd3c25-ff2b-5a93-c648-b015cc9a6b8c",
+  "host": "gpu05",
+  "job": "51083",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.004137112759053707,
+      "finite": true,
+      "ms": 5.2280322265625,
+      "rounds_ms": [
+        5.20679443359375,
+        5.242081298828125,
+        5.24990478515625,
+        5.216665649414063,
+        5.2280322265625,
+        5.218897705078125,
+        5.233213500976563
+      ],
+      "warm_replays": 60,
+      "kernels": {
+        "_pair_transition_kernel": [
+          1,
+          1751.5
+        ],
+        "k1_bf16_c128_h256_bm128_bn32_wm32_s2_mb3": [
+          1,
+          1078.2
+        ],
+        "k3_bf16_c128_h256_bm64_bn16_wm32_s1_mb4": [
+          1,
+          1038.3
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          534.5
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": [
+          1,
+          501.2
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          5.0
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          4.6
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "native_gate": {
+    "n": 216,
+    "passed": 206,
+    "failed": [],
+    "skipped": [
+      {
+        "id": "c128x128_n32_in_bf16_res0_mnone_exact",
+        "why": "exact_small_n:32(the reference library takes a different path below 101 tokens; the fast variant serves this size)"
+      },
+      {
+        "id": "c64x128_n256_out_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_out_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_in_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_out_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_out_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_in_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c256x128_n403_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:256x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      }
+    ]
+  },
+  "selection": "Selection(transition:v2@bm64bh32w4s2il0 word=fast tier=fast cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.973 cls=tol stack_measured=False reference_stack_numbers)"
+}

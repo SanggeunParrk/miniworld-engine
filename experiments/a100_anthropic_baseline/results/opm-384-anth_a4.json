@@ -1,0 +1,21 @@
+{
+  "module": "opm",
+  "L": 384,
+  "arm": "anth:a4",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "9cbd3c25-ff2b-5a93-c648-b015cc9a6b8c",
+  "host": "gpu05",
+  "job": "51083",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": 1024,
+  "modes": {
+    "inference": {
+      "error": "Traceback (most recent call last):\n  File \"/home/psk6950/practice/miniworld-engine/experiments/a100_anthropic_baseline/bench.py\", line 368, in <module>\n    y = fn(*xin)\n        ^^^^^^^^\n  File \"/home/psk6950/practice/miniworld-engine/experiments/a100_anthropic_baseline/bench.py\", line 310, in fn\n    return pair + msa_opm.forward_mask_norm(view, msa, mask.to(torch.bfloat16))\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/psk6950/practice/refs/uplifting-biomolecular-modeling/common/opt_core/opt_core/ops/msa_opm/__init__.py\", line 555, in forward_mask_norm\n    outs.append(opm_core(a[bi].contiguous(), b[bi].contiguous(), cache, \"mask_norm\", norm_tensor=nm, proj_in_kernel=proj_in_kernel, chunked=chunked, cfg=cfg))\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/psk6950/practice/refs/uplifting-biomolecular-modeling/common/opt_core/opt_core/ops/msa_opm/__init__.py\", line 461, in opm_core\n    h = _opm_kernel[grid](A, B, wout, bias, norm_t, out, ws, S, SK, N, NB, num_pid_n, float(norm_scalar), A_T=a_t, **common)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/psk6950/practice/FoldForge/.venv/lib/python3.12/site-packages/triton/runtime/jit.py\", line 370, in <lambda>\n    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)\n                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/psk6950/practice/FoldForge/.venv/lib/python3.12/site-packages/triton/runtime/jit.py\", line 743, in run\n    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/psk6950/practice/FoldForge/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py\", line 482, in launch_metadata\n    self._init_handles()\n  File \"/home/psk6950/practice/FoldForge/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py\", line 456, in _init_handles\n    raise_(OutOfResources(self.metadata.shared, max_shared, \"shared memory\"))\n  File \"/home/psk6950/practice/FoldForge/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py\", line 448, in raise_\n    raise err\ntriton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 180224, Hardware limit: 166912. Reducing block sizes or `num_stages` may help.\n"
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "({'BI': 4, 'BJ': 8, 'BK': 32, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 4, 'AT': True}, 'override:a4')"
+}

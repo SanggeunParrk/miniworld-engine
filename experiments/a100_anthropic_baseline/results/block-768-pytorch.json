@@ -1,0 +1,201 @@
+{
+  "module": "block",
+  "L": 768,
+  "arm": "pytorch",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "9cbd3c25-ff2b-5a93-c648-b015cc9a6b8c",
+  "host": "gpu05",
+  "job": "51083",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0035995454527437687,
+      "finite": true,
+      "ms": 24.17282958984375,
+      "rounds_ms": [
+        24.16605224609375,
+        24.1639208984375,
+        24.1704345703125,
+        24.17282958984375,
+        24.18333740234375,
+        24.18323486328125,
+        24.18481201171875
+      ],
+      "warm_replays": 30,
+      "kernels": {
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::opera": [
+          4,
+          14955.4
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn": [
+          7,
+          3643.5
+        ],
+        "triton_poi_fused__unsafe_view_bitwise_and_mul_sigmoid_unsqueeze_1": [
+          2,
+          1068.4
+        ],
+        "triton_poi_fused__unsafe_view_mul_sigmoid_4": [
+          1,
+          1062.9
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn": [
+          2,
+          1020.3
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          2,
+          770.9
+        ],
+        "triton_red_fused__to_copy_cat_native_layer_norm_permute_view_2": [
+          1,
+          530.6
+        ],
+        "triton_poi_fused__unsafe_view_add_mul_sigmoid_5": [
+          1,
+          427.3
+        ],
+        "triton_per_fused__to_copy__unsafe_view_add_mul_native_layer_norm_sigmoid_3": [
+          1,
+          350.3
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_0": [
+          1,
+          173.4
+        ]
+      }
+    },
+    "training": {
+      "finite": true,
+      "ms": 69.6031005859375,
+      "rounds_ms": [
+        69.5310693359375,
+        69.560234375,
+        69.57505859375,
+        69.6031005859375,
+        69.6237841796875,
+        69.6695703125,
+        69.6864599609375
+      ],
+      "warm_replays": 30,
+      "kernels": {
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::opera": [
+          12,
+          42928.6
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn": [
+          12,
+          5229.9
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn": [
+          7,
+          3826.2
+        ],
+        "triton_poi_fused__unsafe_view_add_mul_sigmoid_sigmoid_backward_view_0": [
+          1,
+          1755.3
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn": [
+          3,
+          1506.7
+        ],
+        "triton_poi_fused__unsafe_view_add_bitwise_and_mul_permute_sigmoid_sigmoid_backward_slice_backward_squeeze_unsqueeze_view_4": [
+          1,
+          1433.0
+        ],
+        "triton_poi_fused__unsafe_view_add_bitwise_and_mul_permute_sigmoid_sigmoid_backward_slice_backward_squeeze_unsqueeze_view_5": [
+          1,
+          1389.4
+        ],
+        "triton_per_fused__to_copy_cat_native_layer_norm_permute_view_3": [
+          1,
+          1332.1
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_64x3_nt": [
+          3,
+          1120.1
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_nt": [
+          4,
+          1102.7
+        ],
+        "triton_poi_fused__unsafe_view_mul_sigmoid_5": [
+          1,
+          1062.1
+        ],
+        "triton_poi_fused__unsafe_view_bitwise_and_mul_sigmoid_unsqueeze_2": [
+          1,
+          1050.5
+        ],
+        "triton_per_fused__to_copy__unsafe_view_add_div_mul_native_layer_norm_backward_sigmoid_sigmoid_backward_view_2": [
+          1,
+          911.6
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          2,
+          770.7
+        ],
+        "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_64x3_nt": [
+          2,
+          712.6
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_native_layer_norm_backward_view_3": [
+          1,
+          671.4
+        ],
+        "triton_poi_fused__to_copy_add_view_6": [
+          1,
+          605.9
+        ],
+        "triton_per_fused__to_copy_add_native_layer_norm_native_layer_norm_backward_7": [
+          1,
+          482.6
+        ],
+        "triton_poi_fused__to_copy__unsafe_view_add_div_mul_native_layer_norm_sigmoid_1": [
+          1,
+          439.1
+        ],
+        "triton_poi_fused__to_copy__unsafe_view_add_div_mul_sigmoid_6": [
+          1,
+          427.7
+        ],
+        "triton_per_fused__to_copy__unsafe_view_add_div_mul_native_layer_norm_sigmoid_4": [
+          1,
+          355.8
+        ],
+        "triton_per_fused__to_copy_native_layer_norm_1": [
+          1,
+          172.4
+        ],
+        "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at": [
+          6,
+          93.8
+        ],
+        "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, fa": [
+          9,
+          59.5
+        ],
+        "Memset (Unknown)": [
+          6,
+          6.6
+        ],
+        "triton_poi_fused_gt_rand_0": [
+          1,
+          2.9
+        ]
+      }
+    }
+  },
+  "timing": "static torch.compile(fullgraph) captured in one CUDA graph",
+  "resolved_backends": {
+    "trimul": "pytorch",
+    "trimul.ln_pair": "pytorch",
+    "trimul.ln_out": "pytorch",
+    "transition": "pytorch",
+    "transition.ln_in": "pytorch"
+  }
+}

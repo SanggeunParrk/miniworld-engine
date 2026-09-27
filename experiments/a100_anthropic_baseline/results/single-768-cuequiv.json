@@ -1,0 +1,179 @@
+{
+  "module": "single",
+  "L": 768,
+  "arm": "cuequiv",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "4c63d63c-a522-9e93-68e5-93cee99e0cc5",
+  "host": "gpu05",
+  "job": "51085",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0026246632914990187,
+      "finite": true,
+      "ms": 2.6420428466796877,
+      "rounds_ms": [
+        2.6420428466796877,
+        2.641878967285156,
+        2.6417355346679687,
+        2.6827572631835936,
+        2.699263916015625,
+        2.637230224609375,
+        2.642083740234375
+      ],
+      "warm_replays": 124,
+      "kernels": {
+        "fused_sigmoid_gated_dual_gemm_forward_kernel": [
+          2,
+          1079.7
+        ],
+        "layer_norm_transpose_forward_kernel": [
+          2,
+          575.1
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          533.3
+        ],
+        "triton_poi_fused_add_view_2": [
+          1,
+          261.0
+        ],
+        "triton_poi_fused_bitwise_and_cat_fused_gated_dual_gemm_unsqueeze_view_0": [
+          2,
+          4.8
+        ],
+        "triton_poi_fused_bitwise_and_cat_fused_gated_dual_gemm_unsqueeze_view_1": [
+          1,
+          2.5
+        ]
+      }
+    },
+    "training": {
+      "finite": true,
+      "ms": 10.608856201171875,
+      "rounds_ms": [
+        10.608856201171875,
+        10.571578369140624,
+        10.667410888671874,
+        10.57547607421875,
+        10.6672900390625,
+        10.586541748046875,
+        10.67055908203125
+      ],
+      "warm_replays": 30,
+      "kernels": {
+        "fused_sigmoid_gated_dual_gemm_backward_pregemm_kernel": [
+          2,
+          1771.7
+        ],
+        "layer_norm_transpose_backward_kernel": [
+          2,
+          1337.8
+        ],
+        "fused_sigmoid_gated_dual_gemm_forward_kernel": [
+          2,
+          1190.1
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn": [
+          3,
+          1123.5
+        ],
+        "triton_poi_fused_cat_fused_gated_dual_gemm_backward_permute_squeeze_view_3": [
+          1,
+          1051.4
+        ],
+        "layer_norm_transpose_forward_kernel": [
+          2,
+          628.5
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          560.3
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_nt": [
+          2,
+          538.9
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": [
+          1,
+          532.8
+        ],
+        "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn": [
+          2,
+          513.1
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_64x3_nt": [
+          2,
+          374.2
+        ],
+        "triton_poi_fused_add_layer_norm_transpose_bwd_view_4": [
+          1,
+          345.6
+        ],
+        "triton_poi_fused__to_copy_add_div_mul_view_3": [
+          1,
+          258.1
+        ],
+        "triton_poi_fused_add_view_5": [
+          1,
+          256.7
+        ],
+        "triton_poi_fused__to_copy_div_fused_gated_dual_gemm_backward_mul_view_0": [
+          1,
+          175.2
+        ],
+        "triton_red_fused_sum_view_1": [
+          4,
+          26.0
+        ],
+        "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, fa": [
+          4,
+          25.1
+        ],
+        "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at": [
+          1,
+          13.0
+        ],
+        "triton_red_fused_sum_view_2": [
+          4,
+          9.2
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::oper": [
+          1,
+          5.5
+        ],
+        "triton_poi_fused_cat_2": [
+          2,
+          4.8
+        ],
+        "void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned long, 2, at::native::templates::cuda::random_from_to_kernel<at::CUD": [
+          1,
+          4.0
+        ],
+        "triton_poi_fused_gt_rand_0": [
+          1,
+          2.9
+        ],
+        "triton_poi_fused_bitwise_and_unsqueeze_1": [
+          1,
+          2.7
+        ],
+        "void at::native::vectorized_elementwise_kernel<2, at::native::FillFunctor<long>, std::array<char*, 1ul> >(int, at::native::FillFunctor<long>, std::array<char*, ": [
+          1,
+          1.8
+        ]
+      }
+    }
+  },
+  "timing": "static torch.compile(fullgraph) captured in one CUDA graph",
+  "resolved_backends": {
+    "": "cuequivariance",
+    "ln_pair": "pytorch",
+    "ln_out": "pytorch"
+  }
+}

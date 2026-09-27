@@ -1,0 +1,59 @@
+{
+  "module": "single",
+  "L": 384,
+  "arm": "anth:tmk3_exact",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "9cbd3c25-ff2b-5a93-c648-b015cc9a6b8c",
+  "host": "gpu05",
+  "job": "51083",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0026532660704106092,
+      "finite": true,
+      "ms": 0.5895782470703125,
+      "rounds_ms": [
+        0.590458869934082,
+        0.5902131271362304,
+        0.5899059295654296,
+        0.588328971862793,
+        0.5875302505493164,
+        0.5895782470703125,
+        0.5893734359741211
+      ],
+      "warm_replays": 551,
+      "kernels": {
+        "_k_proj9": [
+          1,
+          201.9
+        ],
+        "layer_norm_transpose_forward_kernel": [
+          2,
+          159.8
+        ],
+        "_k_out9": [
+          1,
+          119.5
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn": [
+          1,
+          87.9
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          4.2
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          3.2
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(row='tmk3_exact', word='tmk3_exact', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='bitwise\u2261cueq', exact_vs='cuequivariance_torch.triangle_multiplicative_update (0.10.0 and 0.11.1 measured) -- bitwise; needs cuequivariance_ops_torch (its LayerNorm kernels are the exact LN stages)', backward=False, capture_safe=True, x_stock=1.415, fallback='cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)"
+}

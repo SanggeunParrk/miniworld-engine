@@ -1,0 +1,102 @@
+{
+  "module": "single",
+  "L": 384,
+  "arm": "anth:native_rebuilt",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "e696edfd-a9aa-57a0-b706-fe91411e2f97",
+  "host": "gpu05",
+  "job": "51086",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.002653221134096384,
+      "finite": true,
+      "ms": 0.42524673461914064,
+      "rounds_ms": [
+        0.425533447265625,
+        0.4254924774169922,
+        0.42524673461914064,
+        0.4251852798461914,
+        0.42502143859863284,
+        0.4250624084472656,
+        0.42524673461914064
+      ],
+      "warm_replays": 742,
+      "kernels": {
+        "k1_bf16_c128_h128_bm128_bn32_wm32_s2_mb3": [
+          1,
+          169.3
+        ],
+        "k3_bf16_c128_h128_bm128_bn32_wm32_s2_mb2": [
+          1,
+          159.8
+        ],
+        "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": [
+          1,
+          91.9
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          4.3
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> >": [
+          1,
+          3.4
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "native_gate": {
+    "n": 216,
+    "passed": 206,
+    "failed": [],
+    "skipped": [
+      {
+        "id": "c128x128_n32_in_bf16_res0_mnone_exact",
+        "why": "exact_small_n:32(the reference library takes a different path below 101 tokens; the fast variant serves this size)"
+      },
+      {
+        "id": "c64x128_n256_out_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_out_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n256_in_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_out_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_out_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c64x128_n403_in_bf16_res1_mtail3_exact",
+        "why": "exact_no_reference:64x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      },
+      {
+        "id": "c256x128_n403_in_bf16_res0_mtail3_exact",
+        "why": "exact_no_reference:256x128(the reference library defines no result at c_hidden != c_z; the fast variant serves this pair)"
+      }
+    ]
+  },
+  "selection": "trimul_native sm_80 member: k1_bf16_c128_h128_bm128_bn32_wm32_s2_mb3 | torch.bmm TN | k3_bf16_c128_h128_bm128_bn32_wm32_s2_mb2"
+}

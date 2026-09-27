@@ -1,0 +1,137 @@
+module,L,arm,mode,ms,rel_rms,finite,selection,error,gpu,host
+block,384,anth:fast,inference,1.2260761260986328,0.004154815338551998,True,Selection(transition:v2@bm64bh32w4s2il0 word=fast tier=fast cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=2.957 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+block,384,anth:v2,inference,1.2364595031738281,0.004154815338551998,True,Selection(transition:v2@bm64bh32w4s2il0 word=v2 tier=None cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=2.957 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+block,384,cuequiv,inference,2.2824140930175782,0.0034251457545906305,True,,,NVIDIA A100 80GB PCIe,gpu01
+block,384,cuequiv,training,7.108321533203125,,True,,,NVIDIA A100 80GB PCIe,gpu01
+block,384,engine,inference,1.4447410583496094,0.003644763957709074,True,,,NVIDIA A100 80GB PCIe,gpu05
+block,384,engine,training,5.373923950195312,,True,,,NVIDIA A100 80GB PCIe,gpu05
+block,384,pytorch,inference,3.5324517822265626,0.003628185950219631,True,,,NVIDIA A100 80GB PCIe,gpu05
+block,384,pytorch,training,10.057860107421876,,True,,,NVIDIA A100 80GB PCIe,gpu05
+block,768,anth:fast,inference,5.2280322265625,0.004137112759053707,True,Selection(transition:v2@bm64bh32w4s2il0 word=fast tier=fast cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.973 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+block,768,anth:v2,inference,5.24353515625,0.004137112759053707,True,Selection(transition:v2@bm64bh32w4s2il0 word=v2 tier=None cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.973 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu01
+block,768,cuequiv,inference,9.260809936523437,0.0034024901688098907,True,,,NVIDIA A100 80GB PCIe,gpu05
+block,768,cuequiv,training,28.15634521484375,,True,,,NVIDIA A100 80GB PCIe,gpu05
+block,768,engine,inference,5.984583740234375,0.0036258152686059475,True,,,NVIDIA A100 80GB PCIe,gpu01
+block,768,engine,training,22.2284619140625,,True,,,NVIDIA A100 80GB PCIe,gpu01
+block,768,pytorch,inference,24.17282958984375,0.0035995454527437687,True,,,NVIDIA A100 80GB PCIe,gpu05
+block,768,pytorch,training,69.6031005859375,,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,384,anth:a1,inference,6.35156494140625,0.0016778658609837294,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 3, 'AT': True}, 'override:a1')",,NVIDIA A100 80GB PCIe,gpu05
+opm,384,anth:a3,inference,5.540003662109375,0.0016778658609837294,True,"({'BI': 8, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 3, 'AT': True}, 'override:a3')",,NVIDIA A100 80GB PCIe,gpu05
+opm,384,anth:a4,inference,,,,"({'BI': 4, 'BJ': 8, 'BK': 32, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 4, 'AT': True}, 'override:a4')","triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 180224, Hardware limit: 166912. Reducing block sizes or `num_stages` may help.",NVIDIA A100 80GB PCIe,gpu05
+opm,384,anth:a5,inference,6.43293212890625,0.0016778658609837294,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 4, 'AT': True}, 'override:a5')",,NVIDIA A100 80GB PCIe,gpu01
+opm,384,anth:a6,inference,6.828871459960937,0.0016778658609837294,True,"({'BI': 4, 'BJ': 8, 'BK': 64, 'BZ': 16, 'GROUP_M': 16, 'num_warps': 8, 'num_stages': 2, 'AT': True}, 'override:a6')",,NVIDIA A100 80GB PCIe,gpu05
+opm,384,anth:default,inference,6.334955444335938,0.0016778658609837294,True,"({'BI': 4, 'BJ': 8, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 3, 'AT': True}, 'cc80')",,NVIDIA A100 80GB PCIe,gpu01
+opm,384,anth:v1,inference,15.359017333984376,0.0016778658609837294,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 2}, 'override:v1')",,NVIDIA A100 80GB PCIe,gpu05
+opm,384,anth:v2,inference,14.719508056640626,0.0016778657445684075,True,"({'BI': 4, 'BJ': 4, 'BK': 32, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 4, 'num_stages': 3}, 'override:v2')",,NVIDIA A100 80GB PCIe,gpu05
+opm,384,anth:v3,inference,14.982677001953125,0.0016778658609837294,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 32, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 2}, 'override:v3')",,NVIDIA A100 80GB PCIe,gpu01
+opm,384,anth:v4,inference,14.337802734375,0.0016778658609837294,True,"({'BI': 8, 'BJ': 4, 'BK': 32, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 2}, 'override:v4')",,NVIDIA A100 80GB PCIe,gpu05
+opm,384,engine,inference,2.361958465576172,0.0016700170235708356,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,384,engine,training,6.947286376953125,,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,384,pytorch,inference,2.3425433349609377,0.0016700158594176173,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,384,pytorch,training,6.616415405273438,,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:a1,inference,22.30255615234375,0.001677582273259759,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 3, 'AT': True}, 'override:a1')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:a3,inference,19.04226318359375,0.001677582273259759,True,"({'BI': 8, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 3, 'AT': True}, 'override:a3')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:a4,inference,,,,"({'BI': 4, 'BJ': 8, 'BK': 32, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 4, 'AT': True}, 'override:a4')","triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 180224, Hardware limit: 166912. Reducing block sizes or `num_stages` may help.",NVIDIA A100 80GB PCIe,gpu01
+opm,768,anth:a5,inference,22.6972265625,0.001677582273259759,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 4, 'AT': True}, 'override:a5')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:a6,inference,23.92748046875,0.001677582273259759,True,"({'BI': 4, 'BJ': 8, 'BK': 64, 'BZ': 16, 'GROUP_M': 16, 'num_warps': 8, 'num_stages': 2, 'AT': True}, 'override:a6')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:default,inference,22.25606689453125,0.001677582273259759,True,"({'BI': 4, 'BJ': 8, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 3, 'AT': True}, 'cc80')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:v1,inference,58.5101904296875,0.001677582273259759,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 2}, 'override:v1')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:v2,inference,55.96544921875,0.0016775821568444371,True,"({'BI': 4, 'BJ': 4, 'BK': 32, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 4, 'num_stages': 3}, 'override:v2')",,NVIDIA A100 80GB PCIe,gpu01
+opm,768,anth:v3,inference,57.19443359375,0.001677582273259759,True,"({'BI': 4, 'BJ': 4, 'BK': 64, 'BZ': 32, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 2}, 'override:v3')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,anth:v4,inference,54.102119140625,0.001677582273259759,True,"({'BI': 8, 'BJ': 4, 'BK': 32, 'BZ': 16, 'GROUP_M': 8, 'num_warps': 8, 'num_stages': 2}, 'override:v4')",,NVIDIA A100 80GB PCIe,gpu05
+opm,768,engine,inference,8.991314086914063,0.001669786055572331,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,768,engine,training,25.99915771484375,,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,768,pytorch,inference,8.892313842773438,0.001669783261604607,True,,,NVIDIA A100 80GB PCIe,gpu05
+opm,768,pytorch,training,25.0298046875,,True,,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:a4,inference,3.1171994018554687,0.0016918025212362409,True,a4,,NVIDIA A100 80GB PCIe,gpu01
+pwa,384,anth:default,inference,1.946234893798828,0.0016918040346354246,True,module default _CFG,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:fp_fo4,inference,3.0446182250976563,0.0016918040346354246,True,fp_fo4,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:g_fo1,inference,1.9342745971679687,0.0016918040346354246,True,g_fo1,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:g_fo2p,inference,1.91889404296875,0.0016918040346354246,True,g_fo2p,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:g_fo3,inference,2.030919647216797,0.0016918040346354246,True,g_fo3,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:g_fo4,inference,1.992069091796875,0.0016918040346354246,True,g_fo4,,NVIDIA A100 80GB PCIe,gpu01
+pwa,384,anth:g_fo7,inference,3.0205950927734375,0.0016918040346354246,True,g_fo7,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:g_fohp1,inference,2.3360716247558595,0.0016918040346354246,True,g_fohp1,,NVIDIA A100 80GB PCIe,gpu01
+pwa,384,anth:h_fg1,inference,1.9851469421386718,0.0016918040346354246,True,h_fg1,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:h_fg3,inference,1.9446170043945312,0.0016918040346354246,True,h_fg3,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,anth:v0,inference,3.703684997558594,0.0016918025212362409,True,v0,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,engine,inference,2.13501953125,0.0016893764259293675,True,,,NVIDIA A100 80GB PCIe,gpu01
+pwa,384,engine,training,6.238779907226562,,True,,,NVIDIA A100 80GB PCIe,gpu01
+pwa,384,pytorch,inference,2.0617010498046877,0.0016893739812076092,True,,,NVIDIA A100 80GB PCIe,gpu05
+pwa,384,pytorch,training,5.6281494140625,,True,,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:a4,inference,7.915130615234375,0.0016791692469269037,True,a4,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:default,inference,5.755391845703125,0.001679169130511582,True,module default _CFG,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:fp_fo4,inference,7.632772827148438,0.001679169130511582,True,fp_fo4,,NVIDIA A100 80GB PCIe,gpu01
+pwa,768,anth:g_fo1,inference,5.749801025390625,0.001679169130511582,True,g_fo1,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:g_fo2p,inference,5.6184014892578125,0.001679169130511582,True,g_fo2p,,NVIDIA A100 80GB PCIe,gpu01
+pwa,768,anth:g_fo3,inference,5.96463623046875,0.001679169130511582,True,g_fo3,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:g_fo4,inference,5.818961791992187,0.001679169130511582,True,g_fo4,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:g_fo7,inference,7.495679931640625,0.001679169130511582,True,g_fo7,,NVIDIA A100 80GB PCIe,gpu01
+pwa,768,anth:g_fohp1,inference,6.4532275390625,0.001679169130511582,True,g_fohp1,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:h_fg1,inference,6.089400024414062,0.001679169130511582,True,h_fg1,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:h_fg3,inference,5.697843017578125,0.001679169130511582,True,h_fg3,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,anth:v0,inference,10.248826904296875,0.0016791692469269037,True,v0,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,engine,inference,5.173555297851562,0.0016775944968685508,True,,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,engine,training,15.222689208984375,,True,,,NVIDIA A100 80GB PCIe,gpu05
+pwa,768,pytorch,inference,5.3157275390625,0.0016775951953604817,True,,,NVIDIA A100 80GB PCIe,gpu01
+pwa,768,pytorch,training,14.289974365234375,,True,,,NVIDIA A100 80GB PCIe,gpu01
+single,384,anth:esm_k1ptr,inference,0.445849609375,0.0024903665762394667,True,"Selection(row='esm_k1ptr', word='esm_k1ptr', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='fast', exact_vs=None, backward=False, capture_safe=True, x_stock=None, fallback='v4 (c 128 | 256) / cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu05
+single,384,anth:esm_v5_fwd,inference,0.4070195388793945,0.002868464682251215,True,"Selection(row='esm_v5_fwd', word='esm_v5_fwd', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0312;relrms=0.00527)', exact_vs=None, backward=False, capture_safe=True, x_stock=2.76, fallback='v4', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config={'k1': {'BM': 128, 'BN': 64, 'impl': 'tma', 'num_stages': 2, 'num_warps': 4}, 'k3': {'BM': 128, 'BN': 64, 'num_stages': 1, 'num_warps': 4}})",,NVIDIA A100 80GB PCIe,gpu01
+single,384,anth:fast,inference,0.46157825469970704,0.0026532108895480633,True,"Selection(row='v4', word='fast', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0156;relrms=0.000169)', exact_vs=None, backward=False, capture_safe=True, x_stock=2.474, fallback='cueq', reason='fast winner on A100:2.10.0+cu128/3.6.0/cueq0.10.0; column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0', config=None)",,NVIDIA A100 80GB PCIe,gpu01
+single,384,anth:native_rebuilt,inference,0.42524673461914064,0.002653221134096384,True,trimul_native sm_80 member: k1_bf16_c128_h128_bm128_bn32_wm32_s2_mb3 | torch.bmm TN | k3_bf16_c128_h128_bm128_bn32_wm32_s2_mb2,,NVIDIA A100 80GB PCIe,gpu05
+single,384,anth:tmk3_exact,inference,0.5895782470703125,0.0026532660704106092,True,"Selection(row='tmk3_exact', word='tmk3_exact', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='bitwise≡cueq', exact_vs='cuequivariance_torch.triangle_multiplicative_update (0.10.0 and 0.11.1 measured) -- bitwise; needs cuequivariance_ops_torch (its LayerNorm kernels are the exact LN stages)', backward=False, capture_safe=True, x_stock=1.415, fallback='cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu05
+single,384,anth:tmk3_fast,inference,0.526110725402832,0.0026532087940722704,True,"Selection(row='tmk3_fast', word='tmk3_fast', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0156;relrms=0.000169)', exact_vs=None, backward=False, capture_safe=True, x_stock=2.034, fallback='v4', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu05
+single,384,anth:v4,inference,0.45910015106201174,0.0026532108895480633,True,"Selection(row='v4', word='v4', cell='8.0|bf16|C128|H128|N<=400|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0156;relrms=0.000169)', exact_vs=None, backward=False, capture_safe=True, x_stock=2.474, fallback='cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu05
+single,384,cuequiv,inference,0.6204825592041016,0.0026532660704106092,True,,,NVIDIA A100 80GB PCIe,gpu01
+single,384,cuequiv,training,2.61392333984375,,True,,,NVIDIA A100 80GB PCIe,gpu01
+single,384,engine,inference,0.5163417434692383,0.0024902382865548134,True,,,NVIDIA A100 80GB PCIe,gpu05
+single,384,engine,training,1.9761228942871094,,True,,,NVIDIA A100 80GB PCIe,gpu05
+single,384,pytorch,inference,1.3706854248046876,0.0028175776824355125,True,,,NVIDIA A100 80GB PCIe,gpu05
+single,384,pytorch,training,4.247340698242187,,True,,,NVIDIA A100 80GB PCIe,gpu05
+single,768,anth:esm_k1ptr,inference,1.7755340576171874,0.0024654963053762913,True,"Selection(row='esm_k1ptr', word='esm_k1ptr', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='fast', exact_vs=None, backward=False, capture_safe=True, x_stock=None, fallback='v4 (c 128 | 256) / cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu05
+single,768,anth:esm_v5_fwd,inference,1.7794866943359375,0.0028362239245325327,True,"Selection(row='esm_v5_fwd', word='esm_v5_fwd', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0312;relrms=0.00524)', exact_vs=None, backward=False, capture_safe=True, x_stock=1.303, fallback='v4', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config={'k1': {'BM': 128, 'BN': 64, 'impl': 'tma', 'num_stages': 2, 'num_warps': 4}, 'k3': {'BM': 128, 'BN': 64, 'num_stages': 1, 'num_warps': 4}})",,NVIDIA A100 80GB PCIe,gpu05
+single,768,anth:fast,inference,1.7769267272949218,0.0028362239245325327,True,"Selection(row='esm_v5_fwd', word='fast', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0312;relrms=0.00524)', exact_vs=None, backward=False, capture_safe=True, x_stock=1.303, fallback='v4', reason='fast winner on A100:2.10.0+cu128/3.6.0/cueq0.10.0; column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; stepaside native', config={'k1': {'BM': 128, 'BN': 64, 'impl': 'tma', 'num_stages': 2, 'num_warps': 4}, 'k3': {'BM': 128, 'BN': 64, 'num_stages': 1, 'num_warps': 4}})",,NVIDIA A100 80GB PCIe,gpu05
+single,768,anth:native_rebuilt,inference,1.8107801818847655,0.002624656306579709,True,trimul_native sm_80 member: k1_bf16_c128_h128_bm128_bn32_wm32_s2_mb3 | torch.bmm TN | k3_bf16_c128_h128_bm128_bn32_wm32_s2_mb2,,NVIDIA A100 80GB PCIe,gpu05
+single,768,anth:tmk3_exact,inference,2.4864767456054686,0.0026246632914990187,True,"Selection(row='tmk3_exact', word='tmk3_exact', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='bitwise≡cueq', exact_vs='cuequivariance_torch.triangle_multiplicative_update (0.10.0 and 0.11.1 measured) -- bitwise; needs cuequivariance_ops_torch (its LayerNorm kernels are the exact LN stages)', backward=False, capture_safe=True, x_stock=0.912, fallback='cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu01
+single,768,anth:tmk3_fast,inference,2.2687744140625,0.0026246849447488785,True,"Selection(row='tmk3_fast', word='tmk3_fast', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0156;relrms=0.000171)', exact_vs=None, backward=False, capture_safe=True, x_stock=1.003, fallback='v4', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu05
+single,768,anth:v4,inference,1.9288473510742188,0.0026246856432408094,True,"Selection(row='v4', word='v4', cell='8.0|bf16|C128|H128|N<=800|out|fwd', size_measured=False, stack='A100:2.10.0+cu128/3.6.0/cueq0.10.0', cls='tol(maxabs=0.0156;relrms=0.000172)', exact_vs=None, backward=False, capture_safe=True, x_stock=1.18, fallback='cueq', reason='column=sibling:A100:2.10.0+cu128/3.6.0/cueq0.10.0; row word', config=None)",,NVIDIA A100 80GB PCIe,gpu05
+single,768,cuequiv,inference,2.6420428466796877,0.0026246632914990187,True,,,NVIDIA A100 80GB PCIe,gpu05
+single,768,cuequiv,training,10.608856201171875,,True,,,NVIDIA A100 80GB PCIe,gpu05
+single,768,engine,inference,2.1829632568359374,0.0024654327426105738,True,,,NVIDIA A100 80GB PCIe,gpu01
+single,768,engine,training,8.170397338867188,,True,,,NVIDIA A100 80GB PCIe,gpu01
+single,768,pytorch,inference,10.759127197265625,0.0027838002424687147,True,,,NVIDIA A100 80GB PCIe,gpu05
+single,768,pytorch,training,31.92530029296875,,True,,,NVIDIA A100 80GB PCIe,gpu05
+transition,384,anth:af3_fused,inference,0.4288307189941406,0.0029924188274890184,True,Selection(transition:af3_fused word=af3_fused tier=None cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=2.587 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+transition,384,anth:fast,inference,0.45758464813232425,0.003131765639409423,True,Selection(transition:v2@bm64bh32w4s2il0 word=fast tier=fast cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=2.957 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu01
+transition,384,anth:lnl,inference,0.4353228759765625,0.0029924188274890184,True,Selection(transition:lnl word=lnl tier=None cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=2.353 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu01
+transition,384,anth:pf,inference,0.3948953628540039,0.003265331033617258,True,Selection(transition:pf word=pf tier=None cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=None cls=None stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+transition,384,anth:v1,inference,0.8951808166503906,0.0029924451373517513,True,"Selection(transition:v1 word=v1 tier=None cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=1.643 cls=bitwise stack_measured=False reference_stack_numbers,exact_class_given_the_callers_ln_output)",,NVIDIA A100 80GB PCIe,gpu05
+transition,384,anth:v2,inference,0.4525260925292969,0.003131765639409423,True,Selection(transition:v2@bm64bh32w4s2il0 word=v2 tier=None cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=2.957 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+transition,384,engine,inference,0.5509939193725586,0.0025050691328942776,True,,,NVIDIA A100 80GB PCIe,gpu05
+transition,384,engine,training,2.109372863769531,,True,,,NVIDIA A100 80GB PCIe,gpu05
+transition,384,pytorch,inference,0.9756671905517578,0.002848281292244792,True,,,NVIDIA A100 80GB PCIe,gpu01
+transition,384,pytorch,training,2.4869062805175783,,True,,,NVIDIA A100 80GB PCIe,gpu01
+transition,768,anth:af3_fused,inference,1.6720895385742187,0.002993006957694888,True,Selection(transition:af3_fused word=af3_fused tier=None cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.488 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+transition,768,anth:fast,inference,1.7863066101074219,0.003130281111225486,True,Selection(transition:v2@bm64bh32w4s2il0 word=fast tier=fast cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.973 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+transition,768,anth:lnl,inference,1.6691200256347656,0.002993006957694888,True,Selection(transition:lnl word=lnl tier=None cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.23 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+transition,768,anth:pf,inference,1.5421849060058594,0.003263835795223713,True,Selection(transition:pf word=pf tier=None cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=None cls=None stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu01
+transition,768,anth:v1,inference,3.4433023071289064,0.0029930078890174627,True,"Selection(transition:v1 word=v1 tier=None cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=1.725 cls=bitwise stack_measured=False reference_stack_numbers,exact_class_given_the_callers_ln_output)",,NVIDIA A100 80GB PCIe,gpu05
+transition,768,anth:v2,inference,1.777418212890625,0.003130281111225486,True,Selection(transition:v2@bm64bh32w4s2il0 word=v2 tier=None cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.973 cls=tol stack_measured=False reference_stack_numbers),,NVIDIA A100 80GB PCIe,gpu05
+transition,768,engine,inference,2.1810585021972657,0.002504647709429264,True,,,NVIDIA A100 80GB PCIe,gpu05
+transition,768,engine,training,8.357914428710938,,True,,,NVIDIA A100 80GB PCIe,gpu05
+transition,768,pytorch,inference,3.778703308105469,0.0028488889802247286,True,,,NVIDIA A100 80GB PCIe,gpu05
+transition,768,pytorch,training,9.36306640625,,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,384,anth:native_bidir,inference,0.7900569915771485,0.0026688731741160154,True,sm80 native composed: k1_bf16_c128_h256_bm128_bn32_wm32_s2_mb3 | bmm NT(out half) + TN(in half) | k3_bf16_c128_h256_bm64_bn16_wm32_s1_mb4,,NVIDIA A100 80GB PCIe,gpu05
+trimul,384,cuequiv,inference,1.3137715148925782,0.0026192492805421352,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,384,cuequiv,training,4.435234680175781,,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,384,engine,inference,0.863846435546875,0.0025035319849848747,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,384,engine,training,3.197518615722656,,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,384,pytorch,inference,2.559754180908203,0.0028352970257401466,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,384,pytorch,training,7.377061157226563,,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,768,anth:native_bidir,inference,3.41712890625,0.0026399269700050354,True,sm80 native composed: k1_bf16_c128_h256_bm128_bn32_wm32_s2_mb3 | bmm NT(out half) + TN(in half) | k3_bf16_c128_h256_bm64_bn16_wm32_s1_mb4,,NVIDIA A100 80GB PCIe,gpu01
+trimul,768,cuequiv,inference,5.464022827148438,0.002591509837657213,True,,,NVIDIA A100 80GB PCIe,gpu01
+trimul,768,cuequiv,training,18.27014404296875,,True,,,NVIDIA A100 80GB PCIe,gpu01
+trimul,768,engine,inference,3.8272000122070313,0.0024790759198367596,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,768,engine,training,14.153720703125,,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,768,pytorch,inference,20.359066162109375,0.0028013435658067465,True,,,NVIDIA A100 80GB PCIe,gpu05
+trimul,768,pytorch,training,59.463662109375,,True,,,NVIDIA A100 80GB PCIe,gpu05

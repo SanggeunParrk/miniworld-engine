@@ -1,0 +1,51 @@
+{
+  "module": "transition",
+  "L": 384,
+  "arm": "anth:v1",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "e696edfd-a9aa-57a0-b706-fe91411e2f97",
+  "host": "gpu05",
+  "job": "51086",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0029924451373517513,
+      "finite": true,
+      "ms": 0.8951808166503906,
+      "rounds_ms": [
+        0.8952422332763672,
+        0.8950579071044922,
+        0.8950784301757813,
+        0.8950374603271485,
+        0.8954879760742187,
+        0.8951808166503906,
+        0.8952422332763672
+      ],
+      "warm_replays": 334,
+      "kernels": {
+        "_fused_transition_kernel": [
+          1,
+          440.3
+        ],
+        "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, ": [
+          1,
+          299.9
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          101.7
+        ],
+        "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(in": [
+          1,
+          67.9
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(transition:v1 word=v1 tier=None cell=8.0|bf16|pair_c128_n4|N<=400|eager|fwd x_stock=1.643 cls=bitwise stack_measured=False reference_stack_numbers,exact_class_given_the_callers_ln_output)"
+}

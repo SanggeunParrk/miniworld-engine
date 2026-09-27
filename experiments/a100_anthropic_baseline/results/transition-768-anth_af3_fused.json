@@ -1,0 +1,39 @@
+{
+  "module": "transition",
+  "L": 768,
+  "arm": "anth:af3_fused",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "e696edfd-a9aa-57a0-b706-fe91411e2f97",
+  "host": "gpu05",
+  "job": "51086",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": null,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.002993006957694888,
+      "finite": true,
+      "ms": 1.6720895385742187,
+      "rounds_ms": [
+        1.672069091796875,
+        1.672069091796875,
+        1.6720895385742187,
+        1.671557159423828,
+        1.6782131958007813,
+        1.6920166015625,
+        1.7452236938476562
+      ],
+      "warm_replays": 188,
+      "kernels": {
+        "_ft_kernel": [
+          1,
+          1753.7
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "Selection(transition:af3_fused word=af3_fused tier=None cell=8.0|bf16|pair_c128_n4|N<=800|eager|fwd x_stock=3.488 cls=tol stack_measured=False reference_stack_numbers)"
+}

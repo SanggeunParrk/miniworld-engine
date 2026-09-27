@@ -1,0 +1,87 @@
+{
+  "module": "pwa",
+  "L": 384,
+  "arm": "anth:g_fohp1",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "uuid": "489b77fc-38d7-5a3e-a6aa-04e2996c2c62",
+  "host": "gpu01",
+  "job": "51084",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "dtype": "bf16",
+  "msa_depth": 1024,
+  "modes": {
+    "inference": {
+      "rel_rms_vs_fp32": 0.0016918040346354246,
+      "finite": true,
+      "ms": 2.3360716247558595,
+      "rounds_ms": [
+        2.3349658203125,
+        2.3362559509277343,
+        2.3364813232421877,
+        2.3364402770996096,
+        2.3360716247558595,
+        2.3350682067871094,
+        2.33533447265625
+      ],
+      "warm_replays": 130,
+      "kernels": {
+        "_pwa_fohp_kernel": [
+          1,
+          1229.0
+        ],
+        "_ln_vg_kernel": [
+          1,
+          478.2
+        ],
+        "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, ": [
+          1,
+          307.4
+        ],
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::opera": [
+          1,
+          103.8
+        ],
+        "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFl": [
+          1,
+          89.0
+        ],
+        "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(in": [
+          1,
+          67.7
+        ],
+        "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::": [
+          1,
+          40.8
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::opera": [
+          4,
+          17.1
+        ],
+        "void (anonymous namespace)::softmax_warp_forward<c10::BFloat16, c10::BFloat16, float, 9, false, false>(c10::BFloat16*, c10::BFloat16 const*, int, int, int, bool": [
+          1,
+          10.0
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<c10::BFloat16> >(at::TensorIteratorBase&, at::native:": [
+          1,
+          7.6
+        ],
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()()": [
+          1,
+          5.5
+        ],
+        "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnOther_add<c10::BFloat16>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnOthe": [
+          1,
+          2.4
+        ],
+        "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor": [
+          1,
+          1.8
+        ]
+      }
+    }
+  },
+  "timing": "eager Anthropic call captured in one CUDA graph",
+  "selection": "g_fohp1"
+}
