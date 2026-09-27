@@ -57,9 +57,18 @@ def _time_bwd_path(impl, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
 def _resolve_bwd_path(
     m: int, n: int, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor
 ) -> str:
+    # Offline, dtype-specific calibration may refine the coarse H100 heuristic.
+    # Never reuse a BF16/FP32-affine measurement for another precision contract.
+    regime = f"{x.dtype}|{weight.dtype}"
     if settings.current().engine_backend == "triton":
         override = _ln_bwd_override()
-        return override if override in {"atomic", "persistent"} else _static_bwd_path(m, n, False)
+        if override in {"atomic", "persistent"}:
+            return override
+        if dispatch_cache.autotune_mode() != "off":
+            cached = dispatch_cache.lookup(x.device, n, dispatch_cache.mbucket(m), regime=regime)
+            if cached in {"atomic", "persistent"}:
+                return cached
+        return _static_bwd_path(m, n, False)
     override = _ln_bwd_override()
     if override is not None and override in _VALID_BWD_PATHS:
         if override == "cuda" and x.dtype != weight.dtype:
@@ -79,6 +88,9 @@ def _resolve_bwd_path(
     cc = torch.cuda.get_device_capability(device)
     # H100 is already measured -> trust the static heuristic (unless explicitly forced).
     if mode != "force" and cc == _HOPPER:
+        cached = dispatch_cache.lookup(device, n, dispatch_cache.mbucket(m), regime=regime)
+        if cached in {"atomic", "persistent"} or (cached == "cuda" and is_bf16):
+            return cached
         return _static_bwd_path(m, n, is_bf16)
 
     mb = dispatch_cache.mbucket(m)

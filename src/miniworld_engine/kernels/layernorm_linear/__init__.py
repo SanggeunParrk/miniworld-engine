@@ -69,10 +69,9 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
         )
 
     # --- portable Triton fallback (non-Hopper) ---
-    y = layernorm_linear_triton(x, ln_weight, ln_bias, weight, bias, eps)
     if save_stats:
-        xf = x.reshape(-1, x.shape[-1]).float()
-        mean = xf.mean(-1)
-        rstd = torch.rsqrt(xf.var(-1, unbiased=False) + eps)
-        return y, mean, rstd
-    return y
+        from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+            layernorm_linear_triton_fwd_stats,
+        )
+        return layernorm_linear_triton_fwd_stats(x, ln_weight, ln_bias, weight, bias, eps)
+    return layernorm_linear_triton(x, ln_weight, ln_bias, weight, bias, eps)
