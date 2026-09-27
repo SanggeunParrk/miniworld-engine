@@ -8,6 +8,19 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+- Add portable Triton OuterProductMean and MSAPairWeightedAveraging (forward and
+  backward; kernel families `outer_product_mean`, `pair_weighted_averaging`, 12
+  autotuned kernels). `miniworld` now takes them on every GPU and width the
+  native H100 paths do not serve, and under `engine_backend="triton"`; before,
+  those calls ran the module's PyTorch statements. `implementation="triton"` on
+  either module used to run the same statements silently and now runs the
+  kernels or raises `NotImplementedError` naming the reason (CPU input, non-bf16,
+  interchain masking, d_msa / d_hidden not a power of two, OPM d_pair not a
+  multiple of 32). Their autotune grids ship at full ladder width; no cache is
+  built yet, so a first call uses the bounded miss fallback.
+- `build.launch_bind` reads a kernel's tuned axes from the shipped grid spec of
+  its `configs_for("<op>")`, so axes not spelled `BLOCK_*` are recognised.
+
 - Fuse OPM/PWA training dropout and residual epilogues, retain live-weight graph
   replay, and record MSA comparisons with the standard depth of 1024.
 - Reuse D128 TriMul preparation and expose optimizer-state layout migration for

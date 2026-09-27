@@ -1,0 +1,69 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "host": "gpu01",
+ "extra": [],
+ "rows": [
+  {
+   "op": "opm",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.0016690732445567846,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1824.8294067382812,
+   "rounds_ms": [
+    1.8229862976074218,
+    1.8251365661621093,
+    1.8233958435058595,
+    1.8237849426269532,
+    1.8248294067382813,
+    1.8731826782226562,
+    1.8781593322753907
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1289.9894000000002,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 278.22779999999995,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 78.65255000000025,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 6.027149999999437
+   },
+   "pct_of_sol": 79.43490262966242
+  },
+  {
+   "op": "opm",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.001668875920586288,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7125.0518798828125,
+   "rounds_ms": [
+    7.059874267578125,
+    7.2742529296875,
+    7.060969848632812,
+    7.125051879882813,
+    7.2005029296875,
+    7.059653930664062,
+    7.185953979492187
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5787.8708,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1145.98535,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 145.87159999999827,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.5422999999997495
+   },
+   "pct_of_sol": 81.37773517089624
+  }
+ ]
+}

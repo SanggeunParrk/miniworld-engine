@@ -175,6 +175,8 @@ OP_FAMILIES = (
     "gated_residual",      # adaLN-Zero residual multiply/add, without a projection
     "layernorm_linear",     # before "layernorm": it is the longer, more specific prefix
     "layernorm",
+    "outer_product_mean",       # MSA -> pair (kernels/outer_product_mean)
+    "pair_weighted_averaging",  # MSA pair-weighted averaging (kernels/pair_weighted_averaging)
     "rmsnorm",
     "rope",           # covers rmsnorm_adamod_* too: same prefix
     "swa_atom_attention",

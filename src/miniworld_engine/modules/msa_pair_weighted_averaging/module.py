@@ -7,6 +7,7 @@ from jaxtyping import Bool, Float
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
 from miniworld_engine.integrations import pwa_train as _pwa_train
+from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear
@@ -96,6 +97,27 @@ class MSAPairWeightedAveraging(nn.Module):
                 _anthropic.require_pwa(msa, *_dims, **_fused)      # explicit: the reason, never a reroute
             if _anthropic.serves_pwa(msa, *_dims, **_fused):
                 return msa + _anthropic.pair_weighted_averaging(self, msa, pair, mask)
+        # The portable Triton path (kernels.pair_weighted_averaging) for every call the native paths above did not take:
+        # other GPUs, other widths, engine_backend="triton". The residual and the row dropout are fused into it; the keep-mask
+        # is drawn here exactly as Dropout(broadcast_dim=1) draws it. An explicit implementation="triton" refuses with the reason.
+        if self.implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON) and (
+                resolve("msa_pair_weighted_averaging", self.implementation, msa.device) == KernelBackend.TRITON):
+            from miniworld_engine.kernels.pair_weighted_averaging.interface import (
+                refusal,
+                triton_pair_weighted_averaging,
+            )
+            why = refusal(msa, pair, self.n_head, self.to_value.weight.shape[0] // self.n_head)
+            if why is None:
+                p_drop = float(self.drop_msa.p_drop) if self.training else 0.0
+                keep = None
+                if p_drop > 0:
+                    keep = torch.rand((msa.shape[0], msa.shape[2], msa.shape[3]), device=msa.device, dtype=msa.dtype) > p_drop
+                return triton_pair_weighted_averaging(msa, pair, mask, self.ln_msa.weight, self.ln_msa.bias, self.to_value.weight,
+                                                      self.to_gate.weight, self.ln_pair.weight, self.ln_pair.bias,
+                                                      self.to_bias.weight, self.to_out.weight, eps_msa=float(self.ln_msa.eps),
+                                                      eps_pair=float(self.ln_pair.eps), keep=keep, p_drop=p_drop)
+            if self.implementation == ImplementationType.TRITON:
+                raise NotImplementedError(f"MSAPairWeightedAveraging(implementation='triton'): {why}")
         msa_res = msa  # residual == the ORIGINAL input (before ln_msa rebinds `msa`)
         msa = self.ln_msa(msa)
         value = self.to_value(msa)

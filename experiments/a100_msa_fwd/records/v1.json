@@ -1,0 +1,129 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "host": "gpu01",
+ "extra": [],
+ "rows": [
+  {
+   "op": "opm",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1823.9077758789062,
+   "rounds_ms": [
+    1.8239077758789062,
+    1.824583740234375,
+    1.824153594970703,
+    1.8091212463378907,
+    1.8134220886230468,
+    1.8110464477539063,
+    1.8864128112792968
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1268.2130500000003,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4> >(a100::OpmEpiloguePar": 302.33895000000007,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 78.04800000000053,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 5.947150000000828
+   },
+   "pct_of_sol": 79.47504153281483
+  },
+  {
+   "op": "opm",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7109.63623046875,
+   "rounds_ms": [
+    7.0448370361328125,
+    7.1718817138671875,
+    7.080341186523437,
+    7.08655517578125,
+    7.168018188476562,
+    7.10963623046875,
+    7.128079833984375
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5699.6981,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4> >(a100::OpmEpiloguePar": 1256.6692999999998,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 145.31040000000058,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.463999999999808
+   },
+   "pct_of_sol": 81.55418451300588
+  },
+  {
+   "op": "pwa",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.0016761950682848692,
+   "max_abs": 0.01591348648071289,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016920117195695639,
+   "sol_us": {
+    "flop_us": 484.442112,
+    "byte_us": 86.39952059925093,
+    "total": 484.442112
+   },
+   "us": 1592.3231506347656,
+   "rounds_ms": [
+    1.5921688842773438,
+    1.5923231506347657,
+    1.5922163391113282,
+    1.5924589538574219,
+    1.5926393127441407,
+    1.5917280578613282,
+    1.59985595703125
+   ],
+   "kernels_us": {
+    "void a100::pwa_main_kernel<a100::PwaMCfg<4> >(a100::PwaMainParams)": 1328.0886499999995,
+    "a100::pwa_value_kernel(a100::PwaValueParams)": 249.19509999999994,
+    "a100::pwa_pair_kernel(a100::PwaPairParams)": 35.28470000000038
+   },
+   "pct_of_sol": 30.423605397364312
+  },
+  {
+   "op": "pwa",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016698488034307957,
+   "max_abs": 0.01586437225341797,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016798661090433598,
+   "sol_us": {
+    "flop_us": 1615.6459008000002,
+    "byte_us": 219.92605243445692,
+    "total": 1615.6459008000002
+   },
+   "us": 5227.2882080078125,
+   "rounds_ms": [
+    5.214508666992187,
+    5.21881103515625,
+    5.240966796875,
+    5.223316040039062,
+    5.2272882080078125,
+    5.24056884765625,
+    5.237001953125
+   ],
+   "kernels_us": {
+    "void a100::pwa_main_kernel<a100::PwaMCfg<4> >(a100::PwaMainParams)": 4619.10795,
+    "a100::pwa_value_kernel(a100::PwaValueParams)": 489.1338999999991,
+    "a100::pwa_pair_kernel(a100::PwaPairParams)": 111.93759999999938
+   },
+   "pct_of_sol": 30.90791700226041
+  }
+ ]
+}

@@ -1,0 +1,72 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "host": "gpu05",
+ "extra": [
+  "-DOPM_E_NS=3",
+  "-DOPM_E_DPS=2"
+ ],
+ "rows": [
+  {
+   "op": "opm",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1870.4794311523438,
+   "rounds_ms": [
+    1.8703155517578125,
+    1.870663604736328,
+    1.8704794311523438,
+    1.870417938232422,
+    1.8654617309570312,
+    1.92616455078125,
+    1.9949568176269532
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1266.50815,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<3, 2> >(a100::OpmEpilogue": 348.4685000000001,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 77.88375000000023,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 5.928000000000315
+   },
+   "pct_of_sol": 77.49625247185834
+  },
+  {
+   "op": "opm",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7304.6356201171875,
+   "rounds_ms": [
+    7.304635620117187,
+    7.193919067382812,
+    7.284934692382812,
+    7.386964111328125,
+    7.320198974609375,
+    7.291691284179688,
+    7.4001007080078125
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5614.533600000003,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<3, 2> >(a100::OpmEpilogue": 1494.8294999999976,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 143.61489999999714,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.451199999999677
+   },
+   "pct_of_sol": 79.3770716451833
+  }
+ ]
+}

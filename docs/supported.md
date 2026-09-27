@@ -36,7 +36,7 @@ the manifest it cites, so this table cannot age past its evidence again.
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 91 | yes, on sm86 (which satisfies sm80) |
+| sm80 | 103 | yes, on sm86 (which satisfies sm80) |
 | sm90 | 21 | partial: three [TriMul parity kernels](kernels/trimul-sm90-parity.md) |
 | sm100 | 4 | **no** |
 

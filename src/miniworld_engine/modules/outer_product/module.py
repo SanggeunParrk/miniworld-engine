@@ -7,6 +7,7 @@ from jaxtyping import Bool, Float, Int
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
 from miniworld_engine.integrations import opm_train as _opm_train
+from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 
@@ -136,6 +137,22 @@ class OuterProductMean(nn.Module):
                 _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
                 _pair = _anthropic.outer_product_mean(self, msa, _m)
                 return residual + _pair if residual is not None else _pair
+        # The portable Triton path (kernels.outer_product_mean) for every call the native paths above did not take:
+        # other GPUs, other widths, engine_backend="triton". An explicit implementation="triton" refuses with the reason.
+        if self.implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON) and (
+                resolve("outer_product_mean", self.implementation, msa.device) == KernelBackend.TRITON):
+            from miniworld_engine.kernels.outer_product_mean.interface import (
+                refusal,
+                triton_outer_product_mean,
+            )
+            why = refusal(msa, self.to_left.weight.shape[0], self.to_out.weight.shape[0],
+                          interchain=bool(self.mask_interchain and token_asym_id is not None), residual=residual)
+            if why is None:
+                return triton_outer_product_mean(msa, mask, self.ln_msa.weight, self.ln_msa.bias, self.to_left.weight,
+                                                 self.to_right.weight, self.to_out.weight, self.to_out.bias, residual,
+                                                 eps=float(self.ln_msa.eps), normalize_before_proj=self.normalize_before_proj)
+            if self.implementation == ImplementationType.TRITON:
+                raise NotImplementedError(f"OuterProductMean(implementation='triton'): {why}")
         msa = self.ln_msa(msa)
         left = self.to_left(msa)
         right = self.to_right(msa)

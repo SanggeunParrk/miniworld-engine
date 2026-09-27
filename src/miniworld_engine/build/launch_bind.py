@@ -73,6 +73,15 @@ def _resolve_import(node: ast.ImportFrom, this_module: str) -> str | None:
     return node.module
 
 
+def _grid_axes(op: str) -> set[str]:
+    """The tile axes the shipped grid spec of ``op`` declares (launch meta excluded); empty without one."""
+    spec = SRC / PKG / "autotune" / "configs" / "grid" / f"{op}.csv"
+    if not spec.is_file():
+        return set()
+    rows = [line.split(",", 1)[0].strip() for line in spec.read_text().splitlines()[1:] if line.strip()]
+    return {r for r in rows if r not in ("num_warps", "num_stages", "num_ctas", "maxnreg")}
+
+
 def _config_parameters(fn: ast.FunctionDef, tree: ast.AST) -> set[str]:
     """Read explicit Triton Config dictionary keys, including local config factories.
 
@@ -95,6 +104,11 @@ def _config_parameters(fn: ast.FunctionDef, tree: ast.AST) -> set[str]:
             if name == "Config" and node.args and isinstance(node.args[0], ast.Dict):
                 names.update(k.value for k in node.args[0].keys
                              if isinstance(k, ast.Constant) and isinstance(k.value, str))
+            elif (name == "configs_for" and node.args and isinstance(node.args[0], ast.Constant)
+                  and isinstance(node.args[0].value, str)):
+                # The shipped grid names the op's tile axes: `configs_for("op")` injects exactly the axes of
+                # `autotune/configs/grid/<op>.csv`, whatever their spelling (TI, BJ, SPLIT, PPS as well as BLOCK_*).
+                names.update(_grid_axes(node.args[0].value))
             elif name in factories and name not in visited:
                 visited.add(name)
                 pending.append(factories[name])

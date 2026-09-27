@@ -1,0 +1,71 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "host": "gpu05",
+ "extra": [],
+ "rows": [
+  {
+   "op": "pwa_split",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.0016787906643003225,
+   "max_abs": 0.01591348648071289,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016920117195695639,
+   "sol_us": {
+    "flop_us": 484.442112,
+    "byte_us": 86.39952059925093,
+    "total": 484.442112
+   },
+   "us": 926.9248199462891,
+   "rounds_ms": [
+    0.92801025390625,
+    0.9271705627441407,
+    0.9266995239257813,
+    0.9266175842285156,
+    0.9269248199462891,
+    0.9269452667236329,
+    0.9266175842285156
+   ],
+   "kernels_us": {
+    "void a100::pwa_ctr_kernel<a100::PwaCCfg<2, 64> >(a100::PwaCtrParams)": 445.46180000000004,
+    "a100::pwa_out2_kernel(a100::PwaOut2Params)": 211.96059999999972,
+    "a100::pwa_value_kernel(a100::PwaValueParams)": 182.82420000000016,
+    "a100::pwa_pair_kernel(a100::PwaPairParams)": 42.897750000000116,
+    "a100::pwa_compact_kernel(unsigned char const*, int, int*, int*)": 3.361599999999839
+   },
+   "pct_of_sol": 52.263366087022156
+  },
+  {
+   "op": "pwa_split",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.001671547070145607,
+   "max_abs": 0.01587533950805664,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016798661090433598,
+   "sol_us": {
+    "flop_us": 1615.6459008000002,
+    "byte_us": 219.92605243445692,
+    "total": 1615.6459008000002
+   },
+   "us": 2549.6249389648438,
+   "rounds_ms": [
+    2.5470777893066407,
+    2.549550018310547,
+    2.5496249389648438,
+    2.6020333862304685,
+    2.6464801025390625,
+    2.5591270446777346,
+    2.547649230957031
+   ],
+   "kernels_us": {
+    "void a100::pwa_ctr_kernel<a100::PwaCCfg<2, 64> >(a100::PwaCtrParams)": 1631.4033000000002,
+    "a100::pwa_out2_kernel(a100::PwaOut2Params)": 421.09024999999957,
+    "a100::pwa_value_kernel(a100::PwaValueParams)": 379.1158499999999,
+    "a100::pwa_pair_kernel(a100::PwaPairParams)": 131.13529999999966,
+    "a100::pwa_compact_kernel(unsigned char const*, int, int*, int*)": 3.665650000001051
+   },
+   "pct_of_sol": 63.367983114252
+  }
+ ]
+}

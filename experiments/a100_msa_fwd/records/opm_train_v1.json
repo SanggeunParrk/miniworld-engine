@@ -1,0 +1,103 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "host": "gpu05",
+ "extra": [],
+ "rows": [
+  {
+   "op": "opm",
+   "L": 384,
+   "S": 1024,
+   "rel": {
+    "msa": 0.004387421999126673,
+    "residual": 0.0,
+    "ln_w": 0.0035667165648192167,
+    "ln_b": 0.0023213790263980627,
+    "w_left": 0.004284476861357689,
+    "w_right": 0.0044450764544308186,
+    "w_out": 0.0046545942313969135,
+    "b_out": 4.4939835674995265e-07
+   },
+   "bf16_module_rel": {
+    "msa": 0.004744059406220913,
+    "residual": 0.0,
+    "ln_w": 0.004068388137966394,
+    "ln_b": 0.0033837384544312954,
+    "w_left": 0.0046603004448115826,
+    "w_right": 0.00473696319386363,
+    "w_out": 0.004654160235077143,
+    "b_out": 0.001791638322174549
+   },
+   "finite": true,
+   "us": 5482.137680053711,
+   "rounds_ms": [
+    5.482035064697266,
+    5.482137680053711,
+    5.481216049194336,
+    5.482035064697266,
+    5.805260848999024,
+    5.679308700561523,
+    5.548697662353516
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_64x3_tn": 1287.0742000000002,
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_64x3_nn": 1268.13,
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1259.8995999999986,
+    "a100::opm_dgrad_kernel(a100::OpmDgradParams)": 397.8499999999997,
+    "a100::opm_dwo_kernel(a100::OpmDwoParams)": 288.59559999999897,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::O": 271.9553999999994,
+    "a100::opm_pbwd_kernel(a100::OpmPbwdParams)": 200.3522000000001,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 79.4688000000001,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int": 5.875399999999354,
+    "void at::native::vectorized_elementwise_kernel<4, at::native": 1.9519999999998616
+   }
+  },
+  {
+   "op": "opm",
+   "L": 768,
+   "S": 1024,
+   "rel": {
+    "msa": 0.004390193149447441,
+    "residual": 0.0,
+    "ln_w": 0.003959096968173981,
+    "ln_b": 0.0021748552098870277,
+    "w_left": 0.004467460326850414,
+    "w_right": 0.004473605193197727,
+    "w_out": 0.004697998054325581,
+    "b_out": 1.3363878679228947e-06
+   },
+   "bf16_module_rel": {
+    "msa": 0.004746475722640753,
+    "residual": 0.0,
+    "ln_w": 0.0038881029468029737,
+    "ln_b": 0.003070874372497201,
+    "w_left": 0.00461982935667038,
+    "w_right": 0.004712347406893969,
+    "w_out": 0.004667715169489384,
+    "b_out": 0.0016163081163540483
+   },
+   "finite": true,
+   "us": 21212.103271484375,
+   "rounds_ms": [
+    21.618115234375,
+    21.212103271484374,
+    21.387835693359374,
+    21.15191192626953,
+    21.099606323242188,
+    21.33278045654297,
+    21.110357666015624
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_64x3_tn": 5502.7252000000035,
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_64x3_nn": 5436.561600000001,
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5429.054200000001,
+    "a100::opm_dgrad_kernel(a100::OpmDgradParams)": 1727.8690000000001,
+    "a100::opm_dwo_kernel(a100::OpmDwoParams)": 1100.9468000000008,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::O": 1083.218599999997,
+    "a100::opm_pbwd_kernel(a100::OpmPbwdParams)": 374.0947999999996,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 144.31439999999873,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int": 7.37920000000031,
+    "void at::native::vectorized_elementwise_kernel<4, at::native": 2.0992000000005646
+   }
+  }
+ ]
+}

@@ -1,0 +1,441 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "host": "gpu05",
+ "extra": [],
+ "rows": [
+  {
+   "op": "opm",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1824.9728393554688,
+   "rounds_ms": [
+    1.829539794921875,
+    1.8249728393554687,
+    1.819115447998047,
+    1.8187673950195313,
+    1.819033660888672,
+    1.8793881225585938,
+    1.9063398742675781
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1278.6189499999991,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 275.39020000000016,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 78.38444999999942,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 5.961599999999748
+   },
+   "pct_of_sol": 79.42865949237593
+  },
+  {
+   "op": "opm",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7067.3419189453125,
+   "rounds_ms": [
+    6.9991827392578125,
+    7.191614990234375,
+    7.023297729492188,
+    7.067341918945313,
+    7.127718505859375,
+    7.052400512695312,
+    7.077457885742188
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5725.4498,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1133.6501999999994,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 145.69554999999983,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.500849999998786
+   },
+   "pct_of_sol": 82.04224326626735
+  },
+  {
+   "op": "opmpipe_8_2",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 2925.416259765625,
+   "rounds_ms": [
+    2.924246520996094,
+    2.925018310546875,
+    2.9260403442382814,
+    2.9445126342773436,
+    2.9536614990234376,
+    2.924111328125,
+    2.925416259765625
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nt": 2823.507950000003,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1510.6105500000126,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 75.57355000000018,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 5.638399999999205
+   },
+   "pct_of_sol": 49.55026340477555
+  },
+  {
+   "op": "opmpipe_8_2",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 9576.179809570312,
+   "rounds_ms": [
+    9.5590625,
+    9.556805419921876,
+    9.576643676757813,
+    9.54048828125,
+    9.580701293945312,
+    9.634039306640625,
+    9.576179809570313
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nt": 9336.026700000004,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 3297.560950000017,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 140.87770000000154,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 6.958400000000824
+   },
+   "pct_of_sol": 60.548214057189554
+  },
+  {
+   "op": "opmpipe_16_2",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 2355.1148986816406,
+   "rounds_ms": [
+    2.3542912292480467,
+    2.3551148986816406,
+    2.3557273864746096,
+    2.355424652099609,
+    2.3555238342285154,
+    2.35463623046875,
+    2.3549125671386717
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nt": 2209.5374500000016,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 795.5561999999995,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 79.1411500000001,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 5.8624000000002745
+   },
+   "pct_of_sol": 61.54907614959415
+  },
+  {
+   "op": "opmpipe_16_2",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 8238.618774414062,
+   "rounds_ms": [
+    8.22130615234375,
+    8.265758056640625,
+    8.222017822265625,
+    8.277590942382812,
+    8.231588134765625,
+    8.26357421875,
+    8.238618774414062
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nt": 8001.082949999997,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1736.694749999998,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 141.18145000000004,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.248000000000275
+   },
+   "pct_of_sol": 70.37837298173046
+  },
+  {
+   "op": "opmpipe_32_2",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 2046.1030578613281,
+   "rounds_ms": [
+    2.045029754638672,
+    2.045737609863281,
+    2.0453446960449218,
+    2.046103057861328,
+    2.0991590881347655,
+    2.1299859619140626,
+    2.069852142333984
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nt": 1920.0985500000002,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 425.3981000000005,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 81.09490000000002,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 6.000000000000205
+   },
+   "pct_of_sol": 70.84449909943106
+  },
+  {
+   "op": "opmpipe_32_2",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7614.50439453125,
+   "rounds_ms": [
+    7.61450439453125,
+    7.693076782226562,
+    7.569020385742188,
+    7.623161010742187,
+    7.593369750976563,
+    7.58625,
+    7.63784423828125
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 6034.995900000004,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1462.3562499999962,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 142.83289999999803,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.497599999999512
+   },
+   "pct_of_sol": 76.14685801172143
+  },
+  {
+   "op": "opmpipe_64_2",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1931.2211608886719,
+   "rounds_ms": [
+    1.9289990234375,
+    1.9303872680664063,
+    1.9349874877929687,
+    1.9302105712890625,
+    1.9312211608886718,
+    1.958369903564453,
+    1.9460371398925782
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1463.8131500000015,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 365.1058500000006,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 82.75420000000014,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 6.214400000000593
+   },
+   "pct_of_sol": 75.05880174453834
+  },
+  {
+   "op": "opmpipe_64_2",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7401.0662841796875,
+   "rounds_ms": [
+    7.356627197265625,
+    7.549890747070313,
+    7.37656494140625,
+    7.441133422851562,
+    7.401066284179688,
+    7.346571655273437,
+    7.459760131835938
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 6042.623549999999,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1404.1958499999985,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 144.85045000000093,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.560050000000387
+   },
+   "pct_of_sol": 78.34284448977417
+  },
+  {
+   "op": "opmpipe_96_2",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1897.5712585449219,
+   "rounds_ms": [
+    1.9061459350585936,
+    1.8992402648925781,
+    1.8907296752929688,
+    1.8826495361328126,
+    1.885617218017578,
+    2.001036834716797,
+    1.8975712585449218
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1517.5312999999996,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 366.0257500000011,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 84.49519999999968,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 6.448049999999921
+   },
+   "pct_of_sol": 76.38983020387502
+  },
+  {
+   "op": "opmpipe_96_2",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7303.80615234375,
+   "rounds_ms": [
+    7.282958374023438,
+    7.475003051757812,
+    7.29765625,
+    7.371629028320313,
+    7.293494873046875,
+    7.30380615234375,
+    7.386105346679687
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5941.129450000006,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1360.9004000000048,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 145.90020000000123,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.636850000000458
+   },
+   "pct_of_sol": 79.38608622217319
+  },
+  {
+   "op": "opmpipe_192_2",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1863.4291076660156,
+   "rounds_ms": [
+    1.8631552124023438,
+    1.8632109069824219,
+    1.863315887451172,
+    1.8634291076660157,
+    1.8635443115234376,
+    1.9331219482421875,
+    1.8707180786132813
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1409.3581000000008,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 330.13905000000017,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 83.37470000000023,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 6.220799999999782
+   },
+   "pct_of_sol": 77.78946118404224
+  },
+  {
+   "op": "opmpipe_192_2",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7246.220703125,
+   "rounds_ms": [
+    7.159523315429688,
+    7.459219360351563,
+    7.159673461914062,
+    7.297107543945312,
+    7.246220703125,
+    7.198679809570312,
+    7.267698974609375
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5893.705500000001,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<4, 1> >(a100::OpmEpilogue": 1221.9350999999976,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 146.81219999999934,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.857649999999559
+   },
+   "pct_of_sol": 80.01696452744629
+  }
+ ]
+}

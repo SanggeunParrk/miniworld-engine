@@ -1,0 +1,72 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "host": "gpu05",
+ "extra": [
+  "-DOPM_E_NS=2",
+  "-DOPM_E_DPS=2"
+ ],
+ "rows": [
+  {
+   "op": "opm",
+   "L": 384,
+   "S": 1024,
+   "rel_rms": 0.001669073710218072,
+   "max_abs": 0.01590442657470703,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016770890215411782,
+   "sol_us": {
+    "flop_us": 1449.5514624,
+    "byte_us": 78.54501872659176,
+    "total": 1449.5514624
+   },
+   "us": 1852.1087646484375,
+   "rounds_ms": [
+    1.8465177917480469,
+    1.8647244262695313,
+    1.8562457275390625,
+    1.8521087646484375,
+    1.8373017883300782,
+    1.8427903747558594,
+    1.9125862121582031
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 1262.2517500000001,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<2, 2> >(a100::OpmEpilogue": 302.4479999999998,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 77.97154999999962,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 5.966449999999668
+   },
+   "pct_of_sol": 78.26492104933968
+  },
+  {
+   "op": "opm",
+   "L": 768,
+   "S": 1024,
+   "rel_rms": 0.0016688758041709661,
+   "max_abs": 0.01597881317138672,
+   "finite": true,
+   "bf16_module_rel_rms": 0.0016768650384619832,
+   "sol_us": {
+    "flop_us": 5798.2058496,
+    "byte_us": 251.3440599250936,
+    "total": 5798.2058496
+   },
+   "us": 7176.041259765625,
+   "rounds_ms": [
+    7.0844482421875,
+    7.383474731445313,
+    7.056614379882813,
+    7.20806396484375,
+    7.192318115234375,
+    7.136943969726563,
+    7.176041259765625
+   ],
+   "kernels_us": {
+    "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt": 5632.90765,
+    "void a100::opm_epilogue_kernel<a100::OpmECfg<2, 2> >(a100::OpmEpilogue": 1182.0035,
+    "a100::opm_prologue_kernel(a100::OpmPrologueParams)": 144.6233499999991,
+    "a100::opm_maskbits_kernel(unsigned char const*, unsigned int*, int, in": 7.436799999997447
+   },
+   "pct_of_sol": 80.79950546144677
+  }
+ ]
+}
