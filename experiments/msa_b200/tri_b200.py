@@ -99,15 +99,13 @@ class _Fused(torch.autograd.Function):
         B, L, C, H, eps = ctx.dims
         m, e = mod_ext(), ext()
         dy = dy.contiguous().view(-1, C)
-        do, dg, delta, dwo = m.tri_gate_bwd(dy, g, o.view(-1, C), wo.contiguous(), B, L)
+        do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo.contiguous(), B, L)
         shp = (B, L, L, H, C // H)
         dq, dk, dv, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, (C // H) ** -0.5)
         dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
-        dpair = dy.clone()
-        y, dgam, dbet = m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wb, lnw, lnb, eps, dpair, B, L)
-        dw = [t.t() @ y for t in (dq, dk, dv, dg)]
-        dwb = db.view(B, H, -1).permute(1, 0, 2).reshape(H, -1).to(torch.bfloat16) @ y
-        return (dpair.view(B, L, L, C), dgam.to(lnw.dtype), dbet.to(lnb.dtype), *(t.to(w4.dtype) for t in dw), dwb.to(wb.dtype),
+        m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wb, lnw, lnb, eps, dpair, B, L)
+        dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, L, w4, wb, lnw, lnb, True, dwo)
+        return (dpair.view(B, L, L, C), dgb[0].to(lnw.dtype), dgb[1].to(lnb.dtype), *(dw[t].to(w4.dtype) for t in range(4)), dgb[2:].to(wb.dtype),
                 dwo.to(wo.dtype), None, None, None)
 
 

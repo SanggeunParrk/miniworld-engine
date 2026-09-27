@@ -45,13 +45,13 @@ for name, fn in (("torch", lambda: xf + (torch.sigmoid(g_) * o_) @ wo.t()), ("ou
     print(f"tail {name:6s} {r['ms']*1e3:8.1f} us  {r['J']*1e3:7.2f} mJ  {r['W']:5.0f} W", flush=True)
 # ---- gate backward
 dy = torch.randn(B * L * L, C, device="cuda", generator=g).to(torch.bfloat16)
-do_, dg_, delta, dwo = ext.tri_gate_bwd(dy, g_, o_, wo, B, L)
+do_, dg_, delta, dwo, seed = ext.tri_gate_bwd(dy, g_, o_, wo, B, L)
 du = dy.float() @ wo.float()
 sg = torch.sigmoid(g_.float())
 do_r = du * sg; dg_r = du * o_.float() * sg * (1 - sg)
 de_r = (do_r * o_.float()).view(B, L, L, 4, 32).sum(-1).permute(0, 1, 3, 2)
 dwo_r = dy.float().t() @ (sg * o_.float()).to(torch.bfloat16).float()
-print(f"gate_bwd: do {rel(do_, do_r):.2e}  dg {rel(dg_, dg_r):.2e}  delta {rel(delta, de_r):.2e}  dWo {rel(dwo, dwo_r):.2e}")
+print(f"gate_bwd: do {rel(do_, do_r):.2e}  dg {rel(dg_, dg_r):.2e}  delta {rel(delta, de_r):.2e}  dWo {rel(dwo, dwo_r):.2e}  seed exact {bool(torch.equal(seed, dy))}")
 def torch_gate_bwd():
     du_ = dy @ wo; s_ = torch.sigmoid(g_); d_ = du_ * s_
     return d_, du_ * o_ * s_ * (1 - s_), (d_.float() * o_.float()).view(B, L, L, 4, 32).sum(-1), dy.t() @ (s_ * o_)
@@ -74,13 +74,26 @@ yy2 = torch.nn.functional.layer_norm(x.view(-1, C).float(), (C,), lw_, lb_, 1e-5
 l2 = (torch.cat([yy2 @ w4[i * C:(i + 1) * C].float().t() for i in range(4)], -1) * torch.cat([t.float() for t in d4], -1)).sum() + ((yy2 @ wb.float().t()) * dbias.permute(0, 2, 3, 1).reshape(-1, 4)).sum()
 dgam_r, dbet_r = torch.autograd.grad(l2, [lw_, lb_])
 dp = dres.clone()
-yk, dgam, dbet = ext.tri_head_bwd(*d4, dbias, x.view(-1, C), w4, wb, lnw, lnb, 1e-5, dp, B, L)
-print(f"head_bwd: dpair {rel(dp, ref_dp):.2e}  y {rel(yk, yy.detach()):.2e}  dgamma {rel(dgam, dgam_r):.2e}  dbeta {rel(dbet, dbet_r):.2e}")
+ext.tri_head_bwd(*d4, dbias, x.view(-1, C), w4, wb, lnw, lnb, 1e-5, dp, B, L)
+mt, cs, bh, cdb = ext.tri_wgrad(*d4, dbias, x.view(-1, C), 1e-5, B, L, w4, wb, lnw, lnb, False, torch.empty(0, device="cuda"))
+dwf, dgbf, _ = ext.tri_wgrad(*d4, dbias, x.view(-1, C), 1e-5, B, L, w4, wb, lnw, lnb, True, torch.empty(0, device="cuda"))
+dW = [(lnw[:, None] * mt[t] + lnb[:, None] * cs[t][None, :]).t() for t in range(4)]          # dW_t [o, c]
+dgam = sum((w4[t * C:(t + 1) * C].float().t() * mt[t]).sum(1) for t in range(4)) + (wb.float() * bh).sum(0)
+dbet = sum(cs[t] @ w4[t * C:(t + 1) * C].float() for t in range(4)) + cdb @ wb.float()
+dwb = lnw[None, :] * bh + cdb[:, None] * lnb[None, :]
+xh = torch.nn.functional.layer_norm(x.view(-1, C).float(), (C,), None, None, 1e-5)
+yf32 = xh * lnw + lnb
+dw_r = [d4[i].float().t() @ yf32 for i in range(4)]
+dwb_r = dbias.permute(1, 0, 2, 3).reshape(4, -1) @ yf32
+print(f"head_bwd: dpair {rel(dp, ref_dp):.2e}  dgamma {rel(dgam, dgam_r):.2e}  dbeta {rel(dbet, dbet_r):.2e}  dWb {rel(dwb, dwb_r):.2e}  "
+      + "  ".join(f"dW{n} {rel(dW[i], dw_r[i]):.2e}" for i, n in enumerate("qkvg")))
+print(f"wgrad finish: dW {max(rel(dwf[i], dw_r[i]) for i in range(4)):.2e}  dgamma {rel(dgbf[0], dgam_r):.2e}  dbeta {rel(dgbf[1], dbet_r):.2e}  dWb {rel(dgbf[2:], dwb_r):.2e}")
 def torch_head():
     xx = x.view(-1, C).requires_grad_(True)
     y3 = torch.nn.functional.layer_norm(xx, (C,), lnw.to(torch.bfloat16), lnb.to(torch.bfloat16), 1e-5)
     gy = sum(d4[i] @ w4[i * C:(i + 1) * C] for i in range(4)) + (dbias.permute(0, 2, 3, 1).reshape(-1, 4).to(torch.bfloat16) @ wb)
     return torch.autograd.grad(y3, [xx], gy)[0] + dres, y3
-for name, fn in (("torch", torch_head), ("ours", lambda: ext.tri_head_bwd(*d4, dbias, x.view(-1, C), w4, wb, lnw, lnb, 1e-5, dp, B, L))):
+for name, fn in (("torch", torch_head), ("ours head", lambda: ext.tri_head_bwd(*d4, dbias, x.view(-1, C), w4, wb, lnw, lnb, 1e-5, dp, B, L)),
+                 ("ours wgrad", lambda: ext.tri_wgrad(*d4, dbias, x.view(-1, C), 1e-5, B, L, w4, wb, lnw, lnb, True, torch.empty(0, device="cuda")))):
     r = sustained(fn, secs=2.0)
-    print(f"head_bwd {name:6s} {r['ms']*1e3:8.1f} us  {r['J']*1e3:7.2f} mJ  {r['W']:5.0f} W", flush=True)
+    print(f"head_bwd {name:10s} {r['ms']*1e3:8.1f} us  {r['J']*1e3:7.2f} mJ  {r['W']:5.0f} W", flush=True)
