@@ -1,0 +1,5681 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 128), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 16), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 32), ('BLOCK_N', 64)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 128)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 16)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 256)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 32)), 8, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 2, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 4, 5)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 1)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64)), 8, 5)"
+  ],
+  "config_space_hash": "495cb8396d8d",
+  "driver_id_scheme": 2,
+  "driver_identity": "e4f9fe954d07",
+  "entries": {
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=140739636104202": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010400000028312206,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010400000028312206,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010400000028312206,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010400000028312206,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010400000028312206,
+        "num_stages": 1,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=140739636366346": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=17598630071306": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.02518399991095066,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025248000398278236,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025312000885605812,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025472000241279602,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.025631999596953392,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=17598630595594": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.025119999423623085,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02534399926662445,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02558399923145771,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.025631999596953392,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026240000501275063,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=17598631644170": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03417599946260452,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03440000116825104,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.034623999148607254,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03516799956560135,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.035232000052928925,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=26394723093514": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.02550400048494339,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025536000728607178,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025696000084280968,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025919999927282333,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026079999282956123,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=26394723617802": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.025696000084280968,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02579200081527233,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026048000901937485,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026240000501275063,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026623999699950218,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=26394724666378": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.0342399999499321,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.034591998904943466,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03465599939227104,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.035679999738931656,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03577600046992302,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=281477124459530": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010528000071644783,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010528000071644783,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010528000071644783,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010528000071644783,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 1,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=281477124721674": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011615999974310398,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011615999974310398,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011648000217974186,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011648000217974186,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011648000217974186,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=35190816115722": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.02566399984061718,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025696000084280968,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025887999683618546,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.02611199952661991,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02630399912595749,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=35190816640010": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026048000901937485,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02630399912595749,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026335999369621277,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.026335999369621277,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02675200067460537,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=35190817688586": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.034304000437259674,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.034591998904943466,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03471999987959862,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03526400029659271,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.035360001027584076,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=562952101170186": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011872000060975552,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01190400030463934,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01190400030463934,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01190400030463934,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011935999616980553,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=562952101432330": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013151999562978745,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013151999562978745,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013151999562978745,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013151999562978745,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013151999562978745,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=70370891926538": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01017600018531084,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010208000428974628,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010208000428974628,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010208000428974628,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010208000428974628,
+        "num_stages": 1,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=70370892188682": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=8802537049098": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.02521600015461445,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025280000641942024,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.02537599951028824,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.025472000241279602,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.025567999109625816,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=8802537573386": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.024879999458789825,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.025087999179959297,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02534399926662445,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.025439999997615814,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.02598400041460991,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=0,shape_key=8802538621962": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03388800099492073,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03433600068092346,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03452799841761589,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03519999980926514,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03532800078392029,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=140739636104202": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011136000044643879,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011168000288307667,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011168000288307667,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011168000288307667,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01119999960064888,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=140739636366346": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011839999817311764,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011872000060975552,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011872000060975552,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011872000060975552,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011872000060975552,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=17598630071306": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.030559999868273735,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030559999868273735,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03057599999010563,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.0306560005992651,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03081599995493889,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=17598630595594": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030432000756263733,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030527999624609947,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030751999467611313,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030848000198602676,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03110400028526783,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=17598631644170": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041600000113248825,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.042047999799251556,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04224000126123428,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04320000112056732,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04639999940991402,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=26394723093514": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.030592000111937523,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.030688000842928886,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030848000198602676,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03097599931061268,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.031136000528931618,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=26394723617802": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.031072000041604042,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.031231999397277832,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03136000037193298,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03139200061559677,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.031647998839616776,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=26394724666378": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04156799986958504,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04214400053024292,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.042208001017570496,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04320000112056732,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.046431999653577805,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=281477124459530": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011807999573647976,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011807999573647976,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011807999573647976,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011839999817311764,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011839999817311764,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=281477124721674": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01283199992030859,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012864000163972378,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012864000163972378,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012864000163972378,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012864000163972378,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=35190816115722": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.030991999432444572,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03110400028526783,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03139200061559677,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03142400085926056,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.031647998839616776,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=35190816640010": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03152000159025192,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.031647998839616776,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03167999908328056,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.0318400003015995,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03209599852561951,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=35190817688586": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041919998824596405,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04243199899792671,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.042527999728918076,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.0435199998319149,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.046592000871896744,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=562952101170186": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013024000450968742,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013024000450968742,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013055999763309956,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013055999763309956,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013055999763309956,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=562952101432330": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014720000326633453,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014720000326633453,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014720000326633453,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014751999638974667,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014911999925971031,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=70370891926538": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010879999957978725,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010879999957978725,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010879999957978725,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010912000201642513,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010912000201642513,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=70370892188682": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011327999643981457,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011327999643981457,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011327999643981457,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011327999643981457,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.011327999643981457,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=8802537049098": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.030271999537944794,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030271999537944794,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03049599938094616,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03049599938094616,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030527999624609947,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=8802537573386": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03017600066959858,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03030399978160858,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030432000756263733,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03046399913728237,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.030719999223947525,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_WEIGHT=1,shape_key=8802538621962": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04095999896526337,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041471999138593674,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04150399938225746,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.042688000947237015,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04588799923658371,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=140739636104202": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010528000071644783,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01056000031530857,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=140739636366346": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011648000217974186,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011711999773979187,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011711999773979187,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011744000017642975,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011744000017642975,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=17598630071306": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03203200176358223,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.032416000962257385,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03280000016093254,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03283200040459633,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03286400064826012,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=17598630595594": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03532800078392029,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03577600046992302,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03641600161790848,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03654399886727333,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03657599911093712,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=17598631644170": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.049247998744249344,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05004800111055374,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.050624001771211624,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05081599950790405,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05097600072622299,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=26394723093514": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03190400078892708,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03244800120592117,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03276799991726875,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03276799991726875,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03296000137925148,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=26394723617802": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03561599925160408,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03606399893760681,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03654399886727333,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03667199984192848,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03686400130391121,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=26394724666378": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.050303999334573746,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.051072001457214355,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05145600065588951,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05161599814891815,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05190400034189224,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=281477124459530": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.012160000391304493,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.012191999703645706,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.012223999947309494,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.012223999947309494,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.012223999947309494,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=281477124721674": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013120000250637531,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013183999806642532,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013279999606311321,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013279999606311321,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013407999649643898,
+        "num_stages": 5,
+        "num_warps": 2
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=35190816115722": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.032416000962257385,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03296000137925148,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03324799984693527,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03324799984693527,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.033535998314619064,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=35190816640010": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03590400144457817,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.0363520011305809,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03680000081658363,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03699199855327606,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03718400001525879,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=35190817688586": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05011200159788132,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05087999999523163,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05135999992489815,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05161599814891815,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05206400156021118,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=562952101170186": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013663999736309052,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013728000223636627,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013791999779641628,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013824000023305416,
+        "num_stages": 5,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013824000023305416,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=562952101432330": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01711999997496605,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.017152000218629837,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.017152000218629837,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.017184000462293625,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.017216000705957413,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=70370891926538": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01027199998497963,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010304000228643417,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010367999784648418,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010367999784648418,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.010400000028312206,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=70370892188682": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010879999957978725,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.010975999757647514,
+        "num_stages": 5,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.011008000001311302,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01104000024497509,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01104000024497509,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=8802537049098": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03177599981427193,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03215999901294708,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03254399821162224,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03254399821162224,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.032896000891923904,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=8802537573386": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03612799942493439,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03638400137424469,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03680000081658363,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.03705599904060364,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.037567999213933945,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=0,shape_key=8802538621962": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.048767998814582825,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04995200037956238,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05020799860358238,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05036799982190132,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05075199902057648,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=140739636104202": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.012128000147640705,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.012128000147640705,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.012160000391304493,
+        "num_stages": 5,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.012160000391304493,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.012160000391304493,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=140739636366346": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01321600005030632,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01321600005030632,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01321600005030632,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01321600005030632,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.013232000172138214,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=17598630071306": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.037567999213933945,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.037696000188589096,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03788800165057182,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03798399865627289,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03855999931693077,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=17598630595594": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04070400074124336,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04094399884343147,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.0414079986512661,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041471999138593674,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04153599962592125,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=17598631644170": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05648000165820122,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05753599852323532,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05804799869656563,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05999999865889549,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.06019200012087822,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=26394723093514": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03743999823927879,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03743999823927879,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03763199970126152,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.0379519984126091,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03862399980425835,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=26394723617802": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04118400067090988,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041728001087903976,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041760001331567764,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04182400181889534,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04224000126123428,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=26394724666378": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.057760000228881836,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05875200033187866,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05913599953055382,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.06115199998021126,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.06137600168585777,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=281477124459530": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013439999893307686,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013439999893307686,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013439999893307686,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013472000136971474,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.013472000136971474,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=281477124721674": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014783999882638454,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014816000126302242,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014816000126302242,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.014816000126302242,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01484800036996603,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=35190816115722": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03827200084924698,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.038336001336574554,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03859199956059456,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.0387520007789135,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.039455998688936234,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=35190816640010": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04131200164556503,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041919998824596405,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04198399931192398,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04198399931192398,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04214400053024292,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=35190817688586": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.057792000472545624,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.058687999844551086,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05929600074887276,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.06108799949288368,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.06151999905705452,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=562952101170186": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01539199985563755,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01548799965530634,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.015519999898970127,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.015519999898970127,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.015519999898970127,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=562952101432330": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.018848000094294548,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.018880000337958336,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.019071999937295914,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01913600042462349,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.01913600042462349,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=70370891926538": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011392000131309032,
+        "num_stages": 5,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01142400037497282,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01142400037497282,
+        "num_stages": 5,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.01142400037497282,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.011455999687314034,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=70370892188682": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012191999703645706,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012223999947309494,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012223999947309494,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012223999947309494,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.012223999947309494,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=8802537049098": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03718400001525879,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03728000074625015,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.037567999213933945,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.03788800165057182,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.038656000047922134,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=8802537573386": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04073600098490715,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04105599969625473,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.04108799993991852,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041152000427246094,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.041200000792741776,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "float32|HAS_WEIGHT=1,shape_key=8802538621962": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05676800012588501,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.057840000838041306,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05814399942755699,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.05961599946022034,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.06006399914622307,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ]
+  },
+  "env_identity": "4cfb996f8c09",
+  "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+  "key_scheme": 3,
+  "op": "rmsnorm_adamod_bwd_triton",
+  "op_identity": "064bdd9f97f3",
+  "provenance": {
+    "built_utc": "2026-09-04T21:15:35+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}
