@@ -1,0 +1,5 @@
+build/
+__pycache__/
+profiles/**/*.nsys-rep
+profiles/**/*.sqlite
+profiles/**/*.ncu-rep

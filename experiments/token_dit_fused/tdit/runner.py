@@ -313,9 +313,12 @@ class FusedTokenDiT:
         # The sm_90a core is the default wherever it fits: same contract (gated output over q), 46.7 us against the
         # Triton core's 52.8 at L768, +8.8 us a block in the step. core="gated2"/"cuda" pins one for an A/B.
         use_cuda_core = self.core in ("gated2", "cuda") and self._cuda_core_ok(L, D, H)
+        use_b200_core = self.core in ("gated2", "b200") and self._b200_core_ok(L, D, H)   # sm_100a: augattn_sm100/attn_inf.cu
+        if self.core == "b200" and not use_b200_core:
+            raise RuntimeError("core='b200' asked for, but this device, shape or build cannot take it")
         if self.core == "cuda" and not use_cuda_core:
             raise RuntimeError("core='cuda' asked for, but this shape or build cannot take it")
-        if self.core == "gated2" and not use_cuda_core:
+        if self.core == "gated2" and not use_cuda_core and not use_b200_core:
             assert self.prescale, "the v2 core expects pre-scaled logits"
             key_d = (bias.data_ptr(), tuple(bias.shape))
             if getattr(self, "_bdesc_key", None) != key_d:
@@ -328,6 +331,9 @@ class FusedTokenDiT:
                 self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
             if use_cuda_core:
                 self._cuda_core(qkvg, bias, b, S, H)                  # sigmoid(g)*o over q, one sm_90a kernel
+                self._mm(qkvg[:, :D], p["wo"], y)
+            elif use_b200_core:
+                self._b200_core(qkvg, bias, b, S, H)                  # sigmoid(g)*o over q, one sm_100a kernel
                 self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated2":
                 attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
@@ -353,9 +359,17 @@ class FusedTokenDiT:
                                  None if last else g1[:, b + 1, 1], xa8 if fp8 else xa, L, self.eps, inv_s)
         return x.view(S, 1, L, D).to(out_dtype or single.dtype)
 
+    def _b200_core_ok(self, L, D, H):
+        if getattr(self, "_b200_core", None) is None:
+            from . import b200_core
+            self._b200_core = b200_core.InfCore() if b200_core.supported(self.dtype, L, D, H) else False
+        return self._b200_core is not False and self.prescale
+
     def _cuda_core_ok(self, L, D, H):
         """The sm_90a core handles this shape, and its extension builds. Falls back to the Triton core otherwise."""
         if self.dtype is not torch.bfloat16 or D != 768 or H != 16 or L % 128:
+            return False
+        if torch.cuda.get_device_capability() != (9, 0):   # sm_90a only (the build is lazy, so an import succeeds anywhere)
             return False
         if self._cuda_core is None:
             try:
