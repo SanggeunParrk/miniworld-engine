@@ -318,6 +318,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
 #ifndef TA_NOLD
 #define TA_NOLD 0
 #endif
+#ifndef TA_NOLDS
+#define TA_NOLDS 0
+#endif
 #ifndef TA_NOST
 #define TA_NOST 0
 #endif
@@ -398,32 +401,29 @@ __global__ void __launch_bounds__(256) triattn_biasT(const __nv_bfloat16* __rest
   for (int i = ty; i < 32; i += 8) dst[(size_t)(k0 + i) * S + q0 + tx] = t[tx][i];
 }
 
-// ---- kernel 1: dK, dV.  Task = (b, h, 128-key tile) x KR = 2 pair rows, all queries in 32-wide sub-tiles; stage y = (sub-tile, row),
+// ---- kernel 1: dK, dV.  Task = (b, h, 128-key tile) x KR = 2 pair rows, all queries in 64-wide sub-tiles; stage y = (sub-tile, row),
 // y & 1 = the row = the grad group that owns it (the two groups alternate stages, as the forward's softmax groups do):
-//   MMA:   S^T = K_r . Q^T, dP^T = V_r . dO^T   (ts: A = K_r / V_r from TMEM, B = Q / dO K-major; M = 128 k, N = 32 q, K = 32)
-//   grad:  P^T, dS^T (bf16) over S^T / dP^T
-//   MMA:   dV_r += P^T . dO, dK_r += dS^T . Q   (ts: A from TMEM, B MN-major; N = 32, K = 32)
-// TMEM: three fp32 S^T | dP^T buffers, released by the grad group as soon as it has loaded them (the S^T issuer reuses one for
-// stage y + 3 without waiting for stage y's gradient GEMMs), and one compact bf16 P^T | dS^T buffer per group, which the gradient
-// GEMMs read (a group rewrites it two stages later, long after they retired).  Every hand-off costs ~100-300 clk (barrier round
-// trip, issue); this split keeps all of them off the per-stage critical path.  K / V are double-buffered in TMEM and each
-// group stages its row's next-task K / V itself, so a task's first S^T GEMMs run while the groups drain the previous task's dK / dV
-// (only the row's first gradient GEMM waits for its drain).
+//   S^T MMA warp:  S^T = K_r . Q^T, dP^T = V_r . dO^T  (ss: K_r / V_r from shared; M = 128 k, N = 64 q, K = 32)
+//   grad group r:  P^T, dS^T (bf16) -> its P^T | dS^T TMEM buffer
+//   grad MMA warp: dV_r += P^T . dO, dK_r += dS^T . Q   (ts: A from TMEM, B MN-major; N = 32, K = 64)
+// Every hand-off here (a barrier round trip, a group of MMA issues) costs ~100-300 clk, so the structure is chosen to keep them off
+// the critical path and few per unit of work: 64-query stages (a group's fixed per-stage cost ~600 clk against ~700 of math, which
+// the other group's math covers), each group's S^T | dP^T buffer is released as soon as the group has loaded it (the next S^T of
+// that group goes out during its math), each group rewrites its P^T | dS^T buffer only a stage later, and the S^T and gradient GEMMs
+// have their own issuing warps.  TMEM: S^T | dP^T of group g at 128 g (64 + 64 fp32), P^T | dS^T of group g at 256 + 64 g
+// (32 + 32 bf16 pairs), dV_r / dK_r at 384 + 64 r.  K / V stay in shared memory (double-buffered across tasks).
 constexpr int KR = 2;
-constexpr int KB_QW = 32, KB_QT = KB_QW * D, KB_BT = BN * KB_QW;   // Q / dO sub-tile [32][32] (2 KiB), bias^T [128 k][32 q] fp32 (16 KiB)
-constexpr int KB_NQ = 12, KB_NB = 4, KB_NS = 3, KB_THREADS = 352;  // 0 TMA, 1 S^T MMA, 2-5 / 6-9 grad groups (rows 0 / 1), 10 grad MMA
-constexpr int KB_COL_P = KB_NS * 64;                                // S^T | dP^T buffer j at 64 j (32 + 32) | P^T | dS^T of group g at 192 + 32 g
-constexpr int KB_COL_G = KB_COL_P + 2 * 32;                         // dV_r at 256 + 64 r, dK_r at +32
-constexpr int KB_COL_A = KB_COL_G + KR * 64;                        // K / V buffer kb: K_r at 384 + 64 kb + 16 r, V_r at +32
-constexpr int KB_SMEM = 1024 + (2 * KR * 2 * KVT + KB_NQ * 2 * KB_QT) * 2 + KB_NB * KB_BT * 4 + KB_NQ * 2 * KB_QW * 4 + 512;
+constexpr int KB_QW = 64, KB_QT = KB_QW * D, KB_BT = BN * KB_QW;   // Q / dO sub-tile [64][32] (4 KiB), bias^T [2 halves][128 k][32 q] fp32
+constexpr int KB_NQ = 6, KB_NB = 2, KB_THREADS = 352;              // 0 TMA, 1 S^T MMA, 2-5 / 6-9 grad groups (rows 0 / 1), 10 grad MMA
+constexpr int KB_COL_P = 256, KB_COL_G = 384;
+constexpr int KB_SMEM = 1024 + (2 * KR * 2 * KVT + KR * 2 * KVT + KB_NQ * 2 * KB_QT) * 2 + KB_NB * KB_BT * 4 + KB_NQ * 2 * KB_QW * 4 + 512;
 constexpr uint32_t ID_ST = idesc_bf16(128, KB_QW, 0, 0);
 constexpr uint32_t ID_G = idesc_bf16(128, D, 0, 1);
-static_assert(KB_COL_A + 2 * 64 <= 512, "TMEM");
 static_assert(KB_SMEM <= 232448, "smem");
 
 __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
     int N, int H, int S, int ntasks, float scl, float scale,
-    const __grid_constant__ CUtensorMap qmap,            // q / dO [B*N*S][H*32], box (32, 32), 64B swizzle
+    const __grid_constant__ CUtensorMap qmap,            // q / dO [B*N*S][H*32], box (32, 64), 64B swizzle
     const __grid_constant__ CUtensorMap dmap,
     const __grid_constant__ CUtensorMap kmap,            // k / v, box (32, 128), 64B swizzle
     const __grid_constant__ CUtensorMap vmap,
@@ -434,33 +434,33 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
   const int NK = S / BN, NG = (N + KR - 1) / KR, NQS = S / KB_QW, SPT = KR * NQS;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
-  __nv_bfloat16* sKV = reinterpret_cast<__nv_bfloat16*>(smb);   // [KR][K | V] staging (row r: its group's next task)
-  __nv_bfloat16* sO = sKV + KR * 2 * KVT;                        // [KR][dV | dK] out tiles for the TMA stores
+  __nv_bfloat16* sKV = reinterpret_cast<__nv_bfloat16*>(smb);   // [2 task buffers][KR][K | V]
+  __nv_bfloat16* sO = sKV + 2 * KR * 2 * KVT;                    // [KR][dV | dK] out tiles for the TMA stores
   __nv_bfloat16* sQ = sO + KR * 2 * KVT;                         // [NQ][Q | dO]
-  float* sB = reinterpret_cast<float*>(sQ + KB_NQ * 2 * KB_QT);  // [NB][128 k][32 q]
-  float* sLD = sB + KB_NB * KB_BT;                               // [NQ][lse 32 | delta 32]
+  float* sB = reinterpret_cast<float*>(sQ + KB_NQ * 2 * KB_QT);  // [NB][2 q halves][128 k][32 q]
+  float* sLD = sB + KB_NB * KB_BT;                               // [NQ][lse 64 | delta 64]
   uint64_t* bars = reinterpret_cast<uint64_t*>(sLD + KB_NQ * 2 * KB_QW);
-  uint64_t* af = bars;               // [KR] row r's staging landed
-  uint64_t* at = af + KR;            // [2]  count 8: K / V buffer kb written
-  uint64_t* dfr = at + 2;            // [KR] row r's dK / dV final
+  uint64_t* kvf = bars;              // [2]  a task buffer's K / V landed
+  uint64_t* kve = kvf + 2;           // [2]  its last S^T GEMMs retired
+  uint64_t* dfr = kve + 2;           // [KR] row r's dK / dV final
   uint64_t* de = dfr + KR;           // [KR] count 4: row r drained
   uint64_t* qf = de + KR;            // [NQ]
   uint64_t* qe = qf + KB_NQ;         // [NQ]
   uint64_t* bf = qe + KB_NQ;         // [NB]
   uint64_t* be = bf + KB_NB;         // [NB] count 8
-  uint64_t* sf = be + KB_NB;         // [NS] S^T | dP^T of the buffer ready
-  uint64_t* se = sf + KB_NS;         // [NS] count 4: the group loaded it (free for the next S^T)
-  uint64_t* pf = se + KB_NS;         // [2]  count 4: group g's P^T | dS^T written
-  uint64_t* ge = pf + 2;             // [2]  group g's gradient GEMMs retired (its P^T | dS^T buffer may be rewritten)
+  uint64_t* sf = be + KB_NB;         // [2]  group g's S^T | dP^T ready
+  uint64_t* se = sf + 2;             // [2]  count 4: group g loaded it
+  uint64_t* pf = se + 2;             // [2]  count 4: group g's P^T | dS^T written
+  uint64_t* ge = pf + 2;             // [2]  group g's gradient GEMMs retired
   uint32_t* tslot = reinterpret_cast<uint32_t*>(ge + 2);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int r = 0; r < KR; ++r) { bar_init(af + r, 1); bar_init(dfr + r, 1); bar_init(de + r, 4); }
-    bar_init(at, 8); bar_init(at + 1, 8);
+    for (int i = 0; i < 2; ++i) {
+      bar_init(kvf + i, 1); bar_init(kve + i, 1); bar_init(dfr + i, 1); bar_init(de + i, 4);
+      bar_init(sf + i, 1); bar_init(se + i, 4); bar_init(pf + i, 4); bar_init(ge + i, 1);
+    }
     for (int i = 0; i < KB_NQ; ++i) { bar_init(qf + i, 1); bar_init(qe + i, 1); }
     for (int i = 0; i < KB_NB; ++i) { bar_init(bf + i, 1); bar_init(be + i, 8); }
-    for (int i = 0; i < KB_NS; ++i) { bar_init(sf + i, 1); bar_init(se + i, 4); }
-    for (int i = 0; i < 2; ++i) { bar_init(pf + i, 4); bar_init(ge + i, 1); }
     bar_init_fence();
   }
   if (warp == 1) tmem_alloc(tslot, 512);
@@ -472,22 +472,51 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
   auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
   auto decode = [&](int t, int& kt, int& g, int& bh) { kt = t % NK; g = (t / NK) % NG; bh = t / (NK * NG); };
   auto nrow = [&](int g, int r) { return min(g * KR + r, N - 1); };   // rows past N compute on row N-1 and store nothing
+  const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
+  const int total = mytasks * SPT;
 
   if (warp == 0) {
     if (lane == 0) {
+      // K / V of local task j into buffer j & 1, once task j - 2's S^T GEMMs retired.  Issued as early as that buffer frees (a
+      // non-blocking probe each stage: blocking would stall the ring prefetch), not when the ring reaches the task -- 32 KiB from
+      // L2 / HBM took ~4K clk and stalled every task start.
+      int kv_next = 0;                             // the next local task whose K / V is not issued yet
+      auto kv_issue = [&](bool block) {
+        if (kv_next >= mytasks) return;
+        const int kb = kv_next & 1;
+        if (kv_next >= 2) {
+          const uint32_t par = ((kv_next >> 1) - 1) & 1;
+          if (!block && !probe(A(kve + kb), par)) return;
+          wait(A(kve + kb), par);
+        }
+        int kt, g, bh; decode(blockIdx.x + kv_next * gridDim.x, kt, g, bh);
+        expect_tx(A(kvf + kb), KR * 2 * KVT * 2);
+        for (int r = 0; r < KR; ++r) {
+          const int rw = ((bh / H) * N + nrow(g, r)) * S + kt * BN;
+          load_2d(&kmap, A(sKV + (kb * KR + r) * 2 * KVT), A(kvf + kb), (bh % H) * D, rw);
+          load_2d(&vmap, A(sKV + (kb * KR + r) * 2 * KVT + KVT), A(kvf + kb), (bh % H) * D, rw);
+        }
+        ++kv_next;
+      };
       int lt = 0, y = 0;
       for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
         int kt, g, bh; decode(t, kt, g, bh);
         const int b_ = bh / H, h_ = bh % H;
+        while (kv_next <= lt) kv_issue(true);      // this task's (normally issued long ago)
         for (int w = 0; w < SPT; ++w, ++y) {
+          if (kv_next == lt + 1) kv_issue(false);
           const int qs = w >> 1, r = w & 1, sl = y % KB_NQ;
           if (r == 0) {
             const int jb = lt * NQS + qs, bs = jb % KB_NB;
             if (jb >= KB_NB) wait(A(be + bs), ((jb / KB_NB) - 1) & 1);
+            if (TA_BIAS1 && jb >= KB_NB) arrive(A(bf + bs));   // timing only
+            else {
             expect_tx(A(bf + bs), KB_BT * 4);
-            load_2d(&bmap, A(sB + bs * KB_BT), A(bf + bs), qs * KB_QW, bh * S + kt * BN);
+            for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, A(sB + bs * KB_BT + hh * BN * 32), A(bf + bs), qs * KB_QW + hh * 32, bh * S + kt * BN);
+            }
           }
           if (y >= KB_NQ) wait(A(qe + sl), ((y / KB_NQ) - 1) & 1);
+          if (TA_QD1 && y >= KB_NQ) { arrive(A(qf + sl)); continue; }   // timing only
           expect_tx(A(qf + sl), 2 * KB_QT * 2 + 2 * KB_QW * 4);
           const int rw = (b_ * N + nrow(g, r)) * S + qs * KB_QW;
           load_2d(&qmap, A(sQ + sl * 2 * KB_QT), A(qf + sl), h_ * D, rw);
@@ -499,72 +528,67 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
       }
     }
   } else if (warp == 1 || warp == 10) {
-    // Two issuing warps: warp 1 the S^T / dP^T GEMMs, warp 10 the gradient GEMMs.  An issue loop is a serial instruction stream on
-    // an SMSP shared with two busy grad warps (~30 clk per UTCHMMA plus the barrier round trips), and one warp issuing all eight
-    // GEMMs of a 32-query stage took ~780 clk against the grad side's ~260.  Each loop is kept lean: the converged warp runs it and
-    // one elected lane's tcgen05 ops are predicated (no branch / warp sync per group), ring slots and phase bits are incremental
-    // counters (no divisions), barrier addresses and descriptor bases precomputed.  Stage buffer b takes S^T of y + 4 only after
-    // the gradient GEMMs of y retired (ge): the two warps' GEMMs are not ordered in the tensor pipe.
+    // Issue loops: the converged warp runs them, one elected lane's tcgen05 ops are predicated (no branch / warp sync per group);
+    // ring slots and phase bits are incremental counters (no divisions); barrier addresses and descriptor bases precomputed.
     const uint32_t L = elect_one() ? 1u : 0u;
-    const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
-    const int total = mytasks * SPT;
-    const uint64_t dK0 = desc_k64(sQ), dM0 = sdesc(sa(sQ), KB_QT * 2, 512, 4);
-    constexpr uint64_t SLOT = 2 * KB_QT * 2 / 16, MAT = KB_QT * 2 / 16;
-    const uint32_t qfa = A(qf), qea = A(qe), sfa = A(sf), sea = A(se), pfa = A(pf), gea = A(ge), ata = A(at), dea = A(de), dfa = A(dfr);
-    const uint32_t tA = tmem + KB_COL_A, tG = tmem + KB_COL_G;
-    int sl = 0, slp = 0, b = 0, bp = 0, w = 0, lt = 0;   // ring slot / phase, stage buffer / phase, task-local stage, task
+    constexpr uint64_t SLOT = 2 * KB_QT * 2 / 16, MAT = KB_QT * 2 / 16, KVM = KVT * 2 / 16, KVROW = 2 * KVT * 2 / 16;
+    const uint32_t qfa = A(qf), qea = A(qe), sfa = A(sf), sea = A(se), pfa = A(pf), gea = A(ge), dea = A(de), dfa = A(dfr);
+    int sl = 0, slp = 0, w = 0, lt = 0, gp = 0;          // ring slot / phase, task-local stage, task, phase of the group barriers
     if (warp == 1) {
-      // S^T of a stage goes out only once its Q | dO | lse | delta slot and its bias tile landed, so the grad warps' S^T barrier
-      // implies both (release / acquire through this thread): one barrier round trip a stage for them instead of three
-      const uint32_t bfa = A(bf);
+      // S^T of a stage goes out once its Q | dO | lse | delta slot and its bias tile landed, so the grad group's S^T barrier implies
+      // both (release / acquire through this thread): one barrier a stage for the group.
+      const uint64_t dQ0 = desc_k64(sQ), dKV0 = desc_k64(sKV);
+      const uint32_t bfa = A(bf), kvfa = A(kvf), kvea = A(kve);
       int bs = 0, bsp = 0;
       for (int y = 0; y < total; ++y) {
+        const int r = w & 1, kb = lt & 1;
         TL(0, y);
         const uint32_t okq = probe(qfa + sl * 8, slp);
-        const uint32_t okg = y >= KB_NS ? probe(sea + b * 8, bp ^ 1) : 1u;   // the group loaded S^T of y - 3
-        const uint32_t okb = (w & 1) == 0 ? probe(bfa + bs * 8, bsp) : 1u;
-        if (w == 0) wait(ata + (lt & 1) * 8, (lt >> 1) & 1);
+        const uint32_t oke = y >= 2 ? probe(sea + r * 8, gp ^ 1) : 1u;     // group r loaded its previous S^T
+        const uint32_t okb = r == 0 ? probe(bfa + bs * 8, bsp) : 1u;
+        if (w == 0) wait(kvfa + kb * 8, (lt >> 1) & 1);
         if (!okq) wait(qfa + sl * 8, slp);
-        if (!okg) wait(sea + b * 8, bp ^ 1);
+        if (!oke) wait(sea + r * 8, gp ^ 1);
         if (!okb) wait(bfa + bs * 8, bsp);
-        if ((w & 1) == 1 && ++bs == KB_NB) { bs = 0; bsp ^= 1; }
-        TL(1, y);
         tc_fence_after();
-        const uint64_t bq = dK0 + sl * SLOT;
-        const uint32_t d = tmem + b * 64, a = tA + (lt & 1) * 64 + (w & 1) * 16;
-        mma_ts_if(L, d, a, bq, ID_ST, 0u);
-        mma_ts_if(L, d, a + 8, bq + 2, ID_ST, 1u);
-        mma_ts_if(L, d + 32, a + 32, bq + MAT, ID_ST, 0u);
-        mma_ts_if(L, d + 32, a + 40, bq + MAT + 2, ID_ST, 1u);
-        mma_commit_if(L, sfa + b * 8);
-        TL(2, y);
+        const uint64_t bq = dQ0 + sl * SLOT, ak = dKV0 + (kb * KR + r) * KVROW;
+        const uint32_t d = tmem + r * 128;
+        mma_ss_if(L, d, ak, bq, ID_ST, 0u);
+        mma_ss_if(L, d, ak + 2, bq + 2, ID_ST, 1u);
+        mma_ss_if(L, d + 64, ak + KVM, bq + MAT, ID_ST, 0u);
+        mma_ss_if(L, d + 64, ak + KVM + 2, bq + MAT + 2, ID_ST, 1u);
+        TL(1, y);
+        mma_commit_if(L, sfa + r * 8);
+        if (w == SPT - 1) mma_commit_if(L, kvea + kb * 8);  // the task's K / V buffer is free once these retire
+        if (r == 1) { if (++bs == KB_NB) { bs = 0; bsp ^= 1; } gp ^= (y >= 1); }
+        if (y == 0) gp = 0;
         if (++sl == KB_NQ) { sl = 0; slp ^= 1; }
-        if (++b == KB_NS) { b = 0; bp ^= 1; }
         if (++w == SPT) { w = 0; ++lt; }
       }
     } else {
-      int pp = 0;                                          // phase of pf[r]: flips every two stages
+      const uint64_t dM0 = sdesc(sa(sQ), KB_QT * 2, 512, 4);
+      const uint32_t tG = tmem + KB_COL_G;
       for (int p = 0; p < total; ++p) {
         const int r = w & 1;                               // = the group
         const bool first = w < 2, last = w >= SPT - 2;
-        TL(3, p);
-        const uint32_t okp = probe(pfa + r * 8, pp);
+        TL(2, p);
+        const uint32_t okp = probe(pfa + r * 8, gp);
         if (first && lt >= 1) wait(dea + r * 8, (lt - 1) & 1);   // the row's accumulators of the previous task were drained
-        if (!okp) wait(pfa + r * 8, pp);
-        TL(16, p);
+        if (!okp) wait(pfa + r * 8, gp);
+        TL(3, p);
         tc_fence_after();
         const uint64_t bm = dM0 + sl * SLOT;
-        const uint32_t acc = first ? 0u : 1u, a = tmem + KB_COL_P + r * 32, g0 = tG + r * 64;
-        mma_ts_if(L, g0, a, bm + MAT, ID_G, acc);                 // dV_r += P^T dO
-        mma_ts_if(L, g0, a + 8, bm + MAT + 64, ID_G, 1u);
-        mma_ts_if(L, g0 + 32, a + 16, bm, ID_G, acc);             // dK_r += dS^T Q
-        mma_ts_if(L, g0 + 32, a + 24, bm + 64, ID_G, 1u);
+        const uint32_t acc = first ? 0u : 1u, a = tmem + KB_COL_P + r * 64, g0 = tG + r * 64;
+#pragma unroll
+        for (int kk = 0; kk < KB_QW / 16; ++kk) {
+          mma_ts_if(L, g0, a + kk * 8, bm + MAT + kk * 64, ID_G, (acc | kk) ? 1u : 0u);        // dV_r += P^T dO
+          mma_ts_if(L, g0 + 32, a + 32 + kk * 8, bm + kk * 64, ID_G, (acc | kk) ? 1u : 0u);    // dK_r += dS^T Q
+        }
         mma_commit_if(L, qea + sl * 8);
         mma_commit_if(L, gea + r * 8);
         if (last) mma_commit_if(L, dfa + r * 8);
-        TL(17, p);
+        if (r == 1) gp ^= 1;
         if (++sl == KB_NQ) { sl = 0; slp ^= 1; }
-        if (r == 1) pp ^= 1;
         if (++w == SPT) { w = 0; ++lt; }
       }
     }
@@ -574,95 +598,91 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
     const int gi = (warp - 2) >> 2;                // this group's row
     const bool lead = qq == 2 && lane == 0;        // warps 2 / 6: the group's TMA-issuing thread
     const float2 sc2 = make_float2(scl, scl), neg1 = make_float2(-1.f, -1.f);
-    const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
-    auto stage_kv = [&](int j) {                   // the group's row of local task j -> staging (issued by the lead)
-      int kt, g, bh; decode(blockIdx.x + j * gridDim.x, kt, g, bh);
-      const int rw = ((bh / H) * N + nrow(g, gi)) * S + kt * BN;
-      expect_tx(A(af + gi), 2 * KVT * 2);
-      load_2d(&kmap, A(sKV + gi * 2 * KVT), A(af + gi), (bh % H) * D, rw);
-      load_2d(&vmap, A(sKV + gi * 2 * KVT + KVT), A(af + gi), (bh % H) * D, rw);
-    };
-    auto copy_kv = [&](int j) {                    // staging (local task j) -> K / V buffer j & 1; then stage task j + 1
-      wait(A(af + gi), j & 1);
-      uint32_t wk[16], wv[16];
-      row_sw64(sKV + gi * 2 * KVT, k, wk);
-      row_sw64(sKV + gi * 2 * KVT + KVT, k, wv);
-      named_sync(1 + gi, 128);                     // every thread has read the staging tile
-      if (lead && j + 1 < mytasks) stage_kv(j + 1);
-      const uint32_t ta = tmem_at(tmem + KB_COL_A + (j & 1) * 64, qq * 32, 0);
-      tmem_st8(ta + gi * 16, wk); tmem_st8(ta + gi * 16 + 8, wk + 8);
-      tmem_st8(ta + 32 + gi * 16, wv); tmem_st8(ta + 32 + gi * 16 + 8, wv + 8);
-      tmem_wait_st();
-      tc_fence_before();
-      __syncwarp();
-      if (lane == 0) arrive(A(at + (j & 1)));
-    };
-    if (lead && mytasks > 0) stage_kv(0);
-    if (mytasks > 0) copy_kv(0);
-    int yb = gi, ybp = 0, js = 0;                  // this group's next stage: its S^T buffer (y % 3) / phase, its stage count
-    int lt = 0;
+    const uint32_t tS = tmem_at(tmem + gi * 128, qq * 32, 0), tP = tmem_at(tmem + KB_COL_P + gi * 64, qq * 32, 0);
+    int js = 0, lt = 0;                            // this group's stage count (phase of sf / se / pf / ge), task
     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
       int kt, g, bh; decode(t, kt, g, bh);
       const int b_ = bh / H, h_ = bh % H;
-      for (int qs = 0; qs < NQS; ++qs) {
-        const int jb = lt * NQS + qs, bs = jb % KB_NB, y = lt * SPT + qs * 2 + gi, b = yb, sl = y % KB_NQ;
+      for (int qs = 0; qs < NQS; ++qs, ++js) {
+        const int jb = lt * NQS + qs, bs = jb % KB_NB, y = lt * SPT + qs * 2 + gi, sl = y % KB_NQ;
         if (lane == 0 && qq == 2) TL(4 + gi * 6, y);
-        wait(A(sf + b), ybp);                        // implies the bias tile and the lse / delta slot (see the S^T issuer)
-        float bl[32];                              // bias * log2e of (query 32 qs + i, key k)
-        {
-          const float* bp = sB + bs * KB_BT + k * 32;
-#pragma unroll
-          for (int c = 0; c < 8; ++c) {
-            const float4 u = *reinterpret_cast<const float4*>(bp + ((c ^ (k & 7)) << 2));
-            bl[c * 4] = u.x; bl[c * 4 + 1] = u.y; bl[c * 4 + 2] = u.z; bl[c * 4 + 3] = u.w;
-          }
-        }
-        __syncwarp();
-        if (lane == 0) arrive(A(be + bs));
+        wait(A(sf + gi), js & 1);                   // implies the bias tile and the lse / delta slot (see the S^T issuer)
         if (lane == 0 && qq == 2) TL(5 + gi * 6, y);
-        if (lane == 0 && qq == 2) TL(6 + gi * 6, y);
         tc_fence_after();
-        const uint32_t tb = tmem_at(tmem + b * 64, qq * 32, 0);
-        float sv[32], dp[32];
-        tmem_ld32(tb, sv);
-        tmem_ld32(tb + 32, dp);
         const float* ld = sLD + sl * 2 * KB_QW;
-        tmem_wait_ld();
-        tc_fence_before();
-        __syncwarp();
-        if (lane == 0) arrive(A(se + b));           // loaded: the buffer takes the S^T of stage y + 3
-        yb += 2; if (yb >= KB_NS) { yb -= KB_NS; ybp ^= 1; }
-        uint32_t pk[16], dk[16];
 #pragma unroll
-        for (int j = 0; j < 8; ++j) {
-          const float4 l4 = *reinterpret_cast<const float4*>(ld + 4 * j);
-          const float4 d4 = *reinterpret_cast<const float4*>(ld + KB_QW + 4 * j);
+        for (int c = 0; c < 2; ++c) {              // 32-query chunks (registers)
+          float sv[32], dp[32], bl[32];
+#if TA_NOLD
 #pragma unroll
-          for (int h2 = 0; h2 < 2; ++h2) {
-            const int i = 4 * j + 2 * h2;
-            const float2 lm = h2 ? make_float2(l4.z, l4.w) : make_float2(l4.x, l4.y);
-            const float2 dm = h2 ? make_float2(d4.z, d4.w) : make_float2(d4.x, d4.y);
-            // FADD2 has no negate: -lse / -delta go through FFMA2 with -1 (else two FADD negations a pair)
-            const float2 x = fma2(lm, neg1, fma2(make_float2(sv[i], sv[i + 1]), sc2, make_float2(bl[i], bl[i + 1])));
-            const float2 pp = make_float2(ex2f(x.x), ex2f(x.y));
-            const float2 ds = mul2(pp, fma2(dm, neg1, make_float2(dp[i], dp[i + 1])));
-            pk[i >> 1] = pack2(pp.x, pp.y);
-            dk[i >> 1] = pack2(ds.x, ds.y);
+          for (int i = 0; i < 32; ++i) { sv[i] = __int_as_float(tS + i + c); dp[i] = sv[i] * 0.5f; }
+#else
+          tmem_ld32(tS + c * 32, sv);
+          tmem_ld32(tS + 64 + c * 32, dp);
+#endif
+#if TA_NOLDS
+#pragma unroll
+          for (int i = 0; i < 32; ++i) bl[i] = sv[i] * 0.25f;
+#else
+          {
+            const float* bp = sB + bs * KB_BT + c * BN * 32 + k * 32;
+#pragma unroll
+            for (int q4 = 0; q4 < 8; ++q4) {
+              const float4 u = *reinterpret_cast<const float4*>(bp + ((q4 ^ (k & 7)) << 2));
+              bl[q4 * 4] = u.x; bl[q4 * 4 + 1] = u.y; bl[q4 * 4 + 2] = u.z; bl[q4 * 4 + 3] = u.w;
+            }
           }
+#endif
+          tmem_wait_ld();
+          if (c == 1) {                             // both chunks loaded: the group's S^T buffer takes its next stage
+            tc_fence_before();
+            __syncwarp();
+            if (lane == 0) { arrive(A(se + gi)); arrive(A(be + bs)); }
+          }
+          uint32_t pk[16], dk[16];
+#if TA_NOMATH
+#pragma unroll
+          for (int i = 0; i < 16; ++i) { pk[i] = __float_as_uint(sv[2 * i] + bl[i]); dk[i] = __float_as_uint(dp[2 * i + 1]); }
+          if (ld[c] == 1.2345f) pk[0] = 0;
+#else
+#pragma unroll
+          for (int j = 0; j < 8; ++j) {
+#if TA_NOLDS
+            const float4 l4 = make_float4(bl[j], bl[j + 1], bl[j + 2], bl[j + 3]), d4 = make_float4(dp[j], dp[j + 8], dp[j + 16], dp[j + 24]);
+#else
+            const float4 l4 = *reinterpret_cast<const float4*>(ld + c * 32 + 4 * j);
+            const float4 d4 = *reinterpret_cast<const float4*>(ld + KB_QW + c * 32 + 4 * j);
+#endif
+#pragma unroll
+            for (int h2 = 0; h2 < 2; ++h2) {
+              const int i = 4 * j + 2 * h2;
+              const float2 lm = h2 ? make_float2(l4.z, l4.w) : make_float2(l4.x, l4.y);
+              const float2 dm = h2 ? make_float2(d4.z, d4.w) : make_float2(d4.x, d4.y);
+              // FADD2 has no negate: -lse / -delta go through FFMA2 with -1 (else two FADD negations a pair)
+              const float2 x = fma2(lm, neg1, fma2(make_float2(sv[i], sv[i + 1]), sc2, make_float2(bl[i], bl[i + 1])));
+              const float2 pp = make_float2(ex2f(x.x), ex2f(x.y));
+              const float2 ds = mul2(pp, fma2(dm, neg1, make_float2(dp[i], dp[i + 1])));
+              pk[i >> 1] = pack2(pp.x, pp.y);
+              dk[i >> 1] = pack2(ds.x, ds.y);
+            }
+          }
+#endif
+          if (c == 0 && js >= 1) wait(A(ge + gi), (js - 1) & 1);   // this group's previous gradient GEMMs read the P^T | dS^T buffer
+#if TA_NOST
+          if (pk[3] == 0x12345u && dk[7] == 0x777u) {
+#endif
+          tmem_st8(tP + c * 16, pk); tmem_st8(tP + c * 16 + 8, pk + 8);
+          tmem_st8(tP + 32 + c * 16, dk); tmem_st8(tP + 32 + c * 16 + 8, dk + 8);
+#if TA_NOST
+          }
+#endif
         }
-        if (lane == 0 && qq == 2) TL(7 + gi * 6, y);
-        if (js >= 1) wait(A(ge + gi), (js - 1) & 1);   // the gradient GEMMs of this group's previous stage read its P^T | dS^T
-        ++js;
-        tc_fence_after();
-        const uint32_t tp = tmem_at(tmem + KB_COL_P + gi * 32, qq * 32, 0);
-        tmem_st8(tp, pk); tmem_st8(tp + 8, pk + 8);
-        tmem_st8(tp + 16, dk); tmem_st8(tp + 24, dk + 8);
+        if (lane == 0 && qq == 2) TL(6 + gi * 6, y);
         tmem_wait_st();
         tc_fence_before();
         __syncwarp();
         if (lane == 0) arrive(A(pf + gi));
-        if (lane == 0 && qq == 2) TL(8 + gi * 6, y);
-        if (qs == 1 && lt + 1 < mytasks) copy_kv(lt + 1);   // the next task's K / V row, well before its first S^T
+        if (lane == 0 && qq == 2) TL(7 + gi * 6, y);
       }
       // ---- dK / dV of row gi ----
       wait(A(dfr + gi), lt & 1);
@@ -673,7 +693,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
       tmem_wait_ld();
       tc_fence_before();
       __syncwarp();
-      if (lane == 0) arrive(A(de + gi));              // the accumulators are free for the next task
+      if (lane == 0) arrive(A(de + gi));           // the accumulators are free for the next task
       if (lead) bulk_wait_read<0>();               // the previous task's stores have read the out tiles
       named_sync(1 + gi, 128);
       {
@@ -1040,7 +1060,7 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
                                 CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   const uint64_t rows = (uint64_t)(B * N * S), cols = (uint64_t)(H * D);
   auto m2 = [&](const torch::Tensor& t, uint32_t box, const char* what) { return make_map<2>(t.data_ptr(), {cols, rows}, {cols}, {D, box}, CU_TENSOR_MAP_SWIZZLE_64B, what); };
-  CUtensorMap q32 = m2(q, KB_QW, "q"), d32 = m2(dout, KB_QW, "dout"), k128 = m2(k, 128, "k"), v128 = m2(v, 128, "v");
+  CUtensorMap q32 = m2(q, KB_QW, "q"), d32 = m2(dout, KB_QW, "dout"), k128 = m2(k, 128, "k"), v128 = m2(v, 128, "v");   // (q32: box KB_QW rows)
   CUtensorMap q128 = m2(q, 128, "q"), d128 = m2(dout, 128, "dout"), k64 = m2(k, 64, "k"), v64 = m2(v, 64, "v");
   CUtensorMap dkm = m2(dk, 128, "dk"), dvm = m2(dv, 128, "dv"), dqm = m2(dq, 128, "dq");
   auto bT = torch::empty({B, H, S, S}, q.options().dtype(torch::kFloat32));

@@ -132,6 +132,11 @@ __device__ __forceinline__ void mma_ts_if(uint32_t leader, uint32_t d_tmem, uint
                "@q tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p;\n}\n"
                :: "r"(d_tmem), "r"(a_tmem), "l"(b_desc), "r"(idesc), "r"(accumulate), "r"(leader) : "memory");
 }
+__device__ __forceinline__ void mma_ss_if(uint32_t leader, uint32_t d_tmem, uint64_t a_desc, uint64_t b_desc, uint32_t idesc, uint32_t accumulate) {
+  asm volatile("{\n.reg .pred p, q;\nsetp.ne.b32 p, %4, 0;\nsetp.ne.b32 q, %5, 0;\n"
+               "@q tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p;\n}\n"
+               :: "r"(d_tmem), "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(accumulate), "r"(leader) : "memory");
+}
 __device__ __forceinline__ void mma_commit_if(uint32_t leader, uint32_t bar) {
   asm volatile("{\n.reg .pred q;\nsetp.ne.b32 q, %1, 0;\n@q tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\n}\n"
                :: "r"(bar), "r"(leader) : "memory");
