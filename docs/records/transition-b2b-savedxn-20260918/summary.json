@@ -1,0 +1,309 @@
+{
+  "node": "node02",
+  "allocation": 13269,
+  "base_commit": "59bdb335064caee8ec75bafe3bbafa655955a7b8",
+  "rows": [
+    {
+      "length": 384,
+      "width": 128,
+      "mode": "inference",
+      "samples_ms": {
+        "auto": [
+          0.16099199652671814,
+          0.16092799603939056
+        ],
+        "triton": [
+          0.27590399980545044,
+          0.27529600262641907
+        ]
+      },
+      "mean_ms": {
+        "auto": 0.16095999628305435,
+        "triton": 0.27560000121593475,
+        "h100": 0.16095999628305435
+      },
+      "speedup_vs_triton": 1.7122266872526608
+    },
+    {
+      "length": 384,
+      "width": 128,
+      "mode": "training",
+      "samples_ms": {
+        "auto": [
+          0.9401280283927917,
+          0.9401919841766357
+        ],
+        "triton": [
+          1.0441280007362366,
+          1.0494719743728638
+        ]
+      },
+      "mean_ms": {
+        "auto": 0.9401600062847137,
+        "triton": 1.0467999875545502,
+        "h100": 0.9401600062847137
+      },
+      "speedup_vs_triton": 1.1134274810212912
+    },
+    {
+      "length": 768,
+      "width": 128,
+      "mode": "inference",
+      "samples_ms": {
+        "auto": [
+          0.5711199939250946,
+          0.5711840093135834
+        ],
+        "triton": [
+          1.0336960554122925,
+          1.0397440195083618
+        ]
+      },
+      "mean_ms": {
+        "auto": 0.571152001619339,
+        "triton": 1.0367200374603271,
+        "h100": 0.571152001619339
+      },
+      "speedup_vs_triton": 1.8151385874880985
+    },
+    {
+      "length": 768,
+      "width": 128,
+      "mode": "training",
+      "samples_ms": {
+        "auto": [
+          3.5248959064483643,
+          3.524127960205078
+        ],
+        "triton": [
+          3.975920081138611,
+          3.9748159646987915
+        ]
+      },
+      "mean_ms": {
+        "auto": 3.524511933326721,
+        "triton": 3.975368022918701,
+        "h100": 3.524511933326721
+      },
+      "speedup_vs_triton": 1.1279201484122725
+    },
+    {
+      "length": 384,
+      "width": 256,
+      "mode": "inference",
+      "samples_ms": {
+        "auto": [
+          0.5285280048847198,
+          0.5255039930343628
+        ],
+        "triton": [
+          0.7317920029163361,
+          0.7199040055274963
+        ]
+      },
+      "mean_ms": {
+        "auto": 0.5270159989595413,
+        "triton": 0.7258480042219162,
+        "h100": 0.5270159989595413
+      },
+      "speedup_vs_triton": 1.377278878923824
+    },
+    {
+      "length": 384,
+      "width": 256,
+      "mode": "training",
+      "samples_ms": {
+        "auto": [
+          2.2708640098571777,
+          2.2550721168518066
+        ],
+        "triton": [
+          2.4415040016174316,
+          2.4332000017166138
+        ]
+      },
+      "mean_ms": {
+        "auto": 2.262968063354492,
+        "triton": 2.4373520016670227,
+        "h100": 2.262968063354492
+      },
+      "speedup_vs_triton": 1.0770598317918962
+    }
+  ],
+  "direct_comparison": [
+    {
+      "length": 384,
+      "width": 128,
+      "mode": "inference",
+      "samples_ms": {
+        "b2b": [
+          0.16019199788570404,
+          0.15958400070667267
+        ],
+        "cute": [
+          0.3097600042819977,
+          0.3077920079231262
+        ],
+        "triton": [
+          0.27535998821258545,
+          0.27606400847435
+        ]
+      },
+      "mean_ms": {
+        "b2b": 0.15988799929618835,
+        "cute": 0.30877600610256195,
+        "triton": 0.2757119983434677
+      }
+    },
+    {
+      "length": 384,
+      "width": 128,
+      "mode": "training",
+      "samples_ms": {
+        "b2b": [
+          1.0000320076942444,
+          0.9970079958438873
+        ],
+        "b2b_saved": [
+          0.9375680088996887,
+          0.9343360066413879
+        ],
+        "cute": [
+          1.198464035987854,
+          1.1974719762802124
+        ],
+        "triton": [
+          1.0502400398254395,
+          1.0500799417495728
+        ]
+      },
+      "mean_ms": {
+        "b2b": 0.9985200017690659,
+        "b2b_saved": 0.9359520077705383,
+        "cute": 1.1979680061340332,
+        "triton": 1.050159990787506
+      }
+    },
+    {
+      "length": 768,
+      "width": 128,
+      "mode": "inference",
+      "samples_ms": {
+        "b2b": [
+          0.5707200169563293,
+          0.571615993976593
+        ],
+        "cute": [
+          1.1750080585479736,
+          1.1652159690856934
+        ],
+        "triton": [
+          1.0364480018615723,
+          1.0364160537719727
+        ]
+      },
+      "mean_ms": {
+        "b2b": 0.5711680054664612,
+        "cute": 1.1701120138168335,
+        "triton": 1.0364320278167725
+      }
+    },
+    {
+      "length": 768,
+      "width": 128,
+      "mode": "training",
+      "samples_ms": {
+        "b2b": [
+          3.7607359886169434,
+          3.757391929626465
+        ],
+        "b2b_saved": [
+          3.5290560722351074,
+          3.5263359546661377
+        ],
+        "cute": [
+          4.5959038734436035,
+          4.612351894378662
+        ],
+        "triton": [
+          3.9832160472869873,
+          3.9711519479751587
+        ]
+      },
+      "mean_ms": {
+        "b2b": 3.759063959121704,
+        "b2b_saved": 3.5276960134506226,
+        "cute": 4.604127883911133,
+        "triton": 3.977183997631073
+      }
+    },
+    {
+      "length": 384,
+      "width": 256,
+      "mode": "inference",
+      "samples_ms": {
+        "b2b": [
+          0.5270079970359802,
+          0.5230399966239929
+        ],
+        "cute": [
+          0.6528319716453552,
+          0.650592029094696
+        ],
+        "triton": [
+          0.7165120244026184,
+          0.706496000289917
+        ]
+      },
+      "mean_ms": {
+        "b2b": 0.5250239968299866,
+        "cute": 0.6517120003700256,
+        "triton": 0.7115040123462677
+      }
+    },
+    {
+      "length": 384,
+      "width": 256,
+      "mode": "training",
+      "samples_ms": {
+        "b2b": [
+          2.399824023246765,
+          2.3970561027526855
+        ],
+        "b2b_saved": [
+          2.240607976913452,
+          2.2494399547576904
+        ],
+        "cute": [
+          2.520016074180603,
+          2.5455039739608765
+        ],
+        "triton": [
+          2.4243199825286865,
+          2.4027199745178223
+        ]
+      },
+      "mean_ms": {
+        "b2b": 2.3984400629997253,
+        "b2b_saved": 2.2450239658355713,
+        "cute": 2.5327600240707397,
+        "triton": 2.4135199785232544
+      }
+    }
+  ],
+  "source_sha256": {
+    "src/miniworld_engine/kernels/transition/cuda/transition_b2b_kernel.cu": "8456a346e8fd2cafd92a884a01c769590e7ed1f32bddf5d2fa923a4568e6b420",
+    "src/miniworld_engine/kernels/transition/cuda/__init__.py": "27d84a1b7001d38f27c219a26b084f84b916f290bb0dd2dd38958246f1775662",
+    "src/miniworld_engine/kernels/transition/hopper.py": "1ff49b4ec021d03c30d700ceaab10f82de19caa59f592c6dde8ad904b8fb3ad4",
+    "src/miniworld_engine/settings.py": "8b02f6631d537102afca97f48c0888c3a8cabf9b949113cd4171d51b58b77115",
+    "src/miniworld_engine/kernels/drivers/hopper.py": "9dde9aa306b3912b386eeeaf9c357d322c6635b2be8eea94910f59d02708d9e7",
+    "tests/numerics/test_transition_hopper_residual_gpu.py": "7fe43a120cf537f00ed2ce8a29465d73e72ae130557a3a62ac748c8974b82e88"
+  },
+  "tests": {
+    "combined_passed": 52,
+    "sanitizer_passed": 2,
+    "sanitizer_errors": 0
+  },
+  "native_tuning": "Full existing legal b2b space: D128 4 configs at L384/768, D256 2 configs at L384; both saved/non-saved. Six runtime buckets published; other native kernels/shapes not rebuilt. Module comparisons use default configs, also the tuning winners.",
+  "native_identity": "706d32803a60681fd43405fdaf949fc3e22fae64a8db3c16176a9eac40bf6d48"
+}

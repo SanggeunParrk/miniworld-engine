@@ -185,6 +185,7 @@ template <
     int BN,
     int DN,
     int STAGES,
+    bool SAVE_XN,
     class TmaWa,
     class TmaWb,
     class TmaWs>
@@ -198,6 +199,7 @@ __global__ __launch_bounds__(kThreads, MW_TRANSITION_MIN_BLOCKS) void transition
     const __nv_bfloat16* __restrict__ wb_raw,
     const __nv_bfloat16* __restrict__ ws_raw,
     __nv_bfloat16* __restrict__ out_raw,
+    __nv_bfloat16* __restrict__ xn_raw,
     const int64_t M,
     const bool add_residual,
     __grid_constant__ TmaWa const tma_wa,
@@ -379,6 +381,12 @@ __global__ __launch_bounds__(kThreads, MW_TRANSITION_MIN_BLOCKS) void transition
             xn_vec.bf[i] = static_cast<BF>(xn);
         }
         smem_store_u128(&sXn(m, k0), xn_vec.vec);
+        // Save the EXACT BF16 operand consumed by WGMMA. Each row/column vector
+        // has one owner; no second normalization pass or staging copy is needed.
+        // Inference specializes this store away completely.
+        if constexpr (SAVE_XN) {
+            global_store_u128(xn_raw + row * K + k0, xn_vec.vec, valid);
+        }
     }
     cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
 
@@ -567,6 +575,7 @@ __global__ __launch_bounds__(kThreads, MW_TRANSITION_MIN_BLOCKS) void transition
     (void)wb_raw;
     (void)ws_raw;
     (void)out_raw;
+    (void)xn_raw;
     (void)M;
     (void)add_residual;
     (void)tma_wa;
@@ -646,7 +655,7 @@ void check_transition_b2b_inputs(
 
 using namespace b2b_detail;
 
-template <int K, int ND, int D, int CTA_M, int WG_M, int BN, int DN, int STAGES>
+template <int K, int ND, int D, int CTA_M, int WG_M, int BN, int DN, int STAGES, bool SAVE_XN>
 void launch_transition_b2b_kernel(
     const torch::Tensor& x,
     const torch::Tensor& rstd,
@@ -657,6 +666,7 @@ void launch_transition_b2b_kernel(
     const torch::Tensor& wb,
     const torch::Tensor& ws,
     torch::Tensor& out,
+    torch::Tensor& xn,
     int64_t M,
     bool add_residual,
     cudaStream_t stream
@@ -686,7 +696,7 @@ void launch_transition_b2b_kernel(
                                 make_shape(Int<D>{}, Int<BN>{}), Int<1>{});
 
     auto* kernel = transition_b2b_rs_wgmma_kernel<
-        CTA_M, WG_M, K, ND, D, BN, DN, STAGES, decltype(tma_wa), decltype(tma_wb), decltype(tma_ws)>;
+        CTA_M, WG_M, K, ND, D, BN, DN, STAGES, SAVE_XN, decltype(tma_wa), decltype(tma_wb), decltype(tma_ws)>;
     check_cuda(
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Smem::kDynamicSmemBytes),
         "transition_b2b_rs_wgmma_kernel dynamic shared-memory attribute failed"
@@ -708,6 +718,7 @@ void launch_transition_b2b_kernel(
         reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(ws.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
+        SAVE_XN ? reinterpret_cast<__nv_bfloat16*>(xn.data_ptr<at::BFloat16>()) : nullptr,
         M,
         add_residual,
         tma_wa,
@@ -717,7 +728,8 @@ void launch_transition_b2b_kernel(
     check_cuda(cudaGetLastError(), "transition_b2b_rs_wgmma_kernel launch failed");
 }
 
-torch::Tensor transition_b2b_fwd(
+template <bool SAVE_XN>
+std::vector<torch::Tensor> transition_b2b_fwd_impl(
     const torch::Tensor& x,
     const torch::Tensor& rstd,
     const torch::Tensor& c1,
@@ -738,18 +750,36 @@ torch::Tensor transition_b2b_fwd(
     const int64_t ND = wa.size(0);
     const int64_t D = ws.size(0);
     auto out = torch::empty({x.size(0), D}, x.options());
+    auto xn = SAVE_XN ? torch::empty_like(x) : torch::Tensor();
     const int64_t M = x.size(0);
     if (M == 0) {
-        return out;
+        return {out, xn};
     }
     TORCH_CHECK(M % kBlockM == 0, "transition_b2b CUDA path requires M to be divisible by 128");
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     TORCH_CHECK(K == MW_TRANSITION_WIDTH && ND == 4 * MW_TRANSITION_WIDTH && D == MW_TRANSITION_WIDTH,
                 "extension configuration does not match input shape");
-    launch_transition_b2b_kernel<MW_TRANSITION_WIDTH, 4 * MW_TRANSITION_WIDTH, MW_TRANSITION_WIDTH, kBlockM, kWarpgroupM, MW_TRANSITION_BN, kDn, MW_TRANSITION_STAGES>(
-        x, rstd, c1, g, beta, wa, wb, ws, out, M, add_residual, stream);
-    return out;
+    launch_transition_b2b_kernel<MW_TRANSITION_WIDTH, 4 * MW_TRANSITION_WIDTH, MW_TRANSITION_WIDTH, kBlockM, kWarpgroupM, MW_TRANSITION_BN, kDn, MW_TRANSITION_STAGES, SAVE_XN>(
+        x, rstd, c1, g, beta, wa, wb, ws, out, xn, M, add_residual, stream);
+    return {out, xn};
+}
+
+torch::Tensor transition_b2b_fwd(
+    const torch::Tensor& x, const torch::Tensor& rstd, const torch::Tensor& c1,
+    const torch::Tensor& g, const torch::Tensor& beta, const torch::Tensor& wa,
+    const torch::Tensor& wb, const torch::Tensor& ws, bool add_residual
+) {
+    return transition_b2b_fwd_impl<false>(x, rstd, c1, g, beta, wa, wb, ws, add_residual)[0];
+}
+
+std::vector<torch::Tensor> transition_b2b_fwd_saved(
+    const torch::Tensor& x, const torch::Tensor& rstd, const torch::Tensor& c1,
+    const torch::Tensor& g, const torch::Tensor& beta, const torch::Tensor& wa,
+    const torch::Tensor& wb, const torch::Tensor& ws
+) {
+    // The saved-activation training entry always includes the identity residual.
+    return transition_b2b_fwd_impl<true>(x, rstd, c1, g, beta, wa, wb, ws, true);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -757,4 +787,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("x"), pybind11::arg("rstd"), pybind11::arg("c1"), pybind11::arg("g"),
           pybind11::arg("beta"), pybind11::arg("wa"), pybind11::arg("wb"), pybind11::arg("ws"),
           pybind11::arg("add_residual") = false);
+    m.def("transition_b2b_fwd_saved", &transition_b2b_fwd_saved,
+          "Fused transition with residual and saved normalized activation (CUDA)");
 }

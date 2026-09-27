@@ -390,3 +390,31 @@ def transition_squeeze_residual_triton():
     r = rows2d(ROWS, K_SMALL)
     expected = ((h.float() @ w.float().T).to(h.dtype).float() + r.float()).to(r.dtype)
     return squeeze_residual(h, w, r, SHAPE_KEY), expected
+
+
+def transition_b2b_residual_triton():
+    from miniworld_engine.kernels.drivers.transition import _transition_operands, SHAPE_KEY
+    from miniworld_engine.kernels.transition.triton.b2b_residual import forward
+    from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
+    x, g, b, wa, wb, ws = _transition_operands()
+    rs, c1 = stats_triton(x, 1e-5, shape_key=SHAPE_KEY)
+    xn = torch.nn.functional.layer_norm(x.float(), (x.shape[-1],), g.float(), b.float()).to(x.dtype)
+    a, gate = xn.float() @ wa.float().T, xn.float() @ wb.float().T
+    h = (torch.nn.functional.silu(a) * gate).to(x.dtype)
+    expected = (h.float() @ ws.float().T).to(x.dtype) + x
+    y, saved = forward(x, g, b, rs, c1, wa, wb, ws, True, SHAPE_KEY)
+    return y, expected
+
+
+def transition_segmented_b2b_triton():
+    from miniworld_engine.kernels.drivers.transition import _transition_operands, SHAPE_KEY
+    from miniworld_engine.kernels.transition.triton.segmented_residual import forward
+    from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
+    x,g,b,wa,wb,ws = _transition_operands()
+    rs,c1 = stats_triton(x,1e-5,shape_key=SHAPE_KEY)
+    xn = torch.nn.functional.layer_norm(x.float(),(x.shape[-1],),g.float(),b.float()).to(x.dtype)
+    a, gate = xn.float() @ wa.float().T, xn.float() @ wb.float().T
+    h = (torch.nn.functional.silu(a)*gate).to(x.dtype)
+    expected = (h.float() @ ws.float().T).to(x.dtype)+x
+    y,saved = forward(x,x,g,b,rs,c1,wa,wb,ws,True,True,SHAPE_KEY)
+    return y,expected

@@ -72,6 +72,7 @@ class TriangleAttention(nn.Module):
         use_qk_norm: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
+        anthropic_row: str = "k2b",
     ) -> None:
         super().__init__()
         self.n_head = n_head
@@ -106,6 +107,9 @@ class TriangleAttention(nn.Module):
         # lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_triangle_attention(self.implementation)
+        self.anthropic_row = anthropic_row
+        if self._backend == KernelBackend.ANTHROPIC and not use_self_attention:
+            raise ValueError("Anthropic TriangleAttention adapter requires use_self_attention=True")
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False
         self.nvtx_name = f"triangle_attention/{position}"
@@ -131,6 +135,13 @@ class TriangleAttention(nn.Module):
         self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
         self.to_gate = Linear(d_pair, d_hidden, bias=False, init="gating")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
+        # Independent switches for qualified H100 projection and grouped-bias backward.
+        # Each switch also selects its corresponding benchmark baseline.
+        self._fuse_projection_backward = True
+        self._fuse_bias_backward = True
+        self._fuse_dq_backward = True
+        self._fuse_front_backward = True
+        self._fuse_gate_backward = True
 
     def _kernel_triangle_attention(
         self,
@@ -148,12 +159,23 @@ class TriangleAttention(nn.Module):
             return torch.einsum("bhijk,bhikd->bhijd", attention, value)
 
         if backend == KernelBackend.TRITON:
+            if (getattr(self, "_fuse_bias_backward", True) and torch.is_grad_enabled()
+                    and not self.use_qk_norm):
+                from miniworld_engine.kernels.triangle_attention.cuda.bias_backward import can_use, attention
+                if can_use(query, key, value, bias):
+                    return attention(query, key, value, bias, native_dq=getattr(self, "_fuse_dq_backward", True))
             return kernels.triton_triangle_attention_pair_bias(
                 query,
                 key,
                 value,
                 bias,
             )
+
+        if backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic import triangle_attention
+            q, k, v = (t.permute(0, 2, 1, 3, 4).contiguous() for t in (query, key, value))
+            out = triangle_attention(q, k, v, bias.unsqueeze(1).float(), row=self.anthropic_row)
+            return out.permute(0, 2, 1, 3, 4)
 
         if backend == KernelBackend.CUEQUIVARIANCE:
             # cuequiv backend (opt-in): lazy import so the default path never needs cuequiv.
@@ -277,6 +299,27 @@ class TriangleAttention(nn.Module):
         comment); fusing them into the attention epilogue for the speed win is a later task.
         >>> The raw op without the residual is ``_attention()`` / ``ops.triangle_attention``,
         not a flag on this module."""
+        if self._backend == KernelBackend.ANTHROPIC:
+            if self.anthropic_row.startswith("block:"):
+                from miniworld_engine.integrations.anthropic import module_triangle_attention
+                return module_triangle_attention(self, pair, mask)
+            from miniworld_engine.integrations.anthropic import _inference
+            _inference()
+            if self.training and self.p_drop:
+                raise RuntimeError("Anthropic TriangleAttention requires eval() when dropout is enabled")
+        if (
+            getattr(self, "_fuse_front_backward", True)
+            and getattr(self, "_fuse_projection_backward", True)
+            and torch.is_grad_enabled() and self._backend == KernelBackend.TRITON
+            and self.use_self_attention and not self.use_qk_norm and self.n_head == 4
+            and _bo_dispatch.use_kernels(pair.shape[1])
+        ):
+            from miniworld_engine.kernels.triangle_attention.cuda import ln_backward
+            weights = (self.to_query.weight, self.to_key.weight, self.to_value.weight,
+                       self.to_gate.weight, self.to_bias.weight)
+            if ln_backward.can_use(pair, weights, self.ln_pair.weight, self.ln_pair.bias):
+                with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                    return ln_backward.forward(self, pair, mask)
         out = self._attention(pair, mask)
         if self.p_drop > 0.0 and self.training:
             out = out * self._make_drop_scale(pair, self.p_drop)
@@ -315,8 +358,21 @@ class TriangleAttention(nn.Module):
                 return out
 
             pair = self._layernorm(pair, backend)
-            value = self.to_value(pair)
-            bias = self.to_bias(pair)
+            fused_projection = False
+            if (
+                getattr(self, "_fuse_projection_backward", True) and torch.is_grad_enabled()
+                and backend == KernelBackend.TRITON and self.use_self_attention
+                and not self.use_qk_norm and self.n_head == 4
+            ):
+                from miniworld_engine.kernels.triangle_attention.cuda import can_use, projections
+                weights = (self.to_query.weight, self.to_key.weight, self.to_value.weight,
+                           self.to_gate.weight, self.to_bias.weight)
+                fused_projection = can_use(pair, weights)
+            if fused_projection:
+                query, key, value, gate, bias = projections(pair, *weights)
+            else:
+                value = self.to_value(pair)
+                bias = self.to_bias(pair)
 
             # No .contiguous(): the bias-only einsum and the self-attention kernels
             # consume these strided views directly (the triton kernel re-packs
@@ -327,8 +383,9 @@ class TriangleAttention(nn.Module):
                 bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
 
             if self.use_self_attention:
-                query = self.to_query(pair)
-                key = self.to_key(pair)
+                if not fused_projection:
+                    query = self.to_query(pair)
+                    key = self.to_key(pair)
 
                 # No .contiguous(): the triton attention kernel consumes these strided
                 # (B,H,L,L2,D) views directly via explicit strides (head_dim D is stride-1,
@@ -353,7 +410,7 @@ class TriangleAttention(nn.Module):
                 # Fuse sigmoid(to_gate(pair)) * out + the to_out projection (gated
                 # tensor never hits HBM). Backend chosen per-GPU in _gate_out: fused
                 # GEMM at small DH, split (sigmoid*mul + cuBLAS to_out) at large DH.
-                out = self._gate_out(self.to_gate(pair), out)
+                out = self._gate_out(gate if fused_projection else self.to_gate(pair), out)
             else:
                 out = sigmoid_gate(self.to_gate(pair), out)
                 out = self.to_out(out)

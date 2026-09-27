@@ -207,7 +207,7 @@ static int choose_bwd_grid(int waves) {
 //   EPT = elements per transaction = TX_BYTES / sizeof(scalar_t).
 //   The register-column-partial design is unchanged: each lane still privately owns its
 //   K = N/32 columns in acc_dw[K]/acc_db[K] (no atomics / no shared / no spill).
-template <typename scalar_t, int MAX_K, int TX_BYTES>
+template <typename scalar_t, int MAX_K, int TX_BYTES, bool HAS_RESIDUAL>
 __launch_bounds__(LN_BWD_BLOCK_THREADS, MW_LN_MIN_BLOCKS)
 __global__ void layer_norm_bwd_main_kernel(
     const scalar_t* __restrict__ DY,       // [M, N]
@@ -216,6 +216,7 @@ __global__ void layer_norm_bwd_main_kernel(
     const float*    __restrict__ Mean,     // [M]
     const float*    __restrict__ Rstd,     // [M]
     const float*    __restrict__ RS,       // [M] per-row scale (mask fold), or nullptr
+    const scalar_t* __restrict__ RES,      // [M, N], optional identity gradient
     scalar_t*       __restrict__ DX,       // [M, N]
     float*          __restrict__ PartDW,   // [gridDim.x * 4, N]
     float*          __restrict__ PartDB,   // [gridDim.x * 4, N]
@@ -309,7 +310,9 @@ __global__ void layer_norm_bwd_main_kernel(
         for (int v = 0; v < NV_MAX; ++v) {
             const int col0 = (v * 32 + lane) * EPT;
             if (col0 < N) {
-                Pack dxp;
+                Pack dxp, rp;
+                if constexpr (HAS_RESIDUAL)
+                    rp.vec = *reinterpret_cast<const VecT*>(RES + row * N + col0);
 #pragma unroll
                 for (int e = 0; e < EPT; ++e) {
                     const int k = v * EPT + e;
@@ -318,7 +321,10 @@ __global__ void layer_norm_bwd_main_kernel(
                     const float xhat = (x_v - mean) * rstd;
                     const float wdy = wdy_vals[k];
                     const float dx_v = (wdy - (xhat * c1 + c2)) * rstd;
-                    dxp.s[e] = (scalar_t)dx_v;
+                    // Keep the original activation-dtype rounding BEFORE identity addition.
+                    const scalar_t rounded_dx = (scalar_t)dx_v;
+                    dxp.s[e] = HAS_RESIDUAL
+                        ? (scalar_t)((float)rounded_dx + (float)rp.s[e]) : rounded_dx;
                     acc_dw[k] += dy_v * xhat;
                     acc_db[k] += dy_v;
                 }
@@ -394,7 +400,8 @@ layer_norm_cuda_bwd(
     torch::Tensor weight,   // [N]
     torch::Tensor mean,     // [M], fp32
     torch::Tensor rstd,     // [M], fp32
-    c10::optional<torch::Tensor> rowscale, int waves, int reduce_block, int tx_bytes)
+    c10::optional<torch::Tensor> rowscale, int waves, int reduce_block, int tx_bytes,
+    c10::optional<torch::Tensor> residual)
 {
     TORCH_CHECK(dy.is_cuda(),     "dy must be a CUDA tensor");
     TORCH_CHECK(x.is_cuda(),      "x must be a CUDA tensor");
@@ -434,6 +441,14 @@ layer_norm_cuda_bwd(
         rs_ptr = rs_contig.data_ptr<float>();
     }
 
+    torch::Tensor residual_contig;
+    if (residual.has_value()) {
+        TORCH_CHECK(residual->device() == x.device() && residual->scalar_type() == x.scalar_type(),
+                    "residual must match x device and dtype");
+        TORCH_CHECK(residual->sizes() == x.sizes(), "residual must match x shape");
+        residual_contig = residual->contiguous();
+    }
+
     auto dx_2d = torch::empty_like(dy_contig);
     auto dw = torch::empty_like(w_contig);
     auto db = torch::empty_like(w_contig);
@@ -463,24 +478,29 @@ layer_norm_cuda_bwd(
             const int txb = tx_bytes;
             TORCH_CHECK((txb == 8 || txb == 16) && N % (32 * (txb / elt)) == 0 && N <= 1024,
                         "vectorized LayerNorm backward requires aligned width <= 1024");
-            auto launch = [&](auto mk, auto tx) {
+            auto launch = [&](auto mk, auto tx, auto has_residual) {
                 constexpr int MK = decltype(mk)::value;
                 constexpr int TX = decltype(tx)::value;
-                layer_norm_bwd_main_kernel<scalar_t, MK, TX><<<grid, block, main_smem, stream>>>(
+                layer_norm_bwd_main_kernel<scalar_t, MK, TX, decltype(has_residual)::value><<<grid, block, main_smem, stream>>>(
                     dy_contig.data_ptr<scalar_t>(),
                     x_contig.data_ptr<scalar_t>(),
                     w_contig.data_ptr<scalar_t>(),
                     mean_contig.data_ptr<float>(),
                     rstd_contig.data_ptr<float>(),
                     rs_ptr,
+                    residual.has_value() ? residual_contig.data_ptr<scalar_t>() : nullptr,
                     dx_2d.data_ptr<scalar_t>(),
                     partial_dw.data_ptr<float>(),
                     partial_db.data_ptr<float>(),
                     M, N);
             };
             auto pick_tx = [&](auto mk) {
-                if (txb == 16) launch(mk, std::integral_constant<int, 16>{});
-                else           launch(mk, std::integral_constant<int, 8>{});
+                auto residual_launch = [&](auto tx) {
+                    if (residual.has_value()) launch(mk, tx, std::true_type{});
+                    else launch(mk, tx, std::false_type{});
+                };
+                if (txb == 16) residual_launch(std::integral_constant<int, 16>{});
+                else residual_launch(std::integral_constant<int, 8>{});
             };
             if (max_k == 4)       pick_tx(std::integral_constant<int, 4>{});
             else if (max_k == 8)  pick_tx(std::integral_constant<int, 8>{});
@@ -531,5 +551,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"),
         py::arg("mean"),
         py::arg("rstd"),
-        py::arg("rowscale"), py::arg("waves"), py::arg("reduce_block"), py::arg("tx_bytes"));
+        py::arg("rowscale"), py::arg("waves"), py::arg("reduce_block"), py::arg("tx_bytes"),
+        py::arg("residual") = py::none());
 }

@@ -1,0 +1,478 @@
+{
+  "node": "node02",
+  "D": 384,
+  "L": 384,
+  "mode": "normalized operand, full output width",
+  "rows": [
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 9.361095726490021e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.776839746747698,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 238,
+      "spills": 0,
+      "shared_bytes": 36864,
+      "wgmma": 10,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.4297084370628
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.641778802871704,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 238,
+      "spills": 0,
+      "shared_bytes": 36864,
+      "wgmma": 10,
+      "mma_sync": 0,
+      "cp_async": 16,
+      "tma": 0,
+      "seconds": 1.0364349475130439
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 5.3493306040763855e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 4.682224243879318e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.10279786851671,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 238,
+      "spills": 0,
+      "shared_bytes": 36864,
+      "wgmma": 18,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.1005632625892758
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.350695991516113,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 238,
+      "spills": 0,
+      "shared_bytes": 65536,
+      "wgmma": 18,
+      "mma_sync": 0,
+      "cp_async": 24,
+      "tma": 0,
+      "seconds": 1.0957321217283607
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 512,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 5.893222987651825e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 512,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 5.228408927917481,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 124,
+      "shared_bytes": 131072,
+      "wgmma": 130,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.4832495339214802
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 5.0051137804985046e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 5.227513611316681e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.6782534217834475,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.3078245325013995
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.5301009611649947,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 1.2116652904078364
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 4.7550536692142487e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 3.605149686336517e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.3402778625488283,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.3335837488994002
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.2779605388641357,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 1.247821556404233
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 512,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "ValueError('output accumulator alone exceeds the per-thread register budget')",
+      "seconds": 6.102211773395538e-05
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 512,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.2774688243865966,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 34,
+      "shared_bytes": 196608,
+      "wgmma": 132,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9145210329443216
+    }
+  ],
+  "best": [
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.2779605388641357,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 1.247821556404233
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.3402778625488283,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.3335837488994002
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.5301009611649947,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 1.2116652904078364
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.6782534217834475,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.3078245325013995
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.10279786851671,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 238,
+      "spills": 0,
+      "shared_bytes": 36864,
+      "wgmma": 18,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.1005632625892758
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 512,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.2774688243865966,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 34,
+      "shared_bytes": 196608,
+      "wgmma": 132,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9145210329443216
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.350695991516113,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 238,
+      "spills": 0,
+      "shared_bytes": 65536,
+      "wgmma": 18,
+      "mma_sync": 0,
+      "cp_async": 24,
+      "tma": 0,
+      "seconds": 1.0957321217283607
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.641778802871704,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 238,
+      "spills": 0,
+      "shared_bytes": 36864,
+      "wgmma": 10,
+      "mma_sync": 0,
+      "cp_async": 16,
+      "tma": 0,
+      "seconds": 1.0364349475130439
+    }
+  ]
+}

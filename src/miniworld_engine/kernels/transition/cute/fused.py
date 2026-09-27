@@ -153,7 +153,7 @@ def _cute_fwd(
 
 def _cute_bwd_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weight,
                    expand_b_weight, squeeze_weight, eps, backward_backend, orig_shape,
-                   shape_key):
+                   shape_key, fuse_residual=False):
     """``dx`` at the forward's pre-flatten ``orig_shape`` and in ``x2``'s dtype (the autocast one,
     which ``grad_output`` need not share), then ``dgamma``, ``dbeta``, ``dWa``, ``dWb`` and ``dWs``
     each shaped like the weight they belong to.
@@ -163,8 +163,8 @@ def _cute_bwd_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weigh
     """
     return (
         grad_output.new_empty(tuple(orig_shape), dtype=x2.dtype),
-        torch.empty_like(ln_weight),
-        torch.empty_like(ln_bias),
+        torch.empty_like(ln_weight, dtype=torch.float32 if fuse_residual else ln_weight.dtype),
+        torch.empty_like(ln_bias, dtype=torch.float32 if fuse_residual else ln_bias.dtype),
         torch.empty_like(expand_a_weight),
         torch.empty_like(expand_b_weight),
         torch.empty_like(squeeze_weight),
@@ -186,6 +186,7 @@ def _cute_bwd(
     backward_backend: str,
     orig_shape: list[int],
     shape_key: int,
+    fuse_residual: bool = False,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
 ]:
@@ -234,12 +235,12 @@ def _cute_bwd(
 
     # LayerNorm backward (EXISTING triton kernel from saved stats: dx, dgamma, dbeta).
     dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight,
-                                           shape_key=shape_key)
+                                           shape_key=shape_key, residual=go if fuse_residual else None)
 
     return (
         dx.reshape(tuple(orig_shape)),
-        dgamma.to(ln_weight.dtype),
-        dbeta.to(ln_bias.dtype),
+        dgamma.to(torch.float32 if fuse_residual else ln_weight.dtype),
+        dbeta.to(torch.float32 if fuse_residual else ln_bias.dtype),
         dWa, dWb, dWs,
     )
 

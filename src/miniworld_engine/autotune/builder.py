@@ -102,11 +102,16 @@ class Case:
         """Which activation THIS dims entry drives -- and therefore the rank of its input."""
         return self.streams[dim_index] if self.streams else "token_pair"
 
-    def lengths_for(self, dim_index: int) -> tuple[int, ...]:
-        """The lengths THIS dims entry runs at."""
-        if self.lengths_by_dim:
-            return self.lengths_by_dim[dim_index]
-        return self.lengths
+    def lengths_for(self, dim_index: int, *, train: bool | None = None) -> tuple[int, ...]:
+        """Declared lengths, or the mode-specific subset for an actual build."""
+        lengths = self.lengths_by_dim[dim_index] if self.lengths_by_dim else self.lengths
+        if train is None:
+            return lengths
+        mode = "train" if train else "eval"
+        if self.rows:
+            return self.rows[dim_index].lengths_for(mode)
+        from miniworld_engine.autotune.module_registry import lengths_for_mode
+        return lengths_for_mode(self.stream_for(dim_index), lengths, mode)
     #: run a backward too -- training-only kernels are a large share of the registry
     train: bool = True
     #: input dtype. Per case, because the modules differ: the fused bf16 kernels want bf16, while
@@ -1054,7 +1059,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         if (r["kernel"] not in BUILD_OPS and config_dir is not None
                 and not (config_dir / f"{r['kernel']}.csv").is_file()):
             continue          # this config set declares no grid for it
-        if r["kernel"] in {"transition_fwd_b2b_triton", "transition_fwd_b2b_ktiled_triton"}:
+        if r["kernel"] in {"transition_fwd_b2b_triton", "transition_fwd_b2b_ktiled_triton", "transition_b2b_residual_triton", "transition_segmented_b2b_triton"}:
             from miniworld_engine.autotune.module_registry import (
                 transition_driver_shapes,
             )
@@ -1128,6 +1133,20 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                      + [("atom", A) for A in DIT_ATOM_LENGTHS])
         else:
             sided = [("", L) for L in SHAPES_BY_LEVEL[r["level"]]]
+        # Backward-only driver kernels have no inference work.
+        # Their modes are explicit metadata, never guessed from a kernel name.
+        # Shared forward kernels, including saveact helpers, retain inference
+        # buckets and reuse those entries for the two training shapes.
+        modes = set((r.get("build_modes") or "eval|train").split("|"))
+        if not modes <= {"eval", "train"}:
+            raise ValueError(f"{r['kernel']}: invalid build_modes {modes}")
+        if modes == {"train"}:
+            from miniworld_engine.autotune.module_registry import (
+                TRAIN_ATOM_LENGTHS, TRAIN_TOKEN_LENGTHS,
+            )
+            sided = [(side, length) for side, length in sided
+                     if length in (TRAIN_ATOM_LENGTHS if side == "atom"
+                                   else TRAIN_TOKEN_LENGTHS)]
         if r["kernel"] not in BUILD_OPS and not _keys_on_shape(
                 Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):
             # A kernel that does not key on shape_key has no per-shape cache to build, so driving
@@ -1157,10 +1176,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                     _axis=_axis, _axis_drives=_axis_drives, _op=r["kernel"]) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
-            # The explicit Hopper squeeze dispatch is qualified at D=512, outside
-            # the current model widths. Keep its standalone cache build reachable.
+            # Native squeeze/residual serves wide auto and explicit CuTe widths.
             if _op == "transition_squeeze_residual_sm90_cute":
-                return (512,)
+                return (128, 256, 384, 512, 768)
             # The axis ladder REPLACES the stream ladder only where the driver takes that axis as
             # its width -- `driver_width` returns the head dim itself, or the per-side hidden
             # width, or ND -- because then no stream rung is the right number and no side changes
@@ -1371,6 +1389,8 @@ def units(selected: list[Case]) -> list[Unit]:
                 for dtype in case.dtypes:
                     dt = str(dtype).replace("torch.", "")
                     for train in ((False, True) if case.train else (False,)):
+                        if length not in case.lengths_for(di, train=train):
+                            continue
                         mode = "train" if train else "eval"
                         for impl in (i for i in case.impls if (i, dt) in allowed):
                             # "" = no compute-dtype argument at all, which is a DIFFERENT unit from
@@ -2103,6 +2123,8 @@ def audit(selected: list[Case]) -> list[tuple]:
             for length in case.lengths_for(di):
                 for dtype in case.dtypes:
                     for train in ((False, True) if case.train else (False,)):
+                        if length not in case.lengths_for(di, train=train):
+                            continue
                         for impl in case.impls:
                             # Snapshot BEFORE, and drop what this case added if it then died. A
                             # miss is a claim that production asks for a key the cache lacks, and

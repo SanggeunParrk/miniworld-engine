@@ -1,0 +1,28 @@
+{
+  "module_name": "triattn_bias_rs8_async_q4",
+  "binary": "triattn_bias_rs8_async_q4.so",
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "lengths": [
+    384,
+    768,
+    1024
+  ],
+  "partial_dtype": "fp32",
+  "row_group": 8,
+  "artifact": "rs8_async_q4",
+  "qualification_job": 17203,
+  "files": {
+    "bias_backward.py": "cd4e989934131ea5a0c2128f123165d9cd89f15fc284080bf42bbcab26cf4a56",
+    "bias_fusion.cu": "401b3c654c2e0b2d34bb843966c92c05ce7d9eed7d76d46ab8f25045343ac8e2",
+    "build_bias.py": "4f740ab6c0ac5e246ce2b27902a9d2e8110d384470a510ad442884a8a090b18c",
+    "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
+    "triattn_bias_rs8_async_q4.so": "0b377f05a587d59913f5db7166e6a95b922d09d4124f851d85489950bcbb5065"
+  },
+  "dq_artifact": "rs_softmax_overlap",
+  "below80_combined_job": 16576,
+  "priority_combined_job": 16661,
+  "core90_combined_job": 17204,
+  "legacy_abi_row_group": 4,
+  "core90_followup_baseline": "checkpoint17175"
+}

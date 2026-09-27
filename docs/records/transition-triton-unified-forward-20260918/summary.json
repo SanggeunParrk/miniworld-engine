@@ -1,0 +1,339 @@
+{
+  "node": "node02",
+  "rows": [
+    {
+      "D": 128,
+      "L": 384,
+      "mode": "inference",
+      "ms": {
+        "b2b": 0.17920000106096268,
+        "split": 0.2751599922776222
+      },
+      "repeats": 2
+    },
+    {
+      "D": 128,
+      "L": 384,
+      "mode": "training",
+      "ms": {
+        "b2b": 0.9618880152702332,
+        "split": 1.0478560328483582
+      },
+      "repeats": 2
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "mode": "inference",
+      "ms": {
+        "b2b": 0.8103040158748627,
+        "split": 0.7165760099887848
+      },
+      "repeats": 2
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "mode": "training",
+      "ms": {
+        "b2b": 2.464191973209381,
+        "split": 2.4332239627838135
+      },
+      "repeats": 2
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "mode": "inference",
+      "ms": {
+        "b2b": 0.6573039889335632,
+        "split": 1.0351200103759766
+      },
+      "repeats": 2
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "mode": "training",
+      "ms": {
+        "b2b": 3.6248640418052673,
+        "split": 3.979575991630554
+      },
+      "repeats": 2
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "mode": "inference",
+      "ms": {
+        "b2b": 3.097856044769287,
+        "split": 2.9198720455169678
+      },
+      "repeats": 2
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "mode": "training",
+      "ms": {
+        "b2b": 9.600263833999634,
+        "split": 9.620575666427612
+      },
+      "repeats": 2
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "mode": "inference",
+      "ms": {
+        "old_b2b": 1.6936160326004028,
+        "segmented": 1.5790959894657135,
+        "split": 1.419376015663147
+      },
+      "repeats": 2
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "mode": "training",
+      "ms": {
+        "old_b2b": 4.937864065170288,
+        "segmented": 4.798648118972778,
+        "split": 4.713888168334961
+      },
+      "repeats": 2
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "mode": "inference",
+      "ms": {
+        "old_b2b": 2.7596001029014587,
+        "segmented": 3.097216010093689,
+        "split": 2.327631950378418
+      },
+      "repeats": 2
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "mode": "training",
+      "ms": {
+        "old_b2b": 7.8297200202941895,
+        "segmented": 8.111008167266846,
+        "split": 7.600896120071411
+      },
+      "repeats": 2
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "mode": "inference",
+      "ms": {
+        "old_b2b": 6.427023887634277,
+        "segmented": 5.939512014389038,
+        "split": 5.788800001144409
+      },
+      "repeats": 2
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "mode": "training",
+      "ms": {
+        "old_b2b": 19.666495323181152,
+        "segmented": 19.13001537322998,
+        "split": 18.94774341583252
+      },
+      "repeats": 2
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "mode": "inference",
+      "ms": {
+        "old_b2b": 10.580272197723389,
+        "segmented": 11.960439920425415,
+        "split": 9.191119909286499
+      },
+      "repeats": 2
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "mode": "training",
+      "ms": {
+        "old_b2b": 31.436543464660645,
+        "segmented": 32.53438377380371,
+        "split": 29.398303985595703
+      },
+      "repeats": 2
+    }
+  ],
+  "dispatch": {
+    "default_triton_b2b": "SM90 BF16 n4 D128 M>=16384",
+    "split": "D256/384/512 and unsupported shapes"
+  },
+  "new_layout_attempts": {
+    "tune-D384": {
+      "attempts": 81,
+      "valid": 61,
+      "best": {
+        "config": {
+          "BM": 64,
+          "BN": 128,
+          "BK": 64,
+          "num_warps": 8,
+          "num_stages": 1,
+          "PACKED": true
+        },
+        "status": "ok",
+        "ms": 3.333385181427002,
+        "relative_frobenius": 0.00019622105173766613,
+        "registers": 255,
+        "spills": 0,
+        "shared_bytes": 147456,
+        "wgmma": 12,
+        "mma_sync": 0,
+        "cp_async": 0,
+        "tma": 0,
+        "seconds": 2.1102498276159167
+      }
+    },
+    "tune-D512": {
+      "attempts": 81,
+      "valid": 61,
+      "best": {
+        "config": {
+          "BM": 64,
+          "BN": 128,
+          "BK": 64,
+          "num_warps": 8,
+          "num_stages": 3,
+          "PACKED": true
+        },
+        "status": "ok",
+        "ms": 6.031576824188233,
+        "relative_frobenius": 0.00020602285803761333,
+        "registers": 255,
+        "spills": 6,
+        "shared_bytes": 147456,
+        "wgmma": 12,
+        "mma_sync": 0,
+        "cp_async": 41,
+        "tma": 0,
+        "seconds": 1.7310989927500486
+      }
+    },
+    "concat-D384": {
+      "attempts": 81,
+      "valid": 63,
+      "best": {
+        "config": {
+          "BM": 64,
+          "BN": 128,
+          "BK": 64,
+          "num_warps": 8,
+          "num_stages": 3,
+          "PACKED": 2
+        },
+        "status": "ok",
+        "ms": 2.006893253326416,
+        "relative_frobenius": 0.00019622105173766613,
+        "registers": 255,
+        "spills": 74,
+        "shared_bytes": 131072,
+        "wgmma": 12,
+        "mma_sync": 0,
+        "cp_async": 38,
+        "tma": 0,
+        "seconds": 2.1531578544527292
+      }
+    },
+    "concat-D512": {
+      "attempts": 81,
+      "valid": 63,
+      "best": {
+        "config": {
+          "BM": 64,
+          "BN": 64,
+          "BK": 64,
+          "num_warps": 8,
+          "num_stages": 3,
+          "PACKED": 2
+        },
+        "status": "ok",
+        "ms": 3.6800620317459107,
+        "relative_frobenius": 0.00020602285803761333,
+        "registers": 255,
+        "spills": 10,
+        "shared_bytes": 73728,
+        "wgmma": 8,
+        "mma_sync": 0,
+        "cp_async": 26,
+        "tma": 0,
+        "seconds": 1.5094434078782797
+      }
+    },
+    "segmented-D384": {
+      "attempts": 108,
+      "valid": 84,
+      "best": {
+        "config": {
+          "BM": 64,
+          "BN": 128,
+          "BK": 64,
+          "BO": 128,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "status": "ok",
+        "ms": 1.4669862365722657,
+        "relative_frobenius": 0.00019622105173766613,
+        "registers": 255,
+        "spills": 0,
+        "shared_bytes": 122880,
+        "wgmma": 32,
+        "mma_sync": 0,
+        "cp_async": 41,
+        "tma": 0,
+        "seconds": 1.5294837532564998
+      }
+    },
+    "segmented-D512": {
+      "attempts": 81,
+      "valid": 63,
+      "best": {
+        "config": {
+          "BM": 64,
+          "BN": 128,
+          "BK": 64,
+          "BO": 128,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "status": "ok",
+        "ms": 2.9756554709540475,
+        "relative_frobenius": 0.00020602285803761333,
+        "registers": 255,
+        "spills": 18,
+        "shared_bytes": 122880,
+        "wgmma": 40,
+        "mma_sync": 0,
+        "cp_async": 41,
+        "tma": 0,
+        "seconds": 1.8269002512097359
+      }
+    }
+  },
+  "production_tuning_attempts": {
+    "128": {
+      "attempts": 288,
+      "valid": 272
+    },
+    "256": {
+      "attempts": 252,
+      "valid": 196
+    }
+  }
+}

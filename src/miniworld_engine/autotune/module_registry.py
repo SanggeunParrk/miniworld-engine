@@ -15,16 +15,9 @@ from pathlib import Path
 REGISTRY_MODULE = Path(__file__).resolve().parents[1] / "kernels" / "registry_module.csv"
 REGISTRY_KERNEL = Path(__file__).resolve().parents[1] / "kernels" / "registry_kernel.csv"
 
-#: Token counts run to 768, not to the training crop. `CropConfig.max_tokens` is 384 in every
-#: committed data config, and reading it as the ceiling is what cut this ladder at 512: the crop
-#: bounds TRAINING, and inference runs the trunk at whatever length the target is. The step is
-#: `bucket_token_size` 128, so the ladder is 128 through 768; atoms step by `bucket_atom_size`
-#: 1024 and run to 8192.
-#:
-#: What each stream name means, as a length ladder. The names are the ones the model uses for its
-#: activations (see viz.sweep_page.shape_name and MiniWorld's own token/atom vocabulary); the
-#: ladders are MiniWorld's collate buckets -- CropConfig.bucket_token_size 128 and
-#: bucket_atom_size 1024, so a production length is always a multiple of one of those.
+#: Inference keeps its multi-bucket coverage. Training pads to exactly two
+#: lengths per token/atom stream; it is filtered separately below. Neither the
+#: inference ladder nor runtime cache-key bucketing is narrowed by this policy.
 STREAM_LADDERS: dict[str, tuple[int, ...]] = {
     "token_pair": (128, 256, 384, 512, 640, 768),
     "token_single": (128, 256, 384, 512, 640, 768),
@@ -33,6 +26,28 @@ STREAM_LADDERS: dict[str, tuple[int, ...]] = {
     "atom_pair": (1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192),
     "noise": (1,),
 }
+
+TRAIN_TOKEN_LENGTHS = (384, 768)
+TRAIN_ATOM_LENGTHS = (4096, 8192)
+TRAIN_STREAM_LADDERS: dict[str, tuple[int, ...]] = {
+    "token_pair": TRAIN_TOKEN_LENGTHS,
+    "token_single": TRAIN_TOKEN_LENGTHS,
+    "msa_token": TRAIN_TOKEN_LENGTHS,
+    "atom_single": TRAIN_ATOM_LENGTHS,
+    "atom_pair": TRAIN_ATOM_LENGTHS,
+    # Noise is one conditioning vector, not a token/atom length axis.
+    "noise": (1,),
+}
+
+
+def lengths_for_mode(stream: str, lengths: tuple[int, ...], mode: str) -> tuple[int, ...]:
+    """Restrict training work while preserving the declared inference shapes."""
+    if mode == "eval":
+        return lengths
+    if mode != "train":
+        raise ValueError(f"unknown build mode: {mode!r}")
+    allowed = TRAIN_STREAM_LADDERS[stream]
+    return tuple(length for length in lengths if length in allowed)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,6 +69,11 @@ class ModuleRow:
 
     def augmentation(self, mode: str) -> int:
         return self.train_augmentation if mode == "train" else self.eval_augmentation
+
+    def lengths_for(self, mode: str) -> tuple[int, ...]:
+        if mode not in self.modes:
+            return ()
+        return lengths_for_mode(self.stream, self.lengths, mode)
 
 
 def _ints(raw: str) -> tuple[int, ...]:
@@ -108,9 +128,14 @@ def transition_driver_shapes(kernel: str) -> tuple[tuple[str, int, int, int], ..
         if row.module not in {"transition", "swiglu_ffn"}:
             continue
         width = row.dims["d_hidden"]
-        if (width <= 128) != small:
+        if kernel in {"transition_b2b_residual_triton", "transition_segmented_b2b_triton"}:
+            if width not in (128, 256) or row.dims.get("n", 4) != 4:
+                continue
+        elif (width <= 128) != small:
             continue
         expanded = row.dims.get("d_expanded", row.dims.get("n", 4) * width)
+        if kernel in {"transition_b2b_residual_triton", "transition_segmented_b2b_triton"} and expanded != 4 * width:
+            continue
         if expanded % width:
             raise ValueError("Transition driver requires an integral expansion ratio")
         for length in row.lengths:

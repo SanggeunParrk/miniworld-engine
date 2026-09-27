@@ -1,0 +1,10 @@
+{
+  "kernels/transition/triton/b2b_residual.py": "8e69c64cf2255d449dd0bf0f13c173bf278c475f3ddb32de2be4ceb71d03314e",
+  "kernels/transition/triton/wide_b2b.py": "a534b0956f939b767858e1a4d6ca969f628dc6d79a82fbcd30800b2ca600051d",
+  "kernels/transition/triton/segmented_b2b.py": "358b8f7137bd7b672dd20741af5f3a069f93775fabf1fa62c108a9fd039fea41",
+  "kernels/transition/triton/residual.py": "8a9053fd57ab28d895aa6f24b18715260af3aec1ab47b900724cd8939d57d628",
+  "kernels/transition/whole_op.py": "584cad9a9aac1d836af26deb717b7828aa71aad5d626ead0feb9de41bc690197",
+  "modules/transition/module.py": "bd8f1f04f6a960021fac0e9f6bca96c4ae491870c941ad02a4a9c68ec299ac88",
+  "settings.py": "e82a81fbf59e04fed5a12a0c03e43eb6ed2c5a4b08fbe9bcf114b54bdc99b3cb",
+  "autotune/configs/grid/transition_b2b_residual_triton.csv": "cafd029d0dcff65bddf6f7bb1b2a3df2228041984a8f79b442a1ddb253f19fd6"
+}

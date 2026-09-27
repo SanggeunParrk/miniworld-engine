@@ -51,7 +51,23 @@ def _b2b_launch(
     return _ext("b2b", x.shape[-1], config).transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, True)
 
 
-def _run_configured(kind, symbol, tensors, *, config=None, residual=False):
+def _b2b_saved_launch_fake(x, rstd, c1, g, beta, wa, wb, ws, bn, stages, warpgroups, kt, min_blocks):
+    return torch.empty_like(x), torch.empty_like(x)
+
+
+@opaque(fake=_b2b_saved_launch_fake, name="transition_b2b_saved_fwd_cuda")
+def _b2b_saved_launch(
+    x: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor,
+    g: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor,
+    wb: torch.Tensor, ws: torch.Tensor, bn: int, stages: int,
+    warpgroups: int, kt: int, min_blocks: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    config = dict(bn=bn, stages=stages, warpgroups=warpgroups, kt=kt, min_blocks=min_blocks)
+    y, xn = _ext("b2b", x.shape[-1], config).transition_b2b_fwd_saved(x, rstd, c1, g, beta, wa, wb, ws)
+    return y, xn
+
+
+def _run_configured(kind, symbol, tensors, *, config=None, residual=False, save_xn=False):
     from miniworld_engine.autotune.hopper_cuda_config import candidates
     from miniworld_engine.autotune.native import choose_config, tensor_key
     x = tensors[0]
@@ -64,12 +80,14 @@ def _run_configured(kind, symbol, tensors, *, config=None, residual=False):
         config = choose_config(
             {"b2b": "transition_fwd_b2b_sm90_cuda", "gatebwd": "transition_bwd_gate_sm90_cuda",
              "expand_gate": "transition_expand_gate_sm90_cuda"}[kind], grid, dtype=str(x.dtype),
-            bucket=tensor_key(*tensors, extra=(residual,)), device_index=x.device.index,
-            run=lambda c: _run_configured(kind, symbol, tensors, config=c, residual=residual),
+            bucket=tensor_key(*tensors, extra=(residual, "save_xn") if save_xn else (residual,)), device_index=x.device.index,
+            run=lambda c: _run_configured(kind, symbol, tensors, config=c, residual=residual, save_xn=save_xn),
         )
     if config not in grid:
         raise ValueError("CUDA transition config does not support the input row count")
     if kind == "b2b" and residual:
+        if save_xn:
+            return _b2b_saved_launch(*tensors, **config)
         return _b2b_launch(*tensors, **config)
     fn = getattr(_ext(kind, width, config), symbol)
     return fn(*tensors, True) if residual else fn(*tensors)
@@ -96,6 +114,17 @@ def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, *, config=None):
     """
     return _run_configured("b2b", "transition_b2b_fwd",
                            (x, rstd, c1, g, beta, wa, wb, ws), config=config, residual=True)
+
+
+def transition_b2b_fwd_saved(x, rstd, c1, g, beta, wa, wb, ws, *, config=None):
+    """Return (y=x+transition(x), xn) with xn emitted by the same b2b kernel.
+
+    Uses the inference configuration space with a distinct saved-activation cache
+    bucket. The returned BF16 xn is exactly the forward WGMMA input.
+    """
+    return _run_configured("b2b", "transition_b2b_fwd_saved",
+                           (x, rstd, c1, g, beta, wa, wb, ws), config=config,
+                           residual=True, save_xn=True)
 
 
 def transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb, *, config=None):

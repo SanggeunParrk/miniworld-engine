@@ -133,6 +133,9 @@ def layer_norm_bwd_main_kernel() -> None:
     x = rows2d(_M, _D_CUDA_BWD)
     mean, rstd = _ln_stats(x)
     layer_norm_bwd_cuda(torch.randn_like(x), x, vec(_D_CUDA_BWD), mean, rstd)
+    # Distinct tensor-key bucket: residual traffic can change the best persistent grid.
+    layer_norm_bwd_cuda(torch.randn_like(x), x, vec(_D_CUDA_BWD), mean, rstd,
+                        residual=torch.randn_like(x))
 
 
 def layer_norm_bwd_reduce_kernel() -> None:

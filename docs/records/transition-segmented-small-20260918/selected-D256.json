@@ -1,0 +1,62 @@
+{
+  "separate": {
+    "mode": "separate",
+    "config": {
+      "BM": 128,
+      "BN": 32,
+      "BK": 256,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "status": "ok",
+    "ms": 0.5095613320668538,
+    "relative_frobenius": 6.612775177927688e-05,
+    "registers": 210,
+    "spills": 0,
+    "shared_bytes": 212992,
+    "wgmma": 36,
+    "mma_sync": 0,
+    "seconds": 1.2615644009783864
+  },
+  "fused_inference": {
+    "mode": "fused_inference",
+    "config": {
+      "BM": 128,
+      "BN": 32,
+      "BK": 256,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "status": "ok",
+    "ms": 0.5916060843118808,
+    "relative_frobenius": 7.6201198680792e-05,
+    "registers": 250,
+    "spills": 0,
+    "shared_bytes": 212992,
+    "wgmma": 36,
+    "mma_sync": 0,
+    "seconds": 1.5774498749524355
+  },
+  "fused_training": {
+    "mode": "fused_training",
+    "config": {
+      "BM": 128,
+      "BN": 32,
+      "BK": 256,
+      "BO": 64,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "status": "ok",
+    "ms": 0.6060411214828492,
+    "relative_frobenius": 7.6201198680792e-05,
+    "registers": 250,
+    "spills": 0,
+    "shared_bytes": 212992,
+    "wgmma": 40,
+    "mma_sync": 0,
+    "seconds": 1.666855807416141
+  }
+}

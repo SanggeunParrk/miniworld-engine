@@ -1,0 +1,314 @@
+[
+  {
+    "name": "triton-streamed_k-D128-fwd",
+    "config": {
+      "BM": 64,
+      "BN": 64,
+      "BK": 64,
+      "BO": 64,
+      "num_warps": 8,
+      "num_stages": 2
+    },
+    "ms": 0.23250164422463243,
+    "registers": 128,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='d18651d70abf191c87536dd5d609881546f83343bf4455670198b2d3f9f3ee76', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=2, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=49152, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 16,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 12,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 11,
+      "WARPGROUP": 8
+    }
+  },
+  {
+    "name": "triton-full_k-D128-fwd",
+    "config": {
+      "BM": 128,
+      "BN": 32,
+      "BK": 128,
+      "BO": 64,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "ms": 0.131844035999195,
+    "registers": 128,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='0b378575790fb432b1700a4a9d9c24d5c8062ae62cfe47f7cae0a720237401f6', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=3, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=106496, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 20,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 18,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 7,
+      "WARPGROUP": 7
+    }
+  },
+  {
+    "name": "triton-D128-gate",
+    "config": {
+      "BLOCK_K": 32,
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    "ms": 0.31111127753006784,
+    "registers": 163,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='7f859a3e6469e55d43b411819bedcee809c0653faf3fda1cd039634ee2ddca47', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_transition_expand_gatebwd_kernel', num_ctas=1, num_stages=3, num_warps=4, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=36864, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 4,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 18,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 11,
+      "WARPGROUP": 4
+    }
+  },
+  {
+    "name": "triton-streamed_k-D256-fwd",
+    "config": {
+      "BM": 64,
+      "BN": 128,
+      "BK": 64,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "ms": 0.6555592515733507,
+    "registers": 253,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='59e929b9294acf23d9403d4ae6a0315ae77add9ce96abe1516e9c50123db3386', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=3, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=122880, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 48,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 60,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 18,
+      "WARPGROUP": 17
+    }
+  },
+  {
+    "name": "triton-full_k-D256-fwd",
+    "config": {
+      "BM": 128,
+      "BN": 32,
+      "BK": 256,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "ms": 0.4947178109486898,
+    "registers": 210,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='8c12ade3a0648da686ef6e1b9aa7be4c88f02c83d67f11b05e25bcbe257b18c0', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=3, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=212992, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 36,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 36,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 7,
+      "WARPGROUP": 7
+    }
+  },
+  {
+    "name": "triton-D256-gate",
+    "config": {
+      "BLOCK_K": 64,
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "ms": 0.7460303211212158,
+    "registers": 255,
+    "spills": 14,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='c15eda8dc1da9d65b640dbd7f2e0eab27999179ec9ac3312711607cf16cb9035', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_transition_expand_gatebwd_kernel', num_ctas=1, num_stages=2, num_warps=4, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=81920, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 8,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 40,
+      "LDL": 13,
+      "STL": 13,
+      "BAR": 18,
+      "WARPGROUP": 4
+    }
+  },
+  {
+    "name": "triton-streamed_k-D384-fwd",
+    "config": {
+      "BM": 64,
+      "BN": 128,
+      "BK": 64,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "ms": 1.4036592665172758,
+    "registers": 255,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='f3dabbcb6dee95172553d8d8957f919be19af0c7c8d10dec16dad3bfb22703e8', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=3, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=122880, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 72,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 80,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 26,
+      "WARPGROUP": 25
+    }
+  },
+  {
+    "name": "triton-full_k-D384-fwd",
+    "config": {
+      "BM": 64,
+      "BN": 32,
+      "BK": 512,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 1
+    },
+    "ms": 4.064673886980329,
+    "registers": 208,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='0abca4b30c47c319300c17d444ae89d7e83b91bbc1144d98fe6766fc6aed65ce', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=1, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=131072, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 134,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 0,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 14,
+      "WARPGROUP": 10
+    }
+  },
+  {
+    "name": "triton-D384-gate",
+    "config": {
+      "BLOCK_K": 64,
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "ms": 1.3767550675765328,
+    "registers": 255,
+    "spills": 14,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='c15eda8dc1da9d65b640dbd7f2e0eab27999179ec9ac3312711607cf16cb9035', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_transition_expand_gatebwd_kernel', num_ctas=1, num_stages=2, num_warps=4, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=81920, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 8,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 40,
+      "LDL": 13,
+      "STL": 13,
+      "BAR": 18,
+      "WARPGROUP": 4
+    }
+  },
+  {
+    "name": "triton-streamed_k-D512-fwd",
+    "config": {
+      "BM": 64,
+      "BN": 128,
+      "BK": 64,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "ms": 2.6925771366466176,
+    "registers": 255,
+    "spills": 18,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='299e13b2cc1e3167ae106d312b8cf8a72be8982a530202f19860b02d6d9ddfac', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=3, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=122880, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 96,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 100,
+      "LDL": 18,
+      "STL": 18,
+      "BAR": 34,
+      "WARPGROUP": 33
+    }
+  },
+  {
+    "name": "triton-full_k-D512-fwd",
+    "config": {
+      "BM": 64,
+      "BN": 32,
+      "BK": 512,
+      "BO": 128,
+      "num_warps": 8,
+      "num_stages": 1
+    },
+    "ms": 6.623744773864746,
+    "registers": 254,
+    "spills": 0,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='a0d6cdb037443285e6d364beef5d539405b05e79c957e0e1616e566375e10c6c', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_segmented', num_ctas=1, num_stages=1, num_warps=8, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=131072, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 136,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 0,
+      "LDL": 0,
+      "STL": 0,
+      "BAR": 18,
+      "WARPGROUP": 12
+    }
+  },
+  {
+    "name": "triton-D512-gate",
+    "config": {
+      "BLOCK_K": 64,
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "GROUP_M": 4,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "ms": 2.1174518145047703,
+    "registers": 255,
+    "spills": 14,
+    "metadata": "KernelMetadata(allowed_dot_input_precisions=['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'], arch='sm90', backend_name='cuda', debug=False, default_dot_input_precision='tf32', deprecated_fp8_dot_operand_dtypes=['fp8e4b15'], enable_fp_fusion=True, enable_reflect_ftz=True, extern_libs=[['libdevice', '/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/lib/libdevice.10.bc']], global_scratch_align=1, global_scratch_size=0, hash='c15eda8dc1da9d65b640dbd7f2e0eab27999179ec9ac3312711607cf16cb9035', instrumentation_mode='', ir_override=None, launch_cooperative_grid=False, launch_pdl=False, max_num_imprecise_acc_default=1073741824, maxnreg=None, name='_transition_expand_gatebwd_kernel', num_ctas=1, num_stages=2, num_warps=4, profile_scratch_align=1, profile_scratch_size=0, ptx_options=None, ptx_version=None, sanitize_overflow=True, shared=81920, supported_fp8_dtypes=['fp8e4b15', 'fp8e4nv', 'fp8e5'], target=GPUTarget(backend='cuda', arch=90, warp_size=32), tensordesc_meta=[], tmem_size=0, triton_version='3.6.0', warp_size=32)",
+    "ptxas_returncode": 0,
+    "opcodes": {
+      "HGMMA": 8,
+      "HMMA": 0,
+      "UTMALDG": 0,
+      "LDGSTS": 40,
+      "LDL": 13,
+      "STL": 13,
+      "BAR": 18,
+      "WARPGROUP": 4
+    }
+  }
+]

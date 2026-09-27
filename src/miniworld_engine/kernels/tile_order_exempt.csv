@@ -19,3 +19,5 @@ triangle_attention_bwd_dkdv_triton,"attention: grid axes are (tile, batch*head*r
 triangle_attention_bwd_atomic_triton,"attention: grid axes are (tile, batch*head*row); N_CTX is looped in-kernel. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
 rmsnorm_adamod_fwd_triton,"1-D grid over M alone; N and K are looped in-kernel, so one program owns a whole row block across every column and there is no column-tile axis to order"
 rmsnorm_adamod_bwd_triton,"1-D grid over M alone; N and K are looped in-kernel, same schedule as the forward"
+transition_b2b_residual_triton,"1-D row grid; each program owns the entire output width and loops over hidden tiles. There is no output-column grid axis for GROUP_M to reorder."
+transition_segmented_b2b_triton,"1-D row grid; all output segments belong to the same program and reuse one hidden tile. No output-column grid axis exists for GROUP_M to reorder."

@@ -49,12 +49,20 @@ class BidirectionalTriangleMultiplication(nn.Module):
         *,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
+        training_output_backend: str = "triton",
+        anthropic_row: str = "native_rebuilt",
     ) -> None:
         super().__init__()
         # Keep the PUBLIC option on self.implementation (contract: modules never overwrite it
         # with the resolved backend). 'miniworld' (auto) -> concrete backend for the running
         # GPU arch is resolved ONCE into self._backend; forward routes on that.
         self.implementation = ImplementationType(implementation)
+        if training_output_backend not in ("triton", "anthropic_cuda"):
+            raise ValueError("Unknown TriMul training output backend")
+        if training_output_backend == "anthropic_cuda" and self.implementation != ImplementationType.TRITON:
+            raise ValueError("The experimental Anthropic CUDA output requires implementation='triton'")
+        self.training_output_backend = training_output_backend
+        self.anthropic_row = anthropic_row
         self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
         if self._backend == KernelBackend.CUTE:
             from miniworld_engine.kernels.trimul_inproj.cute import (
@@ -88,14 +96,15 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
         d2 = 2 * self.d_hidden
 
-        self.ln_pair = LayerNorm(d_pair, implementation=implementation)
+        norm_impl = "pytorch" if self._backend == KernelBackend.ANTHROPIC else implementation
+        self.ln_pair = LayerNorm(d_pair, implementation=norm_impl)
         # Doubled-width left/right projections: [outgoing | incoming] channels.
         self.to_left = Linear(d_pair, d2, bias=False, init="default")
         self.to_left_gate = Linear(d_pair, d2, bias=False, init="zero")
         self.to_right = Linear(d_pair, d2, bias=False, init="default")
         self.to_right_gate = Linear(d_pair, d2, bias=False, init="zero")
 
-        self.ln_out = LayerNorm(d2, implementation=implementation)
+        self.ln_out = LayerNorm(d2, implementation=norm_impl)
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d2, d_pair, bias=False, init="zero")
 
@@ -129,6 +138,11 @@ class BidirectionalTriangleMultiplication(nn.Module):
                 out = out * _ds
             return out + _pair_in
 
+        if self._backend == KernelBackend.ANTHROPIC:
+            if self.anthropic_row == "training_saved":
+                return self._forward_triton(pair, mask, _ds)
+            from miniworld_engine.integrations.anthropic_training import module_update
+            return _r(module_update(self, pair, mask, bidirectional=True))
         if settings.current().trimul_sm90_kernels and self._backend != KernelBackend.PYTORCH:
             # Explicit kernel-level overrides preserve the Triton algorithm;
             # never enter the legacy CuTe projection-aware backward here.
@@ -230,6 +244,13 @@ class BidirectionalTriangleMultiplication(nn.Module):
             bidirectional_trimul_triton,
         )
 
+        if self._backend == KernelBackend.ANTHROPIC and self.anthropic_row == "training_saved":
+            self.anthropic_selection = {
+                "row": "training_saved", "front": "Anthropic K1-derived, prenorm + preact saves",
+                "output": "Anthropic K3-derived F567, separate LN_out",
+                "backward": "unchanged Triton/cuBLAS", "save_policy": "unchanged",
+                "dropout_residual": "fused F567",
+            }
         return bidirectional_trimul_triton(
             pair,
             self.to_left.weight.to(pair.dtype), self.to_left_gate.weight.to(pair.dtype),
@@ -240,6 +261,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
             self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
             mask=mask,
             dropscale=dropscale,
+            output_backend=("anthropic_saved" if self._backend == KernelBackend.ANTHROPIC
+                            and self.anthropic_row == "training_saved" else
+                            self.training_output_backend
+                            if torch.is_grad_enabled() or dropscale is not None else "triton"),
         )
 
     def _forward_cute_train(

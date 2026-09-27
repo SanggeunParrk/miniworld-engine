@@ -1,0 +1,92 @@
+[
+  {
+    "variant": "streamed_k",
+    "D": 384,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 64,
+      "mgroups": 2,
+      "ngroups": 2,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "resources": {
+      "forward_smem": 98352,
+      "backward_smem": 57392
+    },
+    "status": "built"
+  },
+  {
+    "variant": "streamed_k",
+    "D": 512,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 64,
+      "mgroups": 2,
+      "ngroups": 2,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "resources": {
+      "forward_smem": 131120,
+      "backward_smem": 57392
+    },
+    "status": "built"
+  },
+  {
+    "variant": "full_k",
+    "D": 384,
+    "config": {
+      "bk": 512,
+      "bn": 32,
+      "bo": 64,
+      "mgroups": 2,
+      "ngroups": 2,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "resources": {
+      "forward_smem": 221232,
+      "backward_smem": 229424
+    },
+    "status": "built"
+  },
+  {
+    "variant": "full_k",
+    "D": 384,
+    "config": {
+      "bk": 384,
+      "bn": 32,
+      "bo": 64,
+      "mgroups": 2,
+      "ngroups": 2,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "resources": {
+      "forward_smem": 172080,
+      "backward_smem": 180272
+    },
+    "status": "built"
+  },
+  {
+    "variant": "full_k",
+    "D": 512,
+    "config": {
+      "bk": 512,
+      "bn": 32,
+      "bo": 64,
+      "mgroups": 2,
+      "ngroups": 2,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "resources": {
+      "forward_smem": 229424,
+      "backward_smem": 229424
+    },
+    "status": "built"
+  }
+]

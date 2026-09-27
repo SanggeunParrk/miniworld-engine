@@ -1,0 +1,7 @@
+{
+  "src/miniworld_engine/kernels/transition/triton/wide_b2b.py": "450e7d37b295c78b475949b6046b7d08574b17638e2f0822dc0218623d9f3885",
+  "tests/numerics/test_transition_wide_b2b_gpu.py": "cadc463eae0df55aaebdf950a96f62f6d82758a74e9dbf67170617367ea79aaf",
+  "src/miniworld_engine/kernels/transition/triton/residual.py": "8a9053fd57ab28d895aa6f24b18715260af3aec1ab47b900724cd8939d57d628",
+  "src/miniworld_engine/kernels/transition/triton/fused.py": "7b2bf102a307a58fc45ce7ebf38d521cccda804032363cee59076088b4d89561",
+  "src/miniworld_engine/kernels/transition/hopper.py": "1ff49b4ec021d03c30d700ceaab10f82de19caa59f592c6dde8ad904b8fb3ad4"
+}

@@ -1,0 +1,164 @@
+{
+  "node": "node02",
+  "length": 768,
+  "width": 128,
+  "kind": "torch.profiler single compiled forward/backward, not graph timing",
+  "traces": {
+    "recompute": [
+      {
+        "kernel": "triton_poi_fused__to_copy_0",
+        "us": 1.5040000000001328
+      },
+      {
+        "kernel": "triton_poi_fused__to_copy_0",
+        "us": 1.47199999999998
+      },
+      {
+        "kernel": "_stats_kernel",
+        "us": 54.6880000000001
+      },
+      {
+        "kernel": "void b2b_detail::transition_b2b_rs_wgmma_kernel<128, 64, 128, 512, 128, 128, 128, 2, false, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > > >(__nv_bfloat16 const*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, long, bool, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >)",
+        "us": 499.23099999999977
+      },
+      {
+        "kernel": "Memset (Device)",
+        "us": 0.7359999999998763
+      },
+      {
+        "kernel": "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT",
+        "us": 274.46299999999974
+      },
+      {
+        "kernel": "_transition_expand_gatebwd_kernel",
+        "us": 1480.6370000000002
+      },
+      {
+        "kernel": "nvjet_tst_128x128_64x6_2x1_v_bz_splitK_NTT",
+        "us": 265.91899999999987
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+        "us": 4.22400000000016
+      },
+      {
+        "kernel": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 1, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us": 2.7520000000004075
+      },
+      {
+        "kernel": "nvjet_tst_128x128_64x6_1x2_h_bz_splitK_NTT",
+        "us": 473.02399999999943
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+        "us": 3.6799999999993815
+      },
+      {
+        "kernel": "Memcpy DtoD (Device -> Device)",
+        "us": 1.5360000000000582
+      },
+      {
+        "kernel": "Memset (Device)",
+        "us": 0.7359999999998763
+      },
+      {
+        "kernel": "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_NNN",
+        "us": 450.8789999999999
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> >, std::array<char*, 3ul>)",
+        "us": 4.288000000000466
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+        "us": 1.5999999999994543
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+        "us": 1.4719999999997526
+      },
+      {
+        "kernel": "_ln_bwd_residual_kernel",
+        "us": 226.6880000000001
+      }
+    ],
+    "saved": [
+      {
+        "kernel": "triton_poi_fused__to_copy_0",
+        "us": 1.47199999999998
+      },
+      {
+        "kernel": "triton_poi_fused__to_copy_0",
+        "us": 1.8559999999999945
+      },
+      {
+        "kernel": "_stats_kernel",
+        "us": 54.975999999999885
+      },
+      {
+        "kernel": "void b2b_detail::transition_b2b_rs_wgmma_kernel<128, 64, 128, 512, 128, 128, 128, 2, true, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > > >(__nv_bfloat16 const*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, long, bool, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >, cute::TiledCopy<cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<131072>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> >, cute::Layout<cute::tuple<cute::C<64>, cute::C<128> >, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0> > > const&, cute::Swizzle<3, 4, 3> const&> >, cutlass::bfloat16_t>, cute::Layout<cute::tuple<cute::C<1>, cute::tuple<cute::tuple<cute::tuple<cute::C<64>, cute::C<128> >, cute::C<2> > > >, cute::tuple<cute::C<0>, cute::tuple<cute::tuple<cute::tuple<cute::C<128>, cute::C<1> >, cute::C<8192> > > > >, cute::tuple<cute::C<128>, cute::C<128> > >)",
+        "us": 504.89400000000023
+      },
+      {
+        "kernel": "Memset (Device)",
+        "us": 0.7359999999998763
+      },
+      {
+        "kernel": "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT",
+        "us": 276.6380000000004
+      },
+      {
+        "kernel": "_transition_expand_gatebwd_kernel",
+        "us": 1229.4029999999998
+      },
+      {
+        "kernel": "nvjet_tst_128x128_64x6_2x1_v_bz_splitK_NTT",
+        "us": 267.96599999999944
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+        "us": 4.512000000000626
+      },
+      {
+        "kernel": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 1, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us": 2.5599999999994907
+      },
+      {
+        "kernel": "nvjet_tst_128x128_64x6_1x2_h_bz_splitK_NTT",
+        "us": 473.59799999999996
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+        "us": 3.6159999999999854
+      },
+      {
+        "kernel": "Memcpy DtoD (Device -> Device)",
+        "us": 1.6320000000005166
+      },
+      {
+        "kernel": "Memset (Device)",
+        "us": 0.7359999999998763
+      },
+      {
+        "kernel": "nvjet_tst_128x256_64x4_1x2_h_bz_coopA_NNN",
+        "us": 450.4939999999997
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> >, std::array<char*, 3ul>)",
+        "us": 4.512000000000626
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+        "us": 1.4719999999997526
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+        "us": 1.4400000000005093
+      },
+      {
+        "kernel": "_ln_bwd_residual_kernel",
+        "us": 228.79899999999998
+      }
+    ]
+  }
+}

@@ -28,6 +28,7 @@ class ImplementationType(str, Enum):
     CUTE = "cute"
     CUEQUIVARIANCE = "cuequivariance"
     MINIWORLD = "miniworld"
+    ANTHROPIC = "anthropic"  # attributed upstream inference kernels; explicit opt-in
 
 
 class InvalidImplementationError(ValueError):

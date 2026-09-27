@@ -1,0 +1,29 @@
+{
+  "module_name": "triattn_training_qg_scoped",
+  "binary": "triattn_training_qg_scoped.so",
+  "artifact": "qg_scoped",
+  "lengths": [
+    384,
+    768,
+    1024
+  ],
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "baseline_promotion": 17774,
+  "files": {
+    "qg_projection_attention.py": "fd4c6934b2e8e5512ecca41a6f0bdceec84c0598f69245025aa11ecaa68ddd9b",
+    "qg_projection_attention.cu": "3ab75326bb94cff16a8037b0ce5f4e8b1408e577b5299b102cda08a836fb729a",
+    "triattn_training_qg_scoped.so": "190008b18dd52a986f7add85b18f1e1e3b62965063c6c8c5eb7a66a6c36a23ed"
+  },
+  "promotion": "18006",
+  "evidence": {
+    "artifact": "qg_scoped",
+    "qualify": 17994,
+    "verify": 17995,
+    "bench": 17989,
+    "sanitize": 17996,
+    "profile": 17990
+  },
+  "dispatcher_sha256": "7b9a1610c238de2a88cc6ae3e0299f08404743d63b3f347ff6763a2cfc258089",
+  "dispatcher_qkv_promotion": "18246"
+}

@@ -80,6 +80,12 @@ class Transition(nn.Module):
         d_hidden: int = 128,
         n: int = 4,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        *,
+        anthropic_row: str = "v2",
+        cuda_variant: str | None = None,
+        cuda_forward_config: dict[str, int] | None = None,
+        cuda_backward_config: dict[str, int] | None = None,
+        cuda_norm_config: tuple[int, int, int, int, int] = (4, 4, 8, 256, 4),
     ) -> None:
         super().__init__()
         self.d_hidden = d_hidden
@@ -96,9 +102,24 @@ class Transition(nn.Module):
         # Resolution lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_transition(self.implementation)
+        self.anthropic_row = anthropic_row
+        self.cuda_variant = cuda_variant
+        self.cuda_forward_config = dict(cuda_forward_config) if cuda_forward_config is not None else None
+        self.cuda_backward_config = dict(cuda_backward_config) if cuda_backward_config is not None else None
+        self.cuda_norm_config = tuple(cuda_norm_config)
+        if self._backend == KernelBackend.CUDA:
+            from miniworld_engine.kernels.transition.cuda.variants import validate
+
+            if n != 4 or cuda_variant is None or cuda_forward_config is None or cuda_backward_config is None:
+                raise ValueError(
+                    "CUDA Transition requires n=4, cuda_variant='streamed_k' or 'full_k', "
+                    "and explicit cuda_forward_config/cuda_backward_config"
+                )
+            validate(cuda_variant, d_hidden, cuda_forward_config)
+            validate(cuda_variant, d_hidden, cuda_backward_config)
 
         self.ln_in = LayerNorm(
-            d_hidden, implementation=self.implementation, dtype=torch.bfloat16
+            d_hidden, implementation=(ImplementationType.PYTORCH if self._backend == KernelBackend.ANTHROPIC else self.implementation), dtype=torch.bfloat16
         )
         self.expand_a = Linear(
             d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.bfloat16
@@ -118,26 +139,32 @@ class Transition(nn.Module):
         kernels can't run.
 
         Residual is always included; whether it shares a kernel with the projection
-        depends on the backend and transition_residual_fusion setting. The raw op
-        without the residual is available through ``ops.transition``.
+        depends on the backend and transition_residual_fusion setting.
+        ``ops.transition`` also includes the residual.
         """
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic import module_transition
+            return module_transition(self, x)
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
 
         if backend == KernelBackend.CUDA:
-            # kernels.cuda_transition has never been implemented (see its docstring). Reaching
-            # here used to raise ImportError from four frames down; this names the module and
-            # the way out. Transition(implementation="cuda") is the only way to get here.
-            xln = self.ln_in(x)
-            out = kernels.cuda_transition(
-                xln,
+            from miniworld_engine.kernels.transition.cuda.variants import transition
+
+            return transition(
+                x,
+                self.ln_in.weight,
+                self.ln_in.bias,
                 self.expand_a.weight.to(x.dtype),
                 self.expand_b.weight.to(x.dtype),
                 self.squeeze.weight.to(x.dtype),
-                self.n,
+                self.ln_in.eps,
+                variant=self.cuda_variant,
+                forward_config=self.cuda_forward_config,
+                backward_config=self.cuda_backward_config,
+                norm_config=self.cuda_norm_config,
             )
-            return out + x
 
         if backend in {
             KernelBackend.TRITON,
@@ -149,6 +176,13 @@ class Transition(nn.Module):
             return self._inference_forward(x)
 
         if backend == KernelBackend.CUTE:
+            if settings.current().transition_residual_fusion:
+                from miniworld_engine.kernels.transition.hopper import supported, transition_residual_hopper
+                if supported(x, self.n):
+                    return transition_residual_hopper(
+                        x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight,
+                        self.expand_b.weight, self.squeeze.weight, self.ln_in.eps, use_b2b=False,
+                    )
             # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
             # explicit selection). Same fused structure; LN folded into the cute expand.
             backward_backend = _explicit_cute_backward_backend()
@@ -173,7 +207,7 @@ class Transition(nn.Module):
             return out + x
 
         if settings.current().transition_residual_fusion:
-            return self._residual_triton_forward(x)
+            return self._residual_forward(x)
         if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): the fused triton path uses the
@@ -262,7 +296,7 @@ class Transition(nn.Module):
             return out + x
 
         if settings.current().transition_residual_fusion:
-            return self._residual_triton_forward(x)
+            return self._residual_forward(x)
         if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
@@ -312,10 +346,19 @@ class Transition(nn.Module):
             save_xn=False,
         )
 
-    def _residual_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
-        from miniworld_engine.kernels.transition.triton.residual import transition_residual
+    def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.transition.hopper import enabled, transition_residual_hopper
+        if enabled(x, self.n):
+            return transition_residual_hopper(
+                x, self.ln_in.weight, self.ln_in.bias,
+                self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.eps,
+            )
+        return self._residual_triton_forward(x)
 
-        return transition_residual(
+    def _residual_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.transition.triton.b2b_residual import transition_residual_dispatch
+
+        return transition_residual_dispatch(
             x, self.ln_in.weight, self.ln_in.bias,
             self.expand_a.weight.to(x.dtype), self.expand_b.weight.to(x.dtype),
             self.squeeze.weight.to(x.dtype), self.ln_in.eps,
