@@ -160,10 +160,24 @@
     },
     "path": "atomic"
   },
+  "64|262144": {
+    "ms": {
+      "atomic": 0.448829,
+      "persistent": 0.47577
+    },
+    "path": "atomic"
+  },
   "64|4096": {
     "ms": {
       "atomic": 0.018825,
       "persistent": 0.025771
+    },
+    "path": "atomic"
+  },
+  "64|524288": {
+    "ms": {
+      "atomic": 0.887758,
+      "persistent": 0.931358
     },
     "path": "atomic"
   }
