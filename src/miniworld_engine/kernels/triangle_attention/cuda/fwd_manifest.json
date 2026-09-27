@@ -1,0 +1,34 @@
+{
+  "module_name": "triattn_training_cooperative_head2",
+  "binary": "triattn_training_cooperative_head2.so",
+  "artifact": "cooperative_head2",
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "arch": "sm_90a",
+  "lengths": [
+    384,
+    768,
+    1024
+  ],
+  "query_tile": 64,
+  "key_tile": 64,
+  "threads": 128,
+  "kv_stages": 2,
+  "normalizer": "fp32_unrounded_probability_sum",
+  "lse": "fp32_base2",
+  "qualification_job": 17564,
+  "benchmark_job": 17568,
+  "profile_job": 17566,
+  "full_sanitizer_job": 17565,
+  "dispatcher": {
+    "path": "../triton/main.py",
+    "sha256": "de5673c82fe84236ff09e0f3c394faff56e2d6da2d4d025d447a0bbe6bcc22da"
+  },
+  "files": {
+    "training_forward.py": "10f00912a7010da430948af391ad634fb699004b1be34b8e0269ccc3c2d1e3a7",
+    "training_forward.cu": "3f3bc13616174712be492f62bf77d2abb4786ab3c7b7b147bf2b577e1bfcd753",
+    "triattn_training_cooperative_head2.so": "34e365e2a18bcf29e4e07d5f424396722f3f1b6d9e9cd9c97fe83d557d21af9f",
+    "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc"
+  },
+  "baseline_promotion": 17345
+}
