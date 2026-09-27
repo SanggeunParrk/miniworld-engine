@@ -87,7 +87,11 @@ class ModuleTarget:
 #: A THIRD name space, alongside the cases `build <case>` takes and the kernels `--per-op` takes.
 #: It has to be: a case names a module and an op names a kernel, and neither can say "half the
 #: model" -- the trunk is 33 kernels across 7 families, and no module or kernel name spells that.
-STACKS: tuple[str, ...] = ("trunk", "diffusion")
+#: `mpnn` is a THIRD half and not a third value of the trunk/diffusion split: ProteinMPNN is a
+#: different model, so `build mpnn` is "build the other model's kernels", not "build part of
+#: the structure model". Its rows are `stack=mpnn` and no row is `both` across the two models -- nothing is
+#: shared between them at the kernel level.
+STACKS: tuple[str, ...] = ("trunk", "diffusion", "mpnn")
 
 
 #: Every module-level bench target. `bench_module <name>` and `dev capture <name>` take these.
@@ -470,7 +474,7 @@ CONFIG_ROOT = "configs"
 #: argument resolution before doing any work. Building the cache MEANS searching, so the full
 #: search grid is the only sensible default; the pinned single-config sets (blk*, warp*, mixed*)
 #: exist for A/B runs and have to be asked for by name.
-DEFAULT_CONFIG_SET = "grid"
+DEFAULT_CONFIG_SET = "default"
 
 
 def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
@@ -815,12 +819,16 @@ def cmd_build(args: argparse.Namespace) -> int:
     """Build the cache. The builder owns decomposition and multi-GPU execution; this only parses."""
     from miniworld_engine.autotune import builder
 
+    os.environ["MINIWORLD_BUILD_SCOPE"] = ("all" if getattr(args, "include_alternatives", False) else "production")
+    os.environ["MINIWORLD_BUILD_MODE"] = getattr(args, "mode", "both")
     repo = Path(__file__).resolve().parents[2]
     # Reject a name we already know is not a target BEFORE anything imports. Everything below --
     # apply_config_dir, cases(), op_units() -- imports every kernel module, which is minutes of
     # triton compilation, and `build <typo>` used to spend all of it before printing "unknown
     # case". Both name spaces are declared and readable without importing anything: CASE_NAMES is
     # a literal, and the per-op sweep's names are the first column of registry.csv.
+    if getattr(args, "backend", "auto") != "auto":
+        args.per_op = True
     rc = _reject_unknown_build_target(args, repo)
     if rc:
         return rc
@@ -854,6 +862,13 @@ def cmd_build(args: argparse.Namespace) -> int:
         stack = args.case if args.case in STACKS else None
         only = None if args.case == "all" or stack else set(_op_names(args.case))
         units = builder.op_units(only, config_dir=directory, stack=stack)
+        backend = getattr(args, "backend", "auto")
+        if backend != "auto":
+            from miniworld_engine.autotune.native import BUILD_OPS, build_ops_for_arch
+            native_ops = build_ops_for_arch((builder.device_sm() or "").replace("_", ""))
+            units = [u for u in units if (u.op in native_ops if backend == "native" else u.op not in BUILD_OPS)]
+        from miniworld_engine.autotune import policy
+        units = policy.filter_op_units(units)
         if not units:
             print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
             return None
@@ -1087,7 +1102,11 @@ def _empty_triton_cache(dry_run: bool) -> int:
     try:
         entries, total = triton_cache.clear(directory, dry_run=dry_run)
     except ValueError as exc:
-        print(f"  {exc}")
+        # stderr, because the caller in `build all` discards this exit code on purpose -- a
+        # 20-hour build that measured everything is not a failure because cleanup declined. That
+        # made the refusal one indented line in a 900-line stdout log, which is how 623 GB
+        # accumulated unnoticed. On stderr it is at least where a job script looks.
+        print(f"  {exc}", file=sys.stderr)
         return 2
     verb = "would remove" if dry_run else "removed"
     print(f"  triton cache: {verb} {entries:,} entries, {total / 1024**3:.1f} GB from {directory}")
@@ -1702,6 +1721,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "`bench_kernel` / `bench_module`.")
     bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
+    bld.add_argument("--backend", choices=("auto", "native", "triton"), default="auto",
+                     help="auto follows module dispatch; native/triton explicitly tune per-op drivers")
+    bld.add_argument("--include-alternatives", action="store_true",
+                     help="also tune forced fallback backends; default follows production dispatch")
+    bld.add_argument("--mode", choices=("both", "train", "eval"), default="both",
+                     help="training uses token L384/L768; inference keeps the full declared ladder")
     bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
     # Filling the gaps is what a build IS. It was opt-in, and the two ways to get a complete
     # cache were `--fill-gaps` (bench only the missing keys) and `--rebuild-cached` (re-measure
@@ -1820,17 +1845,12 @@ def build_parser() -> argparse.ArgumentParser:
         # invoking bench.py directly.
         parser_.add_argument("--sweep-axis", default="seq_len", choices=("seq_len", "d_pair"),
                              help="which axis to sweep (default: seq_len)")
-        # Default "auto" picks the empirically-best regime per (mode, module): inference is
-        # launch-bound for the small/many-launch modules so it captures a manual CUDA graph, while
-        # training is backward-dominated (compute-bound) so it stays compile-only (a graph removes no
-        # meaningful launch overhead there and its copy/replay only adds cost). swa_atom_attention is
-        # launch-bound in its backward too, so it takes manual in both modes. Measured across every
-        # module at the fixed real shape; see BenchConfig.cudagraph. Pass an explicit value to force
-        # one regime for all runs (e.g. `--cudagraph manual` to reproduce the older committed tables).
+        # The runner expands auto module training into separate OFF/ON processes.
+        # Explicit graph requests still select exactly one regime.
         parser_.add_argument("--cudagraph", default="auto",
                              choices=("disabled", "manual", "graphed", "auto"),
-                             help="CUDA-graph mode (default: auto -- inference=manual, "
-                                  "training=compile-only, per measured best)")
+                             help="CUDA-graph mode (default auto: module training reports OFF and ON; "
+                                  "inference uses manual, memory and kernel training use disabled)")
         parser_.add_argument("--compile", default="true", choices=("true", "false"),
                              help="torch.compile the module under test (default: true)")
         # Passed to the child through the ENVIRONMENT, not argv: settings.compile_wrap is read

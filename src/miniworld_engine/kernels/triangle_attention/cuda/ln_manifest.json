@@ -1,0 +1,28 @@
+{
+  "module_name": "triattn_ln_warp_packed",
+  "binary": "triattn_ln_warp_packed.so",
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "lengths": [
+    384,
+    768,
+    1024
+  ],
+  "artifact": "warp_packed",
+  "qualification_job": 16574,
+  "files": {
+    "build_ln.py": "1af45f01c1c72e747fb9a7475cbc8454ed7d655a71eb5edc90784a1f6d3e38f6",
+    "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
+    "ln_backward.py": "7b9a1610c238de2a88cc6ae3e0299f08404743d63b3f347ff6763a2cfc258089",
+    "ln_residual.cu": "cabd03e537012a204018fde8962ee62d3115098cfb6b02343ce9b1dc8955220c",
+    "triattn_ln_warp_packed.so": "046cf013e9124aaabdbcd76c3fec2dea6139faa940c10d7189ad9a7c079b1fac"
+  },
+  "gate_artifact": "n64_staged",
+  "below80_combined_job": 16576,
+  "wgrad_artifact": "shared_z_tensor",
+  "wgrad_qualification_job": 16662,
+  "priority_combined_job": 16661,
+  "q_forward_promotion": "17774",
+  "qg_forward_promotion": "18006",
+  "qkv_forward_promotion": "18246"
+}

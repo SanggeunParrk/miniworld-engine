@@ -219,3 +219,38 @@ def benchmark_source_hash() -> str:
 def require_source_identity(expected: str) -> None:
     if benchmark_source_hash() != expected:
         raise RuntimeError("benchmark or engine sources changed during this run; rerun from stable sources")
+
+
+def check_stochastic_graph_replay(step: Callable, replay: Callable, graph_outputs: dict) -> dict:
+    """Check seeded outputs/fresh gradients and advancing dropout outside the timer.
+
+    Keep captured tensor references: eager validation can replace .grad objects.
+    Restore caller RNG state after validation instead of changing benchmark seeds.
+    """
+    tensors = _output_tensors(graph_outputs)
+    if not tensors:
+        raise RuntimeError("graph capture produced no observable tensors")
+    device = next(iter(tensors.values())).device
+    devices = [device.index] if device.type == "cuda" else []
+    checks = {}
+    with torch.random.fork_rng(devices=devices):
+        for seed in (12345, 67890):
+            torch.manual_seed(seed)
+            expected = snapshot_outputs(step())
+            torch.manual_seed(seed)
+            replay()
+            if devices:
+                torch.cuda.synchronize(device)
+            checks[str(seed)] = check_execution_outputs(graph_outputs, expected)
+        replay()
+        before = snapshot_outputs(graph_outputs["result"])
+        replay()
+        if devices:
+            torch.cuda.synchronize(device)
+        check_finite_outputs(graph_outputs)
+        after = snapshot_outputs(graph_outputs["result"])
+        if not before or before.keys() != after.keys():
+            raise RuntimeError("dropout graph has no consistent observable output")
+        if not any(not torch.equal(before[key], after[key]) for key in before):
+            raise RuntimeError("dropout graph replay did not advance its random output")
+    return {"seeded_outputs_and_gradients": checks, "dropout_replay_changes_output": True}

@@ -1,0 +1,11 @@
+{
+  "src/miniworld_engine/kernels/transition/hopper.py": "1ff49b4ec021d03c30d700ceaab10f82de19caa59f592c6dde8ad904b8fb3ad4",
+  "src/miniworld_engine/kernels/transition/cuda/transition_b2b_kernel.cu": "8456a346e8fd2cafd92a884a01c769590e7ed1f32bddf5d2fa923a4568e6b420",
+  "src/miniworld_engine/autotune/hopper_cuda_config.py": "95cf09842d7601ca109d01c546720c893b87fca8a3a370127df048b8743ddbbf",
+  "src/miniworld_engine/kernels/transition/cute/gemm_transition_swiglu.py": "a59c0a773b3d6a06059e934abb15c34268c441f67a4e9815f4ccced7c07213df",
+  "src/miniworld_engine/kernels/transition/cute/squeeze_residual.py": "f5a7888f925d4bab65e815cfd35e9cf00116f3efa6e5cf9b47e48050f2c56f7b",
+  "src/miniworld_engine/kernels/transition/cute/fused.py": "cbf9702ceed750fcb92c39f5b8b38e3d8d3c1f8a4ce9a49c1b2f15e554cf3cb4",
+  "src/miniworld_engine/kernels/transition/triton/fused.py": "7b2bf102a307a58fc45ce7ebf38d521cccda804032363cee59076088b4d89561",
+  "src/miniworld_engine/settings.py": "8b02f6631d537102afca97f48c0888c3a8cabf9b949113cd4171d51b58b77115",
+  "benchmarks/runners/bench.py": "95334b1bcdd15eddef42a65d30650e1f70576e5c737114d28cd7224a79499517"
+}

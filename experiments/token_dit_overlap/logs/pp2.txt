@@ -1,0 +1,59 @@
+## start 22:37:23 restart=0
+#### diag
+L384 K768 adaln=0 mc=15: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=0 mc=10: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=0 mc=7: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=0 mc=1: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=0 mc=0: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=15: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=10: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=7: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=1: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=0: x err 1.9e-06, bad rows 0 (tiles [])
+#### diag done
+#### test
+L384 S5 K768 adaln=1 max_cl=0: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L384 S5 K768 adaln=1 max_cl=7: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L384 S5 K768 adaln=1 max_cl=2: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L384 S5 K768 adaln=0 max_cl=0: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L384 S5 K768 adaln=0 max_cl=7: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L384 S5 K768 adaln=0 max_cl=2: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L384 S5 K1536 adaln=1 max_cl=0: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L384 S5 K1536 adaln=1 max_cl=7: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L384 S5 K1536 adaln=1 max_cl=2: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L384 S5 K1536 adaln=0 max_cl=0: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L384 S5 K1536 adaln=0 max_cl=7: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L384 S5 K1536 adaln=0 max_cl=2: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L768 S5 K768 adaln=1 max_cl=0: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L768 S5 K768 adaln=1 max_cl=7: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L768 S5 K768 adaln=1 max_cl=2: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L768 S5 K768 adaln=0 max_cl=0: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L768 S5 K768 adaln=0 max_cl=7: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L768 S5 K768 adaln=0 max_cl=2: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L768 S5 K1536 adaln=1 max_cl=0: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L768 S5 K1536 adaln=1 max_cl=7: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L768 S5 K1536 adaln=1 max_cl=2: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L768 S5 K1536 adaln=0 max_cl=0: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L768 S5 K1536 adaln=0 max_cl=7: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L768 S5 K1536 adaln=0 max_cl=2: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L128 S3 K768 adaln=1 max_cl=0: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L128 S3 K768 adaln=1 max_cl=7: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L128 S3 K768 adaln=1 max_cl=2: x 1.9e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L128 S3 K768 adaln=0 max_cl=0: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L128 S3 K768 adaln=0 max_cl=7: x 1.9e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L128 S3 K768 adaln=0 max_cl=2: x 1.8e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L128 S3 K1536 adaln=1 max_cl=0: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L128 S3 K1536 adaln=1 max_cl=7: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L128 S3 K1536 adaln=1 max_cl=2: x 2.3e-06 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+L128 S3 K1536 adaln=0 max_cl=0: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L128 S3 K1536 adaln=0 max_cl=7: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+L128 S3 K1536 adaln=0 max_cl=2: x 2.3e-06 (rows 1.7e-03)  xa 0.0e+00 (rows 0.0e+00)  det=True  ok
+ALL OK
+#### test done
+#### bench
+L384 Wo     : mm+rows do_bench   19.0  graph   12.1   |   pp do_bench   37.5  graph   21.9  us
+L384 squeeze: mm+rows do_bench   21.8  graph   14.8   |   pp do_bench   47.1  graph   29.8  us
+L768 Wo     : mm+rows do_bench   29.1  graph   21.7   |   pp do_bench   52.4  graph   43.7  us
+L768 squeeze: mm+rows do_bench   34.0  graph   28.6   |   pp do_bench   71.4  graph   63.3  us
+#### bench done
+## all done 22:39:41

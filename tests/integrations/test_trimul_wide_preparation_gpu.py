@@ -13,7 +13,8 @@ pytestmark = [
 
 
 @pytest.mark.parametrize("width", [64, 256, 384, 512])
-def test_packing_once_and_fp32_mask_owned(width, monkeypatch):
+@pytest.mark.parametrize("batched_mask", [False, True])
+def test_packing_once_and_fp32_mask_owned(width, batched_mask, monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
     n, d = 384, width
@@ -32,6 +33,8 @@ def test_packing_once_and_fp32_mask_owned(width, monkeypatch):
     ]
     # Already-FP32 callers must not make a custom-op output alias an input.
     mask = torch.ones(n, n, device="cuda", dtype=torch.float32)
+    if batched_mask:
+        mask = mask.unsqueeze(0)
     ds = torch.ones(n, d, device="cuda", dtype=x.dtype)
     pack, norm = W.pack_into, W.normalize_into
     calls = [0, 0]

@@ -1203,10 +1203,18 @@ def heuristic_subset(configs: list, cap: int = 24) -> list:
                 if k in axes and isinstance(x, int) and x > 0:
                     v *= x
             return v * max(1, c.num_stages)
-        # Still inside the industry centre: warps in {4,8}, stages in {2,3,4}. The floor is about
-        # TILE SIZE, not about widening the warps/stages search, and
-        # test_the_fallback_prefers_the_industry_centre_of_the_space pins that.
-        centre = [c for c in configs if c.num_warps in (4, 8) and c.num_stages in (2, 3, 4)]
+        # The WARPS centre is kept -- test_the_fallback_prefers_the_industry_centre_of_the_space
+        # pins it -- and the stages constraint reaches down to the ladder's own minimum. It used to
+        # be {2, 3, 4} here as well, and that left the floor with nothing to offer a kernel whose
+        # only fitting rung is one stage: `num_stages` is the pipeline depth and multiplies the
+        # shared-memory requirement outright, so no tile is small enough to rescue a grid that is
+        # only searched at two stages and up. Measured: mpnn_edge_tail's replay and dX asked for
+        # 104,448 B against a 101,376 B limit at every one of the 24, the floor's smallest
+        # included, while their ladders offer stages=1 and their own file records that a
+        # stages-2 floor had already hidden the node message's winner once.
+        stages_floor = min((c.num_stages for c in configs), default=1)
+        centre = [c for c in configs
+                  if c.num_warps in (4, 8) and c.num_stages in (2, 3, 4, stages_floor)]
         smallest = sorted(centre or configs, key=volume)[:floor]
         keep, seen = [], set()
         for c in smallest + ranked:
@@ -1310,7 +1318,7 @@ def grid_compatible(data: dict, configs) -> bool:
     } <= set(previous or ())
 
 
-def _cached_subset(autotuner, configs, nargs, meta):
+def _cached_subset(autotuner, configs, nargs, meta, resource_prune=None):
     """The cached top-K for this (op, gpu, dtype, bucket), or a bounded fallback on a miss."""
     from miniworld_engine.autotune.configs import op_of  # avoid an import cycle
 
@@ -1326,7 +1334,12 @@ def _cached_subset(autotuner, configs, nargs, meta):
     # Capture records the declared grid; shape/device pruning only limits which
     # of its winners may launch. Comparing the pruned subset falsely invalidates
     # a valid cache whenever an early prune removes even one unsafe schedule.
-    if not grid_compatible(data, autotuner.configs):
+    from miniworld_engine.autotune.configs import using_default_space, validated_global_configs
+    from miniworld_engine import settings
+    reuse_global = (using_default_space() and not settings.current().run_autotune
+                    and bool(data.get("op_identity"))
+                    and bool(validated_global_configs(op, data.get("entries", {}).get(f"{dtype}|{bucket}", []))))
+    if not reuse_global and not grid_compatible(data, autotuner.configs):
         return _miss(op, gk, dtype,
                      "tuned autotune cache is STALE (kernel config grid changed)", configs)
     if _scheme_stale(op, data.get("key_scheme")):
@@ -1352,6 +1365,12 @@ def _cached_subset(autotuner, configs, nargs, meta):
     if not entry:
         return _miss(op, gk, f"{dtype}|{bucket}",
                      "no tuned autotune cache entry for this shape", configs)
+    if reuse_global and stored_op_id and _stored_rev(data) == build_rev(op):
+        measured = validated_global_configs(op, entry)
+        if resource_prune:
+            measured = list(resource_prune(measured, nargs, **meta))
+        if measured:
+            return measured
     # Intersect rather than trust: the cache names configs, the grid decides what is launchable.
     want = {_sig_from_dict(c) for c in entry}
     keep = [c for c in configs if _sig(c) in want]
@@ -1417,7 +1436,7 @@ def install_cache_reader() -> None:
             if not cfgs or _BYPASS_CACHED_SUBSET.get() or (cur.run_autotune and not cur.fill_gaps):
                 return cfgs                          # a BUILD re-benches the whole grid on purpose
             try:
-                hit = _cached_subset(self, cfgs, nargs, meta)
+                hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)
             except Exception:  # never break a launch
                 return cfgs
             return hit or cfgs

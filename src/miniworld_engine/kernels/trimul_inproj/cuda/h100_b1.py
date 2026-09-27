@@ -185,7 +185,7 @@ class Plan(T.CooperativePlan):
             else maps[2]
         )
         maps.insert(3, statsmap)
-        self.p = L.Struct(
+        self.p = L.Struct.fixed("h100_b1:1",
             [
                 *maps,
                 d["ds"],

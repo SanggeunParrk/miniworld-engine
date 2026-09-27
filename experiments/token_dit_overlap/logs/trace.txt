@@ -1,0 +1,42 @@
+## start 02:02:07 restart=0
+#### trace768
+kernels per replay 176; wall 151.5 us/block; sum of kernel durations 160.1 us/block
+  plain GEMM                61.3 us/block   40.5 %
+  attention core            41.8 us/block   27.6 %
+  expand+SwiGLU GEMM        29.0 us/block   19.1 %
+  resgate+AdaLN rows        26.6 us/block   17.5 %
+  other                      1.4 us/block    0.9 %
+gaps between consecutive kernels (us, median / min / max; negative = the next one started before this ended):
+  plain GEMM           -> resgate+AdaLN rows     n= 48   -0.54 /  -1.89 /   0.35  total  -1.89 us/block
+  plain GEMM           -> attention core         n= 24   -3.10 /  -3.58 /  -2.53  total  -3.10 us/block
+  attention core       -> plain GEMM             n= 24   -0.70 /  -0.96 /  -0.54  total  -0.72 us/block
+  resgate+AdaLN rows   -> expand+SwiGLU GEMM     n= 24    0.13 /  -0.10 /   0.29  total   0.11 us/block
+  expand+SwiGLU GEMM   -> plain GEMM             n= 24   -3.04 /  -3.36 /  -2.78  total  -3.06 us/block
+  resgate+AdaLN rows   -> plain GEMM             n= 23    0.06 /  -0.22 /   0.19  total   0.04 us/block
+  other                -> other                  n=  3    0.42 /   0.42 /   0.51  total   0.06 us/block
+  other                -> plain GEMM             n=  2    0.26 /   0.22 /   0.26  total   0.02 us/block
+  plain GEMM           -> plain GEMM             n=  1   -1.60 /  -1.60 /  -1.60  total  -0.07 us/block
+  plain GEMM           -> other                  n=  1    0.29 /   0.29 /   0.29  total   0.01 us/block
+  resgate+AdaLN rows   -> other                  n=  1    0.42 /   0.42 /   0.42  total   0.02 us/block
+#### trace768 done
+#### trace384
+kernels per replay 176; wall 80.4 us/block; sum of kernel durations 86.4 us/block
+  plain GEMM                35.6 us/block   44.3 %
+  expand+SwiGLU GEMM        17.6 us/block   21.9 %
+  resgate+AdaLN rows        16.4 us/block   20.4 %
+  attention core            15.8 us/block   19.6 %
+  other                      1.0 us/block    1.2 %
+gaps between consecutive kernels (us, median / min / max; negative = the next one started before this ended):
+  plain GEMM           -> resgate+AdaLN rows     n= 48   -1.50 /  -1.86 /  -1.15  total  -3.01 us/block
+  plain GEMM           -> attention core         n= 24   -2.72 /  -3.20 /  -2.27  total  -2.74 us/block
+  attention core       -> plain GEMM             n= 24   -0.51 /  -0.86 /  -0.42  total  -0.55 us/block
+  resgate+AdaLN rows   -> expand+SwiGLU GEMM     n= 24    0.13 /  -0.03 /   0.26  total   0.12 us/block
+  expand+SwiGLU GEMM   -> plain GEMM             n= 24    0.03 /  -0.16 /   0.29  total   0.02 us/block
+  resgate+AdaLN rows   -> plain GEMM             n= 23    0.10 /   0.00 /   0.29  total   0.09 us/block
+  other                -> other                  n=  3    0.58 /   0.38 /   0.64  total   0.07 us/block
+  other                -> plain GEMM             n=  2    0.16 /   0.13 /   0.16  total   0.01 us/block
+  plain GEMM           -> plain GEMM             n=  1   -0.90 /  -0.90 /  -0.90  total  -0.04 us/block
+  plain GEMM           -> other                  n=  1    0.06 /   0.06 /   0.06  total   0.00 us/block
+  resgate+AdaLN rows   -> other                  n=  1    0.42 /   0.42 /   0.42  total   0.02 us/block
+#### trace384 done
+## all done 02:03:53

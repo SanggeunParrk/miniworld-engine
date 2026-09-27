@@ -63,8 +63,11 @@ def _ext(width: int, ctas: int):
     """Build the extension for one channel width and SM count (both in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid)."""
     ensure_cuda_home()
+    # This change lives in an included header. Give the corrected D64 kernel
+    # its own cache identity instead of accepting a prebuilt pre-barrier binary.
+    revision = "_input_barrier_v1" if width == 64 else ""
     return load_extension(
-        name=f"transition_wide_sm90a_d{width}_c{ctas}",
+        name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"),
                            f"-I{_dir.parent / 'anthropic_v5'}", f"-I{_dir}", f"-I{_dir / 'kernels'}",

@@ -166,9 +166,11 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The launch, split out of the autograd Function so Dynamo can trace up to it and past it.
     Returns (out, xn, rstd, c1), all freshly allocated."""
+    args = (x, gamma, beta, wa, wb, wst, eps, save)
+    config = _select_schedule(args, backward=False, save=save)
     if _is_fake(x, wa):
-        return _fwd_launch_fake(x, gamma, beta, wa, wb, wst, eps, save)
-    return tuple(_ext_for(x, save).transition_fused_fwd(x, gamma, beta, wa, wb, wst, eps, save))
+        return _fwd_launch_fake(*args)
+    return tuple(_ext(config["ctas"], config["dw_repl"], save).transition_fused_fwd(*args))
 
 
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
@@ -184,9 +186,28 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                            torch.Tensor]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
+    args = (dy, x, xn, rstd, c1, gamma, wa, wb, ws)
+    config = _select_schedule(args, backward=True, save=True)
     if _is_fake(dy, x):
-        return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
-    return tuple(_ext_for(x).transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws))
+        return _bwd_launch_fake(*args)
+    return tuple(_ext(config["ctas"], config["dw_repl"], True).transition_fused_bwd(*args))
+
+
+def _select_schedule(args, *, backward, save):
+    from miniworld_engine.autotune.fused_config import transition_candidates, validator
+    from miniworld_engine.autotune.native import choose_config, tensor_key
+    x = args[1] if backward else args[0]
+    sms = _sm_count(x.device)
+    grid = transition_candidates(sms, backward=backward)
+    symbol = "transition_fused_bwd" if backward else "transition_fused_fwd"
+    def run(c):
+        return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save), symbol)(*args))
+    tensors = args if backward else args[:6]
+    op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
+    return choose_config(op, grid, dtype=str(x.dtype),
+                         bucket=tensor_key(*tensors, extra=(save, args[-2] if not backward else None, sms)),
+                         device_index=x.device.index, run=run,
+                         validate=validator(run, grid[0], output_only=not save))
 
 
 class _FusedTransitionSM90A(torch.autograd.Function):

@@ -120,6 +120,9 @@ def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
             computes = row.computes or ("",)
             for compute in computes:
                 for option in (None, *row.options):
+                    from miniworld_engine.autotune import policy
+                    if not policy.allows(row.stream, length, mode, impl, option, row.impls):
+                        continue
                     if not applies(option, mode):
                         continue
                     if (sm and option and option[0] == "trimul_impl"
@@ -220,6 +223,13 @@ def install_recorder(sink: list) -> None:
         sink.append((f"<unautotuned:{self.fn.__name__}>", "", ""))
         return
 
+    from miniworld_engine.autotune import native
+    def native_choice(op, candidates, *, dtype, bucket, **kwargs):
+        if not candidates:
+            raise ValueError(f"{op}: no declared native schedule")
+        sink.append((op, dtype.removeprefix("torch."), bucket))
+        return dict(candidates[0])
+    native.choose_config = native_choice
     autotuner_mod.Autotuner.run = tuned_run
     if hasattr(autotuner_mod, "Heuristics"):
         autotuner_mod.Heuristics.run = tuned_run
@@ -336,7 +346,7 @@ def install_no_calibration() -> None:
 
 
 def install_native_recorders() -> None:
-    """Native CUDA has no autotune grid; model its output without compiling or launching it.
+    """Record native selectors and model outputs without compiling or launching CUDA.
 
     Keep the Python dispatch intact so the other declared pins still trace the Triton
     alternatives. Calling a pybind extension on FakeTensors can fail into a different
@@ -371,7 +381,7 @@ def install_native_recorders() -> None:
             raise RuntimeError("native derivation recorder received a real tensor")
 
     if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
-        # These packaged native composites have no MiniWorld autotune grid.
+        # Packaged composites need explicit fake contracts; tunable ones also record selectors.
         # Keep their module dispatch and saved-tensor/autograd contracts during
         # derivation, while preventing driver/C++ launches on fake data.
         import importlib
@@ -386,17 +396,20 @@ def install_native_recorders() -> None:
             ("kernels.trimul_inproj.cuda.h100_inference", (("inference", "_inference_fake"),)),
         )
 
-        def native_contract(fake):
+        def native_contract(fake, selector=None):
             def run(*args, **kwargs):
                 first = args[0][0] if isinstance(args[0], list) else args[0]
                 require_fake(first)
+                if selector is not None:
+                    selector(*args, **kwargs)
                 return fake(*args, **kwargs)
             return run
 
         for module_name, functions in contracts:
             module = importlib.import_module("miniworld_engine." + module_name)
             for entry, fake in functions:
-                setattr(module, entry, native_contract(getattr(module, fake)))
+                selector = getattr(module, "_select_config", None) if module_name.endswith("h100_inference") else None
+                setattr(module, entry, native_contract(getattr(module, fake), selector))
 
     class TransitionExtension:
         def transition_b2b_fwd(self, x, rstd, c1, g, beta, wa, wb, ws, residual=True):
@@ -741,6 +754,22 @@ def coverage(arch: str, gpu_key_name: str, data_dir: Path | None = None) -> dict
         if op_dir.name not in wanted_ops:
             continue
         try:
+            from miniworld_engine.autotune import native
+            if op_dir.name in native.BUILD_OPS:
+                reason = cache.measurement_mismatch(op_dir.name, data, native.source_identity())
+                if reason:
+                    invalid[op_dir.name] = reason
+                    continue
+                for op, key in want:
+                    if op != op_dir.name:
+                        continue
+                    _, bucket = key.split("|", 1)
+                    grid = native.candidates_for(op, bucket)
+                    live = {tuple(sorted(c.items())) for c in grid}
+                    ranked = cache.runtime_candidates(data, key)
+                    if ranked and any(tuple(sorted(c.get("kwargs", {}).items())) in live for c in ranked):
+                        usable.add((op, key))
+                continue
             configs = configs_for(op_dir.name)
             identity = cache_status._current_op_identity(op_dir.name)
             reason = ("cannot resolve kernel identity" if identity is None else

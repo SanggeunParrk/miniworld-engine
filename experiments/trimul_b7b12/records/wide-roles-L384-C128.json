@@ -1,0 +1,15 @@
+{
+  "config": {
+    "c": 128,
+    "count": 264,
+    "dwctas": 104,
+    "dxcount": 160,
+    "splits": 13,
+    "groups": 8
+  },
+  "times": {
+    "both": 370.8,
+    "dW_only": 349.4,
+    "dx_only": 341.5
+  }
+}

@@ -1,0 +1,394 @@
+# vendored from team-gm psk/benchmark : src/team_gm/modules/layers/transition.py
+from contextlib import contextmanager
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from jaxtyping import Float
+
+from miniworld_engine import kernels, settings
+from miniworld_engine._typecheck import typecheck
+from miniworld_engine.modules import dispatch as _dispatch
+from miniworld_engine.modules.dispatch import KernelBackend, resolve_transition
+from miniworld_engine.modules.exceptions import (
+    ImplementationType,
+    InvalidImplementationError,
+)
+from miniworld_engine.modules.functional import swish_gate
+from miniworld_engine.modules.primitives import LayerNorm, Linear
+
+
+def _force_split_enabled() -> bool:
+    """Force the split path (ln_in + non-fused triton_transition) instead of the fused
+    kernels. The fused large-d path uses the bounded-smem k-tiled b2b (no OOM at d>=256),
+    but the split is the proven, shape-general fallback: set MINIWORLD_TRANSITION_FORCE_SPLIT=1
+    to A/B against it or as an escape hatch on a GPU where the fused path misbehaves. Static
+    (env, compile-safe) rather than a runtime try/except, which is fragile under torch.compile."""
+    from miniworld_engine import settings
+
+    return settings.current().transition_force_split
+
+
+def _cuda_b2b_inference_enabled() -> bool:
+    """Whether to route d=128/n=4 inference through the hand-CUDA fused b2b kernel
+    (beats the Triton b2b ~1.29x). Default on; set MINIWORLD_TRANSITION_CUDA_B2B=0 to
+    A/B against the Triton path."""
+    from miniworld_engine import settings
+
+    return settings.current().transition_cuda_b2b
+
+
+def _large_d_training_backend_from_env() -> str | None:
+    from miniworld_engine import settings
+
+    return settings.current().transition_large_d_training
+
+
+def _explicit_cute_backward_backend() -> str:
+    from miniworld_engine import settings
+
+    return settings.current().transition_cute_backward
+
+
+@contextmanager
+def nvtx_range(name: str, enabled: bool):
+    if enabled:
+        torch.cuda.nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        if enabled:
+            torch.cuda.nvtx.range_pop()
+
+
+class Transition(nn.Module):
+    """Transition layer with SwiGLU activation.
+
+    Parameters
+    ----------
+    d_hidden : int
+        Dimension of the input and output features.
+    n : int
+        Expansion factor.
+    implementation : ImplementationType
+        Implementation to use.
+
+    """
+
+    def __init__(
+        self,
+        d_hidden: int = 128,
+        n: int = 4,
+        implementation: ImplementationType = ImplementationType.PYTORCH,
+        *,
+        anthropic_row: str = "v2",
+        cuda_variant: str | None = None,
+        cuda_forward_config: dict[str, int] | None = None,
+        cuda_backward_config: dict[str, int] | None = None,
+        cuda_norm_config: tuple[int, int, int, int, int] = (4, 4, 8, 256, 4),
+    ) -> None:
+        super().__init__()
+        self.d_hidden = d_hidden
+        self.n = n
+        # Every backend returns x + transition(x). Residual fusion depends on the
+        # selected path: the legacy split adds it separately; transition_residual_fusion
+        # folds it into squeeze forward and input-LN backward. No dropout in this module.
+        # 'miniworld' (ours, auto) resolves to the TRITON family, which itself
+        # dispatches the best concrete kernel per shape/arch (hand-CUDA b2b for
+        # d in {128,256} & n==4, cute split for d>=512, else triton). Transition has
+        # NO cuequivariance kernel, so an explicit CUEQUIVARIANCE request falls back to
+        # the PYTORCH reference (resolve() maps cueq->pytorch for non-trimul ops) — NOT
+        # the Triton fused path (whose bf16 kernel OOMs shared memory at d>=256 on H100).
+        # Resolution lives in modules.dispatch; forward routes on self._backend.
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_transition(self.implementation)
+        self.anthropic_row = anthropic_row
+        self.cuda_variant = cuda_variant
+        self.cuda_forward_config = dict(cuda_forward_config) if cuda_forward_config is not None else None
+        self.cuda_backward_config = dict(cuda_backward_config) if cuda_backward_config is not None else None
+        self.cuda_norm_config = tuple(cuda_norm_config)
+        if self._backend == KernelBackend.CUDA:
+            from miniworld_engine.kernels.transition.cuda.variants import validate
+
+            if n != 4 or cuda_variant is None or cuda_forward_config is None or cuda_backward_config is None:
+                raise ValueError(
+                    "CUDA Transition requires n=4, cuda_variant='streamed_k' or 'full_k', "
+                    "and explicit cuda_forward_config/cuda_backward_config"
+                )
+            validate(cuda_variant, d_hidden, cuda_forward_config)
+            validate(cuda_variant, d_hidden, cuda_backward_config)
+
+        self.ln_in = LayerNorm(
+            d_hidden, implementation=(ImplementationType.PYTORCH if self._backend == KernelBackend.ANTHROPIC else self.implementation), dtype=torch.bfloat16
+        )
+        self.expand_a = Linear(
+            d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.bfloat16
+        )
+        self.expand_b = Linear(
+            d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.bfloat16
+        )
+        self.squeeze = Linear(
+            d_hidden * n, d_hidden, bias=False, init="zero", dtype=torch.bfloat16
+        )
+
+    @typecheck
+    def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
+        """Forward pass. ALWAYS returns the residual output ``y = x + transition(x)`` (the
+        residual is this module's own input ``x``). Routes on the resolved internal backend
+        (``_backend``), degrading to the pytorch reference (with a warning) on a dtype the fused
+        kernels can't run.
+
+        Residual is always included; whether it shares a kernel with the projection
+        depends on the backend and transition_residual_fusion setting.
+        ``ops.transition`` also includes the residual.
+        """
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic import module_transition
+            return module_transition(self, x)
+        backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
+        if backend == KernelBackend.PYTORCH:
+            return self._torch_forward(x) + x
+
+        if backend == KernelBackend.CUDA:
+            from miniworld_engine.kernels.transition.cuda.variants import transition
+
+            return transition(
+                x,
+                self.ln_in.weight,
+                self.ln_in.bias,
+                self.expand_a.weight.to(x.dtype),
+                self.expand_b.weight.to(x.dtype),
+                self.squeeze.weight.to(x.dtype),
+                self.ln_in.eps,
+                variant=self.cuda_variant,
+                forward_config=self.cuda_forward_config,
+                backward_config=self.cuda_backward_config,
+                norm_config=self.cuda_norm_config,
+            )
+
+        if backend in {
+            KernelBackend.TRITON,
+            KernelBackend.CUEQUIVARIANCE,
+        }:
+            is_training = self.training and torch.is_grad_enabled()
+            if is_training:
+                return self._training_forward(x)
+            return self._inference_forward(x)
+
+        if backend == KernelBackend.CUTE:
+            if settings.current().transition_residual_fusion:
+                from miniworld_engine.kernels.transition.hopper import supported, transition_residual_hopper
+                if supported(x, self.n):
+                    return transition_residual_hopper(
+                        x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight,
+                        self.expand_b.weight, self.squeeze.weight, self.ln_in.eps, use_b2b=False,
+                    )
+            # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
+            # explicit selection). Same fused structure; LN folded into the cute expand.
+            backward_backend = _explicit_cute_backward_backend()
+            return kernels.cute_transition_fused(
+                x,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
+                self.expand_a.weight.to(x.dtype),
+                self.expand_b.weight.to(x.dtype),
+                self.squeeze.weight.to(x.dtype),
+                self.n,
+                self.ln_in.eps,
+                backward_backend=backward_backend,
+                residual=x,
+            )
+
+        raise InvalidImplementationError(self.implementation)
+
+    def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward-only dispatch: no tensors are saved for backward."""
+        def _r(out):  # explicit residual add for paths that don't fold it in-kernel
+            return out + x
+
+        if settings.current().transition_residual_fusion:
+            return self._residual_forward(x)
+        if settings.current().engine_backend == "triton" or _force_split_enabled():
+            return _r(self._old_triton_forward(x))
+        # Pre-Hopper (sm_80 / A100), large d (>=256): the fused triton path uses the
+        # bounded-smem k-tiled b2b there (correct, no OOM) but it is SLOWER than the
+        # shape-general split on A100 (measured cudagraph-manual: d=256 2.28 vs 1.40 ms,
+        # d=512 10.9 vs 4.8 ms). So default large-d to the split; d=128 (the AF3 shape)
+        # still takes the fused b2b below, where it wins. is_sm90plus keeps H100/B200 on
+        # their fused/cute paths unchanged.
+        # sm_86 (RTX A5000/A6000): the fused b2b/triton path loses to the shape-general split
+        # even at d=128 (measured cudagraph-manual: ~0.88-0.95x vs old_triton split, both L and
+        # d sweeps), so route ALL d to the split on sm_86. A100 (sm_80) keeps d=128 fused, where
+        # it wins, via the plain `>= 256` gate.
+        if not _dispatch.is_sm90plus(x.device) and (
+            self.d_hidden >= 256 or _dispatch.is_sm86(x.device)
+        ):
+            return _r(self._old_triton_forward(x))
+        # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> the cute
+        # b2b_fwd_sm100 forward (fits smem + correct + cudagraph-capturable at every d; see
+        # fused.py's cuda_b2b_ok gate). The legacy split (_old_triton_forward) is retained
+        # only as an explicit fallback and is no longer on the default sm100 path.
+        # Hand-CUDA fused b2b beats cute at d_hidden=128 (~2.07x) and d_hidden=256 (~1.21x)
+        # for the AF3 shape (n=4 -> K=ND/4=D). Requires bf16 + n==4 + M%128==0. d_hidden=512
+        # is hardware-limited for full fusion (smem cannot co-hold xn+weights+accumulator at
+        # K=D=512) -> cute's non-fused tiled GEMM wins there, so it falls through below.
+        if (
+            _cuda_b2b_inference_enabled()
+            # Hand-CUDA b2b is Hopper (sm_90a) WGMMA/TMA cutlass code: it does not
+            # build/launch on Blackwell (sm_100) NOR on pre-Hopper (sm_80 / A100).
+            # Gate on Hopper *exactly* (is_sm90) -- `not is_sm100` also matched A100
+            # and crashed it. Everything else falls through to the portable Triton
+            # path (correctness-guard: never route to a backend that can't run here).
+            and _dispatch.is_sm90(x.device)
+            and self.d_hidden in (128, 256)
+            and self.n == 4
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and (x.numel() // self.d_hidden) % 128 == 0
+        ):
+            return kernels.cuda_transition_b2b(
+                x,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
+                self.expand_a.weight.to(x.dtype),
+                self.expand_b.weight.to(x.dtype),
+                self.squeeze.weight.to(x.dtype),
+                self.ln_in.eps,
+            )
+        # cute_transition_fused is the quack SM90 (H100) WGMMA path; it asserts
+        # SM90-only. Route the wide-d case here on Hopper *exactly*; on Blackwell
+        # (sm_100) AND on pre-Hopper (sm_80 / A100) fall through to the triton
+        # family (its split path handles any d) — correctness-guard fallback.
+        if self.d_hidden >= 256 and _dispatch.is_sm90(x.device):
+            return kernels.cute_transition_fused(
+                x,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
+                self.expand_a.weight.to(x.dtype),
+                self.expand_b.weight.to(x.dtype),
+                self.squeeze.weight.to(x.dtype),
+                self.n,
+                self.ln_in.eps,
+                residual=x,
+            )
+        return kernels.triton_transition_fused(
+            x,
+            self.ln_in.weight.to(x.dtype),
+            self.ln_in.bias.to(x.dtype),
+            self.expand_a.weight.to(x.dtype),
+            self.expand_b.weight.to(x.dtype),
+            self.squeeze.weight.to(x.dtype),
+            self.n,
+            self.ln_in.eps,
+            save_xn=False,
+        )
+
+    def _training_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Training dispatch: fastest kernel per d (transition has NO cuequivariance kernel).
+
+        Every path carries a real backward; measured fwd+bwd on H100 (L=384, bf16):
+          d=128  b2b(+VersionA) 0.96ms  <  cute+tritonbwd 1.10  <  torch 1.73
+          d=256  b2b 2.40 ~= cute+tritonbwd 2.39  <  torch 3.13
+          d=512  cute+tritonbwd 6.90  <  torch 7.52   (b2b fwd OOMs smem at d=512)
+        Mirrors the inference dispatch: b2b for d<=256, cute split for d=512.
+        """
+        def _r(out):  # explicit residual add for paths that don't fold it in-kernel
+            return out + x
+
+        if settings.current().transition_residual_fusion:
+            return self._residual_forward(x)
+        if settings.current().engine_backend == "triton" or _force_split_enabled():
+            return _r(self._old_triton_forward(x))
+        # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
+        # in training too (d=256 6.3 vs 7.0 ms, d=512 20.2 vs 26.8 ms). d=128 stays fused
+        # on A100. sm_86 (RTX A5000/A6000) also loses at d=128 (~0.91x vs split), so route
+        # ALL d to the split there too.
+        if not _dispatch.is_sm90plus(x.device) and (
+            self.d_hidden >= 256 or _dispatch.is_sm86(x.device)
+        ):
+            return _r(self._old_triton_forward(x))
+        # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> cute
+        # b2b_fwd_sm100 forward + the sm100 gatebwd (Version A) backward. Verified fwd+bwd
+        # cos=1.0 and cudagraph-capturable at every d; ~1.49x faster fwd+bwd than the legacy
+        # split at d=256 (1.45 vs 2.16ms cudagraph). d=512 now also keeps gatebwd instead of
+        # the split's legacy backward. (_old_triton_forward retained only as a fallback.)
+        if self.d_hidden >= 512 and _dispatch.is_sm90(x.device):
+            # d=512: b2b fusion can't fit smem (xn+weights+accumulator) and h round-trip is not
+            # the bottleneck (compute-bound) -> cute split (expand + cuBLAS squeeze). The triton
+            # (Version A style) backward beats the cute backend AND torch; env can override.
+            # SM90 (H100) only; on Blackwell AND pre-Hopper (A100) the triton family (below)
+            # carries d=512 too.
+            backward_backend = _large_d_training_backend_from_env() or "triton"
+            return kernels.cute_transition_fused(
+                x,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
+                self.expand_a.weight.to(x.dtype),
+                self.expand_b.weight.to(x.dtype),
+                self.squeeze.weight.to(x.dtype),
+                self.n,
+                self.ln_in.eps,
+                backward_backend=backward_backend,
+                residual=x,
+            )
+        # d<=256 (Version A / save_xn=False): fused forward (b2b / sm100 cute fwd) + the
+        # sm100 gatebwd backward (recomputes xn from saved stats, less memory). On sm_100
+        # only d=128 reaches here (d>=256 took the split branch above); the AF3 shape.
+        return kernels.triton_transition_fused(
+            x,
+            self.ln_in.weight.to(x.dtype),
+            self.ln_in.bias.to(x.dtype),
+            self.expand_a.weight.to(x.dtype),
+            self.expand_b.weight.to(x.dtype),
+            self.squeeze.weight.to(x.dtype),
+            self.n,
+            self.ln_in.eps,
+            save_xn=False,
+        )
+
+    def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.transition.hopper import enabled, transition_residual_hopper
+        if enabled(x, self.n):
+            return transition_residual_hopper(
+                x, self.ln_in.weight, self.ln_in.bias,
+                self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.eps,
+            )
+        return self._residual_triton_forward(x)
+
+    def _residual_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.transition.triton.b2b_residual import transition_residual_dispatch
+
+        return transition_residual_dispatch(
+            x, self.ln_in.weight, self.ln_in.bias,
+            self.expand_a.weight.to(x.dtype), self.expand_b.weight.to(x.dtype),
+            self.squeeze.weight.to(x.dtype), self.ln_in.eps,
+        )
+
+    def _old_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Legacy split triton transition (ln_in + triton_transition): the shape-general
+        path used on sm_100 for d>=256, where the fused kernels don't fit (b2b/cute are
+        Hopper-only, triton_transition_fused smem-OOMs). Carries a real backward, so it
+        serves both inference and training."""
+        x = self.ln_in(x)
+        return kernels.triton_transition(
+            x,
+            self.expand_a.weight.to(x.dtype),
+            self.expand_b.weight.to(x.dtype),
+            self.squeeze.weight.to(x.dtype),
+            self.n,
+        )
+
+    def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Norm affine params are fp32-pinned; cast them to the activation dtype for the
+        # reference LN so the downstream bf16 expand/squeeze get a matching activation.
+        x = F.layer_norm(
+            x,
+            (self.d_hidden,),
+            self.ln_in.weight.to(x.dtype),
+            self.ln_in.bias.to(x.dtype),
+            self.ln_in.eps,
+        )
+        a = self.expand_a(x)
+        b = self.expand_b(x)
+        x = swish_gate(a, b)
+        return self.squeeze(x)

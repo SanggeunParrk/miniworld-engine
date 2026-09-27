@@ -218,6 +218,11 @@ class Settings:
     #: training and inference). Falls back on any other shape, dtype or architecture.
     #: MINIWORLD_TRANSITION_FUSED_SM90A=0 also turns it off.
     transition_fused_sm90a: bool = True
+    #: Route the pair-bias attention core, when it is asked to compute in bf16 (``compute_dtype=torch.bfloat16``), on
+    #: sm_90 with 16 heads x 48, B == 1 and L a multiple of 128, through the hand-CUDA forward and backward
+    #: (kernels/augmented_attention/cuda: fwd+bwd 2.5x the bf16 Triton core at L=768, A=48, peak memory -1.9 GB).
+    #: Falls back on anything else. MINIWORLD_AUGATTN_BF16_SM90=0 also turns it off.
+    augmented_attention_bf16_sm90: bool = True
     #: Large-d training backend: None = torch fallback, "triton" = cute+triton hybrid, "cute" =
     #: all-cute. Formerly MINIWORLD_TRANSITION_LARGE_D_TRAINING.
     transition_large_d_training: Literal["triton", "cute"] | None = None

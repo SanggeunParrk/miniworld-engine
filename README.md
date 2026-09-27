@@ -16,7 +16,14 @@ to **cut one op out of the full model and optimize it in isolation**:
 
 Current A6000 validation, cache coverage, module timings and qualification limits: [final audit](docs/records/a6000-production-audit.md).
 
-## Version 2.0.0
+## Version 2.1.0
+
+CUDA-first production builds, small default Triton spaces, explicit global search,
+and separate inference/training tuning. [Policy, commands and qualification status](docs/releases/2.1.0.md).
+CUDA tuning coverage is family-specific; preserved measurement records do not
+imply that every inference shape has been re-tuned.
+
+## Version 2.0.0 history
 
 This release builds on Anthropic's stronger published inference kernels and adds
 training implementations. [Release map and migration](docs/releases/2.0.0.md) ·
@@ -204,12 +211,14 @@ in -- `level=module` for a production module (`triangle_multiplication`,
 out of it may share a name, which is why the level is not optional.
 All final benchmarks run the `torch.compile`d path; non-compiled debug probes
 are not valid final benchmark results. The CUDA-graph regime defaults to
-`cudagraph=auto`, resolved per `(mode, module)` from a measured sweep: **inference**
-is launch-bound for the small/many-launch modules so it captures a manual graph;
-**training** is backward-dominated (compute-bound) so it stays compile-only (no
-graph). `swa_atom_attention` is the one exception — its FlashAttention path is not
-graph-capturable — and stays no-graph in both modes. Pass an explicit `--cudagraph`
-to force one regime. See [docs/benchmarking-cautions.md](docs/benchmarking-cautions.md).
+`cudagraph=auto`: inference timing captures a manual graph; module training
+timing runs both graph OFF and ON in separate processes and CSVs. Compilation
+remains enabled on both sides. Memory measurements and kernel training remain
+ungraphed by default. Explicit `--cudagraph disabled` or `--cudagraph manual`
+selects a single regime. Dropout training graph rows require matched-seed output
+and gradient checks plus changing random outputs across consecutive replays;
+capture failures are reported, never replaced with graph OFF.
+See [docs/benchmarking-cautions.md](docs/benchmarking-cautions.md).
 Generated results land in the selected target's `artifacts/` directory, for
 example `benchmarks/modules/triangle_multiplication/artifacts/`.
 The benchmark CSV is the source of truth. It includes method, dimensions,
@@ -284,8 +293,8 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 103 | triton 97, cuda 6 |
-| **sm90+** | H100 | 21 | cute 13, triton 5, cuda 3 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 125 | triton 119, cuda 6 |
+| **sm90+** | H100 | 24 | cute 13, cuda 6, triton 5 |
 | **sm100+** | B200 | 4 | cute 4 |
 <!-- END GENERATED: hardware-support -->
 

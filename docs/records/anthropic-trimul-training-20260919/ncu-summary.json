@@ -1,0 +1,18 @@
+{
+  "v1": {
+    "gpu__time_duration.sum": "862.784000",
+    "dram__bytes.sum.per_second": "1.605847",
+    "dram__cycles_active.avg.pct_of_peak_sustained_elapsed": "47.903697",
+    "lts__throughput.avg.pct_of_peak_sustained_elapsed": "63.593861",
+    "smsp__issue_active.avg.pct_of_peak_sustained_active": "22.086921",
+    "smsp__warps_eligible.avg.per_cycle_active": "0.272139"
+  },
+  "v3": {
+    "gpu__time_duration.sum": "536.256000",
+    "dram__bytes.sum.per_second": "2.542405",
+    "dram__cycles_active.avg.pct_of_peak_sustained_elapsed": "75.844303",
+    "lts__throughput.avg.pct_of_peak_sustained_elapsed": "70.075004",
+    "smsp__issue_active.avg.pct_of_peak_sustained_active": "26.904263",
+    "smsp__warps_eligible.avg.per_cycle_active": "0.408768"
+  }
+}

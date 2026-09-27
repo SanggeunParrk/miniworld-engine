@@ -1,6 +1,6 @@
 # triangle attention
 
-This document records the MiniWorld full triangular self-attention benchmark
+This document records this repo's full triangular self-attention benchmark
 path. It covers `TriangleAttention(use_self_attention=True)`: LayerNorm,
 query/key/value/bias/gate projections, Triton pair-bias attention, and output
 gating. The bias-only case is tracked separately in
@@ -19,7 +19,7 @@ Implementations in the benchmark:
 
 - `pytorch`: compiled module reference
 - `cuequivariance`: cuEquivariance triangle attention path
-- `miniworld`: MiniWorld module path using the canonical Triton pair-bias
+- `miniworld`: this repo's module path using the canonical Triton pair-bias
   attention kernel plus repo LayerNorm/gate dispatch
 
 The benchmark uses `compile=true`, bf16 mixed precision, `mask_prob=0.0`,
@@ -55,13 +55,13 @@ MODULE BENCH DONE target=triangle_attention
 ```
 
 One expected stress point appeared: PyTorch failed with OOM for manual training
-at `L=1024, d_pair=128`; cuEquivariance and MiniWorld completed that point.
+at `L=1024, d_pair=128`; cuEquivariance and Engine completed that point.
 
 ### Manual CUDA graph results
 
 Inference L sweep, fixed `d_pair=128`:
 
-| L | PyTorch | cuEquivariance | MiniWorld | speedup vs best baseline |
+| L | PyTorch | cuEquivariance | Engine | speedup vs best baseline |
 | ---: | ---: | ---: | ---: | ---: |
 | 384 | 3.729 ms | 1.441 ms | 0.700 ms | 2.06x |
 | 512 | 8.135 ms | 2.677 ms | 1.308 ms | 2.05x |
@@ -72,7 +72,7 @@ Inference L sweep, fixed `d_pair=128`:
 
 Training L sweep, fixed `d_pair=128`:
 
-| L | best baseline | MiniWorld | speedup |
+| L | best baseline | Engine | speedup |
 | ---: | ---: | ---: | ---: |
 | 384 | 5.025 ms | 3.318 ms | 1.51x |
 | 512 | 9.786 ms | 6.525 ms | 1.50x |
@@ -83,7 +83,7 @@ Training L sweep, fixed `d_pair=128`:
 
 Initial d sweep at `L=384` was weaker than the L sweep:
 
-| mode | d_pair | MiniWorld | best baseline | speedup |
+| mode | d_pair | Engine | best baseline | speedup |
 | --- | ---: | ---: | ---: | ---: |
 | inference | 128 | 0.701 ms | 1.440 ms | 2.06x |
 | inference | 256 | 1.286 ms | 2.381 ms | 1.85x |

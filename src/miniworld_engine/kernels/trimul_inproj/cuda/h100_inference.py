@@ -56,7 +56,22 @@ def inference(
     direction: int,
     eps: float,
 ) -> torch.Tensor:
-    """Run packaged K1, contractions, and K3 with live weights."""
+    """Run packaged K1, contractions, and K3 with a GPU/shape-specific schedule."""
+    config = _select_config(x, weights, mask, direction, eps)
+    return _run_inference(x, weights, mask, direction, eps, config)
+
+
+def _select_config(x, weights, mask, direction, eps):
+    from miniworld_engine.autotune.fused_config import trimul_candidates, validator
+    from miniworld_engine.autotune.native import choose_config, tensor_key
+    grid = trimul_candidates(x.shape[-1], weights[0].shape[0], x.shape[1], direction)
+    run = lambda c: _run_inference(x, weights, mask, direction, eps, c)
+    return choose_config("trimul_fwd_sm90_cuda", grid, dtype=str(x.dtype),
+                         bucket=tensor_key(x, *weights, mask, extra=(direction, eps)),
+                         device_index=x.device.index, run=run, validate=validator(run, grid[0]))
+
+
+def _run_inference(x, weights, mask, direction, eps, config):
     # weights: left, left gate, right, right gate, output gate, output, four LN affine tensors.
     wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = weights
     z = x[0]
@@ -67,9 +82,8 @@ def inference(
     with torch.cuda.device(x.device):
         T._launch_module()._make_context_current(x.device.index)
         kk = _kernels()
-        cfg = K.lookup(
-            "sm_90a", cz, ch, "b", n, "incoming" if direction == 2 else "outgoing", True
-        )
+        from miniworld_engine.autotune.fused_config import unpack_trimul
+        cfg = unpack_trimul(config)
         # Live packing is captured in CUDA graphs; there is no stale parameter snapshot.
         w1 = (
             torch.stack(

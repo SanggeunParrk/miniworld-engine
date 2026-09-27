@@ -125,7 +125,14 @@ def test_a_dispatch_cache_is_wellformed(path: Path):
         fields = key.split("|")
         assert len(fields) >= 2, f"{key!r}: expected '|'-joined fields, got {fields}"
         assert all(fields), f"{key!r}: an empty field in {fields}"
-        assert fields[-1].isdigit(), f"{key!r}: the last field must be the shape it was tuned at"
+        if path.parent.name == "ln_bwd_dispatch" and len(fields) == 4:
+            # LN dispatch separates activation and affine precision after the
+            # two shape fields; mixed-affine winners are not interchangeable.
+            assert all(field.isdigit() for field in fields[:2]), key
+            assert all(field in {"torch.bfloat16", "torch.float16", "torch.float32", "torch.float64"}
+                       for field in fields[2:]), key
+        else:
+            assert fields[-1].isdigit(), f"{key!r}: the last field must be the shape it was tuned at"
         times = entry["ms"]
         # The two writers spell the winner differently -- layernorm calls it `path`, bias-only
         # calls it `choice`. Their readers each know their own name, so this accepts both rather

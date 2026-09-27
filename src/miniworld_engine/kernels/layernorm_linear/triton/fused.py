@@ -34,7 +34,7 @@ import triton.language as tl
 # kernel was written for) is still reachable; every smaller candidate is made correct by the
 # k-loops below rather than silently wrong.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine.autotune.shape_key import both_key
 
 
 def get_seq_group(rows) -> int:
@@ -82,7 +82,7 @@ def _prefer_covering_lnl(configs, nargs, **_):
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"),
-                 key=['shape_key', 'HAS_BIAS'],
+                 key=['shape_key', 'HAS_BIAS', 'SAVE_STATS'],
                  prune_configs_by={'early_config_prune': _prefer_covering_lnl})
 @triton.jit
 def _lnl_fwd_kernel(
@@ -95,6 +95,7 @@ def _lnl_fwd_kernel(
     stride_ym, stride_yn,
     HAS_BIAS: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
+    Mean=None, Rstd=None, SAVE_STATS: tl.constexpr = False,
 ):
     # One program owns BLOCK_M1 rows and ALL of N: the LayerNorm STATISTICS are computed once
     # per row and reused across the N-loop (vs recomputing them per (M,N) tile). Grid is 1-D
@@ -122,6 +123,9 @@ def _lnl_fwd_kernel(
         xc = tl.where(k_mask[None, :], x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) * inv_k
         rstd = tl.rsqrt(var + eps)
+        if SAVE_STATS:
+            tl.store(Mean + rows, mean, mask=row_mask)
+            tl.store(Rstd + rows, rstd, mask=row_mask)
         g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
         beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
         xn = (xc * rstd[:, None] * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)
@@ -133,7 +137,7 @@ def _lnl_fwd_kernel(
                 w_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
             )
-            acc = tl.dot(xn, w, acc, out_dtype=tl.float32)  # bf16xbf16 -> fp32 acc
+            acc = tl.dot(xn, w, acc, out_dtype=tl.float32, input_precision="ieee")
             if HAS_BIAS:
                 acc += tl.load(b_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)[None, :]
             tl.store(
@@ -166,6 +170,9 @@ def _lnl_fwd_kernel(
             s += tl.sum(xc * xc, axis=1)
         var = s * inv_k
         rstd = tl.rsqrt(var + eps)
+        if SAVE_STATS:
+            tl.store(Mean + rows, mean, mask=row_mask)
+            tl.store(Rstd + rows, rstd, mask=row_mask)
 
         # --- pass 2: loop the projection over N-tiles; each N-tile contracts over the K-tiles,
         # normalizing the x tile in-register (never materializing the normalized row). ---
@@ -188,7 +195,7 @@ def _lnl_fwd_kernel(
                     w_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                     mask=k_mask[:, None] & col_mask[None, :], other=0.0,
                 )
-                acc = tl.dot(xn, w, acc, out_dtype=tl.float32)  # bf16xbf16 -> fp32 acc
+                acc = tl.dot(xn, w, acc, out_dtype=tl.float32, input_precision="ieee")
             if HAS_BIAS:
                 acc += tl.load(b_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)[None, :]
             tl.store(
@@ -213,24 +220,61 @@ def layernorm_linear_triton_fwd(
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Portable Triton ``LayerNorm(x) @ W^T + b``. Falls back to eager torch if K>1024."""
+    return _launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=False)[0]
+
+
+def _with_stats_fake(x, ln_weight, ln_bias, weight, bias, eps=1e-5):
+    m = x.numel() // x.shape[-1]
+    return (x.new_empty((*x.shape[:-1], weight.shape[0])),
+            x.new_empty((m,), dtype=torch.float32),
+            x.new_empty((m,), dtype=torch.float32))
+
+
+@opaque(fake=_with_stats_fake, name="layernorm_linear_fwd_stats")
+def layernorm_linear_triton_fwd_stats(
+    x: torch.Tensor, ln_weight: torch.Tensor, ln_bias: torch.Tensor,
+    weight: torch.Tensor, bias: torch.Tensor | None, eps: float = 1e-5,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Training forward: save the same FP32 statistics used by the projection."""
+    return _launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=True)
+
+
+def _launch(x, ln_weight, ln_bias, weight, bias, eps, *, save_stats):
     assert x.is_cuda and weight.is_cuda
     K = x.shape[-1]
     N = weight.shape[0]
     assert weight.shape[1] == K, f"weight (N,K) mismatch: {tuple(weight.shape)} vs K={K}"
     x2 = x.reshape(-1, K)
     M = x2.shape[0]
+    if M == 0:
+        return (x.new_empty((*x.shape[:-1], N)),
+                x.new_empty((0,), dtype=torch.float32),
+                x.new_empty((0,), dtype=torch.float32))
+
+    # This family uses low-precision Tensor Core tiles. For FP32, use the
+    # existing LN kernel and cuBLAS instead of compiling a large scalar-dot tile.
+    if x.dtype == torch.float32 and K <= 1024:
+        from miniworld_engine.kernels.layernorm.compile_native import _fwd_impl
+        xn, mean, rstd = _fwd_impl(x2.unsqueeze(0), ln_weight, ln_bias, eps)
+        y = torch.nn.functional.linear(xn, weight, bias)
+        return y.reshape(*x.shape[:-1], N), mean, rstd
 
     if K > 1024:  # one-block-K assumption broken; correctness-first eager fallback
         import torch.nn.functional as F
         y = F.linear(F.layer_norm(x2.float(), (K,), ln_weight.float(), ln_bias.float(), eps),
                      weight.float(), None if bias is None else bias.float())
-        if bias is not None:
-            pass
-        return y.to(x.dtype).reshape(*x.shape[:-1], N)
+        if not save_stats:
+            empty = x.new_empty((0,), dtype=torch.float32)
+            return y.to(x.dtype).reshape(*x.shape[:-1], N), empty, empty
+        xf = x2.float()
+        return (y.to(x.dtype).reshape(*x.shape[:-1], N), xf.mean(-1),
+                torch.rsqrt(xf.var(-1, unbiased=False) + eps))
 
     x2 = x2.contiguous()
     w = weight.contiguous()
     y = torch.empty(M, N, device=x.device, dtype=x.dtype)
+    mean = torch.empty(M if save_stats else 0, device=x.device, dtype=torch.float32)
+    rstd = torch.empty_like(mean)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731  (1-D: N looped in-kernel)
     _lnl_fwd_kernel[grid](
         x2, w, bias if bias is not None else x2, ln_weight.contiguous(), ln_bias.contiguous(), y,
@@ -238,8 +282,8 @@ def layernorm_linear_triton_fwd(
         x2.stride(0), x2.stride(1),
         w.stride(0), w.stride(1),
         y.stride(0), y.stride(1),
-        # L = x.shape[-2], read BEFORE the reshape to (M, K) -- one rule for pair
-        # (B, L, L, D) and token/atom (B, L, D). Never M.
-        HAS_BIAS=bias is not None, shape_key=both_key(rows_of(x.shape), N=N, K=K),
+        # This wrapper owns the entire launch, including when x is already 2-D.
+        HAS_BIAS=bias is not None, shape_key=both_key(M, N=N, K=K),
+        Mean=mean, Rstd=rstd, SAVE_STATS=save_stats,
     )
-    return y.reshape(*x.shape[:-1], N)
+    return y.reshape(*x.shape[:-1], N), mean, rstd

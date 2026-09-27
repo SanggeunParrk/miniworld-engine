@@ -1,0 +1,8 @@
+## start 00:47:29 restart=0
+== [BACC=0 QREG=0] -> L=768 nb=24 reps=600: 0 of 600 runs differ bitwise from run 0
+== [BACC=0 QDEP=2] -> L=768 nb=24 reps=600: 0 of 600 runs differ bitwise from run 0
+== [BACC=0 QDEP=1] -> L=768 nb=24 reps=600: 99 of 600 runs differ bitwise from run 0
+== [QREG=0] -> L=768 nb=24 reps=600: 0 of 600 runs differ bitwise from run 0
+== [QDEP=2] -> L=768 nb=24 reps=600: 0 of 600 runs differ bitwise from run 0
+== [QDEP=1] -> L=768 nb=24 reps=600: 7 of 600 runs differ bitwise from run 0
+## all done 01:03:25

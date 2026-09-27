@@ -1,0 +1,261 @@
+"""Compute-efficient ProteinMPNN encoder edge MLP for A5000 crop shapes.
+
+The memory-efficient implementation in :mod:`.main` keeps both dependent
+128x128 projections in one forward kernel and recomputes the first projection
+during backward.  This alternative uses two forward kernels and saves the
+first projection.  Backward can therefore start immediately with the existing
+projection dX kernel; the two global weight gradients and exact BF16 bias
+reductions remain PyTorch GEMM/sum operations.
+
+The caller owns dispatch validation.  In particular, flattened element offsets
+must fit signed int32 and all operands must satisfy the same contiguous BF16
+projection contract as the memory-efficient path.
+"""
+
+from __future__ import annotations
+
+import torch
+import triton
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
+import triton.language as tl
+
+from miniworld_engine.kernels.mpnn_message.triton.main import _projection_dx_op
+
+
+_WIDTH = 128
+
+
+@triton.jit
+def _gelu(x):
+    return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
+
+
+@triton.autotune(
+    configs=configs_for("mpnn_edge_mlp_fwd_gemm_triton"),
+    key=["shape_key"],
+)
+@triton.jit
+def _compute_stage_fwd_kernel(
+    input_ptr,
+    weight_ptr,
+    bias_ptr,
+    output_ptr,
+    rows,
+    shape_key,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so the
+    # two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
+    row_block, output_block = tile_order(tl.program_id(0).to(tl.int64),
+                                         tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
+    row_valid = row_indices < rows
+    output_valid = output_columns < WIDTH
+    accumulator = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
+
+    for hidden_start in range(0, WIDTH, BLOCK_K):
+        hidden_columns = hidden_start + tl.arange(0, BLOCK_K)
+        hidden_valid = hidden_columns < WIDTH
+        values = tl.load(
+            input_ptr + row_indices[:, None] * WIDTH + hidden_columns[None, :],
+            mask=row_valid[:, None] & hidden_valid[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        activated = _gelu(values).to(tl.bfloat16)
+        # nn.Linear stores [output, input].  The A5000 autotune winner forms
+        # the logical [input, output] dot operand directly; the alternative
+        # contiguous [output, input] load followed by tl.trans was slower.
+        weight = tl.load(
+            weight_ptr + output_columns[None, :] * WIDTH + hidden_columns[:, None],
+            mask=output_valid[None, :] & hidden_valid[:, None],
+            other=0.0,
+        ).to(tl.bfloat16)
+        accumulator += tl.dot(activated, weight)
+
+    bias = tl.load(
+        bias_ptr + output_columns,
+        mask=output_valid,
+        other=0.0,
+    )
+    output = (accumulator + bias.to(tl.bfloat16)).to(tl.bfloat16)
+    tl.store(
+        output_ptr + row_indices[:, None] * WIDTH + output_columns[None, :],
+        output,
+        mask=row_valid[:, None] & output_valid[None, :],
+    )
+
+
+def _launch_compute_stage(
+    inputs: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    original_shape = inputs.shape
+    width = inputs.shape[-1]
+    values = inputs.reshape(-1, width)
+    rows = values.shape[0]
+    output = torch.empty_like(values)
+    _compute_stage_fwd_kernel[
+        lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])
+    ](
+        values,
+        weight,
+        bias,
+        output,
+        rows,
+        _shape_key(rows),
+        WIDTH=width,
+    )
+    return output.reshape(original_shape)
+
+
+def _forward_op_fake(
+    preactivation: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    output_weight: torch.Tensor,
+    output_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The update and the intermediate projection, both shaped and typed like `preactivation`.
+
+    The second return is not a public output -- :class:`_EdgeMLPUpdateCompute` saves it for
+    backward -- but a schema has no notion of that, so it is declared like any other.
+    """
+    del hidden_weight, hidden_bias, output_weight, output_bias
+    return torch.empty_like(preactivation), torch.empty_like(preactivation)
+
+
+@opaque(fake=_forward_op_fake, name="mpnn_edge_mlp_compute_save_projected_fwd_v1")
+def _forward_op(
+    preactivation: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    output_weight: torch.Tensor,
+    output_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Two projection launches, returning the intermediate so backward need not recompute it.
+
+    The compute-efficient half of the pair: it holds one extra full-size edge tensor across the
+    step and saves the recompute the memory variant pays instead.
+    """
+    projected = _launch_compute_stage(
+        preactivation,
+        hidden_weight,
+        hidden_bias,
+    )
+    update = _launch_compute_stage(
+        projected,
+        output_weight,
+        output_bias,
+    )
+    return update, projected
+
+
+class _EdgeMLPUpdateCompute(torch.autograd.Function):
+    """The autograd boundary over the two projection launches.
+
+    ``projected`` is saved rather than returned. It used to be a second output of the op, marked
+    non-differentiable so autograd would not materialise a full-size zero gradient for a tensor
+    nobody differentiates; a ``Function`` keeps it in ``ctx`` and returns the one public tensor,
+    which is what the ``mark_non_differentiable``/``set_materialize_grads`` pair was arranging.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        preactivation: torch.Tensor,
+        hidden_weight: torch.Tensor,
+        hidden_bias: torch.Tensor,
+        output_weight: torch.Tensor,
+        output_bias: torch.Tensor,
+    ) -> torch.Tensor:
+        update, projected = _forward_op(
+            preactivation,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
+        )
+        ctx.save_for_backward(
+            preactivation,
+            hidden_weight,
+            output_weight,
+            projected,
+        )
+        ctx.hidden_bias_dtype = hidden_bias.dtype
+        ctx.output_bias_dtype = output_bias.dtype
+        return update
+
+    @staticmethod
+    def backward(ctx, grad_update):
+        preactivation, hidden_weight, output_weight, projected = ctx.saved_tensors
+        grad_update = grad_update.contiguous()
+
+        # Each dX launch also emits exact GELU(input), which is the right operand
+        # required by the following cuBLAS weight-gradient GEMM.
+        grad_projected, hidden_2 = _projection_dx_op(
+            grad_update,
+            output_weight,
+            projected,
+        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            grad_output_weight = grad_update.reshape(-1, _WIDTH).T @ hidden_2.reshape(
+                -1, _WIDTH
+            )
+        del projected, hidden_2
+
+        grad_preactivation, hidden_1 = _projection_dx_op(
+            grad_projected,
+            hidden_weight,
+            preactivation,
+        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            grad_hidden_weight = grad_projected.reshape(-1, _WIDTH).T @ hidden_1.reshape(
+                -1, _WIDTH
+            )
+
+        # Preserve CUDA-autocast Linear's BF16 bias-backward rounding boundary
+        # before converting the result to the original FP32 parameter dtype.
+        grad_hidden_bias = grad_projected.reshape(-1, _WIDTH).sum(
+            dim=0,
+            dtype=grad_projected.dtype,
+        )
+        grad_output_bias = grad_update.reshape(-1, _WIDTH).sum(
+            dim=0,
+            dtype=grad_update.dtype,
+        )
+        return (
+            grad_preactivation,
+            grad_hidden_weight.to(hidden_weight.dtype),
+            grad_hidden_bias.to(ctx.hidden_bias_dtype),
+            grad_output_weight.to(output_weight.dtype),
+            grad_output_bias.to(ctx.output_bias_dtype),
+        )
+
+
+def triton_edge_mlp_update_compute(
+    preactivation: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    output_weight: torch.Tensor,
+    output_bias: torch.Tensor,
+) -> torch.Tensor:
+    """Run the projected-save, compute-efficient edge MLP."""
+    return _EdgeMLPUpdateCompute.apply(
+        preactivation,
+        hidden_weight,
+        hidden_bias,
+        output_weight,
+        output_bias,
+    )
+
+
+__all__ = ["triton_edge_mlp_update_compute"]

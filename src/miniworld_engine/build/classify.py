@@ -29,7 +29,8 @@ from pathlib import Path
 SRC = Path("src")
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 
-GEMM = ((r"\b(?:gemm|compile_gemm_kernel)\s*\(", "external GEMM"), (r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),
+GEMM = ((r"\btorch\.(?:mm|bmm|matmul)\s*\(", "torch GEMM"),
+        (r"\b(?:gemm|compile_gemm_kernel)\s*\(", "external GEMM"), (r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),
         (r"\btcgen05\b|\bwgmma\b|\bmma_atom\b|\bMmaOp\b|\bmake_mma\b|\bSM90_\d+x\d+x\d+_", "mma"))
 REDUCE = ((r"\btl\.(sum|max|min)\b", "tl.reduce"), (r"__shfl\w*", "shfl"),
           (r"\batomic_add\b|\batomicAdd\b|\btl\.atomic_\w+", "atomic"))
@@ -179,7 +180,7 @@ def classify(path: Path, symbol: str) -> tuple[str, str, str]:
     if not src:
         src, how = text, "WHOLE FILE (symbol not found)"
     sig = [n for p, n in GEMM if re.search(p, src)] + [n for p, n in REDUCE if re.search(p, src)]
-    gemm = {"tl.dot", "cublasGemm", "mma", "external GEMM"} & set(sig)
+    gemm = {"torch GEMM", "tl.dot", "cublasGemm", "mma", "external GEMM"} & set(sig)
     red = {"tl.reduce", "shfl", "atomic"} & set(sig)
     kind = "gemm" if gemm else ("reduce" if red else "elem")
     return kind, ",".join(sig), how

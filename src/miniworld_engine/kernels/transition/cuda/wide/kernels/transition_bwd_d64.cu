@@ -361,6 +361,10 @@ TMN_DEVI void input_role(const Par& p, uint8_t* sm, int cta, int tid, int wg, in
         row[64 + col] += dbp[2 * g]; row[64 + col + 1] += dbp[2 * g + 1];
       }
     }
+    // Every warp must finish the scalar x/dy loads in the LN+residual
+    // epilogue before either warpgroup leader releases this input slot.
+    // A leader can otherwise refill it while another warp still reads it.
+    named_bar_sync(1, 256);
     if (wtid == 0) mbar_arrive(in_free + buf);
     if (tid == 0 && i + 2 < n_local) { mbar_wait(in_free + buf, (i >> 1) & 1); issue_in(i + 2); }
   }

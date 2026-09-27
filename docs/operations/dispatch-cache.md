@@ -1,5 +1,8 @@
 # Runtime Dispatch Caches
 
+Current policy: [v2.1.0](../releases/2.1.0.md). Historical full-grid measurements below
+are retained as evidence, not as the default build recommendation.
+
 Some kernels choose among multiple correct implementations at runtime. Those
 choices are performance policy tied to a specific GPU, so — like the autotune-config
 caches — they are committed to git and shared across machines.
@@ -462,7 +465,7 @@ A cache entry names configs; something has to produce the list those names are m
 That is a **config set**: one `<op>.csv` per op under a directory, either materialised (one row =
 one config) or a grid spec (`axis,values`, expanded as a cartesian product).
 
-- The default is `grid`, packaged at `src/miniworld_engine/autotune/configs/grid/` so it ships in
+- Since v2.1 the default is `default`; `grid` is the opt-in global space. Both ship in
   the wheel. `MINIWORLD_CONFIG_DIR` overrides it and must be set **before any kernel module is
   imported** — `triton.Autotuner` keeps the list it was handed only if it is non-empty, so a set
   chosen after the import updates a list nobody reads and the kernel dies at launch with
@@ -482,7 +485,7 @@ registered alternative Triton kernels. It merges measured shards and fails when 
 keys remain unusable. Declared module invocations, selected work units and required cache
 keys are separate quantities; read the command's current counts rather than a fixed total.
 
-    miniworld-engine build all                  # config set defaults to grid; resume is enabled
+    miniworld-engine build all                  # compact default set; production dispatch; resume enabled
     miniworld-engine dev coverage --arch sm86    # default cache key: NVIDIA RTX A6000 (sm86)
     miniworld-engine dev audit                  # build-system contract checks
 

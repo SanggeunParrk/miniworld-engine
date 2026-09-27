@@ -63,12 +63,11 @@ def forward(
     x = leaves[0]
     n = x.shape[1]
     D = x.shape[-1]
-    with torch.cuda.device(x.device):
-        T._launch_module()._make_context_current(x.device.index)
+    with T.native_context(x.device):
         if D != 128:
             from miniworld_engine.kernels.trimul_inproj.cuda.h100_width import Training
 
-            model = Training(*leaves, mask, ds, x.new_empty(x.shape))
+            model = Training(*leaves, mask, ds, None, forward_only=True)
             return [
                 model.forward(),
                 model.front.ab,
@@ -89,6 +88,25 @@ def forward(
         y, s = O.output(d, tri, ln=3, stats=2, method=-1)
         return [y, ab, tri, s["xn"].reshape_as(x), s["ro"], d["w1"],
                 x.new_empty((0,), dtype=torch.float32)]
+
+
+@opaque(fake=lambda leaves, mask, ds: torch.empty_like(leaves[0]),
+        name="trimul_h100_dropout_nograd")
+def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor) -> torch.Tensor:
+    """Preserve training dropout/residual without backward-only D128 saves."""
+    x = leaves[0]
+    n, width = x.shape[1], x.shape[-1]
+    with T.native_context(x.device):
+        if width != 128:
+            from miniworld_engine.kernels.trimul_inproj.cuda.h100_width import Training
+            return Training(*leaves, mask, ds, None, forward_only=True).forward()
+        from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
+        d = _data(leaves, mask, ds)
+        ab, _ = O.front(d)
+        tri = x.new_empty((256, n, n))
+        torch.bmm(ab[:128], ab[256:384].transpose(-1, -2), out=tri[:128])
+        torch.bmm(ab[128:256].transpose(-1, -2), ab[384:], out=tri[128:])
+        return O.output(d, tri, ln=0, stats=0, method=-1)[0]
 
 
 def _backward_fake(leaves, mask, ds, saved, dy):
@@ -117,8 +135,7 @@ def backward(
     D = x.shape[-1]
     ab, tri, xn, stats, packed, prepared_mask = saved
     dy = dy.contiguous()
-    with torch.cuda.device(x.device):
-        T._launch_module()._make_context_current(x.device.index)
+    with T.native_context(x.device):
         if D != 128:
             from miniworld_engine.kernels.trimul_inproj.cuda.h100_width import Training
 
@@ -131,7 +148,7 @@ def backward(
         )
 
         d = _data(leaves, mask, ds, packed=packed, for_backward=True)
-        cfg = json.loads((T.SOURCES / "b1/configs.json").read_text())[str(n)]
+        cfg = T.read_config("b1/configs.json")[str(n)]
         b1 = B1.Plan(dict(d, x=xn), dy, tri, stats, **cfg)
         dg, dwg, dt, dgo, dbo, dwp = b1()
         dl = torch.empty_like(tri)
@@ -176,4 +193,6 @@ class _Training(torch.autograd.Function):
 
 
 def bidirectional_trimul(*args):
+    if not torch.is_grad_enabled():
+        return forward_nograd(list(args[:11]), *args[11:])
     return _Training.apply(*args)

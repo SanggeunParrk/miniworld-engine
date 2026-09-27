@@ -1,0 +1,26 @@
+## start 23:58:28 restart=0
+#### test
+L768 S5 K768 adaln=1 max_cl=0: x 1.7e-03 (rows 1.7e-03)  xa 1.7e-03 (rows 1.7e-03)  det=True  ok
+ALL OK
+#### test done
+#### res
+  REG:124 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:900 TEXTURE:0 SURFACE:0 SAMPLER:0
+  REG:128 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:900 TEXTURE:0 SURFACE:0 SAMPLER:0
+#### res done
+#### times
+L768 Wo: 120 CTAs, <= 2 tiles a CTA, span 21.8 us
+  tile 0 (120) ML starts +  0.3: turn+yfree  0.0  mainloop  5.4  (tail)  0.0  y write  0.5  yfull wait  0.3  residual  5.1  stats wait  0.3  adaln  2.3
+  tile 1 (120) ML starts +  5.9: turn+yfree  5.6  mainloop  5.4  (tail)  0.0  y write  0.3  yfull wait  2.6  residual  2.8  stats wait  0.3  adaln  2.3
+L768 squeeze: 120 CTAs, <= 2 tiles a CTA, span 31.1 us
+  tile 0 (120) ML starts +  0.5: turn+yfree  0.0  mainloop 11.0  (tail)  0.0  y write  0.5  yfull wait  0.3  residual  5.9  stats wait  0.5  adaln  4.4
+  tile 1 (120) ML starts + 11.5: turn+yfree 11.0  mainloop 11.8  (tail)  0.0  y write  0.3  yfull wait  0.0  residual  3.6  stats wait  0.5  adaln  2.3
+L384 Wo: 120 CTAs, <= 1 tiles a CTA, span 12.8 us
+  tile 0 (120) ML starts +  0.8: turn+yfree  0.0  mainloop  5.1  (tail)  0.0  y write  0.3  yfull wait  0.0  residual  3.1  stats wait  0.3  adaln  2.0
+#### times done
+#### bench_ws
+L384 Wo     : mm+rows do_bench   19.4  graph   11.6   |   pp do_bench   23.2  graph   13.0  us
+L384 squeeze: mm+rows do_bench   21.8  graph   14.2   |   pp do_bench   28.4  graph   17.7  us
+L768 Wo     : mm+rows do_bench   29.1  graph   21.6   |   pp do_bench   34.0  graph   21.9  us
+L768 squeeze: mm+rows do_bench   34.2  graph   28.8   |   pp do_bench   41.3  graph   31.1  us
+#### bench_ws done
+## all done 00:01:32

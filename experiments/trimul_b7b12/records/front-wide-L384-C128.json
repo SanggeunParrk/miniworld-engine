@@ -1,0 +1,94 @@
+{
+  "L": 384,
+  "C": 128,
+  "count": 264,
+  "dwctas": 104,
+  "splits": 13,
+  "split": false,
+  "shared": 114688,
+  "vs_triton": {
+    "dx": {
+      "relative_l2": 4.606735274137463e-06,
+      "max_absolute": 0.015625,
+      "finite": true
+    },
+    "dWL": {
+      "relative_l2": 0.00015567867376375943,
+      "max_absolute": 2.0,
+      "finite": true
+    },
+    "dWLg": {
+      "relative_l2": 0.00014743462088517845,
+      "max_absolute": 1.0,
+      "finite": true
+    },
+    "dWR": {
+      "relative_l2": 0.00010785021731862798,
+      "max_absolute": 2.0,
+      "finite": true
+    },
+    "dWRg": {
+      "relative_l2": 0.00017552674398757517,
+      "max_absolute": 1.0,
+      "finite": true
+    },
+    "dgamma": {
+      "relative_l2": 6.426687946259335e-07,
+      "max_absolute": 0.0013427734375,
+      "finite": true
+    },
+    "dbeta": {
+      "relative_l2": 5.519416959032242e-07,
+      "max_absolute": 0.0013427734375,
+      "finite": true
+    }
+  },
+  "vs_fp32": {
+    "dx": {
+      "ours": 0.0024899232666939497,
+      "triton": 0.002489925129339099,
+      "finite": true
+    },
+    "dWL": {
+      "ours": 0.00230898498557508,
+      "triton": 0.002309040166437626,
+      "finite": true
+    },
+    "dWLg": {
+      "ours": 0.002412176225334406,
+      "triton": 0.0024122479371726513,
+      "finite": true
+    },
+    "dWR": {
+      "ours": 0.0024324054829776287,
+      "triton": 0.00243087369017303,
+      "finite": true
+    },
+    "dWRg": {
+      "ours": 0.002273481572046876,
+      "triton": 0.0022732336074113846,
+      "finite": true
+    },
+    "dgamma": {
+      "ours": 0.00270297029055655,
+      "triton": 0.002702894154936075,
+      "finite": true
+    },
+    "dbeta": {
+      "ours": 0.0026076212525367737,
+      "triton": 0.002607612404972315,
+      "finite": true
+    }
+  },
+  "ref_length": 128,
+  "times": {
+    "baseline": {
+      "median_us": 616.8959736824036
+    },
+    "b7b12_cuda": {
+      "median_us": 365.82401394844055
+    }
+  },
+  "speedup": 1.686318968030757,
+  "device": "NVIDIA H100 80GB HBM3"
+}

@@ -1,6 +1,6 @@
 [project]
 name = "miniworld-engine"
-version = "2.0.0"
+version = "2.1.0"
 requires-python = ">=3.10"
 description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
 license = "MIT AND Apache-2.0"
@@ -83,7 +83,7 @@ exclude = ["*.notes", "*.notes.*", "*.autotune.plans", "*.autotune.plans.*"]
 #   - build/*.csv              -> the per-GPU kernel-cache build matrix, read by the cache builder
 #                                 (miniworld_engine.build.matrix) to decide which units a card may
 #                                 build; without it the builder raises on a missing matrix.
-#   - autotune/configs/grid/*.csv -> the DEFAULT autotune search space. Without it a wheel has no
+#   - autotune/configs/{default,grid}/*.csv -> compact default and opt-in global spaces. Without them a wheel has no
 #                                 config set at all and every triton kernel dies at its first
 #                                 launch with `dynamic_func() missing N positional arguments`;
 #                                 see autotune/configs/README.md.
@@ -100,7 +100,7 @@ miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", 
 [tool.setuptools.exclude-package-data]
 miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebuilt in user cache
                     "kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
-                    # The A/B config sets. `grid` is the default and ships; accuracy/blk*/
+                    # Both `default` and opt-in `grid` ship. A/B accuracy/blk*/
                     # warp*/mixed* exist to compare tilings during a sweep and a consumer
                     # never selects one, so 819 CSVs stay out of the wheel.
                     "autotune/configs/accuracy/*", "autotune/configs/blk*/*",

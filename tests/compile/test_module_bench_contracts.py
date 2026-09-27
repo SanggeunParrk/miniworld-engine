@@ -259,8 +259,7 @@ def test_default_dropout_policy_records_effective_probability(runner, target, mo
 
 
 @pytest.mark.parametrize("kwargs", [{"dropout": -.1}, {"dropout": 1},
-    {"dropout": .25, "mode": "inference"}, {"dropout": .25, "target": "transition"},
-    {"dropout": .25, "cudagraph": "manual"}])
+    {"dropout": .25, "mode": "inference"}, {"dropout": .25, "target": "transition"}])
 def test_invalid_dropout_regimes_are_not_silently_ignored(runner, kwargs):
     ns, _, _ = runner
     with pytest.raises(ValueError, match="dropout"):

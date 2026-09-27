@@ -1,6 +1,6 @@
 # bias-only attention
 
-This document records the MiniWorld bias-only TriangleAttention benchmark path.
+This document records this repo's bias-only TriangleAttention benchmark path.
 It covers `TriangleAttention(use_self_attention=False)`: LayerNorm/projection,
 bias-only attention, and output gating. The `softmax -> bmm` portion is kept as
 the unfused attention operation; the optimization target is the surrounding
@@ -26,7 +26,7 @@ Implementations in the final benchmark:
 - `pytorch`: compiled module reference
 - `cuequivariance`: cuEquivariance module path
 - `old_triton`: vendored Team-GM bias-only Triton attention kernel
-- `miniworld`: MiniWorld LayerNorm/projection/gate dispatch path
+- `miniworld`: this repo's LayerNorm/projection/gate dispatch path
 
 The benchmark uses `compile=true`, bf16 mixed precision, `mask_prob=0.0`,
 `n_layers=1`, `L in {384, 512, 640, 768, 896, 1024}`, and
@@ -35,12 +35,12 @@ The benchmark uses `compile=true`, bf16 mixed precision, `mask_prob=0.0`,
 ## CUDA graph regime
 
 The primary comparison is `compile=true + cudagraph=manual`. This is the fair
-steady-state regime for this composed module because the MiniWorld path has
+steady-state regime for this composed module because the Engine path has
 multiple launches around the unfused `softmax -> bmm` core. Without CUDA graph
 capture, launch overhead dominates and hides kernel-side improvements.
 
 `compile=true + cudagraph=disabled` is still run as a diagnostic. It currently
-shows MiniWorld slower than compiled PyTorch/cuEquivariance for several points,
+shows Engine slower than compiled PyTorch/cuEquivariance for several points,
 which is expected for the launch-bound regime and is not the target result.
 
 ## d_pair 128/256 training fix
@@ -59,9 +59,9 @@ signature. The fixed callers pass a placeholder rowscale tensor and
 
 Validated targeted repros:
 
-- training, `compile=true`, `cudagraph=manual`, `L=384`, MiniWorld only:
+- training, `compile=true`, `cudagraph=manual`, `L=384`, Engine only:
   `d_pair=128` at `1.16346 ms`, `d_pair=256` at `2.25346 ms`
-- training, `compile=true`, `cudagraph=disabled`, `L=384`, MiniWorld only:
+- training, `compile=true`, `cudagraph=disabled`, `L=384`, Engine only:
   `d_pair=128` at `1.83210 ms`, `d_pair=256` at `2.34046 ms`
 
 ## H100 benchmark: job 10265
@@ -92,7 +92,7 @@ benchmarks/modules/bias_only_attention/artifacts/NVIDIA H100 80GB HBM3/
 
 Training d sweep, fixed `L=384`:
 
-| d_pair | PyTorch | cuEquivariance | old_triton | MiniWorld | speedup vs best baseline |
+| d_pair | PyTorch | cuEquivariance | old_triton | Engine | speedup vs best baseline |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 128 | 2.067 ms | 2.067 ms | 3.125 ms | 1.157 ms | 1.79x |
 | 256 | 3.660 ms | 3.656 ms | 4.750 ms | 2.246 ms | 1.63x |
@@ -100,7 +100,7 @@ Training d sweep, fixed `L=384`:
 
 Inference d sweep, fixed `L=384`:
 
-| d_pair | PyTorch | cuEquivariance | old_triton | MiniWorld | speedup vs best baseline |
+| d_pair | PyTorch | cuEquivariance | old_triton | Engine | speedup vs best baseline |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 128 | 0.801 ms | 0.798 ms | 0.926 ms | 0.396 ms | 2.02x |
 | 256 | 1.362 ms | 1.363 ms | 1.491 ms | 0.846 ms | 1.61x |
@@ -108,7 +108,7 @@ Inference d sweep, fixed `L=384`:
 
 Training L sweep, fixed `d_pair=128`:
 
-| L | best baseline | MiniWorld | speedup |
+| L | best baseline | Engine | speedup |
 | ---: | ---: | ---: | ---: |
 | 384 | 2.063 ms | 1.160 ms | 1.78x |
 | 512 | 3.519 ms | 1.940 ms | 1.81x |
@@ -119,7 +119,7 @@ Training L sweep, fixed `d_pair=128`:
 
 Inference L sweep, fixed `d_pair=128`:
 
-| L | best baseline | MiniWorld | speedup |
+| L | best baseline | Engine | speedup |
 | ---: | ---: | ---: | ---: |
 | 384 | 0.798 ms | 0.396 ms | 2.02x |
 | 512 | 1.383 ms | 0.671 ms | 2.06x |
@@ -130,7 +130,7 @@ Inference L sweep, fixed `d_pair=128`:
 
 ## Compile-only diagnostic
 
-With `compile=true` and `cudagraph=disabled`, MiniWorld completes but is slower
+With `compile=true` and `cudagraph=disabled`, Engine completes but is slower
 than the best compiled PyTorch/cuEquivariance baseline:
 
 - inference d sweep at `L=384`: `0.37x` to `0.71x`

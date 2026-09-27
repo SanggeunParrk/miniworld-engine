@@ -208,7 +208,7 @@ Rules baked into the module:
   one canonical identity → one fixed colour. Unknown names get a deterministic
   hash colour (stable across figures, never index-dependent). Never hand-assign
   colours in a kernel-local bench — call `color_for` / `style_for`.
-  - **MiniWorld / cute family → gold** — the repo's kernels are
+  - **This repo's kernels / cute family → gold** — the repo's kernels are
     visually fixed across every figure.
   - **NVIDIA family (cuequivariance / dtv1 / TE) → greens & teal.**
   - **baselines (pytorch / torch.compile / triton) → grey & blue** (recede).
@@ -225,9 +225,12 @@ Rules baked into the module:
 - **Use the shared style** (`miniworld_engine.viz`) for every figure — never
   ad-hoc colours.
 - **Both inference and training** when the op is used in training.
-- **CUDA Graph timing regime:** `cudagraph=auto` selects `manual` for inference and
-  `disabled` for training, including SWA attention and SWA DiT. Memory measurements
-  remain ungraphed. Explicit graph requests never silently fall back to disabled.
+- **CUDA Graph timing regime:** `cudagraph=auto` selects `manual` for inference.
+  Module training latency runs both `disabled` and `manual` in separate processes
+  and CSVs, with compilation enabled by default for both. Kernel training and
+  memory measurements remain ungraphed. Explicit graph requests select one regime
+  and never silently fall back to disabled. Dropout training retains probability
+  0.25 and validates matched-seed outputs/gradients and RNG advancement before timing.
   On A6000/FA2, SWA no-grad forward uses fixed-capacity packed buffers with true
   sequence lengths; padding cannot receive softmax probability. This includes the
   no-grad forward inside a training custom op; its backward recomputation retains
@@ -262,7 +265,7 @@ Before treating a benchmark artifact as final, check every item below.
   `grad_max_abs`, `grad_rel_frob`, and `grad_cosine` when the runner has a
   reference path wired.
 - [ ] **Inference/training separation:** implementation rows identify the
-  `execution_path`, and MiniWorld-style kernels must use distinct inference and
+  `execution_path`, and this repo's kernels must use distinct inference and
   training paths when the kernel design has separate save/no-save behavior.
 - [ ] **Both modes:** final artifacts include both inference and training CSVs
   and SVGs for training-relevant ops.
@@ -298,9 +301,9 @@ the matrix below is the remaining repo-developed module kernels, one
 | `augmented_attention_token` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | token path; `d_pair` sweeps pair-bias width. |
 | `augmented_attention_atom` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | atom path; L sweep still includes `L=384`; unsupported/OOM points stay as failed CSV rows. |
 
-Final plots must show a single `MiniWorld` series. If a diagnostic CSV includes
+Final plots must show a single `Engine` series. If a diagnostic CSV includes
 component aliases such as `cute` plus `miniworld`, the shared plotter collapses
-them to the canonical `MiniWorld` backend before drawing.
+them to the canonical `miniworld` backend before drawing.
 
 ## Runtime Dispatch Caches
 
@@ -314,8 +317,10 @@ resolves to **5 for inference** and **48 for training**. An explicit positive in
 overrides the default for shape sweeps. CSV `n_augment` records the resolved count;
 `input_shapes` records whether that module actually has an augmentation axis.
 Pairformer triangle operations and Transition do not acquire a batch/augmentation
-dimension from this setting. Inference timing uses CUDA Graphs and training timing
-disables them through `cudagraph: auto`.
+dimension from this setting. With `cudagraph: auto`, inference timing uses CUDA
+Graphs and module training timing produces both graph OFF and ON results.
+Keep these regimes separate in figures; a graphed module step excludes optimizer,
+input loading and distributed communication and is not whole-training latency.
 
 
 TriangleMultiplication direction is explicit in `trimul_direction` and in each CSV row:

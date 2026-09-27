@@ -1,0 +1,1735 @@
+{
+  "node": "node02",
+  "D": 512,
+  "L": 384,
+  "mode": "interleaved expand dot, full output width",
+  "rows": [
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 13.019404792785645,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 38,
+      "shared_bytes": 10240,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.7580127222463489
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 11.289360046386719,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 12288,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 1.1384148448705673
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 8.136585489908853,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 2,
+      "shared_bytes": 24576,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 29,
+      "tma": 0,
+      "seconds": 1.3657391630113125
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 14.574830436706543,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 186,
+      "spills": 0,
+      "shared_bytes": 10240,
+      "wgmma": 0,
+      "mma_sync": 64,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.1545846117660403
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 15.161808013916016,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 180,
+      "spills": 0,
+      "shared_bytes": 12288,
+      "wgmma": 0,
+      "mma_sync": 64,
+      "cp_async": 14,
+      "tma": 0,
+      "seconds": 1.037803141400218
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 12.75710563659668,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 180,
+      "spills": 0,
+      "shared_bytes": 24576,
+      "wgmma": 0,
+      "mma_sync": 64,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 1.1091697299852967
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 11.703171348571777,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 60,
+      "shared_bytes": 16384,
+      "wgmma": 0,
+      "mma_sync": 128,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.3906045034527779
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 9.687238311767578,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 12,
+      "shared_bytes": 24576,
+      "wgmma": 0,
+      "mma_sync": 128,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 1.337843987159431
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 8.284082158406576,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 8,
+      "shared_bytes": 49152,
+      "wgmma": 0,
+      "mma_sync": 128,
+      "cp_async": 47,
+      "tma": 0,
+      "seconds": 1.39322339463979
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 13.082215881347656,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 8,
+      "shared_bytes": 16384,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.2418585801497102
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 13.517432022094727,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 174,
+      "spills": 0,
+      "shared_bytes": 24576,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 1.0905886674299836
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 12.929729652404784,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 176,
+      "spills": 0,
+      "shared_bytes": 49152,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 29,
+      "tma": 0,
+      "seconds": 1.1737725948914886
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.746472787857056,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.5404627621173859
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.601867561340332,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 244,
+      "spills": 0,
+      "shared_bytes": 133120,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 110,
+      "tma": 0,
+      "seconds": 1.5593794835731387
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.431652228037517,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 240,
+      "spills": 0,
+      "shared_bytes": 231424,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 164,
+      "tma": 0,
+      "seconds": 1.639753956347704
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 8.519453938802084,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 142,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.26534906309098
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 7.97105712890625,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 138,
+      "spills": 0,
+      "shared_bytes": 133120,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 62,
+      "tma": 0,
+      "seconds": 1.2146472735330462
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 6.433748054504394,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 138,
+      "spills": 0,
+      "shared_bytes": 231424,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 92,
+      "tma": 0,
+      "seconds": 1.28739198949188
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.941515159606934,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 48,
+      "shared_bytes": 20480,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.5503360070288181
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 6.402182388305664,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 18,
+      "shared_bytes": 20480,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.38435919303447
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.414065583546956,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 16,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 41,
+      "tma": 0,
+      "seconds": 1.5766287790611386
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 7.533159446716309,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 20480,
+      "wgmma": 0,
+      "mma_sync": 80,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.109744149260223
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 6.980604028701782,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 178,
+      "spills": 0,
+      "shared_bytes": 20480,
+      "wgmma": 0,
+      "mma_sync": 80,
+      "cp_async": 18,
+      "tma": 0,
+      "seconds": 1.0479294871911407
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 5.371290245056152,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 176,
+      "spills": 0,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 80,
+      "cp_async": 26,
+      "tma": 0,
+      "seconds": 1.0991618745028973
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.649535989761352,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 64,
+      "shared_bytes": 32768,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.6025441512465477
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.608787841796875,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 8,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 48,
+      "tma": 0,
+      "seconds": 1.5010024858638644
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.777763175964355,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 32,
+      "shared_bytes": 81920,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 71,
+      "tma": 0,
+      "seconds": 1.6180172013118863
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.660669612884521,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 2,
+      "shared_bytes": 32768,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.2245118832215667
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.961528778076172,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 228,
+      "spills": 0,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.0572365568950772
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 5.31217399597168,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 81920,
+      "wgmma": 0,
+      "mma_sync": 96,
+      "cp_async": 41,
+      "tma": 0,
+      "seconds": 1.1731293322518468
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 5.480592002868653,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 26,
+      "shared_bytes": 163840,
+      "wgmma": 0,
+      "mma_sync": 384,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 2.161300603300333
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(233472, 232448, 'shared memory')",
+      "seconds": 0.9376979088410735
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(430080, 232448, 'shared memory')",
+      "seconds": 0.9818022046238184
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 5.471010551452637,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 186,
+      "spills": 0,
+      "shared_bytes": 163840,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.468323688954115
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(233472, 232448, 'shared memory')",
+      "seconds": 0.55391058139503
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(430080, 232448, 'shared memory')",
+      "seconds": 0.6000089757144451
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 5.779644165039063,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 72,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 320,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 2.274549246765673
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.302373695373535,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 54,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 320,
+      "cp_async": 44,
+      "tma": 0,
+      "seconds": 1.8850055104121566
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.282976500193278,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 54,
+      "shared_bytes": 73728,
+      "wgmma": 0,
+      "mma_sync": 320,
+      "cp_async": 65,
+      "tma": 0,
+      "seconds": 1.8961019301787019
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 5.68279296875,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 2,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.470130336470902
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.29642879486084,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 26,
+      "tma": 0,
+      "seconds": 1.2889600191265345
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.434951464335123,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 38,
+      "tma": 0,
+      "seconds": 1.4182683387771249
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.673981618881226,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 200,
+      "shared_bytes": 65536,
+      "wgmma": 0,
+      "mma_sync": 384,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 2.449720760807395
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 4.708450603485107,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 94,
+      "shared_bytes": 73728,
+      "wgmma": 0,
+      "mma_sync": 384,
+      "cp_async": 80,
+      "tma": 0,
+      "seconds": 2.0669919662177563
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 5.806711654663086,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 122,
+      "shared_bytes": 147456,
+      "wgmma": 0,
+      "mma_sync": 384,
+      "cp_async": 119,
+      "tma": 0,
+      "seconds": 2.502695423550904
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 5.363604431152344,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 8,
+      "shared_bytes": 65536,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.5479833874851465
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.013011817932129,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 8,
+      "shared_bytes": 73728,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 44,
+      "tma": 0,
+      "seconds": 1.3396951165050268
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.56484956741333,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 2,
+      "shared_bytes": 147456,
+      "wgmma": 0,
+      "mma_sync": 192,
+      "cp_async": 65,
+      "tma": 0,
+      "seconds": 1.5237383740022779
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "OutOfResources(294912, 232448, 'shared memory')",
+      "seconds": 1.6429751878604293
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(434176, 232448, 'shared memory')",
+      "seconds": 1.568671048618853
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(827392, 232448, 'shared memory')",
+      "seconds": 1.824033978395164
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "OutOfResources(294912, 232448, 'shared memory')",
+      "seconds": 0.9455602448433638
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(434176, 232448, 'shared memory')",
+      "seconds": 0.8800367098301649
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(827392, 232448, 'shared memory')",
+      "seconds": 0.92933932505548
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 9.192424456278482,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 196,
+      "spills": 0,
+      "shared_bytes": 16384,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.2144770240411162
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 9.453407859802246,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 204,
+      "spills": 0,
+      "shared_bytes": 32768,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 16,
+      "tma": 0,
+      "seconds": 1.1458364864811301
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 6.668700790405273,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 222,
+      "spills": 0,
+      "shared_bytes": 49152,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 23,
+      "tma": 0,
+      "seconds": 1.1644148509949446
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 7.591884676615397,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 228,
+      "spills": 0,
+      "shared_bytes": 32768,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.1549320127815008
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 7.827014350891114,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 225,
+      "spills": 0,
+      "shared_bytes": 65536,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 24,
+      "tma": 0,
+      "seconds": 1.119672266766429
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 6.276333618164062,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 248,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 35,
+      "tma": 0,
+      "seconds": 1.1599048217758536
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.913114404678344,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 131072,
+      "wgmma": 136,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.4606850855052471
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(262144, 232448, 'shared memory')",
+      "seconds": 0.565395001322031
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(360448, 232448, 'shared memory')",
+      "seconds": 0.5963619742542505
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 5.670842819213867,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 249,
+      "spills": 0,
+      "shared_bytes": 24576,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.340834286995232
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.508480072021484,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 252,
+      "spills": 0,
+      "shared_bytes": 49152,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 1.2202851213514805
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 3.8151195526123045,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 253,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 29,
+      "tma": 0,
+      "seconds": 1.3320201504975557
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 4.686747773488363,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 49152,
+      "wgmma": 32,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.3953595841303468
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 4.767959499359131,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 252,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 32,
+      "mma_sync": 0,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 1.2637387998402119
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 3.8011099406651088,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 147456,
+      "wgmma": 32,
+      "mma_sync": 0,
+      "cp_async": 47,
+      "tma": 0,
+      "seconds": 1.3952662479132414
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 4.876083246866862,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 14,
+      "shared_bytes": 196608,
+      "wgmma": 144,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9109421959146857
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(458752, 232448, 'shared memory')",
+      "seconds": 0.7884193379431963
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(655360, 232448, 'shared memory')",
+      "seconds": 0.826689288020134
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 4.561281045277913,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 49152,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9667762136086822
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.7064808981759207,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 81920,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.4905829168856144
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 2.9756554709540475,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 18,
+      "shared_bytes": 122880,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 41,
+      "tma": 0,
+      "seconds": 1.8269002512097359
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 4.239459737141927,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 16,
+      "shared_bytes": 81920,
+      "wgmma": 48,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.7894688751548529
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.3523720264434815,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 4,
+      "shared_bytes": 163840,
+      "wgmma": 48,
+      "mma_sync": 0,
+      "cp_async": 48,
+      "tma": 0,
+      "seconds": 1.5903776939958334
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(245760, 232448, 'shared memory')",
+      "seconds": 0.7917270055040717
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "OutOfResources(327680, 232448, 'shared memory')",
+      "seconds": 1.6899390248581767
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(851968, 232448, 'shared memory')",
+      "seconds": 1.4993826374411583
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 512,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "failed",
+      "error": "OutOfResources(1245184, 232448, 'shared memory')",
+      "seconds": 1.5954650295898318
+    }
+  ],
+  "best": [
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 2.9756554709540475,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 18,
+      "shared_bytes": 122880,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 41,
+      "tma": 0,
+      "seconds": 1.8269002512097359
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.3523720264434815,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 4,
+      "shared_bytes": 163840,
+      "wgmma": 48,
+      "mma_sync": 0,
+      "cp_async": 48,
+      "tma": 0,
+      "seconds": 1.5903776939958334
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.7064808981759207,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 81920,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.4905829168856144
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 3.8011099406651088,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 147456,
+      "wgmma": 32,
+      "mma_sync": 0,
+      "cp_async": 47,
+      "tma": 0,
+      "seconds": 1.3952662479132414
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 3.8151195526123045,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 253,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 29,
+      "tma": 0,
+      "seconds": 1.3320201504975557
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "BO": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 4.239459737141927,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 16,
+      "shared_bytes": 81920,
+      "wgmma": 48,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.7894688751548529
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.282976500193278,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 54,
+      "shared_bytes": 73728,
+      "wgmma": 0,
+      "mma_sync": 320,
+      "cp_async": 65,
+      "tma": 0,
+      "seconds": 1.8961019301787019
+    },
+    {
+      "config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 64,
+        "BO": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "ms": 4.414065583546956,
+      "relative_frobenius": 0.00020602285803761333,
+      "registers": 255,
+      "spills": 16,
+      "shared_bytes": 40960,
+      "wgmma": 0,
+      "mma_sync": 160,
+      "cp_async": 41,
+      "tma": 0,
+      "seconds": 1.5766287790611386
+    }
+  ]
+}

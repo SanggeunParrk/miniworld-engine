@@ -1,0 +1,28 @@
+{
+  "module_name": "triattn_wgrad_shared_z_tensor",
+  "binary": "triattn_wgrad_shared_z_tensor.so",
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "arch": "sm_90a",
+  "lengths": [
+    384,
+    768,
+    1024
+  ],
+  "splits": {
+    "384": 2304,
+    "768": 8960,
+    "1024": 15936
+  },
+  "artifact": "shared_z_tensor",
+  "partial_dtype": "fp32",
+  "qualification_job": 16662,
+  "combined_job": 16661,
+  "files": {
+    "wgrad.cu": "33c298fcb6b95de918c3e73d663a019ab1010a2e4560891cc6862d42fd6be105",
+    "wgrad_backward.py": "91c3e214583ff7a2964e88d0cb489f8bef58b4ea180f240f068811678d707e1b",
+    "build_wgrad.py": "b6705a17fe43749a5a0874645e2dc8d18c047708528e73eca5aa7a4796dc8f42",
+    "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
+    "triattn_wgrad_shared_z_tensor.so": "997ef2a16c62dfdb46f12899a2a09a3f04888747f8b5c384261cc95dc889808c"
+  }
+}

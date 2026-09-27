@@ -356,6 +356,9 @@ def _tri_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
     Split out of ``TritonTriangleAttentionPairBiasFunction.forward`` so ``bias.contiguous()`` and
     ``save_for_backward`` stay traceable -- see ``kernels._compile``.
     """
+    from miniworld_engine.kernels.triangle_attention.cuda import training_forward
+    if training_forward.can_use(q, k, v, bias):
+        return training_forward.forward(q, k, v, bias)
     B, H, L, _, D = q.shape
     sm_scale = D**-0.5
     # B: write `out` into PROJECTION layout [B,L,L2,H*D] via a strided (B,H,L,L2,D) view

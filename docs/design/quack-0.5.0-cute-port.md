@@ -6,7 +6,7 @@
 
 ## Progress (2026-07-13)
 
-- **Phase 0–1 done.** Dev env = the MiniWorld consumer env's python (quack 0.5.0 /
+- **Phase 0–1 done.** Dev env = the consumer env's python (quack 0.5.0 /
   torch 2.10 / cutlass-dsl 4.5.2 / B200) + `PYTHONPATH=<my>/src` — never mutates the
   shared env. A full import probe found exactly **two** quack breaks (below) and **zero**
   cutlass-4.5.2 drift *at import*.
@@ -31,7 +31,7 @@
   to quack 0.5.0's `compile_gemm_kernel`/`.launch` stream convention — genuine per-kernel
   CuTeDSL work, likely multi-session. `make_trivial_tiled_mma(ab_dtype=…)` is also
   deprecated (→ separate `a_dtype`/`b_dtype`) but only warns, not fatal.
- team-gm / MiniWorld are unaffected — they consume
+ the consumers are unaffected — they consume
 `miniworld_engine.ops.*`, and the cute-vs-triton backend choice happens *inside* the
 ops whole-op (Phase 6). No consumer code changes.
 
@@ -54,7 +54,7 @@ ops whole-op (Phase 6). No consumer code changes.
 The cute kernels are pinned to **quack 0.3.11** (`[cute]` extra:
 `quack-kernels==0.3.11`, `nvidia-cutlass-dsl==4.4.2`) and use its internal API
 (`quack.cache_utils`, `quack.gemm_interface`, `quack.gemm_sm90/sm100`,
-`quack.epi_ops`, …). The MiniWorld/team-gm consumer env ships **quack 0.5.0**
+`quack.epi_ops`, …). The consumer env ships **quack 0.5.0**
 because **FlashAttention-4 requires it** (`flash-attn-4` →
 `Requires-Dist: quack-kernels>=0.5.0`; FA4's own CuTeDSL kernels import
 `quack.copy_utils` / `layout_utils` / `cute_dsl_utils`). So:
@@ -144,7 +144,7 @@ B200 (the payoff — confirm the tcgen05 win that motivates this).
 - Wire the ported cute kernels' build-time configs into the new autotune cache via
   `select_config(op, dtype, bucket, candidates)` (falls back to `default_config`
   on a miss); build + ship the B200 (sm100) cute config JSONs.
-- Bump the chain (miniworld-engine → team-gm → MiniWorld); install the cute deps in the
+- Bump the chain (miniworld-engine → its consumers); install the cute deps in the
   consumer env (coexisting with FA4 on quack 0.5.0); verify cute runs there — and that
   `MINIWORLD` (auto) trimul on B200 no longer hits the broken path.
 

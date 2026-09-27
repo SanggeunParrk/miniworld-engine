@@ -1,0 +1,33 @@
+{
+  "baseline_commit": "fb6777417c0a34e383e0984978fec89169c18e28",
+  "baseline_date": "2026-09-11",
+  "current_source_commit": "be17b1f4",
+  "current_date": "2026-09-18",
+  "rows": [
+    {
+      "L": 384,
+      "ms": {
+        "sep11_triton": 1.9509040117263794,
+        "current_triton": 1.5862879753112793,
+        "current_h100": 1.5354160070419312
+      },
+      "triton_speedup": 1.229854882650517,
+      "h100_speedup": 1.2706028872819362,
+      "h100_time_reduction_pct": 21.29720386995246,
+      "current_h100_over_current_triton": 1.033132368059231
+    },
+    {
+      "L": 768,
+      "ms": {
+        "sep11_triton": 7.727527976036072,
+        "current_triton": 6.16215193271637,
+        "current_h100": 5.932240009307861
+      },
+      "triton_speedup": 1.2540307445210395,
+      "h100_speedup": 1.302632389099455,
+      "h100_time_reduction_pct": 23.232370976793604,
+      "current_h100_over_current_triton": 1.0387563421317698
+    }
+  ],
+  "max_reference_gradient_relative_frobenius": 0.005180666223168373
+}

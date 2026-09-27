@@ -43,7 +43,7 @@ mode: inference        # inference | training
 dropout: auto  # training: 0.25; inference: 0
 metric: time           # time | memory
 compile: true
-cudagraph: auto  # inference: manual graph; training: disabled
+cudagraph: auto  # inference: manual; training time: separate OFF/ON runs
 allow_tf32: true
 precision: "bf16-mixed"
 name_suffix: ""

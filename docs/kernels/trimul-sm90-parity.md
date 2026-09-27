@@ -1,10 +1,22 @@
 # H100 kernels inside the Triton bidirectional TriMul algorithm
 
+Development checkpoint: [weekly closeout and same-condition Sep11 comparison](../records/trimul-weekly-closeout-20260918/README.md). The new mapped B4 experiment remains unpromoted.
+
 `settings.configure(trimul_sm90_kernels={"front", "f567", "dual_bwd"})` selects
 individual TMA/WGMMA kernels before model construction/compilation. The default
 is an empty set. Explicit PyTorch modules remain references. These overrides
 retain the Triton fusion boundaries rather than selecting the legacy CuTe algorithm.
 The implementations currently require SM90 and BF16.
+
+`out_ln_bwd` additionally selects the native TMA B4 implementation on the existing
+canonical persistent output-LayerNorm backward branch. It also supports FP32.
+Small-M atomic and narrow-N specialized branches retain their existing dispatch;
+unsupported input layouts/dtypes/alignment use Triton without copying. Its 1,200
+declared configurations come directly from `layernorm_bwd_split_triton.csv`.
+See [B4 dispatch, measurements and partial cache coverage](../records/trimul-b4-sm90-20260918/README.md).
+**Performance correction:** forced Triton atomic beats this native B4 at L768.
+The new mapped TMA candidate is experimental; see the
+[B4 baseline recheck](../records/trimul-b4-l384-20260918/README.md).
 
 ## Preserved contracts
 
@@ -16,7 +28,7 @@ The implementations currently require SM90 and BF16.
   gate, dropout scale and residual. No folded weights or extra bias preparation.
 - B9+B10: gate GEMM rounds to BF16 before addition to the FP32 front GEMM.
   Production column-major dconc views are consumed directly.
-- F1/F4 LayerNorm, contraction GEMMs and other backward boundaries are unchanged.
+- F1/F4 LayerNorm, contraction GEMMs and other backward fusion boundaries are unchanged.
   Inference retains its fused F4567 output kernel; F2 supports both save modes.
 
 ## H100 implementation

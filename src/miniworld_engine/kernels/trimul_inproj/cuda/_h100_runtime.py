@@ -6,7 +6,8 @@ content-addressed user cache. Module handles are specific to a CUDA device.
 
 from pathlib import Path
 from functools import lru_cache, wraps
-import ctypes, fcntl, hashlib, os, shutil, subprocess
+from contextlib import contextmanager
+import ctypes, fcntl, hashlib, os, shutil, subprocess, json
 import torch
 import torch.nn.functional as F
 
@@ -23,6 +24,16 @@ def _launch_module():
     return _h100_launch
 
 
+@contextmanager
+def native_context(device):
+    """One verified framework CUDA context for all maps within a native call."""
+    with torch.cuda.device(device):
+        L = _launch_module()
+        drv = L._make_context_current(device.index)
+        with L.tensor_map_scope(drv):
+            yield
+
+
 def device_cache(fn):
     @lru_cache(None)
     def cached(device, args, kwargs):
@@ -34,6 +45,12 @@ def device_cache(fn):
         return cached(torch.cuda.current_device(), args, tuple(sorted(kwargs.items())))
 
     return call
+
+
+@lru_cache(None)
+def read_config(relative_path):
+    """Read packaged, process-constant configuration once; callers must not mutate it."""
+    return json.loads((SOURCES / relative_path).read_text())
 
 
 def cache_dir():
@@ -156,20 +173,12 @@ def k3_smem(cfg):
     )
 
 
-# A single packing operation, same interleaving as the measured training route.
-# Keeping the copies in torch also makes live weights visible to CUDA graphs.
-@torch.compile(fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
 def pack_into(dst, wl, wlg, wr, wrg):
-    d = wl.shape[-1]
-    dst.copy_(
-        torch.stack(
-            (
-                torch.cat((wlg, wrg)).reshape(-1, 32, d),
-                torch.cat((wl, wr)).reshape(-1, 32, d),
-            ),
-            1,
-        ).reshape(4 * wl.shape[0], d)
-    )
+    # Read live weights on the current stream, including during graph replay.
+    # This op already runs inside the opaque native boundary: a second compiled
+    # Python function adds dispatch overhead without enabling further fusion.
+    from ._h100_pack import pack_into as pack
+    pack(dst, wl, wlg, wr, wrg)
 
 
 @torch.compile(fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})

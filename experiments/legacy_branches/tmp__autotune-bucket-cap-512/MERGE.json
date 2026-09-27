@@ -1,0 +1,15 @@
+{
+  "ref": "tmp/autotune-bucket-cap-512",
+  "tip": "73458b542500c5b103eefbc5b16c29bc45dbfd4a",
+  "merge_base": "31d96e7fce642b0441d49494577f230bd0366937",
+  "current": "d479e05f7560af1fc751633db432158441311215",
+  "reason": "Superseded implementation or machine-specific cache. Preserve branch contents and ancestry without rolling back the current APIs or validated fixes.",
+  "files": [
+    {
+      "status": "M",
+      "path": "src/miniworld_engine/autotune/buckets.py",
+      "sha256": "f242350cd48a65948890d7f08cb42cbbb9e535bc6d223085a96ac9bdd2377d59",
+      "resolution": "identical to current main implementation"
+    }
+  ]
+}

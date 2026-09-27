@@ -139,7 +139,7 @@ class Front:
         ma = tm(self.ab, [64, 1, 32], [n, n, 2 * hidden], [n * 2, n * n * 2])
         tj = (n + bj - 1) // bj
         tiles = ((n + bi - 1) // bi) * tj
-        self.params = U.Struct(
+        self.params = U.Struct.fixed("h100_native:1",
             [
                 mz,
                 mw,
@@ -198,7 +198,7 @@ class Output:
         ]
         tj = (n + bj - 1) // bj
         tiles = ((n + bi0 - 1) // bi0) * tj
-        self.params = U.Struct(
+        self.params = U.Struct.fixed("h100_native:2",
             [*maps, gi, bi, go, bo, x, self.y, None, n, n, tj, tiles, 1, 0, 1e-5, 0]
         )
         self.grid = min(

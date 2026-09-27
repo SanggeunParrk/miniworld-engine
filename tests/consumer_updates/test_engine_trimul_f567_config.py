@@ -19,8 +19,9 @@ OP = "trimul_output_f567_train_triton"
 
 
 def test_csv_owns_every_tiling_axis():
-    grid = configs.configs_for(OP)
+    grid = configs._read(configs.CONFIG_ROOT / "grid" / f"{OP}.csv")
     assert len(grid) == 3072
+    assert 1 <= len(configs._read(configs.CONFIG_ROOT / "default" / f"{OP}.csv")) <= 32
     axes = {"BLOCK_M1", "BLOCK_N", "BLOCK_K", "GROUP_M"}
     assert all(set(c.kwargs) == axes for c in grid)
     assert {c.kwargs["BLOCK_K"] for c in grid} == {16, 32, 64, 128}

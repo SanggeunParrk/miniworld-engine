@@ -1,0 +1,1002 @@
+{
+  "node": "node02",
+  "D": 384,
+  "L": 384,
+  "mode": "normalized operand, full output width",
+  "rows": [
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.675376267866655,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.205320986919105
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.5487607088955966,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 0.7283780593425035
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.926079330444336,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 0.8510279962792993
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.9837884267171226,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 12,
+      "mma_sync": 0,
+      "cp_async": 14,
+      "tma": 0,
+      "seconds": 1.0803876779973507
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.336299196879069,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 0.837799059227109
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.282479985555013,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 0.7797089824452996
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.5879627921364525,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 0.9059183076024055
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.730949115753174,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 20,
+      "tma": 0,
+      "seconds": 0.8846572218462825
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.2797215461730955,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 20,
+      "shared_bytes": 98304,
+      "wgmma": 36,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.3772634761407971
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.7833392143249513,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 6,
+      "shared_bytes": 196608,
+      "wgmma": 36,
+      "mma_sync": 0,
+      "cp_async": 56,
+      "tma": 0,
+      "seconds": 1.3682017484679818
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 4.084107916695731,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 24,
+      "shared_bytes": 98304,
+      "wgmma": 36,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 0.9865504745393991
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 3.477925205230713,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 24,
+      "shared_bytes": 196608,
+      "wgmma": 36,
+      "mma_sync": 0,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 0.914342992939055
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.08685119335468,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 147456,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9020066009834409
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 1.8659656524658204,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 147456,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.5789971258491278
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.711946544647217,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 20,
+      "shared_bytes": 147456,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.0314606092870235
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.223047637939453,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 10,
+      "shared_bytes": 147456,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 18,
+      "tma": 0,
+      "seconds": 0.9857347775250673
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.0122079849243164,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 10,
+      "shared_bytes": 147456,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9014576394110918
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 1.777906608581543,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 163840,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 48,
+      "tma": 0,
+      "seconds": 1.7173526035621762
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.3905807971954345,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 24,
+      "shared_bytes": 147456,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.0673125423491001
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.063605921609061,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 12,
+      "shared_bytes": 163840,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.0550425807014108
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.861180359976632,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 118,
+      "shared_bytes": 163840,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 2.018420551903546
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(327680, 232448, 'shared memory')",
+      "seconds": 0.7862994791939855
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 3.9694871357509065,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 66,
+      "shared_bytes": 163840,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.1169072417542338
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(327680, 232448, 'shared memory')",
+      "seconds": 0.4119361452758312
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.543501615524292,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 298,
+      "shared_bytes": 65536,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 2.5772352563217282
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.804615058898926,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 294,
+      "shared_bytes": 65536,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 24,
+      "tma": 0,
+      "seconds": 2.272670740261674
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 684 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmprxhh0t4k.ptx -o /tmp/tmprxhh0t4k.ptx.o\\n')",
+      "seconds": 0.31031889468431473
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 752 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmp63ada0d5.ptx -o /tmp/tmp63ada0d5.ptx.o\\n')",
+      "seconds": 0.31142291240394115
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.584553575515747,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 318,
+      "shared_bytes": 65536,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 2.725688787177205
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 5.269896278381347,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 298,
+      "shared_bytes": 131072,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 40,
+      "tma": 0,
+      "seconds": 2.4234282402321696
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 784 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmpz434dgem.ptx -o /tmp/tmpz434dgem.ptx.o\\n')",
+      "seconds": 0.3229005504399538
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 875 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmp0pijkc0f.ptx -o /tmp/tmp0pijkc0f.ptx.o\\n')",
+      "seconds": 0.3305296367034316
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 8.676198387145996,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 416,
+      "shared_bytes": 131072,
+      "wgmma": 40,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 2.764660789631307
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(262144, 232448, 'shared memory')",
+      "seconds": 1.2074579047039151
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 976 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmp5u212wvv.ptx -o /tmp/tmp5u212wvv.ptx.o\\n')",
+      "seconds": 0.34631264954805374
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 64,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 1046 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmplf50_j8c.ptx -o /tmp/tmplf50_j8c.ptx.o\\n')",
+      "seconds": 0.3402107488363981
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 4.873151429494222,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 386,
+      "shared_bytes": 131072,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 4.2490346832200885
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 6.813321590423584,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 320,
+      "shared_bytes": 131072,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 3.31412563752383
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 978 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmpoiaq3bnw.ptx -o /tmp/tmpoiaq3bnw.ptx.o\\n')",
+      "seconds": 0.39248501136898994
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 1052 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmp7jk_xeov.ptx -o /tmp/tmp7jk_xeov.ptx.o\\n')",
+      "seconds": 0.3856290867552161
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 6.020310401916504,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 602,
+      "shared_bytes": 131072,
+      "wgmma": 32,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 4.332754454575479
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 4.989666557312011,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 368,
+      "shared_bytes": 196608,
+      "wgmma": 32,
+      "mma_sync": 0,
+      "cp_async": 56,
+      "tma": 0,
+      "seconds": 3.648325579240918
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 1079 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmphuska1fo.ptx -o /tmp/tmphuska1fo.ptx.o\\n')",
+      "seconds": 0.40253509767353535
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 1178 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmpaho18ex3.ptx -o /tmp/tmpaho18ex3.ptx.o\\n')",
+      "seconds": 0.40315283741801977
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 8.194309361775716,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 548,
+      "shared_bytes": 196608,
+      "wgmma": 48,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 4.177464879117906
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "OutOfResources(393216, 232448, 'shared memory')",
+      "seconds": 1.8832970233634114
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 1
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 1334 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmp54im95us.ptx -o /tmp/tmp54im95us.ptx.o\\n')",
+      "seconds": 0.45738781336694956
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 128,
+        "BK": 256,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "failed",
+      "error": "PTXASError('Internal Triton PTX codegen error\\n`ptxas` stderr:\\nptxas fatal   : (C7602) Insufficient registers (128) to compile instruction at line 1406 in function _wide_b2b_kernel. Try to compile with register target of 158 or higher.\\nptxas fatal   : Ptx assembly aborted due to errors\\n\\nRepro command: /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_90a /tmp/tmprioik_aq.ptx -o /tmp/tmprioik_aq.ptx.o\\n')",
+      "seconds": 0.43761763256043196
+    }
+  ],
+  "best": [
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 1.777906608581543,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 163840,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 48,
+      "tma": 0,
+      "seconds": 1.7173526035621762
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 1.8659656524658204,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 147456,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.5789971258491278
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.0122079849243164,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 10,
+      "shared_bytes": 147456,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9014576394110918
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.063605921609061,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 12,
+      "shared_bytes": 163840,
+      "wgmma": 24,
+      "mma_sync": 0,
+      "cp_async": 28,
+      "tma": 0,
+      "seconds": 1.0550425807014108
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.08685119335468,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 255,
+      "spills": 0,
+      "shared_bytes": 147456,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 1.9020066009834409
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "num_warps": 16,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.223047637939453,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 128,
+      "spills": 10,
+      "shared_bytes": 147456,
+      "wgmma": 16,
+      "mma_sync": 0,
+      "cp_async": 18,
+      "tma": 0,
+      "seconds": 0.9857347775250673
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "ms": 2.282479985555013,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 98304,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 32,
+      "tma": 0,
+      "seconds": 0.7797089824452996
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "ms": 2.336299196879069,
+      "relative_frobenius": 0.00019622105173766613,
+      "registers": 254,
+      "spills": 0,
+      "shared_bytes": 73728,
+      "wgmma": 20,
+      "mma_sync": 0,
+      "cp_async": 0,
+      "tma": 0,
+      "seconds": 0.837799059227109
+    }
+  ]
+}

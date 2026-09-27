@@ -83,7 +83,7 @@ def _run(module, x, dy, *, fused, fp32=False):
     if fp32:
         mod = mod.float()
         x, dy = x.float(), dy.float()
-    settings.configure(engine_backend="triton", transition_residual_fusion=True,
+    settings.configure(engine_backend="auto" if fused else "triton", transition_residual_fusion=True,
                        transition_fused_sm90a=fused)
     xx = x.clone().requires_grad_()
     y = mod(xx)

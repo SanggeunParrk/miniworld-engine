@@ -1,0 +1,76 @@
+{
+  "256-384": {
+    "k1": [
+      2,
+      64,
+      4,
+      4,
+      1
+    ],
+    "groups": 4,
+    "normalize": true,
+    "kchunk": 1
+  },
+  "256-768": {
+    "k1": [
+      2,
+      64,
+      4,
+      4,
+      1
+    ],
+    "groups": 4,
+    "normalize": true,
+    "kchunk": 1
+  },
+  "384-384": {
+    "k1": [
+      2,
+      64,
+      2,
+      6,
+      1
+    ],
+    "groups": 3,
+    "normalize": true,
+    "kchunk": 1
+  },
+  "384-768": {
+    "k1": [
+      2,
+      64,
+      2,
+      6,
+      1
+    ],
+    "groups": 3,
+    "normalize": true,
+    "kchunk": 1
+  },
+  "512-384": {
+    "k1": [
+      2,
+      64,
+      4,
+      2,
+      1,
+      2
+    ],
+    "groups": 4,
+    "normalize": false,
+    "kchunk": 1
+  },
+  "512-768": {
+    "k1": [
+      2,
+      64,
+      4,
+      2,
+      1,
+      2
+    ],
+    "groups": 4,
+    "normalize": false,
+    "kchunk": 1
+  }
+}

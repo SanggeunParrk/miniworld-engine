@@ -31,6 +31,7 @@ from benchmarks.runners.measurement import (
     benchmark_source_hash,
     check_execution_outputs,
     check_finite_outputs,
+    check_stochastic_graph_replay,
     compile_for_benchmark,
     compile_module_for_benchmark,
     input_shapes_of,
@@ -150,7 +151,8 @@ class BenchConfig(BaseModel):
     metric: Literal["time", "memory"]
     compile: bool = False
     # Manual graph capture wraps the measured callable after requested compilation.
-    # Auto uses graphs for inference timing and no graph for training or memory.
+    # The entrypoint expands auto module training timing to OFF and ON runs.
+    # A single config resolves auto to OFF for training/memory, ON for inference.
     cudagraph: Literal["disabled", "manual", "graphed", "auto"] = "auto"
     allow_tf32: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
@@ -203,8 +205,6 @@ class BenchConfig(BaseModel):
                 raise ValueError(f"{self.target} has no module dropout")
             if is_inference_mode(self.mode):
                 raise ValueError("inference requires dropout=0 (or auto)")
-            if self.cudagraph != "disabled":
-                raise ValueError("training with dropout requires cudagraph=disabled")
         if not self.implementations:
             raise ValueError("implementations must not be empty")
         if self.n_layers < 1 or self.n_augment < 1:
@@ -445,11 +445,30 @@ def measured_result(
             execution_checks["compiled_vs_eager"] = check_execution_outputs(captured_outputs[0], eager_snapshot)
             del eager_snapshot
         if conf.cudagraph in {"manual", "graphed"}:
-            before_capture = snapshot_outputs(captured_outputs[0])
+            stochastic = is_train and bool(conf.dropout)
+            before_capture = None if stochastic else snapshot_outputs(captured_outputs[0])
             graph = capture_cudagraph(checked_step, params, is_train=is_train)
-            graph.replay()
-            torch.cuda.synchronize()
-            execution_checks["graph_replay"] = check_execution_outputs(captured_outputs[0], before_capture)
+            if stochastic:
+                graph_outputs = captured_outputs[0]
+                graph_grads = [tensor.grad for tensor in grad_to_none]
+
+                def validation_step():
+                    checked_step()
+                    return captured_outputs[0]
+
+                try:
+                    execution_checks["graph_replay"] = check_stochastic_graph_replay(
+                        validation_step, graph.replay, graph_outputs)
+                finally:
+                    # Eager validation allocates new gradients. Restore the captured
+                    # buffers so observable .grad attributes follow subsequent replays.
+                    for tensor, gradient in zip(grad_to_none, graph_grads, strict=True):
+                        tensor.grad = gradient
+                    captured_outputs[0] = graph_outputs
+            else:
+                graph.replay()
+                torch.cuda.synchronize()
+                execution_checks["graph_replay"] = check_execution_outputs(captured_outputs[0], before_capture)
             del before_capture
             timed = graph.replay
             actual_graph = "manual"
@@ -528,8 +547,8 @@ def capture_cudagraph(step: Callable, params: list, is_train: bool,
     in a per-shape CUDA graph and return it; replay reruns the captured kernels with zero
     host/launch overhead — the deployment regime for graph-break cute/triton kernels. Reusing the
     harness's own step keeps the backward path consistent (fabric.backward, required by the
-    fabric/precision strategy). Training: params get static .grad buffers (accumulated on replay,
-    fine for timing). Module-scoped — `step` excludes the optimizer. Inputs must be the same static
+    fabric/precision strategy). The measured_result wrapper clears gradients inside the captured
+    step, so replay writes fresh gradients to static buffers. Module-scoped — `step` excludes the optimizer. Inputs must be the same static
     tensors each replay (the harness reuses one pair/dy/mask)."""
     if is_train:
         for p in params:
@@ -681,7 +700,7 @@ def _miniworld_inference(
     )
 
 
-class MiniWorldTriangleMultiplicationInference(nn.Module):
+class FusedTriangleMultiplicationInference(nn.Module):
     def __init__(self, base: TriangleMultiplication) -> None:
         super().__init__()
         from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch
@@ -740,7 +759,7 @@ class MiniWorldTriangleMultiplicationInference(nn.Module):
         )
 
 
-class MiniWorldTriangleMultiplicationTraining(nn.Module):
+class FusedTriangleMultiplicationTraining(nn.Module):
     def __init__(self, base: TriangleMultiplication) -> None:
         super().__init__()
         from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged import (
@@ -847,7 +866,7 @@ def bench_module_triangle_multiplication(
                 # Use the real production module (implementation=MINIWORLD): its per-GPU
                 # dispatch runs the sm100-native cute path on B200 (tcgen05 front + split
                 # sm100 out-projection), correct at every d. The prior hand-wired wrappers
-                # (MiniWorld*Inference/Training, BidirV6TriMul) called the H100 quack /
+                # (Fused*Inference/Training, BidirV6TriMul) called the H100 quack /
                 # back_split kernels, which are numerically WRONG on sm_100 (out-cosine
                 # ~0.05-0.7 vs pytorch) and assert "SM90 only" at d>=256.
                 # cute path is bf16-only (asserts on fp32 weights); pin bf16 like the
@@ -3816,6 +3835,23 @@ def _target_config_path() -> str:
     version_base=None,
 )
 def main(cfg: DictConfig) -> None:
+    from benchmarks.runners.bench_policy import graph_regimes
+
+    regimes = graph_regimes(cfg.level, cfg.mode, cfg.metric, cfg.cudagraph)
+    if len(regimes) > 1:
+        # Separate processes preserve independent RNG/compile state and separate CSVs.
+        # Run both even if one fails; never replace a failed graph run with OFF.
+        import subprocess
+
+        overrides = [arg for arg in sys.argv[1:] if not arg.startswith("cudagraph=")]
+        failed = False
+        for regime in regimes:
+            cmd = [sys.executable, str(Path(__file__).resolve()), *overrides, f"cudagraph={regime}"]
+            print(f"=== module training benchmark: cudagraph={regime}", flush=True)
+            failed |= subprocess.run(cmd, check=False).returncode != 0
+        if failed:
+            raise SystemExit(1)
+        return
     # The config set is chosen at import time via MINIWORLD_CONFIG_DIR (see autotune.configs):
     # this module's own header imports miniworld_engine.modules, which pulls kernel modules in,
     # so selecting here would already be too late for every op registered by that chain.

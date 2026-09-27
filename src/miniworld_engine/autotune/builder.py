@@ -818,14 +818,16 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         BOTH_PAIR_LENGTHS,
         DIT_ATOM_LENGTHS,
         DIT_TOKEN_LENGTHS,
+        MPNN_NODE_SHAPES,
         SHAPES_BY_LEVEL,
         TOKEN_SHAPES,
     )
 
-    if stack is not None and stack not in ("trunk", "diffusion"):
+    if stack is not None and stack not in ("trunk", "diffusion", "mpnn"):
         # Returning the `both` rows for an unrecognised name -- a third of the sweep -- and having
         # the CLI report it as a build is worse than not running.
-        msg = f"op_units(stack={stack!r}): the halves are 'trunk' and 'diffusion'"
+        msg = (f"op_units(stack={stack!r}): the halves are 'trunk', 'diffusion' and 'mpnn' "
+               f"-- the first two are the structure model's, the third is the other model's")
         raise ValueError(msg)
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
@@ -1017,6 +1019,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         "H": PAIR_BIDIR,            # the per-side hidden width; 2 * d_pair on a bidirectional trimul
         "ND": EXPANDED_WIDTHS,      # n * d_hidden, the transition's expanded width
     }
+    MPNN_EDGE_WIDTH = 128
     assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
     LADDER = {"atom": PRESENTED["atom"],
               "pair": PRESENTED["pair"],
@@ -1049,7 +1052,13 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             continue
         if only and r["kernel"] not in only:
             continue
-        if stack and r.get("stack") not in (stack, "both"):
+        # `both` is both halves of the STRUCTURE model, not all three stacks. A kernel the trunk and the
+        # diffusion side share is launched by neither ProteinMPNN nor anything else, so asking for
+        # the mpnn half must not drag it in: `build mpnn` did exactly that and spent its first
+        # minute on gated_projection and layernorm, at pair shapes, into a shard directory the
+        # A6000 build on another node was already filling with the same units.
+        shared = "both" if stack in ("trunk", "diffusion") else None
+        if stack and r.get("stack") not in (stack, shared):
             continue
         if (r["kernel"] not in BUILD_OPS and config_dir is not None
                 and not (config_dir / f"{r['kernel']}.csv").is_file()):
@@ -1108,7 +1117,12 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             _tok_shared = TOKEN_SHAPES
             per = {"pair": [("pair", L) for L in BOTH_PAIR_LENGTHS],
                    "atom": [("atom", A) for A in ATOM_SHAPES],
-                   "token": [("token", N) for N in _tok_shared]}
+                   "token": [("token", N) for N in _tok_shared],
+                   # The mpnn families. `level=both` is the literal truth for them -- they key on
+                   # `both_key(rows)` -- and the side says which stream those rows come from: an
+                   # edge launch is N nodes x k neighbours, so its LENGTH is a node count and its
+                   # row count is 48x that.
+                   "edge": [("edge", N) for N in MPNN_NODE_SHAPES]}
             sided = [u for side in want for u in per[side]]
         elif r["level"] == "atom":
             # Also two work lists -- see shape_key.DIT_TOKEN_LENGTHS. `level=atom` says which key
@@ -1228,6 +1242,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 if _shared:
                     return LADDER["both"]
                 return DIT_TOKEN_WIDTHS
+            if side == "edge":
+                return (MPNN_EDGE_WIDTH,)
             return LADDER.get(_k, LADDER["both"])
 
         # A ladder is a guess that a different width is a different bucket. For 17 ops it is not:
@@ -1372,7 +1388,12 @@ def units(selected: list[Case]) -> list[Unit]:
                     dt = str(dtype).replace("torch.", "")
                     for train in ((False, True) if case.train else (False,)):
                         mode = "train" if train else "eval"
+                        from miniworld_engine.autotune import policy
+                        if not policy.allows(case.stream_for(di), length, mode, "miniworld"):
+                            continue
                         for impl in (i for i in case.impls if (i, dt) in allowed):
+                            if not policy.allows(case.stream_for(di), length, mode, impl, impls=case.impls):
+                                continue
                             # "" = no compute-dtype argument at all, which is a DIFFERENT unit from
                             # passing the module's own dtype explicitly only in bookkeeping; cases
                             # without the axis keep their existing stems and stay resumable.
@@ -1382,6 +1403,8 @@ def units(selected: list[Case]) -> list[Unit]:
                                 out.append(Unit(case.name, di, length, train, dt,
                                                 impl=impl, compute=core))
                                 for switch in case.switches:
+                                    if not policy.allows(case.stream_for(di), length, mode, impl, (switch, ""), case.impls):
+                                        continue
                                     values, modes = SWITCHES[switch]
                                     if mode not in modes:
                                         continue
@@ -1967,8 +1990,10 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
 
             from miniworld_engine.autotune.cache import config_space_hash
             from miniworld_engine.autotune.configs import configs_for
+            from miniworld_engine.autotune.native import BUILD_OPS
             grids = [(op, config_space_hash(configs_for(op)))
-                     for op in sorted({op for op, _key in report["missing"]})]
+                     for op in sorted({op for op, _key in report["missing"]})
+                     if op not in BUILD_OPS]
             generation = hashlib.sha256(
                 repr((evidence["source_identity"], sorted(missing), grids)).encode()).hexdigest()[:12]
             work = [dataclasses.replace(u, generation=generation) for u in work]
@@ -2229,7 +2254,7 @@ def _child_main(argv: list[str] | None = None) -> int:
     # rows were split by stream, and this list was not -- so every token unit died in argparse
     # before it reached a kernel, 3 seconds and 0 ops each. The parent process and the child have
     # to agree on the vocabulary; keeping the tuple here in step with `_widths` is the whole job.
-    ap.add_argument("--side", default="", choices=("", "pair", "atom", "token", "msa"),
+    ap.add_argument("--side", default="", choices=("", "pair", "atom", "token", "msa", "edge"),
                     help="which side of a `level=both` kernel to drive. It keys on rows, so pair "
                          "L and atom A of the same value are different buckets and the side "
                          "cannot be inferred from --length. Reaches the drivers as "

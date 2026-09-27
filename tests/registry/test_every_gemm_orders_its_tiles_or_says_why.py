@@ -181,6 +181,10 @@ def test_the_materialised_sets_pin_one_value() -> None:
         with f.open(newline="") as fh:
             rows = list(_csv.reader(fh))[1:]
         seen = {r[i] for r in rows if r}
+        # v2.1 default is a multi-candidate SEARCH set, not an A/B pin.
+        if f.parent.name == "default":
+            assert "1" in seen or "4" in seen
+            continue
         if seen - {"1", "4"}:
             bad.append(f"{f.parent.name}/{f.name}: {sorted(seen)}")
     assert not bad, ("materialised sets pinning a GROUP_M the measurement does not support -- they "

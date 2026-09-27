@@ -1,0 +1,12 @@
+{
+  "src/miniworld_engine/modules/transition/module.py": "9b96f0717137511f779c7a74ad0fe7c7243427c7d1daaad148241bdea5008478",
+  "src/miniworld_engine/kernels/transition/cuda/variants.py": "c662e4848628d96ecb2991e51be5731367f137e1496b96803ff2ee43a1e24a81",
+  "src/miniworld_engine/kernels/transition/cuda/transition_variants_kernel.cu": "9502ec6a3ef5b759ff9735aaae0cf00458c1a22f38142f57eebe80e715a19caf",
+  "src/miniworld_engine/kernels/transition/cuda/transition_variant_norm.cu": "6be33257c9e47ea0f18919dbf33f8d6bd6b41a7045327aa8ce673e8b940552bf",
+  "src/miniworld_engine/kernels/transition/triton/segmented_b2b.py": "8878ec41ebd5104feffd40bf91d31771d53efa7907e1a2602159d6e22751158b",
+  "src/miniworld_engine/kernels/transition/triton/wide_b2b.py": "088e38d5bc1af2a1e66c1dc22d4e2e89ec5bcf703ec80fd51752046d349ae3c8",
+  "src/miniworld_engine/kernels/transition/triton/residual.py": "8a9053fd57ab28d895aa6f24b18715260af3aec1ab47b900724cd8939d57d628",
+  "src/miniworld_engine/kernels/transition/triton/main.py": "46020b3a621eb5d371fff3e7da64800c1291aa4bdc7ff5395a650b4719948cdc",
+  "src/miniworld_engine/kernels/transition/triton/fused.py": "7b2bf102a307a58fc45ce7ebf38d521cccda804032363cee59076088b4d89561",
+  "tests/numerics/test_transition_cuda_variants_gpu.py": "f8deda18b97e35bc512457327be6a5c31f239358a55ee8ba8b256faa4f6174fd"
+}

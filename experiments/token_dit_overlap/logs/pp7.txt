@@ -1,0 +1,46 @@
+## start 23:08:59 restart=0
+#### diag
+L384 K768 adaln=0 mc=0: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=0 mc=3: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=0 mc=1: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=0: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=3: x err 1.9e-06, bad rows 0 (tiles [])
+L384 K768 adaln=1 mc=1: x err 1.9e-06, bad rows 0 (tiles [])
+#### diag done
+#### test
+ALL OK
+#### test done
+#### res
+  REG:128 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:900 TEXTURE:0 SURFACE:0 SAMPLER:0
+  REG:128 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:900 TEXTURE:0 SURFACE:0 SAMPLER:0
+#### res done
+#### times
+L768 Wo: 120 CTAs, kernel span 27.0 us (first CTA start -> last tile freed)
+  tile 0 (120 CTAs) starts +  0.3 us: turn wait  0.0  mainloop  4.6  acc drain  0.0  x wait  1.0  residual  2.0  stats  1.3  adaln  3.3  free  0.5
+  tile 1 (120 CTAs) starts +  0.0 us: turn wait  4.9  mainloop  4.9  acc drain  0.0  x wait  1.0  residual  2.8  stats  1.5  adaln  3.6  free  0.5
+  tile 2 (120 CTAs) starts +  0.0 us: turn wait  9.7  mainloop  5.4  acc drain  0.0  x wait  1.8  residual  2.8  stats  2.3  adaln  1.8  free  0.3
+  tile 3 (120 CTAs) starts + 14.1 us: turn wait  1.0  mainloop  4.6  acc drain  0.0  x wait  1.0  residual  1.5  stats  1.3  adaln  1.5  free  0.3
+L768 squeeze: 120 CTAs, kernel span 42.0 us (first CTA start -> last tile freed)
+  tile 0 (120 CTAs) starts +  0.3 us: turn wait  0.0  mainloop  9.0  acc drain  0.0  x wait  1.3  residual  2.0  stats  1.3  adaln  2.3  free  0.3
+  tile 1 (120 CTAs) starts +  0.3 us: turn wait  9.2  mainloop  9.5  acc drain  0.0  x wait  1.3  residual  2.0  stats  1.5  adaln  2.3  free  0.3
+  tile 2 (120 CTAs) starts +  0.3 us: turn wait 18.7  mainloop  9.2  acc drain  0.0  x wait  1.3  residual  1.8  stats  1.5  adaln  2.3  free  0.3
+  tile 3 (120 CTAs) starts + 16.6 us: turn wait 11.8  mainloop  8.7  acc drain  0.0  x wait  0.5  residual  1.3  stats  1.3  adaln  1.0  free  0.3
+L384 Wo: 120 CTAs, kernel span 15.7 us (first CTA start -> last tile freed)
+  tile 0 (120 CTAs) starts +  0.5 us: turn wait  0.0  mainloop  4.6  acc drain  0.0  x wait  1.0  residual  2.0  stats  1.5  adaln  2.0  free  0.5
+  tile 1 (120 CTAs) starts +  0.5 us: turn wait  4.6  mainloop  4.1  acc drain  0.0  x wait  1.0  residual  1.5  stats  1.5  adaln  1.0  free  0.3
+  tile 2 (120 CTAs) starts +-1406.5 us: turn wait 18.7  mainloop  9.2  acc drain  0.0  x wait  1.3  residual  1.8  stats  1.5  adaln  2.3  free  0.3
+  tile 3 (120 CTAs) starts +-1390.1 us: turn wait 11.8  mainloop  8.7  acc drain  0.0  x wait  0.5  residual  1.3  stats  1.3  adaln  1.0  free  0.3
+#### times done
+#### bench_pp3
+L384 Wo     : mm+rows do_bench   18.9  graph   12.1   |   pp do_bench   24.3  graph   16.5  us
+L384 squeeze: mm+rows do_bench   21.8  graph   14.7   |   pp do_bench   31.4  graph   23.7  us
+L768 Wo     : mm+rows do_bench   28.8  graph   21.4   |   pp do_bench   36.3  graph   27.8  us
+L768 squeeze: mm+rows do_bench   33.9  graph   28.2   |   pp do_bench   50.9  graph   43.7  us
+#### bench_pp3 done
+#### bench_pp
+L384 Wo     : mm+rows do_bench   18.9  graph   11.6   |   pp do_bench   24.0  graph   16.1  us
+L384 squeeze: mm+rows do_bench   21.6  graph   14.3   |   pp do_bench   29.2  graph   21.1  us
+L768 Wo     : mm+rows do_bench   28.9  graph   21.6   |   pp do_bench   34.9  graph   25.9  us
+L768 squeeze: mm+rows do_bench   34.0  graph   28.4   |   pp do_bench   42.5  graph   34.2  us
+#### bench_pp done
+## all done 23:12:40

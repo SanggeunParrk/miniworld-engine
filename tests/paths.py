@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
 from pathlib import Path
 
 ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
@@ -61,3 +62,27 @@ def cache_entries(op: str) -> list[tuple[str, str, list[dict]]]:
             if isinstance(ranked, list) and ranked:
                 out.append((f.stem, key, ranked))
     return out
+
+
+def tracked_subdirectories(root: Path) -> set[str]:
+    """Subdirectories of `root` holding source files tracked or not ignored by git.
+
+    `benchmarks/` results are gitignored, so a working checkout accumulates output under target
+    names that no longer exist and `iterdir()` sees them. That happened: fourteen directories under
+    the retired short vocabulary, plus 257 MB of another branch's `mpnn` output, turned this test
+    red locally while CI -- a fresh clone with only tracked files -- stayed green. A check that
+    depends on what a previous experiment left on disk is not checking the repository.
+
+    Raises rather than falling back to `iterdir()`: a silent fallback restores the behaviour this
+    replaces, and an empty result would make the caller pass vacuously.
+    """
+    rel = root.relative_to(ROOT)
+    proc = subprocess.run(["git", "ls-files", "--cached", "--others",
+                           "--exclude-standard", "-z", "--", str(rel)],
+                          cwd=ROOT, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git ls-files failed for {rel}: {proc.stderr.strip()}")
+    names = {Path(e).relative_to(rel).parts[0]
+             for e in proc.stdout.split("\0") if e and len(Path(e).relative_to(rel).parts) > 1}
+    assert names, f"no tracked files under {rel}; this check would pass vacuously"
+    return names

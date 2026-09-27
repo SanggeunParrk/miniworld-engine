@@ -49,6 +49,7 @@ raises if any op already registered empty.
 from __future__ import annotations
 
 import csv
+import functools
 import itertools
 import os
 import warnings
@@ -278,24 +279,58 @@ def config_set(name: str) -> Path:
 
 
 def default_config_dir() -> Path | None:
-    """The config set used when ``MINIWORLD_CONFIG_DIR`` is not set, or None if none is present.
-
-    ``grid``, not one of the single-config sets: the cache reader INTERSECTS a tuned entry
-    against the live config list (``keep = [c for c in configs if _sig(c) in want]``), so a
-    default smaller than the space the cache was built over would resolve every shipped entry to
-    nothing and re-tune on every call.
-
-    There has to BE a default. Without one, an install that does not export the environment
-    variable leaves every op stranded with triton's substitute config, and the first launch of
-    every triton kernel dies with ``dynamic_func() missing 2 required positional arguments:
-    'BLOCK_M1' and 'BLOCK_K'`` -- a message that names neither the op nor the cause. Every entry
-    point in this repo happens to export it, which is exactly why that went unnoticed.
-    """
-    # One place. `grid` used to exist here AND at the repo root, byte-identical and asserted so,
-    # because `cli.resolve_config_dir` mapped a short name only against the repo root. The
-    # resolver falls back here now, so the root copy is gone and this is the single home.
-    packaged = Path(__file__).parent / "configs" / "grid"
+    """Small packaged per-op space; ``grid`` remains the explicit global space."""
+    packaged = CONFIG_ROOT / "default"
     return packaged if packaged.is_dir() else None
+
+
+def using_default_space() -> bool:
+    return _DIR is not None and _DIR.resolve() == (CONFIG_ROOT / "default").resolve()
+
+
+@functools.lru_cache(maxsize=None)
+def _global_rows(op):
+    path = CONFIG_ROOT / "grid" / f"{op}.csv"
+    if not path.is_file():
+        return ()
+    with path.open(newline="") as handle:
+        return tuple(csv.DictReader(handle))
+
+
+def validated_global_configs(op: str, entries: list) -> list:
+    """Reuse measured global winners without globally SEARCHING on a miss.
+
+    Check membership against the small axis specification without expanding its
+    Cartesian product. Callers must additionally check source/environment/key
+    identity and run the kernel's resource/shape pruner on the returned configs.
+    """
+    rows = _global_rows(op)
+    if not rows:
+        return []
+    spec = ({r["axis"]: {int(v) for v in r["values"].split()} for r in rows}
+            if "axis" in rows[0] else None)
+    if spec and "slice" in spec:
+        return []
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("kwargs"), dict):
+            continue
+        values = {**entry["kwargs"], "num_warps": entry.get("num_warps", 4),
+                  "num_stages": entry.get("num_stages", 2)}
+        if entry.get("maxnreg") is not None:
+            values["maxnreg"] = entry["maxnreg"]
+        if any(type(v) is not int for v in values.values()):
+            continue
+        if spec is not None:
+            valid = set(values) == set(spec) and all(values[k] in v for k, v in spec.items())
+            tiles = [k for k in values if k.startswith("BLOCK")]
+            valid = valid and not _tile_too_small(values, tiles)
+        else:
+            valid = any(values == {k: int(v) for k, v in row.items() if v} for row in rows)
+        if valid:
+            out.append(triton.Config(dict(entry["kwargs"]), num_warps=values["num_warps"],
+                                     num_stages=values["num_stages"], maxnreg=values.get("maxnreg")))
+    return out
 
 
 _ENV_DIR = os.environ.get("MINIWORLD_CONFIG_DIR", "").strip()
@@ -310,13 +345,13 @@ if _ENV_DIR:
         # `configs/grid` for weeks after that directory moved into the package.
         raise RuntimeError(
             f"MINIWORLD_CONFIG_DIR={_ENV_DIR!r} is not a directory. Unset it to use the packaged "
-            f"`grid` set, or point it at a config set that exists.")
+            f"`default` set, or point it at a config set that exists.")
 else:
     _DIR = default_config_dir()
     if _DIR is None:
         warnings.warn(
             "[miniworld.autotune] no autotune config set found: MINIWORLD_CONFIG_DIR is unset and "
-            "the packaged `autotune/configs/grid` is missing. Every triton kernel "
+            "the packaged `autotune/configs/default` is missing. Every triton kernel "
             "will fail at its first launch with `dynamic_func() missing N required positional "
             "arguments` naming its tile axes. Set MINIWORLD_CONFIG_DIR to a config set BEFORE "
             "importing any kernel module.",

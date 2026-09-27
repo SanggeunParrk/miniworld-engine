@@ -31,6 +31,8 @@ import ctypes
 import os
 import struct as _struct
 import threading
+from functools import lru_cache
+from contextlib import contextmanager
 
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_driver as _driver
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_manifest as _manifest
@@ -143,16 +145,17 @@ class Struct(object):
     def __init__(self, fields):
         self.fields = list(fields)
 
+    @staticmethod
+    def fixed(key, fields):
+        """Internal fixed-ABI call sites; pointer slots accept tensors or None."""
+        return _FixedStruct(key, fields)
+
     def layout(self):
-        blob, align = bytearray(), 1
-        for f in self.fields:
-            b, a = _pack_one(f)
-            pad = (-len(blob)) % a
-            blob += b"\x00" * pad
-            blob += b
-            align = max(align, a)
-        blob += b"\x00" * ((-len(blob)) % align)
-        return bytes(blob), align
+        # One C struct.pack for all fields. Cache only immutable layouts, never
+        # tensor addresses, values or mutable launch argument buffers.
+        fields = [_field_format_value(f) for f in self.fields]
+        fmt, align = _layout_format(tuple((f[0], f[1]) for f in fields))
+        return fmt.pack(*(f[2] for f in fields)), align
 
     def pack(self):
         return self.layout()[0]
@@ -162,14 +165,108 @@ class Struct(object):
         return self.layout()[1]
 
 
+_fixed_layouts = {}
+
+
+def _pointer_value(value):
+    return 0 if value is None else value.data_ptr()
+
+
+def _nested_value(value):
+    return value.pack()
+
+
+def _map_value(value):
+    return value.raw
+
+
+def _scalar_value(value):
+    return value.value
+
+
+class _FixedStruct(Struct):
+    __slots__ = ("key",)
+
+    def __init__(self, key, fields):
+        super().__init__(fields)
+        self.key = key
+
+    def layout(self):
+        plan = _fixed_layouts.get(self.key)
+        if plan is None:
+            metadata = [_field_format_value(f) for f in self.fields]
+            fmt, align = _layout_format(tuple((v[0], v[1]) for v in metadata))
+            getters = []
+            for f in self.fields:
+                if f is None or isinstance(f, _tensor_type()):
+                    getters.append(_pointer_value)
+                elif isinstance(f, TensorMap):
+                    getters.append(_map_value)
+                elif isinstance(f, Struct):
+                    getters.append(_nested_value)
+                elif isinstance(f, _Scalar):
+                    getters.append(_scalar_value)
+                else:
+                    getters.append(None)
+            plan = (fmt, align, tuple(getters))
+            if len(_fixed_layouts) >= 512:
+                _fixed_layouts.clear()
+            _fixed_layouts[self.key] = plan
+        fmt, align, getters = plan
+        if len(getters) != len(self.fields):
+            raise ValueError("fixed ABI field count changed for %s" % self.key)
+        return fmt.pack(*(get(f) if get else f for get, f in zip(getters, self.fields))), align
+
+
+@lru_cache(maxsize=512)
+def _layout_format(schema):
+    parts = ["<"]
+    size, align = 0, 1
+    for fmt, field_align in schema:
+        pad = (-size) % field_align
+        if pad:
+            parts.append(str(pad) + "x")
+        parts.append(fmt)
+        size += pad + _struct.calcsize("<" + fmt)
+        align = max(align, field_align)
+    pad = (-size) % align
+    if pad:
+        parts.append(str(pad) + "x")
+    return _struct.Struct("".join(parts)), align
+
+
+@lru_cache(None)
+def _tensor_type():
+    import torch
+    return torch.Tensor
+
+
+def _field_format_value(value):
+    if isinstance(value, TensorMap):
+        return "128s", TensorMap.align, value.raw
+    if isinstance(value, _Scalar):
+        return value.fmt, value.align, value.value
+    if isinstance(value, Struct):
+        blob, align = value.layout()
+        return str(len(blob)) + "s", align, blob
+    if value is None:
+        return "Q", 8, 0
+    if isinstance(value, (bool, int)):
+        if not -(2**31) <= value < 2**31:
+            raise TypeError("int argument outside i32; wrap it (i64/u64)")
+        return "i", 4, value
+    if isinstance(value, float):
+        return "f", 4, value
+    if isinstance(value, (bytes, bytearray)):
+        return str(len(value)) + "s", 1, bytes(value)
+    if isinstance(value, _tensor_type()):
+        return "Q", 8, value.data_ptr()
+    raise TypeError("unsupported kernel argument type %s" % type(value).__name__)
+
+
 def _pack_one(a):
     """-> (bytes, alignment) of one argument."""
-    try:
-        import torch
-
-        is_tensor = isinstance(a, torch.Tensor)
-    except ImportError:
-        is_tensor = False
+    is_tensor = isinstance(a, _tensor_type())
     if is_tensor:
         return _struct.pack("<Q", a.data_ptr()), 8
     if isinstance(a, (_Scalar,)):
@@ -193,23 +290,55 @@ def _pack_one(a):
     raise TypeError("unsupported kernel argument type %s" % type(a).__name__)
 
 
-class _Packed(object):
-    """Host buffers of the packed arguments + the void** array cuLaunchKernel takes; keep it alive until the launch call returns."""
+_argument_storage = threading.local()
 
-    __slots__ = ("bufs", "array")
+
+class _Packed(object):
+    """Exclusive host argument storage until the driver has copied the arguments.
+
+    Only raw host buffers are pooled, per thread; live packs never share storage.
+    No tensor/activation or CUDA stream is retained in the pool.
+    """
+    __slots__ = ("bufs", "array", "_pool", "_key", "_storage")
 
     def __init__(self, args):
-        self.bufs = []
-        ptrs = []
-        for a in args:
-            b, al = _pack_one(a)
-            al = max(al, 8)
-            raw = (ctypes.c_uint8 * (len(b) + al))()
-            addr = (ctypes.addressof(raw) + al - 1) & ~(al - 1)
-            ctypes.memmove(addr, b, len(b))
-            self.bufs.append(raw)
-            ptrs.append(addr)
-        self.array = (ctypes.c_void_p * max(len(ptrs), 1))(*ptrs) if ptrs else None
+        blobs = [_pack_one(a) for a in args]
+        offsets, size = [], 0
+        for blob, align in blobs:
+            # All supported argument alignments are <=64, including tensor maps.
+            size = (size + 63) & ~63
+            offsets.append(size)
+            size += len(blob)
+        capacity = max(64, 1 << max(0, size - 1).bit_length())
+        key = (len(blobs), capacity)
+        pool = getattr(_argument_storage, "free", None)
+        if pool is None:
+            pool = _argument_storage.free = {}
+        free = pool.get(key)
+        if free:
+            storage = free.pop()
+        else:
+            raw = (ctypes.c_uint8 * (capacity + 64))()
+            base = (ctypes.addressof(raw) + 63) & ~63
+            storage = (raw, base, (ctypes.c_void_p * max(1, len(blobs)))())
+        self._pool, self._key, self._storage = pool, key, storage
+        raw, base, array = storage
+        for i, ((blob, _), offset) in enumerate(zip(blobs, offsets)):
+            ctypes.memmove(base + offset, blob, len(blob))
+            array[i] = base + offset
+        self.bufs = [raw]
+        self.array = array if blobs else None
+
+    def __del__(self):
+        storage = getattr(self, "_storage", None)
+        if storage is not None:
+            pool, key = self._pool, self._key
+            # Bound retained host memory: <=16 sizes x 4 leases; each <=64 KiB plus alignment.
+            if key[0] <= 16 and key[1] <= 65536 and (key in pool or len(pool) < 16):
+                free = pool.setdefault(key, [])
+                if len(free) < 4:
+                    free.append(storage)
+            self._storage = None
 
 
 def pack_args(args):
@@ -355,9 +484,6 @@ def _make_context_current(idx):
     torch = _torch()
     torch.cuda.init()
     with torch.cuda.device(idx):
-        torch.empty(
-            1, device="cuda:%d" % idx
-        )  # forces primary-context creation on that device
         drv = driver()
         dev = drv.device_get(idx)
         cur = drv.ctx_get_current()
@@ -558,84 +684,82 @@ _TMAP_DTYPE_OF_TORCH = {
 }
 
 
-def tensor_map(
-    tensor,
-    box,
-    dims=None,
-    strides_bytes=None,
-    swizzle="none",
-    interleave="none",
-    l2="128B",
-    oob="none",
-    elem_strides=None,
-    dtype=None,
-):
-    """Encode a tiled CUtensorMap over ``tensor`` (host-side cuTensorMapEncodeTiled).  By default the map describes the tensor itself:
-    ``dims`` = its sizes innermost-first, ``strides_bytes`` = the byte strides of dimensions 1.. innermost-first (must be multiples of 16; the
-    innermost dimension must be contiguous).  ``box``: the tile extent per dimension, innermost-first (innermost box bytes: a multiple of 16,
-    <= the swizzle span when swizzled; every box extent <= 256).  Out-of-bounds elements of a box read as zero (``oob='none'``).  Returns a
-    ``TensorMap`` usable as a kernel argument (directly or inside a ``Struct``); it keeps ``tensor`` alive."""
-    drv = driver()
+@lru_cache(maxsize=8192)
+def _encoded_tensor_map(drv, context, dtype, rank, address, dims, strides,
+                        box, elem_strides, interleave, swizzle, l2, oob):
+    # Cache descriptor bytes only, never tensors or their allocations. Address,
+    # full layout, options and CUDA context identify the encoding, not contents.
+    return drv.tensor_map_encode_tiled(dtype, rank, address, dims, strides,
+                                       box, elem_strides, interleave, swizzle, l2, oob)
+
+
+_map_scope = threading.local()
+
+
+@contextmanager
+def tensor_map_scope(drv):
+    """Bind a verified CUDA context for one native op, restore on exit/nesting."""
+    previous = getattr(_map_scope, "active", None)
+    _map_scope.active = (drv, int(drv.ctx_get_current()))
+    try:
+        yield
+    finally:
+        _map_scope.active = previous
+
+
+@lru_cache(maxsize=1024)
+def _map_spec(tdt, esz, dims, strides, box, elements, swizzle, interleave, l2, oob):
+    rank = len(dims)
+    if not 1 <= rank <= 5:
+        raise ValueError("tensor_map: rank outside 1..5")
+    if strides is None or len(strides) != rank - 1:
+        raise ValueError("tensor_map: need rank-1 byte strides")
+    if any(s % 16 for s in strides):
+        raise ValueError("tensor_map: strides must be multiples of 16 bytes")
+    box = tuple(int(b) for b in box)
+    if len(box) != rank or any(b < 1 or b > 256 for b in box):
+        raise ValueError("tensor_map: box extents must be in 1..256")
+    if box[0] * esz % 16:
+        raise ValueError("tensor_map: innermost box must be a multiple of 16 bytes")
+    es = tuple(int(e) for e in elements) if elements else (1,) * rank
+    return (_driver.TMAP_DTYPE[tdt], rank, dims, strides, box, es,
+            _driver.TMAP_INTERLEAVE[interleave], _driver.TMAP_SWIZZLE[swizzle],
+            _driver.TMAP_L2[l2], _driver.TMAP_OOB[oob])
+
+
+def tensor_map(tensor, box, dims=None, strides_bytes=None, swizzle="none",
+               interleave="none", l2="128B", oob="none", elem_strides=None, dtype=None):
+    """Encode a TMA descriptor; validate fixed metadata once, read the live address.
+
+    Returns a TensorMap retaining the input tensor. Descriptor caches retain only
+    bytes, keyed by full metadata, address and CUDA context.
+    """
+    active = getattr(_map_scope, "active", None)
+    if active is None:
+        drv = driver()
+        context = int(drv.ctx_get_current())
+    else:
+        drv, context = active
     tdt = dtype or _TMAP_DTYPE_OF_TORCH.get(str(tensor.dtype))
     if tdt is None:
         raise TypeError("no tensor-map data type for %s" % tensor.dtype)
     esz = tensor.element_size()
     if dims is None:
         if tensor.stride(-1) != 1:
-            raise ValueError(
-                "tensor_map: the innermost dimension must be contiguous (stride %d)"
-                % tensor.stride(-1)
-            )
-        dims = [int(s) for s in reversed(tensor.shape)]
-        strides_bytes = [int(st) * esz for st in reversed(tensor.stride()[:-1])]
-    rank = len(dims)
-    if not (1 <= rank <= 5):
-        raise ValueError("tensor_map: rank %d outside 1..5" % rank)
-    if strides_bytes is None or len(strides_bytes) != rank - 1:
-        raise ValueError(
-            "tensor_map: %d strides for rank %d (need rank-1, innermost-first, bytes)"
-            % (0 if strides_bytes is None else len(strides_bytes), rank)
-        )
-    for s in strides_bytes:
-        if s % 16:
-            raise ValueError("tensor_map: stride %d B is not a multiple of 16" % s)
-    if (tensor.data_ptr() % 16) != 0:
+            raise ValueError("tensor_map: innermost dimension must be contiguous")
+        dims = tuple(reversed(tensor.shape))
+        strides_bytes = tuple(int(st) * esz for st in reversed(tensor.stride()[:-1]))
+    address = tensor.data_ptr()
+    if address % 16:
         raise ValueError("tensor_map: base address not 16-byte aligned")
-    box = [int(b) for b in box]
-    if len(box) != rank or any(b < 1 or b > 256 for b in box):
-        raise ValueError(
-            "tensor_map: box %s must have %d extents in 1..256" % (box, rank)
-        )
-    if (box[0] * esz) % 16:
-        raise ValueError(
-            "tensor_map: innermost box extent %d x %d B is not a multiple of 16 bytes"
-            % (box[0], esz)
-        )
-    es = [int(e) for e in (elem_strides or [1] * rank)]
-    raw = drv.tensor_map_encode_tiled(
-        _driver.TMAP_DTYPE[tdt],
-        rank,
-        tensor.data_ptr(),
-        dims,
-        strides_bytes,
-        box,
-        es,
-        _driver.TMAP_INTERLEAVE[interleave],
-        _driver.TMAP_SWIZZLE[swizzle],
-        _driver.TMAP_L2[l2],
-        _driver.TMAP_OOB[oob],
-    )
-    return TensorMap(
-        raw,
-        keep=tensor,
-        spec={
-            "dtype": tdt,
-            "dims": dims,
-            "strides_bytes": strides_bytes,
-            "box": box,
-            "swizzle": swizzle,
-        },
-    )
+    spec = _map_spec(tdt, esz, tuple(dims),
+                     None if strides_bytes is None else tuple(strides_bytes), tuple(box),
+                     tuple(elem_strides) if elem_strides else (), swizzle, interleave, l2, oob)
+    code, rank, dims, strides, box, es, interleave_code, swizzle_code, l2_code, oob_code = spec
+    raw = _encoded_tensor_map(drv, context, code, rank, address, dims, strides, box, es,
+                              interleave_code, swizzle_code, l2_code, oob_code)
+    return TensorMap(raw, keep=tensor, spec={"dtype":tdt, "dims":dims,
+                     "strides_bytes":strides, "box":box, "swizzle":swizzle})
 
 
 def tensor_map_cached(cache, tensor, box, **kw):

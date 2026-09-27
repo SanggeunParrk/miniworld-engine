@@ -1,0 +1,19 @@
+## start 01:57:00 restart=0
+#### early768
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+L=768 S=5 24 blocks, per block
+  base    159.56 us  (+0.00 saved)   runs 154.93 155.85 166.20 159.83 159.30 160.04
+  early   158.82 us  (+0.75 saved)   runs 153.00 154.59 161.06 158.72 161.23 158.91
+  bpre    161.48 us  (-1.92 saved)   runs 159.75 162.95 161.85 162.68 161.12 158.53
+  both    160.10 us  (-0.53 saved)   runs 157.33 157.81 159.74 162.95 162.37 160.45
+  bit-identical to base: base 0.0e+00  early 0.0e+00  bpre 0.0e+00  both 0.0e+00
+#### early768 done
+#### early384
+L=384 S=5 24 blocks, per block
+  base     78.82 us  (+0.00 saved)   runs 77.99 78.95 78.79 78.83 78.87 78.81
+  early    79.89 us  (-1.07 saved)   runs 79.44 80.01 79.87 79.90 79.94 79.88
+  bpre     79.96 us  (-1.14 saved)   runs 78.59 79.97 80.01 79.96 79.98 79.89
+  both     80.93 us  (-2.11 saved)   runs 81.14 81.05 80.85 80.89 80.82 80.98
+  bit-identical to base: base 0.0e+00  early 0.0e+00  bpre 0.0e+00  both 0.0e+00
+#### early384 done
+## all done 02:00:41

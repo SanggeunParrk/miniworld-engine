@@ -20,7 +20,9 @@ def source_identity() -> str:
                      if "notes" not in path.relative_to(directory).parts)
     files.extend((ROOT / "build" / "gpu_to_kernels").glob("*.csv"))
     files.extend(ROOT / "autotune" / name for name in                 ("builder.py", "checkpoint_cases.py", "derive.py", "module_registry.py", "shape_key.py"))
-    h = hashlib.sha256()
+    from miniworld_engine.autotune import policy
+    files.append(ROOT / "autotune" / "policy.py")
+    h = hashlib.sha256(repr(policy.identity()).encode())
     for path in sorted(set(files)):
         h.update(str(path.relative_to(ROOT)).encode())
         h.update(path.read_bytes())

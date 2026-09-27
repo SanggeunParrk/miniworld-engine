@@ -22,8 +22,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from paths import ROOT, tracked_subdirectories
 
-REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
+REPO = ROOT
 BENCH = REPO / "benchmarks" / "runners" / "bench.py"
 SOURCE = BENCH.read_text()
 TREE = ast.parse(SOURCE)
@@ -89,12 +90,6 @@ def test_the_config_directory_is_computed_not_hard_coded() -> None:
 def test_no_target_directory_is_left_without_a_config() -> None:
     """A directory under benchmarks/{kernels,modules}/ with no config is a target that cannot be
     run; `.gitkeep` used to stand in for the file and hid exactly that."""
-    # By module name, not `tests.layout.<name>`: pytest's rootdir insertion puts this
-    # directory on sys.path but does not make `tests` an importable package, so the
-    # dotted form only resolved when some earlier test had already put the repo root
-    # there -- i.e. it passed or failed depending on collection order.
-    from test_bench_target_vocabulary import tracked_subdirectories
-
     for level in ("kernel", "module"):
         root = REPO / "benchmarks" / f"{level}s"
         for name in sorted(tracked_subdirectories(root)):

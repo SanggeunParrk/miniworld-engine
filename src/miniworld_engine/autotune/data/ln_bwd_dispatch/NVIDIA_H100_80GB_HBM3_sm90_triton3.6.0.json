@@ -1,0 +1,23 @@
+{
+  "1024|8192|torch.bfloat16|torch.float32": {
+    "ms": {
+      "atomic": 0.031738,
+      "persistent": 0.060051
+    },
+    "path": "atomic"
+  },
+  "384|131072|torch.bfloat16|torch.float32": {
+    "ms": {
+      "atomic": 0.168355,
+      "persistent": 0.195619
+    },
+    "path": "atomic"
+  },
+  "384|524288|torch.bfloat16|torch.float32": {
+    "ms": {
+      "atomic": 0.646509,
+      "persistent": 0.728506
+    },
+    "path": "atomic"
+  }
+}
