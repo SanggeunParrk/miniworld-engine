@@ -1,0 +1,13 @@
+measured_date,device,torch_version,cuda_version,comparison,mode,objective,step_scope,precision,seq_len,batch_size,k_neighbors,hidden_dim,encoder_layers,decoder_layers,node_message_backend,edge_mlp_backend,latency_runs_ms,latency_median_ms,peak_allocated_mib,compiled,cudagraph_time,cudagraph_memory
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,compute_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,1,48,128,3,3,triton,pytorch,16.276480;16.304435;16.288666,16.288666,1081.388,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,compute_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,1,48,128,3,3,triton,triton_compute,16.079155;16.092876;16.099942,16.092876,937.201,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,compute_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,4,48,128,3,3,triton,pytorch,59.457739;60.081049;59.569461,59.569461,4334.013,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,compute_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,4,48,128,3,3,triton,triton_compute,59.593933;59.295642;59.742313,59.593933,3757.826,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,1,48,128,3,3,triton,pytorch,16.274125;16.290919;16.297267,16.290919,1081.388,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,1,48,128,3,3,triton,triton_memory,16.477594;16.475034;16.509645,16.477594,865.201,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,4,48,128,3,3,triton,pytorch,59.659570;59.942401;60.098355,59.942401,4334.013,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,4,48,128,3,3,triton,triton_memory,60.790372;60.922882;61.327667,60.922882,3469.826,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,inference,none,forward,bf16-mixed,2048,1,48,128,3,3,triton,pytorch,5.834598,5.834598,,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,inference,none,forward,bf16-mixed,2048,1,48,128,3,3,triton,triton_memory,5.853542,5.853542,,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,inference,none,forward,bf16-mixed,2048,4,48,128,3,3,triton,pytorch,21.746636,21.746636,,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,memory_ab,inference,none,forward,bf16-mixed,2048,4,48,128,3,3,triton,triton_memory,21.740544,21.740544,,True,manual,disabled

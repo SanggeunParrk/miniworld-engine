@@ -1,0 +1,963 @@
+{
+  "ref": "origin/backup/mpnn-pre-rebase-20260913",
+  "tip": "aa5192654790d10092b2fe4962e8dcb85d5428e1",
+  "merge_base": "6e847921e04b80bc3be5663e6229d0f6b26aa503",
+  "current": "5b69122964dd05ca34bb72a964490ee244457bab",
+  "reason": "Superseded implementation or machine-specific cache. Preserve branch contents and ancestry without rolling back the current APIs or validated fixes.",
+  "files": [
+    {
+      "status": "M",
+      "path": ".github/workflows/ci.yml",
+      "sha256": "99af0c6cc4bb25daf1cc320f91982114b8ebe68fe43ee0d2f18572a18051edfa",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "README.md",
+      "sha256": "719b9ca6e35edc3b9482e630ac2432b4ef62cf5da6181af5d489e965063d5437",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/__init__.py",
+      "sha256": "2638e55e5763feaa3ccc7be12d7f8bc262fdfbf2cd41bef430f6035e3a5de938",
+      "resolution": "identical to current main implementation"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/kernels/mpnn_edge_tail/artifacts/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/kernels/mpnn_edge_tail/configs/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/kernels/mpnn_edge_tail/configs/bench.yaml",
+      "sha256": "721d57af1eebc01f86942a90683aff75045a5ca6c416d8b2adec2cee6565cd74",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/kernels/mpnn_edge_tail/configs/bench_disabled.yaml",
+      "sha256": "1d79ce27c793be9895ff2c506000d1312c298d24c7e4454d6271b81cc209f15a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/kernels/mpnn_edge_tail/configs/bench_graphed.yaml",
+      "sha256": "5500e12fcf9a80c83e28920e375415b041f249d84d70555a80a86dd37a5888a5",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/kernels/mpnn_edge_tail/results/a5000/tables/training_seq_len.csv",
+      "sha256": "45ca21978b6db03732da7e8660ff8f927d48f6d77ee3acd8e9eecee2a2e9c7ca",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/kernels/mpnn_edge_tail/results/a5000/tables/training_seq_len_cudagraph.csv",
+      "sha256": "2875016f643061b1eb4710b42946854d10ff0f6f85e177106b5171ec844898ec",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/__init__.py",
+      "sha256": "6771317352d9e7fc7ff1fe1b0f2d26a7f6b832cf651dbdab73e03fb55e8f9a5c",
+      "resolution": "identical to current main implementation"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/__init__.py",
+      "sha256": "06a0237b2f9a1942c56e53cbcf5f73c303bff7e1d30e29131c2e689dc9107fb0",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/artifacts/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/configs/bench.yaml",
+      "sha256": "4c9ff329b8d9d53c4f8cb9fc2b622330997ccdd169ba68d47cc1bf8edd8ab9bb",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/configs/bench_batch.yaml",
+      "sha256": "9372f5a0abddd056c5e7e4ee1e609f8c4d7b326b11fa404a8df254377e1912d7",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/configs/bench_packed.yaml",
+      "sha256": "49c1856a88aff75ed31df8f2617533dbead7620303fdecc8b2a733d1abe51bf6",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/profiles/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/plots/inference_seq_len_latency.svg",
+      "sha256": "2bbbdfc67ad70a0f57293fddfe2e65bb765a47b7599019d3312ea2d7d3a120da",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/plots/inference_seq_len_speedup.svg",
+      "sha256": "40d2a1d3a1b29cac27c87036aec21bdd7aa0eb2a7a8657dfd870a969dd669c23",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/plots/training_seq_len_latency.svg",
+      "sha256": "b836d583f09c356d81fd655af8c378379dabb15287f1dccbcb4db32e7b5cd83b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/plots/training_seq_len_speedup.svg",
+      "sha256": "ec9efd17ff8c80f2c6ceb1c0a8c91598039110b1616d86c6c9fae4a855676f5f",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/tables/edge_mlp_backend_l2048.csv",
+      "sha256": "870bf77c4f0f84c33b26cf1db53cfc5155c3833ce59dbe7ac7245209333ac90d",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/tables/inference_seq_len.csv",
+      "sha256": "23800106836870adab66be33ea00948089b9603c225428226b7828cb5a76a8fd",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/tables/l2048_summary.csv",
+      "sha256": "859c3a27c4b5005ee9ef41982a7838192a6eea040600e145c12fcb22eb4a24d9",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/tables/memory_policy_l2048.csv",
+      "sha256": "d14b273a022cda6efdbe8ebc6ff7c17b63ec6d84f05310ee2e6f8e8e795a18aa",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/tables/message_backend_l2048.csv",
+      "sha256": "dcf8e96ceeb9e757ec384c3da8034be4986317faf59d142d13d7ce9b3add0552",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/tables/training_seq_len.csv",
+      "sha256": "04901fbc94280650242523fcc326c61459e53963e4a6723f455711311bb73902",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a5000/tables/true_batch_l2048.csv",
+      "sha256": "e94cf4c7475e6d4749d3b49f1595fc0cb64c2d7d0bb5fb053fa9f1e8de053bb6",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b1_training_seq_len.csv",
+      "sha256": "e435e5c8b80698d277de607262c7daa0a171db11b95ef9d07fa5a48e5f86fb97",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b2_training_seq_len.csv",
+      "sha256": "807883354970a76657a4b1ebbdcf7435cd7d2bca4ba7c0574593f6270b4bbdc7",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b4_memory.csv",
+      "sha256": "d2aa4a2bf72046342e54385246a6289fa68d1f5052c367507da6f6bac40240a0",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b4_parity.csv",
+      "sha256": "c260e728d37c452b84a8864be02d592424e60379e3161e8744b247aa1e15e4c2",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b4_training_seq_len.csv",
+      "sha256": "653d4f64ee1ca68fc5b21f35b38c7d8403a7e436690a93c8f174ae49f02b6e7b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b8_memory.csv",
+      "sha256": "be86882af843e0302145a46a56751d9d104d238dd43bfa1a8db21b0574b4c124",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b8_parity.csv",
+      "sha256": "9bec57b705d09bb6b2fb682bac76030af3b823165981a2fa01de2499467d7e86",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/results/a6000/tables/packed_b8_training_seq_len.csv",
+      "sha256": "16db1040c882891725ed01a7ba9c77fbf3069487fb34cc94111e1a0146516f27",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "benchmarks/modules/mpnn/workload.py",
+      "sha256": "b0f1f3a0189dde5771523f7eb78dcd03ac665018997016bdb74305be1d17e78a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "benchmarks/modules/triangle_multiplication/configs/bench.yaml",
+      "sha256": "6845acc58d94f63fd85f78873ec67b34588ebaea72cb4be6b1ee3a9dbaedba30",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "benchmarks/runners/bench.py",
+      "sha256": "65c08334d83795437f2ca3a275410e79d0feb9d6c1c226006ae21b199b1259b1",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "docs/benchmarks.md",
+      "sha256": "7ed01b8b946358fcd4baf1202260f35725bc4e56bef863f51697dbcc18f6d14d",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "docs/kernels/mpnn.md",
+      "sha256": "0a659f7b7cde0612e2e73e46c453e53e92f473e3363cbc580b654eea5318b200",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "pixi.lock",
+      "sha256": "265f50b4daa011bd451376757a664229cefed9e038532d767494b005e11e9bef",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "pyproject.toml",
+      "sha256": "6cbdb83958b8bdb2b98a41cb538016229564f55f2ce09ef27d7ce4aad9033b7f",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_edge_bwd/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "c6a002990f4a26191867286d26d1426200feb52371005773a14dfda36d22e54b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_edge_bwd/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "ad5afa1abddbab3aa55b7bf45078ee6dec05a8aefcd38fc15375cbe1288b166f",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_norm_bwd/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "a78ad5c0995284da00e913a18027ec95007a8ac932afa41d2fd34d96dbcfb0cd",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_norm_bwd/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "18cd0f0dda47b7d7d6eaf1c4aa09733adcac5ef3d311a2c0449aea8bd88a960d",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_bwd/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "2799d84be33c8ab5a857b90c9c89052289770319d2d30e5f33dbb53af5d34246",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_bwd/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "c3dbce917430e0d4077b1c2b0f662d12f9df2539aeb639ac3994c463db9b51c4",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_edge/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "c37d80c0cdb9e560ee9565fd6e72241146c66ba6b513e68230a9d10bec1b92be",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_edge/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "279eef67d46aefa9e6f243bb146fb4577e0a9b27f3034ddbd5d009804ac18da9",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_hidden/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "41556bd9e205e057b98ad2e95121495e34f817edcba8cb4a0c135851b1873b70",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_hidden/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "8d0d0efb9632f2bd84a7da5fdc8b3be5efcfcc029cf45b2fe4beede5b7184597",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_output/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "8a9cbc746e15ac56903802e34f2014ba4975e74dbfcdfac0f3f8532f6227a8a9",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_compute_project_output/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "995ed6f6d5afd6320b88996d5a6ecc1283017ab267d4f502b24099acc2bb72ef",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_dx/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "04b1e147871b53a99640124aff2753e500ad97732a271ee13825b1a4e6bfec11",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_dx/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "c8672f130b7302f1e8ad1db09e028f2d1c792712528daaf42b4815e3119ac27c",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_norm/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "1efaadfe3d45caf7c0567d262267f7367dd2a5bcaaf9ae8893acc1c29e819ef3",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_norm/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "747b5d6920a1dadeff9e976f7872ea4d8e42661936a763ccb286caac36387d59",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_project/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "b22402944c72f2ffa52966ab51cab47be59ff33e2330dc397354a17eadec1500",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_project/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "9a26bc61eadc61ec9974ed4998617db51096b712516e408389239b559326d289",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_replay/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "ed9bccde45dcc5a54f49f0c5a5a1b9bd58c6da9392d7815a3e7b64500e13815e",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_edge_tail_replay/NVIDIA RTX A6000 (sm86).json",
+      "sha256": "ba76e38f803ee0ef750fbeb3e97fdc4f2b334aafc7ff08ba7a505d9b3819a6b4",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_node_message_dx/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "f6a94a4669530c0162cfc2d6916c0696d2b0703484a9b288a57c91b9021a4d74",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_node_message_fwd/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "5d348a4df57da77a6edb31c319d0c35811685cacd558f00c196d8e8c177c86d6",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_node_message_replay/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "3c178511588e69203e8a98a5ae595f2cf109dec332c61e2864597e91e4138f0f",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/autotune/data/mpnn_relative_position_bwd/NVIDIA RTX A5000 (sm86).json",
+      "sha256": "adefc2d547ca5d8c730499c179ec9b914c034beed155f31b54548464fb5436ee",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_dropout/__init__.py",
+      "sha256": "e6f82ec408aa64e1b0312fc399fbcc4221799b7908f216235af005a513a90ed0",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_dropout/interface.py",
+      "sha256": "23eb3b840218f6dbce9bc9f5f77731081b5439acf18196934b85cacde3d89cc9",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_dropout/triton/__init__.py",
+      "sha256": "1fdc0a77ebf74d619795d250b9a9608ce3bacc3e05ac5ea888a5878a58d839e7",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_dropout/triton/main.py",
+      "sha256": "bbc738b8a6f4720a03ca7e71630ea1a310a6b5812cf92872d392df951992e9d2",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_layernorm/__init__.py",
+      "sha256": "c0f38724a29c458fa829b091127dc3f51483590cbe3d59199095689a0aec1054",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_layernorm/interface.py",
+      "sha256": "4b7f3731d9bd89c52bff0af531f64bf5f14cb382b0415c98d33d99d906bc5ed7",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_layernorm/triton/__init__.py",
+      "sha256": "9cce5d76cad2652862d6e7799eca64830b559123719df0073a0716da5587525b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_layernorm/triton/main.py",
+      "sha256": "4b90af0bdae2bd653c67bec5019f1008ab0a7947645ee67a526ffa136cd6c35a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_mlp/__init__.py",
+      "sha256": "ef2ba5d0793420e9706df6e4d2543e0609902adb2f5aef1d96f0c1363c86ffc0",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_mlp/interface.py",
+      "sha256": "2ba0c252380d93f30f69f8b0950d3cca20d907a86d213ea5c337ae6e8579a346",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_mlp/reference.py",
+      "sha256": "f06597f82392e4c0b328b5aed77300cb335e205b9a9ae0597bf583c0a1f32985",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_mlp/triton/__init__.py",
+      "sha256": "1469e5982dc45f7986ef27cd50105698a80d656f69ea5dbbd36874fffe3215b5",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_mlp/triton/compute.py",
+      "sha256": "13804a0ecd18754661ebcb261bcadfe82436eab9737dfa8997bc13a384c3484e",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_mlp/triton/main.py",
+      "sha256": "85ae1f2e2035eaadcea5bbe5f73c645e6a08303b1662bc834bd6653493ec21b0",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_tail/__init__.py",
+      "sha256": "fa20efcf5ade07ab76c50e90cbe290521ad4631c33dfee2a8439f3420740fdd5",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_tail/interface.py",
+      "sha256": "2f968ddd32552bc33bcb53cbc360b3087f31a9389f0b27db97e1ae259a421475",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_tail/reference.py",
+      "sha256": "8a5916e80ab8bb4ea293d7f19acbcaf2c7cc9b74fea5cbae54eff42aff5e936a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_tail/triton/__init__.py",
+      "sha256": "212e889501aa582a66654fb9b51dc0e48c61f6dd9674022362bd763f1090e51a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_tail/triton/compute.py",
+      "sha256": "2f574e0e0e0aec4cdcc97482d12511e15036184093dba024cc06f5ef0bc2c548",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_edge_tail/triton/main.py",
+      "sha256": "681d39224387be175fdc63411126de1f103d7ac141766356195d96d0c5dc8c33",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_message/__init__.py",
+      "sha256": "6ae3a00bf3beec8405b8f24a93a649d7a508f197b6b77b54ab255f27ea8bbfcb",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_message/_policy.py",
+      "sha256": "d3e2bb65996fd99d50ac278b1146908068813699baf89d53a3c0000a78e55cb8",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_message/interface.py",
+      "sha256": "1809510bad58be49765dba0ae94d07604e3f75213d064437448e034cbeefd220",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_message/reference.py",
+      "sha256": "d2c62fdedbfedad4986b328f66254920437aa87cf5f5f8f627bd39114d316890",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_message/triton/__init__.py",
+      "sha256": "1b59de6103ce1f5460d3e5692474df2b52e424903777ac34c457b7f5034ed143",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_message/triton/inference.py",
+      "sha256": "bd2fa2d36911563c5d4057d16d625f48aec4671ae81de07a7037c81081491d90",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_message/triton/main.py",
+      "sha256": "23e4f8afb6851c94f56ce7dddc5b9f2f21f0bd305762384d6b1b3faee70a2307",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_node_message/__init__.py",
+      "sha256": "bd7f0575b2aed07c3fb867a4a26ab781074afd918e2123c5c7e389c65b436c54",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_node_message/interface.py",
+      "sha256": "474172700e76318ccba1b176f02e93a65bb91bacb5ebdee7d169aa5c33752089",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_node_message/reference.py",
+      "sha256": "3348605792fb0c33a52c3f607f6425c76364cbfb0dce93deb0eecb605074a7e0",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_node_message/triton/__init__.py",
+      "sha256": "6d6795b31b05174336e73a90f05418aa9d56c7d7d2b9459f09e0f864b15bb8bc",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_node_message/triton/main.py",
+      "sha256": "8584b349deea28454a6c19d67aa681e327daf0b9471064f8ada04df805e3b80b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_relative_position/__init__.py",
+      "sha256": "11d0c30ad104010832ec5df820d83df18718cef2166f638898b4d0b6f4abde50",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_relative_position/interface.py",
+      "sha256": "c040b5a1ea92caa2d85da54265391098cd777d0922fb2a319e93093133c5a5a9",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_relative_position/reference.py",
+      "sha256": "82e4939a7d90fe6fa2c54bfa45175925da7179f93cefee1adb28566a3f9f2b57",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_relative_position/triton/__init__.py",
+      "sha256": "aea01f45aab1fc7f3091c00907c6e6dda9ad246153375876d74e2f60aab1e20a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/kernels/mpnn_relative_position/triton/main.py",
+      "sha256": "ac5abbfd754b15fcef2383f8bdd78ee410a0501c2478f4e90fd8bda863ac8037",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "src/miniworld_kernels/modules/__init__.py",
+      "sha256": "538fda784f265b206711dca31b469618ea7629a53855c1ae6162a4ee3c813973",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/__init__.py",
+      "sha256": "d4d10a7f2046d537ce907a9fb5ddbac6a57b532af6e81be910f66d9d81b20c3b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/_functional.py",
+      "sha256": "ded5a498a39392089abde50bd0fd31f7f7691dd85a6e9aefd4ce75557bfbb28b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/batch.py",
+      "sha256": "ff7b9ea4c6ad37d1b0b99d0e47ecc3cb64213c8bb54e6e7d425506e6736ba78b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/conversion.py",
+      "sha256": "c75b9f5fea566bd4d074f107097ad715271625a6781d5b4f0717575647981b8f",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/data.py",
+      "sha256": "047c4647b70b239545bc88990e10965f08fe464ca5bc2095780f97006955f7fc",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/dropout.py",
+      "sha256": "2c7a36fcce90a1fc69b760cdaa04a9693541c116888c4a19bf06abd4f61c6359",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/features.py",
+      "sha256": "2708d59e66f34784bf018d0ff05202da3d0e4da55cb2761bc9efd6f33d016594",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/layers.py",
+      "sha256": "3e118cc35a995cb319dde10c8ede1ccf2554d538d2a44ad39e2b3a76bd9bd1e5",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/legacy.py",
+      "sha256": "a8c07a9f4aa5b31f1635679fefddd356f6124980644364dd933c2986b125ad87",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/loss.py",
+      "sha256": "c17d46dec65d8380bac973aa842db365ccc6e5b3ea4c7abf46f9bf67db6e4f53",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/masking.py",
+      "sha256": "e74d5fa85e515b94cd811a6e80a44903d7ed0a4c05ac842a89fccff76d7b2b0d",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/model.py",
+      "sha256": "cea685487986182982ad1c07266491ea776281fd5846e2f0974f7dd97384c56c",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "src/miniworld_kernels/modules/mpnn/naive.py",
+      "sha256": "e1fe9d80fd30d73d365edac4bda186707e35b7b510206b034f2f4b0f50013904",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/_assert_device.py",
+      "sha256": "9d18b86676c3b37774235aff3e5b711fb6b1eba2661483a939fea9cc2dcba2dc",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/_cudagraph_autograd_repro.py",
+      "sha256": "78cc83bdcaed131d222e27f0849270ad6eb6340c5cdcdbabe3547961fdb4ce65",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/_mpnn_edge_tail_graddiag.py",
+      "sha256": "e9e28da5dfac7f514eaa569d5b78c2a1cdf593db9f893e314217c04b2d4c1137",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/_mpnn_edge_tail_summary.py",
+      "sha256": "4e36f7db64c268d5cbf9ebc964f07396f90aee8c319360569eed10fe42971229",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/_mpnn_knn_free.py",
+      "sha256": "ca09a555e7abbe10618974c13233b80245fb5d6a0666eb8703e001523f75934b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/_mpnn_knn_share.py",
+      "sha256": "82dee6734eaf16388537a5f4574b49d6114c0a6b00fcb31a70c5df856dc5ad41",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/_smoke_h100.sbatch",
+      "sha256": "86d583b062cc1ce6f55e564dcc2ac28c4a455ffee583fd0b1a224fe3fa2843c2",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_autotune_capture_a100.sbatch",
+      "sha256": "9dd87d521b5f374e35bc66b386b440fbf655a8ad92f2b9c229f9b9f95c618eeb",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_autotune_capture_ampere.sbatch",
+      "sha256": "aac4830a23cde39b6e446d1d07bfed966ef8503f3f2994afa1638596bb68fbf1",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_bench_a100.sbatch",
+      "sha256": "6db6364f39e0fb0bd196db80014b7343e0a4319f586662e15a9f0a8cf4c589dc",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_bench_ampere.sbatch",
+      "sha256": "083cb2fb34126cad0eb8d1e72d636cabaff9124b3c649c6f6ab1280f063a2c0e",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_bench_h100.sbatch",
+      "sha256": "0a8d6a17fa6214269dd56759597788f88b91d41d544d11d399a17448180a57c6",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_kbench_a100.sbatch",
+      "sha256": "1d9a84884ca24096fbeea2e01629c12c619b79bb1e8af9d5abf064bdff5340a1",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_kbench_ampere.sbatch",
+      "sha256": "4890698a11223ef5af457f78dd7fc8363a3556d251578f05f785e4502f2ab28b",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_kbench_h100.sbatch",
+      "sha256": "b4578a3caa7751e053fb1eadf0b145eb731d894b1dfae741b683206d1b556487",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_kbench_one_a100.sbatch",
+      "sha256": "b1c4a78cc1909ef299f3c7fb74075762f4f9f87c7d48e6321227950ed396d637",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_kbench_one_ampere.sbatch",
+      "sha256": "4480562d513da455a2de98e51f7497f6959bb958907675d4ee9b9d0d8c37c8e8",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/run_mpnn_edge_tail_ampere.sbatch",
+      "sha256": "40baa55cff4c025416374a2afe19e6f4ad4329924cf8836c939ac45b4f659cfe",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/run_mpnn_full_packed_ampere.sbatch",
+      "sha256": "47e2340135bede499b9ebb09996e953c3467303a079b3c3ecd469ece1f0aa1cd",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/run_mpnn_gputests_ampere.sbatch",
+      "sha256": "c4abdee40baf7c7de6056949eeca2aade1d4eaed3db84364207587ad70c9473f",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "submits/run_mpnn_l2048_measure.sh",
+      "sha256": "32a81cc5d3f28f2209f936fa86f29ff6eae63e3fdd4c4e36f8303469ee935a5a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "submits/run_verify_a100.sbatch",
+      "sha256": "b40934c70ec920df6387c0a92ddd77f44b9ff98f58e27b4b0dc76f62f306d8ba",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "M",
+      "path": "tests/test_lazy_kernel_exports.py",
+      "sha256": "5f1e016e7c0c3e0f6e9e1664499d7855627576ea371a98434c44ff5931a6e6fa",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_autotune_configs.py",
+      "sha256": "3bdca75919067eb349dacc96992dd6ddae616a5d23e1f91a21565d82dd9a18fa",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_batch.py",
+      "sha256": "d45669b7cf0ed00e83c86da81a0702ae483ceaf072e10593542f4203c86f1876",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_benchmark_workload.py",
+      "sha256": "2f0e2e36b7286dee40cbc85649c578504afb24580c1dc954ff21ba03a59dc3d4",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_conversion.py",
+      "sha256": "315d85355042d4453a2f6091533bbebf32e960df0e23abaae6fa9ca58320f028",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_edge_dropout.py",
+      "sha256": "b138138c62485e18cf300b60d47158e4336cc5770963b7647da0d3b135485d59",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_edge_layernorm.py",
+      "sha256": "124ce34f88c84b47ecd967e1ca29327f9cd97ffad5fc787d88b2930b50d9cbec",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_edge_mlp_kernel.py",
+      "sha256": "6531848db8a8f3b18c1d832b819178a1ecfec55641dbb3db6fa257c6fa20d09a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_edge_tail.py",
+      "sha256": "17a4cd87f431de5dca3de08206015879f5439036018331ecc38eddb6724aed86",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_edge_tail_compute.py",
+      "sha256": "1d7fca48deda6ef6a01232d1daab00fbb8515cee3452492f34cac4eaea98726c",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_encoder_node_recompute.py",
+      "sha256": "610429b7e9f3a47827c454ba600fb46cb9a12e9ff069986cf8d42fee60d5c9ea",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_knn_backends.py",
+      "sha256": "4a3b0d34a84d29cbac0f873ed75e891b340c016afc73c7dffb075fc1b09faac8",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_message_kernel.py",
+      "sha256": "e57eae2c09146f35db3d5c0faf6b612ccc774f2c4e013218ebefaaaacde98e3e",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_node_message.py",
+      "sha256": "c81b0edad7ca30a5c1796cf002cf7a2265f6a59e7d9152db9bb7fdfe3113f537",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_numerical.py",
+      "sha256": "189d28db1dca8b8117e985702739e64bc0a93d5db9b2fdd542b75cf39180d5fb",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_reference.py",
+      "sha256": "d2739204a2809bf3cb4b04aded8920e3ee418d8253f8b32522ae3d8095607962",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_relative_position.py",
+      "sha256": "a1c378057b121c2118f6e1be00e9227ea5d6a7c72a2f3d99296fc722bb17e48a",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_transition_recompute.py",
+      "sha256": "ebbc3bc2e09adf24520d16f1d0150ddbd4982df9a4db880684606aa03d98887d",
+      "resolution": "historical file preserved here; current implementation retained"
+    },
+    {
+      "status": "A",
+      "path": "tests/test_mpnn_upstream_parity.py",
+      "sha256": "840db0d566f5d1fdd2952ff6a517ced53a778a91313fc2f5096d478e247956c2",
+      "resolution": "historical file preserved here; current implementation retained"
+    }
+  ]
+}

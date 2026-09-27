@@ -1,0 +1,221 @@
+[project]
+name = "miniworld-kernels"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
+dependencies = [
+  # Lean runtime core. This is the PUBLIC CONTRACT surface a parent (team-gm)
+  # inherits when it consumes miniworld-kernels as a submodule / dependency:
+  # only what `miniworld_kernels.kernels.*` needs to import and run its Triton
+  # entry points. Bench harness, comparison baselines, and the CuTeDSL backend
+  # are optional extras below so the parent never drags them in.
+  "torch>=2.8",
+  "triton",
+  "einops",
+  "jaxtyping",
+  "numpy",
+]
+
+[project.optional-dependencies]
+# CuTeDSL / quack backends (the .cute kernel paths). cutlass ships as the
+# `nvidia-cutlass-dsl` wheel — no git submodule needed (see third_party/).
+# Pinned to the quack 0.5.0 / cutlass-dsl 4.5.2 set so the cute kernels coexist with
+# FlashAttention-4 (which requires quack-kernels>=0.5.0). The cute launch path was
+# migrated to cutlass-dsl 4.5.2's TVM-FFI convention; the quack-import shim
+# (kernels/_quack_compat.py) additionally keeps quack 0.3.11 importable, but the
+# supported/tested runtime is this set. Do NOT bump quack to 0.6.x: it drags torch
+# 2.10 -> 2.13 and breaks the cu130 stack.
+cute = ["nvidia-cutlass-dsl==4.5.2", "quack-kernels==0.5.0"]
+# Comparison baselines only (CUEQUIVARIANCE impl path + reference helpers).
+# NOT required to use the miniworld kernels.
+baselines = ["cuequivariance-torch>=0.9,<0.10", "scipy"]
+# Benchmark harness (benchmarks/runners/bench.py, team-gm hydra style) + plots.
+bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
+# Dev: tests, lint, type smoke-check.
+dev = ["pytest", "ruff", "pyright"]
+# FlashAttention-4 (Blackwell/sm_100) — EXTERNAL CuTeDSL JIT wheel, used only as a
+# benchmark comparison backend (miniworld-kernels ships no flash kernel of its own).
+# Opt-in so it never enters the default/parent solve; it is a prerelease wheel, so
+# install with: uv pip install --prerelease=allow "flash-attn-4[cu13]"
+flash = ["flash-attn-4"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ----------------------------------------------------------------------------
+# ruff — practical repo policy.
+#
+# This repo keeps faithful ports, benchmark probes, and module wrappers side by
+# side. `select = ["ALL"]` turns docstring, annotation, naming, print, and
+# complexity rules into noise for that shape of code. Keep ruff focused on rules
+# that catch real breakage across src/benchmarks/submits.
+# ----------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+exclude = [
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  "benchmarks/**/artifacts",
+  "third_party",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+  "E501",
+  "E701",
+  "E702",
+  "E402",
+  "E731",
+  "E741",
+  "F722",    # Incompatible with jaxtyping
+  "COM812",  # Conflicts with ruff formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# team-gm's tests/benchmarks relaxations (+ E402/I001 for our sys.path bootstrap).
+"submits/*" = ["D", "ANN201", "S101", "INP001", "ANN001", "PLR2004"]
+"benchmarks/**/*.py" = [
+  "E402",
+]
+# team-gm's kernel relaxation (math-notation names, no annotations) for the
+# connecting/reference code that lives under kernels/ (interface.py, reference.py).
+"src/miniworld_kernels/kernels/**/*.py" = []
+# Vendored kernel *bodies* are faithful copies (triton main/perf/miniworld,
+# CuTeDSL, CUDA) from team-gm branches + FlashAttentionBias — not linted, exactly
+# as the originals are not held to this repo's standards.
+"src/miniworld_kernels/kernels/**/triton/*.py" = ["ALL"]
+"src/miniworld_kernels/kernels/**/cute/*.py" = ["ALL"]
+"src/miniworld_kernels/kernels/**/cuda/*.py" = ["ALL"]
+# dtv1 is the vendored perf/trimul fused kernel kept as a baseline.
+"src/miniworld_kernels/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
+"src/miniworld_kernels/modules/triangle_multiplication/baseline_dtv1_bidir.py" = [
+  "ALL",
+]
+"src/miniworld_kernels/_typecheck.py" = []
+
+[tool.ruff.format]
+docstring-code-format = false
+
+# ----------------------------------------------------------------------------
+# pyright / ty — team-gm ships no type-checker config. This repo contains
+# Triton/CuTe launch syntax, optional native extensions, and dynamic PyTorch
+# modules, so pyright is kept as an import/syntax smoke check rather than a full
+# static typing gate.
+# ----------------------------------------------------------------------------
+
+[tool.pyright]
+include = ["src", "benchmarks", "submits"]
+exclude = [
+  ".pixi",
+  "**/.pixi",
+  "**/__pycache__",
+  "cute-env",
+  "**/cute/**",
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  "benchmarks/**/artifacts",
+  "third_party",
+]
+pythonVersion = "3.10"
+typeCheckingMode = "off"
+reportMissingImports = "warning"
+
+[tool.ty.src]
+include = ["src", "benchmarks", "submits"]
+exclude = [
+  ".pixi",
+  "**/.pixi",
+  "**/__pycache__",
+  "cute-env",
+  "**/cute/**",
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  "benchmarks/**/artifacts",
+  "third_party",
+]
+
+[tool.ty.environment]
+python-version = "3.10"
+
+# ----------------------------------------------------------------------------
+# pixi — single unified environment for the whole repo (triton + Transformer
+# Engine cu12 + CuTeDSL/quack + cuequivariance + benching). Replaces the old
+# per-backend cute-env/ and te-env/ folders. The materialized `.pixi/` is
+# gitignored. See docs/benchmarks.md and docs/kernels/.
+#
+# Cluster notes (CSSB H100, driver 575 = CUDA 12.9-max):
+#   - MUST be cu12, never cu13 (transformer_engine_cu12 + core-cu12 extra).
+#   - Build needs no GPU (srun without --gres); compute nodes are offline so
+#     resolve/download runs on the login node wrapped in `timeout`.
+#   - Runtime needs this env's libstdc++: export LD_LIBRARY_PATH=$CONDA_PREFIX/lib
+# ----------------------------------------------------------------------------
+[tool.pixi.workspace]
+channels = ["conda-forge", "nvidia"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+pip = "*"
+# CUDA toolchain to compile transformer_engine_torch from source (cu12.8).
+cuda-toolkit = "12.8.*"
+cudnn = "*"
+nccl = "*"
+cuda-nvtx-dev = "12.8.*"
+ninja = "*"
+cmake = "*"
+setuptools = "*"
+wheel = "*"
+pybind11 = "*"
+
+[tool.pixi.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu128"]
+no-build-isolation = ["transformer-engine-torch"]
+
+# The dev environment installs the package WITH ALL EXTRAS so the full bench +
+# baseline + cute + dev stack is present here, even though the published
+# `[project.dependencies]` core stays lean for downstream consumers (team-gm).
+# `[project.dependencies]` (torch, triton, einops, jaxtyping, numpy) plus every
+# extra (cute/baselines/bench/dev) are pulled via the editable install below.
+[tool.pixi.pypi-dependencies]
+miniworld-kernels = { path = ".", editable = true, extras = ["cute", "baselines", "bench", "dev"] }
+# Transformer Engine (cu12) is dev-only and needs the special no-build-isolation
+# handling above, so it stays an explicit pixi dep rather than a package extra.
+transformer-engine = { version = "*", extras = ["pytorch", "core-cu12"] }
+transformer-engine-cu12 = "*"
+# cu12 ops backend for the cuequivariance baseline (pairs with the [baselines] extra).
+cuequivariance-ops-torch-cu12 = "*"
+
+[tool.pixi.activation.env]
+PYTHONNOUSERSITE = "1"
+CUDA_HOME = "$CONDA_PREFIX"
+
+# transformer-engine-torch's sdist metadata wrongly declares a dep on the cu13
+# core (the real build uses cu12), so the lock pins BOTH cu12 and cu13 and the
+# cu13 lib overwrites cu12 in transformer_engine/wheel_lib/. The cluster's 575
+# driver can't run cu13. `fix-te-cu12` reinstalls the cu12 core last so it wins.
+# RUN IT AFTER EVERY `pixi install`.
+[tool.pixi.tasks]
+fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==2.16.0"
+smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
+smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
+smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
+ruff-check = "ruff check src benchmarks submits"
+ruff-format = "ruff format src benchmarks submits"
+pyright = "pyright"
+
+test = "pytest tests/test_public_api.py tests/test_lazy_kernel_exports.py tests/test_int64_offsets.py tests/test_mpnn_reference.py tests/test_mpnn_conversion.py tests/test_mpnn_numerical.py tests/test_mpnn_batch.py tests/test_mpnn_benchmark_workload.py tests/test_mpnn_message_kernel.py tests/test_mpnn_edge_mlp_kernel.py tests/test_mpnn_edge_layernorm.py tests/test_mpnn_encoder_node_recompute.py tests/test_mpnn_transition_recompute.py tests/test_mpnn_autotune_configs.py tests/test_mpnn_edge_dropout.py tests/test_mpnn_edge_tail_compute.py -q"
+test-gpu = "pytest tests/test_numerical.py tests/test_mpnn_upstream_parity.py tests/test_mpnn_conversion.py tests/test_mpnn_numerical.py tests/test_mpnn_batch.py tests/test_mpnn_benchmark_workload.py tests/test_mpnn_message_kernel.py tests/test_mpnn_edge_mlp_kernel.py tests/test_mpnn_edge_layernorm.py tests/test_mpnn_encoder_node_recompute.py tests/test_mpnn_transition_recompute.py tests/test_mpnn_edge_tail.py tests/test_mpnn_edge_tail_compute.py tests/test_mpnn_node_message.py tests/test_mpnn_knn_backends.py tests/test_mpnn_relative_position.py tests/test_mpnn_autotune_configs.py tests/test_mpnn_edge_dropout.py -q"
+ci = "ruff check src benchmarks submits && pyright && pytest tests/test_public_api.py tests/test_lazy_kernel_exports.py tests/test_int64_offsets.py tests/test_mpnn_reference.py tests/test_mpnn_conversion.py tests/test_mpnn_numerical.py tests/test_mpnn_batch.py tests/test_mpnn_benchmark_workload.py tests/test_mpnn_message_kernel.py tests/test_mpnn_edge_mlp_kernel.py tests/test_mpnn_edge_layernorm.py tests/test_mpnn_encoder_node_recompute.py tests/test_mpnn_transition_recompute.py tests/test_mpnn_autotune_configs.py tests/test_mpnn_edge_dropout.py tests/test_mpnn_edge_tail_compute.py -q"

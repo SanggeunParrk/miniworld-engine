@@ -1,0 +1,1 @@
+"""ProteinMPNN benchmark workload definitions."""
