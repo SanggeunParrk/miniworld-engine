@@ -388,6 +388,28 @@ __device__ __forceinline__ void row_sw64(const __nv_bfloat16* tile, int row, uin
   }
 }
 
+// ---- delta[b, n, h, s] = sum_d dout . out (fp32), the softmax backward's row term: one thread per (b, n, s, h), 64 B of each
+__global__ void __launch_bounds__(256) triattn_delta(const __nv_bfloat16* __restrict__ dout, const __nv_bfloat16* __restrict__ out,
+                                                     float* __restrict__ delta, int N, int H, int S, long total) {
+  const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  const int h = (int)(i % H);
+  const long bns = i / H;
+  const int s = (int)(bns % S);
+  const long bn = bns / S;
+  const uint4* a = reinterpret_cast<const uint4*>(dout + i * D);
+  const uint4* b = reinterpret_cast<const uint4*>(out + i * D);
+  float acc = 0.f;
+#pragma unroll
+  for (int c = 0; c < 4; ++c) {
+    const uint4 x = a[c], y = b[c];
+    const uint32_t xs[4] = {x.x, x.y, x.z, x.w}, ys[4] = {y.x, y.y, y.z, y.w};
+#pragma unroll
+    for (int e = 0; e < 4; ++e) { const float2 p = bf2f(xs[e]), q = bf2f(ys[e]); acc = fmaf(p.x, q.x, fmaf(p.y, q.y, acc)); }
+  }
+  delta[(bn * H + h) * S + s] = acc;
+}
+
 // ---- bias^T * log2e (fp32 [b, h, k, q]) for the KV kernel, whose threads own a key: one 32 x 32 tile per block
 __global__ void __launch_bounds__(256) triattn_biasT(const __nv_bfloat16* __restrict__ bias, float* __restrict__ out, int S) {
   __shared__ float t[32][33];
@@ -1029,6 +1051,18 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
 #if TA_TL
 torch::Tensor triattn_tl() { auto t = torch::empty({24, 256}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_tl, sizeof(g_tl))); return t; }
 #endif
+// delta = rowsum(dout o out) fp32 [B, N, H, S] from dout / out [B, N, S, H, 32] bf16
+torch::Tensor triattn_delta_rows(torch::Tensor dout, torch::Tensor out) {
+  TORCH_CHECK(dout.is_contiguous() && out.is_contiguous() && dout.sizes() == out.sizes() && dout.dim() == 5 && dout.size(4) == D, "dout / out: [B, N, S, H, 32]");
+  const long B = dout.size(0), N = dout.size(1), S = dout.size(2), H = dout.size(3), total = B * N * S * H;
+  auto delta = torch::empty({B, N, H, S}, dout.options().dtype(torch::kFloat32));
+  triattn_delta<<<(unsigned)((total + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const __nv_bfloat16*>(dout.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
+      delta.data_ptr<float>(), (int)N, (int)H, (int)S, total);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return delta;
+}
+
 std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor dout,
                                        torch::Tensor lse, torch::Tensor delta, double scale) {
   TORCH_CHECK(q.is_cuda() && q.scalar_type() == torch::kBFloat16 && q.dim() == 5 && q.size(4) == D, "q: [B, N, S, H, 32] bf16");
@@ -1079,6 +1113,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #if TA_TL
   m.def("triattn_tl", &triattn_tl);
 #endif
+  m.def("triattn_delta", &triattn_delta_rows, "rowsum(dout o out) fp32 [B, N, H, S]");
   m.def("triattn_bwd", &triattn_bwd, "sm100 triangle-attention backward: (dq, dk, dv [B, N, S, H, 32] bf16, dbias fp32 [B, H, S, S])",
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("dout"), py::arg("lse"), py::arg("delta"), py::arg("scale"));
 }
