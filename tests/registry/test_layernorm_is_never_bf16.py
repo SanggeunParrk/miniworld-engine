@@ -65,6 +65,15 @@ NARROW = re.compile(r"\.to\(\s*torch\.bfloat16\s*\)|\.bfloat16\(\)")
 #: that file learned to read their width from a tensor. A key that a reformat invalidates is a key
 #: that gets bulk-updated without anyone rereading the judgement.
 NOT_A_NORMALISATION = {
+    ("trimul_inproj/cuda/h100_b7.py",
+     'self.mask = d["mask"].bfloat16().reshape(-1)'):
+        "Mask storage for the H100 projection path, not a normalized activation.",
+    ("trimul_inproj/cuda/h100_single.py",
+     "self.mask = mask.reshape(n, n).bfloat16().contiguous()"):
+        "Mask storage for the H100 projection path, not a normalized activation.",
+    ("trimul_inproj/cuda/h100_single_b7.py",
+     'self.mask = d["mask"].bfloat16().reshape(-1)'):
+        "Mask storage for the H100 projection path, not a normalized activation.",
     ("adaln/triton/inference.py",
      "sb = torch.matmul(cond_aff.to(torch.bfloat16), weight_cat.t().to(torch.bfloat16))"):
         "GEMM operands: the conditioning matmul that PRODUCES scale and bias, cast the way every "
