@@ -13,23 +13,45 @@
 //
 // The path it replaces runs three kernels and puts the [M][512] SwiGLU activation through HBM twice (151 MB each way at
 // L384); here it never leaves registers, and the only traffic is x in, xn out and out out.
+//
+// p14: ping-pong.  NCU and the p13b ring-depth control showed the two warpgroups running in LOCKSTEP: both issue G1 at once,
+// both run SwiGLU at once (sharing the MUFU), and the tensor pipe idles in between (50 % active).  Here each warpgroup issues
+// one tensor batch per chunk -- G2(j-1) + G1(j) -- and the batches alternate between the warpgroups through two named
+// barriers (FA3 ping-pong), so one warpgroup's SwiGLU runs under the other's GEMMs.  The weight-ring producer is warpgroup 1's
+// first thread: warpgroup 1 trails by half a chunk, so when it releases a slot warpgroup 0 already has, and its wait on the
+// free barrier never holds the leading warpgroup.  Per-element arithmetic is unchanged: the output is bit-identical.
+// p13: the base schedule with the weight ring split by operand.  NCU (L384) put ~11 % of all warp samples in the w_full spin
+// in front of every chunk's G1: the combined [Wa;Wb | Ws^T] slot was released only once G2 of that chunk retired (one chunk
+// later), so each 48 KB refill had about half a chunk to land.  Here [Wa;Wb] is released as soon as G1 retires and Ws^T as
+// soon as G2 does, in rings of NAB = 3 and NWS = 2 slots, which gives every refill one to two chunks of slack.  The room
+// comes from single-buffering xn (each warpgroup reads and rewrites only its own 64 rows, and all its wgmma have retired
+// before the next LayerNorm).  Also: the output store waits for the READ of its source (.read), not for global completion.
+// Registers, schedule and arithmetic are the base kernel's: the output is bit-identical.
 #include "tmn_kernels.cuh"
+#include <type_traits>
 using namespace tmn; using namespace tmn::sm90;
 
 #ifndef NCTA
 #define NCTA 132
 #endif
 #ifndef FWD_SAVE
-#define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only -- see below.
+#define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only.
 #endif
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 
-// ---- shared memory: a two-slot weight ring plus double-buffered x and xn tiles
-constexpr int F_SLOT = 49152, F_RING = 0;                      // slot: [Wa_j; Wb_j] 32 KB at +0, then Ws^T_j 16 KB at +32768
-constexpr int F_WST = 32768;
-constexpr int F_X = 2 * F_SLOT, F_XB = 32768;                  // x  tile [128 rows][128 d] bf16, double-buffered
-constexpr int F_XN = F_X + 2 * F_XB;                           // xn tile, double-buffered
-constexpr int F_BAR = F_XN + 2 * F_XB;
+// ---- shared memory: split weight ring ([Wa;Wb] x NAB, Ws^T x NWS), double-buffered x, single xn
+#ifndef NAB
+#define NAB 3
+#endif
+#ifndef NWS
+#define NWS 2
+#endif
+constexpr int F_ABS = 32768, F_AB = 0;                         // [Wa_j; Wb_j] packed, [128 n][128 d]
+constexpr int F_WSS = 16384, F_WS = F_AB + NAB * F_ABS;        // Ws^T_j, [64 hs][128 d]
+constexpr int F_X = F_WS + NWS * F_WSS, F_XB = 32768;          // x  tile [128 rows][128 d] bf16, double-buffered
+constexpr int F_XN = F_X + 2 * F_XB;                           // xn tile, single
+constexpr int F_BAR = F_XN + F_XB;
+static_assert(F_WS % 1024 == 0 && F_X % 1024 == 0 && F_XN % 1024 == 0, "128B-swizzled tiles need 1 KB alignment");
 constexpr int SMEM_BYTES = 231424;
 static_assert(F_BAR + 256 <= SMEM_BYTES, "shared memory budget");
 
@@ -63,7 +85,7 @@ TMN_DEVI void mma128_rs(float (&d)[64], const uint32_t (&a)[4], uint32_t desc_lo
 }
 
 
-struct FwdPar {                                 // the tensor maps stay in the grid-constant parameter bank
+struct Par {                                 // the tensor maps stay in the grid-constant parameter bank
   const CUtensorMap *x, *wa, *wb, *wst, *outm;
   const float *gamma, *beta;
   __nv_bfloat16 *xn, *out;
@@ -75,6 +97,7 @@ TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int 
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%2, %3}], [%1];"
                :: "l"(map), "r"(smem_u32(src)), "r"(c0), "r"(c1) : "memory");
 }
+TMN_DEVI void named_bar_arrive(int id, int nthreads) { __syncwarp(); asm volatile("bar.arrive %0, %1;\n" :: "r"(id), "r"(nthreads) : "memory"); }
 TMN_DEVI uint2 lds64u(uint32_t a) { uint2 v; asm volatile("ld.shared.v2.b32 {%0,%1}, [%2];" : "=r"(v.x), "=r"(v.y) : "r"(a) : "memory"); return v; }
 TMN_DEVI void stg64u(void* p, uint32_t a, uint32_t b) { asm volatile("st.global.v2.b32 [%0], {%1,%2};" :: "l"(p), "r"(a), "r"(b) : "memory"); }
 TMN_DEVI float warp_allsum(float v) {
@@ -88,25 +111,32 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
                      const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mwst,
                      const __grid_constant__ CUtensorMap mout, const float* __restrict__ gamma, const float* __restrict__ beta,
                      __nv_bfloat16* __restrict__ xn, __nv_bfloat16* __restrict__ out,
-                     float* __restrict__ rstd, float* __restrict__ c1, int M, int tiles, float eps, int save) {
-  const FwdPar p{&mx, &mwa, &mwb, &mwst, &mout, gamma, beta, xn, out, rstd, c1, M, tiles};
+                     float* __restrict__ rstd, float* __restrict__ c1, int M, int tiles, float eps) {
+  const Par p{&mx, &mwa, &mwb, &mwst, &mout, gamma, beta, xn, out, rstd, c1, M, tiles};
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
   const int cta = blockIdx.x;
   uint64_t* bars = reinterpret_cast<uint64_t*>(sm + F_BAR);
-  uint64_t* w_full = bars; uint64_t* w_free = bars + 2; uint64_t* x_full = bars + 4; uint64_t* x_free = bars + 6;
+  uint64_t* ab_full = bars; uint64_t* ab_free = bars + NAB;
+  uint64_t* ws_full = bars + 2 * NAB; uint64_t* ws_free = ws_full + NWS;
+  uint64_t* x_full = ws_free + NWS; uint64_t* x_free = x_full + 2;
   const int n_local = (tiles > cta) ? (tiles - cta + NCTA - 1) / NCTA : 0;
   const uint32_t wmax = (uint32_t)n_local * NCH;
-  auto issue_w = [&](uint32_t seq) {                      // chunk seq % NCH into slot seq & 1
-    const int s = seq & 1, j = (int)(seq % NCH); uint8_t* b = sm + F_RING + s * F_SLOT;
-    mbar_arrive_expect_tx(w_full + s, 49152);
+  auto issue_ab = [&](uint32_t seq) {                     // [Wa_j; Wb_j] of chunk seq % NCH into slot seq % NAB
+    const int s = (int)(seq % NAB), j = (int)(seq % NCH); uint8_t* b = sm + F_AB + s * F_ABS;
+    mbar_arrive_expect_tx(ab_full + s, F_ABS);
 #pragma unroll
     for (int c = 0; c < 2; ++c) {
-      tma_load_2d(b + c * 16384, p.wa, w_full + s, c * 64, j * HS);            // rows 0..63 of the packed [Wa_j; Wb_j] tile
-      tma_load_2d(b + c * 16384 + 8192, p.wb, w_full + s, c * 64, j * HS);      // rows 64..127
-      tma_load_2d(b + F_WST + c * 8192, p.wst, w_full + s, c * 64, j * HS);     // Ws^T_j, [64 hs][128 d]
+      tma_load_2d(b + c * 16384, p.wa, ab_full + s, c * 64, j * HS);           // rows 0..63 of the packed tile
+      tma_load_2d(b + c * 16384 + 8192, p.wb, ab_full + s, c * 64, j * HS);    // rows 64..127
     }
+  };
+  auto issue_ws = [&](uint32_t seq) {                     // Ws^T_j of chunk seq % NCH into slot seq % NWS
+    const int s = (int)(seq % NWS), j = (int)(seq % NCH); uint8_t* b = sm + F_WS + s * F_WSS;
+    mbar_arrive_expect_tx(ws_full + s, F_WSS);
+#pragma unroll
+    for (int c = 0; c < 2; ++c) tma_load_2d(b + c * 8192, p.wst, ws_full + s, c * 64, j * HS);
   };
   auto issue_x = [&](int i) {
     const int buf = i & 1, row = (cta + i * NCTA) * ROWS; uint8_t* b = sm + F_X + buf * F_XB;
@@ -117,13 +147,20 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
       for (int h = 0; h < 2; ++h) tma_load_2d(b + c * 16384 + h * 8192, p.x, x_full + buf, c * 64, row + h * 64);
   };
   if (tid == 0) {
-    mbar_init(w_full, 1); mbar_init(w_full + 1, 1); mbar_init(w_free, 2); mbar_init(w_free + 1, 2);
+    for (int s = 0; s < NAB; ++s) { mbar_init(ab_full + s, 1); mbar_init(ab_free + s, 2); }
+    for (int s = 0; s < NWS; ++s) { mbar_init(ws_full + s, 1); mbar_init(ws_free + s, 2); }
     mbar_init(x_full, 1); mbar_init(x_full + 1, 1); mbar_init(x_free, 2); mbar_init(x_free + 1, 2);
     fence_barrier_init();
   }
   __syncthreads();
-  uint32_t wseq = 0;
-  if (tid == 0) { if (wmax > 0) issue_w(0); if (wmax > 1) issue_w(1); for (int i = 0; i < 2 && i < n_local; ++i) issue_x(i); }
+  constexpr int PROD = 128;                               // the producer: warpgroup 1's first thread (the trailing warpgroup)
+  constexpr int BAR_TURN = 3;                             // named barriers 3 + wg: "warpgroup wg may issue its tensor batch"
+  if (tid == PROD) {
+    for (uint32_t q = 0; q < NAB && q < wmax; ++q) issue_ab(q);
+    for (uint32_t q = 0; q < NWS && q < wmax; ++q) issue_ws(q);
+    for (int i = 0; i < 2 && i < n_local; ++i) issue_x(i);
+  }
+  if (wg == 1 && n_local > 0) named_bar_arrive(BAR_TURN + 0, 256);   // warpgroup 0 takes the first turn
   // LayerNorm mapping: this thread owns columns 4 lane .. 4 lane + 3 of rows 16 warp + ii (ii < 16) of its warpgroup's half
   const int c0 = 4 * lane;
   const uint32_t xcol = (uint32_t)(c0 >> 6) * 16384 + (uint32_t)(((c0 & 63) * 2) & 15);
@@ -134,7 +171,7 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
 
   for (int i = 0; i < n_local; ++i) {
     const int buf = i & 1, trow = (cta + i * NCTA) * ROWS;
-    const uint32_t xu = su + F_X + buf * F_XB, xnu = su + F_XN + buf * F_XB;
+    const uint32_t xu = su + F_X + buf * F_XB, xnu = su + F_XN;
     mbar_wait(x_full + buf, (i >> 1) & 1);
     // ---------------------------------------------------------------- LayerNorm, in registers, into the xn tile
     // Eight rows at a time: the two warp reductions a row needs are five dependent shuffles each, and one row at a time
@@ -187,82 +224,84 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
 #if FWD_SAVE
         stg64u(p.xn + (size_t)(trow + r) * D_ + c0, o.x, o.y);   // the backward's saved xn: 32 lanes x 8 B = one whole row
         if (lane == 0) { const int gr = trow + r; p.rstd[gr] = rs; p.c1[gr] = mean * rs; }
-#else
-        // The inference build keeps these stores in the code and skips them at run time (save = 0). Removing them at compile
-        // time lets ptxas schedule the kernel into 155 registers, and that schedule measured 7-8 % SLOWER than the training
-        // build even though it writes 38 MB less at L384; behind the runtime guard it keeps the training build's schedule and
-        // is 15-16 % faster than the compiled-out form (L384 138.3 -> 116.9 us, L768 516.3 -> 432.5 us, output bit-identical).
-        if (save) {
-          stg64u(p.xn + (size_t)(trow + r) * D_ + c0, o.x, o.y);
-          if (lane == 0) { const int gr = trow + r; p.rstd[gr] = rs; p.c1[gr] = mean * rs; }
-        }
 #endif
       }
     }
     fence_proxy_async();                                  // the generic stores of xn -> visible to the wgmma operand reads
     named_bar_sync(1 + wg, 128);
-    // ---------------------------------------------------------------- the eight hidden chunks
+    // ---------------------------------------------------------------- nine ping-pong tensor batches per tile
+    // batch 0 = G1(0); batch j = G2(j-1) + G1(j) for j = 1..7; batch 8 = G2(7).  After batch j retires, SwiGLU(j) forms the h
+    // that batch j+1 consumes.  [Wa;Wb]_c is released after batch j (c = cb + j), Ws^T_(c-1) after the same batch.
+    const uint32_t cb = (uint32_t)i * NCH;
     float acc[64];
 #pragma unroll
     for (int e = 0; e < 64; ++e) acc[e] = 0.f;
-    for (int j = 0; j < NCH; ++j, ++wseq) {
-      const int s = (int)(wseq & 1);
-      const uint32_t slot = su + F_RING + s * F_SLOT;
-      mbar_wait(w_full + s, (uint32_t)((wseq >> 1) & 1));
-      float AB[64];
+    float AB[64];
+    uint32_t fh[4][4];
+    // the batch as a compile-time shape (G1 only / G2 + G1 / G2 only): runtime branches around wgmma make ptxas serialize them
+    auto batch = [&](auto G1c, auto G2c, uint32_t c) __attribute__((always_inline)) {
+      constexpr bool g1 = decltype(G1c)::value, g2 = decltype(G2c)::value;
+      if constexpr (g1) mbar_wait(ab_full + (int)(c % NAB), (c / NAB) & 1u);
+      if constexpr (g2) mbar_wait(ws_full + (int)((c - 1) % NWS), ((c - 1) / NWS) & 1u);
+      named_bar_sync(BAR_TURN + wg, 256);                 // my turn on the tensor pipe
+      if constexpr (g1) {
 #pragma unroll
-      for (int e = 0; e < 64; ++e) AB[e] = 0.f;
+        for (int e = 0; e < 64; ++e) AB[e] = 0.f;
+      }
       fence_regs(AB); fence_regs(acc); wgmma_fence();
-#pragma unroll
-      for (int ks = 0; ks < 8; ++ks) mma128<0, 0>(AB, dk128(xnu + wg * 8192, ks), dk128(slot, ks), ks > 0);
-      wgmma_commit();
-      wgmma_wait<1>(); fence_regs(acc);                   // also retires the previous chunk's squeeze update
-      if (j > 0 || i > 0) {
-        const int ps = (int)((wseq - 1) & 1);
-        if (wtid == 0) mbar_arrive(w_free + ps);
-        if (tid == 0) { mbar_wait(w_free + ps, (uint32_t)(((wseq - 1) >> 1) & 1)); if (wseq + 1 < wmax) issue_w(wseq + 1); }
-      }
-      wgmma_wait<0>(); fence_regs(AB);
-      uint32_t fh[4][4];                                  // h = bf16(silu(a) b): C group g holds a, group g + 8 holds b
-#pragma unroll
-      for (int g = 0; g < 8; ++g) {
-        const int e0 = 4 * g, ks = g >> 1, o = (g & 1) ? 2 : 0;
-#pragma unroll
-        for (int r = 0; r < 2; ++r) {
-          const float a0 = AB[e0 + 2 * r], a1 = AB[e0 + 2 * r + 1];
-          const float b0 = AB[e0 + 32 + 2 * r], b1 = AB[e0 + 32 + 2 * r + 1];
-          fh[ks][o + r] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
-        }
-      }
-      fence_regs(acc); wgmma_fence();
-      {
-        const uint64_t bd = dsc_(slot + F_WST, 8192, 1024);   // Ws^T_j is [K = 64 hs][N = 128 d]
+      if constexpr (g2) {
+        const uint64_t bd = dsc_(su + F_WS + (int)((c - 1) % NWS) * F_WSS, 8192, 1024);   // Ws^T is [K = 64 hs][N = 128 d]
         const uint32_t blo = (uint32_t)bd, bhi = (uint32_t)(bd >> 32);
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks) mma128_rs(acc, fh[ks], blo, bhi, (uint32_t)(ks * 2048) >> 4, 1);
       }
+      if constexpr (g1) {
+        const uint32_t aslot = su + F_AB + (int)(c % NAB) * F_ABS;
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks) mma128<0, 0>(AB, dk128(xnu + wg * 8192, ks), dk128(aslot, ks), ks > 0);
+      }
       wgmma_commit();
-    }
-    wgmma_wait<0>(); fence_regs(acc);
+      named_bar_arrive(BAR_TURN + (wg ^ 1), 256);         // hand the tensor pipe to the other warpgroup
+      wgmma_wait<0>(); fence_regs(acc); fence_regs(AB);
+      if (wtid == 0) {
+        if constexpr (g1) mbar_arrive(ab_free + (int)(c % NAB));
+        if constexpr (g2) mbar_arrive(ws_free + (int)((c - 1) % NWS));
+      }
+      if (tid == PROD) {                                  // the trailing warpgroup: the leading one has already released these
+        if constexpr (g1) { if (c + NAB < wmax) { mbar_wait(ab_free + (int)(c % NAB), (c / NAB) & 1u); issue_ab(c + NAB); } }
+        if constexpr (g2) { if ((c - 1) + NWS < wmax) { mbar_wait(ws_free + (int)((c - 1) % NWS), ((c - 1) / NWS) & 1u); issue_ws(c - 1 + NWS); } }
+      }
+      if constexpr (g1) {                                 // h = bf16(silu(a) b): C group g holds a, group g + 8 holds b
+#pragma unroll
+        for (int g = 0; g < 8; ++g) {
+          const int e0 = 4 * g, ks = g >> 1, o = (g & 1) ? 2 : 0;
+#pragma unroll
+          for (int r = 0; r < 2; ++r) {
+            const float a0 = AB[e0 + 2 * r], a1 = AB[e0 + 2 * r + 1];
+            const float b0 = AB[e0 + 32 + 2 * r], b1 = AB[e0 + 32 + 2 * r + 1];
+            fh[ks][o + r] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+          }
+        }
+      }
+    };
+    using T_ = std::integral_constant<bool, true>; using F_ = std::integral_constant<bool, false>;
+    batch(T_{}, F_{}, cb);
+#pragma unroll 1
+    for (int j = 1; j < NCH; ++j) batch(T_{}, T_{}, cb + (uint32_t)j);
+    batch(F_{}, T_{}, cb + NCH);
     // ---------------------------------------------------------------- out = bf16(x + acc), added IN PLACE over the x tile and
     // handed to one TMA store per warpgroup half.  Straight 4-byte global stores from this fragment layout touch eight
     // half-used 32-byte sectors per instruction and measured 60 us of the kernel's 145.
-    // ldmatrix.x4 hands each thread its x values in exactly the accumulator's fragment layout (row lane / 4, columns
-    // 2 (lane % 4) + {0, 1} of each 8 x 8 matrix), so four matrices per instruction replace sixteen 4-byte accesses; the add
-    // is the base kernel's, element for element.  Matrices per x4: (rows 0-7, g), (rows 8-15, g), (0-7, g + 1), (8-15, g + 1).
-    {
-      const int mi = lane >> 3, mrow = wg * WGR + 16 * warp + 8 * (mi & 1) + (lane & 7);
+    const int lrow = wg * WGR + 16 * warp + (lane >> 2);
 #pragma unroll
-      for (int gp = 0; gp < 8; ++gp) {
-        const int col = 8 * (2 * gp + (mi >> 1));
-        const uint32_t ad = xu + (col >> 6) * 16384 + swz128((uint32_t)mrow, (uint32_t)((col & 63) * 2));
-        uint32_t xr[4];
-        ldsm_x4(xr, ad);
-        const int g0 = 2 * gp, g1 = 2 * gp + 1;
-        stsm_x4(ad, pack_bf16(bf16lo(xr[0]) + acc[4 * g0 + 0], bf16hi(xr[0]) + acc[4 * g0 + 1]),
-                    pack_bf16(bf16lo(xr[1]) + acc[4 * g0 + 2], bf16hi(xr[1]) + acc[4 * g0 + 3]),
-                    pack_bf16(bf16lo(xr[2]) + acc[4 * g1 + 0], bf16hi(xr[2]) + acc[4 * g1 + 1]),
-                    pack_bf16(bf16lo(xr[3]) + acc[4 * g1 + 2], bf16hi(xr[3]) + acc[4 * g1 + 3]));
+    for (int rb = 0; rb < 2; ++rb) {
+      const int r = lrow + 8 * rb;
+#pragma unroll
+      for (int g = 0; g < 16; ++g) {
+        const int col = 8 * g + 2 * (lane & 3);
+        const uint32_t ad = xu + (col >> 6) * 16384 + swz128((uint32_t)r, (uint32_t)((col & 63) * 2));
+        const uint32_t xv = lds32(ad);
+        sts32(ad, pack_bf16(bf16lo(xv) + acc[4 * g + 2 * rb], bf16hi(xv) + acc[4 * g + 2 * rb + 1]));
       }
     }
     fence_proxy_async();
@@ -271,40 +310,10 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
 #pragma unroll
       for (int c = 0; c < 2; ++c) tma_store_2d(p.outm, sm + F_X + buf * F_XB + c * 16384 + wg * 8192, c * 64, trow + wg * WGR);
       tma_store_commit();
-      tma_store_wait_all();                                // the store has read the tile: the buffer may be refilled
+      tma_store_wait_read<0>();                            // the store has READ the tile: the buffer may be refilled (global completion is the kernel's end)
       mbar_arrive(x_free + buf);
     }
-    if (tid == 0 && i + 2 < n_local) { mbar_wait(x_free + buf, (i >> 1) & 1); issue_x(i + 2); }
+    if (tid == PROD && i + 2 < n_local) { mbar_wait(x_free + buf, (i >> 1) & 1); issue_x(i + 2); }
   }
-}
-
-// ================================================================================== host launcher
-// Wiring surface for `fused_sm90a.py`. The kernel is a persistent grid: one CTA per SM, NCTA
-// baked in at build time from the device's own multiprocessor count, so there is nothing to
-// choose at launch. The opt-in shared-memory attribute is set once per process: sm_90's
-// effective dynamic ceiling is 231424 B, not the 232448 B the occupancy API advertises.
-
-#include <stdexcept>
-#include <string>
-
-int transition_fused_fwd_ctas() { return NCTA; }
-int transition_fused_fwd_rows() { return ROWS; }
-bool transition_fused_fwd_saves_xn() { return FWD_SAVE != 0; }
-
-void transition_fused_fwd_launch(
-    const CUtensorMap& mx, const CUtensorMap& mwa, const CUtensorMap& mwb,
-    const CUtensorMap& mwst, const CUtensorMap& mout,
-    const float* gamma, const float* beta, __nv_bfloat16* xn, __nv_bfloat16* out,
-    float* rstd, float* c1, int M, int tiles, float eps, cudaStream_t stream) {
-  const int save = FWD_SAVE != 0;                        // the inference build (FWD_SAVE = 0) is always launched with save = 0
-  static const bool ready = [] {
-    cudaError_t e = cudaFuncSetAttribute(reinterpret_cast<const void*>(transition_fwd_fused),
-                                         cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
-    if (e != cudaSuccess)
-      throw std::runtime_error(std::string("transition_fwd_fused smem opt-in: ") + cudaGetErrorString(e));
-    return true;
-  }();
-  (void)ready;
-  transition_fwd_fused<<<NCTA, 256, SMEM_BYTES, stream>>>(
-      mx, mwa, mwb, mwst, mout, gamma, beta, xn, out, rstd, c1, M, tiles, eps, save);
+  if (wg == 0 && n_local > 0) named_bar_sync(BAR_TURN + 0, 256);   // warpgroup 1's final hand-over
 }

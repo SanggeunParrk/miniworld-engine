@@ -13,6 +13,12 @@
 //
 // The path it replaces runs three kernels and puts the [M][512] SwiGLU activation through HBM twice (151 MB each way at
 // L384); here it never leaves registers, and the only traffic is x in, xn out and out out.
+//
+// p16: dedicated producer warps.  In the base kernel the weight and x rings are refilled by thread 0, a CONSUMER thread: it
+// waits on the free barrier for BOTH warpgroups before issuing, so warpgroup 0 is dragged to warpgroup 1's pace and the two run
+// in lockstep (NCU: ~11 % of samples spinning on w_full in front of G1; deeper rings did not help, so it is not load latency).
+// Here warp 8 refills the weight ring and warp 9 the x ring; consumers only arrive.  Launch with 320 threads.
+// 183 registers x 320 threads = 58.6 K, inside the 64 K register file.
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
@@ -20,7 +26,7 @@ using namespace tmn; using namespace tmn::sm90;
 #define NCTA 132
 #endif
 #ifndef FWD_SAVE
-#define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only -- see below.
+#define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only.
 #endif
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 
@@ -63,7 +69,7 @@ TMN_DEVI void mma128_rs(float (&d)[64], const uint32_t (&a)[4], uint32_t desc_lo
 }
 
 
-struct FwdPar {                                 // the tensor maps stay in the grid-constant parameter bank
+struct Par {                                 // the tensor maps stay in the grid-constant parameter bank
   const CUtensorMap *x, *wa, *wb, *wst, *outm;
   const float *gamma, *beta;
   __nv_bfloat16 *xn, *out;
@@ -83,13 +89,13 @@ TMN_DEVI float warp_allsum(float v) {
   return v;
 }
 
-extern "C" __global__ void __launch_bounds__(256, 1)
+extern "C" __global__ void __launch_bounds__(320, 1)
 transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mwa,
                      const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mwst,
                      const __grid_constant__ CUtensorMap mout, const float* __restrict__ gamma, const float* __restrict__ beta,
                      __nv_bfloat16* __restrict__ xn, __nv_bfloat16* __restrict__ out,
-                     float* __restrict__ rstd, float* __restrict__ c1, int M, int tiles, float eps, int save) {
-  const FwdPar p{&mx, &mwa, &mwb, &mwst, &mout, gamma, beta, xn, out, rstd, c1, M, tiles};
+                     float* __restrict__ rstd, float* __restrict__ c1, int M, int tiles, float eps) {
+  const Par p{&mx, &mwa, &mwb, &mwst, &mout, gamma, beta, xn, out, rstd, c1, M, tiles};
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
@@ -124,6 +130,14 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
   __syncthreads();
   uint32_t wseq = 0;
   if (tid == 0) { if (wmax > 0) issue_w(0); if (wmax > 1) issue_w(1); for (int i = 0; i < 2 && i < n_local; ++i) issue_x(i); }
+  if (tid >= 256) {                                     // ---------------- producers
+    if (tid == 256) {                                     // warp 8: weight chunk seq into slot seq & 1 once both warpgroups retired seq - 2
+      for (uint32_t seq = 2; seq < wmax; ++seq) { mbar_wait(w_free + (seq & 1), ((seq - 2) >> 1) & 1); issue_w(seq); }
+    } else if (tid == 288) {                              // warp 9: x tile i into buffer i & 1 once both warpgroups stored tile i - 2
+      for (int i = 2; i < n_local; ++i) { mbar_wait(x_free + (i & 1), ((i - 2) >> 1) & 1); issue_x(i); }
+    }
+    return;
+  }
   // LayerNorm mapping: this thread owns columns 4 lane .. 4 lane + 3 of rows 16 warp + ii (ii < 16) of its warpgroup's half
   const int c0 = 4 * lane;
   const uint32_t xcol = (uint32_t)(c0 >> 6) * 16384 + (uint32_t)(((c0 & 63) * 2) & 15);
@@ -187,15 +201,6 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
 #if FWD_SAVE
         stg64u(p.xn + (size_t)(trow + r) * D_ + c0, o.x, o.y);   // the backward's saved xn: 32 lanes x 8 B = one whole row
         if (lane == 0) { const int gr = trow + r; p.rstd[gr] = rs; p.c1[gr] = mean * rs; }
-#else
-        // The inference build keeps these stores in the code and skips them at run time (save = 0). Removing them at compile
-        // time lets ptxas schedule the kernel into 155 registers, and that schedule measured 7-8 % SLOWER than the training
-        // build even though it writes 38 MB less at L384; behind the runtime guard it keeps the training build's schedule and
-        // is 15-16 % faster than the compiled-out form (L384 138.3 -> 116.9 us, L768 516.3 -> 432.5 us, output bit-identical).
-        if (save) {
-          stg64u(p.xn + (size_t)(trow + r) * D_ + c0, o.x, o.y);
-          if (lane == 0) { const int gr = trow + r; p.rstd[gr] = rs; p.c1[gr] = mean * rs; }
-        }
 #endif
       }
     }
@@ -217,11 +222,7 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
       for (int ks = 0; ks < 8; ++ks) mma128<0, 0>(AB, dk128(xnu + wg * 8192, ks), dk128(slot, ks), ks > 0);
       wgmma_commit();
       wgmma_wait<1>(); fence_regs(acc);                   // also retires the previous chunk's squeeze update
-      if (j > 0 || i > 0) {
-        const int ps = (int)((wseq - 1) & 1);
-        if (wtid == 0) mbar_arrive(w_free + ps);
-        if (tid == 0) { mbar_wait(w_free + ps, (uint32_t)(((wseq - 1) >> 1) & 1)); if (wseq + 1 < wmax) issue_w(wseq + 1); }
-      }
+      if ((j > 0 || i > 0) && wtid == 0) mbar_arrive(w_free + (int)((wseq - 1) & 1));   // the producer warp refills it
       wgmma_wait<0>(); fence_regs(AB);
       uint32_t fh[4][4];                                  // h = bf16(silu(a) b): C group g holds a, group g + 8 holds b
 #pragma unroll
@@ -247,22 +248,16 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
     // ---------------------------------------------------------------- out = bf16(x + acc), added IN PLACE over the x tile and
     // handed to one TMA store per warpgroup half.  Straight 4-byte global stores from this fragment layout touch eight
     // half-used 32-byte sectors per instruction and measured 60 us of the kernel's 145.
-    // ldmatrix.x4 hands each thread its x values in exactly the accumulator's fragment layout (row lane / 4, columns
-    // 2 (lane % 4) + {0, 1} of each 8 x 8 matrix), so four matrices per instruction replace sixteen 4-byte accesses; the add
-    // is the base kernel's, element for element.  Matrices per x4: (rows 0-7, g), (rows 8-15, g), (0-7, g + 1), (8-15, g + 1).
-    {
-      const int mi = lane >> 3, mrow = wg * WGR + 16 * warp + 8 * (mi & 1) + (lane & 7);
+    const int lrow = wg * WGR + 16 * warp + (lane >> 2);
 #pragma unroll
-      for (int gp = 0; gp < 8; ++gp) {
-        const int col = 8 * (2 * gp + (mi >> 1));
-        const uint32_t ad = xu + (col >> 6) * 16384 + swz128((uint32_t)mrow, (uint32_t)((col & 63) * 2));
-        uint32_t xr[4];
-        ldsm_x4(xr, ad);
-        const int g0 = 2 * gp, g1 = 2 * gp + 1;
-        stsm_x4(ad, pack_bf16(bf16lo(xr[0]) + acc[4 * g0 + 0], bf16hi(xr[0]) + acc[4 * g0 + 1]),
-                    pack_bf16(bf16lo(xr[1]) + acc[4 * g0 + 2], bf16hi(xr[1]) + acc[4 * g0 + 3]),
-                    pack_bf16(bf16lo(xr[2]) + acc[4 * g1 + 0], bf16hi(xr[2]) + acc[4 * g1 + 1]),
-                    pack_bf16(bf16lo(xr[3]) + acc[4 * g1 + 2], bf16hi(xr[3]) + acc[4 * g1 + 3]));
+    for (int rb = 0; rb < 2; ++rb) {
+      const int r = lrow + 8 * rb;
+#pragma unroll
+      for (int g = 0; g < 16; ++g) {
+        const int col = 8 * g + 2 * (lane & 3);
+        const uint32_t ad = xu + (col >> 6) * 16384 + swz128((uint32_t)r, (uint32_t)((col & 63) * 2));
+        const uint32_t xv = lds32(ad);
+        sts32(ad, pack_bf16(bf16lo(xv) + acc[4 * g + 2 * rb], bf16hi(xv) + acc[4 * g + 2 * rb + 1]));
       }
     }
     fence_proxy_async();
@@ -274,37 +269,6 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
       tma_store_wait_all();                                // the store has read the tile: the buffer may be refilled
       mbar_arrive(x_free + buf);
     }
-    if (tid == 0 && i + 2 < n_local) { mbar_wait(x_free + buf, (i >> 1) & 1); issue_x(i + 2); }
+
   }
-}
-
-// ================================================================================== host launcher
-// Wiring surface for `fused_sm90a.py`. The kernel is a persistent grid: one CTA per SM, NCTA
-// baked in at build time from the device's own multiprocessor count, so there is nothing to
-// choose at launch. The opt-in shared-memory attribute is set once per process: sm_90's
-// effective dynamic ceiling is 231424 B, not the 232448 B the occupancy API advertises.
-
-#include <stdexcept>
-#include <string>
-
-int transition_fused_fwd_ctas() { return NCTA; }
-int transition_fused_fwd_rows() { return ROWS; }
-bool transition_fused_fwd_saves_xn() { return FWD_SAVE != 0; }
-
-void transition_fused_fwd_launch(
-    const CUtensorMap& mx, const CUtensorMap& mwa, const CUtensorMap& mwb,
-    const CUtensorMap& mwst, const CUtensorMap& mout,
-    const float* gamma, const float* beta, __nv_bfloat16* xn, __nv_bfloat16* out,
-    float* rstd, float* c1, int M, int tiles, float eps, cudaStream_t stream) {
-  const int save = FWD_SAVE != 0;                        // the inference build (FWD_SAVE = 0) is always launched with save = 0
-  static const bool ready = [] {
-    cudaError_t e = cudaFuncSetAttribute(reinterpret_cast<const void*>(transition_fwd_fused),
-                                         cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
-    if (e != cudaSuccess)
-      throw std::runtime_error(std::string("transition_fwd_fused smem opt-in: ") + cudaGetErrorString(e));
-    return true;
-  }();
-  (void)ready;
-  transition_fwd_fused<<<NCTA, 256, SMEM_BYTES, stream>>>(
-      mx, mwa, mwb, mwst, mout, gamma, beta, xn, out, rstd, c1, M, tiles, eps, save);
 }

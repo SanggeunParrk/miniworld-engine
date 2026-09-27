@@ -1,3 +1,4 @@
+// p20: epilogue through ldmatrix.x4 / stmatrix.x4 in the accumulator layout (bit-identical).
 // transition_fwd.cu — the Transition forward (LayerNorm + SwiGLU expand + squeeze + residual) of the MiniWorld pair
 // Transition at D = 128, H = 4D = 512, bf16, as ONE fused sm_90a kernel that also emits what the backward needs.
 // SPDX-License-Identifier: Apache-2.0
@@ -20,7 +21,7 @@ using namespace tmn; using namespace tmn::sm90;
 #define NCTA 132
 #endif
 #ifndef FWD_SAVE
-#define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only -- see below.
+#define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only.
 #endif
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 
@@ -63,7 +64,7 @@ TMN_DEVI void mma128_rs(float (&d)[64], const uint32_t (&a)[4], uint32_t desc_lo
 }
 
 
-struct FwdPar {                                 // the tensor maps stay in the grid-constant parameter bank
+struct Par {                                 // the tensor maps stay in the grid-constant parameter bank
   const CUtensorMap *x, *wa, *wb, *wst, *outm;
   const float *gamma, *beta;
   __nv_bfloat16 *xn, *out;
@@ -88,8 +89,8 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
                      const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mwst,
                      const __grid_constant__ CUtensorMap mout, const float* __restrict__ gamma, const float* __restrict__ beta,
                      __nv_bfloat16* __restrict__ xn, __nv_bfloat16* __restrict__ out,
-                     float* __restrict__ rstd, float* __restrict__ c1, int M, int tiles, float eps, int save) {
-  const FwdPar p{&mx, &mwa, &mwb, &mwst, &mout, gamma, beta, xn, out, rstd, c1, M, tiles};
+                     float* __restrict__ rstd, float* __restrict__ c1, int M, int tiles, float eps) {
+  const Par p{&mx, &mwa, &mwb, &mwst, &mout, gamma, beta, xn, out, rstd, c1, M, tiles};
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
@@ -187,15 +188,6 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
 #if FWD_SAVE
         stg64u(p.xn + (size_t)(trow + r) * D_ + c0, o.x, o.y);   // the backward's saved xn: 32 lanes x 8 B = one whole row
         if (lane == 0) { const int gr = trow + r; p.rstd[gr] = rs; p.c1[gr] = mean * rs; }
-#else
-        // The inference build keeps these stores in the code and skips them at run time (save = 0). Removing them at compile
-        // time lets ptxas schedule the kernel into 155 registers, and that schedule measured 7-8 % SLOWER than the training
-        // build even though it writes 38 MB less at L384; behind the runtime guard it keeps the training build's schedule and
-        // is 15-16 % faster than the compiled-out form (L384 138.3 -> 116.9 us, L768 516.3 -> 432.5 us, output bit-identical).
-        if (save) {
-          stg64u(p.xn + (size_t)(trow + r) * D_ + c0, o.x, o.y);
-          if (lane == 0) { const int gr = trow + r; p.rstd[gr] = rs; p.c1[gr] = mean * rs; }
-        }
 #endif
       }
     }
@@ -276,35 +268,4 @@ transition_fwd_fused(const __grid_constant__ CUtensorMap mx, const __grid_consta
     }
     if (tid == 0 && i + 2 < n_local) { mbar_wait(x_free + buf, (i >> 1) & 1); issue_x(i + 2); }
   }
-}
-
-// ================================================================================== host launcher
-// Wiring surface for `fused_sm90a.py`. The kernel is a persistent grid: one CTA per SM, NCTA
-// baked in at build time from the device's own multiprocessor count, so there is nothing to
-// choose at launch. The opt-in shared-memory attribute is set once per process: sm_90's
-// effective dynamic ceiling is 231424 B, not the 232448 B the occupancy API advertises.
-
-#include <stdexcept>
-#include <string>
-
-int transition_fused_fwd_ctas() { return NCTA; }
-int transition_fused_fwd_rows() { return ROWS; }
-bool transition_fused_fwd_saves_xn() { return FWD_SAVE != 0; }
-
-void transition_fused_fwd_launch(
-    const CUtensorMap& mx, const CUtensorMap& mwa, const CUtensorMap& mwb,
-    const CUtensorMap& mwst, const CUtensorMap& mout,
-    const float* gamma, const float* beta, __nv_bfloat16* xn, __nv_bfloat16* out,
-    float* rstd, float* c1, int M, int tiles, float eps, cudaStream_t stream) {
-  const int save = FWD_SAVE != 0;                        // the inference build (FWD_SAVE = 0) is always launched with save = 0
-  static const bool ready = [] {
-    cudaError_t e = cudaFuncSetAttribute(reinterpret_cast<const void*>(transition_fwd_fused),
-                                         cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
-    if (e != cudaSuccess)
-      throw std::runtime_error(std::string("transition_fwd_fused smem opt-in: ") + cudaGetErrorString(e));
-    return true;
-  }();
-  (void)ready;
-  transition_fwd_fused<<<NCTA, 256, SMEM_BYTES, stream>>>(
-      mx, mwa, mwb, mwst, mout, gamma, beta, xn, out, rstd, c1, M, tiles, eps, save);
 }

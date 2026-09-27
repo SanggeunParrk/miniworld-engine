@@ -51,8 +51,11 @@ def _ext(ctas: int, dw_repl: int, save: bool):
     different multiprocessor count gets its own build rather than a silently wrong grid.
 
     ``save`` picks the forward variant. Writing ``xn`` and the LayerNorm statistics is inside
-    the normalization epilogue, so inference gets its own build that skips them rather than a
-    runtime branch: it is one fewer M x 128 bf16 tensor allocated and written per call.
+    the normalization epilogue; the training build writes them unconditionally, and the
+    inference build keeps the stores in the code but skips them at run time. Compiling them
+    out instead produced a smaller-register schedule that was 7-8 % slower than the training
+    build; behind the runtime guard the inference forward is 15-16 % faster than that
+    (bit-identical output), and it still allocates no M x 128 tensor it does not return.
     """
     ensure_cuda_home()
     return load_extension(
@@ -217,5 +220,16 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
 
     Call ``supported(x, wa, ws)`` first: this raises rather than falling back, so a dispatch bug
     shows up as an error instead of a silent slowdown.
+
+    Inference is decided HERE, not inside the autograd Function: its ``forward`` always runs with
+    grad mode off, and ``ctx.needs_input_grad`` only reflects ``requires_grad`` -- which module
+    parameters keep under ``torch.no_grad()`` -- so deciding there sent every no_grad call through
+    the training build, writing an M x 128 ``xn`` nobody reads (38 MB at L384, 151 MB at L768).
     """
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
+        shape = x.shape
+        out, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma.float().contiguous(),
+                                   beta.float().contiguous(), wa.contiguous(), wb.contiguous(),
+                                   ws.t().contiguous(), float(eps), False)
+        return out.reshape(shape)
     return _FusedTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
