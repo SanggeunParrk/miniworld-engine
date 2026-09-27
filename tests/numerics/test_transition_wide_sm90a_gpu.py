@@ -165,6 +165,49 @@ def test_replay_is_bit_identical(d, monkeypatch):
 
 
 @needs_hopper
+def test_d64_persistent_input_buffer_reuse(monkeypatch):
+    """Exercise many refills per CTA, including under Compute Sanitizer.
+
+    The small width tests have fewer tiles than input CTAs and cannot expose
+    a leader releasing the shared input slot before the other warps finish.
+    This shape is the training MSA (1024 rows x 384 tokens).
+    """
+    from miniworld_engine import settings
+
+    monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    settings.configure(engine_backend="auto", transition_residual_fusion=True,
+                       transition_fused_sm90a=True)
+    module, x, dy = _build((1, 1024, 384, 64))
+    x.requires_grad_()
+    params = [x, *module.parameters()]
+    for p in params:
+        p.grad = torch.zeros_like(p)
+
+    def step():
+        for p in params:
+            p.grad.zero_()
+        module(x).backward(dy)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            step()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            step()
+    torch.cuda.current_stream().wait_stream(stream)
+    expected = [p.grad.clone() for p in params]
+    for i in range(30):
+        if i % 2:
+            graph.replay()
+        else:
+            step()
+        for p, reference in zip(params, expected):
+            torch.testing.assert_close(p.grad, reference, rtol=0, atol=0)
+
+
+@needs_hopper
 @pytest.mark.parametrize("d", [384, 512])
 def test_saved_h_changes_nothing_but_the_kernel(d, monkeypatch):
     """MINIWORLD_TRANSITION_WIDE_SAVE_H=1 keeps the forward's h and skips its store in the gate kernel. Only dWs reads h, and
