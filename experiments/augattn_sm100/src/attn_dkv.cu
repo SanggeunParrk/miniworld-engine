@@ -12,6 +12,9 @@
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef PP
+#define PP 1                             // FA4-style ping-pong: the two dS warpgroups take turns on the exponentials (named bars 3, 4)
+#endif
 #ifndef TST
 #define TST 1                            // dK / dV leave through smem-staged TMA bulk stores (coalesced) instead of per-row st.v4
 #endif
@@ -35,6 +38,23 @@ __device__ unsigned long long g_tr[8][256];
 #else
 #define TR(ev, i) do { } while (0)
 #endif
+#ifndef PMOD
+#define PMOD 4                           // of every PMOD exponential pairs, PCNT run on the FMA pipe (polynomial), the rest on MUFU
+#endif
+#ifndef PCNT
+#define PCNT 0
+#endif
+// 2^x for a pair on the FMA pipe (as attn_fwd2.cu): degree-3 fit of 2^f, f = x - round(x), exponent added to the bit pattern
+DEVI f2 ex2_poly2(f2 x) {
+  const float x0 = fminf(fmaxf(lo2(x), -126.f), 126.f), x1 = fminf(fmaxf(hi2(x), -126.f), 126.f);
+  const f2 xc = mk2(x0, x1), C = mk2(12582912.f, 12582912.f);
+  const f2 j = add2(xc, C);
+  const f2 f = add2(xc, neg2(add2(j, neg2(C))));
+  f2 p = fma2(mk2(0.0555041086648216f, 0.0555041086648216f), f, mk2(0.2402264923172785f, 0.2402264923172785f));
+  p = fma2(p, f, mk2(0.6931471805599453f, 0.6931471805599453f));
+  p = fma2(p, f, mk2(1.0f, 1.0f));
+  return mk2(__int_as_float(__float_as_int(lo2(p)) + (__float_as_int(lo2(j)) << 23)), __int_as_float(__float_as_int(hi2(p)) + (__float_as_int(hi2(j)) << 23)));
+}
 struct Bars {
   uint64_t full[ST], empty[ST], kvfull[2], kvempty[2], s_full[2], s_free[2], ds_full[2], ds_free[2], acc_full, acc_free;
   uint32_t tmem;
@@ -180,6 +200,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     const int w = (warp - 4) >> 2;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const f2 CQL = mk2(RSQD * LOG2E, RSQD * LOG2E), L2E = mk2(LOG2E, LOG2E);
+    if (PP && w == 1) named_bar_arrive(3, 256);                          // warpgroup 0 takes the first exp turn
     for (int G = w, li = 0, n = w; G < nblk; G += 2, n += 2) {
       if (n >= nb) { n -= nb; ++li; }
       const int s = G % ST;
@@ -191,6 +212,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       if (w == 0 && r == 0) TR(3, G);
       tc_fence_after();
       uint32_t pp0[16], pd0[16];
+      if (PP) named_bar_sync(3 + w, 256);                                  // my exp turn
 #pragma unroll
       for (int cc = 0; cc < 2; ++cc) {                                     // 32 queries per half
         uint32_t sv[32], dv[32];
@@ -214,7 +236,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
             const int j = q * 4 + e, col = cc * 32 + 2 * j;
             const float2 lse = lds64f(sl + col * 4), dd = lds64f(sl + 512 + col * 4);
             const f2 x = fma2(mk2u(sv[2 * j], sv[2 * j + 1]), CQL, fma2(mk2(bf16lo(bb[e]), bf16hi(bb[e])), L2E, mk2(-lse.x, -lse.y)));
-            const f2 p = mk2(ex2f(lo2(x)), ex2f(hi2(x)));
+            const f2 p = (((j) % PMOD) < PCNT) ? ex2_poly2(x) : mk2(ex2f(lo2(x)), ex2f(hi2(x)));
             const f2 ds = mul2(p, add2(mk2u(dv[2 * j], dv[2 * j + 1]), mk2(-dd.x, -dd.y)));
             pp[j] = pack_bf16(lo2(p), hi2(p));
             pd[j] = pack_bf16(lo2(ds), hi2(ds));
@@ -230,6 +252,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           tmem_st16(trow + T_P + w * 64 + 48, pd);
         }
       }
+      if (PP) named_bar_arrive(4 - w, 256);                                // hand the MUFU over
       tmem_wait_st();
       tc_fence_before();
       __syncwarp();

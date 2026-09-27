@@ -13,7 +13,7 @@ _CUBIN2 = _AUG / "build" / "attn_inf2.cubin"
 
 
 class InfCore:
-    def __init__(self, cubin=None, pdl=False, v2=True):
+    def __init__(self, cubin=None, pdl=False, v2=False):   # attn_inf2 (key split) is slower at the step's S = 5
         self.v2 = v2 and (cubin is None) and _CUBIN2.exists()
         cubin = cubin or (_CUBIN2 if self.v2 else _CUBIN)
         if str(_AUG) not in sys.path:

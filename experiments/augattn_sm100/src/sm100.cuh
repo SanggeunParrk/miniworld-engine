@@ -140,6 +140,7 @@ DEVI bool elect_one() {
 DEVI void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 DEVI void pdl_launch() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
 DEVI void named_bar_sync(int id, int n) { asm volatile("bar.sync %0, %1;" :: "r"(id), "r"(n) : "memory"); }
+DEVI void named_bar_arrive(int id, int n) { asm volatile("bar.arrive %0, %1;" :: "r"(id), "r"(n) : "memory"); }
 
 // ------------------------------------------------------------------ TMA
 DEVI void tma_load_2d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1) {

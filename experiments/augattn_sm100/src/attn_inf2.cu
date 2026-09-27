@@ -20,7 +20,6 @@ using namespace s100;
 #ifndef ST
 #define ST 5
 #endif
-DEVI void named_bar_arrive(int id, int n) { asm volatile("bar.arrive %0, %1;" :: "r"(id), "r"(n) : "memory"); }
 constexpr int BN = 64, DH = 48, QM = 128, DM = 768;
 constexpr int TQ = QM * 128, TK = BN * 128, TB = QM * BN * 2;
 constexpr int STB = 2 * TK + TB;                                           // K | V | bias = 32 KB

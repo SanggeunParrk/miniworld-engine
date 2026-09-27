@@ -14,6 +14,9 @@
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef PP
+#define PP 1                             // FA4-style ping-pong: the two softmax warpgroups take turns on the exponentials (MUFU), so one
+#endif                                   // warpgroup's exp phase runs under the other's S load / bias / max / P store (named bars 3, 4)
 #ifndef LAZY
 #define LAZY 5.545177444479562f          // natural units (8 in log2 units)
 #endif
@@ -167,6 +170,7 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
     setmaxnreg_inc<224>();
     const int w = (warp - 4) >> 2;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+    if (PP && w == 1) named_bar_arrive(3, 256);                          // warpgroup 0 takes the first exp turn
     const f2 CQ = mk2(0.14433756729740643f, 0.14433756729740643f), L2E = mk2(LOG2E, LOG2E);
     float m_i = -INFINITY, l_i = 0.f;
     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
@@ -221,6 +225,7 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
       }
       const f2 NM = mk2(-m_i * LOG2E, -m_i * LOG2E);
       f2 ssp[4] = {mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f)};
+      if (PP) named_bar_sync(3 + w, 256);                                  // my exp turn: the other warpgroup's exps are done
 #pragma unroll
       for (int cc = 0; cc < 2; ++cc) {                                     // 32 keys -> 16 packed P columns
         uint32_t pk[16];
@@ -235,6 +240,7 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
         }
         tmem_st16(trow + T_P + w * 32 + cc * 16, pk);
       }
+      if (PP) named_bar_arrive(4 - w, 256);                                // hand the MUFU to the other warpgroup
       const f2 ss = add2(add2(ssp[0], ssp[1]), add2(ssp[2], ssp[3]));
       l_i += lo2(ss) + hi2(ss);
       tmem_wait_st();
