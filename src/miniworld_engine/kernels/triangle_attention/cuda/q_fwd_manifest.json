@@ -1,0 +1,30 @@
+{
+  "module_name": "triattn_training_q_only_head4",
+  "binary": "triattn_training_q_only_head4.so",
+  "artifact": "q_only_head4",
+  "lengths": [
+    384,
+    768,
+    1024
+  ],
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "baseline_promotion": 17628,
+  "files": {
+    "q_projection_attention.py": "cffc2010c7a59bd03a39e1502492ee1934d46245fcbd6b0d3823d49bed6edc80",
+    "q_projection_attention.cu": "5b777814ee5a36f297c4c7720effe7cd7768ba665ed57fc945b34a8c255978ea",
+    "triattn_training_q_only_head4.so": "b3b06e1467ac6b51d6366524555315d292f30e88842a671a8a1ff7a68dbd9bc6"
+  },
+  "promotion": "17774",
+  "evidence": {
+    "artifact": "q_only_head4",
+    "qualify": 17762,
+    "verify": 17765,
+    "bench": 17756,
+    "sanitize": 17766,
+    "profile": 17767
+  },
+  "dispatcher_sha256": "7b9a1610c238de2a88cc6ae3e0299f08404743d63b3f347ff6763a2cfc258089",
+  "dispatcher_qg_promotion": "18006",
+  "dispatcher_qkv_promotion": "18246"
+}

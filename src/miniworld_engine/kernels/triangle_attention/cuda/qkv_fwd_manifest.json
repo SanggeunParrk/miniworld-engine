@@ -1,0 +1,27 @@
+{
+  "module_name": "triattn_training_qkv_compact_retire6",
+  "binary": "triattn_training_qkv_compact_retire6.so",
+  "artifact": "qkv_compact_retire6",
+  "lengths": [
+    1024
+  ],
+  "torch": "2.10.0+cu128",
+  "python_abi": "cpython-310",
+  "baseline_promotion": 18006,
+  "files": {
+    "qkv_projection_attention.py": "b0aa2c88412a46857c9c1b2ab5f0800ba5890da21c8a2f4820ad33a1a11985e5",
+    "qkv_projection_attention.cu": "22c9363c7df465938d847ef275f867e3bd68c44c72e1aa9cfadc42ea0f80df45",
+    "triattn_training_qkv_compact_retire6.so": "fd75100f530f2a2f07ef20dda802352c48c2957f44e1581a4b057d14ed4faeac"
+  },
+  "promotion": "18246",
+  "evidence": {
+    "artifact": "qkv_compact_retire6",
+    "qualify": 18232,
+    "verify": 18233,
+    "bench": 18240,
+    "sanitize": 18222,
+    "sanitize1024": 18234,
+    "profile": 18235
+  },
+  "dispatcher_sha256": "7b9a1610c238de2a88cc6ae3e0299f08404743d63b3f347ff6763a2cfc258089"
+}

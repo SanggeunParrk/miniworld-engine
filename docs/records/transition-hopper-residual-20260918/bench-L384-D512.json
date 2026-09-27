@@ -1,0 +1,447 @@
+{
+  "node": "node02",
+  "length": 384,
+  "width": 512,
+  "device": "NVIDIA H100 80GB HBM3",
+  "fixture": "bench_module_transition; deterministic nonzero squeeze adapter",
+  "compile": "static dynamic=False; official fixture fullgraph=False; graph count recorded per row",
+  "cudagraph": "manual",
+  "autotune_miss_cap": 24,
+  "native": "runtime selected cache or declared default; no claim of full tuning",
+  "rows": [
+    {
+      "repeat": 0,
+      "mode": "inference",
+      "backend": "triton",
+      "value": 2.3284480571746826,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004156219772994518,
+      "output_cosine": 0.9999912977218628,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 0,
+      "mode": "inference",
+      "backend": "legacy",
+      "value": 1.8184959888458252,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004789938684552908,
+      "output_cosine": 0.9999884963035583,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 0,
+      "mode": "inference",
+      "backend": "h100",
+      "value": 1.843168020248413,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004788403399288654,
+      "output_cosine": 0.9999885559082031,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 0,
+      "mode": "training",
+      "backend": "triton",
+      "value": 7.392384052276611,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.0041580284014344215,
+      "output_cosine": 0.9999914169311523,
+      "grad_max_abs": 0.25,
+      "grad_rel_frob": 0.004630381241440773,
+      "grad_cosine": 0.9999893307685852,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}, \"inference_step.x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 7, \"graph_replay\": {\"output[gradients][0]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][1]\": {\"limit\": 0.0001, \"relative_frobenius\": 7.193206670308427e-07}, \"output[gradients][2]\": {\"limit\": 0.0001, \"relative_frobenius\": 7.529325216637517e-07}, \"output[gradients][3]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][4]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][5]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[result]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 0,
+      "mode": "training",
+      "backend": "legacy",
+      "value": 7.370000123977661,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004789064638316631,
+      "output_cosine": 0.9999885559082031,
+      "grad_max_abs": 0.25,
+      "grad_rel_frob": 0.00488054845482111,
+      "grad_cosine": 0.9999880194664001,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}, \"inference_step.x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 7, \"graph_replay\": {\"output[gradients][0]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][1]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][2]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][3]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][4]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][5]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[result]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 0,
+      "mode": "training",
+      "backend": "h100",
+      "value": 7.220288038253784,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004791135434061289,
+      "output_cosine": 0.9999885559082031,
+      "grad_max_abs": 0.25,
+      "grad_rel_frob": 0.004881855566054583,
+      "grad_cosine": 0.9999881982803345,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}, \"inference_step.x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 7, \"graph_replay\": {\"output[gradients][0]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][1]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][2]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][3]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][4]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][5]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[result]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 1,
+      "mode": "inference",
+      "backend": "h100",
+      "value": 1.8119679689407349,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004790151491761208,
+      "output_cosine": 0.9999886751174927,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 1,
+      "mode": "inference",
+      "backend": "legacy",
+      "value": 1.8114240169525146,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004786784294992685,
+      "output_cosine": 0.9999884366989136,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 1,
+      "mode": "inference",
+      "backend": "triton",
+      "value": 2.2910399436950684,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004157109186053276,
+      "output_cosine": 0.9999914169311523,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 1,
+      "mode": "training",
+      "backend": "h100",
+      "value": 7.149807929992676,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004788427613675594,
+      "output_cosine": 0.9999886751174927,
+      "grad_max_abs": 0.25,
+      "grad_rel_frob": 0.004881314467638731,
+      "grad_cosine": 0.9999880790710449,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}, \"inference_step.x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 7, \"graph_replay\": {\"output[gradients][0]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][1]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][2]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][3]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][4]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][5]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[result]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 1,
+      "mode": "training",
+      "backend": "legacy",
+      "value": 7.28219199180603,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.0047907656989991665,
+      "output_cosine": 0.9999886751174927,
+      "grad_max_abs": 0.25,
+      "grad_rel_frob": 0.004881683737039566,
+      "grad_cosine": 0.9999882578849792,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}, \"inference_step.x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 7, \"graph_replay\": {\"output[gradients][0]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][1]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][2]\": {\"limit\": 0.0001, \"relative_frobenius\": 0.0}, \"output[gradients][3]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][4]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][5]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[result]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 1,
+      "mode": "training",
+      "backend": "triton",
+      "value": 7.384096145629883,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.transition.module.Transition",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.125,
+      "output_rel_frob": 0.004157743416726589,
+      "output_cosine": 0.9999912977218628,
+      "grad_max_abs": 0.25,
+      "grad_rel_frob": 0.004629998933523893,
+      "grad_cosine": 0.9999892115592957,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}, \"inference_step.x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 512]}}",
+      "execution_validation": "{\"finite_tensors\": 7, \"graph_replay\": {\"output[gradients][0]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][1]\": {\"limit\": 0.0001, \"relative_frobenius\": 6.97172822583525e-07}, \"output[gradients][2]\": {\"limit\": 0.0001, \"relative_frobenius\": 5.859146767761558e-07}, \"output[gradients][3]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][4]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[gradients][5]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}, \"output[result]\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    }
+  ],
+  "traces": {
+    "0-inference-triton": [
+      {
+        "kernel": "## Call CompiledFxGraph fcf57cll5liyllifm7t6i57tkuwbeg2h5jl4hg33bnoob4qcuwfb ##",
+        "us": 2733.413
+      },
+      {
+        "kernel": "layer_norm_fwd_fused",
+        "us": 100.28900000000021
+      },
+      {
+        "kernel": "transition_fwd_kernel",
+        "us": 1521.667
+      },
+      {
+        "kernel": "_squeeze_residual_kernel",
+        "us": 693.4409999999998
+      }
+    ],
+    "0-inference-legacy": [
+      {
+        "kernel": "## Call CompiledFxGraph fziu3fjs7jm5iy54jchw6fld536b4ry3nhdk7jaan4wtxee7vwiv ##",
+        "us": 2783.152
+      },
+      {
+        "kernel": "triton_poi_fused__to_copy_transition_cute_fused_fwd_view_0",
+        "us": 1.7290000000000418
+      },
+      {
+        "kernel": "triton_poi_fused__to_copy_transition_cute_fused_fwd_view_0",
+        "us": 1.7279999999999518
+      },
+      {
+        "kernel": "_stats_kernel",
+        "us": 53.47199999999998
+      },
+      {
+        "kernel": "_fold_kernel",
+        "us": 5.3120000000001255
+      },
+      {
+        "kernel": "kernel_cutlass_kernel_miniworld_enginekernelstransitioncutegemm_transition_swigluGemmLnGatedSm90_object_at__TiledMMA_ThrLayoutVMNK128211112800_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK_0",
+        "us": 1227.9429999999998
+      },
+      {
+        "kernel": "kernel_cutlass_kernel_miniworld_enginekernelstransitioncutesqueeze_residualRoundedResidualSm90_object_at__TiledMMA_ThrLayoutVMNK128211112800_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK64_0",
+        "us": 471.68200000000024
+      }
+    ],
+    "0-inference-h100": [
+      {
+        "kernel": "## Call CompiledFxGraph fsoy63j4akchuxk46u76q74ln6uz35gmklxdh3taxmxrejbmdcgz ##",
+        "us": 2877.835
+      },
+      {
+        "kernel": "triton_poi_fused__to_copy_transition_residual_sm90_fwd_view_0",
+        "us": 1.88799999999992
+      },
+      {
+        "kernel": "triton_poi_fused__to_copy_transition_residual_sm90_fwd_view_0",
+        "us": 1.9200000000000728
+      },
+      {
+        "kernel": "_stats_kernel",
+        "us": 53.40800000000013
+      },
+      {
+        "kernel": "_fold_kernel",
+        "us": 5.567999999999984
+      },
+      {
+        "kernel": "kernel_cutlass_kernel_miniworld_enginekernelstransitioncutegemm_transition_swigluGemmLnGatedSm90_object_at__TiledMMA_ThrLayoutVMNK128211112800_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK_0",
+        "us": 1322.885
+      },
+      {
+        "kernel": "kernel_cutlass_kernel_miniworld_enginekernelstransitioncutesqueeze_residualRoundedResidualSm90_object_at__TiledMMA_ThrLayoutVMNK128211112800_PermutationMNK____MMAAtom_ThrID1281_ShapeMNK64_0",
+        "us": 478.65800000000036
+      }
+    ],
+    "0-training-triton": [
+      {
+        "kernel": "## Call CompiledFxGraph frlhcfyuge5dfx4hrjju2tn3dxmigsis3xptv3ubn4ffk4vpknw7 ##",
+        "us": 2383.3950000000004
+      },
+      {
+        "kernel": "transition_fwd_kernel",
+        "us": 1628.3869999999997
+      },
+      {
+        "kernel": "_squeeze_residual_kernel",
+        "us": 753.6000000000004
+      },
+      {
+        "kernel": "## Call CompiledFxGraph fpkyjyq6vimxbthjj5zrqmmesd3uzow2p725swilfwzmcesh5yp4 ##",
+        "us": 5396.361
+      },
+      {
+        "kernel": "Memset (Device)",
+        "us": 1.1840000000001965
+      },
+      {
+        "kernel": "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT",
+        "us": 524.1609999999991
+      },
+      {
+        "kernel": "_transition_expand_gatebwd_kernel",
+        "us": 2300.8359999999993
+      },
+      {
+        "kernel": "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_splitK_NTT",
+        "us": 428.1919999999991
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+        "us": 6.049000000000888
+      },
+      {
+        "kernel": "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_splitK_NTT",
+        "us": 840.5450000000001
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, float*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+        "us": 8.447999999998501
+      },
+      {
+        "kernel": "triton_poi_fused_cat_0",
+        "us": 4.192000000000917
+      },
+      {
+        "kernel": "Memset (Device)",
+        "us": 0.7680000000000291
+      },
+      {
+        "kernel": "nvjet_tst_256x128_64x4_1x2_h_bz_coopA_NNT",
+        "us": 878.0810000000001
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+        "us": 1.8239999999987049
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+        "us": 1.7600000000002183
+      },
+      {
+        "kernel": "_ln_bwd_residual_kernel",
+        "us": 382.4329999999991
+      }
+    ],
+    "0-training-legacy": [],
+    "0-training-h100": [],
+    "1-inference-h100": [],
+    "1-inference-legacy": [],
+    "1-inference-triton": [],
+    "1-training-h100": [],
+    "1-training-legacy": [],
+    "1-training-triton": []
+  }
+}

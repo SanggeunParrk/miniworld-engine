@@ -1,0 +1,447 @@
+{
+  "length": 768,
+  "batch": 1,
+  "d_pair": 128,
+  "dropout": 0.25,
+  "fixture_config": {
+    "d_single": 384,
+    "d_pair": 128,
+    "d_single_token": 768,
+    "d_single_atom": 128,
+    "d_pair_atom": 16,
+    "n_layers": 1,
+    "trimul_direction": "outgoing",
+    "n_augment": 48,
+    "mask_prob": 0.2,
+    "min_seq_len": 768,
+    "max_seq_len": 768,
+    "seq_len_step": 64,
+    "min_d_pair": 64,
+    "max_d_pair": 256,
+    "d_pair_step": 64,
+    "d_pair_values": null,
+    "sweep_axis": "seq_len",
+    "sweep_seq_len": 512,
+    "autotune_shard": "",
+    "config_dir": "",
+    "pin_gate_backend": "",
+    "dropout": 0.25,
+    "compile_jobs": 0,
+    "pin_infer_concat": null,
+    "pin_transition_cuda_b2b": null,
+    "target": "triangle_multiplication_bidirectional",
+    "level": "module",
+    "implementations": [
+      "pytorch",
+      "triton"
+    ],
+    "mode": "training",
+    "metric": "time",
+    "compile": true,
+    "cudagraph": "disabled",
+    "allow_tf32": true,
+    "precision": "bf16-mixed",
+    "layernorm_weight_precision": null,
+    "allow_eager": false,
+    "name_suffix": "",
+    "swa_component": "block",
+    "swa_kernels": null,
+    "swa_active_gates": false
+  },
+  "actual_capture": "manual stochastic adapter outside stock measured_result",
+  "source": "official bench_module_triangle_multiplication_bidirectional fixture; its separate paired-dropout correctness runs unchanged",
+  "timed_scope": "static-compiled forward plus backward with fresh production torch.rand dropout on every CUDA graph replay; fresh-gradient overwrite graph; no optimizer",
+  "explicit_sm90_configs": {
+    "trimul_inproj_gemm_gate_mmajor_sm90_cute": {
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 32,
+      "BLOCK_M1": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "trimul_output_f567_train_sm90_cute": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "trimul_input_dual_bwd_sm90_cute": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    "layernorm_bwd_split_sm90_cute": {
+      "BLOCK_M1": 32,
+      "BLOCK_K": 256,
+      "num_warps": 8,
+      "num_stages": 2
+    }
+  },
+  "explicit_triton_configs": {
+    "front": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    "f567": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "dual_bwd": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 3
+    }
+  },
+  "builds": [
+    {
+      "build": 0,
+      "ms": {
+        "triton": 6.184535980224609,
+        "h100": 5.9422959089279175
+      },
+      "samples_ms": {
+        "triton": [
+          6.151808023452759,
+          6.1527040004730225,
+          6.15336012840271,
+          6.15833592414856,
+          6.2860798835754395,
+          6.4443840980529785,
+          6.200096130371094,
+          6.174191951751709,
+          6.161407947540283,
+          6.19488000869751,
+          6.558752059936523,
+          6.239935874938965
+        ],
+        "h100": [
+          5.931039810180664,
+          5.935343980789185,
+          5.931472063064575,
+          5.934512138366699,
+          6.117535829544067,
+          5.959887981414795,
+          5.94924783706665,
+          5.932016134262085,
+          5.932463884353638,
+          6.000927925109863,
+          6.019871950149536,
+          5.974287986755371
+        ]
+      },
+      "errors_vs_triton": {
+        "h100": [
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": false,
+            "max_abs": 0.0625,
+            "relative_l2": 7.452361023752019e-05
+          },
+          {
+            "equal": false,
+            "max_abs": 0.170196533203125,
+            "relative_l2": 6.996526644797996e-05
+          },
+          {
+            "equal": false,
+            "max_abs": 0.1801605224609375,
+            "relative_l2": 4.858671672991477e-05
+          },
+          {
+            "equal": false,
+            "max_abs": 2.0,
+            "relative_l2": 0.00012558930029626936
+          },
+          {
+            "equal": false,
+            "max_abs": 2.0,
+            "relative_l2": 0.00020970223704352975
+          },
+          {
+            "equal": false,
+            "max_abs": 4.0,
+            "relative_l2": 0.00016975348989944905
+          },
+          {
+            "equal": false,
+            "max_abs": 2.0,
+            "relative_l2": 0.00020063147530891
+          },
+          {
+            "equal": false,
+            "max_abs": 0.000335693359375,
+            "relative_l2": 2.75276221373133e-07
+          },
+          {
+            "equal": false,
+            "max_abs": 0.00018310546875,
+            "relative_l2": 1.239614988435278e-07
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          }
+        ]
+      },
+      "checks": {
+        "triton": {
+          "finite_tensors": 12,
+          "all_gradients_present": 11,
+          "same_rng_repeat": [
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00390625,
+              "relative_l2": 8.114321303764882e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.005859375,
+              "relative_l2": 1.1763052043534117e-06
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            }
+          ],
+          "stable_buffer_pointers": true,
+          "fresh_rng_output_changed": true,
+          "fresh_rng_dx_changed": true,
+          "fresh_rng_output_relative_l2": 0.411067932844162,
+          "fresh_rng_dx_relative_l2": 0.5284244418144226,
+          "cuda_rng_state_advanced": true,
+          "timed_rng_reseed": false
+        },
+        "h100": {
+          "finite_tensors": 12,
+          "all_gradients_present": 11,
+          "same_rng_repeat": [
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00177001953125,
+              "relative_l2": 7.321827979467344e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.004150390625,
+              "relative_l2": 1.1125825949420687e-06
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            }
+          ],
+          "stable_buffer_pointers": true,
+          "fresh_rng_output_changed": true,
+          "fresh_rng_dx_changed": true,
+          "fresh_rng_output_relative_l2": 0.411067932844162,
+          "fresh_rng_dx_relative_l2": 0.5284244418144226,
+          "cuda_rng_state_advanced": true,
+          "timed_rng_reseed": false
+        }
+      },
+      "runtime_chosen": {},
+      "fixture_results": {
+        "triton": {
+          "value": NaN,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.triangle_multiplication.bidirectional.BidirectionalTriangleMultiplication",
+          "reference": "pytorch",
+          "output_max_abs": 0.06117868423461914,
+          "output_rel_frob": 0.0034745633602142334,
+          "output_cosine": 0.9999940395355225,
+          "grad_max_abs": 0.06814336776733398,
+          "grad_rel_frob": 0.005029816646128893,
+          "grad_cosine": 0.9999873042106628,
+          "compiled": true,
+          "cudagraph": "manual_stochastic_adapter",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "",
+          "execution_validation": "{\"finite_tensors\": 12, \"all_gradients_present\": 11, \"same_rng_repeat\": [{\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": false, \"max_abs\": 0.00390625, \"relative_l2\": 8.114321303764882e-07}, {\"equal\": false, \"max_abs\": 0.005859375, \"relative_l2\": 1.1763052043534117e-06}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}], \"stable_buffer_pointers\": true, \"fresh_rng_output_changed\": true, \"fresh_rng_dx_changed\": true, \"fresh_rng_output_relative_l2\": 0.411067932844162, \"fresh_rng_dx_relative_l2\": 0.5284244418144226, \"cuda_rng_state_advanced\": true, \"timed_rng_reseed\": false}"
+        },
+        "h100": {
+          "value": NaN,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.triangle_multiplication.bidirectional.BidirectionalTriangleMultiplication",
+          "reference": "pytorch",
+          "output_max_abs": 0.06117868423461914,
+          "output_rel_frob": 0.0034745633602142334,
+          "output_cosine": 0.9999940395355225,
+          "grad_max_abs": 0.06814336776733398,
+          "grad_rel_frob": 0.005029814317822456,
+          "grad_cosine": 0.9999873042106628,
+          "compiled": true,
+          "cudagraph": "manual_stochastic_adapter",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "",
+          "execution_validation": "{\"finite_tensors\": 12, \"all_gradients_present\": 11, \"same_rng_repeat\": [{\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": false, \"max_abs\": 0.00177001953125, \"relative_l2\": 7.321827979467344e-07}, {\"equal\": false, \"max_abs\": 0.004150390625, \"relative_l2\": 1.1125825949420687e-06}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}, {\"equal\": true, \"max_abs\": 0.0, \"relative_l2\": 0.0}], \"stable_buffer_pointers\": true, \"fresh_rng_output_changed\": true, \"fresh_rng_dx_changed\": true, \"fresh_rng_output_relative_l2\": 0.411067932844162, \"fresh_rng_dx_relative_l2\": 0.5284244418144226, \"cuda_rng_state_advanced\": true, \"timed_rng_reseed\": false}"
+        }
+      },
+      "provenance": {
+        "pair": "6e003d221d38052c56b34ea9b96818a787c7a7c23d02c7e1b2ac0d484f2727e9",
+        "dy": "602bca872b07ce515de13d26e789b89a48006a0a6d6f59ebe0510bdc9e63cb55",
+        "token_mask": "078b22a70b106e8403f71b5a4d154d0c185e5fdc0f58cd46d01fc8815167489e",
+        "parameters": {
+          "layers.0.ln_pair.weight": "02722f124d0f1736a9dd7c4ddcd05630dcf16ee1ce3454e9a876005ce005d4ac",
+          "layers.0.ln_pair.bias": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+          "layers.0.to_left.weight": "193d9a2227d84800371eb01163ac472e5d3e7952fea48e2491d9c9bb73886183",
+          "layers.0.to_left_gate.weight": "8f99ebb2397f3fdebe0f44ea7afc0e89a5de51a6d00962cefe5f4f23c6f2a42d",
+          "layers.0.to_right.weight": "7d9c6d5701a5cac7fad4213ece20441550924d5499a806fe7e523a5b134829c6",
+          "layers.0.to_right_gate.weight": "ddbc334144e3de00f2cecf3b4bf8a9f1e5887f4c5f9521d3cbd0213035c9e7a6",
+          "layers.0.ln_out.weight": "893a106828fbdb9521e1d868c985aab7ad2ae2f606edc55329265a5e7676006c",
+          "layers.0.ln_out.bias": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "layers.0.to_gate.weight": "d164c01bb1e01cbc599d189c8ea07dec4d83c5276dd02440b66807ffcced76c3",
+          "layers.0.to_out.weight": "abb8b29ee691e3bec781531c06416efd2ab6e8968d7afd54a0df5b7b35edb8e2"
+        },
+        "output_projection_nonzero": [
+          32768
+        ],
+        "dropout_method_restored": true
+      }
+    }
+  ],
+  "device": "NVIDIA H100 80GB HBM3",
+  "version": "current",
+  "round": 0,
+  "arms": {
+    "triton": [],
+    "h100": [
+      "front",
+      "f567",
+      "dual_bwd",
+      "out_ln_bwd"
+    ]
+  },
+  "source_commit": "be17b1f4",
+  "torch_version": "2.10.0+cu128",
+  "triton_version": "3.6.0",
+  "passed": true,
+  "native_calls": {
+    "trimul_inproj_gemm_gate_mmajor_sm90_cute": 11,
+    "trimul_output_f567_train_sm90_cute": 11,
+    "layernorm_bwd_split_sm90_cute": 11,
+    "trimul_input_dual_bwd_sm90_cute": 11
+  }
+}

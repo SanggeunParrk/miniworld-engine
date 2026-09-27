@@ -1,0 +1,1330 @@
+{
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "original_files": 5199,
+  "missing": [],
+  "changed_original_files": [
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/esm/ef2_t16/sm_90a/SHA256SUMS",
+      "original_sha256": "b5f5c1ee03a4c28b5445f985ce67409bfb8fd0cc21c8c32f01d5e7529532a415",
+      "local_sha256": "1d565223fe47cc69fe8d96770941cea28a645788534f24ac7a4fca6d67a41a95"
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/esm/ef2_t16/sm_90a/ef2_transition_cute.cubin",
+      "original_sha256": "2f600bd17b86cbee53cc0509c3a9238e5ce7ca5a97158e1543089d95f4077af3",
+      "local_sha256": "bdcc76df49178b155741ad158911df63d42b03319110060e4778887df617b70e"
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/esm/ef2_t16/sm_90a/manifest.json",
+      "original_sha256": "67734e22937641a244c945a4af3827a6ba4598697b3d72308361520b01305fcc",
+      "local_sha256": "318f897a06c364bc1b1cad77cd09cb30873dad88d9c58c41769f4d9c9c86e4a5"
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/flash_prebuilt/manifest.json",
+      "original_sha256": "36258bf7e039678dad4556829cc14d6c4d812d5b7df283fe39e20a40d8b3a5cd",
+      "local_sha256": "8f5e0d6ecf4d3ea02ba3f8c9be6453d856d03e676c162d1fe25182b922f14348"
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/tx_sm90a/prebuilt/manifest.json",
+      "original_sha256": "65fa66f24ab2aa0b08f437d359363f7a46f512db30e89eafea30a9ef797828fc",
+      "local_sha256": "b615b04455742153eb7015c7361053656626571f012bd74e68616f0b157346c4"
+    }
+  ],
+  "local_binaries_and_manifests": [
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/150a47ba4a21e62e9d68ccb72efd61f92435d7eedd72d3fd9f13d671227bebc1/__triton_launcher.so",
+      "sha256": "4cc4058fe961411a0dfc7d619c2f7d65d2f31b6f7cc840bad101431beee0bbce",
+      "bytes": 17928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/178fe305e55193d6bddbd0dde6e14589b0b63d728d76ccd0d2c9066b552f3735/_gap_serial_kernel.cubin",
+      "sha256": "0219d8fb1fad7a2f7822fa5e033bc4d86d0257ff18deaf9fa820fd2a5069b504",
+      "bytes": 9072
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/178fe305e55193d6bddbd0dde6e14589b0b63d728d76ccd0d2c9066b552f3735/_gap_serial_kernel.ptx",
+      "sha256": "c5cf090d886f7ff62e28fbc256cd64dace8b61a0dfb610ac2b0dbdefb4a4790b",
+      "bytes": 2944
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/1a624ce51bdbc9382bd12680608ed41415bf2d801d2b2476f9c197147e0209c4/_im2col_dot_kernel.cubin",
+      "sha256": "d83caba8b74199837019ac644a3ee07a5f221b0da66192d8d283663031ae7bca",
+      "bytes": 143072
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/1a624ce51bdbc9382bd12680608ed41415bf2d801d2b2476f9c197147e0209c4/_im2col_dot_kernel.ptx",
+      "sha256": "79d04c41af21e6d1e0bac44c6a4c72a089d4c5703741dae65ed80a777338596e",
+      "bytes": 104910
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/1bbca4215d9790d60902fe916691ea219ff2c3332c494f3a5649764b98b5017f/__triton_launcher.so",
+      "sha256": "c2bc0f4f59b65a6142ac37896443bfc2a1e604cd1ab9e9e28dd138329c5924a4",
+      "bytes": 22024
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/41ce1f58e0a8aa9865e66b90d58b3307bb64c5a006830e49543444faf56202fc/cuda_utils.so",
+      "sha256": "cbe83986fb8a105ab3fd2f52733b102e8fa904ceb656732d3c198c7e2dab2a95",
+      "bytes": 22952
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/4678d35af8a924dc07bf4f5dc1f9ce166efd5da6a286e5add4dc7845211032b1/_gap_serial_kernel.cubin",
+      "sha256": "f28d17bf57fae94e5a7950bd6dd737830801a15a2386f2e72aafc1926d3fc81b",
+      "bytes": 9072
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/4678d35af8a924dc07bf4f5dc1f9ce166efd5da6a286e5add4dc7845211032b1/_gap_serial_kernel.ptx",
+      "sha256": "c895e353283d033e1f684509e073bc107b5cd3e9b9e6e93943996f7685e3591b",
+      "bytes": 2944
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/52f27c6f205847b0ae6d4ea3cf7b160065b93fc9526278d8bbd9f9703cc2b60d/_im2col_dot_kernel.cubin",
+      "sha256": "1beffde52808b42a730ae658a96b553b1def6c9508fb4529ef3e8b47e30d7a94",
+      "bytes": 104928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/52f27c6f205847b0ae6d4ea3cf7b160065b93fc9526278d8bbd9f9703cc2b60d/_im2col_dot_kernel.ptx",
+      "sha256": "29a4f3b7631059e93195165e8079b536eb2d97214eb5560291802ce2bb98b1ba",
+      "bytes": 74775
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/53f95da69db59cba491a9cf1f15f0b7525daa59face29ae12df3cb918c419b51/_im2col_dot_kernel.cubin",
+      "sha256": "311f7c7f983789e446e06167549a551696b0ce38c4eb09bfa5bcdc7f84b9230a",
+      "bytes": 185952
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/53f95da69db59cba491a9cf1f15f0b7525daa59face29ae12df3cb918c419b51/_im2col_dot_kernel.ptx",
+      "sha256": "2fe2e88a6ca4391a02f758e99986af5900e553f3385a643d0dc207a65d36ae67",
+      "bytes": 132987
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/937370abc16b366b5b9f5de7b6390e00161256088687b5a4ca20f95af40ca044/_im2col_dot_kernel.cubin",
+      "sha256": "1beffde52808b42a730ae658a96b553b1def6c9508fb4529ef3e8b47e30d7a94",
+      "bytes": 104928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/937370abc16b366b5b9f5de7b6390e00161256088687b5a4ca20f95af40ca044/_im2col_dot_kernel.ptx",
+      "sha256": "29a4f3b7631059e93195165e8079b536eb2d97214eb5560291802ce2bb98b1ba",
+      "bytes": 74775
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/9f049bb2514ecdcd3b3e0ee91d62e69904f634fcf135097f1af97db46e3a154f/_head_serial_kernel.cubin",
+      "sha256": "c766384b4ba1a450b6f3b44d654fa8976be9c1c4de49e60995b3f006bc6e4c51",
+      "bytes": 37608
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/9f049bb2514ecdcd3b3e0ee91d62e69904f634fcf135097f1af97db46e3a154f/_head_serial_kernel.ptx",
+      "sha256": "7ed6ecfe0e2d40de8d419a05e6bfd935ed1b237803c75d594f748d885bedcb50",
+      "bytes": 36343
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/a33922ee91f3b603c197e0a341a6418fb0e1a03ee12e77bd47ee19c97b4c825c/_head_serial_kernel.cubin",
+      "sha256": "f4f69b5119b1a494bf1dfdf619ccf71767e76cdef58d77e347913484c7164f27",
+      "bytes": 37608
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/a33922ee91f3b603c197e0a341a6418fb0e1a03ee12e77bd47ee19c97b4c825c/_head_serial_kernel.ptx",
+      "sha256": "17a609eb3ba42357a65bde5edda90a1e4cf44687925e696e4432e3d548ad6f34",
+      "bytes": 36343
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/addd46078697a41fd834d62c1105e44fbae1d1eff315fe703947ec36bf0db214/__triton_launcher.so",
+      "sha256": "3ac7822e61beec97811e7ec1e30d7a17d7e67ecbdb8dc1fa20df94e7f4883b6c",
+      "bytes": 17928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/b625a6c2cf6c6f72d41e63670ea7c6867a96b27fac9fdfaef363b30a9d691798/_im2col_dot_kernel.cubin",
+      "sha256": "311f7c7f983789e446e06167549a551696b0ce38c4eb09bfa5bcdc7f84b9230a",
+      "bytes": 185952
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/b625a6c2cf6c6f72d41e63670ea7c6867a96b27fac9fdfaef363b30a9d691798/_im2col_dot_kernel.ptx",
+      "sha256": "2fe2e88a6ca4391a02f758e99986af5900e553f3385a643d0dc207a65d36ae67",
+      "bytes": 132987
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/e69a6b825f2b6ab11de35252b52022493baeb8ed465f0b2db06560a77e3e50b2/__triton_launcher.so",
+      "sha256": "eaffafd41695289edf044abb59f03b6f12003e6773f3abd9d8e90319cc4aa9c2",
+      "bytes": 17928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/e7fbd0e5bafd221d7dcfb0f64a5f4bdd9605088d31b6388c1b7c39dbad14b4fc/_im2col_dot_kernel.cubin",
+      "sha256": "7f6131e0673d3fefcb7a34731cd793fa4de911c2e536cadffdc394ee471d78c8",
+      "bytes": 80864
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm89_l40s/e7fbd0e5bafd221d7dcfb0f64a5f4bdd9605088d31b6388c1b7c39dbad14b4fc/_im2col_dot_kernel.ptx",
+      "sha256": "b8bb019eb1b41b97a81956392cd62a0614fbf93734c5dcbb23bb595ef22143d6",
+      "bytes": 59087
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/095378f98043a2d7aa303f52bcc678969c4fdfe7c6bad66330ad12c166ca562e/_gap_serial_kernel.cubin",
+      "sha256": "d9dac01c89dd9472ddfee87b1bdcacd50061e0247225789b66fbe0747bbcbf78",
+      "bytes": 9600
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/095378f98043a2d7aa303f52bcc678969c4fdfe7c6bad66330ad12c166ca562e/_gap_serial_kernel.ptx",
+      "sha256": "885dc9fe35a267441310c61e8bb4beed7741fdaf5379021ce59d9b9ef15159c3",
+      "bytes": 2945
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/150a47ba4a21e62e9d68ccb72efd61f92435d7eedd72d3fd9f13d671227bebc1/__triton_launcher.so",
+      "sha256": "4cc4058fe961411a0dfc7d619c2f7d65d2f31b6f7cc840bad101431beee0bbce",
+      "bytes": 17928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/1a009ea04ffb495c85dc5b16f8c58a025565ba46c056eb7e8a8ca3903c9a5bbe/_head_serial_kernel.cubin",
+      "sha256": "a6319be2f629aa7d09c80c15e34bfcf23b802389446bab362dd94254d2ae340f",
+      "bytes": 37912
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/1a009ea04ffb495c85dc5b16f8c58a025565ba46c056eb7e8a8ca3903c9a5bbe/_head_serial_kernel.ptx",
+      "sha256": "6caee80eefd0deb9f037c584ec2556c84e32c8a9baed7f1d2d2d61ae3b7229b3",
+      "bytes": 36344
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/1bbca4215d9790d60902fe916691ea219ff2c3332c494f3a5649764b98b5017f/__triton_launcher.so",
+      "sha256": "c2bc0f4f59b65a6142ac37896443bfc2a1e604cd1ab9e9e28dd138329c5924a4",
+      "bytes": 22024
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/2cbf88875070c452e44ddb73ebc9708f103491befca4129dacb473813b2ef6ab/_im2col_dot_kernel.cubin",
+      "sha256": "459299d464a56e330ab740cbf8651994a1ea488dc794d789c86eb9f2dcd53f4e",
+      "bytes": 48600
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/2cbf88875070c452e44ddb73ebc9708f103491befca4129dacb473813b2ef6ab/_im2col_dot_kernel.ptx",
+      "sha256": "aa4e8ae6f431ad729a7e7c2c190314e0562a71581beed1df03e8b9eb378b59dd",
+      "bytes": 34706
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/36f311ed6c8aabb3fb0f73067ca7f02d616b4224e5cee3f134053ff4b14490ce/_im2col_dot_kernel.cubin",
+      "sha256": "ded7c6d86eb7bce7b0828fe60e97c3752e8d4efabffb27a9cfeafd5ee51a37ec",
+      "bytes": 187736
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/36f311ed6c8aabb3fb0f73067ca7f02d616b4224e5cee3f134053ff4b14490ce/_im2col_dot_kernel.ptx",
+      "sha256": "8953c9fb2b729e8e52007f3e18abe6803b1d3a7657ea759b17929dcf865413f3",
+      "bytes": 132988
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/3eb9e39e4716b162e8739d30ae72e4ab9ddec1adfa47ab47cf10267d4dfaae44/_im2col_dot_kernel.cubin",
+      "sha256": "afebbe8fffbaa8b93c28c6c9ca040ae6e01f3891b9417956a9d007d984774229",
+      "bytes": 183512
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/3eb9e39e4716b162e8739d30ae72e4ab9ddec1adfa47ab47cf10267d4dfaae44/_im2col_dot_kernel.ptx",
+      "sha256": "07997058729be7d4044452acff622673b77c71d7e64ffd2b1addc33258f80b0d",
+      "bytes": 129892
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/41ce1f58e0a8aa9865e66b90d58b3307bb64c5a006830e49543444faf56202fc/cuda_utils.so",
+      "sha256": "0069afaeaf20d2876a672574113d93732eef1170d9670b75872d2f9907480938",
+      "bytes": 22952
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/474d4e68dc0c6cc86148d78f558065237d22b9fb8de6f365df3a280d65d79aa6/_im2col_dot_kernel.cubin",
+      "sha256": "74a377b646f3b90966db9778c76a7167dfc649457d66206a6f8051541ced422a",
+      "bytes": 59480
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/474d4e68dc0c6cc86148d78f558065237d22b9fb8de6f365df3a280d65d79aa6/_im2col_dot_kernel.ptx",
+      "sha256": "3dd9f37caf4feea98526ab1e2095293edbc130808207a27e97a55083d41f9ccb",
+      "bytes": 41775
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/49efb3dc8f0cfb71a0e4749a5d477630210bb3d196bfdb2dbb7a201426de5f84/__triton_launcher.so",
+      "sha256": "b005d93a798aa45dbf4eaa365644168a077f2528615b373e4576feee03488bc1",
+      "bytes": 17928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/59c7d57262a00ef5104d4b7b2595af05e55c80842d5ef0108640be162424b117/_im2col_dot_kernel.cubin",
+      "sha256": "05097dd9f054c33d6197a3707f1f011cf9cb441e2cea763ea5bee7be226e1442",
+      "bytes": 105688
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/59c7d57262a00ef5104d4b7b2595af05e55c80842d5ef0108640be162424b117/_im2col_dot_kernel.ptx",
+      "sha256": "64a212068c68ece96ff2a239fe3c6c52a7d0307a1847928263d84ac721d6e63f",
+      "bytes": 74776
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/62e937db20d49c0c07e7ff6677bde50892ef33ae28f224674e66c1187c43bb32/_im2col_dot_kernel.cubin",
+      "sha256": "c85f63bc16f00b31efc8f11ef52953038458454eb13b8a37d1febae5056d1cee",
+      "bytes": 81624
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/62e937db20d49c0c07e7ff6677bde50892ef33ae28f224674e66c1187c43bb32/_im2col_dot_kernel.ptx",
+      "sha256": "b33edc76dbae318d7e1abbe0a855686cfc053280112fcc28245ab90371f75df7",
+      "bytes": 58740
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/662accc89191fc01750a75839c42ff0a56fd8a346c6fae00169af24a865a8c07/_gap_serial_kernel.cubin",
+      "sha256": "3965b054a032ae4c727ab4c68319e34abc70fe666cff167936f2b9b050e11546",
+      "bytes": 9600
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/662accc89191fc01750a75839c42ff0a56fd8a346c6fae00169af24a865a8c07/_gap_serial_kernel.ptx",
+      "sha256": "9babbe9a86ab0c1cf5c836008ae6df3bfa6b1c0e263557e944727c6ac033de7b",
+      "bytes": 2945
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/78d4ef8871fc8207113515a5d32b73a2d0e21d3e0690423a99cad649c38a9fe1/_dense_chains_kernel.cubin",
+      "sha256": "c3dc457f4d73d05b2f0fc41399f48ab1a04b04616f1aced472a568d754839f11",
+      "bytes": 8328
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/78d4ef8871fc8207113515a5d32b73a2d0e21d3e0690423a99cad649c38a9fe1/_dense_chains_kernel.ptx",
+      "sha256": "1f3798c43d2ffedfdb4c9f6ee858bdcfb5f40a0a1be500af68ff144cd8f45865",
+      "bytes": 5833
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/865652c5028878d456baa44ba3231cc3780660598fb87f3882511eb268359274/_im2col_dot_kernel.cubin",
+      "sha256": "746054ad4b99b40ea00ff7de37bfd17b9dbf660aeb92916a68e83318ebc5632d",
+      "bytes": 141272
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/865652c5028878d456baa44ba3231cc3780660598fb87f3882511eb268359274/_im2col_dot_kernel.ptx",
+      "sha256": "d8635dc4da60874c5d8c0cc81c3e27688882feb78e5b5ce03a180773d8f415e1",
+      "bytes": 103326
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/8d3137fdc1f2048d6ca52326fe237e9381544fc06e25026abdee3075a60305c6/_head_serial_kernel.cubin",
+      "sha256": "868289e6719ba965c572a4e7d59913842860f910b4a72f3bf75790eeb9016d52",
+      "bytes": 37912
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/8d3137fdc1f2048d6ca52326fe237e9381544fc06e25026abdee3075a60305c6/_head_serial_kernel.ptx",
+      "sha256": "cf431f359f878ec3c51b837b173c97b3a62e1563b4870b26138126834c0e59b6",
+      "bytes": 36344
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/94cf7bd57229ad807fce84c5761107b5a5a2ebfbbc4446caa034d0ea32aa4873/_im2col_dot_kernel.cubin",
+      "sha256": "658b4100b2830cd2126948e7f78d6f9714b1e4d562b7939fd970c70bae4a7c7e",
+      "bytes": 60120
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/94cf7bd57229ad807fce84c5761107b5a5a2ebfbbc4446caa034d0ea32aa4873/_im2col_dot_kernel.ptx",
+      "sha256": "db028d3e48189ea8c5087e70a489db2a0363b537e39da27153cac6e5a4ebfc4e",
+      "bytes": 42436
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/9f1ffddd4adf964fdd43c4ba17dda9f8018a3593f89614d2a940f2d70aa5b75c/_im2col_dot_kernel.cubin",
+      "sha256": "d69d0df7c1abab2ccbb40eae0af761a5e3b5f24d090a42272f913046cb0218b8",
+      "bytes": 81496
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/9f1ffddd4adf964fdd43c4ba17dda9f8018a3593f89614d2a940f2d70aa5b75c/_im2col_dot_kernel.ptx",
+      "sha256": "830559a871fa6dc3765837306dd4976be28dba4b1cf139dc58f903176acbdd67",
+      "bytes": 59088
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/a20f6c8441d1f4c35904df8eecbf5af091c41280487ad6aeaa7d6d6b7f8ebf38/_im2col_dot_kernel.cubin",
+      "sha256": "93e34f9b565427053f2984add0ea83e63675fd04dc565437a4faa83816b35c1f",
+      "bytes": 103128
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/a20f6c8441d1f4c35904df8eecbf5af091c41280487ad6aeaa7d6d6b7f8ebf38/_im2col_dot_kernel.ptx",
+      "sha256": "61f1aa22bd4332744641b068a6cecd01a5288a53f19b93b5ddc024ed02663491",
+      "bytes": 72928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/a37d9e625fb442fe6ce84bfa73582cd029d5ba2347b068c78c78bde9410df8d7/_im2col_dot_kernel.cubin",
+      "sha256": "ded7c6d86eb7bce7b0828fe60e97c3752e8d4efabffb27a9cfeafd5ee51a37ec",
+      "bytes": 187736
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/a37d9e625fb442fe6ce84bfa73582cd029d5ba2347b068c78c78bde9410df8d7/_im2col_dot_kernel.ptx",
+      "sha256": "8953c9fb2b729e8e52007f3e18abe6803b1d3a7657ea759b17929dcf865413f3",
+      "bytes": 132988
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/a7debca1180bd6cefa1ed187761ee4f86f5217146c9a7a95979b11562dcb2ff0/_im2col_dot_kernel.cubin",
+      "sha256": "74a377b646f3b90966db9778c76a7167dfc649457d66206a6f8051541ced422a",
+      "bytes": 59480
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/a7debca1180bd6cefa1ed187761ee4f86f5217146c9a7a95979b11562dcb2ff0/_im2col_dot_kernel.ptx",
+      "sha256": "3dd9f37caf4feea98526ab1e2095293edbc130808207a27e97a55083d41f9ccb",
+      "bytes": 41775
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/addd46078697a41fd834d62c1105e44fbae1d1eff315fe703947ec36bf0db214/__triton_launcher.so",
+      "sha256": "3ac7822e61beec97811e7ec1e30d7a17d7e67ecbdb8dc1fa20df94e7f4883b6c",
+      "bytes": 17928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/b3aedfdd8f3ab44fd54277516adca39b81c3ee7375f5aca48f408f36496ab922/_im2col_dot_kernel.cubin",
+      "sha256": "658b4100b2830cd2126948e7f78d6f9714b1e4d562b7939fd970c70bae4a7c7e",
+      "bytes": 60120
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/b3aedfdd8f3ab44fd54277516adca39b81c3ee7375f5aca48f408f36496ab922/_im2col_dot_kernel.ptx",
+      "sha256": "db028d3e48189ea8c5087e70a489db2a0363b537e39da27153cac6e5a4ebfc4e",
+      "bytes": 42436
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/b9e557d261a617d4396ada90941bfe0cb821de2d990df04c2b24b597dc65c970/_im2col_dot_kernel.cubin",
+      "sha256": "c2f122fe328334a115f86c242a4744c0b826b3010bb95454e6ed1ced4c3cf432",
+      "bytes": 143960
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/b9e557d261a617d4396ada90941bfe0cb821de2d990df04c2b24b597dc65c970/_im2col_dot_kernel.ptx",
+      "sha256": "bc4703cfab931aeab0c8ecf53ca132f485edd2b140c583333823016e19efcc5a",
+      "bytes": 104911
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/cd24682fd4b4d27322b5c57d8e4d9e2535ba6cf674dfd188823a36a0da128bdb/_dense_chains_kernel.cubin",
+      "sha256": "98a98d2d47d9e5cc454ff54aa3593eff32b8e9aa22444c5980440054f406110b",
+      "bytes": 8456
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/cd24682fd4b4d27322b5c57d8e4d9e2535ba6cf674dfd188823a36a0da128bdb/_dense_chains_kernel.ptx",
+      "sha256": "d0fc6bbe54eb35d63df4c77b7928b08e1bdefee24a32651aaa2594ced0b8b80e",
+      "bytes": 3619
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/def5ebfe90c56b2fe017bbc5bf7ded89e253b3fdc5592d337392328527d86f2b/_im2col_dot_kernel.cubin",
+      "sha256": "05097dd9f054c33d6197a3707f1f011cf9cb441e2cea763ea5bee7be226e1442",
+      "bytes": 105688
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/def5ebfe90c56b2fe017bbc5bf7ded89e253b3fdc5592d337392328527d86f2b/_im2col_dot_kernel.ptx",
+      "sha256": "64a212068c68ece96ff2a239fe3c6c52a7d0307a1847928263d84ac721d6e63f",
+      "bytes": 74776
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/e05c2037ff437da3a4322a36b6737095a3d90ba8d04b74e2cee272a63a1293ca/_im2col_dot_kernel.cubin",
+      "sha256": "93e34f9b565427053f2984add0ea83e63675fd04dc565437a4faa83816b35c1f",
+      "bytes": 103128
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/e05c2037ff437da3a4322a36b6737095a3d90ba8d04b74e2cee272a63a1293ca/_im2col_dot_kernel.ptx",
+      "sha256": "61f1aa22bd4332744641b068a6cecd01a5288a53f19b93b5ddc024ed02663491",
+      "bytes": 72928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/e69a6b825f2b6ab11de35252b52022493baeb8ed465f0b2db06560a77e3e50b2/__triton_launcher.so",
+      "sha256": "eaffafd41695289edf044abb59f03b6f12003e6773f3abd9d8e90319cc4aa9c2",
+      "bytes": 17928
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/ecb2c3b85394b5081901c3cf66f0f6f9cc345f5ece31aae03b96c3127ecdde80/_im2col_dot_kernel.cubin",
+      "sha256": "afebbe8fffbaa8b93c28c6c9ca040ae6e01f3891b9417956a9d007d984774229",
+      "bytes": 183512
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/ecb2c3b85394b5081901c3cf66f0f6f9cc345f5ece31aae03b96c3127ecdde80/_im2col_dot_kernel.ptx",
+      "sha256": "07997058729be7d4044452acff622673b77c71d7e64ffd2b1addc33258f80b0d",
+      "bytes": 129892
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/f69b11aec29f7da33e872c7b12645f3f92607ca337d65fabedb0600bec4b8ed5/_im2col_dot_kernel.cubin",
+      "sha256": "86dc9cec3ee210234edc2153fc74f499505c36a4dc8a6d4667f3067d2cfe6839",
+      "bytes": 47448
+    },
+    {
+      "path": "chrombpnet/opt/kit/torch/triton_cache_sm90/f69b11aec29f7da33e872c7b12645f3f92607ca337d65fabedb0600bec4b8ed5/_im2col_dot_kernel.ptx",
+      "sha256": "ba5b7e2613668b2cbdbac04ee0c93ee390b06e4b0ccc70fbf5d7917dca9c9a95",
+      "bytes": 33929
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/apb/dit_exact/prebuilt/torch2.13.0-cu130-sm90/dit_attn_exact.so",
+      "sha256": "f95aea477b48cd92c960b761c581b816c93a84cf24b6545706490cc25054c9ed",
+      "bytes": 332768
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/apb/dit_exact/prebuilt/torch2.7.1-cu126-sm90/dit_attn_exact.so",
+      "sha256": "405933ef29262dd15ec073c1c28e93d091381017eaaf6e40b46f115238ddee2e",
+      "bytes": 279224
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/ln/exactln/prebuilt/exactln_fwd-sm80.cubin",
+      "sha256": "3f6ca035bdefda2ab5b8045ed914a26eae96fa286b48dcd73952c2573be11d88",
+      "bytes": 940576
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/ln/exactln/prebuilt/exactln_fwd-sm90.cubin",
+      "sha256": "076c4858d764d604494a5c1d30f3e97006e3f9c486a6511f9af14916be478203",
+      "bytes": 925296
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/esm/ef2_t16/sm_90a/ef2_transition_cute.cubin",
+      "sha256": "bdcc76df49178b155741ad158911df63d42b03319110060e4778887df617b70e",
+      "bytes": 570192
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/flash_prebuilt/torch2.13.0+cu130-cpython-312-x86_64-linux-gnu-sm90/flash_transition_sm90a.so",
+      "sha256": "4172424874d2ece9d068afd072dbe88ff8eb639d8a8a81786d0ada9dfdd20494",
+      "bytes": 541152
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/flash_prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90/flash_transition_sm90a.so",
+      "sha256": "6982edbb2a46b65338e529daa495ad30c5f79f24e52b5dba21998d3a685f451d",
+      "bytes": 496632
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/transition/flash_sm90a/prebuilt/torch2.13.0-cu130/flash_transition_sm90a.so",
+      "sha256": "99d63df40709fcd14c2eb35a5a18ec7984367c42c880063a47dc1ec678e9c63d",
+      "bytes": 539664
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.10.0+cu128-cpython-311-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "fb9e8210faaa7fdf7c336cb4f3b34d492a440051462d4797fd1260ecd57d543d",
+      "bytes": 631568
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.11.0+cu128-cpython-312-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "b14383db1e922cca13a56fbfa1f41d2d94d0db9c5d6b642a04c8c05904fe720a",
+      "bytes": 621440
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.12.0+cu130-cpython-311-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "7e84e8d15bab6e2a940d102138f12c5e3d6849c98849fc6a5365da12252aad35",
+      "bytes": 632872
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.13.0+cu130-cpython-311-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "2e58364a65582690e0af5bfed8a06774c17a9b1d7e83c5bf38f883ece1f80381",
+      "bytes": 667552
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.13.0+cu130-cpython-312-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "8212eab9c1cd3ac8754d2c3679556e338023568f69743fa73780dcd1bc48a15c",
+      "bytes": 660904
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.7.1+cu126-cpython-311-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "9dd943b2c6ce72155b62259aeecebb43c1f3066d6a2678c67ff2d24f628bbd56",
+      "bytes": 1104096
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.7.1+cu128-cpython-311-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "aa0ea1736eda17f83feafe1cb84c0b0ae26b543e14ae8ec096d264bd4f76d391",
+      "bytes": 1097960
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "46bea090281f03090962873d23b61a75aa4dc4c624a3670d13c72a9ebfff2636",
+      "bytes": 621336
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90/manifest.json",
+      "sha256": "c06ba28ef32a5600ccafd37d9b6a2556da923f6876e2a673d62200a56e1096b3",
+      "bytes": 1140
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.10.0+cu128-cpython-311-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "0a4c9a58e07261ddf60528bd237d3563c2afab1a0324053b00ab4d76c891a7fd",
+      "bytes": 1538440
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.10.0+cu128-cpython-311-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "cbe38d76985291c25d8d98485123ed4527d16bcf998115d0aa4a003e9bdc4cc5",
+      "bytes": 1339472
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.10.0+cu128-cpython-311-x86_64-linux-gnu/triattn_sm80_ext.so",
+      "sha256": "488c9a490adef8b834c8cbab7d6df74b9b429a7531a7f8332bc8c9fd7a8598b8",
+      "bytes": 12235360
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.10.0+cu128-cpython-311-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "3704a21ca6c44916aad6ea6b46e52d637d20a6a7cf09ca2a1ad935855ca42bac",
+      "bytes": 763016
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-311-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "b6206d366755c4651e097267708a3a5b5c80174a766ec5ad9908dfe30924d157",
+      "bytes": 1568680
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-311-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "d047ccdfd86472adcb57cf4d3a5558932c8afb9efe3cd73ad6040f1f5cf98004",
+      "bytes": 1339920
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-311-x86_64-linux-gnu/triattn_sm80_ext.so",
+      "sha256": "91bdd45a755b29ef5ad12fba872e86217feed20341597d7cbbdb3fb8ea85725b",
+      "bytes": 12264224
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-311-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "c9cb37f59cc21cb7b7b997e9493b95a60594d303c82ec6173f6f68002947253e",
+      "bytes": 760880
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-312-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "f963f480c39138b9fcdd2118c6566cd864504ecae0f7f188722e8e49c22aa0cd",
+      "bytes": 1581672
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-312-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "8a7c304fe7dc51b39026bfbc76b1c0535a3f1b6cd5334fa56e3f424e6d047454",
+      "bytes": 1361792
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-312-x86_64-linux-gnu/triattn_sm80_ext.so",
+      "sha256": "3652de0be1ed25b7700fb242665a7c94c1fc11d5143cfd3c6b8468376db420a8",
+      "bytes": 12286424
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.12.0+cu130-cpython-312-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "b3d990831c5eb87697ec648a5cb21b813beb17007a6de833a67ad05bb1b82d84",
+      "bytes": 778032
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-311-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "714e181b18ce73446ea20052c440cb46f181d556bbfb425ecbafcd1379aa77d2",
+      "bytes": 1594744
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-311-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "9799ab896262a713fdf1840f2ab869cb012c9bd00a0baa2e6c1663c528498a35",
+      "bytes": 1374864
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-311-x86_64-linux-gnu/triattn_sm80_ext.so",
+      "sha256": "89a76f04e99e7df4737a4c1bb0150e2efad18c8a77831b4d8a5e069159013e9f",
+      "bytes": 12304024
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-311-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "a8d81396a93f4badef40b20bbfb14d2dd62dc2b4bce9f836e0b8e2215d385d9f",
+      "bytes": 786336
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-312-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "47fcac98ae07d3a700a92cf0ccee8db9924f41f5c341efb55e12ec6be8e01ae6",
+      "bytes": 1575768
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-312-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "39c4861285f409f9157db16c73dbae19b290d16423689eae151fe8413db82be1",
+      "bytes": 1363864
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-312-x86_64-linux-gnu/triattn_sm80_ext.so",
+      "sha256": "cec8ffbf306b02de84b0997f1c916d40b9e702a46c733b71ba843f25c5452fba",
+      "bytes": 12292192
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu130-cpython-312-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "153f6d6e8399d3cc355a1c6e9bd440e2ff8229012b85dc848a6849768dec339b",
+      "bytes": 780304
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu126-cpython-311-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "d2d35e8ca4f56f9d64296cb7310dc9aa856d6961e7146c40dd67ebb8f08942ca",
+      "bytes": 1531056
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu126-cpython-311-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "0eec9468d07b20beb0981045ffb039ed173ced172c020de85dac989bf25a1106",
+      "bytes": 1320664
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu126-cpython-311-x86_64-linux-gnu/triattn_sm80_ext.so",
+      "sha256": "32134d39a21f94200212b56a59e663b53a977c41ac787519a321d88497ba2341",
+      "bytes": 12220480
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu126-cpython-311-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "ce003571c418571d6eb37064adc5b33a9493d25be70e4a5b966051ed6e27efe5",
+      "bytes": 748800
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu128-cpython-311-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "c0c5352b1f6eca9c496376749daf6afe6876ca4b4b76fe96f029300e879e3283",
+      "bytes": 1509120
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu128-cpython-311-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "5fc55e3b0622d62de102e5488b8c1e2001e03ef596ad85d6995de9a205df3448",
+      "bytes": 1314408
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu128-cpython-311-x86_64-linux-gnu/triattn_sm80_ext.so",
+      "sha256": "a0199b13157ddb7051d82ed07a0b535f802928b5532b6a3a742bb30fd7416159",
+      "bytes": 12206072
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.7.1+cu128-cpython-311-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "9c15f6646492dd99a7a421333647e7deaa25fbf21a6a7c58642d499d9e7705f5",
+      "bytes": 735048
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "47ef1d0f02e358f69537f399db9c3f8e5669b5414ccf38843174a6a4799edc13",
+      "bytes": 1556864
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "f89e5be794e69be929aae6e88c8df213f3844765ad8dfeed68fe80ec97316949",
+      "bytes": 1333632
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "968f194e12d69601506c4872087d1c9a909a3cb12786179ef94ff48ddac03c5d",
+      "bytes": 756928
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/cuda/sm_80/libtriattn_sm80_xla.so",
+      "sha256": "463526b03d9be3ebe7f19e45a2dfca92f370dff42860963f5fe7781ee34ed686",
+      "bytes": 12939960
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/cuda/sm_90a/libtriattn_m1_xla.so",
+      "sha256": "9f9970752196c0c81d222a3790b10fa81e1976158212ac9f3e39ac9a33bb9dae",
+      "bytes": 2200072
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/cuda/sm_90a/libtriattn_mw_cuda.so",
+      "sha256": "3fb0a62950de01c078528aaf8541b531160b4f25ddf5f245a97c2e83b8d7c32f",
+      "bytes": 1370352
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/cuda/sm_90a/libtriattn_mw_cuda_lse.so",
+      "sha256": "7b14bce069723235c444b47dd150398faf4cf30800f2aa62a064cd1f087f21a3",
+      "bytes": 1386744
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask0_b160_any.cubin",
+      "sha256": "4319a7e2f67b3827114ae3b1885406dc699bbb5ecff73bf0023327ba8617041e",
+      "bytes": 92336
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask0_b160_s16.cubin",
+      "sha256": "d5088390b1c853b7ebad5f439b9455ca4a13767b0c35cc8cf851644680fd2727",
+      "bytes": 88624
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask0_b161_any.cubin",
+      "sha256": "45361dbb4a50754031f46a032447d9342a8e220bc854d371fe0dfac1eeb68547",
+      "bytes": 167600
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask0_b161_s16.cubin",
+      "sha256": "0b519676688b7ad4b1bbd17183dd38cff7138017f50b7954fb7c4c7d850a6c30",
+      "bytes": 159024
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask1_b160_any.cubin",
+      "sha256": "014c6175e639de21981cb8707c2f6be3d8c8236e8f0348587351c83c230dc4ee",
+      "bytes": 195888
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask1_b160_s16.cubin",
+      "sha256": "8ce819c6144356b48a466f95b8542a4f4d50d2f73b22919383c8d31c545cb9bc",
+      "bytes": 182064
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask1_b161_any.cubin",
+      "sha256": "17b85d892bf024780b543d910efc94ddf041858234eaff127bc3162dd6d1549e",
+      "bytes": 364720
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d16_mask1_b161_s16.cubin",
+      "sha256": "f7d444a52987531a57e147361df6c707fa725425851794de48b368f75abad6c3",
+      "bytes": 337328
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask0_b160_any.cubin",
+      "sha256": "27829b8ec7f8250ab9e0ec7187a83b3870bf4cf54a0248f0b0972c727a6f71c5",
+      "bytes": 107568
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask0_b160_s16.cubin",
+      "sha256": "cf58c0e0a81b6d1e430d7a71d1fb5f8df9279ad811f2b4893b8b056a81abcc53",
+      "bytes": 103344
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask0_b161_any.cubin",
+      "sha256": "e60bf58f4719728660e152c78cdf2bacc85110529bc3c4ebea926457f3c3995c",
+      "bytes": 193456
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask0_b161_s16.cubin",
+      "sha256": "b3d7cb4b19b2f653f2835aba5bd8931e1d1659097ba12ff02814587e70c5c9e5",
+      "bytes": 182960
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask1_b160_any.cubin",
+      "sha256": "d104e2e691f36930390382e913e53cbd68a884dae05f4e1e82f26a477367169c",
+      "bytes": 227376
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask1_b160_s16.cubin",
+      "sha256": "8d5965a63c1337dfd386903abce4c03d01d84d7cad24561a9c4d5e9dba17c421",
+      "bytes": 209712
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask1_b161_any.cubin",
+      "sha256": "cbe91508291efbdeb1c0550fb9f0e018e573d14d12c5a7884bb167d5be7bd835",
+      "bytes": 417840
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_bf16_d32_mask1_b161_s16.cubin",
+      "sha256": "3c16012ab83ee25e5aa1aed13acb43550a0da2de0954c9f572f2b2cb96251905",
+      "bytes": 389680
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d16_mask0_b160_any.cubin",
+      "sha256": "ff97afeb6b17887d351d3d1c9535413f73b8ecfd53d865b83f48343d57eb6e57",
+      "bytes": 118368
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d16_mask0_b160_s16.cubin",
+      "sha256": "a1e6d041682ed42348e2545d868986f7a4b8d0fbbc58451857e9d81c22ad8e10",
+      "bytes": 114912
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d16_mask1_b160_any.cubin",
+      "sha256": "ba9f8b69ab31253402602433f2637f6e47f4068baada4af21034b37b6315c7ff",
+      "bytes": 237792
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d16_mask1_b160_s16.cubin",
+      "sha256": "2419619f3ba72184955314775ab0fa4a556c02ecdb2054474940849e30de8b60",
+      "bytes": 225632
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d32_mask0_b160_any.cubin",
+      "sha256": "bb4486556e6cadc257795bb4d564d75ed04fcda3f026ddaf3b7ca6c1f958b3f0",
+      "bytes": 150240
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d32_mask0_b160_s16.cubin",
+      "sha256": "ca834525eec113f62a8d2de4e23443a80d350fd396cb8d20d330998c708f5190",
+      "bytes": 147296
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d32_mask1_b160_any.cubin",
+      "sha256": "8778856456215f902fb3c724f65c730a144c0766950cb2efd7e95101c1c0af76",
+      "bytes": 299104
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_fwd_fp32_d32_mask1_b160_s16.cubin",
+      "sha256": "ad2c324d3df50b0c7987555881575939fb55ac2d207d5d19c1a7b67af146d11b",
+      "bytes": 286560
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_prep_mk0_any.cubin",
+      "sha256": "75a013fddf10d9da7fe9afefeffab1aeb57f21cda4c5f91329b2036e41863c93",
+      "bytes": 17512
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_prep_mk0_s16.cubin",
+      "sha256": "aaffc3f5b6c07eed8968f64f2705f4ea2df6241554af2ce40d2be59725b4848c",
+      "bytes": 13288
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_prep_mk1_any.cubin",
+      "sha256": "b77b03f56f15356b517f8137ba2cd2b12c4b83a4c48603d1d276c852d582bc28",
+      "bytes": 38112
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2b_prep_mk1_s16.cubin",
+      "sha256": "7f84f3e17152972276f2caa265b63fbdafb6e401027fc013015f75ea3e7400c9",
+      "bytes": 33120
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask0_b160_any.cubin",
+      "sha256": "32b41416a8711b7338065c22e121a29c1de649b830b1116652259601d38b8835",
+      "bytes": 119216
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask0_b160_s16.cubin",
+      "sha256": "7114e863e7c04042ae5e79f135cfd28b07c19c1ca7372aeb80effc2bd1f7f3cd",
+      "bytes": 114736
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask0_b161_any.cubin",
+      "sha256": "5c9eb0402c1c0e026c0a75de51e3122f912b55899182cb5da8d1cd71f3a0ee6d",
+      "bytes": 209072
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask0_b161_s16.cubin",
+      "sha256": "f7716f4964738b39008d3ca5f55eb259746779c2ea202d0ec27c5ba33078adcd",
+      "bytes": 195376
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask1_b160_any.cubin",
+      "sha256": "101ca22a3febd59314b3693bfe02637debabe2a3e65bbcdbb6c277312a844af4",
+      "bytes": 242608
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask1_b160_s16.cubin",
+      "sha256": "856ebbd8e8884b266132433caa98c2cd681c1c96bdbda25c8371afae80681be2",
+      "bytes": 223152
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask1_b161_any.cubin",
+      "sha256": "10c1b678f0e2ee8733ceec415027ae4741e05d65c3353353a4bd5582aef899a4",
+      "bytes": 441136
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_bf16_d32_mask1_b161_s16.cubin",
+      "sha256": "0ff1971dc6f7a5593c57f821db4e3a430edddc4ad7db021b164e337c6677dbef",
+      "bytes": 405296
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_fp32_d32_mask0_b160_any.cubin",
+      "sha256": "4479c309bbce523962208fd27784e984f779629db91ee7b716209dd8308cc52e",
+      "bytes": 163120
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_fp32_d32_mask0_b160_s16.cubin",
+      "sha256": "a6dc3fcc2e02131047876b6130dd828f5223286fdc0ee14a0141ae8b1dbd5746",
+      "bytes": 159408
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_fp32_d32_mask1_b160_any.cubin",
+      "sha256": "5647b872bf0e979c7abb5507fd146a07ed663a68a09b54e949f34956a4956774",
+      "bytes": 311728
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_80/k2bl_fwd_fp32_d32_mask1_b160_s16.cubin",
+      "sha256": "2702ab45b8b5bdd38f7cbf1252e305c65700f4304f51659aa72edcca52cdd0ac",
+      "bytes": 299440
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask0_b160_any.cubin",
+      "sha256": "bbb018304201e95e3c3bcdf7bedabbb2915e2b0da69ecfc95a93d918b3116df7",
+      "bytes": 85552
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask0_b160_s16.cubin",
+      "sha256": "cd6e22692ec7aa57d42feca508a62bd953e36cd1ac73b6246f4a3bd388fef9be",
+      "bytes": 81584
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask0_b161_any.cubin",
+      "sha256": "24bc0a0b2ffd426a8a55339cd592d5d3eafa2f3c3a787f1c081b268b92b4dda8",
+      "bytes": 155184
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask0_b161_s16.cubin",
+      "sha256": "1f23538a6e23380e61594739b36ff0cd3aa5a23a44531b5763d42e06a4c8087e",
+      "bytes": 145072
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask1_b160_any.cubin",
+      "sha256": "ef1d74e051b2469d39e57a95d10d88cd667adee1f0632ed0b38f6ed451bda24f",
+      "bytes": 174512
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask1_b160_s16.cubin",
+      "sha256": "dc28396c7180268d9ffe1aa67ccd55f1ccc013736df49db7d9166813b531a495",
+      "bytes": 161456
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask1_b161_any.cubin",
+      "sha256": "00ab7624a4458f8ad4e6195b1c19dc5dca8d1602c6021f38837e43e8dda2a7b5",
+      "bytes": 321712
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d16_mask1_b161_s16.cubin",
+      "sha256": "77b302ca44aac7916564cc987a5cef63a5d7f0b8149292481b16f6cc7102333a",
+      "bytes": 295856
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask0_b160_any.cubin",
+      "sha256": "fe3b3bc69cc34bed870ae9d2a34260ff24a3ea5e02e5c74698843af84003b49f",
+      "bytes": 92080
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask0_b160_s16.cubin",
+      "sha256": "8bb870bb35860febac32d8c69c643850b269b6632cffad876ae58eae3a3910d8",
+      "bytes": 88112
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask0_b161_any.cubin",
+      "sha256": "a12c595a61fe10d376288bf609186a4090edbc6f44f24c86c4fe329a0d8248ec",
+      "bytes": 167984
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask0_b161_s16.cubin",
+      "sha256": "8286f109f9ed49ce20580fdfa07b14d96946b44bc7a2fee27fd6c0a837b8276f",
+      "bytes": 157616
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask1_b160_any.cubin",
+      "sha256": "a01af56d41cd6ca988f63c5dcf57f6e37042e0bb66ad4b1839237e490291fd2c",
+      "bytes": 188208
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask1_b160_s16.cubin",
+      "sha256": "cb451732d082628f57981543c2481fc0a7ad6a34b65166c43859996c1139b4ae",
+      "bytes": 171568
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask1_b161_any.cubin",
+      "sha256": "08053626d919c2c37421021d26c08b4669b40a951ad50f839ba68bf2d18b8d93",
+      "bytes": 343728
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_bf16_d32_mask1_b161_s16.cubin",
+      "sha256": "d722688a7a20c02b00f0d759f7b797c9d102ba7063b352dd92f8615308c7b68a",
+      "bytes": 316976
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d16_mask0_b160_any.cubin",
+      "sha256": "caea45728895b5c19e0fe8263f54490f8d038d206e8e94cf7a655333382445a6",
+      "bytes": 109224
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d16_mask0_b160_s16.cubin",
+      "sha256": "65a70395044c3e7b100623cf87ed1bdba0c6b9edecb8b1458f4e691d7abcc65c",
+      "bytes": 105640
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d16_mask1_b160_any.cubin",
+      "sha256": "7a16a3c6d4edc510387f296cec810a7fa36b9a54a900b085b6009a993de42f12",
+      "bytes": 218792
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d16_mask1_b160_s16.cubin",
+      "sha256": "54189311274e98536de385ee0240b03f4fcbd3bf63151fafa820a703edc36d3e",
+      "bytes": 205352
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d32_mask0_b160_any.cubin",
+      "sha256": "9601953d77287c378401ae338436c40159e8e8e173f19988d0ffdbd292da4cac",
+      "bytes": 130216
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d32_mask0_b160_s16.cubin",
+      "sha256": "7382399243c73dea64f8ce9e4731d4477aa28734cd3bbf975eff1457f52bed6a",
+      "bytes": 126248
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d32_mask1_b160_any.cubin",
+      "sha256": "f3f8d6e4d8efd05b45f1f04d2a33d3b2f1963e9c9f89a8ffac19ea3160783de2",
+      "bytes": 252968
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_fwd_fp32_d32_mask1_b160_s16.cubin",
+      "sha256": "b6824ab9be9c20751784f151ab46a0fc707c7a7bed2d12cec7a9cd4d6b51631e",
+      "bytes": 241064
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_prep_mk0_any.cubin",
+      "sha256": "c079f24454b8d3afe720a623d9d9122a0d78747f22732c839f1e97701dbfd04b",
+      "bytes": 18232
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_prep_mk0_s16.cubin",
+      "sha256": "ca5bfe510aad4faab1af6e3d53fede3f3cef2d2d5107b16b9bc2ac78e74f49c0",
+      "bytes": 13880
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_prep_mk1_any.cubin",
+      "sha256": "8a2bb19baae02848a200bb7cee9c34b4d39e986ae8b072b16a44bf30f5e6076e",
+      "bytes": 39608
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2b_prep_mk1_s16.cubin",
+      "sha256": "978882e509f6d966cc5d9b5e3d31b4a3e2ba16dee57f3666ecc80a2cc55b8056",
+      "bytes": 34488
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask0_b160_any.cubin",
+      "sha256": "fd8faed52ec29119924fd2c6b47b8be4f5ff8696e111f1fca6b038496f2b3f74",
+      "bytes": 104504
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask0_b160_s16.cubin",
+      "sha256": "5daa2f042add7c46a1863dea5b4606c5ccf023028f8d35add48442e9224e0756",
+      "bytes": 100408
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask0_b161_any.cubin",
+      "sha256": "3228add1de77825559deed9ca86fe79d72b7efeaee3ecbb8d54948ccd5664929",
+      "bytes": 180792
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask0_b161_s16.cubin",
+      "sha256": "2da25259f31968918b86ac729d8cf3c63585b5f63b62c8de21051efd5060aa04",
+      "bytes": 170552
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask1_b160_any.cubin",
+      "sha256": "c9b84d4a8ea0ba95810536f811616bd5266417287769982fc5e805eed79f9050",
+      "bytes": 199992
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask1_b160_s16.cubin",
+      "sha256": "4325d663fc433866323d10e9454f71050d3c872731ef18b334bb33fd90e74d02",
+      "bytes": 185272
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask1_b161_any.cubin",
+      "sha256": "3bb6b0e4bb66d7086cb2016cecd8ca4f6ff8f223f4c09937176fd38ba31fb71c",
+      "bytes": 356024
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_bf16_d32_mask1_b161_s16.cubin",
+      "sha256": "58668dde56e27fbd30cc012bfb1d46ad014a4fe19b2312f49db7451170c9315a",
+      "bytes": 330040
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_fp32_d32_mask0_b160_any.cubin",
+      "sha256": "49adb25f729ee600b255e0dc29d1ec479f7da371d04becf10115f882ae7d1052",
+      "bytes": 143800
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_fp32_d32_mask0_b160_s16.cubin",
+      "sha256": "81731f0f6e909914a5b112d2180ccd9bdc13f7a9832a188b2a5723d5587bf79b",
+      "bytes": 140216
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_fp32_d32_mask1_b160_any.cubin",
+      "sha256": "ee3cf5194f4d8821f4294535be264f582b3dd607c9a4e83dff5f7491d8835c60",
+      "bytes": 271160
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/k2b/sm_90/k2bl_fwd_fp32_d32_mask1_b160_s16.cubin",
+      "sha256": "331fb814a5b99140e9636b0590c665c53037e22154d0554a34f7d77603805fa6",
+      "bytes": 255672
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/launcher/ffi-0.1/libtriattn_xla_launch.so",
+      "sha256": "df93725ed04d0486823b615b3765f1141c42ae22239fe17aa9638cc61c5d63bb",
+      "bytes": 255360
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn_xla/bin/launcher/ffi-0.3/libtriattn_xla_launch.so",
+      "sha256": "28c7450ef0ec0fbcde1b969748db7a7e71a20d9202fe0a69510e1f4461aec511",
+      "bytes": 295832
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/esm_v61/pkg/v6.1/bin/k3v6.1_fastsig0_lnfold1.sm_90a.cubin",
+      "sha256": "ef4b5b2f3ef0d24c7550ffe7c294d5f31537c2070499b0431263ec2c6e2881ce",
+      "bytes": 820320
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/esm_v61/pkg/v6.1/bin/k3v6.1_fastsig1_lnfold1.sm_90a.cubin",
+      "sha256": "7fb328f9bff9ea39f9d32f3c81844b118f7c0cde7baa304ee471443abdc332af",
+      "bytes": 819808
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_80/trimul_k1_sm80.cubin",
+      "sha256": "d9fc073d88183a1a8c90a1e435d3e721a1064311eba879732766237b828898a4",
+      "bytes": 5799648
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_80/trimul_k3_sm80.cubin",
+      "sha256": "dc37c9ae449d07a93a3b25d29ed69d7c9eab1fe084955b72295b08d8f4bc83bc",
+      "bytes": 5831008
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z128_h128.cubin",
+      "sha256": "a285b9f5d8fbba191afcc0224b5e50cafbb9e76ea12d23a48cedc8653e52562b",
+      "bytes": 1812976
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z128_h256.cubin",
+      "sha256": "9d5ed98af64bf655038c4c15e111bb0187042ae2f2c6595c2e31b021adc27281",
+      "bytes": 575472
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z128_h384.cubin",
+      "sha256": "43a27115c9b78f27bb15a78c4e139b5deeb46856b6bdd4a7522cdb06cb4e7569",
+      "bytes": 462576
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z128_h64.cubin",
+      "sha256": "9ac7274d6a883d6123e0e76d8c9ed38a465d6d3cfe6a8fac7d83c3bbfa025222",
+      "bytes": 515760
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z256_h128.cubin",
+      "sha256": "d5ba442fdf1992bdcc8f960c605ba0a63685f762d4d026a5f620101161b223c2",
+      "bytes": 629744
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z256_h256.cubin",
+      "sha256": "4d995f56cbf3fd82885d9d91b9c45004ee31273512c040bc65f4d3ac19cbe077",
+      "bytes": 2104688
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z256_h384.cubin",
+      "sha256": "c20a180cca5200ca00aebba5503aff93eedea4d72826014a8c4877a8dab74e35",
+      "bytes": 461872
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z256_h64.cubin",
+      "sha256": "9c319d78bc698c48b81d0b3efefef0aec24bdfb4273994e752bba8eb58f4598a",
+      "bytes": 639664
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z384_h128.cubin",
+      "sha256": "6c984bdfad4ce6bc241373092c26c15f96cdcc04e66522b546deedf88134e677",
+      "bytes": 448560
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z384_h256.cubin",
+      "sha256": "2ec3c37706f60cdd97b5a608dbc6d88aa8c65eedbc42b26eb0606da9fa65d288",
+      "bytes": 470064
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z384_h384.cubin",
+      "sha256": "12dfde98761d123fdc303779c3a47fcb2c8a99fe91fb9dc3e9fae14a6a0c4b15",
+      "bytes": 505904
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z384_h64.cubin",
+      "sha256": "2b5b625ae0ccb9e5c64a60ef8d52abf376733f6fa5195e636d90b617f7e39307",
+      "bytes": 433200
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z64_h128.cubin",
+      "sha256": "5d8f18fa22c60a1021ff164d80eb2694e2f1dde9eb6f7e2050553d12cc732750",
+      "bytes": 1315824
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z64_h256.cubin",
+      "sha256": "965c1c83efc4b3ad6564ac790995f8b94ecad7ae71a6d7ec9515a9bf853c5cb3",
+      "bytes": 538608
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z64_h384.cubin",
+      "sha256": "4880ba475b86d935c0264ee6530999417b2356df6ca8eb815229e1c2ba558f33",
+      "bytes": 438000
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90_z64_h64.cubin",
+      "sha256": "20dd40e94b3f3387b972b27c18b367b7c1b0b99ee3f05486c01bd1af2969053a",
+      "bytes": 1247216
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z128_h384.cubin",
+      "sha256": "05ddd836743618038dbb8dfad90743f199d01c6934b067aa88b9905d9c27f0f2",
+      "bytes": 283568
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z256_h256.cubin",
+      "sha256": "516c27587e16fe2dbc8e5d0f97f5654946b7bf1bacfb4ade737b545740241d04",
+      "bytes": 388016
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z256_h384.cubin",
+      "sha256": "44b6ff525ccf11d6322e1c0e014a499ea503802fc69966c87f4ffa5cf3098997",
+      "bytes": 264432
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z384_h128.cubin",
+      "sha256": "3b15b39cf4b5b2b0c10925af55f96964b856d783804195c4bddc2a17058f480d",
+      "bytes": 327600
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z384_h256.cubin",
+      "sha256": "e2931fe4efeb0a70913a6d30eec91ea5dd600a1589b014915ae3f4d7ef158375",
+      "bytes": 271600
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z384_h384.cubin",
+      "sha256": "abc1f22eed6c8781cb8c15dc1c598bacb107d725778863cfb9a07ca248432a79",
+      "bytes": 552432
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z384_h64.cubin",
+      "sha256": "d0e70eb68ee9734494e8300e649f47df4982dd4daae67eab62b1efce28b15a62",
+      "bytes": 316336
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build/sm_90a/tmn90w_z64_h384.cubin",
+      "sha256": "fed37394dcf4bfa85236ed08b21ebec95f94e0b68305a668c96ad9559b6c8e18",
+      "bytes": 264112
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/tx_sm90a/prebuilt/torch2.11.0+cu128-cpython-312-x86_64-linux-gnu-sm90/protenix_trimul_tx_sm90.so",
+      "sha256": "edddd50f7d94350c81f49d83153d10080b7e4cc1ac76bfb314ec0a068c5771aa",
+      "bytes": 1234248
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/tx_sm90a/prebuilt/torch2.13.0+cu130-cpython-311-x86_64-linux-gnu-sm90/protenix_trimul_tx_sm90.so",
+      "sha256": "e913917e2d714daa98feb97f40973adc29994c392b75a26b15db1284928af64a",
+      "bytes": 1304824
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/tx_sm90a/prebuilt/torch2.13.0+cu130-cpython-312-x86_64-linux-gnu-sm90/protenix_trimul_tx_sm90.so",
+      "sha256": "0a47260e04409ab50b80e58029b0093b19927a9551a5a816e00833b90a042f91",
+      "bytes": 1293752
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul/tx_sm90a/prebuilt/torch2.10.0+cu128-cpython-310-x86_64-linux-gnu-sm90/protenix_trimul_tx_sm90.so",
+      "sha256": "a4b01ac498514803246ac5eaf8e8eeb95ad84ca23d4335585434dfe369110477",
+      "bytes": 1246776
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul_xla/pkg/v1/build/sm_90a/tmn90_z128_h128.cubin",
+      "sha256": "b8f491d2dd5f86c4b63222181d00bd0f7645a1bf85205d8c9f421456b6de3724",
+      "bytes": 1381040
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/trimul_xla/pkg/v1/build/sm_90a/tmn90_z64_h64.cubin",
+      "sha256": "e348e93c6aaae9d18b4078184cbf68b202bd9df88251889712f34503b7013a93",
+      "bytes": 648688
+    },
+    {
+      "path": "ef2inv/opt/forward/ESMFOLD2_DESIGN_FAST_INFERENCE_KIT_v1/k/ef2_t16/sm_90a/ef2_transition_cute.cubin",
+      "sha256": "2f600bd17b86cbee53cc0509c3a9238e5ce7ca5a97158e1543089d95f4077af3",
+      "bytes": 591392
+    },
+    {
+      "path": "enformer/opt/forward/bin/enformer_fastkit_fused.so",
+      "sha256": "df0b296956cd8183811aa33e2bbc077812f46be7a1a9c1baa3138a599ad6387e",
+      "bytes": 1779784
+    },
+    {
+      "path": "enformer/opt/forward/bin/enformer_xattn_ext.so",
+      "sha256": "bcd7c89c9ccb3d1a19bc2dcbb3684ec5eb63aace925f044b80e6aac04c8c2084",
+      "bytes": 1671600
+    },
+    {
+      "path": "enformer/opt/forward/classes/a100_80gb/enformer_fastkit_fused.so",
+      "sha256": "3c79f7960eb4fc4f7243a739be6abef362abd2660011780f40d62cdcc49eb715",
+      "bytes": 1755208
+    },
+    {
+      "path": "enformer/opt/forward/classes/a100_80gb/enformer_xattn_ext.so",
+      "sha256": "d48d1649cc6ccce57510c0b1452e05a2ac104a9cb5c635f175a464931a426a05",
+      "bytes": 1642928
+    },
+    {
+      "path": "enformer_deepmind/opt/enformer_deepmind_opt/ops/edm_ops.so",
+      "sha256": "49d160b2af6c1b66473b27723b640cc68831eac72b7ff85fa0e9e66f86cedf47",
+      "bytes": 596856
+    },
+    {
+      "path": "opendde/opt/forward/fast_inference/levers/LNSTREAM/prebuilt/torch2.7.1-cu126-cp311-cxx11abi1/fast_layer_norm_cuda_v2_cs.so",
+      "sha256": "6407b1634db48dce9aab22a6efbe39be94e7c85aac1d74d8eb5be9fb787a47f0",
+      "bytes": 1494720
+    },
+    {
+      "path": "progen2/opt/forward/engines/progen2/kits/v0_ew/libew_progen2.so",
+      "sha256": "16fc893a012a1cdacfb20502891a222d8389bd41e39e9568f234d26a5d310e14",
+      "bytes": 3306072
+    },
+    {
+      "path": "protenix_v1/opt/forward/v05_addon/lib/fastln_prebuilt/fast_layer_norm_cuda_v2_stream.so",
+      "sha256": "2cd311aafa33d133a9cb299b7d689447eb181029a44cffc2981c50aa73df3337",
+      "bytes": 3990768
+    },
+    {
+      "path": "protenix_v2/opt/forward/flashpairformer/third_party/fastln_prebuilt/fast_layer_norm_cuda_v2_stream.so",
+      "sha256": "c295028752de1efc9a714d371f9ef8b467f60943ad3183bcee0afd925290a0a4",
+      "bytes": 3092032
+    },
+    {
+      "path": "protenix_v2/opt/forward/flashpairformer/third_party/fastln_prebuilt_cu130/fast_layer_norm_cuda_v2_stream.so",
+      "sha256": "ab5ce7d841e9376e346131449f141f87510a3011334965cce3b9e4eb8b06ca4b",
+      "bytes": 3453104
+    },
+    {
+      "path": "protenix_v2/opt/forward/flashpairformer/third_party/protenix_fpf_triatt_procuda/prebuilt/libtriatt_procuda_sm90a.so",
+      "sha256": "e9009ba57e432421cf1943cbbe5c22777bc1a674ca0423448ac2f06b9baecbcf",
+      "bytes": 1025792
+    }
+  ],
+  "policy": "No imported kernel source edits; only runtime binaries and build manifests/checksums may differ. Local rebuilt binaries have no inherited upstream certification."
+}

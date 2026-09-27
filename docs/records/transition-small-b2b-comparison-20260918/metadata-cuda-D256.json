@@ -1,0 +1,14 @@
+{
+  "D": 256,
+  "backend": "cuda",
+  "config": {
+    "bn": 64,
+    "stages": 1,
+    "warpgroups": 2,
+    "kt": 256,
+    "min_blocks": 1
+  },
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "extension_path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_b2b_cuda_k256_bn64_kt256_min_blocks1_stages1_warpgroups2/transition_b2b_cuda_k256_bn64_kt256_min_blocks1_stages1_warpgroups2.so"
+}

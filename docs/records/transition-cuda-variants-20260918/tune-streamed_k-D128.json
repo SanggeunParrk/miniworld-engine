@@ -1,0 +1,935 @@
+{
+  "node": "node02",
+  "device": "NVIDIA H100 80GB HBM3",
+  "torch_version": "2.10.0+cu128",
+  "cuda_version": "12.8",
+  "triton_version": "3.6.0",
+  "source_sha256": "9502ec6a3ef5b759ff9735aaae0cf00458c1a22f38142f57eebe80e715a19caf",
+  "D": 128,
+  "L": 384,
+  "variant": "streamed_k",
+  "config_scope": "bounded seed sweep; not full public grid",
+  "rows": [
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 1,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 24624,
+        "backward_smem": 32816
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+      "fwd_ms": 0.3156608001708984,
+      "gate_bwd_ms": 0.6030467466874556,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4425683934241533
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 41024,
+        "backward_smem": 49216
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.27955386114458664,
+      "gate_bwd_ms": 0.44535680135091144,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4439916322007775
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 3,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 57424,
+        "backward_smem": 65616
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+      "fwd_ms": 0.28311760991597346,
+      "gate_bwd_ms": 0.4027326661713269,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4318958623334765
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 64,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 1,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 41008,
+        "backward_smem": 57392
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+      "fwd_ms": 0.22490940420968192,
+      "gate_bwd_ms": 0.4675312984690947,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4294176856055856
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 64,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 65600,
+        "backward_smem": 81984
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.19935062870834813,
+      "gate_bwd_ms": 0.4219180773663264,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.441526470705867
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 64,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 3,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 90192,
+        "backward_smem": 106576
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+      "fwd_ms": 0.2022600868420723,
+      "gate_bwd_ms": 0.41262517427143297,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4469800386577845
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 128,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 1,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 73776,
+        "backward_smem": 106544
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+      "fwd_ms": 0.18985896640353733,
+      "gate_bwd_ms": 0.49931892201870304,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4379731034860015
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 128,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 114752,
+        "backward_smem": 147520
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.17371821840777668,
+      "gate_bwd_ms": 0.6242156195262122,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.42921575717628
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 128,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 3,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 155728,
+        "backward_smem": 188496
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+      "fwd_ms": 0.28146144515233684,
+      "gate_bwd_ms": 0.6076715792142428,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.440767857246101
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 64,
+        "bo": 128,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 65600,
+        "backward_smem": 81984
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn64_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn64_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.2004562358565742,
+      "gate_bwd_ms": 0.42332897186279295,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4469208363443613
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 64,
+        "mgroups": 2,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 57408,
+        "backward_smem": 81984
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo64_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.33395939354135207,
+      "gate_bwd_ms": 0.4826995472849151,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.439667606726289
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 64,
+        "bo": 64,
+        "mgroups": 1,
+        "ngroups": 2,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 65600,
+        "backward_smem": 81984
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.32182236648187407,
+      "gate_bwd_ms": 0.4220656618158868,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.438817392103374
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 128,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 1,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 24624,
+        "backward_smem": 32816
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+      "fwd_ms": 0.3118030878502553,
+      "gate_bwd_ms": 0.6016497987689394,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 174.61625999677926
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 128,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 41024,
+        "backward_smem": 49216
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.27548963106595553,
+      "gate_bwd_ms": 0.44355954064263237,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4340243665501475
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 128,
+        "mgroups": 1,
+        "ngroups": 1,
+        "stages": 3,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 57424,
+        "backward_smem": 65616
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+      "fwd_ms": 0.27954891285997757,
+      "gate_bwd_ms": 0.4007618913746843,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 226.6643840400502
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 128,
+        "mgroups": 2,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 57408,
+        "backward_smem": 81984
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.3308087476094564,
+      "gate_bwd_ms": 0.4812875235952982,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.4403245728462934
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 32,
+        "bo": 128,
+        "mgroups": 2,
+        "ngroups": 1,
+        "stages": 3,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 82000,
+        "backward_smem": 106576
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+      "fwd_ms": 0.3358937796899828,
+      "gate_bwd_ms": 0.44136522505018444,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 270.7074877778068
+    },
+    {
+      "config": {
+        "bk": 64,
+        "bn": 64,
+        "bo": 128,
+        "mgroups": 2,
+        "ngroups": 1,
+        "stages": 2,
+        "min_blocks": 1
+      },
+      "status": "ok",
+      "resources": {
+        "forward_smem": 81984,
+        "backward_smem": 131136
+      },
+      "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+      "fwd_ms": 0.24157206295458086,
+      "gate_bwd_ms": 0.4436937310722437,
+      "errors": {
+        "y": 0.0001259780110558495,
+        "h": 5.83874088988523e-06,
+        "da": 2.3478398361476138e-05,
+        "db": 3.4394365684420336e-06
+      },
+      "seconds": 2.430681247264147
+    }
+  ],
+  "triton": [
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "BO": 64,
+        "num_warps": 8,
+        "num_stages": 1
+      },
+      "status": "ok",
+      "relative": 0.0001259780110558495,
+      "ms": 0.3388404520148905,
+      "registers": 92,
+      "spills": 0,
+      "shared": 16384
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 32,
+        "BK": 64,
+        "BO": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "relative": 0.0001259780110558495,
+      "ms": 0.3465973536173503,
+      "registers": 99,
+      "spills": 0,
+      "shared": 32768
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 64,
+        "BK": 64,
+        "BO": 64,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "status": "ok",
+      "relative": 0.0001259780110558495,
+      "ms": 0.24045109865142078,
+      "registers": 128,
+      "spills": 0,
+      "shared": 49152
+    },
+    {
+      "config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 64,
+        "BO": 64,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "relative": 0.0001259780110558495,
+      "ms": 0.263356440226237,
+      "registers": 171,
+      "spills": 0,
+      "shared": 122880
+    },
+    {
+      "config": {
+        "BM": 128,
+        "BN": 32,
+        "BK": 64,
+        "BO": 64,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "status": "ok",
+      "relative": 0.0001259780110558495,
+      "ms": 0.2910314812379725,
+      "registers": 166,
+      "spills": 0,
+      "shared": 73728
+    }
+  ],
+  "triton_gate_ms": 0.31774352192878724,
+  "best_forward": {
+    "config": {
+      "bk": 64,
+      "bn": 128,
+      "bo": 64,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "ok",
+    "resources": {
+      "forward_smem": 114752,
+      "backward_smem": 147520
+    },
+    "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "fwd_ms": 0.17371821840777668,
+    "gate_bwd_ms": 0.6242156195262122,
+    "errors": {
+      "y": 0.0001259780110558495,
+      "h": 5.83874088988523e-06,
+      "da": 2.3478398361476138e-05,
+      "db": 3.4394365684420336e-06
+    },
+    "seconds": 2.42921575717628
+  },
+  "best_backward": {
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "ok",
+    "resources": {
+      "forward_smem": 57424,
+      "backward_smem": 65616
+    },
+    "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "fwd_ms": 0.27954891285997757,
+    "gate_bwd_ms": 0.4007618913746843,
+    "errors": {
+      "y": 0.0001259780110558495,
+      "h": 5.83874088988523e-06,
+      "da": 2.3478398361476138e-05,
+      "db": 3.4394365684420336e-06
+    },
+    "seconds": 226.6643840400502
+  },
+  "best_triton_forward": {
+    "config": {
+      "BM": 64,
+      "BN": 64,
+      "BK": 64,
+      "BO": 64,
+      "num_warps": 8,
+      "num_stages": 2
+    },
+    "status": "ok",
+    "relative": 0.0001259780110558495,
+    "ms": 0.24045109865142078,
+    "registers": 128,
+    "spills": 0,
+    "shared": 49152
+  },
+  "norm": [
+    {
+      "config": [
+        4,
+        2,
+        8,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.21304175542748494,
+      "total_ms": 0.24426765296966269
+    },
+    {
+      "config": [
+        4,
+        2,
+        8,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.18469823261476911,
+      "total_ms": 0.21592413015694686
+    },
+    {
+      "config": [
+        4,
+        2,
+        16,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.22617529945812007,
+      "total_ms": 0.25740119700029784
+    },
+    {
+      "config": [
+        4,
+        2,
+        16,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.19813178091338188,
+      "total_ms": 0.22935767845555963
+    },
+    {
+      "config": [
+        4,
+        4,
+        8,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.19618294143676757,
+      "total_ms": 0.22740883897894532
+    },
+    {
+      "config": [
+        4,
+        4,
+        8,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.14336815718766097,
+      "total_ms": 0.17459405472983872
+    },
+    {
+      "config": [
+        4,
+        4,
+        16,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.20476867992025582,
+      "total_ms": 0.23599457746243357
+    },
+    {
+      "config": [
+        4,
+        4,
+        16,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.15191975083462028,
+      "total_ms": 0.18314564837679803
+    },
+    {
+      "config": [
+        4,
+        8,
+        8,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.2816434307374816,
+      "total_ms": 0.31286932827965935
+    },
+    {
+      "config": [
+        4,
+        8,
+        8,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.17338604606320507,
+      "total_ms": 0.20461194360538282
+    },
+    {
+      "config": [
+        4,
+        8,
+        16,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.3390128234337116,
+      "total_ms": 0.37023872097588933
+    },
+    {
+      "config": [
+        4,
+        8,
+        16,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03122589754217776,
+      "bwd_ms": 0.22051639663440556,
+      "total_ms": 0.25174229417658334
+    },
+    {
+      "config": [
+        8,
+        2,
+        8,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.19705515914226895,
+      "total_ms": 0.2285740943026234
+    },
+    {
+      "config": [
+        8,
+        2,
+        8,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.14346761458959334,
+      "total_ms": 0.1749865497499478
+    },
+    {
+      "config": [
+        8,
+        2,
+        16,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.2053073803583781,
+      "total_ms": 0.23682631551873254
+    },
+    {
+      "config": [
+        8,
+        2,
+        16,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.1521429425547559,
+      "total_ms": 0.18366187771511036
+    },
+    {
+      "config": [
+        8,
+        4,
+        8,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.2795324988987135,
+      "total_ms": 0.311051434059068
+    },
+    {
+      "config": [
+        8,
+        4,
+        8,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.17223305531910488,
+      "total_ms": 0.20375199047945933
+    },
+    {
+      "config": [
+        8,
+        4,
+        16,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.45831136925275934,
+      "total_ms": 0.4898303044131138
+    },
+    {
+      "config": [
+        8,
+        4,
+        16,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.2823857706489292,
+      "total_ms": 0.3139047058092837
+    },
+    {
+      "config": [
+        8,
+        8,
+        8,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.7933646774291992,
+      "total_ms": 0.8248836125895537
+    },
+    {
+      "config": [
+        8,
+        8,
+        8,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.4319814954485212,
+      "total_ms": 0.4635004306088757
+    },
+    {
+      "config": [
+        8,
+        8,
+        16,
+        128,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.828585588171127,
+      "total_ms": 0.8601045233314815
+    },
+    {
+      "config": [
+        8,
+        8,
+        16,
+        256,
+        32
+      ],
+      "fwd_ms": 0.03151893516035446,
+      "bwd_ms": 0.4578498301786535,
+      "total_ms": 0.48936876533900797
+    }
+  ],
+  "best_norm": {
+    "config": [
+      4,
+      4,
+      8,
+      256,
+      32
+    ],
+    "fwd_ms": 0.03122589754217776,
+    "bwd_ms": 0.14336815718766097,
+    "total_ms": 0.17459405472983872
+  }
+}

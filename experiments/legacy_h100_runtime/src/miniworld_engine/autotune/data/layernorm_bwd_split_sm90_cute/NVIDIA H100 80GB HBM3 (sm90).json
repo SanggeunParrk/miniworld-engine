@@ -1,0 +1,500 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 8)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 8)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 8)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 8)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+    "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 8)), 0, 0)"
+  ],
+  "config_space_hash": "c829fd9bb647",
+  "driver_id_scheme": 2,
+  "driver_identity": "3097d2e0200f",
+  "entries": {
+    "bfloat16|([((589824, 256), (1, 589824), 'torch.bfloat16'), ((589824, 256), (1, 589824), 'torch.bfloat16'), ((256,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32')], (232448,))": [
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 32,
+          "num_stages": 2,
+          "num_warps": 8
+        },
+        "ms": 0.38339200615882874,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 16,
+          "num_stages": 2,
+          "num_warps": 16
+        },
+        "ms": 0.41844800114631653,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 16,
+          "num_stages": 2,
+          "num_warps": 8
+        },
+        "ms": 0.4382079988718033,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 16,
+          "num_stages": 3,
+          "num_warps": 8
+        },
+        "ms": 0.4434559941291809,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 32,
+          "num_stages": 3,
+          "num_warps": 16
+        },
+        "ms": 0.4453919976949692,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16|([((589824, 256), (1, 589824), 'torch.bfloat16'), ((589824, 256), (1, 589824), 'torch.bfloat16'), ((256,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32')], (232448,))": [
+      "c829fd9bb647"
+    ]
+  },
+  "env_identity": "4cfb996f8c09",
+  "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+  "grids": {
+    "c829fd9bb647": [
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 8)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 8)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 8)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 8)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 8)), 0, 0)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16|([((589824, 256), (1, 589824), 'torch.bfloat16'), ((589824, 256), (1, 589824), 'torch.bfloat16'), ((256,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32')], (232448,))": {
+      "feb21cc2ae285dfe7e8f": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 2,
+              "num_warps": 8
+            },
+            "ms": 0.38339200615882874,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 2,
+              "num_warps": 16
+            },
+            "ms": 0.41844800114631653,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 2,
+              "num_warps": 8
+            },
+            "ms": 0.4382079988718033,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 3,
+              "num_warps": 8
+            },
+            "ms": 0.4434559941291809,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 3,
+              "num_warps": 16
+            },
+            "ms": 0.4453919976949692,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 2), ('num_warps', 8)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 16), ('num_stages', 3), ('num_warps', 8)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 2), ('num_warps', 8)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 32), ('num_stages', 3), ('num_warps', 8)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 1), ('num_warps', 8)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 16)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 4)), 0, 0)",
+          "((('BLOCK_K', 256), ('BLOCK_M1', 64), ('num_stages', 2), ('num_warps', 8)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 2,
+              "num_warps": 8
+            },
+            "ms": 0.38339200615882874,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 2,
+              "num_warps": 16
+            },
+            "ms": 0.41844800114631653,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 2,
+              "num_warps": 8
+            },
+            "ms": 0.4382079988718033,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 3,
+              "num_warps": 8
+            },
+            "ms": 0.4434559941291809,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 3,
+              "num_warps": 16
+            },
+            "ms": 0.4453919976949692,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 3,
+              "num_warps": 4
+            },
+            "ms": 0.4492959976196289,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 2,
+              "num_warps": 4
+            },
+            "ms": 0.4501760005950928,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 2,
+              "num_warps": 16
+            },
+            "ms": 0.45364800095558167,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 2,
+              "num_warps": 4
+            },
+            "ms": 0.4635840058326721,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 64,
+              "num_stages": 2,
+              "num_warps": 16
+            },
+            "ms": 0.4671359956264496,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 1,
+              "num_warps": 4
+            },
+            "ms": 0.4695360064506531,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 1,
+              "num_warps": 8
+            },
+            "ms": 0.4862399995326996,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 64,
+              "num_stages": 1,
+              "num_warps": 16
+            },
+            "ms": 0.5157120227813721,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 3,
+              "num_warps": 16
+            },
+            "ms": 0.5271679759025574,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 3,
+              "num_warps": 8
+            },
+            "ms": 0.5353919863700867,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 1,
+              "num_warps": 4
+            },
+            "ms": 0.5381760001182556,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 64,
+              "num_stages": 2,
+              "num_warps": 8
+            },
+            "ms": 0.5619199872016907,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 1,
+              "num_warps": 16
+            },
+            "ms": 0.5673759877681732,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 64,
+              "num_stages": 1,
+              "num_warps": 8
+            },
+            "ms": 0.569487988948822,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 64,
+              "num_stages": 2,
+              "num_warps": 4
+            },
+            "ms": 0.6138240098953247,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 1,
+              "num_warps": 8
+            },
+            "ms": 0.6417919993400574,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 16,
+              "num_stages": 1,
+              "num_warps": 16
+            },
+            "ms": 0.6993600130081177,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 32,
+              "num_stages": 3,
+              "num_warps": 4
+            },
+            "ms": 0.7174720168113708,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 256,
+              "BLOCK_M1": 64,
+              "num_stages": 1,
+              "num_warps": 4
+            },
+            "ms": 0.9348320066928864,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 64,
+          "bench_rep_ms": 30,
+          "implementation": "2bcc56253acb08d4993bce7934d9a47483d30065b178b79ff53568d4858e261a",
+          "kind": "native",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "native_runtime_profiles": {
+    "bfloat16|([((589824, 256), (1, 589824), 'torch.bfloat16'), ((589824, 256), (1, 589824), 'torch.bfloat16'), ((256,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32')], (232448,))": "feb21cc2ae285dfe7e8f"
+  },
+  "op": "layernorm_bwd_split_sm90_cute",
+  "op_identity": "2bcc56253acb08d4993bce7934d9a47483d30065b178b79ff53568d4858e261a",
+  "provenance": {
+    "built_utc": "2026-09-17T23:11:52+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

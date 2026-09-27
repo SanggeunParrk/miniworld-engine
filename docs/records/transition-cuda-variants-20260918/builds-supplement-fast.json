@@ -1,0 +1,582 @@
+[
+  {
+    "variant": "streamed_k",
+    "D": 128,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 82000,
+      "backward_smem": 106576
+    },
+    "seconds": 1.994219597429037
+  },
+  {
+    "variant": "streamed_k",
+    "D": 128,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 57408,
+      "backward_smem": 81984
+    },
+    "seconds": 1.9955571088939905
+  },
+  {
+    "variant": "streamed_k",
+    "D": 128,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 41024,
+      "backward_smem": 49216
+    },
+    "seconds": 1.9967739656567574
+  },
+  {
+    "variant": "streamed_k",
+    "D": 128,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 24624,
+      "backward_smem": 32816
+    },
+    "seconds": 1.9980149203911424
+  },
+  {
+    "variant": "streamed_k",
+    "D": 128,
+    "config": {
+      "bk": 64,
+      "bn": 64,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 81984,
+      "backward_smem": 131136
+    },
+    "seconds": 1.9968888191506267
+  },
+  {
+    "variant": "streamed_k",
+    "D": 128,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d128_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 57424,
+      "backward_smem": 65616
+    },
+    "seconds": 1.9987784642726183
+  },
+  {
+    "variant": "full_k",
+    "D": 128,
+    "config": {
+      "bk": 128,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 41008,
+      "backward_smem": 49200
+    },
+    "seconds": 0.058388836681842804
+  },
+  {
+    "variant": "full_k",
+    "D": 128,
+    "config": {
+      "bk": 128,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 73808,
+      "backward_smem": 82000
+    },
+    "seconds": 0.05826336983591318
+  },
+  {
+    "variant": "full_k",
+    "D": 128,
+    "config": {
+      "bk": 128,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 57408,
+      "backward_smem": 65600
+    },
+    "seconds": 0.05999289080500603
+  },
+  {
+    "variant": "full_k",
+    "D": 128,
+    "config": {
+      "bk": 128,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 73792,
+      "backward_smem": 98368
+    },
+    "seconds": 0.05923677235841751
+  },
+  {
+    "variant": "streamed_k",
+    "D": 256,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 32816,
+      "backward_smem": 32816
+    },
+    "seconds": 10.055223180912435
+  },
+  {
+    "variant": "full_k",
+    "D": 128,
+    "config": {
+      "bk": 128,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_full_k_d128_bk128_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 90192,
+      "backward_smem": 114768
+    },
+    "seconds": 90.13346012029797
+  },
+  {
+    "variant": "streamed_k",
+    "D": 256,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 49216,
+      "backward_smem": 49216
+    },
+    "seconds": 128.24048038665205
+  },
+  {
+    "variant": "streamed_k",
+    "D": 256,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 65600,
+      "backward_smem": 81984
+    },
+    "seconds": 135.0871705757454
+  },
+  {
+    "variant": "streamed_k",
+    "D": 256,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 65616,
+      "backward_smem": 65616
+    },
+    "seconds": 137.63422488421202
+  },
+  {
+    "variant": "full_k",
+    "D": 128,
+    "config": {
+      "bk": 128,
+      "bn": 64,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d128_bk128_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d128_bk128_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 114752,
+      "backward_smem": 163904
+    },
+    "seconds": 142.18066134862602
+  },
+  {
+    "variant": "streamed_k",
+    "D": 256,
+    "config": {
+      "bk": 64,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 90192,
+      "backward_smem": 106576
+    },
+    "seconds": 143.89157727267593
+  },
+  {
+    "variant": "streamed_k",
+    "D": 256,
+    "config": {
+      "bk": 64,
+      "bn": 64,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 98368,
+      "backward_smem": 131136
+    },
+    "seconds": 121.47172555699944
+  },
+  {
+    "variant": "full_k",
+    "D": 256,
+    "config": {
+      "bk": 256,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages1_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 81968,
+      "backward_smem": 81968
+    },
+    "seconds": 132.94520232453942
+  },
+  {
+    "variant": "full_k",
+    "D": 256,
+    "config": {
+      "bk": 256,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 114752,
+      "backward_smem": 114752
+    },
+    "seconds": 134.10897900536656
+  },
+  {
+    "variant": "full_k",
+    "D": 256,
+    "config": {
+      "bk": 256,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 1,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 147536,
+      "backward_smem": 147536
+    },
+    "seconds": 133.45678524114192
+  },
+  {
+    "variant": "full_k",
+    "D": 256,
+    "config": {
+      "bk": 256,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 147520,
+      "backward_smem": 163904
+    },
+    "seconds": 129.71911529358476
+  },
+  {
+    "variant": "full_k",
+    "D": 256,
+    "config": {
+      "bk": 256,
+      "bn": 32,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups2_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 180304,
+      "backward_smem": 196688
+    },
+    "seconds": 135.54337965138257
+  },
+  {
+    "variant": "full_k",
+    "D": 256,
+    "config": {
+      "bk": 256,
+      "bn": 64,
+      "bo": 128,
+      "mgroups": 2,
+      "ngroups": 1,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 229440,
+      "backward_smem": 262208
+    },
+    "seconds": 125.902666663751
+  },
+  {
+    "variant": "streamed_k",
+    "D": 384,
+    "config": {
+      "bk": 256,
+      "bn": 64,
+      "bo": 64,
+      "mgroups": 1,
+      "ngroups": 2,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d384_bk256_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages2_9502ec6a3ef5/transition_v2_streamed_k_d384_bk256_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 245824,
+      "backward_smem": 229440
+    },
+    "seconds": 121.7202509790659
+  },
+  {
+    "variant": "full_k",
+    "D": 384,
+    "config": {
+      "bk": 512,
+      "bn": 64,
+      "bo": 64,
+      "mgroups": 1,
+      "ngroups": 2,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d384_bk512_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages1_9502ec6a3ef5/transition_v2_full_k_d384_bk512_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages1_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 245808,
+      "backward_smem": 229424
+    },
+    "seconds": 122.31442825496197
+  },
+  {
+    "variant": "streamed_k",
+    "D": 512,
+    "config": {
+      "bk": 256,
+      "bn": 64,
+      "bo": 64,
+      "mgroups": 1,
+      "ngroups": 2,
+      "stages": 2,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d512_bk256_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages2_9502ec6a3ef5/transition_v2_streamed_k_d512_bk256_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages2_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 262208,
+      "backward_smem": 229440
+    },
+    "seconds": 124.27881109155715
+  },
+  {
+    "variant": "streamed_k",
+    "D": 512,
+    "config": {
+      "bk": 64,
+      "bn": 128,
+      "bo": 64,
+      "mgroups": 1,
+      "ngroups": 2,
+      "stages": 3,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d512_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups2_stages3_9502ec6a3ef5/transition_v2_streamed_k_d512_bk64_bn128_bo64_mgroups1_min_blocks1_ngroups2_stages3_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 254032,
+      "backward_smem": 188496
+    },
+    "seconds": 125.10007450543344
+  },
+  {
+    "variant": "full_k",
+    "D": 512,
+    "config": {
+      "bk": 512,
+      "bn": 64,
+      "bo": 64,
+      "mgroups": 1,
+      "ngroups": 2,
+      "stages": 1,
+      "min_blocks": 1
+    },
+    "status": "built",
+    "path": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d512_bk512_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages1_9502ec6a3ef5/transition_v2_full_k_d512_bk512_bn64_bo64_mgroups1_min_blocks1_ngroups2_stages1_9502ec6a3ef5.so",
+    "resources": {
+      "forward_smem": 262192,
+      "backward_smem": 229424
+    },
+    "seconds": 114.76967842690647
+  }
+]

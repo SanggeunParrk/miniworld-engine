@@ -1,0 +1,162 @@
+[
+  {
+    "D": 128,
+    "L": 384,
+    "mode": "inference",
+    "triton_split": 0.2754559963941574,
+    "triton:streamed_k": 0.28888800740242004,
+    "cuda:streamed_k": 0.21076000109314919,
+    "triton:full_k": 0.16592800244688988,
+    "cuda:full_k": 0.21671999990940094
+  },
+  {
+    "D": 128,
+    "L": 768,
+    "mode": "inference",
+    "triton_split": 1.0324320197105408,
+    "triton:streamed_k": 1.0536320209503174,
+    "cuda:streamed_k": 0.7734000086784363,
+    "triton:full_k": 0.5939360111951828,
+    "cuda:full_k": 0.783840000629425
+  },
+  {
+    "D": 256,
+    "L": 384,
+    "mode": "inference",
+    "triton_split": 0.7077919989824295,
+    "triton:streamed_k": 0.7434719949960709,
+    "cuda:streamed_k": 0.6666560024023056,
+    "triton:full_k": 0.5651200115680695,
+    "cuda:full_k": 0.6465120017528534
+  },
+  {
+    "D": 256,
+    "L": 768,
+    "mode": "inference",
+    "triton_split": 2.896456003189087,
+    "triton:streamed_k": 2.8114399909973145,
+    "cuda:streamed_k": 2.603983998298645,
+    "triton:full_k": 2.115391969680786,
+    "cuda:full_k": 2.430527925491333
+  },
+  {
+    "D": 384,
+    "L": 384,
+    "mode": "inference",
+    "triton_split": 1.4128479957580566,
+    "triton:streamed_k": 1.5821919739246368,
+    "cuda:streamed_k": 1.8576479852199554,
+    "triton:full_k": 4.367944121360779,
+    "cuda:full_k": 1.6430720090866089
+  },
+  {
+    "D": 384,
+    "L": 768,
+    "mode": "inference",
+    "triton_split": 5.781247854232788,
+    "triton:streamed_k": 5.957520127296448,
+    "cuda:streamed_k": 7.084352016448975,
+    "triton:full_k": 16.475951671600342,
+    "cuda:full_k": 6.342927932739258
+  },
+  {
+    "D": 512,
+    "L": 384,
+    "mode": "inference",
+    "triton_split": 2.3445279598236084,
+    "triton:streamed_k": 3.120247960090637,
+    "cuda:streamed_k": 3.4022079706192017,
+    "triton:full_k": 7.272655963897705,
+    "cuda:full_k": 3.3560720086097717
+  },
+  {
+    "D": 512,
+    "L": 768,
+    "mode": "inference",
+    "triton_split": 9.264503955841064,
+    "triton:streamed_k": 12.025311946868896,
+    "cuda:streamed_k": 13.09881591796875,
+    "triton:full_k": 27.936991691589355,
+    "cuda:full_k": 12.811791896820068
+  },
+  {
+    "D": 128,
+    "L": 384,
+    "mode": "training",
+    "triton_split": 1.0470719933509827,
+    "triton:streamed_k": 1.0629279911518097,
+    "cuda:streamed_k": 1.0798720121383667,
+    "triton:full_k": 0.9359039962291718,
+    "cuda:full_k": 1.03261598944664
+  },
+  {
+    "D": 128,
+    "L": 768,
+    "mode": "training",
+    "triton_split": 3.9804880619049072,
+    "triton:streamed_k": 3.9905999898910522,
+    "cuda:streamed_k": 4.058359861373901,
+    "triton:full_k": 3.523840069770813,
+    "cuda:full_k": 3.837936043739319
+  },
+  {
+    "D": 256,
+    "L": 384,
+    "mode": "training",
+    "triton_split": 2.4144479632377625,
+    "triton:streamed_k": 2.4310960173606873,
+    "cuda:streamed_k": 2.5985360145568848,
+    "triton:full_k": 2.2516480684280396,
+    "cuda:full_k": 2.434320092201233
+  },
+  {
+    "D": 256,
+    "L": 768,
+    "mode": "training",
+    "triton_split": 9.564720153808594,
+    "triton:streamed_k": 9.592991828918457,
+    "cuda:streamed_k": 10.168032169342041,
+    "triton:full_k": 8.902096271514893,
+    "cuda:full_k": 9.599344253540039
+  },
+  {
+    "D": 384,
+    "L": 384,
+    "mode": "training",
+    "triton_split": 4.762864112854004,
+    "triton:streamed_k": 4.893472075462341,
+    "cuda:streamed_k": 5.570824027061462,
+    "triton:full_k": 7.580032110214233,
+    "cuda:full_k": 5.42412006855011
+  },
+  {
+    "D": 384,
+    "L": 768,
+    "mode": "training",
+    "triton_split": 19.2151517868042,
+    "triton:streamed_k": 19.572351455688477,
+    "cuda:streamed_k": 22.133528232574463,
+    "triton:full_k": 29.653183937072754,
+    "cuda:full_k": 21.49240779876709
+  },
+  {
+    "D": 512,
+    "L": 384,
+    "mode": "training",
+    "triton_split": 7.721312046051025,
+    "triton:streamed_k": 8.191407918930054,
+    "cuda:streamed_k": 9.286767959594727,
+    "triton:full_k": 12.23363184928894,
+    "cuda:full_k": 9.738431692123413
+  },
+  {
+    "D": 512,
+    "L": 768,
+    "mode": "training",
+    "triton_split": 29.201839447021484,
+    "triton:streamed_k": 32.5666561126709,
+    "cuda:streamed_k": 36.43228054046631,
+    "triton:full_k": 48.86224842071533,
+    "cuda:full_k": 39.595672607421875
+  }
+]
