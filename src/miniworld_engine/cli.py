@@ -1087,7 +1087,11 @@ def _empty_triton_cache(dry_run: bool) -> int:
     try:
         entries, total = triton_cache.clear(directory, dry_run=dry_run)
     except ValueError as exc:
-        print(f"  {exc}")
+        # stderr, because the caller in `build all` discards this exit code on purpose -- a
+        # 20-hour build that measured everything is not a failure because cleanup declined. That
+        # made the refusal one indented line in a 900-line stdout log, which is how 623 GB
+        # accumulated unnoticed. On stderr it is at least where a job script looks.
+        print(f"  {exc}", file=sys.stderr)
         return 2
     verb = "would remove" if dry_run else "removed"
     print(f"  triton cache: {verb} {entries:,} entries, {total / 1024**3:.1f} GB from {directory}")
@@ -1820,17 +1824,12 @@ def build_parser() -> argparse.ArgumentParser:
         # invoking bench.py directly.
         parser_.add_argument("--sweep-axis", default="seq_len", choices=("seq_len", "d_pair"),
                              help="which axis to sweep (default: seq_len)")
-        # Default "auto" picks the empirically-best regime per (mode, module): inference is
-        # launch-bound for the small/many-launch modules so it captures a manual CUDA graph, while
-        # training is backward-dominated (compute-bound) so it stays compile-only (a graph removes no
-        # meaningful launch overhead there and its copy/replay only adds cost). swa_atom_attention is
-        # launch-bound in its backward too, so it takes manual in both modes. Measured across every
-        # module at the fixed real shape; see BenchConfig.cudagraph. Pass an explicit value to force
-        # one regime for all runs (e.g. `--cudagraph manual` to reproduce the older committed tables).
+        # The runner expands auto module training into separate OFF/ON processes.
+        # Explicit graph requests still select exactly one regime.
         parser_.add_argument("--cudagraph", default="auto",
                              choices=("disabled", "manual", "graphed", "auto"),
-                             help="CUDA-graph mode (default: auto -- inference=manual, "
-                                  "training=compile-only, per measured best)")
+                             help="CUDA-graph mode (default auto: module training reports OFF and ON; "
+                                  "inference uses manual, memory and kernel training use disabled)")
         parser_.add_argument("--compile", default="true", choices=("true", "false"),
                              help="torch.compile the module under test (default: true)")
         # Passed to the child through the ENVIRONMENT, not argv: settings.compile_wrap is read

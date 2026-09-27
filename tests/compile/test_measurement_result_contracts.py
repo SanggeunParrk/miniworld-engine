@@ -37,7 +37,7 @@ def runner(monkeypatch):
               _compile_wrap_now=lambda: "custom_op", os=SimpleNamespace(environ={}),
               **{name: getattr(runtime, name) for name in ("UnsupportedBenchmark", "compile_for_benchmark",
                   "observe_execution", "parameter_dtype_of", "require_compile_evidence", "input_shapes_of",
-                  "snapshot_outputs", "check_execution_outputs", "check_finite_outputs")})
+                  "snapshot_outputs", "check_execution_outputs", "check_finite_outputs", "check_stochastic_graph_replay")})
     def no_spec(value):
         raise ValueError(value)
     ns["parse_implementation_spec"] = no_spec

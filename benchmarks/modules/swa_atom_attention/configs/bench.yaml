@@ -32,7 +32,7 @@ mode: inference
 metric: time
 # Both variants compile; inference uses graph replay, training disables graphs.
 compile: true
-cudagraph: auto  # inference: manual graph; training: disabled
+cudagraph: auto  # inference: manual; training time: separate OFF/ON runs
 allow_tf32: true
 precision: "bf16-mixed"
 name_suffix: ""

@@ -1,13 +1,13 @@
 # Benchmark execution contract
 
-The official path is `miniworld-engine bench` → `runners/bench.py` → CSV schema 2 → `runners/plot_csv.py`. A requested option is not evidence that it ran. This contract was introduced after the September 2026 audit found that 16 of 17 kernel benchmark targets ignored `compile=True` while recording it as true.
+The official path is `miniworld-engine bench_module` / `bench_kernel` → `runners/bench.py` → CSV schema 2 → `runners/plot_csv.py`. A requested option is not evidence that it ran. This contract was introduced after the September 2026 audit found that 16 of 17 kernel benchmark targets ignored `compile=True` while recording it as true.
 
 ## What a successful row establishes
 
 - The requested implementation produced a finite timing or memory measurement and observable finite output tensors. Training checks include the forward result and available input/parameter gradients.
 - `compiled` comes from an executed Inductor executable observed through the same callable that is subsequently timed. Calling `torch.compile`, tracing a graph, or compiling only a reference is insufficient. A requested compile with no observed executable becomes `unsupported`, with no valid measurement value.
 - `compile_scope` distinguishes module forward from standalone callable compilation and records `fullgraph` versus `partial_allowed`. Module compilation allows graph breaks. It does **not** establish that an entire forward/backward step was fused or that custom CUDA/Triton operators were lowered by Inductor.
-- `cudagraph` records the timer actually used. Manual capture includes a replay/output consistency check before timing. An inference request for `graphed` currently uses manual capture and records `manual`; `graphed` training is explicitly unsupported. `auto` selects manual for inference timing, including SWA/FlashAttention targets, and disabled for training and memory. Capture failures are reported without silently switching graphs off. A6000/FA2 SWA no-grad capture/replay is GPU-tested; those tests do not verify FA4 GPU capture.
+- `cudagraph` records the timer actually used. Manual capture includes a replay/output consistency check before timing. An inference request for `graphed` currently uses manual capture and records `manual`; `graphed` training is explicitly unsupported. `auto` selects manual for inference timing, including SWA/FlashAttention targets, and disabled for memory and kernel training. For module training latency, the entrypoint expands `auto` into separate `disabled` and `manual` processes/CSVs. Explicit choices run only that regime. Capture failures are reported without silently switching graphs off. A6000/FA2 SWA no-grad capture/replay is GPU-tested; those tests do not verify FA4 GPU capture.
 - `measurement_scope` distinguishes forward, backward-only, and forward+backward. Backward-only autograd over a prebuilt eager graph rejects compile requests rather than claiming compiled backward.
 - Actual input and parameter dtypes and captured input tensor shapes are stored. A precision request alone does not determine these values. Unsupported FP32 backend requests are rejected explicitly. `tokens` and `batch_size` remain blank where the harness cannot establish their semantics reliably.
 - Inference sets modules to eval mode and disables autograd. Training clears the requested gradients inside each step, including graph capture, so replay uses the same fresh-gradient semantics as eager timing. This benchmark measures forward/backward, without an optimizer update.
@@ -20,7 +20,7 @@ The compile backend is Inductor with `dynamic=False`. Inductor's internal CUDA g
 
 The compile witness adds a small Python wrapper/ContextVar lookup to compiled execution. A separate A6000 BF16 L128 TriangleMultiplication training A/B found 0% PyTorch and 0.18% MiniWorld median change when bypassing only the witness body (three repetitions, outputs and gradients checked). This does not quantify every target or shape. Manual graph replay avoids executing that Python wrapper per replay. Do not describe the no-graph numbers as uninstrumented production latency.
 
-Pure kernel compiled output is compared against the exact eager callable. Graph replay is compared against its pre-capture result, including available training gradients. Relative Frobenius limits are 2% for BF16/FP16 and 0.01% for FP32. These are **execution-consistency** checks, not substitutes for per-kernel FP32-reference accuracy gates. Module accuracy fields remain blank where no independent mathematical reference comparison was performed. A passing execution-contract row must not be reported as complete numerical certification.
+Pure kernel compiled output is compared against the exact eager callable. Deterministic graph replay is compared against its pre-capture result, including available training gradients. Dropout training compares graph outputs and gradients against the same compiled callable using two matched seeds, checks that consecutive replays change dropout output, restores captured gradient buffers, and restores caller RNG state. Failed checks produce failed rows before timing; dropout is never disabled for capture. Relative Frobenius limits are 2% for BF16/FP16 and 0.01% for FP32. These are **execution-consistency** checks, not substitutes for per-kernel FP32-reference accuracy gates. Module accuracy fields remain blank where no independent mathematical reference comparison was performed. A passing execution-contract row must not be reported as complete numerical certification.
 
 Memory mode measures peak allocated-memory growth of an eager/compiled non-graph step. Graph-memory requests are unsupported. It does not claim total process memory or compilation memory.
 
@@ -41,3 +41,14 @@ A6000 kernel contract matrix: 228 cases, 181 successful executions and 47 explic
 The full per-target/implementation tables and raw allocation/CSV evidence are in the workspace audit reports. Blackwell/Hopper-specific numerical execution and external-checkout developer probes were not run on another GPU. Retired probes that compared identical current implementations or included module construction in a fallback timer now fail with an explanation.
 
 Remaining production-kernel numerical issues and the separately tracked incomplete A6000 autotune keys are not made complete by these benchmark-harness checks. Keep those statuses separate from execution-contract coverage.
+
+## Paired training graph policy validation (2026-09-17)
+
+The official entrypoint produced 30 successful A6000 L128 training rows with actual
+compiled execution: PyTorch and MiniWorld OFF/ON for TriMul, bidirectional TriMul,
+TriangleAttention, SWA attention, SWA DiT and token DiT, plus cuEquivariance OFF/ON
+for the three triangle targets. Triangle dropout remained 0.25; every graphed
+dropout row passed both seeded output/gradient checks and changing-replay checks.
+CPU benchmark-contract regression tests, Ruff and ty passed. These are execution
+checks, not final tuned-cache latency or end-to-end training certification. Local
+logs and the exact CSV manifest are in `.bench/graph-policy-20260917/`.
