@@ -188,28 +188,29 @@ class LayerNormLinearTritonFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps, length):
-        from miniworld_engine.kernels.layernorm_linear.interface import (
-            layernorm_linear_triton,
+        from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+            layernorm_linear_triton_fwd_stats,
         )
 
-        Y = layernorm_linear_triton(x, ln_weight, ln_bias, weight, bias, eps)
-        xf = x.reshape(-1, x.shape[-1]).float()
-        mean = xf.mean(-1)
-        rstd = torch.rsqrt(xf.var(-1, unbiased=False) + eps)
-        ctx.save_for_backward(x, mean, rstd, ln_weight, ln_bias, weight)
+        x2 = x.reshape(-1, x.shape[-1]).contiguous()
+        Y, mean, rstd = layernorm_linear_triton_fwd_stats(
+            x2, ln_weight, ln_bias, weight, bias, eps)
+        ctx.save_for_backward(x2, mean, rstd, ln_weight, ln_bias, weight)
+        ctx.input_shape = x.shape
         ctx.has_bias = bias is not None
         # Rows, not `length`: see BOTH_ROWS. x is (M, K) here, so M is readable directly.
         ctx.shape_key = both_key(x.reshape(-1, x.shape[-1]).shape[0])
-        return Y
+        return Y.reshape(*x.shape[:-1], weight.shape[0])
 
     @staticmethod
     def backward(ctx, dY):
         x, mean, rstd, gamma, beta, W = ctx.saved_tensors
         dx, dg, db_ln, dW, db = _compose_backward(
-            dY, x, mean, rstd, gamma, beta, W, ctx.has_bias, dx_via_quack=False,
+            dY.reshape(-1, dY.shape[-1]), x, mean, rstd, gamma, beta, W,
+            ctx.has_bias, dx_via_quack=False,
             shape_key=ctx.shape_key,
         )
-        return dx, dg, db_ln, dW, db, None, None
+        return dx.reshape(ctx.input_shape), dg, db_ln, dW, db, None, None
 
 
 def layernorm_linear_triton_fn(x, ln_weight, ln_bias, weight, bias=None, eps: float = 1e-5,
@@ -218,4 +219,15 @@ def layernorm_linear_triton_fn(x, ln_weight, ln_bias, weight, bias=None, eps: fl
 
     ``length`` is L (see ``layernorm_linear_fn``) -- the pre-flatten token/atom count, used only
     as the backward's autotune-cache label."""
+    if not x.is_cuda or x.dtype == torch.float64 or x.shape[-1] > 1024 or x.numel() == 0:
+        acc = torch.float64 if x.dtype == torch.float64 else torch.float32
+        xn = torch.nn.functional.layer_norm(
+            x.to(acc), (x.shape[-1],), ln_weight.to(acc), ln_bias.to(acc), eps)
+        return torch.nn.functional.linear(xn.to(x.dtype), weight, bias)
+    if x.dtype == torch.float32:
+        from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
+        # Keep a pre-flatten leading dimension for the norm's cache-key contract.
+        xn = layernorm_kernel(x.unsqueeze(0) if x.ndim == 2 else x,
+                              ln_weight, ln_bias, eps).reshape(x.shape)
+        return torch.nn.functional.linear(xn, weight, bias)
     return LayerNormLinearTritonFn.apply(x, ln_weight, ln_bias, weight, bias, eps, length)

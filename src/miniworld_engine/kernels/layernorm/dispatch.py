@@ -84,17 +84,20 @@ def _load(device_index: int) -> dict:
 
 
 @device_constant
-def lookup(device: torch.device, n: int, mb: int) -> str | None:
+def lookup(device: torch.device, n: int, mb: int, *, regime: str | None = None) -> str | None:
     idx = device.index if device.index is not None else torch.cuda.current_device()
-    entry = _load(idx).get(f"{n}|{mb}")
+    key = f"{n}|{mb}" if regime is None else f"{n}|{mb}|{regime}"
+    entry = _load(idx).get(key)
     return entry["path"] if entry else None
 
 
-def store(device: torch.device, n: int, mb: int, path: str, times_ms: dict[str, float]) -> None:
+def store(device: torch.device, n: int, mb: int, path: str, times_ms: dict[str, float],
+          *, regime: str | None = None) -> None:
     """Persist a choice. Atomic write; merges with the in-memory + on-disk cache."""
     idx = device.index if device.index is not None else torch.cuda.current_device()
     data = _load(idx)
-    data[f"{n}|{mb}"] = {"path": path, "ms": {k: round(v, 6) for k, v in times_ms.items()}}
+    key = f"{n}|{mb}" if regime is None else f"{n}|{mb}|{regime}"
+    data[key] = {"path": path, "ms": {k: round(v, 6) for k, v in times_ms.items()}}
     try:
         _cache_dir().mkdir(parents=True, exist_ok=True)
         fp = _file(idx)
