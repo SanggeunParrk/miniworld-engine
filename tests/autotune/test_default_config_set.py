@@ -1,21 +1,4 @@
-"""There must be a config set without setting an environment variable, and it must be `grid`.
-
-`MINIWORLD_CONFIG_DIR` used to be the only way a config set was ever selected. Unset, `_DIR`
-stayed None, every op registered an empty list, triton substituted its own `Config({})`, and the
-first launch of every triton kernel died with
-
-    TypeError: dynamic_func() missing 2 required positional arguments: 'BLOCK_M1' and 'BLOCK_K'
-
-which names neither the op nor the cause. Every sbatch script and every bench entry point in this
-repo exports the variable, so the failure only showed up when one of them did not -- a bench run
-with no `MINIWORLD_CONFIG_DIR`, where the `miniworld` row came back `status=failed` with that
-message while `pytorch` next to it was fine.
-
-The second test is the one that says WHICH set the default has to be: the cache reader intersects
-a shipped entry against the live config list, so a default narrower than the space the cache was
-built over resolves every entry to nothing and re-tunes on every call. That failure is silent --
-correct numbers, no warning, just slow.
-"""
+"""Packaged defaults stay small while validated global cache winners remain usable."""
 from __future__ import annotations
 
 import json
@@ -34,10 +17,10 @@ def test_a_config_set_is_selected_without_the_environment_variable():
     assert d.is_dir()
 
 
-def test_the_default_is_grid():
+def test_the_default_is_small():
     d = configs.default_config_dir()
     assert d is not None
-    assert d.name == "grid"
+    assert d.name == "default"
 
 
 def test_the_default_ships_inside_the_package():
@@ -47,7 +30,7 @@ def test_the_default_ships_inside_the_package():
     at all -- `default_config_dir()` would fall through to the RuntimeWarning and every triton
     kernel would fail at launch. The default set is packaged; the A-B sets stay at the root.
     """
-    packaged = Path(configs.__file__).parent / "configs" / "grid"
+    packaged = Path(configs.__file__).parent / "configs" / "default"
     assert packaged.is_dir(), "the default set is not inside the package; a wheel would ship none"
     assert configs.default_config_dir() == packaged, "the packaged copy is not the one chosen"
     assert len(list(packaged.glob("*.csv"))) > 70
@@ -127,7 +110,8 @@ def test_a_shipped_cache_entry_still_exists_in_the_default_config_set(op):
         entries = json.loads(f.read_text()).get("entries", {})
         for bucket, ranked in entries.items():
             hit = [c for c in ranked if cache._sig_from_dict(c) in live]
-            assert hit, f"{f.name} {bucket}: none of its {len(ranked)} configs is in the grid"
+            assert hit or configs.validated_global_configs(op, ranked), (
+                f"{f.name} {bucket}: no winner remains in the declared global domain")
 
 
 def test_every_runtime_data_extension_is_declared_as_package_data():

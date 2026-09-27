@@ -1,0 +1,78 @@
+{
+  "version": "2.1.0",
+  "date": "2026-09-27",
+  "gpu_used": false,
+  "slurm": {
+    "partition": "h100",
+    "qos": "normal_h100",
+    "gres": "none"
+  },
+  "full_cpu": {
+    "job": 19676,
+    "passed": 3967,
+    "failed": 16,
+    "skipped": 279,
+    "deselected_gpu": 1002,
+    "failures": [
+      "tests/autotune/test_compact_search_space.py::test_inventory_does_not_add_an_unreached_b2b_driver",
+      "tests/autotune/test_v210_policy.py::test_per_op_modes_preserve_atom_and_mpnn",
+      "tests/builder/test_jit_build_lock.py::test_every_jit_load_goes_through_the_guard",
+      "tests/compile/test_compile_wrap_coverage.py::test_every_launcher_is_opaque_or_only_reached_through_one",
+      "tests/compile/test_compile_wrap_coverage.py::test_op_names_start_with_their_family",
+      "tests/compile/test_compile_wrap_coverage.py::test_nothing_bypasses_the_compile_wrap_switch",
+      "tests/compile/test_fake_matches_body.py::test_every_op_and_fake_is_written_the_same_way",
+      "tests/consumer_updates/test_triton_backend_option.py::test_standalone_layernorm_cannot_select_cuda",
+      "tests/layout/test_kernel_layout.py::test_the_only_non_family_directories_are_the_harness",
+      "tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_counts_the_kernels_the_build_drives",
+      "tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_states_the_current_sweep_size",
+      "tests/layout/test_the_sweep_page_matches_the_repo.py::test_every_row_the_build_drives_is_on_the_page",
+      "tests/registry/test_a_release_has_been_run_on_a_card.py::test_the_released_version_has_run_on_a_card",
+      "tests/registry/test_both_level_row_key.py::test_every_both_level_family_names_all_three_streams_it_runs_on",
+      "tests/registry/test_key_flags_are_built_on_both_sides.py::test_every_boolean_key_flag_is_tuned_on_both_sides",
+      "tests/registry/test_no_stale_caches.py::test_no_committed_cache_is_stale_on_a_gpu_we_can_rebuild"
+    ]
+  },
+  "targeted": {
+    "job": 19680,
+    "passed": 164,
+    "skipped": 1,
+    "lint": "passed"
+  },
+  "resolved_after_full_run": [
+    "tests/autotune/test_v210_policy.py::test_per_op_modes_preserve_atom_and_mpnn",
+    "tests/registry/test_both_level_row_key.py::test_every_both_level_family_names_all_three_streams_it_runs_on"
+  ],
+  "remaining_failures": [
+    "tests/autotune/test_compact_search_space.py::test_inventory_does_not_add_an_unreached_b2b_driver",
+    "tests/builder/test_jit_build_lock.py::test_every_jit_load_goes_through_the_guard",
+    "tests/compile/test_compile_wrap_coverage.py::test_every_launcher_is_opaque_or_only_reached_through_one",
+    "tests/compile/test_compile_wrap_coverage.py::test_op_names_start_with_their_family",
+    "tests/compile/test_compile_wrap_coverage.py::test_nothing_bypasses_the_compile_wrap_switch",
+    "tests/compile/test_fake_matches_body.py::test_every_op_and_fake_is_written_the_same_way",
+    "tests/consumer_updates/test_triton_backend_option.py::test_standalone_layernorm_cannot_select_cuda",
+    "tests/layout/test_kernel_layout.py::test_the_only_non_family_directories_are_the_harness",
+    "tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_counts_the_kernels_the_build_drives",
+    "tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_states_the_current_sweep_size",
+    "tests/layout/test_the_sweep_page_matches_the_repo.py::test_every_row_the_build_drives_is_on_the_page",
+    "tests/registry/test_a_release_has_been_run_on_a_card.py::test_the_released_version_has_run_on_a_card",
+    "tests/registry/test_key_flags_are_built_on_both_sides.py::test_every_boolean_key_flag_is_tuned_on_both_sides",
+    "tests/registry/test_no_stale_caches.py::test_no_committed_cache_is_stale_on_a_gpu_we_can_rebuild"
+  ],
+  "remaining_explanation": "13 existing baseline failures plus the new 2.1.0 GPU release-manifest gate. The full suite was not rerun after the two fixes; targeted checks are separate evidence.",
+  "pending_gpu": [
+    "Actual dispatch and cache coverage on target GPU",
+    "Independent full forward/backward correctness",
+    "Changed-input CUDA Graph replay",
+    "Compute Sanitizer",
+    "Paired baseline/candidate timings over inference ladder and training L384/L768"
+  ],
+  "release_tag_created": false,
+  "registry_followup": {
+    "job": 19681,
+    "passed": 69
+  },
+  "parent_install_contract": {
+    "job": 19681,
+    "passed": 4
+  }
+}

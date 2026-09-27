@@ -474,7 +474,7 @@ CONFIG_ROOT = "configs"
 #: argument resolution before doing any work. Building the cache MEANS searching, so the full
 #: search grid is the only sensible default; the pinned single-config sets (blk*, warp*, mixed*)
 #: exist for A/B runs and have to be asked for by name.
-DEFAULT_CONFIG_SET = "grid"
+DEFAULT_CONFIG_SET = "default"
 
 
 def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
@@ -819,12 +819,16 @@ def cmd_build(args: argparse.Namespace) -> int:
     """Build the cache. The builder owns decomposition and multi-GPU execution; this only parses."""
     from miniworld_engine.autotune import builder
 
+    os.environ["MINIWORLD_BUILD_SCOPE"] = ("all" if getattr(args, "include_alternatives", False) else "production")
+    os.environ["MINIWORLD_BUILD_MODE"] = getattr(args, "mode", "both")
     repo = Path(__file__).resolve().parents[2]
     # Reject a name we already know is not a target BEFORE anything imports. Everything below --
     # apply_config_dir, cases(), op_units() -- imports every kernel module, which is minutes of
     # triton compilation, and `build <typo>` used to spend all of it before printing "unknown
     # case". Both name spaces are declared and readable without importing anything: CASE_NAMES is
     # a literal, and the per-op sweep's names are the first column of registry.csv.
+    if getattr(args, "backend", "auto") != "auto":
+        args.per_op = True
     rc = _reject_unknown_build_target(args, repo)
     if rc:
         return rc
@@ -858,6 +862,13 @@ def cmd_build(args: argparse.Namespace) -> int:
         stack = args.case if args.case in STACKS else None
         only = None if args.case == "all" or stack else set(_op_names(args.case))
         units = builder.op_units(only, config_dir=directory, stack=stack)
+        backend = getattr(args, "backend", "auto")
+        if backend != "auto":
+            from miniworld_engine.autotune.native import BUILD_OPS, build_ops_for_arch
+            native_ops = build_ops_for_arch((builder.device_sm() or "").replace("_", ""))
+            units = [u for u in units if (u.op in native_ops if backend == "native" else u.op not in BUILD_OPS)]
+        from miniworld_engine.autotune import policy
+        units = policy.filter_op_units(units)
         if not units:
             print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
             return None
@@ -1710,6 +1721,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "`bench_kernel` / `bench_module`.")
     bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
+    bld.add_argument("--backend", choices=("auto", "native", "triton"), default="auto",
+                     help="auto follows module dispatch; native/triton explicitly tune per-op drivers")
+    bld.add_argument("--include-alternatives", action="store_true",
+                     help="also tune forced fallback backends; default follows production dispatch")
+    bld.add_argument("--mode", choices=("both", "train", "eval"), default="both",
+                     help="training uses token L384/L768; inference keeps the full declared ladder")
     bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
     # Filling the gaps is what a build IS. It was opt-in, and the two ways to get a complete
     # cache were `--fill-gaps` (bench only the missing keys) and `--rebuild-cached` (re-measure

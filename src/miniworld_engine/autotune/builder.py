@@ -1388,7 +1388,12 @@ def units(selected: list[Case]) -> list[Unit]:
                     dt = str(dtype).replace("torch.", "")
                     for train in ((False, True) if case.train else (False,)):
                         mode = "train" if train else "eval"
+                        from miniworld_engine.autotune import policy
+                        if not policy.allows(case.stream_for(di), length, mode, "miniworld"):
+                            continue
                         for impl in (i for i in case.impls if (i, dt) in allowed):
+                            if not policy.allows(case.stream_for(di), length, mode, impl, impls=case.impls):
+                                continue
                             # "" = no compute-dtype argument at all, which is a DIFFERENT unit from
                             # passing the module's own dtype explicitly only in bookkeeping; cases
                             # without the axis keep their existing stems and stay resumable.
@@ -1398,6 +1403,8 @@ def units(selected: list[Case]) -> list[Unit]:
                                 out.append(Unit(case.name, di, length, train, dt,
                                                 impl=impl, compute=core))
                                 for switch in case.switches:
+                                    if not policy.allows(case.stream_for(di), length, mode, impl, (switch, ""), case.impls):
+                                        continue
                                     values, modes = SWITCHES[switch]
                                     if mode not in modes:
                                         continue
@@ -1983,8 +1990,10 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
 
             from miniworld_engine.autotune.cache import config_space_hash
             from miniworld_engine.autotune.configs import configs_for
+            from miniworld_engine.autotune.native import BUILD_OPS
             grids = [(op, config_space_hash(configs_for(op)))
-                     for op in sorted({op for op, _key in report["missing"]})]
+                     for op in sorted({op for op, _key in report["missing"]})
+                     if op not in BUILD_OPS]
             generation = hashlib.sha256(
                 repr((evidence["source_identity"], sorted(missing), grids)).encode()).hexdigest()[:12]
             work = [dataclasses.replace(u, generation=generation) for u in work]

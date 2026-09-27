@@ -1,29 +1,19 @@
-# Packaged config sets
+# Packaged Triton config spaces
 
-The autotune search space that **ships inside the wheel**. `configs.default_config_dir()`
-resolves `grid` from here when `MINIWORLD_CONFIG_DIR` is not set, which is what makes the
-package usable without exporting an environment variable.
+- `default/`: small per-kernel starting spaces, selected unless explicitly overridden.
+- `grid/`: the complete declared global domains, selected with `build all grid`.
+- `accuracy`, `blk*`, `warp*`, `mixed*`: historical development comparison sets.
 
-Only the default set lives here, and after `plan.md` P10 it lives here ONLY: `cli.resolve_config_dir`
-now falls back to this directory when the repo root has no `configs/<name>`, so `grid` has a single
-home instead of a repo-root copy kept byte-identical by a test. The repo root's `configs/` still
-holds the A-B sets used during development (`blk16` … `blk128`, `warp4`, `warp8`, `mixed1`,
-`mixed2`, `accuracy`); those are development inputs, not runtime data, and a consumer has no use
-for them. A set that exists in both places resolves to the repo's — that is where an experiment
-edits it.
+Every op has a CSV in both default and grid. The global domains and the existing
+resource/shape predictors remain intact. Explicit `MINIWORLD_CONFIG_DIR` selects
+its directory before kernels import. Sharding and multiple-GPU global builds
+remain supported. Defaults are not measurement results.
 
-`autotune/manifests/` is **not** a config set: it is the tracked per-GPU
-record of which kernels each card was observed to run, read by `autotune/devices.py`, and it holds
-one CSV per GPU rather than one per op. Passing it where a config set is expected fails at
-`resolve_config_dir` with "3/91 ops covered", which is the right answer but a confusing one if this
-paragraph does not exist.
+Runtime can reuse a compatible measured global winner outside the default search
+space after source/environment/key, global-domain and resource validation. A miss
+still searches the compact default set. Custom directories use only their own
+declared candidates.
 
-`grid` must stay the set the shipped `data/**` caches were tuned over: the cache reader intersects a
-stored entry against the live config list, so a narrower default would resolve every shipped entry
-to nothing and silently re-tune on every call. `tests/autotune/test_default_config_set.py` asserts exactly
-that against the committed caches, and also that there is only one copy of `grid`.
-
-These files are hand-maintained. They were generated once, by a `gen_shards` script that has
-since been deleted along with the rest of `tools/`: the ladders are now derived from measurement
-and edited in place, and a generator that regenerates them from a template would overwrite the
-evidence. `tests/registry/test_a_ladder_offers_what_wins.py` is what holds them honest instead.
+`dev/make_default_configs.py` generates the initial compact declarations. Review
+per-kernel changes and retain measured fast shapes before promotion; generation
+never rewrites grid or measured caches. See [v2.1 policy](../../../../docs/releases/2.1.0.md).

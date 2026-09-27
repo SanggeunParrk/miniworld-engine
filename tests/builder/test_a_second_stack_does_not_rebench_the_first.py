@@ -23,7 +23,7 @@ import json
 import pytest
 
 from miniworld_engine import cli
-from miniworld_engine.autotune import builder
+from miniworld_engine.autotune import builder, policy
 from miniworld_engine.autotune.configs import config_set
 
 
@@ -48,15 +48,15 @@ def _args(shards, case, *extra):
 
 def test_the_two_stacks_really_do_share_most_of_their_units() -> None:
     """The premise. If it stopped being true the guard below would be guarding nothing."""
-    cd = config_set("grid")
-    trunk = {u.stem for u in builder.op_units(config_dir=cd, stack="trunk")}
-    diff = {u.stem for u in builder.op_units(config_dir=cd, stack="diffusion")}
-    both = {u.stem for u in builder.op_units(config_dir=cd)}
+    cd = config_set("default")
+    trunk = {u.stem for u in _units(config_dir=cd, stack="trunk")}
+    diff = {u.stem for u in _units(config_dir=cd, stack="diffusion")}
+    both = {u.stem for u in _units(config_dir=cd)}
     # `mpnn` is a third stack and it IS disjoint from the other two. `both` means both STRUCTURE-model
     # halves -- a kernel those two share is launched by neither ProteinMPNN nor anything else --
     # so the sharing rule stops at the model boundary. It did not, and `build mpnn` spent its first
     # minute building gated_projection and layernorm at pair shapes.
-    mpnn = {u.stem for u in builder.op_units(stack="mpnn", config_dir=cd)}
+    mpnn = {u.stem for u in _units(stack="mpnn", config_dir=cd)}
     assert trunk & diff, "the stacks no longer overlap; this whole file is about the overlap"
     assert mpnn, "the mpnn stack reaches no unit at all"
     assert not (mpnn & (trunk | diff)), (
@@ -78,10 +78,10 @@ def _finish(shard_dir, unit) -> None:
 
 
 def test_a_finished_unit_is_skipped_by_the_second_stack(spy, tmp_path, capsys) -> None:
-    cd = config_set("grid")
-    shared = next(iter({u.stem for u in builder.op_units(config_dir=cd, stack="trunk")}
-                       & {u.stem for u in builder.op_units(config_dir=cd, stack="diffusion")}))
-    unit = next(u for u in builder.op_units(config_dir=cd, stack="diffusion") if u.stem == shared)
+    cd = config_set("default")
+    shared = next(iter({u.stem for u in _units(config_dir=cd, stack="trunk")}
+                       & {u.stem for u in _units(config_dir=cd, stack="diffusion")}))
+    unit = next(u for u in _units(config_dir=cd, stack="diffusion") if u.stem == shared)
     _finish(tmp_path, unit)
 
     assert cli.cmd_build(_args(tmp_path, "diffusion")) == 0
@@ -94,8 +94,8 @@ def test_a_finished_unit_is_skipped_by_the_second_stack(spy, tmp_path, capsys) -
 
 
 def test_no_resume_is_how_you_say_measure_it_all_again(spy, tmp_path, capsys) -> None:
-    cd = config_set("grid")
-    units = builder.op_units(config_dir=cd, stack="diffusion")
+    cd = config_set("default")
+    units = _units(config_dir=cd, stack="diffusion")
     _finish(tmp_path, units[0])
     assert cli.cmd_build(_args(tmp_path, "diffusion", "--no-resume")) == 0
     assert spy, "--no-resume must let the build through; builder.build_all does the filtering"
@@ -105,14 +105,14 @@ def test_no_resume_is_how_you_say_measure_it_all_again(spy, tmp_path, capsys) ->
 def test_an_empty_shard_dir_is_not_a_refusal(spy, tmp_path) -> None:
     """A first build must not need a flag to say it is the first."""
     assert cli.cmd_build(_args(tmp_path, "trunk")) == 0
-    assert spy == [len(builder.op_units(config_dir=config_set("grid"), stack="trunk"))]
+    assert spy == [len(_units(config_dir=config_set("default"), stack="trunk"))]
 
 
 def test_a_shard_with_no_entries_does_not_count_as_finished(spy, tmp_path) -> None:
     """`dump_shard` writes a file even when the unit measured nothing -- an unsupported shape, or a
     kernel that died before the first config. Those are exactly the units a restart must re-run, so
     they must not trigger the refusal either."""
-    units = builder.op_units(config_dir=config_set("grid"), stack="trunk")
+    units = _units(config_dir=config_set("default"), stack="trunk")
     (tmp_path / f"{units[0].stem}.json").write_text("{}")
     assert cli.cmd_build(_args(tmp_path, "trunk")) == 0
     assert spy
@@ -148,3 +148,7 @@ def test_the_cheap_test_still_separates_the_two_kinds_of_shard(tmp_path) -> None
     assert empty.stat().st_size <= cli._EMPTY_SHARD_BYTES < full.stat().st_size
     assert not _shard_has_entries(empty)
     assert _shard_has_entries(full)
+
+
+def _units(*args, **kwargs):
+    return policy.filter_op_units(builder.op_units(*args, **kwargs))

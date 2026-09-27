@@ -387,3 +387,23 @@ def trimul_parity_front_sm90():
     for save in (False, True):
         for pair_mask in (None, mask):
             bidir_front_sm90(*args, save_preact=save, pair_mask=pair_mask)
+
+
+def trimul_fwd_sm90_cuda():
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import inference
+    from miniworld_engine.autotune.fused_config import trimul_candidates
+    length, width = driver_length(384), driver_width(128)
+    x = torch.randn(1, length, length, width, device="cuda", dtype=BF16)
+    mask = torch.ones(1, length, length, device="cuda", dtype=torch.float32)
+    for hidden in (width, 2 * width):
+        if not trimul_candidates(width, hidden, length, 0):
+            continue
+        def weight(n, k):
+            return torch.randn(n, k, device="cuda", dtype=BF16) / k ** 0.5
+        def affine(n, bias=False):
+            return torch.zeros(n, device="cuda") if bias else torch.ones(n, device="cuda")
+        weights = [weight(hidden, width) for _ in range(4)]
+        weights += [weight(width, width), weight(width, hidden), affine(width), affine(width, True),
+                    affine(hidden), affine(hidden, True)]
+        for direction in (0, 1, 2):
+            inference(x, weights, mask, direction, 1e-5)

@@ -6,7 +6,20 @@ here. Format loosely follows
 
 The public surface is enforced by `tests/compile/test_public_api.py`.
 
-## [Unreleased]
+## [2.1.0] - 2026-09-27
+
+- Follow production backend dispatch when building caches; force alternative
+  implementations only with an explicit request.
+- Ship compact per-kernel Triton defaults while preserving global config spaces,
+  shared-memory prediction and opt-in multi-GPU global searches.
+- Keep compatible measured global winners usable without global runtime searches.
+- Restrict token training build lengths to 384/768 and preserve inference ladders.
+- Expose native-only inference builds and register exact-shape tuning for fused
+  Transition and packaged TriMul inference, including candidate output validation.
+- Document fixed/manual CUDA schedules separately from integrated autotuners.
+- GPU qualification of the new tuning integrations remains pending.
+
+### Consolidated work since 2.0.0
 
 - Fuse OPM/PWA training dropout and residual epilogues, retain live-weight graph
   replay, and record MSA comparisons with the standard depth of 1024.

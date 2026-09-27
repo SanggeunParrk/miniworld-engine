@@ -22,6 +22,8 @@ def task_for(op, config, bucket):
     from miniworld_engine.autotune.native import BUILD_OPS
     if op not in BUILD_OPS:
         return None
+    if op == "trimul_fwd_sm90_cuda":
+        return None  # payload build and driver context are owned by the allocated GPU process
     if op in ("trimul_inproj_gemm_gate_mmajor_sm90_cute",
               "trimul_output_f567_train_sm90_cute", "trimul_input_dual_bwd_sm90_cute"):
         # These launchers currently compile exact tensor layouts on the allocated
@@ -59,6 +61,10 @@ def _major(meta, first, last):
 def compile_task(task):
     """Compile only. No tensor allocation on CUDA, launch, timing or cache ranking."""
     op, c, ts = task["op"], task["config"], task["tensors"]
+    if op in ("transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda"):
+        from miniworld_engine.kernels.transition.cuda.fused_sm90a import _ext
+        _ext(c["ctas"], c["dw_repl"], bool(task["extra"][0]))
+        return
     if op.endswith("sm90_cuda"):
         from miniworld_engine.kernels.transition.cuda import _ext
         kind = {"transition_fwd_b2b_sm90_cuda": "b2b", "transition_bwd_gate_sm90_cuda": "gatebwd",

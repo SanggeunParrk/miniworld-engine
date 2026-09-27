@@ -25,6 +25,8 @@ from miniworld_engine.autotune.cache import (
 
 _WINNERS: dict = {}
 BUILD_OPS = frozenset({
+    "trimul_fwd_sm90_cuda",
+    "transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda",
     "trimul_output_bwd_rows_sm90_cute",
     "trimul_inproj_masked_sm90_cute",
     "transition_squeeze_residual_sm90_cute",
@@ -40,6 +42,10 @@ BUILD_OPS = frozenset({
 
 
 def native_shape_supported(op, width, dtype):
+    if op == "trimul_fwd_sm90_cuda":
+        return width in (64, 128, 256, 384, 512) and dtype == "bfloat16"
+    if op in ("transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda"):
+        return width == 128 and dtype == "bfloat16"
     if op in ("layernorm_fwd_cuda", "layernorm_bwd_split_cuda"):
         if op == "layernorm_bwd_split_cuda":
             alignment = 128 if dtype == "bfloat16" else 64
@@ -93,7 +99,8 @@ def source_identity() -> str:
               Path(__file__).with_name("hopper_cuda_config.py"),
               Path(__file__).with_name("native_compile.py"),
               Path(__file__).with_name("native_history.py"),
-              Path(__file__).with_name("trimul_sm90_config.py")]
+              Path(__file__).with_name("trimul_sm90_config.py"),
+              Path(__file__).with_name("fused_config.py")]
     for path in paths:
         if "notes" not in path.parts:
             digest.update(str(path.relative_to(root)).encode())
@@ -117,7 +124,7 @@ def source_identity() -> str:
 def policy_identity():
     """Search policy invalidates completed build units, never compatible timings."""
     digest = hashlib.sha256()
-    for name in ("cute_config.py", "hopper_cuda_config.py", "trimul_sm90_config.py"):
+    for name in ("cute_config.py", "hopper_cuda_config.py", "trimul_sm90_config.py", "fused_config.py"):
         digest.update(Path(__file__).with_name(name).read_bytes())
     from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS
     for name in sorted(TRITON_OPS.values()):
@@ -128,6 +135,13 @@ def policy_identity():
 
 def candidates_for(op, bucket):
     """CPU-readable declared grid for one exact native workload."""
+    tensors, extra = ast.literal_eval(bucket)
+    if op == "trimul_fwd_sm90_cuda":
+        from miniworld_engine.autotune.fused_config import trimul_candidates
+        return trimul_candidates(tensors[0][0][-1], tensors[1][0][0], tensors[0][0][1], extra[0])
+    if op in ("transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda"):
+        from miniworld_engine.autotune.fused_config import transition_candidates
+        return transition_candidates(extra[-1], backward="bwd" in op)
     from miniworld_engine.autotune.trimul_sm90_config import (
         TRITON_OPS,
         partition_for_bucket,
@@ -205,7 +219,7 @@ class _CacheConfigView(Sequence):
         return as_cfg_dict({"kwargs": dict(self._candidates[index])})
 
 
-def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None):
+def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None, validate=None):
     """Resolve one config; in a build, measure every candidate once per exact workload.
 
     The first candidate is the documented cache-miss default. Invalid candidates are
@@ -296,7 +310,9 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None)
                             record = {"status": native_history.compile_failure_status(result),
                                       "diagnostic": str(result)}
                         else:
-                            run(c)
+                            output = run(c)
+                            if validate is not None:
+                                validate(c, output)
                             torch.cuda.synchronize(device_index)
                             ms = float(bencher._do_bench(lambda c=c: run(c), quantiles=None,
                                                         return_mode="median"))

@@ -71,6 +71,7 @@ def test_sm_tag_is_the_file_stem():
 def test_units_drop_only_the_unbuildable_impls(sm, expected_impls, monkeypatch):
     monkeypatch.setattr(builder, "device_sm", lambda: sm)
     cases = [c for c in builder.cases() if c.name == "triangle_multiplication"]
+    monkeypatch.setenv("MINIWORLD_BUILD_SCOPE", "all")
     assert {u.impl for u in builder.units(cases)} == expected_impls
 
 

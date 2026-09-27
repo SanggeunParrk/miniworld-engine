@@ -16,7 +16,14 @@ to **cut one op out of the full model and optimize it in isolation**:
 
 Current A6000 validation, cache coverage, module timings and qualification limits: [final audit](docs/records/a6000-production-audit.md).
 
-## Version 2.0.0
+## Version 2.1.0
+
+CUDA-first production builds, small default Triton spaces, explicit global search,
+and separate inference/training tuning. [Policy, commands and qualification status](docs/releases/2.1.0.md).
+CUDA tuning coverage is family-specific; preserved measurement records do not
+imply that every inference shape has been re-tuned.
+
+## Version 2.0.0 history
 
 This release builds on Anthropic's stronger published inference kernels and adds
 training implementations. [Release map and migration](docs/releases/2.0.0.md) ·
@@ -287,7 +294,7 @@ from the code.
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
 | **sm80+** | A100, A5000, A6000, RTX 4090 | 113 | triton 107, cuda 6 |
-| **sm90+** | H100 | 21 | cute 13, triton 5, cuda 3 |
+| **sm90+** | H100 | 24 | cute 13, cuda 6, triton 5 |
 | **sm100+** | B200 | 4 | cute 4 |
 <!-- END GENERATED: hardware-support -->
 

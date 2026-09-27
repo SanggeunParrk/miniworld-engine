@@ -1,8 +1,9 @@
 # Consolidated development main (2026-09-27)
 
 All local branches and all fetched origin branches are ancestors of the consolidated
-main. Main is the development entry point; historical refs/worktrees remain as
-recovery points, not required extra branches to assemble a checkout.
+main. Main is the development entry point. Merged branch refs were subsequently
+deleted except the two MPNN refs; historical worktree files remain detached.
+This is the 2.0.0 consolidation snapshot; see ../releases/2.1.0.md for the new policy.
 
 Included implementations: current upstream main, D64 input-buffer barrier, Triton
 Norm dispatch/tuning, opt-in native Norm, TriMul wide-forward sources and Transition

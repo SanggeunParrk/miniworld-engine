@@ -121,7 +121,7 @@ def test_source_and_wheel_dispatch_identity_agree(monkeypatch, tmp_path):
     paths = ("settings.py", "kernels/registry_module.csv", "kernels/registry.csv",
              "modules/example.py", "kernels/example/triton/main.py",
              "autotune/builder.py", "autotune/checkpoint_cases.py", "autotune/derive.py", "autotune/module_registry.py",
-             "autotune/shape_key.py", "build/gpu_to_kernels/sm86.csv")
+             "autotune/shape_key.py", "autotune/policy.py", "build/gpu_to_kernels/sm86.csv")
     for relative in paths:
         path = source / relative
         path.parent.mkdir(parents=True, exist_ok=True)

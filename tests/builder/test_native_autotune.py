@@ -333,7 +333,10 @@ def test_native_launchers_use_registered_measurement_names():
     from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS
     # Parity resolves through trimul_sm90_config, whose op is a parameter.
     assert set(TRITON_OPS) <= native.BUILD_OPS
-    assert len(seen | set(TRITON_OPS)) == len(native.BUILD_OPS) - 3  # CUDA Transition constructs three names
+    dynamic = {"transition_fwd_b2b_sm90_cuda", "transition_expand_gate_sm90_cuda",
+               "transition_bwd_gate_sm90_cuda", "transition_fwd_residual_sm90_cuda",
+               "transition_bwd_residual_sm90_cuda"}
+    assert seen | set(TRITON_OPS) | dynamic == set(native.BUILD_OPS)
 
 
 def test_m2_rejects_unused_architecture_fields_before_compilation(monkeypatch):
