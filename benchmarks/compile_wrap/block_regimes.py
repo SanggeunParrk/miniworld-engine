@@ -1,6 +1,6 @@
 """Is plain torch.compile fast enough COMPARED TO eager + a captured CUDA graph?
 
-That is the question MiniWorld's config forces. `n_recycle_max == 1` gets
+That is the question the model's config forces. `n_recycle_max == 1` gets
 scripts/cudagraph_trainer.py: eager, with fwd+loss+bwd captured as ONE torch.cuda.CUDAGraph
 (measured 8-GPU: 71% -> ~96-100% util, ~1.8x). `n_recycle_max > 1` -- which is 4 of the 5
 top-level configs -- cannot capture a graph at all (the recycle depth varies), so it runs Fabric
@@ -102,7 +102,7 @@ failures = 0
 for impl_name, impl in (("pytorch", ImplementationType.PYTORCH),
                         ("miniworld", ImplementationType.MINIWORLD)):
     for mode, train in (("inference", False), ("training", True)):
-        # The two regimes MiniWorld actually runs, plus the two "what if" corners.
+        # The two regimes the model actually runs, plus the two "what if" corners.
         for compile_it, cudagraph in ((False, True), (True, False), (False, False), (True, True)):
             label = (f"wrap={args.wrap} impl={impl_name} mode={mode} "
                      f"compile_requested={str(compile_it).lower()} cudagraph={str(cudagraph).lower()}")

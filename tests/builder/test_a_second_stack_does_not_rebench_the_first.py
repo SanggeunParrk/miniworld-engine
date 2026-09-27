@@ -52,9 +52,18 @@ def test_the_two_stacks_really_do_share_most_of_their_units() -> None:
     trunk = {u.stem for u in builder.op_units(config_dir=cd, stack="trunk")}
     diff = {u.stem for u in builder.op_units(config_dir=cd, stack="diffusion")}
     both = {u.stem for u in builder.op_units(config_dir=cd)}
+    # `mpnn` is a third stack and it IS disjoint from the other two. `both` means both STRUCTURE-model
+    # halves -- a kernel those two share is launched by neither ProteinMPNN nor anything else --
+    # so the sharing rule stops at the model boundary. It did not, and `build mpnn` spent its first
+    # minute building gated_projection and layernorm at pair shapes.
+    mpnn = {u.stem for u in builder.op_units(stack="mpnn", config_dir=cd)}
     assert trunk & diff, "the stacks no longer overlap; this whole file is about the overlap"
-    assert trunk | diff == both, (
-        "trunk + diffusion is no longer the same work as `all`; one half now reaches a unit the "
+    assert mpnn, "the mpnn stack reaches no unit at all"
+    assert not (mpnn & (trunk | diff)), (
+        "an mpnn unit is reachable from a structure-model half; the two models share no kernel, "
+        "and a `both` row belongs to that model's two halves only")
+    assert trunk | diff | mpnn == both, (
+        "the halves are no longer the same work as `all`; one half now reaches a unit the "
         "full sweep does not, or the reverse")
     # Not a threshold on a number that may drift -- the claim is that the overlap is a big fraction
     # of either sweep, which is what makes re-benching it expensive rather than untidy.

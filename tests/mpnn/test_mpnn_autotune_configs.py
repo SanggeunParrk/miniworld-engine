@@ -1,0 +1,156 @@
+"""Static checks on the fused MPNN kernels' autotune grids.
+
+These run on CPU.  They exist because both failure modes below were first seen as a
+crash inside a multi-minute GPU job on a shared cluster, where the same information was
+available from the decorated function object all along.
+"""
+
+from __future__ import annotations
+
+import triton
+
+from miniworld_engine.kernels.mpnn_edge_tail.triton import compute as edge_tail_compute
+from miniworld_engine.kernels.mpnn_edge_tail.triton import main as edge_tail
+from miniworld_engine.kernels.mpnn_node_message.triton import main as node_message
+from miniworld_engine.kernels.mpnn_relative_position.triton import (
+    main as relative_position,
+)
+
+#: `edge_tail_compute` was missing, and with it six of the fourteen autotuned kernels -- so every
+#: check in this file ran on eight. The exemption list one of them carried named those six by hand,
+#: which made the omission look deliberate: the names were there, the kernels were not, and nothing
+#: reached them either way.
+_MODULES = (edge_tail, edge_tail_compute, node_message, relative_position)
+
+#: The number this file must see. A module dropped from `_MODULES` silently narrows every check
+#: here to whatever is left, which is exactly what happened.
+_AUTOTUNED_KERNELS = 14
+
+
+def _autotuned_kernels() -> list[tuple[str, triton.runtime.Autotuner]]:
+    found = []
+    for module in _MODULES:
+        for name in sorted(dir(module)):
+            candidate = getattr(module, name)
+            if isinstance(candidate, triton.runtime.Autotuner):
+                found.append((f"{module.__name__}.{name}", candidate))
+    return found
+
+
+def test_every_autotune_key_is_declared_by_its_kernel() -> None:
+    """A configuration may not carry a key its kernel does not take.
+
+    Triton raises ``KeyError: Keyword argument ... unrecognised`` at launch, not at
+    import, so a knob added to a shared configuration factory reaches every kernel
+    built from it and fails only on the ones that never declared it.
+    """
+    kernels = _autotuned_kernels()
+    assert len(kernels) == _AUTOTUNED_KERNELS, (
+        f"discovery found {len(kernels)} autotuned kernels, expected {_AUTOTUNED_KERNELS} -- "
+        f"a module missing from _MODULES narrows every check in this file: "
+        f"{sorted(n for n, _ in kernels)}")
+
+    for name, kernel in kernels:
+        declared = set(kernel.fn.arg_names)
+        for config in kernel.configs:
+            undeclared = sorted(set(config.kwargs) - declared)
+            assert not undeclared, f"{name} has no parameter {undeclared} for {config}"
+
+
+def test_no_autotune_knob_is_pinned_to_a_single_value() -> None:
+    """Every knob offered must vary across the grid.
+
+    A knob fixed on the strength of one measurement hides the winner from a tuner that
+    can only choose from the list it is given.  Three separate regressions in this
+    file's history were exactly that; see ``_configs`` for the measurements.
+    """
+    for name, kernel in _autotuned_kernels():
+        knobs: dict[str, set[object]] = {}
+        for config in kernel.configs:
+            for knob, value in config.kwargs.items():
+                knobs.setdefault(knob, set()).add(value)
+            knobs.setdefault("num_warps", set()).add(config.num_warps)
+            knobs.setdefault("num_stages", set()).add(config.num_stages)
+
+        pinned = sorted(knob for knob, values in knobs.items() if len(values) == 1)
+        assert not pinned, f"{name} pins {pinned} to one value each"
+
+
+def test_every_kernel_is_wired_to_the_committed_autotune_cache() -> None:
+    """Each grid must be narrowable by the repository's per-GPU cache.
+
+    The grids here are deliberately large -- 324 configurations for the norm pass --
+    because pinning a knob has hidden the winner three times.  The cache is where that
+    compile cost is meant to be paid: it narrows to a measured top-K without pinning,
+    and it is what every other kernel family in the package already uses.
+    """
+    # The hook this used to name -- a per-kernel `make_cache_prune` object carrying a hand-written
+    # `key_bucket_of(...)` -- was deleted in fcd3c7a, and its absence WAS the bug: every capture
+    # after it recorded the single bucket `any|any`, one config per op for every shape. What
+    # replaced it needs no per-kernel wiring: `install_cache_pruning` narrows every autotuner to
+    # the cached top-K, and `bucket_of_autotuner` reads the bucket from the kernel's own
+    # `key=[...]`. So the thing to check is no longer a hook per kernel, it is that each kernel
+    # keys on the shape at all -- without `shape_key` in `key`, one bucket serves every shape and
+    # the cache is back to `any|any` by another route.
+    # The mpnn kernels used to key on their own dimension names (`rows`, `NEIGHBORS`, `buckets`,
+    # `groups_total`) and this test carried a fourteen-name exemption list while they were ported.
+    # Both forms work -- triton re-tunes per distinct key tuple either way -- but only the packed
+    # key is comparable across kernels, and the cache reader, the builder, the coverage checks and
+    # the sweep page all speak that one vocabulary. The list is empty now, so there is none.
+    keyless = []
+    for name, kernel in _autotuned_kernels():
+        keys = list(getattr(kernel, "keys", []) or [])
+        if "shape_key" not in keys:
+            keyless.append(f"{name}: key={keys}")
+    assert not keyless, (
+        "autotuned kernels that do not key on shape_key, so one cache bucket serves every shape:"
+        "\n  " + "\n  ".join(keyless))
+
+
+def test_cache_buckets_do_not_depend_on_the_row_count() -> None:
+    """A bucket keyed on the row count needs one cache entry per batch size, which is no cache.
+
+    This used to read the answer off a `_miniworld_bucket_of` attribute that `make_cache_prune`
+    hung on each kernel. Both are gone (fcd3c7a); the bucket now comes from the kernel's own
+    `key=[...]` through `bucket_of_autotuner`. So the check reads the key list instead, which is
+    the thing that decides it.
+
+    The mpnn families were exempt here while they keyed on `rows` / `groups_total`; they are on
+    `shape_key` now, so the rule covers every autotuned kernel in the package with no exceptions.
+    """
+    ROW_LIKE = {"rows", "groups_total", "M", "m", "numel", "n_elements"}
+    bad = []
+    for name, kernel in _autotuned_kernels():
+        keys = set(getattr(kernel, "keys", []) or [])
+        if keys & ROW_LIKE:
+            bad.append(f"{name}: key={sorted(keys)}")
+    assert not bad, (
+        "kernels keyed on a row count, which needs one cache entry per batch size:\n  "
+        + "\n  ".join(bad))
+
+
+def test_a_constexpr_flag_is_in_the_key_and_not_in_the_shape() -> None:
+    """A flag belongs BESIDE `shape_key`, never packed into it.
+
+    Both are true at once and they pull opposite ways. A flag has to be in `key=[...]` -- each
+    value compiles a different kernel, so the config that wins with dropout on is not the one that
+    wins with it off, and a shared bucket averages them. And it cannot be packed INTO `shape_key`,
+    because `pack` is for widths and refuses a zero: a zero digit is indistinguishable from an
+    absent axis, so two shapes would share a key. A flag that is OFF is exactly that zero.
+
+    Folding `DROPOUT` in raised `ShapeKeyTooWide` on every launch with dropout disabled -- every
+    inference launch, and every training launch at p=0. Nothing on CPU caught it: these kernels
+    only run on a card, so eleven GPU tests were the first thing to say so. This check is static.
+    """
+    FLAGS = ("DROPOUT", "EMIT_BIAS")
+    missing = []
+    for name, kernel in _autotuned_kernels():
+        fn = getattr(kernel, "fn", kernel)
+        params = set(getattr(getattr(fn, "fn", fn), "__annotations__", {}))
+        params |= set(getattr(fn, "arg_names", []) or [])
+        keys = set(getattr(kernel, "keys", []) or [])
+        missing.extend(f"{name}: has {flag} but key={sorted(keys)}"
+                       for flag in FLAGS if flag in params and flag not in keys)
+    assert not missing, (
+        "constexpr flags that change the compiled kernel but do not appear in its autotune key:"
+        "\n  " + "\n  ".join(missing))

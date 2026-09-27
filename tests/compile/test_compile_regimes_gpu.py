@@ -1,4 +1,4 @@
-"""The graph the compiler actually gets, in the shapes MiniWorld trains in.
+"""The graph the compiler actually gets, in the shapes the model trains in.
 
 ``compile_wrap="custom_op"`` is only worth being the default if the single graph it produces
 SURVIVES the things real training does to a model. Three of those are not visible in a

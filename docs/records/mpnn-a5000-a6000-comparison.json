@@ -1,0 +1,420 @@
+{
+  "status": "complete",
+  "source_commit": "17492754",
+  "a6000_job_id": "1682218",
+  "a6000_node": "gpu01",
+  "a5000_job_id": "1680997",
+  "a5000_node": "gpu02",
+  "source_hash": "24038f7ed5f9dd34076e3819a9183c333c38b358e90262272bd91bc30f277fa1",
+  "scope": "A6000; B8 L8192 K48 D128 3+3; BF16 autocast, FP32 params and AdamW; dropout .25; fullgraph forward/AOT backward; CUDA graphs off; no checkpoint; no accumulation; no allocator cap; 7 timing samples + 20 validation steps per fresh process",
+  "comparison": {
+    "same_policy_a6000_speedup_over_a5000": 1.2340758122636728,
+    "same_policy_a6000_step_time_reduction_pct": 18.9677011685616,
+    "all_compute_step_time_reduction_vs_current_a6000_pct": 2.2180045427746986,
+    "fastest_a6000_step_time_reduction_vs_current_a6000_pct": 3.4143911855812448,
+    "current_a6000_step_time_overhead_vs_fastest_pct": 3.5350930925348356,
+    "fastest_a6000_speedup_over_a5000_current": 1.277701541059649,
+    "current_a6000_allocated_memory_saving_vs_fastest_gib": 3.515625
+  },
+  "records": [
+    {
+      "device": "NVIDIA RTX A5000",
+      "base_model_config": {
+        "sequence_vocabulary": 21,
+        "output_vocabulary": 21,
+        "node_width": 128,
+        "edge_width": 128,
+        "hidden_width": 128,
+        "encoder_depth": 3,
+        "decoder_depth": 3,
+        "k_neighbors": 48,
+        "coordinate_noise": 0,
+        "dropout": 0.25,
+        "block_linear_min_edges": 0,
+        "message_backend": "triton_compute",
+        "edge_mlp_backend": "triton_compute",
+        "edge_norm_backend": "pytorch",
+        "feature_backend": "memory",
+        "relative_position_backend": "triton",
+        "knn_backend": "cdist",
+        "knn_query_chunk": 2048,
+        "knn_cutoff": 16.0,
+        "edge_w1_recompute": "off",
+        "encoder_node_w1_recompute": "off",
+        "decoder_node_w1_recompute": "off",
+        "transition_recompute": "off",
+        "edge_dropout_backend": "pytorch",
+        "edge_tail_backend": "triton_compute",
+        "node_message_backend": "triton_compute"
+      },
+      "configuration": {
+        "feature_backend": "memory",
+        "node_mask": 1,
+        "tail_mask": 0,
+        "decoder_mask": 0,
+        "timing_cap_gib": 22.5,
+        "cap_gib": 22.0,
+        "repeats": 7,
+        "validation_steps": 20,
+        "expected_device": "A5000",
+        "out": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a5000-1680997/confirm-new-node1.json"
+      },
+      "source_hash": "24038f7ed5f9dd34076e3819a9183c333c38b358e90262272bd91bc30f277fa1",
+      "script_hash": "21c7d75dbdbc237c239dea958cb613adee4684e98f9db050e41882e7421b831f",
+      "actual_kernel_dispatch": {
+        "node:SAVE_PREACT=False": 1,
+        "tail_compute_forward": 3,
+        "node:SAVE_PREACT=True": 2,
+        "message_projection": 3,
+        "tail_compute_backward": 3,
+        "feature_radial_backward": 1
+      },
+      "resolved_policy": {
+        "encoder_node": [
+          "triton",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ]
+      },
+      "checkpoint_api_calls": 0,
+      "median_step_ms": 546.6132202148438,
+      "peak_allocated_gib": 21.846173763275146,
+      "peak_reserved_gib": 21.97265625,
+      "timing_peak_allocated_gib": 21.858761310577393,
+      "timing_peak_reserved_gib": 22.458984375,
+      "timing_includes_optimizer": true,
+      "batch": 8,
+      "length": 8192,
+      "scope": "Fullgraph forward, AOTAutograd backward, eager AdamW; graph OFF; real B8 L8192 no accumulation; all checkpoints OFF; per-layer memory masks bit0=first layer; fresh process per candidate",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "allocator_configuration": "expandable_segments:True",
+      "label": "A5000 current",
+      "record": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a5000-1680997/confirm-new-node1.json",
+      "record_sha256": "e1f6179ee1d098eeac6770dfb88900e6e65c137636423d05e441d4b86631c2f4",
+      "sample_ms": [
+        544.3594360351562,
+        545.0987548828125,
+        547.2870483398438,
+        546.6132202148438,
+        547.4488525390625,
+        547.7929077148438,
+        545.3619384765625
+      ],
+      "validated_extra_steps": 20
+    },
+    {
+      "device": "NVIDIA RTX A6000",
+      "base_model_config": {
+        "sequence_vocabulary": 21,
+        "output_vocabulary": 21,
+        "node_width": 128,
+        "edge_width": 128,
+        "hidden_width": 128,
+        "encoder_depth": 3,
+        "decoder_depth": 3,
+        "k_neighbors": 48,
+        "coordinate_noise": 0,
+        "dropout": 0.25,
+        "block_linear_min_edges": 0,
+        "message_backend": "triton_compute",
+        "edge_mlp_backend": "triton_compute",
+        "edge_norm_backend": "pytorch",
+        "feature_backend": "memory",
+        "relative_position_backend": "triton",
+        "knn_backend": "cdist",
+        "knn_query_chunk": 2048,
+        "knn_cutoff": 16.0,
+        "edge_w1_recompute": "off",
+        "encoder_node_w1_recompute": "off",
+        "decoder_node_w1_recompute": "off",
+        "transition_recompute": "off",
+        "edge_dropout_backend": "pytorch",
+        "edge_tail_backend": "triton_compute",
+        "node_message_backend": "triton_compute"
+      },
+      "configuration": {
+        "feature_backend": "memory",
+        "node_mask": 1,
+        "tail_mask": 0,
+        "decoder_mask": 0,
+        "timing_cap_gib": null,
+        "cap_gib": 0.0,
+        "repeats": 7,
+        "validation_steps": 20,
+        "expected_device": "A6000",
+        "out": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a6000-compare-1682218/current.json"
+      },
+      "source_hash": "24038f7ed5f9dd34076e3819a9183c333c38b358e90262272bd91bc30f277fa1",
+      "script_hash": "21c7d75dbdbc237c239dea958cb613adee4684e98f9db050e41882e7421b831f",
+      "actual_kernel_dispatch": {
+        "node:SAVE_PREACT=False": 1,
+        "tail_compute_forward": 3,
+        "node:SAVE_PREACT=True": 2,
+        "message_projection": 3,
+        "tail_compute_backward": 3,
+        "feature_radial_backward": 1
+      },
+      "resolved_policy": {
+        "encoder_node": [
+          "triton",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ]
+      },
+      "checkpoint_api_calls": 0,
+      "median_step_ms": 442.9332580566406,
+      "peak_allocated_gib": 21.846173763275146,
+      "peak_reserved_gib": 22.068359375,
+      "timing_peak_allocated_gib": 21.858761310577393,
+      "timing_peak_reserved_gib": 22.732421875,
+      "timing_includes_optimizer": true,
+      "batch": 8,
+      "length": 8192,
+      "scope": "Fullgraph forward, AOTAutograd backward, eager AdamW; graph OFF; real B8 L8192 no accumulation; all checkpoints OFF; per-layer memory masks bit0=first layer; fresh process per candidate",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "allocator_configuration": "expandable_segments:True",
+      "label": "A6000 current",
+      "record": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a6000-compare-1682218/current.json",
+      "record_sha256": "3e0d2fc56ad0e17fd977188946db17f4bb26e44bf5b5dcdfdff87e72c37e1ffa",
+      "sample_ms": [
+        441.0941467285156,
+        441.03680419921875,
+        442.9332580566406,
+        442.9148254394531,
+        443.18719482421875,
+        443.8466491699219,
+        443.65106201171875
+      ],
+      "validated_extra_steps": 20
+    },
+    {
+      "device": "NVIDIA RTX A6000",
+      "base_model_config": {
+        "sequence_vocabulary": 21,
+        "output_vocabulary": 21,
+        "node_width": 128,
+        "edge_width": 128,
+        "hidden_width": 128,
+        "encoder_depth": 3,
+        "decoder_depth": 3,
+        "k_neighbors": 48,
+        "coordinate_noise": 0,
+        "dropout": 0.25,
+        "block_linear_min_edges": 0,
+        "message_backend": "triton_compute",
+        "edge_mlp_backend": "triton_compute",
+        "edge_norm_backend": "pytorch",
+        "feature_backend": "memory",
+        "relative_position_backend": "triton",
+        "knn_backend": "cdist",
+        "knn_query_chunk": 2048,
+        "knn_cutoff": 16.0,
+        "edge_w1_recompute": "off",
+        "encoder_node_w1_recompute": "off",
+        "decoder_node_w1_recompute": "off",
+        "transition_recompute": "off",
+        "edge_dropout_backend": "pytorch",
+        "edge_tail_backend": "triton_compute",
+        "node_message_backend": "triton_compute"
+      },
+      "configuration": {
+        "feature_backend": "memory",
+        "node_mask": 0,
+        "tail_mask": 0,
+        "decoder_mask": 0,
+        "timing_cap_gib": null,
+        "cap_gib": 0.0,
+        "repeats": 7,
+        "validation_steps": 20,
+        "expected_device": "A6000",
+        "out": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a6000-compare-1682218/all-compute.json"
+      },
+      "source_hash": "24038f7ed5f9dd34076e3819a9183c333c38b358e90262272bd91bc30f277fa1",
+      "script_hash": "21c7d75dbdbc237c239dea958cb613adee4684e98f9db050e41882e7421b831f",
+      "actual_kernel_dispatch": {
+        "node:SAVE_PREACT=True": 3,
+        "tail_compute_forward": 3,
+        "message_projection": 3,
+        "tail_compute_backward": 3,
+        "feature_radial_backward": 1
+      },
+      "resolved_policy": {
+        "encoder_node": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ]
+      },
+      "checkpoint_api_calls": 0,
+      "median_step_ms": 433.1089782714844,
+      "peak_allocated_gib": 23.314923763275146,
+      "peak_reserved_gib": 23.943359375,
+      "timing_peak_allocated_gib": 23.327511310577393,
+      "timing_peak_reserved_gib": 23.943359375,
+      "timing_includes_optimizer": true,
+      "batch": 8,
+      "length": 8192,
+      "scope": "Fullgraph forward, AOTAutograd backward, eager AdamW; graph OFF; real B8 L8192 no accumulation; all checkpoints OFF; per-layer memory masks bit0=first layer; fresh process per candidate",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "allocator_configuration": "expandable_segments:True",
+      "label": "A6000 all compute, regenerate RBF",
+      "record": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a6000-compare-1682218/all-compute.json",
+      "record_sha256": "bcb265d38c7603d17374dd452f726a0f4d16069a3574f5f9df628f42c18f35f5",
+      "sample_ms": [
+        432.7096252441406,
+        432.7065734863281,
+        433.1704406738281,
+        432.8069152832031,
+        433.1089782714844,
+        434.1370849609375,
+        434.3480224609375
+      ],
+      "validated_extra_steps": 20
+    },
+    {
+      "device": "NVIDIA RTX A6000",
+      "base_model_config": {
+        "sequence_vocabulary": 21,
+        "output_vocabulary": 21,
+        "node_width": 128,
+        "edge_width": 128,
+        "hidden_width": 128,
+        "encoder_depth": 3,
+        "decoder_depth": 3,
+        "k_neighbors": 48,
+        "coordinate_noise": 0,
+        "dropout": 0.25,
+        "block_linear_min_edges": 0,
+        "message_backend": "triton_compute",
+        "edge_mlp_backend": "triton_compute",
+        "edge_norm_backend": "pytorch",
+        "feature_backend": "pytorch",
+        "relative_position_backend": "triton",
+        "knn_backend": "cdist",
+        "knn_query_chunk": 2048,
+        "knn_cutoff": 16.0,
+        "edge_w1_recompute": "off",
+        "encoder_node_w1_recompute": "off",
+        "decoder_node_w1_recompute": "off",
+        "transition_recompute": "off",
+        "edge_dropout_backend": "pytorch",
+        "edge_tail_backend": "triton_compute",
+        "node_message_backend": "triton_compute"
+      },
+      "configuration": {
+        "feature_backend": "pytorch",
+        "node_mask": 0,
+        "tail_mask": 0,
+        "decoder_mask": 0,
+        "timing_cap_gib": null,
+        "cap_gib": 0.0,
+        "repeats": 7,
+        "validation_steps": 20,
+        "expected_device": "A6000",
+        "out": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a6000-compare-1682218/all-compute-save-rbf.json"
+      },
+      "source_hash": "24038f7ed5f9dd34076e3819a9183c333c38b358e90262272bd91bc30f277fa1",
+      "script_hash": "21c7d75dbdbc237c239dea958cb613adee4684e98f9db050e41882e7421b831f",
+      "actual_kernel_dispatch": {
+        "node:SAVE_PREACT=True": 3,
+        "tail_compute_forward": 3,
+        "message_projection": 3,
+        "tail_compute_backward": 3
+      },
+      "resolved_policy": {
+        "encoder_node": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ]
+      },
+      "checkpoint_api_calls": 0,
+      "median_step_ms": 427.8097839355469,
+      "peak_allocated_gib": 25.361798763275146,
+      "peak_reserved_gib": 25.974609375,
+      "timing_peak_allocated_gib": 25.374386310577393,
+      "timing_peak_reserved_gib": 25.974609375,
+      "timing_includes_optimizer": true,
+      "batch": 8,
+      "length": 8192,
+      "scope": "Fullgraph forward, AOTAutograd backward, eager AdamW; graph OFF; real B8 L8192 no accumulation; all checkpoints OFF; per-layer memory masks bit0=first layer; fresh process per candidate",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "allocator_configuration": "expandable_segments:True",
+      "label": "A6000 all compute, retain RBF",
+      "record": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a6000-compare-1682218/all-compute-save-rbf.json",
+      "record_sha256": "4a9bc809a327f74c1eec88695355158673339fb485b7bcef91afdc77edac00f5",
+      "sample_ms": [
+        426.8216247558594,
+        426.50213623046875,
+        427.58245849609375,
+        427.8097839355469,
+        428.0504455566406,
+        428.1866149902344,
+        427.87738037109375
+      ],
+      "validated_extra_steps": 20
+    }
+  ],
+  "hardware_sample": {
+    "scope": "Allocated A6000, sampled during all-compute run; instantaneous, not a run average",
+    "uuid": "GPU-8216929f-6220-d20a-9a8d-d6e677a15987",
+    "pstate": "P0",
+    "sm_clock_mhz": 1710,
+    "memory_clock_mhz": 8001,
+    "power_limit_w": 300,
+    "power_draw_w": 291.04,
+    "temperature_c": 82,
+    "gpu_utilization_pct": 100
+  },
+  "limitations": [
+    "A6000 candidates ran sequentially on the same allocated card; the A5000 result is the earlier completed confirmation, not a simultaneous cross-GPU trial.",
+    "A6000 used its full available allocator capacity for all three candidates. A5000 training used a 22 GiB cap and the shared timer used 22.5 GiB to accommodate its 256 MiB flush buffer.",
+    "These are warmed execution times; cold compile/warmup is excluded. The 20 checked optimizer steps per candidate do not establish long-run convergence.",
+    "No exhaustive new autotune-cache build was performed. The frozen sources use the existing runtime heuristic shortlist when tuned MPNN caches are absent.",
+    "Historical A6000 records used a different allocation and some different allocator caps; use this same-allocation comparison for policy differences. No specific cause is assigned to the change in absolute times."
+  ]
+}
