@@ -9,15 +9,18 @@ import torch
 
 _AUG = Path(__file__).resolve().parents[2] / "augattn_sm100"
 _CUBIN = _AUG / "build" / "attn_inf.cubin"
+_CUBIN2 = _AUG / "build" / "attn_inf2.cubin"
 
 
 class InfCore:
-    def __init__(self, cubin=_CUBIN, pdl=False):
+    def __init__(self, cubin=None, pdl=False, v2=True):
+        self.v2 = v2 and (cubin is None) and _CUBIN2.exists()
+        cubin = cubin or (_CUBIN2 if self.v2 else _CUBIN)
         if str(_AUG) not in sys.path:
             sys.path.insert(0, str(_AUG))
         import drv
         self.drv = drv
-        self.k = drv.Kernel(str(cubin), "augattn_inf_sm100", 232448, pdl=pdl)
+        self.k = drv.Kernel(str(cubin), "augattn_inf2_sm100" if self.v2 else "augattn_inf_sm100", 232448, pdl=pdl)
         self.nsm = torch.cuda.get_device_properties(0).multi_processor_count
         self.runs = {}
 
@@ -30,7 +33,7 @@ class InfCore:
         bv = bias[block * H:(block + 1) * H]             # this block's heads, [H, L, L] -> rows H L of L keys
         maps = (tm(q, [D, M], rs, [DH, 128]), tm(k, [D, M], rs, [DH, 64]), tm(v, [D, M], rs, [DH, 64]),
                 tm(bv, [L, H * L], L * bias.element_size(), [64, 128]), tm(g, [D, M], rs, [DH, 128]))
-        items = ((S + 1) // 2) * H * (L // 128)
+        items = (S if self.v2 else (S + 1) // 2) * H * (L // 128)
         grid = (min(self.nsm, items), 1, 1)
         mq, mk, mv, mb, mg = maps
 

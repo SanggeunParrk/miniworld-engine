@@ -21,6 +21,7 @@ p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=384)
 p.add_argument("--augment", type=int, default=48)
 p.add_argument("--reps", type=int, default=5)
+p.add_argument("--stack", type=int, default=1, help="blocks chained (per-block times reported); the fused path hoists the pair bias")
 p.add_argument("--variants", nargs="+", default=["pytorch", "engine", "engine-bf16"])
 p.add_argument("--gradreport", action="store_true", help="per-tensor grad rel error of every variant vs the first")
 p.add_argument("--profile", action="store_true", help="per-kernel breakdown of one forward+backward of the last variant")
@@ -33,14 +34,14 @@ torch.manual_seed(0)
 
 def make(impl):
     torch.manual_seed(0)
-    m = DiTBlock(768, 384, 128, 16, 2, use_qk_norm=True, implementation=impl).to(dev)
+    ms = torch.nn.ModuleList([DiTBlock(768, 384, 128, 16, 2, use_qk_norm=True, implementation=impl) for _ in range(a.stack)]).to(dev)
     with torch.no_grad():                                           # non-zero everywhere (zero-init outputs would hide work)
-        for prm in m.parameters():
+        for prm in ms.parameters():
             if prm.ndim == 2:
                 prm.normal_(std=prm.shape[1] ** -0.5 * 0.5)
             elif prm.numel() > 1:
                 prm.add_(torch.randn_like(prm) * 0.1)
-    return m
+    return ms
 
 
 g = torch.Generator(device=dev).manual_seed(1)
@@ -85,8 +86,14 @@ def use_b200_core(on):
 def run_variant(name):
     use_b200_core(name == "engine-b200")
     impl = ImplementationType.PYTORCH if name == "pytorch" else ImplementationType.MINIWORLD
-    if name == "tdit-b200":
-        from tdit.train_b200 import block_forward
+    from tdit.train_b200 import stack_forward
+
+    def run(x):
+        if name == "tdit-b200":
+            return stack_forward(list(m), x, cond, pair)
+        for blk in m:
+            x = blk(x, cond, pair, None, **kw)
+        return x
     kw = {"compute_dtype": torch.bfloat16} if name in ("engine-bf16", "engine-b200") else {}
     m = make(impl)
     single, cond, pair = (t.clone().requires_grad_(True) for t in (single0, cond0, pair0))
@@ -95,13 +102,13 @@ def run_variant(name):
         for t in (single, cond, pair):
             t.grad = None
         m.zero_grad(set_to_none=True)
-        out = block_forward(m, single, cond, pair) if name == "tdit-b200" else m(single, cond, pair, None, **kw)
+        out = run(single)
         out.float().backward(dout)
         return out
 
     def fwd():
         with torch.no_grad():
-            return block_forward(m, single, cond, pair) if name == "tdit-b200" else m(single, cond, pair, None, **kw)
+            return run(single)
 
     def timed(fn):
         for _ in range(2):
@@ -135,11 +142,11 @@ def run_variant(name):
             print(f"    {t:8.1f} us  x{n:<3d} {k[:110]}")
     peak = torch.cuda.max_memory_allocated() / 2**30
     torch.cuda.reset_peak_memory_stats()
-    return t_fwd, t_train, grads, peak
+    return t_fwd / a.stack, t_train / a.stack, grads, peak
 
 
 ref = None
-print(f"[token DiT training] one block, A={A}, L={L}, qk_norm, fp32 params")
+print(f"[token DiT training] {a.stack} block(s), per-block times, A={A}, L={L}, qk_norm, fp32 params")
 for name in a.variants:
     t_fwd, t_train, gr, peak = run_variant(name)
     if ref is None:

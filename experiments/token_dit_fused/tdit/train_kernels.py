@@ -314,28 +314,33 @@ def _pair_bias_fwd(PAIR, WP, WB, BIAS, PST, R2, eps, ROWS: tl.constexpr):
 
 
 @triton.jit
-def _pair_bias_bwd(DB, PAIR, PST, WP, WB, DPAIR, PART, R2, ROWS: tl.constexpr):
-    """dbias [16, L L] fp32 -> dpair (fp32) and per-program partials of dWbias [16, 128] and dwp [128] -> PART[pid, 17, 128]."""
+def _pair_bias_bwd(DB, PAIR, PST, WP, WB, DPAIR, PART, R2, NIT, ROWS: tl.constexpr):
+    """dbias [16, L L] fp32 -> dpair (fp32); dWbias [16, 128] and dwp [128] accumulated in registers over this program's NIT
+    row chunks, then added once into PART[17, 128] (atomics per program, not per chunk)."""
     pid = tl.program_id(0)
-    r = pid * ROWS + tl.arange(0, ROWS)
     c = tl.arange(0, 128)
     hh = tl.arange(0, 16)
-    rm = r < R2
-    db = tl.load(DB + hh[None, :] * R2 + r[:, None], mask=rm[:, None], other=0.0)          # [ROWS, 16]
     wb = tl.load(WB + hh[:, None] * 128 + c[None, :])                                      # [16, 128]
-    dpn = tl.dot(db, wb, input_precision="tf32")                                           # [ROWS, 128]
-    p = tl.load(PAIR + r[:, None] * 128 + c[None, :], mask=rm[:, None], other=0.0)
-    mean = tl.load(PST + r * 2, mask=rm, other=0.0)
-    rstd = tl.load(PST + r * 2 + 1, mask=rm, other=0.0)
-    ph = tl.where(rm[:, None], (p - mean[:, None]) * rstd[:, None], 0.0)
     wp = tl.load(WP + c)
-    tl.atomic_add(PART + 16 * 128 + c, tl.sum(dpn * ph, 0), sem="relaxed")
-    dwb = tl.dot(tl.trans(db), ph * wp[None, :], input_precision="tf32")                   # [16, 128]
-    tl.atomic_add(PART + hh[:, None] * 128 + c[None, :], dwb, sem="relaxed")
-    dxh = dpn * wp[None, :]
-    m1 = tl.sum(dxh, 1) / 128
-    m2 = tl.sum(dxh * ph, 1) / 128
-    tl.store(DPAIR + r[:, None] * 128 + c[None, :], rstd[:, None] * (dxh - m1[:, None] - ph * m2[:, None]), mask=rm[:, None])
+    acc_wb = tl.zeros([16, 128], tl.float32)
+    acc_wp = tl.zeros([128], tl.float32)
+    for it in range(NIT):
+        r = (pid * NIT + it) * ROWS + tl.arange(0, ROWS)
+        rm = r < R2
+        db = tl.load(DB + hh[None, :] * R2 + r[:, None], mask=rm[:, None], other=0.0)      # [ROWS, 16]
+        dpn = tl.dot(db, wb, input_precision="tf32")                                       # [ROWS, 128]
+        p = tl.load(PAIR + r[:, None] * 128 + c[None, :], mask=rm[:, None], other=0.0)
+        mean = tl.load(PST + r * 2, mask=rm, other=0.0)
+        rstd = tl.load(PST + r * 2 + 1, mask=rm, other=0.0)
+        ph = tl.where(rm[:, None], (p - mean[:, None]) * rstd[:, None], 0.0)
+        acc_wp += tl.sum(dpn * ph, 0)
+        acc_wb += tl.dot(tl.trans(db), ph * wp[None, :], input_precision="tf32")
+        dxh = dpn * wp[None, :]
+        m1 = tl.sum(dxh, 1) / 128
+        m2 = tl.sum(dxh * ph, 1) / 128
+        tl.store(DPAIR + r[:, None] * 128 + c[None, :], rstd[:, None] * (dxh - m1[:, None] - ph * m2[:, None]), mask=rm[:, None])
+    tl.atomic_add(PART + 16 * 128 + c, acc_wp, sem="relaxed")
+    tl.atomic_add(PART + hh[:, None] * 128 + c[None, :], acc_wb, sem="relaxed")
 
 
 @triton.jit
@@ -375,3 +380,34 @@ def _unfold_lnw(DWN, WS1, WB1, WS2, WB2, W1, W2, DW, DW12, K: tl.constexpr, BK: 
                           tl.where(grp == 2, tl.load(WS2 + row * K + k, mask=km, other=0.0), tl.load(WB2 + row * K + k, mask=km, other=0.0))))
     tl.store(DW + i * K + k, d * lw, mask=km)
     tl.atomic_add(DW12 + (grp // 2) * K + k, d * w, mask=km, sem="relaxed")
+
+
+@triton.jit
+def _ln_rows(X, XH, ST_, R, eps, ROWS: tl.constexpr, N: tl.constexpr):
+    """xhat = LN(x) (no affine) as bf16 [R, N], and (mean, rstd): the hoisted pair LayerNorm (every block's ln_pair shares it)."""
+    r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    c = tl.arange(0, N)
+    rm = r < R
+    x = tl.load(X + r[:, None] * N + c[None, :], mask=rm[:, None], other=0.0)
+    mean = tl.sum(x, 1) / N
+    xc = x - mean[:, None]
+    rstd = tl.rsqrt(tl.sum(xc * xc, 1) / N + eps)
+    tl.store(XH + r[:, None] * N + c[None, :], (xc * rstd[:, None]).to(tl.bfloat16), mask=rm[:, None])
+    tl.store(ST_ + r * 2, mean, mask=rm)
+    tl.store(ST_ + r * 2 + 1, rstd, mask=rm)
+
+
+@triton.jit
+def _ln_rows_bwd(DXH, X, ST_, DX, R, ROWS: tl.constexpr, N: tl.constexpr):
+    """dx = LN'(dxhat) (fp32), xhat recomputed from x and the saved (mean, rstd)."""
+    r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    c = tl.arange(0, N)
+    rm = r < R
+    dxh = tl.load(DXH + r[:, None] * N + c[None, :], mask=rm[:, None], other=0.0)
+    x = tl.load(X + r[:, None] * N + c[None, :], mask=rm[:, None], other=0.0)
+    mean = tl.load(ST_ + r * 2, mask=rm, other=0.0)
+    rstd = tl.load(ST_ + r * 2 + 1, mask=rm, other=0.0)
+    xh = (x - mean[:, None]) * rstd[:, None]
+    m1 = tl.sum(dxh, 1) / N
+    m2 = tl.sum(dxh * xh, 1) / N
+    tl.store(DX + r[:, None] * N + c[None, :], rstd[:, None] * (dxh - m1[:, None] - xh * m2[:, None]), mask=rm[:, None])

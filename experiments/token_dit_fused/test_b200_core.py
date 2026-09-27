@@ -9,6 +9,7 @@ p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=384)
 p.add_argument("--samples", type=int, default=5)
 p.add_argument("--blocks", type=int, default=2)
+p.add_argument("--v2", type=int, default=1)
 a = p.parse_args()
 S, L, H, DH, NB = a.samples, a.length, 16, 48, a.blocks
 D, M = H * DH, a.samples * a.length
@@ -36,7 +37,7 @@ q4, k4, v4, g4 = (t.view(S, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, 
 bd = bias_descriptor(bias)
 attention_gated_in_place2(q4, k4, v4, g4, bd, blk)
 tri = t[:, :D].float()
-core = InfCore()
+core = InfCore(v2=a.v2)
 u = qkvg0.clone()
 core(u, bias, blk, S, H)
 torch.cuda.synchronize()

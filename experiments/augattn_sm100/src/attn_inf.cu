@@ -12,6 +12,9 @@
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef PDB
+#define PDB 1                            // P double-buffered per warpgroup: exps of block n overlap PV(n - 1); only a rescale waits for it
+#endif
 #ifndef LAZY
 #define LAZY 8.0f                        // log2 units
 #endif
@@ -31,7 +34,7 @@ constexpr int O_Q = 0, O_ST = QR * 2 * TQ, O_BAR = O_ST + ST * STB;        // q 
 constexpr int XG = 128 * 128;                                              // per warpgroup: g tile in, gated o out (bf16, SW128, 96 B rows)
 constexpr int O_X = O_BAR + 1024, SMEM_BYTES = O_X + 2 * XG;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
-constexpr uint32_t T_S = 0, T_P = 256, T_O = 320;
+constexpr uint32_t T_S = 0, T_P = 256, T_O = PDB ? 384 : 320;          // P[w][b] at 256 + w * 64 + b * 32 (PDB), else 256 + w * 32
 constexpr uint32_t I_QK = idesc_bf16(128, BN), I_PV = idesc_bf16(128, DH, 0, 1);
 constexpr float LOG2E = 1.4426950408889634f;
 
@@ -42,7 +45,7 @@ __device__ unsigned long long g_tr[8][256];   // CTA 0: 0 prod issued, 1 mma QK(
 #define TR(ev, i) do { } while (0)
 #endif
 struct Bars {
-  uint64_t q_full[QR], q_empty[QR], kv_full[ST], kv_empty[ST], s_full[2][2], p_full[2], p_free[2], o_free[2], g_full[2];
+  uint64_t q_full[QR], q_empty[QR], kv_full[ST], kv_empty[ST], s_full[2][2], p_full[2], p_free[2][2], o_free[2], g_full[2];
   uint32_t tmem;
 };
 #ifndef PMOD
@@ -88,7 +91,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     for (int s = 0; s < ST; ++s) { mbar_init(&B.kv_full[s], 1); mbar_init(&B.kv_empty[s], 2); }
     for (int w = 0; w < 2; ++w) {
       mbar_init(&B.s_full[w][0], 1); mbar_init(&B.s_full[w][1], 1);
-      mbar_init(&B.p_full[w], 4); mbar_init(&B.p_free[w], 1); mbar_init(&B.o_free[w], 4); mbar_init(&B.g_full[w], 1);
+      mbar_init(&B.p_full[w], 4); mbar_init(&B.p_free[w][0], 1); mbar_init(&B.p_free[w][1], 1); mbar_init(&B.o_free[w], 4); mbar_init(&B.g_full[w], 1);
     }
     fence_barrier_init();
   }
@@ -151,8 +154,8 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks)
-          umma_ts(tmem + T_O + w * 64, tmem + T_P + w * 32 + ks * 8, dv + (uint64_t)(ks * 2048 >> 4), I_PV, (n > 0 || ks > 0) ? 1u : 0u);
-        tc_commit(&B.p_free[w]);
+          umma_ts(tmem + T_O + w * 64, tmem + T_P + (PDB ? w * 64 + (G & 1) * 32 : w * 32) + ks * 8, dv + (uint64_t)(ks * 2048 >> 4), I_PV, (n > 0 || ks > 0) ? 1u : 0u);
+        tc_commit(&B.p_free[w][PDB ? (G & 1) : 0]);
         tc_commit(&B.kv_empty[s]);
       }
       __syncwarp();
@@ -206,10 +209,17 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       const float mx = max3f(mxp[0], mxp[1], fmaxf(mxp[2], mxp[3]));
       const float m_new = mx > m_i + LAZY ? mx : m_i;
       if (w == 0 && r == 0) TR(3, G);
-      if (G >= 1) mbar_wait(&B.p_free[w], (G - 1) & 1);                    // PV(G - 1) done: O final for G - 1, P free
+      const bool resc = __any_sync(0xffffffffu, m_new != m_i);
+#if PDB
+      // P buffer G & 1 is free once PV(G - 2) is done; O may be rescaled only once PV(G - 1) is done (rare: lazy max)
+      if (resc && G >= 1) mbar_wait(&B.p_free[w][(G - 1) & 1], ((G - 1) >> 1) & 1);
+      if (G >= 2) mbar_wait(&B.p_free[w][G & 1], ((G - 2) >> 1) & 1);
+#else
+      if (G >= 1) mbar_wait(&B.p_free[w][0], (G - 1) & 1);
+#endif
       if (w == 0 && r == 0) TR(4, G);
       tc_fence_after();
-      if (__any_sync(0xffffffffu, m_new != m_i)) {
+      if (resc) {
         const float alpha = ex2f(m_i - m_new);
         l_i *= alpha;
         if (n >= 1) {
@@ -239,7 +249,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           ssp[k & 3] = add2(ssp[k & 3], mk2(p0, p1));
           pk[k] = pack_bf16(p0, p1);
         }
-        tmem_st16(trow + T_P + w * 32 + cc * 16, pk);
+        tmem_st16(trow + T_P + (PDB ? w * 64 + (G & 1) * 32 : w * 32) + cc * 16, pk);
       }
       const f2 ss = add2(add2(ssp[0], ssp[1]), add2(ssp[2], ssp[3]));
       l_i += lo2(ss) + hi2(ss);
@@ -252,7 +262,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       if (n == nb - 1) {
         // ---- epilogue of the item: o = sigmoid(g) acc / l, bf16, over q
         int a0, m0, head; item_of(li, a0, m0, head);
-        mbar_wait(&B.p_free[w], G & 1);
+        mbar_wait(&B.p_free[w][PDB ? (G & 1) : 0], PDB ? ((G >> 1) & 1) : (G & 1));
         tc_fence_after();
         const float inv = 1.f / l_i;
         uint32_t ov[48];
