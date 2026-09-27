@@ -1,1 +1,0 @@
-"""opt_core.tools.graph_audit — CUDA-graph capture-safety instruments: ``from opt_core.tools.graph_audit.audit import SyncCensus, LaunchCounter, RNGGuard, rng_fingerprint, audit_capture_safety, sync_census``. One shared copy of the module two kits carried; torch is imported on first use; nothing is imported at package level."""

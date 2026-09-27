@@ -2,7 +2,7 @@
 
 The bar this repo holds itself to is written down in
 [`docs/library-standards.md`](docs/library-standards.md), and the open work against it is in
-[`plan.md`](plan.md). Read the first before proposing a change to the second.
+[`docs/development/product-plan.md`](docs/development/product-plan.md). Read the first before proposing a change to the second.
 
 ## The three gates
 

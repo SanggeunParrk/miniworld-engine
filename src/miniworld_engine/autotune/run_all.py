@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", default="", help="comma list of families to run")
     ap.add_argument("--verbose", action="store_true", help="print the traceback for each failure")
     ap.add_argument("--json", default="", metavar="PATH",
-                    help="also write the counts as JSON, for a release verdict (plan.md B1)")
+                    help="also write the counts as JSON, for a release verdict (docs/development/product-plan.md B1)")
     args = ap.parse_args(argv)
 
     want = {f for f in args.only.split(",") if f}
@@ -380,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         # The same numbers the summary above prints, as data. A release verdict has to be
-        # machine-checkable (plan.md B1); re-parsing the human summary would break the moment
+        # machine-checkable (docs/development/product-plan.md B1); re-parsing the human summary would break the moment
         # its wording changed, which is the kind of check that fails for the wrong reason.
         import json
         payload = {

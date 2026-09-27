@@ -97,12 +97,10 @@ benchmarks/**/logs/
 
 # --- .bench: audit scratch, never tracked -----------------------------------------------------
 # One-off probes, per-run logs, result CSVs and sbatch wrappers. The audit tools worth keeping
-# live in src/miniworld_engine/tools/ instead, because docs/records/tiling-audit.md cites them by path and
+# live in src/miniworld_engine/tools/ instead, because docs/records/audits/tiling-audit.md cites them by path and
 # the audit it records has to stay reproducible from a clean checkout.
 .bench/
 
-# staging output of tools/release/gpu_verdict.py; the verdict JSON itself IS committed
-verdicts/.stage/
 benchmarks/*/*/results/*/plots/
 
 # scratch: one-off sbatch scripts and their logs (they belong in a scratchpad, not here)
@@ -120,8 +118,7 @@ bands_*.json
 # Cache merge synchronization; contents are runtime state.
 src/miniworld_engine/autotune/data/.merge.lock
 
-!experiments/trimul_training_v2/
 /.release-build/
 
-# Local H100 wiring validation build products
-/verdicts/h100-jit/
+# Local H100 wiring validation build products (verdicts now live in docs/records/verdicts/)
+/verdicts/

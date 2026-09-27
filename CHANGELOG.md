@@ -98,7 +98,7 @@ Release map, migration limits and evidence: [2.0.0](docs/releases/2.0.0.md).
 - Merge the 24 active MiniWorld consumer patches: packed TriMul buffers, configured
   F567 forward and dual-dgrad/LayerNorm-residual backward fusions, strict Triton
   backend selection, and expanded resumable CuTe/CUDA tuning.
-  See [integration and validation](docs/records/local-patches-20260917/README.md).
+  See [integration and validation](docs/records/cache/local-patches-20260917/README.md).
 - Retire 37 incompatible H100/A5000/A6000 cache files from runtime selection;
   original measurements and checksums remain in the integration archive.
 

@@ -6,7 +6,7 @@ validation and cache-reuse workflow. The molecular ribbon provides application c
 MiniWorld Engine supplies kernels and building blocks, not a full structure-prediction model.
 
 The evidence strip reports A6000 DiT results from the
-[2026-09-11 production audit](../records/a6000-production-audit.md). It compares ordinary
+[2026-09-11 production audit](../records/ampere/a6000-production-audit.md). It compares ordinary
 token DiT (384 tokens) and atom DiT (4096 atoms), depth 1, BF16, against compiled PyTorch.
 Inference uses A5 with CUDA Graph; training uses A48 without graphs and measures forward
 plus backward. These results do not qualify other GPUs or measure a complete model.

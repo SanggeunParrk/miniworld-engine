@@ -160,7 +160,7 @@ The final full CPU suite passed 2,818 tests (32 skipped, 222 GPU tests deselecte
 Ruff passed. Project-environment type checking retains two unresolved optional
 FA2 imports in the attention module because this environment installs FA4; it
 reported no other diagnostics. Detailed evidence and environment requirements
-are recorded in `docs/records/h100-build-preparation.md`.
+are recorded in `docs/records/h100/h100-build-preparation.md`.
 
 The subsequent cache lifecycle review passed 2,825 CPU tests and thirteen real
 cross-process object-cache reuse checks with compilation disabled in the reader.

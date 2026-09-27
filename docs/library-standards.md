@@ -3,12 +3,12 @@
 > **This is the inner layer.** These criteria ask whether the code is a good library.
 > They stop at the edge of this machine. `docs/product-standards.md` covers the rest —
 > portability, distribution, releases, verification at a distance, and the consumer —
-> and is the document `plan.md` is derived from.
+> and is the document `docs/development/product-plan.md` is derived from.
 
 This file is the standard `miniworld-engine` holds itself to. It is not a wish list: every
 criterion below states **the failure it prevents** and **how it is enforced mechanically**, because
 a standard nobody can check is a preference. Where this repo does not yet meet one, the status line
-says so, and `plan.md` carries the work.
+says so, and `docs/development/product-plan.md` carries the work.
 
 Two rules govern the whole document.
 
@@ -64,7 +64,7 @@ getting `ty` to zero buys them nothing.
 *Enforced by:* a test asserting `src/miniworld_engine/py.typed` exists and is shipped by
 `[tool.setuptools.package-data]`.
 
-*Status:* **NOT met** — there is no `py.typed`. -> `plan.md` P1.
+*Status:* **NOT met** — there is no `py.typed`. -> `docs/development/product-plan.md` P1.
 
 ### A4. Version, and a documented path for removal
 
@@ -78,7 +78,7 @@ removing anything because there is no procedure.
 name marked deprecated actually emits a `DeprecationWarning`.
 
 *Status:* **partially met** — SemVer claimed in CHANGELOG, `version = "0.1.0"`, no deprecation
-policy and no mechanism. -> `plan.md` P6.
+policy and no mechanism. -> `docs/development/product-plan.md` P6.
 
 ### A5. The supported hardware is stated, and unsupported hardware fails clearly
 
@@ -92,7 +92,7 @@ of "this backend needs SM90; the triton path covers your card".
 drift from the code.
 
 *Status:* **NOT met** — arch gates live as asserts inside individual checkers (`"SM90 (H100)
-only"`); no matrix anywhere. -> `plan.md` P7.
+only"`); no matrix anywhere. -> `docs/development/product-plan.md` P7.
 
 ---
 
@@ -127,7 +127,7 @@ row's band rather than a module constant. A kernel that wants a wider band has t
 file that declares it, where a reviewer sees it.
 
 *Status:* **NOT met** — `run_all.check_one` applies one band, `rel < 5e-2`, to all 99.
--> `plan.md` P2.
+-> `docs/development/product-plan.md` P2.
 
 ### B3. Coverage is measured against a declaration, never against itself
 
@@ -156,7 +156,7 @@ multiple of 128, so no kernel's boundary mask had ever run.
 and the atom/token side split — all import-time, all in `drivers/`.
 
 *Status:* **met** as a mechanism, **NOT met** as a gate: nothing runs the ragged mode
-automatically, so the mechanism protects nothing. -> `plan.md` P3.
+automatically, so the mechanism protects nothing. -> `docs/development/product-plan.md` P3.
 
 ### B5. Determinism is stated
 
@@ -169,7 +169,7 @@ reproducibility the library never promised.
 
 *Enforced by:* a stated policy plus a test that two calls under one cache state agree bitwise.
 
-*Status:* **NOT met** — nothing states it. -> `plan.md` P8.
+*Status:* **NOT met** — nothing states it. -> `docs/development/product-plan.md` P8.
 
 ---
 
@@ -201,7 +201,7 @@ against it.
 *Enforced by:* not yet. Candidate: a test that every `N.NN ms`-shaped claim in
 `benchmarks/RESULTS.md` matches a value in a committed table.
 
-*Status:* **NOT met.** -> `plan.md` P9.
+*Status:* **NOT met.** -> `docs/development/product-plan.md` P9.
 
 ### C3. The comparison is fair by construction, and the regime is named
 
@@ -283,7 +283,7 @@ them. All eleven sets are packaged now, `configs.config_set(name)` is the single
 `__init__.py`. Adding one — the reflex when making a shipped asset importable — silently replaces
 the module with a namespace package and breaks every import of the config reader.
 
-*Enforced by:* not yet. -> `plan.md` P4.
+*Enforced by:* not yet. -> `docs/development/product-plan.md` P4.
 
 ---
 
@@ -301,7 +301,7 @@ looked like successful runs.
 set is an argument; `build` decomposes, runs and merges in one invocation.
 
 *Status:* **met** structurally, **NOT verified** — no run since the harness refactor has proven
-`build all` end to end. -> `plan.md` P5.
+`build all` end to end. -> `docs/development/product-plan.md` P5.
 
 ### E2. Failure is distinguishable from absence
 
@@ -386,7 +386,7 @@ A module nobody imports, a second CLI one letter from the real one, a cache writ
 nothing reads: each is a trap for the next reader.
 
 *Enforced by:* not automatically. `autotune/build.py` is the current instance.
--> `plan.md` P11.
+-> `docs/development/product-plan.md` P11.
 
 ### F4. Docs are either executable or dated
 
@@ -400,7 +400,7 @@ existed.
 are not checked.
 
 *Status:* **partially met** — `docs/kernels/l2-swizzle.md` names 21 pre-rename ops.
--> `plan.md` P12.
+-> `docs/development/product-plan.md` P12.
 
 ### F5. Working notes are not repository furniture
 
@@ -408,7 +408,7 @@ A root `todo.md` of dated findings is a private notebook in a public hallway. Ei
 live work — in which case they belong in a tracker or a plan — or they are history, in which case
 they belong under `docs/`.
 
-*Status:* **NOT met.** -> `plan.md` P13.
+*Status:* **NOT met.** -> `docs/development/product-plan.md` P13.
 
 ### F6. A consumer can contribute
 
@@ -416,7 +416,7 @@ The repo states how to run the gates, what a change must include (test, CHANGELO
 the review bar is.
 
 *Status:* **NOT met** — no CONTRIBUTING. The information exists, scattered across README and
-pyproject comments. -> `plan.md` P14.
+pyproject comments. -> `docs/development/product-plan.md` P14.
 
 ---
 

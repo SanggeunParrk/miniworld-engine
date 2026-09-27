@@ -74,6 +74,15 @@ figure). Regenerate after the tables change; do not hand-edit the numbers.
 | [reports/swa-dit-fullgraph-a6000-20260915.md](reports/swa-dit-fullgraph-a6000-20260915.md) | FA2 fullgraph backward fix and A6000 training rerun |
 | [reports/swa-dit-esmfold2-a6000-20260915.md](reports/swa-dit-esmfold2-a6000-20260915.md) | corrected ESMFold2 SWA DiT: A6000 time and incremental peak memory, three repetitions |
 
+## Anthropic integration (`anthropic/`)
+
+| page | what it answers |
+|---|---|
+| [anthropic/integration.md](anthropic/integration.md) | how the Anthropic-published kernels are integrated |
+| [anthropic/h100-audit.md](anthropic/h100-audit.md) | H100 audit of the integrated kernels |
+| [anthropic/trimul-analysis.md](anthropic/trimul-analysis.md) | TriMul analysis |
+| [anthropic/trimul-training.md](anthropic/trimul-training.md) | TriMul training adaptation |
+
 ## Records (`records/`)
 
 Measurement records — a number taken at a point in time, kept for evidence. See

@@ -23,7 +23,7 @@ there isn't one.
 **The check must fail for the right reason.** Also inherited, and on **2026-08-25** it turned out
 to be the most-violated rule here. Running the things this repository says it does -- a clean
 clone, the GPU-marked suite, the build-system audit, the coverage replay -- produced nine defects
-(`plan.md` §H), and seven were checks that could not fail, could not pass, or answered a question
+(`docs/development/product-plan.md` §H), and seven were checks that could not fail, could not pass, or answered a question
 nobody asked: a gate asserting per-clone git config that only the author's machine has; an audit
 printing 139 findings about its own missing arguments and exiting 1 every run; a marker documented
 as "needs a CUDA device" that failed instead of skipping without one; a `missing_pairs 0` that
@@ -292,7 +292,7 @@ true, on the same shipped cache on an A6000:
 - declared coverage: **91 OK, missing_pairs 0** -- every (op, dtype, shape bucket) `op_units`
   enumerates is present.
 - the replay: **363 lookups the module matrix asks for and the cache does not serve, across 42 of
-  91 ops** (`docs/records/cache-coverage-replay-a6000.md`).
+  91 ops** (`docs/records/ampere/cache-coverage-replay-a6000.md`).
 
 The cache key carries each kernel's constexprs and no declared work list enumerates them, so the
 first number cannot see the second. `build all` with no flags now runs both work lists rather than
@@ -514,4 +514,4 @@ Every criterion above is a component of one sentence:
 > version, installs it, runs the suite, upgrades `team-gm` to that tag, and gets the same
 > numerical result and a measured step-time improvement — using only what is written down.
 
-Today that sentence fails at the first clause. `plan.md` is the ordered work to make it true.
+Today that sentence fails at the first clause. `docs/development/product-plan.md` is the ordered work to make it true.

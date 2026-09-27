@@ -14,7 +14,7 @@ to **cut one op out of the full model and optimize it in isolation**:
 > and where residuals live) are documented canonically in team-gm's
 > `docs/ARCHITECTURE.md`.
 
-Current A6000 validation, cache coverage, module timings and qualification limits: [final audit](docs/records/a6000-production-audit.md).
+Current A6000 validation, cache coverage, module timings and qualification limits: [final audit](docs/records/ampere/a6000-production-audit.md).
 
 ## Version 2.1.0
 
@@ -28,11 +28,11 @@ imply that every inference shape has been re-tuned.
 This release builds on Anthropic's stronger published inference kernels and adds
 training implementations. [Release map and migration](docs/releases/2.0.0.md) ·
 [Attribution](THIRD_PARTY_NOTICES.md) ·
-[Latest TriMul training evidence](experiments/trimul_training_v2/README.md).
+[Latest TriMul training evidence](experiments/README.md#archived) (archived research capsule).
 The latest TriMul CUDA training route is now connected automatically on supported
 H100 inputs, alongside Transition, MSA and token DiT inference.
 [Current module dispatch and limits](docs/operations/h100-module-wiring.md) ·
-[Recorded comparisons](verdicts/version-compare-20260923/index.html).
+[Recorded comparisons](docs/records/verdicts/version-compare-20260923/index.html).
 D128 improves on the measured Triton baseline; other widths need more optimization.
 
 ## Quickstart

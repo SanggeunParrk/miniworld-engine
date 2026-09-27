@@ -14,7 +14,7 @@ Merge decisions:
 
 - Preserve the current runtime/cache/compile policy rather than restoring the older
   runtime surrounding the research attention checkout. Its superseded files are in
-  `experiments/legacy_h100_runtime/`, with `MERGE.json` provenance.
+  `experiments/legacy_h100_runtime/`, with `MERGE.json` provenance (archived 2026-09-27).
 - Keep both DiT experiment runners: `experiments/token_dit_fused/tdit/runner.py`
   is the latest overlap runner; `runner_multistream.py` preserves the earlier variant.
   Shared scratch ownership is not assumed interchangeable between them.
@@ -23,7 +23,8 @@ Merge decisions:
 - Union the H100 and MPNN kernel registries and MSA/edge build sides. Keep the newer
   cache-grid compatibility check and MPNN's validation-before-pruning behavior.
 - Superseded cache snapshots, wheel-path fixes and the pre-rebase MPNN branch are
-  recorded in `experiments/legacy_branches/`; their history is merged without
+  recorded in `experiments/legacy_branches/` (archived 2026-09-27, see
+  [experiments/README.md](../../experiments/README.md#archived)); their history is merged without
   rolling current APIs back to obsolete implementations.
 
 This integration is not a new GPU qualification. No GPU, benchmark, installation or
