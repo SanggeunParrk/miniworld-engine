@@ -137,6 +137,12 @@ __device__ __forceinline__ void mma_ss_if(uint32_t leader, uint32_t d_tmem, uint
                "@q tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p;\n}\n"
                :: "r"(d_tmem), "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(accumulate), "r"(leader) : "memory");
 }
+// shared -> TMEM copy of a 128-row x 256-bit block (the matrix descriptor's canonical layout -> lane = row, 8 columns), ordered with
+// this thread's tcgen05.mma in the tensor pipe and tracked by tcgen05.commit
+__device__ __forceinline__ void tmem_cp_if(uint32_t leader, uint32_t taddr, uint64_t s_desc) {
+  asm volatile("{\n.reg .pred q;\nsetp.ne.b32 q, %2, 0;\n@q tcgen05.cp.cta_group::1.128x256b [%0], %1;\n}\n"
+               :: "r"(taddr), "l"(s_desc), "r"(leader) : "memory");
+}
 __device__ __forceinline__ void mma_commit_if(uint32_t leader, uint32_t bar) {
   asm volatile("{\n.reg .pred q;\nsetp.ne.b32 q, %1, 0;\n@q tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\n}\n"
                :: "r"(bar), "r"(leader) : "memory");
