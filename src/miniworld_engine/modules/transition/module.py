@@ -47,6 +47,14 @@ def _fused_sm90a_enabled() -> bool:
     return settings.current().transition_fused_sm90a and settings.current().engine_backend != "triton"
 
 
+def _fused_sm80_enabled() -> bool:
+    """Whether to route the d=128/n=4 bf16 residual path on sm_80 through the fused hand-CUDA forward and two-kernel backward
+    (training step ~1.44x the Triton residual path).  Default on; MINIWORLD_TRANSITION_FUSED_SM80=0 to A/B against Triton."""
+    from miniworld_engine import settings
+
+    return settings.current().engine_backend != "triton"
+
+
 def _large_d_training_backend_from_env() -> str | None:
     from miniworld_engine import settings
 
@@ -346,6 +354,13 @@ class Transition(nn.Module):
 
             if fused_wide_sm90a.available(x, wa, ws):
                 return fused_wide_sm90a.transition_wide_sm90a(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+
+        if _fused_sm80_enabled():
+            from miniworld_engine.kernels.transition.cuda import fused_sm80
+
+            if fused_sm80.available(x, wa, ws):
+                return fused_sm80.transition_fused_sm80(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
 
         from miniworld_engine.kernels.transition.triton.residual import (

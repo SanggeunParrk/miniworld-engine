@@ -1,0 +1,65 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "torch": "2.10.0+cu128",
+ "max_sm_clock": 1410,
+ "max_mem_clock": 1512,
+ "power_limit_w": 300.0,
+ "copy": {
+  "ms": 2.6858495712280273,
+  "GBps": 1599.1093998746364,
+  "sm_clock_median": 1410.0,
+  "power_median_w": 281.557
+ },
+ "write": {
+  "ms": 1.1350015640258788,
+  "GBps": 1892.0534702902276,
+  "sm_clock_median": 1410,
+  "power_median_w": 215.715
+ },
+ "read": {
+  "ms": 1.2249088287353516,
+  "GBps": 1753.1783571330402,
+  "sm_clock_median": 1395,
+  "power_median_w": 304.851
+ },
+ "gemm_8192": {
+  "ms": 4.6107135772705075,
+  "TFLOPs": 238.46886373429837,
+  "sm_clock_median": 1140.0,
+  "power_median_w": 302.037
+ },
+ "gemm_16384": {
+  "ms": 37.83992309570313,
+  "TFLOPs": 232.45536202495165,
+  "sm_clock_median": 1095,
+  "power_median_w": 302.174
+ },
+ "contract_L384_C256": {
+  "ms": 0.19005440473556517,
+  "TFLOPs": 152.54068585433245,
+  "GBps": 1191.7241082369724,
+  "sm_clock_median": 997.5,
+  "power_median_w": 298.9255
+ },
+ "contract_L768_C256": {
+  "ms": 1.2186623573303224,
+  "TFLOPs": 190.31377525443258,
+  "GBps": 743.4131845876273,
+  "sm_clock_median": 1035,
+  "power_median_w": 300.245
+ },
+ "contract_L384_C128": {
+  "ms": 0.09912319779396057,
+  "TFLOPs": 146.23735862649085,
+  "GBps": 1142.4793642694597,
+  "sm_clock_median": 1125.0,
+  "power_median_w": 301.377
+ },
+ "contract_L768_C128": {
+  "ms": 0.6103552103042602,
+  "TFLOPs": 189.9944737658457,
+  "GBps": 742.1659131478348,
+  "sm_clock_median": 1057.5,
+  "power_median_w": 300.327
+ }
+}
