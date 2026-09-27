@@ -389,14 +389,28 @@ transition_bwd_fused(const __grid_constant__ CUtensorMap mdy, const __grid_const
 // partw [NDW][3][64 hs][128 d] fp32 -> bf16 dWa [512][128], dWb [512][128], dWs [128][512]
 extern "C" __global__ void reduce_partials(const float* __restrict__ ws, __nv_bfloat16* __restrict__ dWa, __nv_bfloat16* __restrict__ dWb, __nv_bfloat16* __restrict__ dWs,
                                      const float* __restrict__ dgbw, float* __restrict__ dgam, float* __restrict__ dbeta) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= 3 * 8 * HS * D_) {
-    const int c = idx - 3 * 8 * HS * D_;                      // the 256 LayerNorm parameter gradients
-    if (c < 128) {
-      float g = 0.f, b = 0.f;
-      for (int r = 0; r < NDX * 8; ++r) { g += dgbw[(size_t)r * 256 + c]; b += dgbw[(size_t)r * 256 + 128 + c]; }
-      dgam[c] = g; dbeta[c] = b;
-    }
+  const int tid=threadIdx.x;
+  const int idx = blockIdx.x * blockDim.x + tid;
+  if (blockIdx.x >= 768) {
+    const int c=(blockIdx.x-768)*32+(tid&31), part=tid>>5;
+    float g=0.f,b=0.f;
+    for(int r=part;r<NDX*8;r+=8){g+=dgbw[(size_t)r*256+c];b+=dgbw[(size_t)r*256+128+c];}
+    __shared__ float scratch[512];scratch[tid]=g;scratch[256+tid]=b;__syncthreads();
+    if(tid<32){float gs=0.f,bs=0.f;
+      #pragma unroll
+      for(int p=0;p<8;++p){gs+=scratch[p*32+tid];bs+=scratch[256+p*32+tid];}
+      dgam[c]=gs;dbeta[c]=bs;
+    }return;
+  }
+  if (blockIdx.x >= 512) {
+    // Reduce a 16x16 tile, then transpose in shared memory for coalesced dWs stores.
+    const int tile=blockIdx.x-512, h0=(tile/8)*16, d0=(tile%8)*16;
+    const int h=h0+tid/16, d=d0+tid%16, slice=h/64, hs=h%64;
+    float v=0.f;
+    for(int r=0;r<DW_REPL;++r)v+=ws[((size_t)(r*8+slice)*3+2)*HS*D_+hs*D_+d];
+    __shared__ float transpose[16][17];
+    transpose[tid/16][tid%16]=v;__syncthreads();
+    dWs[(size_t)(d0+tid/16)*H_+h0+tid%16]=__float2bfloat16_rn(transpose[tid%16][tid/16]);
     return;
   }
   const int which = idx / (8 * HS * D_), rem = idx % (8 * HS * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
@@ -443,6 +457,6 @@ void transition_fused_bwd_launch(
 void transition_fused_reduce_launch(
     const float* partw, __nv_bfloat16* dWa, __nv_bfloat16* dWb, __nv_bfloat16* dWs,
     const float* dgbw, float* dgam, float* dbeta, cudaStream_t stream) {
-  const int work = 3 * 8 * HS * D_ + 256;
+  const int work = 3 * 8 * HS * D_ + 4 * 256;
   reduce_partials<<<(work + 255) / 256, 256, 0, stream>>>(partw, dWa, dWb, dWs, dgbw, dgam, dbeta);
 }

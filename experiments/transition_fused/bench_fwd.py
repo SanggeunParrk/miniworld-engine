@@ -17,16 +17,23 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import drv  # noqa: E402
 
-D, H, ROWS, NCTA = 128, 512, 128, 132
 p = argparse.ArgumentParser()
 p.add_argument("--length", type=int, default=384)
+p.add_argument("--width", type=int, default=128)
+p.add_argument("--ncta", type=int, default=132)
+p.add_argument("--smem", type=int, default=231424)
+p.add_argument("--wbox", type=int, default=64, help="rows per TMA box of the weight maps (the D = 256 kernel loads 32-unit chunks)")
 p.add_argument("--cubin", default="")
 p.add_argument("--rounds", type=int, default=3)
 p.add_argument("--reps", type=int, default=20)
 p.add_argument("--eps", type=float, default=1e-5)
 p.add_argument("--engine", action="store_true")
 p.add_argument("--save", default="")
+p.add_argument("--ref-cubin", default="", help="also run this cubin once and report how many output elements differ from it")
+p.add_argument("--no-save", action="store_true", help="pass save = 0 (kernels with a trailing save argument; others ignore it)")
+p.add_argument("--threads", type=int, default=256, help="block size (a variant with producer warps launches 320)")
 a = p.parse_args()
+D, H, ROWS, NCTA = a.width, 4 * a.width, 128, a.ncta
 M = a.length * a.length
 tiles = M // ROWS
 dev = "cuda"
@@ -40,20 +47,20 @@ ws = (torch.randn(D, H, device=dev) * H ** -0.5).to(torch.bfloat16).contiguous()
 wst = ws.t().contiguous()
 
 cubin = Path(a.cubin) if a.cubin else HERE / "build" / "transition_fwd.cubin"
-SMEM = 231424
+SMEM = a.smem
 k = drv.Kernel(str(cubin), "transition_fwd_fused", SMEM)
-print(f"{cubin.name}: regs {k.regs} lmem {k.lmem} smem {SMEM} | grid {NCTA}x256 | M {M} = {tiles} tiles", flush=True)
+print(f"{cubin.name}: regs {k.regs} lmem {k.lmem} smem {SMEM} | grid {NCTA}x{a.threads} | M {M} = {tiles} tiles", flush=True)
 tm = lambda t, dims, stride, box: drv.TensorMap(t, dims=dims, stride_bytes=stride, box=box)
 out_k = torch.empty_like(x)
-maps = (tm(x, [D, M], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, 64]),
-        tm(wb, [D, H], D * 2, [64, 64]), tm(wst, [D, H], D * 2, [64, 64]), tm(out_k, [D, M], D * 2, [64, 64]))
+maps = (tm(x, [D, M], D * 2, [64, 64]), tm(wa, [D, H], D * 2, [64, a.wbox]),
+        tm(wb, [D, H], D * 2, [64, a.wbox]), tm(wst, [D, H], D * 2, [64, a.wbox]), tm(out_k, [D, M], D * 2, [64, 64]))
 xn_k = torch.empty_like(x)
 rstd_k = torch.empty(M, device=dev, dtype=torch.float32)
 c1_k = torch.empty(M, device=dev, dtype=torch.float32)
 
 
 def fused():
-    k((NCTA, 1, 1), (256, 1, 1), *maps, gamma, beta, xn_k, out_k, rstd_k, c1_k, int(M), int(tiles), float(a.eps))
+    k((NCTA, 1, 1), (a.threads, 1, 1), *maps, gamma, beta, xn_k, out_k, rstd_k, c1_k, int(M), int(tiles), float(a.eps), int(not a.no_save))
     return out_k, xn_k, rstd_k, c1_k
 
 
@@ -82,6 +89,15 @@ def compare(tag, got, want):
 got = [t.clone() for t in fused()]
 torch.cuda.synchronize()
 rec["cmp"]["fused_vs_fp32"] = compare("fused vs fp32", got, (out_r, xn_r, rstd_r, mean_r * rstd_r))
+if a.ref_cubin:
+    kr = drv.Kernel(a.ref_cubin, "transition_fwd_fused", SMEM)
+    out_r2 = torch.empty_like(x)
+    kr((NCTA, 1, 1), (256, 1, 1), *maps[:4], tm(out_r2, [D, M], D * 2, [64, 64]), gamma, beta, torch.empty_like(x), out_r2,
+       torch.empty(M, device=dev, dtype=torch.float32), torch.empty(M, device=dev, dtype=torch.float32), int(M), int(tiles), float(a.eps))
+    torch.cuda.synchronize()
+    ne = int((got[0] != out_r2).sum()); d = (got[0].float() - out_r2.float())
+    rec["vs_ref"] = dict(frac_differ=ne / got[0].numel(), rel_rms=float(d.norm() / out_r2.float().norm()), max_abs=float(d.abs().max()))
+    print(f"  vs {Path(a.ref_cubin).name}: out elements differing {100 * ne / got[0].numel():.4f} %  rel_rms {rec['vs_ref']['rel_rms']:.3e}  max_abs {rec['vs_ref']['max_abs']:.3e}", flush=True)
 again = [t.clone() for t in fused()]
 torch.cuda.synchronize()
 rec["reproducible"] = {n: bool(torch.equal(u, v)) for n, u, v in zip(NAMES, got, again)}

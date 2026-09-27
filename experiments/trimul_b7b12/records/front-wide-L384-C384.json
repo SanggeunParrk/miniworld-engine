@@ -1,0 +1,58 @@
+{
+  "L": 384,
+  "C": 384,
+  "count": 396,
+  "dwctas": 264,
+  "splits": 11,
+  "split": true,
+  "shared": 209920,
+  "vs_triton": {
+    "dx": {
+      "relative_l2": 5.669635356753133e-05,
+      "max_absolute": 0.03125,
+      "finite": true
+    },
+    "dWL": {
+      "relative_l2": 0.00041334351408295333,
+      "max_absolute": 8.0,
+      "finite": true
+    },
+    "dWLg": {
+      "relative_l2": 0.0004278885608073324,
+      "max_absolute": 2.0,
+      "finite": true
+    },
+    "dWR": {
+      "relative_l2": 0.0004167226725257933,
+      "max_absolute": 8.0,
+      "finite": true
+    },
+    "dWRg": {
+      "relative_l2": 0.00043589025153778493,
+      "max_absolute": 2.0,
+      "finite": true
+    },
+    "dgamma": {
+      "relative_l2": 5.0596969231264666e-05,
+      "max_absolute": 0.11602783203125,
+      "finite": true
+    },
+    "dbeta": {
+      "relative_l2": 4.5683056669076905e-05,
+      "max_absolute": 0.09050750732421875,
+      "finite": true
+    }
+  },
+  "vs_fp32": {},
+  "ref_length": 0,
+  "times": {
+    "baseline": {
+      "median_us": 2127.6800632476807
+    },
+    "b7b12_cuda": {
+      "median_us": 2955.4879665374756
+    }
+  },
+  "speedup": 0.7199082139185227,
+  "device": "NVIDIA H100 80GB HBM3"
+}
