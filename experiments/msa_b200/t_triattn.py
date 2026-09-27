@@ -19,11 +19,17 @@ for L in Ls:
     bias = torch.randn(1, 1, H, L, L, device="cuda", generator=g).to(torch.bfloat16)
     sc = D ** -0.5
     ref = ta.sdpa_reference(q.float(), k.float(), v.float(), bias.float())
-    out, flags = ext.triattn_fwd(q, k, v, bias, sc)
+    qn, kn, vn = (t.permute(0, 1, 3, 2, 4).contiguous() for t in (q, k, v))   # [B, N, S, H, D]: the projection layout
+    out_n, lse, flags = ext.triattn_fwd(qn, kn, vn, bias[:, 0], sc, True)
+    out = out_n.permute(0, 1, 3, 2, 4)
+    # LSE check vs fp32: log2 sum_k 2^(x_k), x = (scale q.k + bias) log2 e
+    xs = (torch.einsum("bnhqd,bnhkd->bnhqk", q.float(), k.float()) * sc + bias.float()) * 1.4426950408889634
+    lse_ref = torch.logsumexp(xs * 0.6931471805599453, -1) * 1.4426950408889634
+    print(f"   lse max abs err {(lse - lse_ref).abs().max().item():.3e}", flush=True)
     fl_ = ta.triangle_attention(q, k, v, bias.float(), None, None, word="flash")
     e_ours = ((out.float() - ref).norm() / ref.norm()).item(); e_fl = ((fl_.float() - ref).norm() / ref.norm()).item()
     print(f"L={L}: rel err vs fp32  ours {e_ours:.2e}  flash {e_fl:.2e}  max|ours-ref| {(out.float()-ref).abs().max().item():.3e}  flags {int(flags.item())}", flush=True)
     fl = 4 * L * H * L * L * D
-    for name, fn in (("ours", lambda: ext.triattn_fwd(q, k, v, bias, sc)), ("flash", lambda: ta.triangle_attention(q, k, v, bias.float(), None, None, word="flash"))):
+    for name, fn in (("ours", lambda: ext.triattn_fwd(qn, kn, vn, bias[:, 0], sc, False)), ("ours+lse", lambda: ext.triattn_fwd(qn, kn, vn, bias[:, 0], sc, True)), ("flash", lambda: ta.triangle_attention(q, k, v, bias.float(), None, None, word="flash"))):
         r = sustained(fn, secs=2.0)
         print(f"   {name:6s} {r['ms']*1e3:8.1f} us  {r['J']*1e3:7.2f} mJ  {r['W']:5.0f} W  {fl/(r['ms']*1e-3)/1e12:6.1f} TF/s", flush=True)

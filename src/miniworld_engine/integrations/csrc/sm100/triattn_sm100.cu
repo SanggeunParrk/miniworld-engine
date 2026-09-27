@@ -25,7 +25,7 @@ constexpr int KVT = BN * D;                                // K or V tile [128 k
 constexpr int BT = BM * BN;                                // bias tile [2 key halves][128 q][64], 128B swizzle, bf16 (32 KiB)
 constexpr int NKV = 5, NB = 2;
 constexpr int THREADS = 448;                               // 0 TMA, 1 MMA, 2-5 / 6-9 softmax groups (even / odd rows), 10-13 epilogue
-constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT) * 2 + 2 * R * BM * 4 + 512;   // + the row sums handed to the epilogue
+constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT) * 2 + 2 * 2 * R * BM * 4 + 512;   // + the row sums / offsets for the epilogue
 constexpr int NS = 3;                                      // S/P TMEM buffers: with two, a group's buffer sat idle through PV + QK^T
 constexpr int COL_S = 0, COL_O = NS * BN;                  // S/P [NS][128] | O [R rows][32] (single: the next task's first PV waits the drain)
 constexpr uint32_t ID_S = idesc_bf16(128, BN, 0, 0);       // A = Q K-major, B = K K-major
@@ -54,11 +54,12 @@ __device__ __forceinline__ float2 ex2_poly2(float2 x) {
 
 __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
-    const __grid_constant__ CUtensorMap qmap,            // q [B*N*H*S][32] bf16, box (32, 128), 64B swizzle
+    const __grid_constant__ CUtensorMap qmap,            // q [B*N*S][H*32] bf16 (the projection's layout), box (32, 128) at column h*32, 64B swizzle
     const __grid_constant__ CUtensorMap kmap,
     const __grid_constant__ CUtensorMap vmap,
     const __grid_constant__ CUtensorMap bmap,            // bias bf16 [B*H*S][S], box (64, 128), 128B swizzle
-    __nv_bfloat16* __restrict__ OUT,                     // [B*N*H*S][32]
+    __nv_bfloat16* __restrict__ OUT,                     // [B*N*S][H*32]
+    float* __restrict__ LSE,                             // [B, N, H, S] base-2 log-sum-exp for the backward, or nullptr
     int* __restrict__ FLAGS) {
   const int QTILES = S / BM, NK = S / BN, NG = (N + R - 1) / R;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -67,7 +68,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
   __nv_bfloat16* sKV = sQ + 2 * R * QT;                          // [NKV][K | V]
   __nv_bfloat16* sB = sKV + NKV * 2 * KVT;                       // [NB][BT]
   float* sL = reinterpret_cast<float*>(sB + NB * BT);            // [2 tasks][R][128] row sums
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sL + 2 * R * BM);
+  float* sM = sL + 2 * R * BM;                                   // [2 tasks][R][128] row offsets
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sM + 2 * R * BM);
   uint64_t* qf = bars;               // [2]   the task's Q tiles landed
   uint64_t* qe = qf + 2;             // [2]   the task's last QK^T retired
   uint64_t* kvf = qe + 2;            // [NKV]
@@ -96,7 +98,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
   const uint32_t tmem = *tslot;
   // task t: q tile fastest (the CTAs sharing a row group's K / V run together), then the row group, then (b, h)
   auto decode = [&](int t, int& bh, int& qt, int& g) { qt = t % QTILES; const int r = t / QTILES; g = r % NG; bh = r / NG; };
-  auto row0 = [&](int bh, int n) -> int { const int b = bh / H, h = bh % H; n = min(n, N - 1); return ((b * N + n) * H + h) * S; };   // first (b,n,h) row
+  auto row0 = [&](int bh, int n) -> int { const int b = bh / H; n = min(n, N - 1); return (b * N + n) * S; };   // first (b, n) row of q / k / v / o
+  auto hcol = [&](int bh) -> int { return (bh % H) * D; };
 
   if (warp == 0) {
     if (lane == 0) {
@@ -106,7 +109,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
         const int nr = R, qb = lt & 1;
         if (lt >= 2) wait(qe + qb, ((lt >> 1) - 1) & 1);
         expect_tx(qf + qb, nr * QT * 2);
-        for (int r = 0; r < nr; ++r) load_2d(&qmap, sQ + (qb * R + r) * QT, qf + qb, 0, row0(bh, g * R + r) + qt * BM);
+        for (int r = 0; r < nr; ++r) load_2d(&qmap, sQ + (qb * R + r) * QT, qf + qb, hcol(bh), row0(bh, g * R + r) + qt * BM);
         for (int j = 0; j < NK; ++j, ++jb) {
           const int bs = jb % NB;
           if (jb >= NB) wait(be + bs, ((jb / NB) - 1) & 1);
@@ -117,8 +120,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
             if (x >= NKV) wait(kve + st, ((x / NKV) - 1) & 1);
             expect_tx(kvf + st, 2 * KVT * 2);
             const int rw = row0(bh, g * R + r) + j * BN;
-            load_2d(&kmap, sKV + st * 2 * KVT, kvf + st, 0, rw);
-            load_2d(&vmap, sKV + st * 2 * KVT + KVT, kvf + st, 0, rw);
+            load_2d(&kmap, sKV + st * 2 * KVT, kvf + st, hcol(bh), rw);
+            load_2d(&vmap, sKV + st * 2 * KVT + KVT, kvf + st, hcol(bh), rw);
           }
         }
       }
@@ -251,7 +254,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
       }
       // hand the row sums to the epilogue warps
 #pragma unroll
-      for (int rr = 0; rr < R / 2; ++rr) sL[((lt & 1) * R + gi + 2 * rr) * BM + row] = l[rr];
+      for (int rr = 0; rr < R / 2; ++rr) { sL[((lt & 1) * R + gi + 2 * rr) * BM + row] = l[rr]; sM[((lt & 1) * R + gi + 2 * rr) * BM + row] = m[rr]; }
       __syncwarp();
       if (lane == 0) arrive(lf + (lt & 1));
     }
@@ -278,7 +281,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
         const float lr = sL[((lt & 1) * R + r) * BM + row];
         const float inv = 1.f / lr;
         bad |= !(lr > 0.f) || !(lr < 3.0e38f);
-        uint4* dst = reinterpret_cast<uint4*>(OUT + ((size_t)row0(bh, g * R + r) + qt * BM + row) * D);
+        if (LSE != nullptr) {                     // base 2: lse = m + log2(l), [B, N, H, S]
+          const int b_ = bh / H, h_ = bh % H;
+          LSE[((size_t)(b_ * N + g * R + r) * H + h_) * S + qt * BM + row] = sM[((lt & 1) * R + r) * BM + row] + __log2f(lr);
+        }
+        uint4* dst = reinterpret_cast<uint4*>(OUT + ((size_t)row0(bh, g * R + r) + qt * BM + row) * (H * D) + hcol(bh));
 #pragma unroll
         for (int c8 = 0; c8 < 4; ++c8) {
           uint4 w;
@@ -296,21 +303,23 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
 }
 }  // namespace
 
-// q, k, v [B, N, H, S, 32] bf16 contiguous; bias [B, 1, H, S, S] (any float dtype; staged to bf16); S % 128 == 0; no mask.
-// -> (out [B, N, H, S, 32] bf16, flags int32 [1]: rows whose softmax offset overflowed -- 0 on model data)
-std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, double scale) {
-  TORCH_CHECK(q.is_cuda() && q.scalar_type() == torch::kBFloat16 && q.dim() == 5 && q.size(4) == D, "q: [B, N, H, S, 32] bf16");
+// q, k, v [B, N, S, H, 32] bf16 contiguous (the projection's layout: row (b, n, s) holds all heads); bias [B, H, S, S] (any float
+// dtype; staged to bf16 when it is not); S % 128 == 0; no mask.
+// -> (out [B, N, S, H, 32] bf16, lse fp32 [B, N, H, S] base 2 (empty unless want_lse), flags int32 [1]: rows whose offset overflowed)
+std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, double scale, bool want_lse) {
+  TORCH_CHECK(q.is_cuda() && q.scalar_type() == torch::kBFloat16 && q.dim() == 5 && q.size(4) == D, "q: [B, N, S, H, 32] bf16");
   for (const auto* t : {&q, &k, &v}) TORCH_CHECK(t->is_contiguous() && t->sizes() == q.sizes() && t->scalar_type() == torch::kBFloat16, "q, k, v: contiguous, same shape");
-  const long B = q.size(0), N = q.size(1), H = q.size(2), S = q.size(3);
+  const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
   TORCH_CHECK(S % BM == 0, "S must be a multiple of 128");
-  TORCH_CHECK(bias.numel() == B * H * S * S, "bias: [B, 1, H, S, S]");
-  auto b16 = bias.to(torch::kBFloat16).contiguous();
+  TORCH_CHECK(bias.numel() == B * H * S * S, "bias: [B, H, S, S]");
+  auto b16 = bias.scalar_type() == torch::kBFloat16 ? bias.contiguous() : bias.to(torch::kBFloat16).contiguous();
   auto out = torch::empty_like(q);
+  auto lse = want_lse ? torch::empty({B, N, H, S}, q.options().dtype(torch::kFloat32)) : torch::empty({0}, q.options().dtype(torch::kFloat32));
   auto flags = torch::zeros({1}, q.options().dtype(torch::kInt32));
-  const uint64_t rows = (uint64_t)(B * N * H * S);
-  CUtensorMap qm = make_map<2>(q.data_ptr(), {(uint64_t)D, rows}, {(uint64_t)D}, {D, BM}, CU_TENSOR_MAP_SWIZZLE_64B, "q");
-  CUtensorMap km = make_map<2>(k.data_ptr(), {(uint64_t)D, rows}, {(uint64_t)D}, {D, BN}, CU_TENSOR_MAP_SWIZZLE_64B, "k");
-  CUtensorMap vm = make_map<2>(v.data_ptr(), {(uint64_t)D, rows}, {(uint64_t)D}, {D, BN}, CU_TENSOR_MAP_SWIZZLE_64B, "v");
+  const uint64_t rows = (uint64_t)(B * N * S), cols = (uint64_t)(H * D);
+  CUtensorMap qm = make_map<2>(q.data_ptr(), {cols, rows}, {cols}, {D, BM}, CU_TENSOR_MAP_SWIZZLE_64B, "q");
+  CUtensorMap km = make_map<2>(k.data_ptr(), {cols, rows}, {cols}, {D, BN}, CU_TENSOR_MAP_SWIZZLE_64B, "k");
+  CUtensorMap vm = make_map<2>(v.data_ptr(), {cols, rows}, {cols}, {D, BN}, CU_TENSOR_MAP_SWIZZLE_64B, "v");
   CUtensorMap bm = make_map<2>(b16.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "bias");
   const int ntasks = (int)(B * H * (S / BM) * ((N + R - 1) / R));
   const int grid = std::min(ntasks, num_sms(q.device().index()));
@@ -318,12 +327,12 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_fwd_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   const float scl = (float)scale * L2E;
   triattn_fwd_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)H, (int)S, ntasks, scl, qm, km, vm, bm,
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), flags.data_ptr<int>());
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {out, flags};
+  return {out, lse, flags};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("triattn_fwd", &triattn_fwd, "sm100 triangle-attention forward (D = 32, bf16, no mask)",
-        py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("scale"));
+  m.def("triattn_fwd", &triattn_fwd, "sm100 triangle-attention forward (D = 32, bf16, no mask): q/k/v/out [B, N, S, H, 32], optional base-2 LSE",
+        py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("scale"), py::arg("want_lse") = false);
 }
