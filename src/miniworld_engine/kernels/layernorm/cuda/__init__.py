@@ -67,10 +67,12 @@ def layer_norm_fwd_cuda(x, weight, bias, eps=1e-5, *, config=None):
     return _ext(ext_config).layer_norm_fwd(x, weight, bias, eps, config["block"])
 
 
-def layer_norm_bwd_cuda(dy, x, weight, mean, rstd, row_scale=None, *, config=None):
+def layer_norm_bwd_cuda(dy, x, weight, mean, rstd, row_scale=None, *, config=None, residual=None):
     """Configured backward of LN(x)*row_scale, including affine gradients."""
     from miniworld_engine.autotune.hopper_cuda_config import layernorm_candidates
     from miniworld_engine.autotune.native import choose_config, tensor_key
+    if residual is not None and (residual.shape != x.shape or residual.dtype != x.dtype or residual.device != x.device):
+        raise ValueError("residual must match x shape, dtype and device")
     grid = layernorm_candidates("bwd", x.shape[-1], x.element_size())
     if not grid:
         # The vectorized CUDA kernel has an alignment contract. Preserve arbitrary
@@ -83,14 +85,17 @@ def layer_norm_bwd_cuda(dy, x, weight, mean, rstd, row_scale=None, *, config=Non
         weighted = grad * weight.float()
         dx = (weighted - weighted.mean(-1, keepdim=True)
               - xhat * (weighted * xhat).mean(-1, keepdim=True)) * rstd.reshape(-1, 1)
-        return dx.reshape_as(x).to(x.dtype), (grad * xhat).sum(0).to(weight.dtype), grad.sum(0).to(weight.dtype)
+        dx = dx.reshape_as(x).to(x.dtype)
+        if residual is not None:
+            dx = dx + residual
+        return dx, (grad * xhat).sum(0).to(weight.dtype), grad.sum(0).to(weight.dtype)
     if config is None:
         config = choose_config("layernorm_bwd_split_cuda", grid, dtype=str(x.dtype),
-                               bucket=tensor_key(dy, x, weight, mean, rstd, row_scale),
+                               bucket=tensor_key(dy, x, weight, mean, rstd, row_scale, residual),
                                device_index=x.device.index,
                                run=lambda c: layer_norm_bwd_cuda(dy, x, weight, mean, rstd,
-                                                                row_scale, config=c))
+                                                                row_scale, config=c, residual=residual))
     if config not in grid:
         raise ValueError("invalid LayerNorm backward configuration")
     return _ext(config).layer_norm_bwd(dy, x, weight, mean, rstd, row_scale,
-                                     config["waves"], config["reduce_block"], config["tx_bytes"])
+                                     config["waves"], config["reduce_block"], config["tx_bytes"], residual)

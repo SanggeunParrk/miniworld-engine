@@ -1326,6 +1326,8 @@ def cmd_callers(args: argparse.Namespace) -> int:
             for length in case.lengths_for(di):
                 for dtype in case.dtypes:
                     for train in ((False, True) if case.train else (False,)):
+                        if length not in case.lengths_for(di, train=train):
+                            continue
                         for impl in case.impls:
                             capture.clear_launched_ops()
                             if builder.run_case(case, length, di, train=train, impl=impl,

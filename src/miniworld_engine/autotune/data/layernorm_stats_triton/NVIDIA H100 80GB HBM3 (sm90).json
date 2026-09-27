@@ -484,7 +484,7 @@
   ],
   "config_space_hash": "7abf97b07c2a",
   "driver_id_scheme": 2,
-  "driver_identity": "70197da3b78e",
+  "driver_identity": "8034589be968",
   "entries": {
     "bfloat16+float32|shape_key=10737485717": [
       {
@@ -5977,9 +5977,11 @@
       "7abf97b07c2a"
     ],
     "bfloat16+float32|shape_key=12885428117": [
-      "7abf97b07c2a"
+      "7abf97b07c2a",
+      "983acc9b0c76"
     ],
     "bfloat16+float32|shape_key=12885952405": [
+      "3d51b82949b6",
       "7abf97b07c2a"
     ],
     "bfloat16+float32|shape_key=12886476693": [
@@ -6169,10 +6171,12 @@
       "7abf97b07c2a"
     ],
     "bfloat16+float32|shape_key=6442977173": [
-      "7abf97b07c2a"
+      "7abf97b07c2a",
+      "d116615379fc"
     ],
     "bfloat16+float32|shape_key=6443501461": [
-      "7abf97b07c2a"
+      "7abf97b07c2a",
+      "ceaa4d4210d4"
     ],
     "bfloat16+float32|shape_key=6444025749": [
       "6e10f677a5c3",
@@ -6382,6 +6386,13 @@
       "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 1, 2)",
       "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 1, 3)",
       "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 1, 4)"
+    ],
+    "3d51b82949b6": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 4, 4)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 1)), 1, 2)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 2)), 2, 2)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 2)), 2, 3)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 4)), 2, 4)"
     ],
     "3fc77f42e8e8": [
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
@@ -6984,6 +6995,13 @@
       "((('BLOCK_K', 256), ('BLOCK_M1', 4)), 1, 4)",
       "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 4, 4)"
     ],
+    "983acc9b0c76": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 2)), 1, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 2)), 1, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 1, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 1, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 2)), 1, 3)"
+    ],
     "a67666cf8f96": [
       "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 1)",
       "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 2)",
@@ -7075,12 +7093,26 @@
       "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 1, 3)",
       "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 1, 4)"
     ],
+    "ceaa4d4210d4": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 2)), 2, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 1)), 1, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 2)), 1, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 4)), 4, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 2)), 1, 1)"
+    ],
     "cfaa3714ce6a": [
       "((('BLOCK_K', 64), ('BLOCK_M1', 32)), 4, 1)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 32)), 4, 2)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 32)), 4, 3)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 32)), 4, 4)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 64)), 1, 3)"
+    ],
+    "d116615379fc": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 2, 4)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 2)), 1, 1)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 2)), 1, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 2)), 1, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 2)), 1, 4)"
     ],
     "d4c777ebf94c": [
       "((('BLOCK_K', 512), ('BLOCK_M1', 4)), 1, 1)",

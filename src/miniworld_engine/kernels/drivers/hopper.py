@@ -82,6 +82,7 @@ def _cuda(kind):
     if kind == "b2b":
         ws = torch.randn(x.shape[-1], wa.shape[0], device=x.device, dtype=x.dtype) / wa.shape[0]**0.5
         cuda.transition_b2b_fwd(*args, ws)
+        cuda.transition_b2b_fwd_saved(*args, ws)
     elif kind == "expand_gate":
         cuda.transition_expand_gate_fwd(*args)
     else:

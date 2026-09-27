@@ -131,6 +131,8 @@ class TriangleMultiplication(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
         ln_implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
+        training_output_backend: str = "triton",
+        anthropic_row: str = "v4",
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
@@ -158,7 +160,13 @@ class TriangleMultiplication(nn.Module):
         # 'miniworld' (auto) -> concrete backend for the running GPU arch. The
         # public option is kept on self.implementation; forward routes on _backend.
         self.implementation = ImplementationType(implementation)
+        if training_output_backend not in ("triton", "anthropic_cuda"):
+            raise ValueError("Unknown TriMul training output backend")
+        if training_output_backend == "anthropic_cuda" and self.implementation != ImplementationType.TRITON:
+            raise ValueError("The experimental Anthropic CUDA output requires implementation='triton'")
+        self.training_output_backend = training_output_backend
         self._backend = resolve_triangle_multiplication(self.implementation)
+        self.anthropic_row = anthropic_row
         self.ln_implementation = ln_implementation
         direction = "outgoing" if outgoing else "incoming"
         self.nvtx_enabled = False
@@ -258,6 +266,13 @@ class TriangleMultiplication(nn.Module):
         >>> The raw op without the residual is ``ops.triangle_multiplicative_update``,
         not a flag on this module."""
         dropout_p = self.p_drop if dropout_p is None else dropout_p
+        if self._backend == KernelBackend.ANTHROPIC:
+            if self.anthropic_row == "training_saved":
+                ds = (self._make_drop_row_scale(pair, dropout_p)
+                      if self.training and dropout_p else None)
+                return self._forward_triton(pair, mask, ds)
+            from miniworld_engine.integrations.anthropic import module_trimul
+            return module_trimul(self, pair, mask, dropout_p)
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             backend = _dispatch.guard_dtype(
                 self._backend, pair.dtype, op="TriangleMultiplication"
@@ -333,6 +348,13 @@ class TriangleMultiplication(nn.Module):
             trimul_triton,
         )
 
+        if self._backend == KernelBackend.ANTHROPIC and self.anthropic_row == "training_saved":
+            self.anthropic_selection = {
+                "row": "training_saved", "front": "Anthropic K1-derived, prenorm + preact saves",
+                "output": "Anthropic K3-derived F567, separate LN_out",
+                "backward": "unchanged Triton/cuBLAS", "save_policy": "unchanged",
+                "dropout_residual": "fused F567",
+            }
         return trimul_triton(
             pair,
             self.to_left.weight, self.to_left_gate.weight,
@@ -345,6 +367,10 @@ class TriangleMultiplication(nn.Module):
             self.outgoing,
             mask=mask,
             dropscale=dropscale,
+            output_backend=("anthropic_saved" if self._backend == KernelBackend.ANTHROPIC
+                            and self.anthropic_row == "training_saved" else
+                            self.training_output_backend
+                            if torch.is_grad_enabled() or dropscale is not None else "triton"),
         )
 
     def _forward_cuequivariance(

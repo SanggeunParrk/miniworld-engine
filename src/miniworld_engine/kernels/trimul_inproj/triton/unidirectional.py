@@ -54,11 +54,15 @@ class _UniBackHalfTriton(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, outgoing,
-                mask=None, residual=None, dropscale=None):
+                mask=None, residual=None, dropscale=None, output_backend="triton"):
         B, L, _, D = x_n.shape
         M = B * L * L
         H = WL.shape[1]                                          # per-side hidden = d_hidden
-        left, right, preact = bidir_front_triton(x_n, WL, WLg, WR, WRg, pair_mask=mask)
+        if output_backend == "anthropic_saved":
+            from miniworld_engine.kernels.trimul_inproj.cuda.anthropic_saved import front
+            left, right, preact = front(x_n, WL, WLg, WR, WRg, pair_mask=mask)
+        else:
+            left, right, preact = bidir_front_triton(x_n, WL, WLg, WR, WRg, pair_mask=mask)
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
         # Mask applies to the contraction inputs (left/right) ONLY — NOT to x_n, so
@@ -67,11 +71,19 @@ class _UniBackHalfTriton(torch.autograd.Function):
         mm = mask  # Applied inside the front stores; x_n/output gate stay unmasked.
         tri = _contract(lf, rf, outgoing)                        # (H, L, L)
         view = tri.reshape(H, M).t()                             # (M, H) m-major
-        if x_n.dtype == torch.bfloat16:
+        if output_backend == "anthropic_cuda":
+            from miniworld_engine.kernels.trimul_inproj.cuda.anthropic_training import fused_output
+            y, te_xn, mean_out, rstd_out, proj, gate = fused_output(
+                tri, x_n, Wp, Wg, ln_out_w, ln_out_b, residual, dropscale, eps)
+        elif x_n.dtype == torch.bfloat16:
             te_xn, mean_out, rstd_out = _ln_materialize(
                 view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
-            y, proj, gate = output_f567_train(
-                te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
+            if output_backend == "anthropic_saved":
+                from miniworld_engine.kernels.trimul_inproj.cuda.anthropic_saved import output
+                y, proj, gate = output(te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
+            else:
+                y, proj, gate = output_f567_train(
+                    te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
         else:
             proj, te_xn, mean_out, rstd_out = _te_forward(
                 view, ln_out_w, ln_out_b, Wp, None, eps, shape_key=both_key(M))
@@ -142,7 +154,7 @@ class _UniBackHalfTriton(torch.autograd.Function):
         del dx
         # trailing Nones: eps, outgoing, mask; then d_residual (fused residual input), dropscale
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
-                d_residual, None)
+                d_residual, None, None)
 
 
 @torch.no_grad()
@@ -210,6 +222,7 @@ def trimul_triton(
     outgoing,                    # bool: outgoing (True) or incoming (False)
     mask=None,                   # (B,L) residue OR (B,L,L) pair mask, optional (folded into LN_in)
     dropscale=None,              # drop_row scale [B,1,L,D] (== mask/(1-p)); training only
+    *, output_backend="triton",
 ):
     """Faithful triton mirror of the single-direction cute trimul. Returns
     (B, L, L, d_pair). Mirrors cute's dispatch exactly: LN_in (triton, row_scale
@@ -220,6 +233,10 @@ def trimul_triton(
     B==1 by design (inherited from the shared bidir front + bdll layout). B>1 was implemented
     + verified correct but is slower than looping this path per batch (L2 thrashing of large
     bdll intermediates); see notes/trimul_batch_generalization."""
+    if output_backend not in ("triton", "anthropic_cuda", "anthropic_saved"):
+        raise ValueError("Unknown TriMul training output backend")
+    if output_backend == "anthropic_cuda" and (not torch.is_grad_enabled() and dropscale is None):
+        raise ValueError("anthropic_cuda is an explicit training prototype; use the inference adapter for inference")
     d = pair.shape[-1]
     if d_hidden != d:
         raise ValueError(
@@ -246,7 +263,7 @@ def trimul_triton(
     ds_2d = dropscale.reshape(L, d) if dropscale is not None else None
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
-    if not torch.is_grad_enabled() and ds_2d is None:
+    if not torch.is_grad_enabled() and ds_2d is None and output_backend != "anthropic_saved":
         # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed. Also gate on
         # ds_2d is None: a live dropout scale (train() under no_grad, p_drop>0) must take the
         # TRAINING apply below (which folds dropout into the gate epilogue) — the inference path
@@ -263,5 +280,5 @@ def trimul_triton(
     # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
     return _UniBackHalfTriton.apply(
         x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, outgoing, m2d,
-        residual_flat, ds_2d,
+        residual_flat, ds_2d, output_backend,
     )

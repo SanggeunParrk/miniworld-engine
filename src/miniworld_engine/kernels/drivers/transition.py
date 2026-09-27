@@ -450,7 +450,7 @@ def squeeze_residual_sm90():
     from miniworld_engine.kernels.transition.cute.squeeze_residual import (
         squeeze_residual,
     )
-    width = 512
+    width = K_SMALL
     expand = torch.randn(ROWS, 4 * width, device=dev(), dtype=BF16)
     weight = torch.randn(width, 4 * width, device=dev(), dtype=BF16)
     residual = torch.randn(ROWS, width, device=dev(), dtype=BF16)
@@ -464,3 +464,25 @@ def transition_squeeze_residual_triton():
     w = rows2d(K_SMALL, N_EXPAND * K_SMALL)
     r = rows2d(ROWS, K_SMALL)
     squeeze_residual(h, w, r, SHAPE_KEY)
+
+
+def transition_b2b_residual_triton():
+    """Build the exact saved/non-saved forward variants used at runtime."""
+    from miniworld_engine.kernels.transition.triton.b2b_residual import forward
+    from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
+    x, g, b, wa, wb, ws = _transition_operands()
+    rs, c1 = stats_triton(x, 1e-5, shape_key=SHAPE_KEY)
+    for save in (False, True):
+        forward(x, g, b, rs, c1, wa, wb, ws, save, SHAPE_KEY)
+
+
+def transition_segmented_b2b_triton():
+    from miniworld_engine.kernels.transition.triton.segmented_residual import forward
+    from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
+    x, g, b, wa, wb, ws = _transition_operands()
+    rs, c1 = stats_triton(x, 1e-5, shape_key=SHAPE_KEY)
+    empty = x.new_empty(0)
+    xn = ((x.float() * rs[:,None] - c1[:,None]) * g.float() + b.float()).to(x.dtype)
+    forward(xn, x, empty, empty, empty, empty, wa, wb, ws, False, False, SHAPE_KEY)
+    for save in (False, True):
+        forward(x, x, g, b, rs, c1, wa, wb, ws, True, save, SHAPE_KEY)

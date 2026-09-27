@@ -1,0 +1,9 @@
+{
+  "config": {
+    "BM": 64,
+    "BN": 128,
+    "BK": 64,
+    "num_warps": 8,
+    "num_stages": 3
+  }
+}

@@ -1,5 +1,31 @@
 # miniworld-engine
 
+## Direction and acknowledgment
+
+We developed our own inference kernels for biomolecular models. Anthropic's
+[biomolecular modeling optimization release](https://www.anthropic.com/research/claude-uplifts-biomolecular-modeling)
+achieved substantially stronger inference results than our effort, and we
+recognize it as the work to build on. We are redirecting miniworld-engine to
+adopt and extend that work, including FlashPairformer, while retaining our
+engine's integration, tuning, cache, and validation infrastructure.
+
+Our intended contribution is **high-performance training support built on
+Anthropic's inference optimizations**. Imported inference kernels and their
+designs will be credited to their authors; our documentation will distinguish
+upstream code, our modifications, and new training implementations.
+
+The first integration and H100 campaign now covers 16 inference operation
+categories, with 178 passing candidate/shape measurements and 72 NCU profiles.
+See [integration and usage](docs/anthropic-integration.md),
+[results and remaining scope](docs/anthropic-h100-audit.md), and
+[project direction and attribution](docs/project-direction.md).
+TriMul now has an explicit `training_saved` row: Anthropic-derived projection
+kernels with the existing fusion boundaries, activation saves and Triton/cuBLAS
+backward. The original-native forward plus reference recomputation backward is
+retained separately as `native_rebuilt`.
+See [training wiring, validation and limitations](docs/anthropic-trimul-training.md).
+End-to-end model qualification remains future work.
+
 ![MiniWorld Engine graphical abstract: model operations, GPU kernel fusion, hardware-specific tuning and cache reuse, with A6000 DiT results.](docs/assets/miniworld-engine-graphical-abstract.png)
 
 [Figure details and measurement scope](docs/assets/README.md).

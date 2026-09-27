@@ -1,0 +1,248 @@
+{
+  "node": "node02",
+  "allocation": 13264,
+  "source_base_commit": "59bdb335064caee8ec75bafe3bbafa655955a7b8",
+  "source_state": "uncommitted local development checkout; installed training package unchanged",
+  "source_sha256": {
+    "src/miniworld_engine/autotune/builder.py": "917a77f6a28bea69c1a49f883c0d7ef7276c76c115d03482f0295769717d9bda",
+    "src/miniworld_engine/autotune/native.py": "a14577faff69515741c1e1e59aafd96d329f7cdf4a3ff7d141a0a5cea6656f40",
+    "src/miniworld_engine/autotune/native_compile.py": "e43559aabd58334013a913abb4df8c2921872917f8522ac1fc5d7e77367a49d1",
+    "src/miniworld_engine/kernels/drivers/layernorm.py": "c86badab4fb113a6ca1180c8027ac1446d912052d61faa0429989c3dd290e95c",
+    "src/miniworld_engine/kernels/drivers/transition.py": "8666df5049b3803f1e5412bd6fde6e36c0403245b881138ed57ae2604ae94b34",
+    "src/miniworld_engine/kernels/layernorm/cuda/__init__.py": "445dc649f564507ba3e6a02e642a8357b7751717740d133fd0db34370da3822a",
+    "src/miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu": "c7e9c86f2dd20ea2a33dfc6126704f0b40160f5fa4afd743bf32fcaed5fc0729",
+    "src/miniworld_engine/kernels/transition/cute/fused.py": "cbf9702ceed750fcb92c39f5b8b38e3d8d3c1f8a4ce9a49c1b2f15e554cf3cb4",
+    "src/miniworld_engine/kernels/transition/cute/squeeze_residual.py": "f5a7888f925d4bab65e815cfd35e9cf00116f3efa6e5cf9b47e48050f2c56f7b",
+    "src/miniworld_engine/kernels/transition/hopper.py": "2dc7f668d99ffcb375d38b67725afaffd116cfc932f5fb8e63b9b8cea97d890b",
+    "src/miniworld_engine/kernels/transition/triton/fused.py": "7b2bf102a307a58fc45ce7ebf38d521cccda804032363cee59076088b4d89561",
+    "src/miniworld_engine/kernels/transition/whole_op.py": "5a7c438df42e79b4a27263fe3cbd318e38da8fc6d838e34c53958c12cbf64163",
+    "src/miniworld_engine/modules/transition/module.py": "a4e20d864ee6896ba79f0a34a4d058b083ccaaa4f900b828a1bd71ab9bf47ca3",
+    "src/miniworld_engine/settings.py": "f40cc2ca8dd3f372fb5dfa3a291fdee99906c0b2405de859a4ad27b5c48517e1",
+    "tests/autotune/test_transition_ln_width_coverage.py": "710c1238b0df0470471157cc8f1235f11bdde05595dd52e7b24b5dd7d52c1964",
+    "tests/numerics/test_transition_hopper_residual_gpu.py": "866b23fb9ef82d6a2e6fd459495a7aecc7037f29f4e665d0b19459e7fa151780"
+  },
+  "method": "Official Transition module fixture, BF16, B=1, n=4, nonzero squeeze, static compile (partial allowed; 1 observed graph), manual CUDA graph, two captures with reversed backend order; training is forward+backward without optimizer",
+  "tuning": "Triton current cache or 24-candidate miss search; native valid cache or declared default. Full native tuning not performed.",
+  "legacy": "Residual fusion disabled, using current shared source; not a historical checkout",
+  "tests": {
+    "hopper_gpu": 16,
+    "cpu": 20,
+    "sanitizer_tests": 6,
+    "sanitizer_errors": 0,
+    "note": "Sanitizer preceded the final Python FP32 affine-gradient preservation fix; CUDA/CuTe memory kernels unchanged"
+  },
+  "rows": [
+    {
+      "length": 384,
+      "width": 128,
+      "mode": "inference",
+      "samples_ms": {
+        "triton": [
+          0.275519996881485,
+          0.2751680016517639
+        ],
+        "legacy": [
+          0.1599999964237213,
+          0.16076800227165222
+        ],
+        "h100": [
+          0.1599999964237213,
+          0.16096000373363495
+        ]
+      },
+      "mean_ms": {
+        "triton": 0.27534399926662445,
+        "legacy": 0.16038399934768677,
+        "h100": 0.16048000007867813
+      },
+      "speedup_vs_triton": 1.7157527363636107,
+      "time_reduction_vs_triton_pct": 41.716543485198606,
+      "speedup_vs_legacy": 0.9994017900614139
+    },
+    {
+      "length": 384,
+      "width": 128,
+      "mode": "training",
+      "samples_ms": {
+        "triton": [
+          1.0487039685249329,
+          1.04966402053833
+        ],
+        "legacy": [
+          1.0352799892425537,
+          1.0378559827804565
+        ],
+        "h100": [
+          0.995743989944458,
+          0.9964959919452667
+        ]
+      },
+      "mean_ms": {
+        "triton": 1.0491839945316315,
+        "legacy": 1.0365679860115051,
+        "h100": 0.9961199909448624
+      },
+      "speedup_vs_triton": 1.0532706943632721,
+      "time_reduction_vs_triton_pct": 5.057645166466496,
+      "speedup_vs_legacy": 1.0406055449487326
+    },
+    {
+      "length": 768,
+      "width": 128,
+      "mode": "inference",
+      "samples_ms": {
+        "triton": [
+          1.0331840515136719,
+          1.0392320156097412
+        ],
+        "legacy": [
+          0.5665759742259979,
+          0.5696640014648438
+        ],
+        "h100": [
+          0.5674079954624176,
+          0.5665439963340759
+        ]
+      },
+      "mean_ms": {
+        "triton": 1.0362080335617065,
+        "legacy": 0.5681199878454208,
+        "h100": 0.5669759958982468
+      },
+      "speedup_vs_triton": 1.8276047682055154,
+      "time_reduction_vs_triton_pct": 45.283574578223615,
+      "speedup_vs_legacy": 1.0020177079020103
+    },
+    {
+      "length": 768,
+      "width": 128,
+      "mode": "training",
+      "samples_ms": {
+        "triton": [
+          3.9779359102249146,
+          3.9730560779571533
+        ],
+        "legacy": [
+          3.933568000793457,
+          3.922144055366516
+        ],
+        "h100": [
+          3.7788479328155518,
+          3.7516640424728394
+        ]
+      },
+      "mean_ms": {
+        "triton": 3.975495994091034,
+        "legacy": 3.9278560280799866,
+        "h100": 3.7652559876441956
+      },
+      "speedup_vs_triton": 1.0558368427370537,
+      "time_reduction_vs_triton_pct": 5.288396888321056,
+      "speedup_vs_legacy": 1.043184325572914
+    },
+    {
+      "length": 384,
+      "width": 512,
+      "mode": "inference",
+      "samples_ms": {
+        "triton": [
+          2.3284480571746826,
+          2.2910399436950684
+        ],
+        "legacy": [
+          1.8184959888458252,
+          1.8114240169525146
+        ],
+        "h100": [
+          1.843168020248413,
+          1.8119679689407349
+        ]
+      },
+      "mean_ms": {
+        "triton": 2.3097440004348755,
+        "legacy": 1.81496000289917,
+        "h100": 1.827567994594574
+      },
+      "speedup_vs_triton": 1.263834783311177,
+      "time_reduction_vs_triton_pct": 20.875733663536657,
+      "speedup_vs_legacy": 0.9931012188150072
+    },
+    {
+      "length": 384,
+      "width": 512,
+      "mode": "training",
+      "samples_ms": {
+        "triton": [
+          7.392384052276611,
+          7.384096145629883
+        ],
+        "legacy": [
+          7.370000123977661,
+          7.28219199180603
+        ],
+        "h100": [
+          7.220288038253784,
+          7.149807929992676
+        ]
+      },
+      "mean_ms": {
+        "triton": 7.388240098953247,
+        "legacy": 7.326096057891846,
+        "h100": 7.18504798412323
+      },
+      "speedup_vs_triton": 1.0282798549542063,
+      "time_reduction_vs_triton_pct": 2.750209956750116,
+      "speedup_vs_legacy": 1.0196307768688935
+    }
+  ],
+  "raw_reports": [
+    "bench-L384-D128.json",
+    "bench-L768-D128.json",
+    "bench-L384-D512.json"
+  ],
+  "profiling": "torch.profiler kernel traces in raw reports; some captures have no CUDA events and cannot substantiate kernel counts; no NCU roofline claim",
+  "physical_event_counts": {
+    "bench-L384-D128.json": {
+      "0-inference-triton": 3,
+      "0-inference-legacy": 0,
+      "0-inference-h100": 0,
+      "0-training-triton": 6,
+      "0-training-legacy": 0,
+      "0-training-h100": 0,
+      "1-inference-h100": 0,
+      "1-inference-legacy": 0,
+      "1-inference-triton": 0,
+      "1-training-h100": 0,
+      "1-training-legacy": 0,
+      "1-training-triton": 0
+    },
+    "bench-L768-D128.json": {
+      "0-inference-triton": 3,
+      "0-inference-legacy": 4,
+      "0-inference-h100": 4,
+      "0-training-triton": 16,
+      "0-training-legacy": 20,
+      "0-training-h100": 18,
+      "1-inference-h100": 3,
+      "1-inference-legacy": 3,
+      "1-inference-triton": 2,
+      "1-training-h100": 18,
+      "1-training-legacy": 20,
+      "1-training-triton": 15
+    },
+    "bench-L384-D512.json": {
+      "0-inference-triton": 3,
+      "0-inference-legacy": 6,
+      "0-inference-h100": 6,
+      "0-training-triton": 15,
+      "0-training-legacy": 0,
+      "0-training-h100": 0,
+      "1-inference-h100": 0,
+      "1-inference-legacy": 0,
+      "1-inference-triton": 0,
+      "1-training-h100": 0,
+      "1-training-legacy": 0,
+      "1-training-triton": 0
+    }
+  }
+}

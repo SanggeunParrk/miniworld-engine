@@ -11,3 +11,13 @@ def test_transition_ln_production_widths_are_not_collapsed():
     units = builder.op_units({op})
     pair_widths = {u.width for u in units if u.side == "pair" and u.length == 384}
     assert {128, 256, 384, 768} <= pair_widths
+
+
+def test_hopper_squeeze_build_covers_auto_and_explicit_cute_widths():
+    from miniworld_engine.autotune.native import native_shape_supported
+    op = "transition_squeeze_residual_sm90_cute"
+    widths = {128, 256, 384, 512, 768}
+    units = builder.op_units({op})
+    pair_widths = {u.width for u in units if u.side == "pair" and u.length == 384}
+    assert widths <= pair_widths
+    assert all(native_shape_supported(op, width, "bfloat16") for width in widths)

@@ -1,0 +1,6 @@
+{
+  "src/miniworld_engine/kernels/transition/triton/wide_b2b.py": "547a7271799c17ac592e564e5a219513b54472aa6c9742a22bfbbdd273d02d96",
+  "src/miniworld_engine/kernels/transition/cuda/transition_b2b_kernel.cu": "8456a346e8fd2cafd92a884a01c769590e7ed1f32bddf5d2fa923a4568e6b420",
+  "src/miniworld_engine/kernels/transition/triton/fused.py": "7b2bf102a307a58fc45ce7ebf38d521cccda804032363cee59076088b4d89561",
+  "src/miniworld_engine/kernels/transition/hopper.py": "1ff49b4ec021d03c30d700ceaab10f82de19caa59f592c6dde8ad904b8fb3ad4"
+}

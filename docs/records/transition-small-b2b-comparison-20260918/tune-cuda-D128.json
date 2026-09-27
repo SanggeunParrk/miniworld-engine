@@ -1,0 +1,95 @@
+{
+  "node": "node02",
+  "D": 128,
+  "L": 384,
+  "rows": [
+    {
+      "config": {
+        "bn": 128,
+        "stages": 2,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 1
+      },
+      "mode": "inference",
+      "ms": 0.13292372417187232
+    },
+    {
+      "config": {
+        "bn": 128,
+        "stages": 2,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 2
+      },
+      "mode": "inference",
+      "ms": 1.1987489560755287
+    },
+    {
+      "config": {
+        "bn": 128,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 1
+      },
+      "mode": "inference",
+      "ms": 0.15583190048168072
+    },
+    {
+      "config": {
+        "bn": 128,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 2
+      },
+      "mode": "inference",
+      "ms": 1.0640363571491647
+    },
+    {
+      "config": {
+        "bn": 128,
+        "stages": 2,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 1
+      },
+      "mode": "training",
+      "ms": 0.1367869753797515
+    },
+    {
+      "config": {
+        "bn": 128,
+        "stages": 2,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 2
+      },
+      "mode": "training",
+      "ms": 1.205584149244355
+    },
+    {
+      "config": {
+        "bn": 128,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 1
+      },
+      "mode": "training",
+      "ms": 0.1589659015074471
+    },
+    {
+      "config": {
+        "bn": 128,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 128,
+        "min_blocks": 2
+      },
+      "mode": "training",
+      "ms": 1.0708714360776155
+    }
+  ]
+}

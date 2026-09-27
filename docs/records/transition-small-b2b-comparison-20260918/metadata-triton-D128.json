@@ -1,0 +1,16 @@
+{
+  "D": 128,
+  "backend": "triton",
+  "config": {
+    "BM": 64,
+    "BN": 64,
+    "BK": 128,
+    "num_warps": 4,
+    "num_stages": 2
+  },
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "registers": 242,
+  "spills": 0,
+  "shared_bytes": 114688
+}

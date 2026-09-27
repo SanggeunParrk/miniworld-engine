@@ -1,0 +1,51 @@
+{
+  "node": "node02",
+  "D": 256,
+  "L": 384,
+  "rows": [
+    {
+      "config": {
+        "bn": 64,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 256,
+        "min_blocks": 1
+      },
+      "mode": "inference",
+      "ms": 0.4724449524512658
+    },
+    {
+      "config": {
+        "bn": 64,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 256,
+        "min_blocks": 2
+      },
+      "mode": "inference",
+      "ms": 1.2430012798309327
+    },
+    {
+      "config": {
+        "bn": 64,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 256,
+        "min_blocks": 1
+      },
+      "mode": "training",
+      "ms": 0.5169008154618113
+    },
+    {
+      "config": {
+        "bn": 64,
+        "stages": 1,
+        "warpgroups": 2,
+        "kt": 256,
+        "min_blocks": 2
+      },
+      "mode": "training",
+      "ms": 1.2740920433631309
+    }
+  ]
+}

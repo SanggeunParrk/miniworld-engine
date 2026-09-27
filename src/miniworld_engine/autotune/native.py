@@ -54,7 +54,7 @@ def native_shape_supported(op, width, dtype):
     if op == "trimul_output_bwd_rows_sm90_cute":
         return width == 128
     if op == "transition_squeeze_residual_sm90_cute":
-        return width == 512  # only this width is enabled in production dispatch
+        return width in (128, 256, 384, 512, 768)  # explicit CuTe also serves small widths
     if op.endswith("sm90_cuda"):
         return width in ((128, 256) if "b2b" in op else (128, 256, 512))
     if op in ("transition_bwd_dx_sm90_cute", "layernorm_linear_bwd_dx_sm90_cute"):

@@ -1,0 +1,110 @@
+{
+  "node": "node02",
+  "D": 384,
+  "L": 384,
+  "mode": "static fullgraph compile plus CUDA Graph; autograd.grad, no optimizer or gradient accumulation; donated_buffer=False for retained backward",
+  "rows": [
+    {
+      "arm": "triton_split",
+      "relative_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "dg": 7.085142783580523e-07,
+        "db": 6.336488240776816e-07,
+        "dwa": 0.0,
+        "dwb": 0.0,
+        "dws": 0.0
+      },
+      "training_base_allocated_bytes": 263588864,
+      "training_peak_allocated_bytes": 2303200256,
+      "training_peak_extra_bytes": 2039611392,
+      "training_fwd_ms": 1.4464132944742838,
+      "training_total_ms": 5.06467539469401,
+      "bwd_ms": 3.3630282084147134,
+      "inference_fwd_ms": 1.4459013621012369
+    },
+    {
+      "arm": "triton:streamed_k",
+      "relative_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "dg": 8.20475008822541e-07,
+        "db": 6.99296379025327e-07,
+        "dwa": 0.0,
+        "dwb": 0.0,
+        "dws": 0.0
+      },
+      "training_base_allocated_bytes": 263588864,
+      "training_peak_allocated_bytes": 2303200256,
+      "training_peak_extra_bytes": 2039611392,
+      "training_fwd_ms": 1.5618213653564452,
+      "training_total_ms": 5.017744954427084,
+      "bwd_ms": 3.398235321044922,
+      "inference_fwd_ms": 1.5640538533528645
+    },
+    {
+      "arm": "cuda:streamed_k",
+      "relative_errors": {
+        "y": 8.013648039195687e-05,
+        "dx": 9.171122655970976e-05,
+        "dg": 9.138932364294305e-05,
+        "db": 9.852396760834381e-05,
+        "dwa": 0.0004128656873945147,
+        "dwb": 0.0004066891851834953,
+        "dws": 0.0004440613556653261
+      },
+      "training_base_allocated_bytes": 263588864,
+      "training_peak_allocated_bytes": 2303200256,
+      "training_peak_extra_bytes": 2039611392,
+      "training_fwd_ms": 1.8352869669596354,
+      "training_total_ms": 5.621925354003906,
+      "bwd_ms": 3.7798388163248697,
+      "inference_fwd_ms": 1.833471425374349
+    },
+    {
+      "arm": "triton:full_k",
+      "relative_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "dg": 7.209980594780063e-07,
+        "db": 6.373579140017682e-07,
+        "dwa": 0.0,
+        "dwb": 0.0,
+        "dws": 0.0
+      },
+      "training_base_allocated_bytes": 263588864,
+      "training_peak_allocated_bytes": 2303200256,
+      "training_peak_extra_bytes": 2039611392,
+      "training_fwd_ms": 4.294787089029948,
+      "training_total_ms": 7.554533386230469,
+      "bwd_ms": 3.406671396891276,
+      "inference_fwd_ms": 4.303230285644531
+    },
+    {
+      "arm": "cuda:full_k",
+      "relative_errors": {
+        "y": 8.013648039195687e-05,
+        "dx": 9.171122655970976e-05,
+        "dg": 9.148467506747693e-05,
+        "db": 9.855134703684598e-05,
+        "dwa": 0.0004128656873945147,
+        "dwb": 0.0004066891851834953,
+        "dws": 0.0004440613556653261
+      },
+      "training_base_allocated_bytes": 263588864,
+      "training_peak_allocated_bytes": 2303200256,
+      "training_peak_extra_bytes": 2039611392,
+      "training_fwd_ms": 1.6350709279378255,
+      "training_total_ms": 5.474434916178385,
+      "bwd_ms": 3.846083323160807,
+      "inference_fwd_ms": 1.6249136606852213
+    }
+  ],
+  "isolated_common_backward_ms": {
+    "dh": 0.30283679962158205,
+    "dWs": 0.24433172543843587,
+    "dWab": 0.520576000213623,
+    "dxn": 0.5379039764404296,
+    "weight_cat": 0.0028197333216667176
+  }
+}

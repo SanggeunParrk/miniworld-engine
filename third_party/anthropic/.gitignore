@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.so
+*.cubin
+*.ptx
+*.o
+*.a
+*.whl
+*.tar.gz
+*.zip
+*.ncu-rep

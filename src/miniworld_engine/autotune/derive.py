@@ -115,6 +115,8 @@ def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
     for row in rows:
         for length, impl, dtype, mode in itertools.product(
                 row.lengths, row.impls, row.dtypes, row.modes):
+            if length not in row.lengths_for(mode):
+                continue
             if sm and not build_matrix.allows(sm, row.module, impl, dtype):
                 continue
             computes = row.computes or ("",)

@@ -1,0 +1,222 @@
+{
+  "node": "node02",
+  "D": 256,
+  "L": 384,
+  "fixture": "bench_module_transition",
+  "compile": "dynamic=False, fullgraph=False",
+  "cudagraph": "manual",
+  "precision": "BF16 activation/weights; FP32 LN affine",
+  "squeeze": "nonzero seed987",
+  "config_scope": "L384 bounded seed winners reused at L768",
+  "configs": {
+    "streamed_k": {
+      "best_forward": {
+        "config": {
+          "bk": 64,
+          "bn": 64,
+          "bo": 64,
+          "mgroups": 1,
+          "ngroups": 1,
+          "stages": 3,
+          "min_blocks": 1
+        },
+        "status": "ok",
+        "resources": {
+          "forward_smem": 106576,
+          "backward_smem": 106576
+        },
+        "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+        "fwd_ms": 0.623545655750093,
+        "gate_bwd_ms": 1.0011998653411864,
+        "errors": {
+          "y": 0.00016215650248341262,
+          "h": 2.435339592921082e-05,
+          "da": 2.8426136850612238e-05,
+          "db": 3.061127426917665e-05
+        },
+        "seconds": 2.4503213549032807
+      },
+      "best_backward": {
+        "config": {
+          "bk": 64,
+          "bn": 64,
+          "bo": 64,
+          "mgroups": 1,
+          "ngroups": 1,
+          "stages": 3,
+          "min_blocks": 1
+        },
+        "status": "ok",
+        "resources": {
+          "forward_smem": 106576,
+          "backward_smem": 106576
+        },
+        "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_streamed_k_d256_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5/transition_v2_streamed_k_d256_bk64_bn64_bo64_mgroups1_min_blocks1_ngroups1_stages3_9502ec6a3ef5.so",
+        "fwd_ms": 0.623545655750093,
+        "gate_bwd_ms": 1.0011998653411864,
+        "errors": {
+          "y": 0.00016215650248341262,
+          "h": 2.435339592921082e-05,
+          "da": 2.8426136850612238e-05,
+          "db": 3.061127426917665e-05
+        },
+        "seconds": 2.4503213549032807
+      },
+      "best_norm": {
+        "config": [
+          4,
+          8,
+          8,
+          128,
+          1
+        ],
+        "fwd_ms": 0.05647325964183269,
+        "bwd_ms": 0.12609610449534792,
+        "total_ms": 0.1825693641371806
+      },
+      "best_triton_forward": {
+        "config": {
+          "BM": 64,
+          "BN": 128,
+          "BK": 64,
+          "BO": 128,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "status": "ok",
+        "relative": 0.00016215650248341262,
+        "ms": 0.668345655021021,
+        "registers": 253,
+        "spills": 0,
+        "shared": 122880
+      }
+    },
+    "full_k": {
+      "best_forward": {
+        "config": {
+          "bk": 256,
+          "bn": 64,
+          "bo": 128,
+          "mgroups": 2,
+          "ngroups": 1,
+          "stages": 2,
+          "min_blocks": 1
+        },
+        "status": "ok",
+        "resources": {
+          "forward_smem": 229440,
+          "backward_smem": 262208
+        },
+        "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn64_bo128_mgroups2_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+        "fwd_ms": 0.5796944659689198,
+        "backward_excluded": "shared memory >232448 bytes",
+        "errors": {
+          "y": 0.00016215650248341262
+        },
+        "seconds": 47.28956988081336
+      },
+      "best_backward": {
+        "config": {
+          "bk": 256,
+          "bn": 32,
+          "bo": 128,
+          "mgroups": 1,
+          "ngroups": 1,
+          "stages": 2,
+          "min_blocks": 1
+        },
+        "status": "ok",
+        "resources": {
+          "forward_smem": 114752,
+          "backward_smem": 114752
+        },
+        "extension": "/home/psk6950/MiniWorld/runs/transition_h100_residual_20260918/torch_extensions/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5/transition_v2_full_k_d256_bk256_bn32_bo128_mgroups1_min_blocks1_ngroups1_stages2_9502ec6a3ef5.so",
+        "fwd_ms": 0.6251550946916853,
+        "gate_bwd_ms": 0.8748737512632858,
+        "errors": {
+          "y": 0.00016215650248341262,
+          "h": 2.435339592921082e-05,
+          "da": 2.8426136850612238e-05,
+          "db": 3.061127426917665e-05
+        },
+        "seconds": 8.475898909382522
+      },
+      "best_norm": {
+        "config": [
+          4,
+          8,
+          8,
+          128,
+          1
+        ],
+        "fwd_ms": 0.05647325964183269,
+        "bwd_ms": 0.12609610449534792,
+        "total_ms": 0.1825693641371806
+      },
+      "best_triton_forward": {
+        "config": {
+          "BM": 128,
+          "BN": 32,
+          "BK": 256,
+          "BO": 128,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "status": "ok",
+        "relative": 0.00016215650248341262,
+        "ms": 0.5222257714522512,
+        "registers": 211,
+        "spills": 0,
+        "shared": 212992
+      }
+    }
+  },
+  "rows": [
+    {
+      "repeat": 0,
+      "mode": "inference",
+      "arm": "pytorch",
+      "value": 0.844400018453598,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "module.reference.torch",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.0,
+      "output_rel_frob": 0.0,
+      "output_cosine": 0.9999997615814209,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 256]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    },
+    {
+      "repeat": 1,
+      "mode": "inference",
+      "arm": "pytorch",
+      "value": 0.8449759781360626,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "module.reference.torch",
+      "reference": "module.reference.torch",
+      "output_max_abs": 0.0,
+      "output_rel_frob": 0.0,
+      "output_cosine": 1.0000001192092896,
+      "grad_max_abs": null,
+      "grad_rel_frob": null,
+      "grad_cosine": null,
+      "compiled": true,
+      "cudagraph": "manual",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 256]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+    }
+  ]
+}
