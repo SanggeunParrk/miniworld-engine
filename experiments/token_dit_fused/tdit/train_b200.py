@@ -1,0 +1,215 @@
+"""Token DiT block, TRAINING (forward + backward), fused for B200 -- v0: the fused algorithm in torch ops with an explicit
+backward, bf16 GEMM operands (fp32 accumulation), fp32 parameters and residual stream, the sm_100a attention core.
+
+Same math as modules.dit.DiTBlock with qk_norm (AF3 Alg. 23 + 25), rearranged the way the inference step is:
+  * the six conditioning projections become two GEMMs: every block-internal LayerNorm of cond shares its statistics, so its
+    weight folds into the projection (c_hat @ [Ws1 w1; Wb1 w1; Ws2 w2; Wb2 w2]^T), and the two output gates read raw cond
+    (c @ [Wsc1; Wsc2]^T);
+  * q|k|v|g is one GEMM (bias on q only);
+  * the attention core is augattn_sm100 (attn_fwd2 + attn_dqb + attn_dkv) on bf16 q, k, v and a head-major bf16 bias.
+Tensors are [M, *] with M = A L (B == 1). Later versions replace the torch glue with row kernels; the interface stays.
+"""
+import math
+import os
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+import triton
+
+H, DH, D = 16, 48, 768
+EPS_LN = 1e-5
+_AUG = Path(__file__).resolve().parents[2] / "augattn_sm100"
+
+
+def _core():
+    """augattn_sm100 host classes (cubins built by augattn_sm100/build.sh)."""
+    if str(_AUG) not in sys.path:
+        sys.path.insert(0, str(_AUG))
+    import attn_op
+    cwd = os.getcwd()
+    os.chdir(_AUG)
+    try:
+        k = attn_op.kernels()
+    finally:
+        os.chdir(cwd)
+    return attn_op, k
+
+
+def pack(block):
+    """fp32 master parameters of a modules.dit.DiTBlock -> the fused layout (views and small concatenations; recomputed
+    each call so the optimizer's in-place updates are seen)."""
+    at, tr = block.attention, block.transition
+    a1, a2 = at.ada_ln_in, tr.ada_ln_in
+    P = dict(
+        w1=a1.ln_cond.weight, w2=a2.ln_cond.weight,
+        Ws1=a1.to_scale.weight, bs1=a1.to_scale.bias, Wb1=a1.to_bias.weight,
+        Ws2=a2.to_scale.weight, bs2=a2.to_scale.bias, Wb2=a2.to_bias.weight,
+        Wg1=at.to_scale.weight, bg1=at.to_scale.bias, Wg2=tr.to_scale.weight, bg2=tr.to_scale.bias,
+        Wq=at.to_query.weight, bq=at.to_query.bias, Wk=at.to_key.weight, Wv=at.to_value.weight, Wgt=at.to_gate.weight,
+        nq=at.norm_query.weight, nk=at.norm_key.weight, eq=at.norm_query.effective_eps(torch.float32)
+        if hasattr(at.norm_query, "effective_eps") else torch.finfo(torch.float32).eps,
+        ek=at.norm_key.effective_eps(torch.float32) if hasattr(at.norm_key, "effective_eps") else torch.finfo(torch.float32).eps,
+        wp=at.ln_pair.weight, Wbias=at.to_bias.weight, Wo=at.to_out.weight,
+        Wa=tr.expand_a.weight, Wb=tr.expand_b.weight, Wsq=tr.squeeze.weight,
+    )
+    return P
+
+
+def _ln(x):
+    mean = x.mean(-1, keepdim=True)
+    var = (x - mean).square().mean(-1, keepdim=True)
+    rstd = torch.rsqrt(var + EPS_LN)
+    return (x - mean) * rstd, rstd
+
+
+def _ln_bwd(dxhat, xhat, rstd):
+    """d/dx of xhat = (x - mean) rstd, given dL/dxhat."""
+    n = xhat.shape[-1]
+    return rstd * (dxhat - dxhat.mean(-1, keepdim=True) - xhat * (dxhat * xhat).mean(-1, keepdim=True))
+
+
+def _mm(a, w):
+    """a [M, K] @ w[N, K]^T in bf16 operands, fp32 result."""
+    return torch.mm(a.to(torch.bfloat16), w.to(torch.bfloat16).t(), out_dtype=torch.float32)
+
+
+def _mmT(dy, x):
+    """dW [N, K] = dy[M, N]^T @ x[M, K], bf16 operands, fp32."""
+    return torch.mm(dy.to(torch.bfloat16).t(), x.to(torch.bfloat16), out_dtype=torch.float32)
+
+
+class _Block(torch.autograd.Function):
+    """v1: every elementwise / row step is one Triton row kernel (tdit/train_kernels.py); bf16 GEMMs through torch.mm."""
+    @staticmethod
+    def forward(ctx, x, c, pair, P, names, *params):
+        ctx.P_dict, ctx.names = P, names
+        from . import train_kernels as T
+        M, L = x.shape[0], pair.shape[0]
+        A, dev, bf = M // L, x.device, torch.bfloat16
+        at, K = _core()
+        W = _weights_bf16(P)
+        R = 8
+        gr = T.grid(M, R)
+        chat = torch.empty(M, 384, device=dev, dtype=bf); cbf = torch.empty_like(chat); cst = torch.empty(M, 2, device=dev)
+        T._cond_prep[gr](c, chat, cbf, cst, M, N=384, BN=512, ROWS=R, eps=EPS_LN)
+        G = torch.mm(chat, W["Wn"].t())                                   # [M, 3072] s1 | sh1 | s2 | sh2 (bf16)
+        Gg = torch.mm(cbf, W["Wg"].t())                                   # [M, 1536] gate1 | gate2
+        xa = torch.empty(M, D, device=dev, dtype=bf); xst = torch.empty(M, 2, device=dev)
+        T._adaln_a[gr](x, G, G.stride(0), P["bs1"], xa, xst, M, N=D, BN=1024, ROWS=R, eps=EPS_LN)
+        qkvg = torch.addmm(W["bqkvg"], xa, W["Wqkvg"].t())                # [M, 3072] bf16
+        qn = torch.empty(M, D, device=dev, dtype=bf); kn = torch.empty_like(qn); vc = torch.empty_like(qn)
+        rqk = torch.empty(M, 32, device=dev)
+        T._qknorm[T.grid(M, 4)](qkvg, P["nq"], P["nk"], qn, kn, vc, rqk, M, float(P["eq"]), float(P["ek"]), ROWS=4)
+        R2 = L * L
+        bias_hm = torch.empty(H, L, L, device=dev, dtype=bf); pst = torch.empty(R2, 2, device=dev)
+        T._pair_bias_fwd[(triton.cdiv(R2, 64),)](pair, P["wp"], P["Wbias"], bias_hm, pst, R2, EPS_LN, ROWS=64)
+        shp = (A, 1, L, H, DH)
+        run, O, LSE = K.fwd.bind(qn.view(shp), kn.view(shp), vc.view(shp), bias_hm)
+        run()
+        og = torch.empty(M, D, device=dev, dtype=bf)
+        T._gate_o[gr](O, qkvg, og, M, ROWS=R)
+        y = torch.mm(og, W["Wo"].t())
+        x1 = torch.empty_like(x); xt = torch.empty(M, D, device=dev, dtype=bf); x1st = torch.empty(M, 2, device=dev)
+        T._res_adaln_b[gr](x, y, Gg, Gg.stride(0), P["bg1"], G, G.stride(0), P["bs2"], x1, xt, x1st, M, N=D, BN=1024, ROWS=R, eps=EPS_LN)
+        ab = torch.mm(xt, W["Wab"].t())
+        h = torch.empty(M, 2 * D, device=dev, dtype=bf)
+        T._swiglu[T.grid(M, 4)](ab, h, M, ROWS=4)
+        z = torch.mm(h, W["Wsq"].t())
+        out = torch.empty_like(x)
+        T._res_c[gr](x1, z, Gg, Gg.stride(0), P["bg2"], out, M, N=D, BN=1024, ROWS=R)
+        ctx.save_for_backward(x, c, pair, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, pst, bias_hm,
+                              O, LSE, og, y, x1, x1st, xt, ab, h, z)
+        ctx.W, ctx.shape = W, (A, L)
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):
+        (x, c, pair, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, pst, bias_hm,
+         O, LSE, og, y, x1, x1st, xt, ab, h, z) = ctx.saved_tensors
+        from . import train_kernels as T
+        P, W = ctx.P_dict, ctx.W
+        A, L = ctx.shape
+        M, dev, bf = x.shape[0], x.device, torch.bfloat16
+        at, K = _core()
+        R = 8
+        gr = T.grid(M, R)
+        dout = dout.float().contiguous()
+        dG = torch.empty(M, 4 * D, device=dev, dtype=bf); dGg = torch.empty(M, 2 * D, device=dev, dtype=bf)
+        dz = torch.empty(M, D, device=dev, dtype=bf)
+        T._res_c_bwd[gr](dout, z, Gg, Gg.stride(0), P["bg2"], dz, dGg, dGg.stride(0), M, N=D, BN=1024, ROWS=R)
+        dh = torch.mm(dz, W["Wsq"])
+        dWsq = _mmT(dz, h)
+        dab = torch.empty(M, 4 * D, device=dev, dtype=bf)
+        T._swiglu_bwd[T.grid(M, 4)](dh, ab, dab, M, ROWS=4)
+        dxt = torch.mm(dab, W["Wab"])
+        dWab = _mmT(dab, xt)
+        dx1 = torch.empty_like(x); dy = torch.empty(M, D, device=dev, dtype=bf)
+        T._res_adaln_b_bwd[gr](dout, dxt, x1, x1st, G, G.stride(0), P["bs2"], Gg, Gg.stride(0), P["bg1"], y, dx1, dy,
+                               dG, dG.stride(0), dGg, dGg.stride(0), M, N=D, BN=1024, ROWS=R)
+        dog = torch.mm(dy, W["Wo"])
+        dWo = _mmT(dy, og)
+        dqkvg = torch.empty(M, 4 * D, device=dev, dtype=bf)
+        shp = (A, 1, L, H, DH)
+        dob = torch.empty(M, D, device=dev, dtype=bf); dd = torch.empty(A, H, L, device=dev)
+        T._gate_o_bwd[T.grid(M, 4)](dog, O, qkvg, dob, dd, dqkvg, L, M, ROWS=4)
+        bias_t = at.bias_transpose(bias_hm)
+        rq_, DQ, DB = K.dqb.bind(qn.view(shp), kn.view(shp), vc.view(shp), dob.view(shp), bias_hm, LSE, dd, zeroed=True)
+        rk_, DK, DV = K.dkv.bind(qn.view(shp), kn.view(shp), vc.view(shp), dob.view(shp), bias_t, LSE, dd, dq_zero=DQ)
+        rk_(); rq_()
+        nprog = triton.cdiv(M, 4)
+        dwqk = torch.empty(nprog, 2, 64, device=dev)
+        T._qknorm_bwd[(nprog,)](DQ, DK, DV, qkvg, rqk, P["nq"], P["nk"], dqkvg, dwqk, M, ROWS=4)
+        dnq, dnk = dwqk[:, 0, :48].sum(0), dwqk[:, 1, :48].sum(0)
+        dxa = torch.mm(dqkvg, W["Wqkvg"])
+        dWqkvg = _mmT(dqkvg, xa)
+        dbq = T.colsum(dqkvg[:, :D])
+        dx = torch.empty_like(x)
+        T._adaln_a_bwd[gr](dxa, x, xst, G, G.stride(0), P["bs1"], dx1, dx, dG, dG.stride(0), M, N=D, BN=1024, ROWS=R)
+        dchat = torch.mm(dG, W["Wn"])
+        dWn = _mmT(dG, chat)
+        dcg = torch.mm(dGg, W["Wg"])
+        dWg = _mmT(dGg, cbf)
+        dc = torch.empty_like(c)
+        T._cond_bwd[gr](dchat, dcg, c, cst, dc, M, N=384, BN=512, ROWS=R)
+        # pair bias backward: dbias [H, L, L] -> dpair, dWbias, dwp (one row kernel + a partial-sum reduction)
+        R2 = L * L
+        npb = triton.cdiv(R2, 64)
+        dpair = torch.empty_like(pair); part = torch.empty(npb, 17, 128, device=dev)
+        T._pair_bias_bwd[(npb,)](DB, pair, pst, P["wp"], P["Wbias"], dpair, part, R2, ROWS=64)
+        part = part.sum(0)
+        dWbias, dwp = part[:16], part[16]
+        colsum = T.colsum
+        dWs1, dWb1, dWs2, dWb2 = dWn.split(D)
+        grads = dict(
+            Ws1=dWs1 * P["w1"], Wb1=dWb1 * P["w1"], Ws2=dWs2 * P["w2"], Wb2=dWb2 * P["w2"],
+            w1=(dWs1 * P["Ws1"]).sum(0) + (dWb1 * P["Wb1"]).sum(0), w2=(dWs2 * P["Ws2"]).sum(0) + (dWb2 * P["Wb2"]).sum(0),
+            bs1=colsum(dG[:, :D]), bs2=colsum(dG[:, 2 * D:3 * D]), Wg1=dWg[:D], Wg2=dWg[D:], bg1=colsum(dGg[:, :D]), bg2=colsum(dGg[:, D:]),
+            Wq=dWqkvg[:D], bq=dbq, Wk=dWqkvg[D:2 * D], Wv=dWqkvg[2 * D:3 * D], Wgt=dWqkvg[3 * D:], nq=dnq, nk=dnk,
+            wp=dwp, Wbias=dWbias, Wo=dWo, Wa=dWab[:2 * D], Wb=dWab[2 * D:], Wsq=dWsq,
+        )
+        pg = [grads.get(n) if ctx.P_dict[n].requires_grad else None for n in ctx.names]
+        return (dx, dc, dpair, None, None, *pg)
+
+
+def _weights_bf16(P):
+    bf = torch.bfloat16
+    return dict(
+        Wn=torch.cat([P["Ws1"] * P["w1"], P["Wb1"] * P["w1"], P["Ws2"] * P["w2"], P["Wb2"] * P["w2"]]).to(bf),
+        Wg=torch.cat([P["Wg1"], P["Wg2"]]).to(bf),
+        Wqkvg=torch.cat([P["Wq"], P["Wk"], P["Wv"], P["Wgt"]]).to(bf),
+        bqkvg=torch.cat([P["bq"], torch.zeros(3 * D, device=P["bq"].device)]).to(bf),
+        Wo=P["Wo"].to(bf), Wab=torch.cat([P["Wa"], P["Wb"]]).to(bf), Wsq=P["Wsq"].to(bf),
+    )
+
+
+def block_forward(block, single, cond, pair):
+    """single [A, 1, L, 768], cond [A, 1, L, 384], pair [1, L, L, 128] -> the block's output, differentiable w.r.t. all
+    three and every parameter of ``block``."""
+    A, B, L, _ = single.shape
+    assert B == 1
+    P = pack(block)
+    names = tuple(n for n, v in P.items() if isinstance(v, torch.Tensor))
+    out = _Block.apply(single.reshape(A * L, -1), cond.reshape(A * L, -1), pair[0], P, names, *[P[n] for n in names])
+    return out.view(A, 1, L, -1)
