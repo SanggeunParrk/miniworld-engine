@@ -176,7 +176,12 @@ def _pack(gamma, beta, wa, wb, ws):
 
 
 # ------------------------------------------------------------------------------------------------------------------ launches
-@opaque(fake=lambda *a: None, name="transition_fused_pack_sm80", mutates_args=("out16", "gb"))
+def _pack_launch_fake(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, idx16: torch.Tensor,
+                      idx32: torch.Tensor, out16: torch.Tensor, gb: torch.Tensor) -> None:
+    return None
+
+
+@opaque(fake=_pack_launch_fake, name="transition_fused_pack_sm80", mutates_args=("out16", "gb"))
 def _pack_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, idx16: torch.Tensor,
                  idx32: torch.Tensor, out16: torch.Tensor, gb: torch.Tensor) -> None:
     if _is_fake(wa, out16):

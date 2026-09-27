@@ -65,6 +65,9 @@ NARROW = re.compile(r"\.to\(\s*torch\.bfloat16\s*\)|\.bfloat16\(\)")
 #: that file learned to read their width from a tensor. A key that a reformat invalidates is a key
 #: that gets bulk-updated without anyone rereading the judgement.
 NOT_A_NORMALISATION = {
+    ("pair_weighted_averaging/triton/main.py",
+     "empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),"):
+        "The row-broadcast dropout keep-mask (0 / 1, exact in bf16) as the kernel's operand, not a normalized activation.",
     ("trimul_inproj/cuda/h100_b7.py",
      'self.mask = d["mask"].bfloat16().reshape(-1)'):
         "Mask storage for the H100 projection path, not a normalized activation.",
