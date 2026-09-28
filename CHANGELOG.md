@@ -47,6 +47,11 @@ GPU qualification of this release is pending.
 
 ### Changed
 
+- Repository layout (no behaviour change): registry CSVs and evidence files moved to
+  `kernels/registry/`; A/B config sets to `autotune/configs/ab/` (short names such as `blk16`
+  still resolve); docs regrouped into `status/` (per-GPU completion, maintainer-judged),
+  `gpus/` (per-cluster how-to), `getting-started/`, `autotune/`, `benchmarks/`, `standards/`,
+  with dated reports and development notes under `records/`; one root `AGENTS.md`.
 - Bidirectional TriMul H100 training at D256/384/512 (L384/768) is a new flattened hand-CUDA +
   cuBLASLt port of the qualified large-width research plans (`h100_wide_training`, 29 frozen
   kernels in `h100_sources/wide_train`): 1.44-1.62x the Triton path in paired CUDA-graph fwd+bwd
@@ -110,7 +115,7 @@ GPU qualification of this release is pending.
   residuals and `torch.compile` boundaries.
 - Make explicit backend comparison policy consistent for Transition.
 - Ship selected CUDA sources/includes and write compilation products only to
-  the user cache. [Dispatch contracts](docs/operations/h100-module-wiring.md).
+  the user cache. [Dispatch contracts](docs/gpus/h100-dispatch.md).
 
 ## [2.0.0] - 2026-09-23
 
@@ -312,7 +317,7 @@ Release map, migration limits and evidence: [2.0.0](docs/releases/2.0.0.md).
   came back "unknown target". `BenchConfig.kernel` is now `target` + `level`
   (`kernel` | `module`), the two levels are separate namespaces, and every target is
   spelled the way the engine spells it: a kernel target names its family in
-  `kernels/registry.csv`, a module target names the module it constructs. So
+  `kernels/registry/registry.csv`, a module target names the module it constructs. So
   `triangle_attention` is now a legal name at both levels and means the right thing at
   each. Renamed: kernel `tri_attn`→`triangle_attention`, `bias_attn`→
   `bias_only_attention`, `aug_attn`→`augmented_attention`, `ln_mask`→`fused_ln_mask`,

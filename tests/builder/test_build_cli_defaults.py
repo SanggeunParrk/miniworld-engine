@@ -211,7 +211,7 @@ def test_the_sweep_axis_reaches_bench_py():
     """Without this the CLI could only ever sweep seq_len.
 
     bench.py's config defaults to `sweep_axis: seq_len` and the CLI never passed one, so the
-    d_pair half of the matrix -- which docs/benchmarks.md and the README both call for, and where
+    d_pair half of the matrix -- which docs/benchmarks/README.md and the README both call for, and where
     the width-dependent kernels separate -- was reachable only by invoking bench.py directly.
     """
     import argparse
@@ -281,7 +281,7 @@ def test_build_accepts_every_declared_case_and_every_registered_op() -> None:
     for name in CASE_NAMES:
         assert cli._reject_unknown_build_target(
             argparse.Namespace(case=name, per_op=False), repo) == 0, name
-    registry = repo / "src" / "miniworld_engine" / "kernels" / "registry.csv"
+    registry = repo / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv"
     with registry.open() as fh:
         ops = [row["kernel"] for row in csv.DictReader(fh)]
     assert ops, "registry.csv is empty"

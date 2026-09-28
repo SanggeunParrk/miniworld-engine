@@ -89,13 +89,13 @@ def test_the_bench_function_of_a_target_is_named_after_it(level: str) -> None:
 def test_no_bench_target_abbreviates_a_name_the_engine_spells_out() -> None:
     """The rule that produced the current names, written as a check.
 
-    Every kernel target names a kernel FAMILY from kernels/registry.csv, except four that bench a
+    Every kernel target names a kernel FAMILY from kernels/registry/registry.csv, except four that bench a
     fused op SHAPE implemented by several families and are named after the shape. Anything else --
     `tri_attn` for `triangle_attention`, `ln_linear` for `layernorm_linear` -- fails here.
     """
     import csv
 
-    with (REPO / "src" / "miniworld_engine" / "kernels" / "registry.csv").open() as fh:
+    with (REPO / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv").open() as fh:
         families = {row["family"] for row in csv.DictReader(fh)}
     #: Targets that bench a fused GEMM/epilogue shape rather than one family. They are named after
     #: the shape because more than one family implements it, so no family name would be right.

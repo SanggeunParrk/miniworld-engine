@@ -10,7 +10,7 @@ than plotted, so a stale number can never appear in a figure. Tables written by 
 aggregator may carry ``value_min``/``value_max``/``n_repetitions``/``runtime_cache_misses``
 columns; they are used for error bars and disclosure when present.
 
-    python benchmarks/runners/report_gpu.py a6000 --out docs/reports/a6000-module-sweeps.md
+    python benchmarks/runners/report_gpu.py a6000 --out docs/benchmarks/reports/a6000-module-sweeps.md
 """
 
 from __future__ import annotations
@@ -472,7 +472,7 @@ def main() -> None:
                         help="figure directory (default <out stem>/ next to the markdown)")
     parser.add_argument("--title", default=None)
     args = parser.parse_args()
-    out_md = args.out or REPO / "docs" / "reports" / f"{args.gpu}-module-sweeps.md"
+    out_md = args.out or REPO / "docs" / "benchmarks" / "reports" / f"{args.gpu}-module-sweeps.md"
     figure_dir = args.figures or out_md.with_suffix("")
     build(args.gpu, out_md, figure_dir, args.title)
 

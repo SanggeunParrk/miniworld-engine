@@ -574,7 +574,7 @@ class OpUnit:
     op: str
     length: int
     dtype: str = "bfloat16"
-    #: Base channel WIDTH to drive at. The shape key carries the whole shape (docs/development/product-plan.md G5), so a
+    #: Base channel WIDTH to drive at. The shape key carries the whole shape (docs/records/development/product-plan.md G5), so a
     #: bucket is a (rows, widths) pair and a sweep that varies only the length reaches exactly one
     #: width per op -- whichever its driver happens to build. That is the 363 uncovered lookups the
     #: module pass exists to reach. One number per unit, not one per axis: a driver derives its
@@ -802,8 +802,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                f"-- the first two are the structure model's, the third is the other model's")
         raise ValueError(msg)
 
-    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
-    # The WIDTHS to drive each op at. The shape key carries the whole shape now (docs/development/product-plan.md G5), so a
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
+    # The WIDTHS to drive each op at. The shape key carries the whole shape now (docs/records/development/product-plan.md G5), so a
     # sweep that varies only the length tunes one width per op -- whichever the driver happens to
     # build -- and every other width the model uses falls back to the grid at runtime. Measured on
     # an A6000: 363 such lookups across 42 of 91 ops
@@ -1019,7 +1019,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # `developed` is a HAND-MAINTAINED judgement, not a rule derived from the benchmark tables,
         # and it has to be: bias_only_attention loses on time on every committed card and uses half
         # the memory at every length, so a rule reading either number alone gets it wrong. Every
-        # `no` carries its reason in kernels/undeveloped.csv, which a test pins.
+        # `no` carries its reason in kernels/registry/undeveloped.csv, which a test pins.
         if (r.get("developed") or "yes").strip() == "no":
             continue
         if only and r["kernel"] not in only:
@@ -2126,7 +2126,7 @@ def _run_one_driver(op: str) -> int:
     import csv
     import importlib
 
-    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
     row = next((r for r in csv.DictReader(reg.open()) if r["kernel"] == op), None)
     if row is None or not (row.get("driver") or "").strip():
         print(f"    no driver for {op!r} in registry.csv", file=sys.stderr)

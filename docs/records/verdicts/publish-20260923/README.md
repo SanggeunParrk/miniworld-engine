@@ -16,7 +16,7 @@ This checkpoint publishes the tested module wiring and follow-up work after tag 
 
 Wide TriMul kernels are connected but further performance tuning remains deferred. Single-direction native training is D128-only. This checkpoint is not a claim of exhaustive tuning or a rebuild of every GPU cache. Installing into MiniWorld's training environment and publishing to a package index are separate operations.
 
-See [dispatch contracts](../../../operations/h100-module-wiring.md) and [comparison dashboard](../version-compare-20260923/index.html).
+See [dispatch contracts](../../../gpus/h100-dispatch.md) and [comparison dashboard](../version-compare-20260923/index.html).
 
 ## Verification
 

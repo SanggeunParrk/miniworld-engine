@@ -5,12 +5,12 @@ Dated findings. Each describes what was true when it ran and is **not** updated 
 changes — the same rule as `src/miniworld_engine/kernels/<family>/notes/`, for the ones that belong
 to no single kernel.
 
-Grouped by subject (2026-09-27):
+Grouped by subject:
 
 | folder | contents |
 |---|---|
 | [ampere/](ampere/) | A100 / A5000 / A6000 audits, cache builds and module investigations |
-| [h100/](h100/) | H100 build preparation and memory-access investigation |
+| [h100/](h100/) | H100 build preparation, memory-access investigation, retired kernels, the historical Vast workflow, [v2.2.0 measurements](h100/v220-measurements-20260928.md) |
 | [mpnn/](mpnn/) | ProteinMPNN kernel port, optimization and memory records |
 | [transition/](transition/) | dated Transition kernel variant studies (Sept 18–19) |
 | [trimul/](trimul/) | dated TriMul studies, including the Anthropic training adoption |
@@ -19,6 +19,11 @@ Grouped by subject (2026-09-27):
 | [cache/](cache/) | tuned-cache builds and patch compatibility records |
 | [audits/](audits/) | naming, tiling and workspace-relocation audits |
 | [verdicts/](verdicts/) | Sept 23 release verdicts and version comparisons (formerly top-level `verdicts/`) |
+| [reports/](reports/) | dated reports (autotune space, cache rebuild inventories, model-shape cleanup, SWA/DiT audits, Sept 27 TriAttn/TriMul config searches) |
+| [development/](development/) | development audits and plans (consolidation, norm CUDA, the Aug 25 product plan) |
+| [anthropic/](anthropic/) | Anthropic-kernel adoption measurements (H100, 2026-09-19) |
+| [cute/](cute/) | CuTe DSL work removed in 2.2.0 (config pinning, SM90 parity, quack port design) |
+| [model-shapes/](model-shapes/) | checkpoint constructor census used by the shape policy |
 
 | | what it records |
 |---|---|
@@ -44,17 +49,17 @@ Grouped by subject (2026-09-27):
 | [a6000-small-input-followup.md](ampere/a6000-small-input-followup.md) | deferred L128 launch-overhead investigation, evidence and acceptance conditions. |
 | [a6000-l384-cache-built.md](ampere/a6000-l384-cache-built.md) | four added L384/A48 keys, explicit RMSNorm precision qualification, and the completed native benchmark. |
 | [a6000-l384-cache-missing.md](ampere/a6000-l384-cache-missing.md) | four missing L384/A48 forward/backward cache keys and the augmentation gap in the build plan. |
-| `naming-audit.md` | the defects found while renaming 111 kernels to `docs/kernels/naming.md`'s rules. The old names are its *subject*, so they stay. Current names: `registry.csv`; the mapping: `docs/kernels/rename-map.tsv`. |
+| `naming-audit.md` | the defects found while renaming 111 kernels to `docs/standards/naming.md`'s rules. The old names are its *subject*, so they stay. Current names: `registry.csv`; the mapping: `docs/records/audits/rename-map.tsv`. |
 | `tiling-audit.md` | one sweep of every kernel's tile axes. Kernel names are the ones `registry.csv` held at the time. |
 | `pairformer-b200-latency.md` | Pairformer pair-track latency on B200 (sm100). |
 | `pairformer-h100-latency.md` | the same on H100 (sm90). |
 | `where-the-cache-build-spends-its-time-a6000.md` | the compile/bench split of an A6000 rebuild, and the three things that were idling: a second autotune key compiling on one core, a pool at 50% occupancy, and compile never overlapping bench. |
 | `cache-coverage-replay-a6000.md` | the 363 lookups the module matrix asks for and the shipped cache does not serve, against a static coverage check that reports zero missing. Work list for the pending rebuild. |
 
-The two latency files were under `benchmarks/runners/`, which `docs/benchmarks.md` forbids —
+The two latency files were under `benchmarks/runners/`, which `docs/benchmarks/README.md` forbids —
 "do not add curated markdown reports under `benchmarks/`; write durable explanations under
 `docs/`" — and nothing cited them. They are the only evidence in this repository of anything
-running on sm90 or sm100 hardware, which `docs/supported.md` lists as never exercised here, so
+running on sm90 or sm100 hardware, which `docs/getting-started/supported.md` lists as never exercised here, so
 they are kept rather than deleted. They are also not a substitute for a device manifest: no
 `#provenance`, no commit, no way to know what code produced them.
 

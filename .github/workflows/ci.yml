@@ -133,7 +133,7 @@ jobs:
               "autotune/data/*.json":  (n("autotune/data"), len(list((src/"autotune/data").rglob("*.json")))),
               "configs/grid/*.csv":    (n("autotune/configs/grid"), len(list((src/"autotune/configs/grid").glob("*.csv")))),
               "manifests/*.csv":       (n("autotune/manifests"), len(list((src/"autotune/manifests").glob("*.csv")))),
-              "registry.csv":          (n("kernels/registry.csv"), 1),
+              "registry.csv":          (n("kernels/registry/registry.csv"), 1),
               "*.cu":                  (sum(x.endswith(".cu") for x in names), len(list(src.rglob("*.cu")))),
           }
           bad = {k: v for k, v in want.items() if v[0] != v[1]}

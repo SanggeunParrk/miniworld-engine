@@ -86,7 +86,7 @@ def _fp32_matmul_ctx(dtype):
 
 
 # shape_key is keyed, and its value is L -- the atom count (this family is level=atom in
-# kernels/registry.csv) -- not the flattened row count M = B*A the kernels iterate.
+# kernels/registry/registry.csv) -- not the flattened row count M = B*A the kernels iterate.
 # `_cond_affine` and `_adaln_epilogue` are INNER launchers that only see the (M, D) matrix, so each
 # takes the key from the caller that still holds the pre-flatten shape; the default covers a caller
 # `shape_key=None` is NOT a working fallback: `length_of` refuses a rank-2 shape, so the

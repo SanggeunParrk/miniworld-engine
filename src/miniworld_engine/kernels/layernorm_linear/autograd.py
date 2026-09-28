@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import triton
 
-# `layer_norm_bwd_dx_fused` is level=both in kernels/registry.csv -> both_key. The key is L (the
+# `layer_norm_bwd_dx_fused` is level=both in kernels/registry/registry.csv -> both_key. The key is L (the
 # token/atom count), never the row count M: the saved x here is already the flattened (M, K)
 # matrix, so L has to arrive from the caller (see `LayerNormLinearTritonFn.forward`'s `length` input).
 from miniworld_engine.autotune.shape_key import both_key, pack

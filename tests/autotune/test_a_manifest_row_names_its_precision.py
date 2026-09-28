@@ -149,7 +149,7 @@ def test_a_skipped_kernel_says_skipped_rather_than_keeping_an_old_verdict(rows):
 
     Six arch-gated kernels sat at `failed` in the committed A6000 manifest -- recorded before the
     arch gate existed, and carried forward untouched by every run since, because a skipped kernel
-    never reaches `results` and so never updates its own row. `docs/supported.md` cites this file
+    never reaches `results` and so never updates its own row. `docs/getting-started/supported.md` cites this file
     as its evidence, so six kernels were documented as broken on a card that simply cannot run
     them.
     """

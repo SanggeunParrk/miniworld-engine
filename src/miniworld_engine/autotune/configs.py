@@ -271,11 +271,22 @@ def config_set(name: str) -> Path:
     was packaged, so a short name resolved against two different roots depending on the caller and
     a wheel install could reach only one of them.
     """
-    d = CONFIG_ROOT / name
-    if not d.is_dir():
-        have = sorted(p.name for p in CONFIG_ROOT.iterdir() if p.is_dir())
-        raise FileNotFoundError(f"no config set {name!r}; have {have}")
-    return d
+    for d in (CONFIG_ROOT / name, AB_ROOT / name):
+        if d.is_dir():
+            return d
+    raise FileNotFoundError(f"no config set {name!r}; have {config_set_names()}")
+
+
+#: The historical A/B comparison sets (`accuracy`, `blk*`, `warp*`, `mixed*`, `gmprobe`) sit one
+#: level down so the root holds only the two sets production uses (`default`, `grid`). Short
+#: names still resolve to them.
+AB_ROOT = CONFIG_ROOT / "ab"
+
+
+def config_set_names() -> list[str]:
+    """Every short name `config_set` accepts."""
+    return sorted(p.name for root in (CONFIG_ROOT, AB_ROOT) if root.is_dir()
+                  for p in root.iterdir() if p.is_dir() and p != AB_ROOT)
 
 
 def default_config_dir() -> Path | None:

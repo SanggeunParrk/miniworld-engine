@@ -19,7 +19,7 @@ Usage (on the target GPU, with the full grid unlocked so every config is benched
 Any wired kernel that fires during the run is captured automatically — no per-kernel code. The
 cross-check that validated this capture path was against two hand-built pilot caches
 (`transition_split_fwd` / `trimul_bidir_front`, names since retired -- see
-docs/kernels/rename-map.tsv); the script that built them is gone, the cross-check is history. Config choice is performance-only, so this never affects numerics.
+docs/records/audits/rename-map.tsv); the script that built them is gone, the cross-check is history. Config choice is performance-only, so this never affects numerics.
 """
 
 from __future__ import annotations
@@ -1503,7 +1503,7 @@ def _symbol_to_op() -> dict[str, str]:
     """
     import csv
 
-    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
     if not reg.is_file():
         return {}
     seen: dict[str, str | None] = {}

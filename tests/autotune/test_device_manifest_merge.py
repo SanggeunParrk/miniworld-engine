@@ -87,7 +87,7 @@ def test_the_whole_registry_is_still_written(manifest):
 def test_a_manifest_says_when_and_against_what_it_was_produced(manifest) -> None:
     """A manifest is the only evidence that any kernel has ever run on a given card. Without
     provenance a file from six months and two rewrites ago is indistinguishable from one produced
-    this morning, and `docs/supported.md` cites these as its evidence."""
+    this morning, and `docs/getting-started/supported.md` cites these as its evidence."""
     devices.record(GPU, {})
     prov = devices.provenance(GPU)
     assert prov is not None, "record() wrote no #provenance row"

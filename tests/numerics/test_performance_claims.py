@@ -1,11 +1,11 @@
 """A latency in a live doc must say what machine it came from.
 
-`docs/library-standards.md` C1: a benchmark number is a claim about a machine, a config set, a
+`docs/standards/library-standards.md` C1: a benchmark number is a claim about a machine, a config set, a
 dtype, a compile mode and a version, and detached from those it is folklore. The committed CSVs
 carry all of it per row. Prose does not, and prose is what people read.
 
 This is enforced at FILE level, not per claim, and the reason is worth stating: the attribution for
-an old number is often not recoverable. `docs/benchmarking-cautions.md` carried 17 latencies and
+an old number is often not recoverable. `docs/benchmarks/cautions.md` carried 17 latencies and
 named a device once; back-filling the rest would mean guessing which card a 2026-07 trimul run
 used, which is worse than saying it is unknown. So the rule is that a live doc making performance
 claims must state the hardware behind them somewhere — which a provenance paragraph satisfies,
@@ -32,16 +32,16 @@ LIVE_DOCS = (
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "benchmarks/RESULTS.md",
-    "docs/benchmarks.md",
-    "docs/benchmarking-cautions.md",
-    "docs/operations/dispatch-cache.md",
+    "docs/benchmarks/README.md",
+    "docs/benchmarks/cautions.md",
+    "docs/autotune/dispatch-cache.md",
     # Written the day the product standard was, and every one of them quotes measurements: the
     # cards a release ran on, the error a stack accumulates, the unit count a stale clone reports.
-    "docs/supported.md",
-    "docs/troubleshooting.md",
-    "docs/reproducing-a-report.md",
-    "docs/product-standards.md",
-    "docs/library-standards.md",
+    "docs/getting-started/supported.md",
+    "docs/getting-started/troubleshooting.md",
+    "docs/getting-started/reproducing-a-report.md",
+    "docs/standards/product-standards.md",
+    "docs/standards/library-standards.md",
 )
 
 #: A latency or a speedup. Deliberately narrow: version numbers, tolerances and counts are not

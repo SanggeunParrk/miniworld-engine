@@ -118,7 +118,7 @@ def test_source_and_wheel_dispatch_identity_agree(monkeypatch, tmp_path):
     import shutil
 
     source = tmp_path / "source"
-    paths = ("settings.py", "kernels/registry_module.csv", "kernels/registry.csv",
+    paths = ("settings.py", "kernels/registry/registry_module.csv", "kernels/registry/registry.csv",
              "modules/example.py", "kernels/example/triton/main.py",
              "autotune/builder.py", "autotune/checkpoint_cases.py", "autotune/derive.py", "autotune/module_registry.py",
              "autotune/shape_key.py", "autotune/policy.py", "build/gpu_to_kernels/sm86.csv")

@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 SRC = Path("src")
-REG = SRC / "miniworld_engine/kernels/registry.csv"
+REG = SRC / "miniworld_engine/kernels/registry/registry.csv"
 
 GEMM = ((r"\btorch\.(?:mm|bmm|matmul)\s*\(", "torch GEMM"),
         (r"\b(?:gemm|compile_gemm_kernel)\s*\(", "external GEMM"), (r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),

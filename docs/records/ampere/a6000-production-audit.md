@@ -94,7 +94,7 @@ Its hash, inventory, import and construction evidence are embedded in the JSON r
 Build coverage certifies declared Triton keys and usable cached candidates. It does not prove
 an independently optimal tile for every physical workload. Six CuTe tuner families remain
 outside the shared builder; H100/B200 native execution and numerical qualification are not
-claimed. See [the build command contract](../../operations/dispatch-cache.md#what-build-all-verifies).
+claimed. See [the build command contract](../../autotune/dispatch-cache.md#what-build-all-verifies).
 
 Read-only wheels can consume shipped caches, but tuned-cache build/merge requires a writable
 installation. Automatic approval review rejected a proposed cache overlay because changing
@@ -106,7 +106,7 @@ Team-GM scratch artifacts (1,067 entries) live in `.scratch/a6000-2026-09/`, and
 engine-root logs/scripts/plans were preserved in `.scratch/root-history/`. Both relocations
 have manifests. Another 32 historical plan files (23.6 MB) were preserved in
 `.scratch/production-audit/plan-history/`; the current verified plan occupies the canonical
-`src/miniworld_engine/kernels/registry_kernel.csv` and units JSON. Final worklogs are under `.scratch/production-audit/`; curated records stay
+`src/miniworld_engine/kernels/registry/registry_kernel.csv` and units JSON. Final worklogs are under `.scratch/production-audit/`; curated records stay
 in `docs/records/`, runtime assets in `src/`, and the wheel in `dist/`.
 
 [Machine-readable evidence](a6000-production-audit.json).

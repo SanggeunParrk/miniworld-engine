@@ -23,7 +23,7 @@ from paths import registry_rows
 from miniworld_engine.autotune.run_all import declines_this_run
 
 REGISTRY = next(p for p in Path(__file__).resolve().parents
-                if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
+                if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry/registry.csv"
 
 
 def _row(**kw):

@@ -55,7 +55,7 @@ validated in the target machine's environment.
 Six CuTe config families have a cache resolver but their `sweep_and_cache` helper is not wired
 into the builder: `transition_swiglu_fwd`, `transition_gate_bwd`, `dab_lnbwd`, `dgrad_lnbwd`,
 `layernorm_linear_m1`, and `tm2_dual_fwd`. Full native-backend cache coverage is still open.
-See [the exact command contract](../../operations/dispatch-cache.md#what-build-all-verifies).
+See [the exact command contract](../../autotune/dispatch-cache.md#what-build-all-verifies).
 
 The existing L384 module benchmark table is unchanged: these build-contract changes do not
 constitute a new benchmark. Its recorded compile/graph/dropout/augmentation provenance remains

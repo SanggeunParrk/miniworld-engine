@@ -48,7 +48,7 @@ def filter_op_units(units):
     import csv
     from pathlib import Path
 
-    with (Path(__file__).resolve().parents[1] / "kernels" / "registry.csv").open() as fh:
+    with (Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv").open() as fh:
         levels = {row["kernel"]: row["level"] for row in csv.DictReader(fh)}
     selected = []
     run_mode = mode()

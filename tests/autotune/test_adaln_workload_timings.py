@@ -120,7 +120,7 @@ def test_workload_contract_covers_every_registered_triton_family(env):
     import csv
     from pathlib import Path
     _,tuner=env
-    registry=Path(cache.__file__).parents[1]/"kernels/registry.csv"
+    registry=Path(cache.__file__).parents[1]/"kernels/registry/registry.csv"
     rows=list(csv.DictReader(registry.open()))
     for row in rows:
         if row["backend"]=="triton":

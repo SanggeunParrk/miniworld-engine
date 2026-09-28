@@ -15,7 +15,7 @@ from miniworld_engine._typecheck import typecheck
 
 # NOT called from this file any more -- every launch below keys on `atom_key(L)` (see
 # autotune/shape_key.py: the key is L, the atom count, and this family is level=atom in
-# kernels/registry.csv). Kept only because ``checks/augmented_attention.py`` still imports it.
+# kernels/registry/registry.csv). Kept only because ``checks/augmented_attention.py`` still imports it.
 def get_seq_group(length) -> int:
     """Delegates to canonical size-bucketing (autotune.buckets)."""
     from miniworld_engine.autotune.buckets import bucket_linear

@@ -39,7 +39,7 @@ from miniworld_engine.autotune.cache import (
 from miniworld_engine.autotune.configs import configs_for
 
 _DATA = Path(__file__).resolve().parent / "data"
-_REGISTRY = Path(__file__).resolve().parent.parent / "kernels" / "registry.csv"
+_REGISTRY = Path(__file__).resolve().parent.parent / "kernels" / "registry" / "registry.csv"
 
 
 @functools.lru_cache(maxsize=1)

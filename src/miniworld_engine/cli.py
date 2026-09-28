@@ -504,11 +504,12 @@ def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
         # "unknown config set", so the prefix is stripped and the name resolved where the sets
         # actually are. A real relative directory still wins if it exists.
         stripped = Path(*given.parts[1:]) if given.parts[:1] == (CONFIG_ROOT,) else given
-        candidates = [given, packaged_root / stripped, packaged_root / config_type]
+        candidates = [given, packaged_root / stripped, packaged_root / config_type,
+                      _configs.AB_ROOT / stripped]
     for c in candidates:
-        if c.is_dir():
+        if c.is_dir() and c != _configs.AB_ROOT:
             return c
-    have = sorted(d.name for d in packaged_root.glob("*") if d.is_dir())
+    have = _configs.config_set_names()
     print(f"unknown config set {config_type!r}; have: {', '.join(have) or '(none)'}\n"
           f"a config set is a short name from that list, or a path to a directory of <op>.csv. "
           f"They live in the package now ({packaged_root}), so the old repo-relative form "
@@ -548,7 +549,7 @@ def apply_config_dir(directory: Path) -> int:
 
 #: Kernel-level bench target -> the build case(s) that drive the same kernels.
 #:
-#: A kernel target is named after the kernel FAMILY in ``kernels/registry.csv`` that it benches --
+#: A kernel target is named after the kernel FAMILY in ``kernels/registry/registry.csv`` that it benches --
 #: `triangle_attention`, `bias_only_attention`, `augmented_attention`,
 #: `layernorm`, `adaln` -- except for the four that bench a fused op SHAPE implemented by several
 #: families rather than one family (`dual_gemm_epilogue`, `gemm_epilogue`, `gemm_gate`,
@@ -792,14 +793,14 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
     Which name space applies is the same choice `cmd_build` makes below: `--per-op` (and `all`,
     which defaults to it) selects ops, anything else selects cases. Read from the declarations,
     never by importing: :data:`~miniworld_engine.autotune.builder.CASE_NAMES` is a literal tuple
-    and the ops are the first column of ``kernels/registry.csv``.
+    and the ops are the first column of ``kernels/registry/registry.csv``.
     """
     from miniworld_engine.autotune.builder import CASE_NAMES  # literal, no imports
 
     if args.case in ("all", *STACKS):
         return 0
     if args.per_op:
-        rows = (Path(__file__).resolve().parent / "kernels" / "registry.csv").read_text()
+        rows = (Path(__file__).resolve().parent / "kernels" / "registry" / "registry.csv").read_text()
         ops = {line.split(",", 1)[0] for line in rows.splitlines()[1:] if line.strip()}
         # A COMMA LIST is one sweep over several kernels, and it is not a convenience. `--per-op`
         # took one name, so tuning a related set meant one command per kernel -- and each command
@@ -1183,7 +1184,7 @@ def cmd_buckets(args: argparse.Namespace) -> int:
 
     rows = {r["kernel"]: r for r in csv.DictReader(
         (Path(builder.__file__).resolve().parent.parent
-         / "kernels" / "registry.csv").open(newline=""))}
+         / "kernels" / "registry" / "registry.csv").open(newline=""))}
     # The DECLARED ladders, not the plan: `op_units` narrows the plan with the evidence this
     # command writes, so probing the plan would re-measure only what the last run left standing and
     # a collapse could never be revisited -- a driver that started honouring its width would keep
@@ -1359,7 +1360,7 @@ def cmd_callers(args: argparse.Namespace) -> int:
                           "dims": [dict(d) for d in case.dims]}
         print(f"  {case.name:32s} {ran:3d} run(s), {len(ops):3d} kernel(s)", flush=True)
     path = Path(args.out) if args.out else (
-        Path(builder.__file__).resolve().parent.parent / "kernels" / "case_callers.json")
+        Path(builder.__file__).resolve().parent.parent / "kernels" / "registry" / "case_callers.json")
     path.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
     print(f"wrote {path}: {len(out)} cases, "
           f"{len({o for v in out.values() for o in v['ops']})} distinct kernels", flush=True)
@@ -1512,7 +1513,7 @@ def _report_coverage(targets: tuple[str, ...], repo: Path, level: str, *,
                      since: float = 0.0) -> int:
     """Compare the kernels that actually launched against everything the repo declares.
 
-    The denominator is ``kernels/registry.csv`` -- declared data, not something derived from this
+    The denominator is ``kernels/registry/registry.csv`` -- declared data, not something derived from this
     run. Deriving it from the run would drop every unreachable kernel out of numerator and
     denominator together and coverage would read 100% forever.
 
@@ -1843,7 +1844,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="bench against the cache already in data/, skipping the "
                                   "pre-bench build (use after `build all` + a clean `audit`)")
         # bench.py's config defaults to seq_len, so without this every run swept one axis and the
-        # d_pair half of the matrix -- which docs/benchmarks.md and the README both call for, and
+        # d_pair half of the matrix -- which docs/benchmarks/README.md and the README both call for, and
         # which is where the width-dependent kernels separate -- could only be reached by
         # invoking bench.py directly.
         parser_.add_argument("--sweep-axis", default="seq_len", choices=("seq_len", "d_pair"),

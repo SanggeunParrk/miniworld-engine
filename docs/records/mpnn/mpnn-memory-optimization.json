@@ -5387,8 +5387,8 @@
     "snapshot": "/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-memory-opt/a5000-source",
     "overlaid_tracked_sources": [
       "src/miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py",
-      "src/miniworld_engine/kernels/registry_kernel.csv",
-      "src/miniworld_engine/kernels/registry_kernel.units.json",
+      "src/miniworld_engine/kernels/registry/registry_kernel.csv",
+      "src/miniworld_engine/kernels/registry/registry_kernel.units.json",
       "src/miniworld_engine/modules/mpnn/features.py",
       "src/miniworld_engine/modules/mpnn/module.py"
     ],

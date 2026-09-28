@@ -21,7 +21,7 @@ AF3's unused `c_hidden_mul=128` constructor argument does not describe its templ
 
 ## Executable build coverage
 
-`src/miniworld_engine/kernels/registry_module.csv` remains the build source of truth. The table expands from 53 to 141 rows. Existing rows and length ladders are preserved. Added rows cover square TriMul 64 and 384, exact template/trunk triangle head layouts, ×2 transitions, MSA transitions, ESMFold2 768/768 conditioning, and exact leaf operations for projected attention, sigmoid gate+output projection, bare SwiGLU, native FP32-affine LayerNorm, FP32-affine LN+BF16 projection, and RMSNorm+modulation.
+`src/miniworld_engine/kernels/registry/registry_module.csv` remains the build source of truth. The table expands from 53 to 141 rows. Existing rows and length ladders are preserved. Added rows cover square TriMul 64 and 384, exact template/trunk triangle head layouts, ×2 transitions, MSA transitions, ESMFold2 768/768 conditioning, and exact leaf operations for projected attention, sigmoid gate+output projection, bare SwiGLU, native FP32-affine LayerNorm, FP32-affine LN+BF16 projection, and RMSNorm+modulation.
 
 The new cases live in `autotune/checkpoint_cases.py` and are included by `builder.cases()` and `CASE_NAMES`; they are not documentation-only shapes. Atom pair projection uses actual 32-query/128-key windows, never a dense atom×atom allocation. Native token output LayerNorm declares both non-augmented and diffusion (eval 5/train 48) rows; equal channel dimensions do not imply equal launch shapes. Existing all-BF16 LN+projection probes are retained alongside native FP32-affine probes. The registry change invalidates the build plan fingerprint; old derived/cache artifacts are not evidence that these added rows have been tuned.
 

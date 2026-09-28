@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-REGISTRY = ROOT / "src" / "miniworld_engine" / "kernels" / "registry.csv"
+REGISTRY = ROOT / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv"
 
 
 def _entry_refs() -> list[tuple[str, str, str]]:

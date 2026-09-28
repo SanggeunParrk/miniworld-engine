@@ -12,8 +12,8 @@ import csv
 import dataclasses
 from pathlib import Path
 
-REGISTRY_MODULE = Path(__file__).resolve().parents[1] / "kernels" / "registry_module.csv"
-REGISTRY_KERNEL = Path(__file__).resolve().parents[1] / "kernels" / "registry_kernel.csv"
+REGISTRY_MODULE = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry_module.csv"
+REGISTRY_KERNEL = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry_kernel.csv"
 
 #: Token counts run to 768, not to the training crop. `CropConfig.max_tokens` is 384 in every
 #: committed data config, and reading it as the ceiling is what cut this ladder at 512: the crop

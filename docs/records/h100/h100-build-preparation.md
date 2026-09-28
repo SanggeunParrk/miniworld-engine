@@ -97,7 +97,7 @@ Logs: `.scratch/hopper-final-cpu-tests.log`, `.scratch/hopper-native-final.log`,
 
 GPU numerics, race/synchronization checks and timing-based config qualification
 are still outstanding for this revision. CPU compilation does not certify them.
-See `docs/kernels/cute-autotune-and-config-pinning.md` for the current configuration
+See `docs/records/cute/cute-autotune-and-config-pinning.md` for the current configuration
 and invariant inventory.
 
 ## 2026-09-12: complete CPU follow-up

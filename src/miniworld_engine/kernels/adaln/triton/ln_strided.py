@@ -32,7 +32,7 @@ import triton.language as tl
 
 
 # shape_key is the SHAPE cache bucket, and shape means L -- the atom count (this family is
-# level=atom in kernels/registry.csv) -- never the row count a kernel receives. It is NOT GROUP_M:
+# level=atom in kernels/registry/registry.csv) -- never the row count a kernel receives. It is NOT GROUP_M:
 # in this file GROUP_M is the tuned L2-swizzle axis the two GEMM kernels read from the CSV, so the
 # bucket takes a separate, lowercase name -- a plain runtime int no kernel body ever reads.
 #

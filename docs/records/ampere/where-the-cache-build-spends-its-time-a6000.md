@@ -135,7 +135,7 @@ magnitude and one kernel's tail is another's body:
 At 20 s the first kernel loses configs that compile fine in 17-47 s.
 
 The build now prints that distribution per round and names every killed config in the `.smem`
-log, which is what a per-kernel decision needs and what did not exist. Tracked as docs/development/product-plan.md G3.
+log, which is what a per-kernel decision needs and what did not exist. Tracked as docs/records/development/product-plan.md G3.
 
 ## What a full build should now cost, and how to check it
 

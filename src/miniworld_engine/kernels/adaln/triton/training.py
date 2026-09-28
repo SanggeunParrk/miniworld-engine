@@ -75,7 +75,7 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # tensor argument, so fp32 and bf16 already land in different cache slots.
 
 
-# shape_key's value is L -- the atom count (this family is level=atom in kernels/registry.csv) --
+# shape_key's value is L -- the atom count (this family is level=atom in kernels/registry/registry.csv) --
 # not the flattened row count M = B*A the kernels iterate. The three launchers below are INNER
 # launchers that only see the (M, D) matrices, so each takes the key from the caller that still
 # holds the pre-flatten shape. `shape_key=None` is NOT a working fallback: `length_of` refuses a rank-2 shape, so the

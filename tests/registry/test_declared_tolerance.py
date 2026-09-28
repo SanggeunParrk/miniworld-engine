@@ -9,7 +9,7 @@ pairformer blocks is not silent in the model.
 `registry.csv` now carries an `rtol` column. Blank means "the default applies", never "unchecked".
 These tests cover the mechanism with synthetic checkers -- no GPU, no kernel -- so the band logic is
 verified independently of whether any particular kernel currently meets a tighter one. Calibrating
-the per-kernel values is a separate step and needs a device (docs/development/product-plan.md P2b).
+the per-kernel values is a separate step and needs a device (docs/records/development/product-plan.md P2b).
 """
 from __future__ import annotations
 
@@ -136,7 +136,7 @@ def test_a_declared_band_is_above_what_that_kernel_measured() -> None:
 
     from miniworld_engine.autotune.run_all import DEFAULT_RTOL, RTOL_MARGIN
 
-    manifests = REGISTRY.parent.parent / "autotune" / "manifests"
+    manifests = REGISTRY.parent.parent.parent / "autotune" / "manifests"
     # (kernel, precision) -> the worst rel each run recorded. Keyed by BOTH, because the same
     # kernel measures four orders apart in the two: `layernorm_fwd_saveact_triton` is 2.8e-03 in
     # bf16 and 1.7e-07 in fp32. Comparing a band against the wrong precision's rows is how a bf16

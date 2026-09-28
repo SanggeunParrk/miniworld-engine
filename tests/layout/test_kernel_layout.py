@@ -158,6 +158,8 @@ def test_notes_are_not_a_package() -> None:
 
 
 HARNESS_DIRS = {"drivers", "checks"}
+#: Data, not code: the registry CSVs and their evidence files (no ``__init__.py``).
+DATA_DIRS = {"registry"}
 
 
 def test_the_only_non_family_directories_are_the_harness() -> None:
@@ -166,7 +168,7 @@ def test_the_only_non_family_directories_are_the_harness() -> None:
     either a family someone forgot to finish or a place kernels will quietly accumulate."""
     stray = sorted(d.name for d in KERNELS.iterdir()
                    if d.is_dir() and d.name != "__pycache__"
-                   and d not in _families() and d.name not in HARNESS_DIRS)
+                   and d not in _families() and d.name not in HARNESS_DIRS | DATA_DIRS)
     assert not stray, (f"directories under kernels/ that are neither a family nor the harness "
                        f"({', '.join(sorted(HARNESS_DIRS))}): {', '.join(stray)}")
 

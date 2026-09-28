@@ -126,7 +126,7 @@ def test_the_sweep_still_enumerates_every_declared_unit() -> None:
     from miniworld_engine.autotune.builder import op_units
     from miniworld_engine.kernels import __file__ as kernels_init
 
-    reg = Path(kernels_init).parent / "registry.csv"
+    reg = Path(kernels_init).parent / "registry" / "registry.csv"
     with reg.open(newline="") as fh:
         rows = [r for r in csv.DictReader(fh) if (r.get("driver") or "").strip()]
     dtypes = sum(len([d for d in (r.get("dtypes") or "").split("|") if d]) for r in rows)

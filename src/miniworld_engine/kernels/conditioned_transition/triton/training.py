@@ -56,7 +56,7 @@ from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_ord
 # form — 1.5x on the whole conditioned_transition step (3406us -> 5107us of kernel time, same
 # 83 launches, so it is GPU work and not launch overhead). Trading ALU for bandwidth is the
 # wrong direction here. BLOCK_E still comes from the config space, so the tile is tuned either way.
-# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
+# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry/registry.csv) --
 # never the row count, and never the flat element count, a kernel receives.
 #
 # WHERE THAT L COMES FROM, and it is the one thing to know about this family: every entry point

@@ -20,7 +20,7 @@ import csv
 from paths import REGISTRY as REG
 from paths import ROOT
 
-EXEMPT = ROOT / "src/miniworld_engine/kernels/tile_order_exempt.csv"
+EXEMPT = ROOT / "src/miniworld_engine/kernels/registry/tile_order_exempt.csv"
 
 
 def _gemms() -> list[dict]:
@@ -60,7 +60,7 @@ def test_every_gemm_is_on_the_axis_or_exempt_with_a_reason() -> None:
             missing.append(r["kernel"])
     assert not missing, (
         "GEMM kernels with a fixed tile visit order and no recorded reason -- either call "
-        "tile_order (see kernels/_tiles.py) or add a row to kernels/tile_order_exempt.csv:\n  "
+        "tile_order (see kernels/_tiles.py) or add a row to kernels/registry/tile_order_exempt.csv:\n  "
         + "\n  ".join(sorted(missing)))
 
 
@@ -73,7 +73,7 @@ def test_no_exemption_outlives_its_kernel() -> None:
             stale.append(f"{kernel}: not a triton gemm in registry.csv")
         elif _uses_tile_order(gemms[kernel]):
             stale.append(f"{kernel}: calls tile_order, so the exemption is spent")
-    assert not stale, "stale rows in kernels/tile_order_exempt.csv:\n  " + "\n  ".join(stale)
+    assert not stale, "stale rows in kernels/registry/tile_order_exempt.csv:\n  " + "\n  ".join(stale)
 
 
 def test_every_reason_says_something() -> None:

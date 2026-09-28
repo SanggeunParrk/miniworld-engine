@@ -28,7 +28,7 @@ def test_every_undeveloped_kernel_names_a_reason() -> None:
     reasons = {r["kernel"]: (r.get("reason") or "").strip() for r in _rows(UNDEV)}
     missing = sorted(marked - set(reasons))
     assert not missing, (
-        "held out of `build all` with no reason recorded in kernels/undeveloped.csv: "
+        "held out of `build all` with no reason recorded in kernels/registry/undeveloped.csv: "
         + ", ".join(missing))
     thin = sorted(k for k in marked if len(reasons[k]) < 40)
     assert not thin, f"the reason is too short to be one: {thin}"
@@ -39,7 +39,7 @@ def test_no_reason_is_recorded_for_a_kernel_that_is_still_built() -> None:
     built = {r["kernel"] for r in _rows(REG)
              if r["backend"] == "triton" and (r.get("developed") or "yes").strip() != "no"}
     stale = sorted(built & {r["kernel"] for r in _rows(UNDEV)})
-    assert not stale, ("kernels/undeveloped.csv explains kernels that ARE built; "
+    assert not stale, ("kernels/registry/undeveloped.csv explains kernels that ARE built; "
                        f"delete the row or set developed=no: {stale}")
 
 

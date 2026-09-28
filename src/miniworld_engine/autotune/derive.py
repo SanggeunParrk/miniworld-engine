@@ -57,7 +57,7 @@ from miniworld_engine.autotune.module_registry import (
     module_rows as module_rows,
 )
 
-REGISTRY_KERNEL = Path(__file__).resolve().parents[1] / "kernels" / "registry_kernel.csv"
+REGISTRY_KERNEL = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry_kernel.csv"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -831,7 +831,7 @@ def uncovered_kernels(arch: str, registry: Path | None = None) -> set[str]:
     the modules already cover is how the build ended up with two disagreeing statements of the
     same shapes in the first place.
     """
-    reg = registry or (Path(__file__).resolve().parents[1] / "kernels" / "registry.csv")
+    reg = registry or (Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv")
     from miniworld_engine.autotune.native import build_ops_for_arch
     native = build_ops_for_arch(normalise_arch(arch))
     ceiling = _ARCH_ORDER.index(normalise_arch(arch))

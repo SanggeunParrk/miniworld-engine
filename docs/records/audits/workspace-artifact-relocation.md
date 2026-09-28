@@ -13,7 +13,7 @@ configuration identity under which historical measurements were made.
 
 The complete movement inventory and script before/after hashes are in
 [relocation-manifest.json](../../.scratch/a6000-2026-09/relocation-manifest.json).
-The sweep page now lives only at [autotune-sweep-grid.html](../../autotune-sweep-grid.html)
+The sweep page now lives only at [autotune-sweep-grid.html](../../autotune/sweep-grid.html)
 (and its archived shortcut); the Team-GM root shortcut was moved too.
 
 Current generic atom DiT measurements are in `.scratch/a6000-2026-09/mw-atom-dit/`.

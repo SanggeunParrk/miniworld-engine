@@ -68,7 +68,7 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
     no unit lands outside the set (nothing floors into a neighbour's bucket).
     """
     # developed=no is what holds a kernel out of `build all`, so it has no units by definition
-    # and the `sides` column becomes a statement about where it WOULD run. kernels/undeveloped.csv
+    # and the `sides` column becomes a statement about where it WOULD run. kernels/registry/undeveloped.csv
     # carries the reason for each; `test_undeveloped_kernels_carry_a_reason` is what keeps that
     # from becoming a way to silence this check.
     rows = [r for r in registry_rows()

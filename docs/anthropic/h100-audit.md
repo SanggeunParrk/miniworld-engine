@@ -18,7 +18,7 @@ MiniWorld 전체 모델 실행/학습 설정의 일괄 교체도 이번 측정�
   182개 파일/176개 서로 다른 내용이며 **커널 개수가 아니다**. 테스트/변형/문서 오탐도 포함한다.
 - 원본 kernel source 수정 없음. 재빌드한 cubin 1개와 매니페스트/체크섬 4개는 원본과
   다르며 [LOCAL_BUILD.json](../../third_party/anthropic/LOCAL_BUILD.json)에 별도로 기록했다.
-- [연결 API 및 재현 방법](integration.md), [출처/개발 방향](../project-direction.md).
+- [연결 API 및 재현 방법](integration.md), [출처/개발 방향](../standards/project-direction.md).
 
 ## 검증 및 측정 조건
 
@@ -157,12 +157,12 @@ Atom-window IEEE는 원본 기본 경로보다 훨씬 느리므로 둘을 혼동
 
 ## 원자료와 재현
 
-- [모든 후보 시간 CSV](../benchmarks/anthropic-h100-20260919/timings.csv)
-- [개별 측정·selection·수치오차 JSON](../benchmarks/anthropic-h100-20260919/all-results.json)
-- [모든 NCU kernel 시간·비중·지표 CSV](../benchmarks/anthropic-h100-20260919/ncu-kernels.csv)
-- [NCU 요약 JSON](../benchmarks/anthropic-h100-20260919/ncu-summary.json)
-- [추가 모듈 검증](../benchmarks/anthropic-h100-20260919/boundary-checks.json)
-- [upstream GPU JUnit](../benchmarks/anthropic-h100-20260919/upstream-gpu-tests.xml)
+- [모든 후보 시간 CSV](../records/anthropic/anthropic-h100-20260919/timings.csv)
+- [개별 측정·selection·수치오차 JSON](../records/anthropic/anthropic-h100-20260919/all-results.json)
+- [모든 NCU kernel 시간·비중·지표 CSV](../records/anthropic/anthropic-h100-20260919/ncu-kernels.csv)
+- [NCU 요약 JSON](../records/anthropic/anthropic-h100-20260919/ncu-summary.json)
+- [추가 모듈 검증](../records/anthropic/anthropic-h100-20260919/boundary-checks.json)
+- [upstream GPU JUnit](../records/anthropic/anthropic-h100-20260919/upstream-gpu-tests.xml)
 - [fresh-cache 재검사](benchmarks/anthropic-h100-20260919/fresh-probe-test.log)
 - [소스 무결성/재빌드 변경 목록](../../third_party/anthropic/LOCAL_BUILD.json)
 

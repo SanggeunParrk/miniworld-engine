@@ -76,7 +76,7 @@ def test_a_real_kernel_the_config_set_cannot_build_is_not_silently_dropped(spy, 
     import csv
     from pathlib import Path
 
-    reg = Path(builder.__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    reg = Path(builder.__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
     driverless = next(
         (r["kernel"] for r in csv.DictReader(reg.open())
          if r["backend"] == "triton" and not (r.get("driver") or "").strip()), None)

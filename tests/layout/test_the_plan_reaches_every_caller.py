@@ -27,7 +27,7 @@ from paths import PKG
 
 from miniworld_engine.autotune import builder
 
-CALLERS = PKG / "kernels" / "case_callers.json"
+CALLERS = PKG / "kernels" / "registry" / "case_callers.json"
 
 #: dims keys that are not a width: head COUNTS (a driver turns one into a head dim) and the
 #: bookkeeping fields a case carries alongside its shape.

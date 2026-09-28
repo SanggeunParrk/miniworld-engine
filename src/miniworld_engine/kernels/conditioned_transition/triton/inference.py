@@ -46,7 +46,7 @@ from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_ord
 
 
 # fmt: off
-# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
+# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry/registry.csv) --
 # never the row count a kernel receives.
 #
 # WHERE THAT L COMES FROM, and it is the one thing to know about this family: every entry point

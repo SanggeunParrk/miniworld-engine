@@ -94,7 +94,7 @@ def _levels() -> dict[str, str]:
     """kernel -> its `level` column, from registry.csv. Read once."""
     import csv
 
-    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
     if not reg.is_file():
         return {}
     return {r["kernel"]: r["level"] for r in csv.DictReader(reg.open())}
@@ -310,7 +310,7 @@ def _registry_driver(op: str) -> tuple[str, str] | None:
     ``("miniworld_engine.kernels.drivers.adaln", "adaln_gemm_gate")``, or None."""
     import csv as _csv
 
-    reg = Path(__file__).resolve().parent.parent / "kernels" / "registry.csv"
+    reg = Path(__file__).resolve().parent.parent / "kernels" / "registry" / "registry.csv"
     try:
         with reg.open(encoding="utf-8") as h:
             for row in _csv.DictReader(h):
@@ -500,7 +500,7 @@ def _build_revs() -> dict[str, int]:
     """kernel -> registry.csv's ``build_rev``. Read once."""
     import csv
 
-    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
     if not reg.is_file():
         return {}
     def _rev(raw) -> int:
@@ -1012,7 +1012,7 @@ def _warn_once(op: str, gk: str, tag: str, reason: str, fallback: str = "") -> N
         f"[miniworld.autotune] {reason} for op '{op}' on '{gk}' ({tag}). Falling back to "
         f"{what} — this run may be slower and the chosen config may be suboptimal. "
         f"Build a tuned cache for this GPU with the autotune cache-builder "
-        f"(see docs/operations/dispatch-cache.md).",
+        f"(see docs/autotune/dispatch-cache.md).",
         stacklevel=4,
     )
 

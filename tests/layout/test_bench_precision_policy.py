@@ -1,5 +1,5 @@
 """The registry-driven bench precision policy (benchmarks/runners/bench_policy.py) must stay
-consistent with kernels/registry.csv and cover every bench target."""
+consistent with kernels/registry/registry.csv and cover every bench target."""
 from __future__ import annotations
 
 import csv
@@ -12,7 +12,7 @@ _RUNNERS = Path(__file__).resolve().parents[2] / "benchmarks" / "runners"
 sys.path.insert(0, str(_RUNNERS))
 import bench_policy as bp
 
-_REG = Path(__file__).resolve().parents[2] / "src" / "miniworld_engine" / "kernels" / "registry.csv"
+_REG = Path(__file__).resolve().parents[2] / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv"
 _BENCH = Path(__file__).resolve().parents[2] / "benchmarks"
 
 

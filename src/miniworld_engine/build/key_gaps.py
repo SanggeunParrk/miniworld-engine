@@ -31,7 +31,7 @@ from pathlib import Path
 from miniworld_engine.autotune.configs import config_set
 
 SRC = Path(__file__).resolve().parents[2]
-REG = SRC / "miniworld_engine/kernels/registry.csv"
+REG = SRC / "miniworld_engine/kernels/registry/registry.csv"
 ALLOWED = Path(__file__).parent / "key_gaps_allowed.csv"
 #: padding helpers derived from a keyed dim, never independent
 IGNORE = {"HEAD_DIM_PAD", "N_PAD"}

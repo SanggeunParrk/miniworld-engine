@@ -2,7 +2,7 @@
 
 Two facts, two sources, no inference between them:
 
-  * WHAT EXISTS is declared by the repo in ``kernels/registry.csv``. It is data, not something
+  * WHAT EXISTS is declared by the repo in ``kernels/registry/registry.csv``. It is data, not something
     to be discovered. The previous version inferred it by walking the AST for
     ``@triton.autotune`` decorators plus whatever symbols the bench happened to import, and that
     guessing produced a string of wrong answers: backends read off the directory name (Triton
@@ -25,7 +25,7 @@ import csv
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parent.parent
-_REGISTRY = _PKG / "kernels" / "registry.csv"
+_REGISTRY = _PKG / "kernels" / "registry" / "registry.csv"
 #: Per-card manifests, beside the tuned caches in `autotune/data/`. They used to be resolved as
 #: `<repo>/configs/devices` via `parents[3]`, which is only the repo in an editable install: from a
 #: wheel that path is `<site-packages>/../../configs/devices` and does not exist, so `run_all`

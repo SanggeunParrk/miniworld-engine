@@ -28,7 +28,7 @@ import json
 from pathlib import Path
 
 #: Beside the registry, because it says the same kind of thing about the same rows.
-EVIDENCE = Path(__file__).resolve().parent.parent / "kernels" / "width_evidence.json"
+EVIDENCE = Path(__file__).resolve().parent.parent / "kernels" / "registry" / "width_evidence.json"
 
 
 def load(path: Path | None = None) -> dict[str, dict[str, list[str]]]:

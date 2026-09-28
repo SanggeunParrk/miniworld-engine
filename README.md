@@ -4,43 +4,32 @@
 
 [Figure details and measurement scope](docs/assets/README.md).
 
-Dedicated GPU kernel-development repo for MiniWorld / AF3-style ops. The idea is
-to **cut one op out of the full model and optimize it in isolation**:
+GPU kernel library for MiniWorld / AF3-style ops. Each op is cut out of the model and
+optimized in isolation: **hand-written CUDA where it exists, a Triton fallback everywhere
+else**, and a PyTorch reference that defines what "correct" means.
 
-> **Where this fits.** miniworld-engine is the bottom layer of a three-layer
-> stack: it owns the fused kernels + building-block ops; **team-gm** composes them
-> into the representative AF3 blocks; terminal product repos assemble those into
-> full models. The boundary rules (which layer owns an op vs. a block vs. a model,
-> and where residuals live) are documented canonically in team-gm's
-> `docs/ARCHITECTURE.md`.
+> **Where this fits.** miniworld-engine is the bottom layer of a three-layer stack: it owns
+> the fused kernels and building-block ops; **team-gm** composes them into representative AF3
+> blocks; terminal product repos assemble those into full models. Boundary rules live in
+> team-gm's `docs/ARCHITECTURE.md`.
 
-Current A6000 validation, cache coverage, module timings and qualification limits: [final audit](docs/records/ampere/a6000-production-audit.md).
+**Version 2.2.0** — CUDA + Triton only (CuTe/quack removed), torch 2.13 / cu129,
+cuequivariance 0.12. [Changelog](CHANGELOG.md) · [releases](docs/releases/) ·
+[attribution](THIRD_PARTY_NOTICES.md).
 
-## Version 2.1.0
-
-CUDA-first production builds, small default Triton spaces, explicit global search,
-and separate inference/training tuning. [Policy, commands and qualification status](docs/releases/2.1.0.md).
-CUDA tuning coverage is family-specific; preserved measurement records do not
-imply that every inference shape has been re-tuned.
-
-## Version 2.0.0 history
-
-This release builds on Anthropic's stronger published inference kernels and adds
-training implementations. [Release map and migration](docs/releases/2.0.0.md) ·
-[Attribution](THIRD_PARTY_NOTICES.md) ·
-[Archived research capsules](docs/records/experiments-archive.md).
-The latest TriMul CUDA training route is now connected automatically on supported
-H100 inputs, alongside Transition, MSA and token DiT inference.
-[Current module dispatch and limits](docs/operations/h100-module-wiring.md) ·
-[Recorded comparisons](docs/records/verdicts/version-compare-20260923/index.html).
-D128 improves on the measured Triton baseline; other widths need more optimization.
+| I want to… | go to |
+|---|---|
+| know what is finished on a GPU, for which shapes | [docs/status/](docs/status/README.md) |
+| run on a specific GPU cluster | [docs/gpus/](docs/gpus/README.md) |
+| read everything else | [docs/README.md](docs/README.md) |
+| work on this repo as an agent | [AGENTS.md](AGENTS.md) |
 
 ## Quickstart
 
 Four steps, and the first three need no GPU. Every command in this section is executed by
 `tests/layout/test_quickstart_runs.py`, so it cannot drift from what the code does.
 
-**1. Install.** The library is a normal wheel; `[cute]` and `[bench]` are extras you do not need
+**1. Install.** The library is a normal wheel; `[bench]` and `[baselines]` are extras you do not need
 to read a number.
 
 ```bash
@@ -64,7 +53,7 @@ which tolerance it is held to.
 # cpu
 python -c "
 import csv, collections, miniworld_engine.kernels as k, pathlib
-reg = pathlib.Path(k.__file__).parent / 'registry.csv'
+reg = pathlib.Path(k.__file__).parent / 'registry' / 'registry.csv'
 rows = list(csv.DictReader(reg.open()))
 print(len(rows), 'kernels;', dict(collections.Counter(r['backend'] for r in rows)))"
 ```
@@ -81,189 +70,48 @@ python -m miniworld_engine.autotune.run_all
 The summary reports `declared`, `driven`, `ok`, `failed`, and `skipped` counts for the
 current registry and device. `skipped` distinguishes unsupported architecture/dtype cases;
 missing drivers and execution failures are reported separately. See
-[docs/supported.md](docs/supported.md) for what has actually been run, and
-[docs/troubleshooting.md](docs/troubleshooting.md) when a step does not do this.
+[docs/getting-started/supported.md](docs/getting-started/supported.md) for what has actually been run, and
+[docs/getting-started/troubleshooting.md](docs/getting-started/troubleshooting.md) when a step does not do this.
 
 **Then:** using the kernels means `from miniworld_engine import ops` — eight whole-op entry points
 that take the same arguments as their torch equivalents. Getting them *fast* on your card means
 building a tuned cache with `miniworld-engine build all`. Its work depends on the GPU,
 current source and existing valid measurements; use `dev coverage` to inspect a specific GPU cache.
-
-## Critical Safety
-
-This repo is often accessed from a cluster login node.
-
-- Do not run recursive scans outside this repo, especially commands like `find $HOME ...`.
-- Do not run installs, builds, benchmarks, profiling, or GPU-dependent commands on the login node.
-- Keep login-node activity limited to lightweight repo-local inspection.
-- Use `srun` or an allocated compute node for GPU work or heavy filesystem activity.
-
-Repo structure:
-
-- A **kernel** (`src/miniworld_engine/kernels/<unit>/`) is a chunk you deliberately chose to fuse and
-  hand-optimize. It owns its backend implementations (`triton/`, `cute/`,
-  `cuda/`) plus a PyTorch `reference.py` and a public `interface.py`.
-- A **module** (`src/miniworld_engine/modules/<op>/`) is a part cut from the
-  model (e.g. `triangle_multiplication`). It only *connects* kernels — it has
-  **no** `triton/cute/cuda` folders.
-- A **benchmark** lives next to its target type:
-  `benchmarks/kernels/<kernel>/...` for isolated kernels and
-  `benchmarks/modules/<module>/...` for composed model modules. Each benchmark
-  target owns its own `configs/` and `artifacts/` folders.
-
-Kernels and modules were consolidated here out of `team-gm`
-(`src/team_gm/modules/`, across `psk/benchmark`, `perf/trimul`, `miniworld`,
-`exp/miniworld`) and the FlashAttentionBias repo (cute trimul work).
-
 ## Layout
 
 ```
 src/miniworld_engine/
-├── _typecheck.py                 # standalone team_gm.typecheck shim
-├── kernels/                      # fusion units: importable backends
-│   ├── tm1/  tm2/                #   left/right- and output-gated GEMM kernels
-│   │   ├── reference.py interface.py
-│   │   └── triton/ cute/ cuda/   #   backend implementations
-│   ├── transition/ layernorm/ adaln/
-│   ├── triangle_attention/ augmented_attention/
-│   ├── bias_only_attention/ gated_projection/
-│   ├── fused_ln_mask/            #   LN+mask fusion (used by the trimul cute path)
-│   ├── drivers/<family>.py       #   autotune-capture harness: one launcher per registry
-│   ├── checks/<family>.py        #     kernel, and its numerical check. One module per
-│   │                             #     `family` in registry.csv -- nothing else groups them.
-│   ├── registry.csv              #   the declared kernel list: family, level, dtypes, driver
-│   └── __init__.py               #   flat re-export bridge: kernels.triton_tm1, ...
-└── modules/                      # model ops: connect kernels (NO backend folders)
-    ├── triangle_multiplication/  #   module.py (connects tm1/tm2/LN; pytorch/triton/
-    │   ├── module.py             #     cute/cuequivariance via ImplementationType)
-    │   ├── reference.py interface.py baseline_dtv1.py
-    ├── triangle_attention/ transition/ adaptive_layernorm/ augmented_attention/
-    ├── attention_pair_bias/ conditioned_transition/ outer_product/ pairformer/
-    ├── msa_pair_weighted_averaging/ swa_atom_attention/
-    │                             #   every op is a folder holding module.py --
-    │                             #     tests/layout/test_module_layout.py enforces it
-    ├── dispatch.py               #   ImplementationType -> internal KernelBackend
-    ├── exceptions.py             #   ImplementationType (pytorch/triton/cuda/cute/cuequivariance)
-    ├── primitives.py             #   layer classes the ops compose (LayerNorm, Linear, Dropout)
-    ├── functional.py             #   free functions the ops compose (sigmoid_gate, swish_gate)
-    └── __init__.py               #   the four flat modules above are the ONLY non-op files
-benchmarks/
-├── kernels/<kernel>/             # isolated kernel benchmarks + configs/artifacts
-├── modules/<module>/             # composed module benchmarks + configs/artifacts
-├── compile_wrap/                 # graph structure + regime A/B behind the compile_wrap default
-└── runners/                      # shared benchmark/render CLI entry points
-docs/                             # pages written for a consumer: cache policy, kernel notes, standards
-    └── kernels/<kernel>/notes/   # (in src) per-round optimization logs, beside the kernel they are about
-benchmarks/runners/bench.py       # active bench runner
-benchmarks/modules/triangle_multiplication/configs/bench.yaml
-pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
+├── kernels/            fusion units — one folder per family
+│   ├── <family>/       reference.py · interface.py · [dispatch.py] · [whole_op.py]
+│   │                   cuda/ · triton/ backends · notes/ (dated optimization logs)
+│   ├── drivers/  checks/   autotune-capture harness: one module per registry family
+│   └── registry/       registry.csv (declared kernels) · registry_module.csv (model shapes)
+│                       · registry_kernel.csv (derived plan) · exemption / evidence lists
+├── modules/            model ops: connect kernels, no backend folders
+├── integrations/       hand-CUDA entry points wired into modules (trimul_h100, token_dit, …)
+├── autotune/           tuner, cache reader/builder · configs/{default,grid,ab/} · data/ (per-GPU caches)
+├── build/              cache-build matrix and audits
+├── ops/                whole-op public API (`from miniworld_engine import ops`)
+├── viz/  cli.py  settings.py
+benchmarks/             runners/bench.py + {kernels,modules}/<target>/configs · results/<gpu>/
+tests/                  CPU contracts; `@pytest.mark.gpu` for device tests
+docs/                   see docs/README.md
+scripts/                one-off maintenance scripts (anthropic/, hopper/, slurm/, audit/)
+third_party/  licenses/ upstream provenance and license texts
 ```
 
-Every kernel family has the same shape, and `tests/layout/test_kernel_layout.py` enforces it:
-
-| file | what it is | required |
-|---|---|---|
-| `reference.py` | the torch definition. `kernels/checks/<family>.py` compares against it, so it is what "correct" means for that family. | yes |
-| `interface.py` | the family's ONE public door — the names the rest of the repo may import, and nothing about which backend serves them. `kernels/__init__.py` reaches only here. | yes |
-| `dispatch.py` | a CHOICE among implementations, at whatever level the choice lives: per-GPU calibration (`layernorm`), a d-aware pick between triton variants (`conditioned_transition/triton`), cuBLAS-vs-quack (`trimul_inproj/cute`). | no |
-| `whole_op.py` | a whole model-layer op with weights as arguments (LN → … → gate in one call). A property of the layer, not of the folder. | no |
-| `triton/` `cute/` `cuda/` `cutlass/` | backends, each a package. | no |
-
-`interface.py` and `dispatch.py` are not synonyms — `conditioned_transition/triton/` used the
-first name for the second job until this table existed.
-
-In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical),
-`perf.py`/`miniworld.py` are alternates. Each vendored file carries a
-`# vendored from team-gm <branch>@<sha>` header. Vendored kernel bodies
-(`**/triton/*.py`, `**/cuda/*.py`) are not linted.
+Every kernel family has the same shape, enforced by `tests/layout/test_kernel_layout.py`:
+`reference.py` (the torch definition checks compare against), `interface.py` (the family's one
+public door), optional `dispatch.py` (a choice among implementations) and `whole_op.py`
+(a whole layer with weights as arguments), and backend packages `cuda/` / `triton/`.
 
 ## Benchmarking
 
-**Benchmark policy: follow the team-gm harness unless there is a specific reason
-not to.** The active path is `benchmarks/runners/bench.py` +
-`benchmarks/modules/<module>/configs/bench.yaml`, launched however your cluster
-launches things. (There is no `submits/` tree any more — 511d905 removed it once
-the work moved into the package; anything still naming `submits/run_*.sbatch` is
-a stale reference.)
-Do not replace the harness with ad hoc timing snippets or custom markdown
-summaries for final results. A benchmark run writes CSV; plotting is a separate
-CSV-rendering step.
-
-Detailed benchmark conventions live in `docs/benchmarks.md`. Runtime dispatch
-cache policy lives in `docs/operations/dispatch-cache.md`.
-
-One entry point — `benchmarks/runners/bench.py`, driven by target-local Hydra
-configs:
-
-```bash
-# Unified repo env (.pixi/). --frozen keeps the cu12 TE core fix.
-srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
-  bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
-    PYTHONPATH=src python benchmarks/runners/bench.py target=triangle_multiplication level=module \
-      implementations=[pytorch,dtv1,cuequivariance,miniworld] mode=inference"'
-```
-
-`target=` names what to bench and `level=` says which of the two namespaces it is
-in -- `level=module` for a production module (`triangle_multiplication`,
-`triangle_attention`, `transition`, `adaptive_layernorm`,
-`augmented_attention_token/atom`), `level=kernel` for a kernel family
-(`triangle_attention`, `layernorm`, `adaln`, ...). A kernel and the module built
-out of it may share a name, which is why the level is not optional.
-All final benchmarks run the `torch.compile`d path; non-compiled debug probes
-are not valid final benchmark results. The CUDA-graph regime defaults to
-`cudagraph=auto`: inference timing captures a manual graph; module training
-timing runs both graph OFF and ON in separate processes and CSVs. Compilation
-remains enabled on both sides. Memory measurements and kernel training remain
-ungraphed by default. Explicit `--cudagraph disabled` or `--cudagraph manual`
-selects a single regime. Dropout training graph rows require matched-seed output
-and gradient checks plus changing random outputs across consecutive replays;
-capture failures are reported, never replaced with graph OFF.
-See [docs/benchmarking-cautions.md](docs/benchmarking-cautions.md).
-Generated results land in the selected target's `artifacts/` directory, for
-example `benchmarks/modules/triangle_multiplication/artifacts/`.
-The benchmark CSV is the source of truth. It includes method, dimensions,
-precision, mode, metric, device, compile flag, and value. Render SVG figures
-from it with `benchmarks/runners/plot_csv.py`.
-For trimul, run separate `sweep_axis=seq_len` and `sweep_axis=d_pair` jobs; the
-figure caption records the fixed dimension (`d_pair=...` or `L=...`).
-
-If an op is not yet integrated into the unified harness, keep local probes
-untracked and move the stable definition into `benchmarks/kernels/<kernel>/`
-or `benchmarks/modules/<module>/`.
-
-The **cute** path is `implementations=[cute]` (an `ImplementationType.CUTE`
-implementation of `triangle_multiplication` that connects the tm1/tm2/fused-LN
-cute kernels). cutlass-dsl + quack are in the unified env, so the same
-`pixi run --frozen ... benchmarks/runners/bench.py implementations=[cute]`
-runs it.
-
-### Ampere workstation cards (A5000 / A6000)
-
-The RTX A5000 / A6000 (GA102 = `sm_86`) are **triton-only** targets, exactly like the
-A100 (`sm_80`): the cute/cutlass paths are gated behind `sm_90+`
-(`torch.cuda.get_device_capability()[0] < 9`), so `MINIWORLD` resolves to the portable
-Triton family — no dispatch change. They live on the `cssb-master` cluster
-(`partition=gpu`, `qos=normal`, A5000=`gpu02`/24 GB, A6000=`gpu01,03-05`/48 GB), which is
-separate from the A100/H100/B200 cluster. One parameterized launcher per bench type covers
-both cards (pick the card with `--gres`; the script auto-detects it and asserts `sm_86`):
-
-```bash
-# one module bench
-srun -p gpu --gres=gpu:A6000:1 -c 8 --mem=64G \
-  .pixi/envs/default/bin/python benchmarks/runners/bench.py target=transition level=module mode=inference
-
-# the tuned cache for this card: one unit per (op, dtype, shape bucket), across every GPU given
-srun -p gpu --gres=gpu:A6000:8 --exclusive \
-  .pixi/envs/default/bin/python -m miniworld_engine.cli build all --gpus 8 --resume
-```
-
-The cache build replaced `CAPTURE_TARGET=all submits/run_autotune_capture_ampere.sbatch`:
-capture used to be driven per bench target, which reached 48 of 91 triton kernels because a
-module only fires the kernels its own shapes dispatch to. `build all` drives the DECLARED work
-list instead — see the CLI section below and `docs/operations/dispatch-cache.md`.
-
-The A5000's 24 GB may OOM at the top of the sweep (L=1024, d=512); `bench.py` records those
-points as `status=failed` rows rather than aborting, so the CSV still shows the memory cliff.
+One entry point: `benchmarks/runners/bench.py` with a target's `configs/bench.yaml`
+(`target=<name> level=module|kernel`). Final numbers are compiled and CUDA-graph timed; the
+CSV is the source of truth and plots are rendered from it. Conventions:
+[docs/benchmarks/](docs/benchmarks/README.md) · traps: [cautions](docs/benchmarks/cautions.md) ·
+cluster commands per GPU: [docs/gpus/](docs/gpus/README.md).
 
 ## torch.compile
 
@@ -286,7 +134,7 @@ Numbers, and the scripts that produced them: `benchmarks/compile_wrap/`.
 
 ## Supported hardware
 
-Every kernel declares its minimum architecture in `kernels/registry.csv`'s `arch` column, and the
+Every kernel declares its minimum architecture in `kernels/registry/registry.csv`'s `arch` column, and the
 table below is checked against that column by `tests/registry/test_hardware_support.py` — so it cannot drift
 from the code.
 
@@ -307,13 +155,6 @@ One extension is **not** in the table because it is not in the registry: `transi
 which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on
 sm_86 ("Error building extension"). `autotune/builder.py` excludes `cuda` from that case's
 implementations for exactly this reason.
-
-## Status
-
-Restructured into the kernels/modules split above. The triangle_multiplication
-cute path wins end-to-end at L ≥ 768 on H100 (≈1.75 ms at L=1024); the
-from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WIP.
-
 ## CLI
 
 `miniworld-engine` (installed by the package; `python -m miniworld_engine.cli` works too):
@@ -328,7 +169,7 @@ miniworld-engine dev audit            # registry, tuning and build-system contra
 `build all` runs only the configured FoldForge/MiniWorld module shapes, then checks
 required cache coverage after merging. Unreachable diagnostic kernels are not appended to
 the default build; use explicit `--per-op` for a separate kernel experiment.
-[Model shape policy](docs/reports/model-shape-cleanup-20260916.md). Declared invocations, selected work and cache keys
+[Model shape policy](docs/records/reports/model-shape-cleanup-20260916.md). Declared invocations, selected work and cache keys
 are different counts; the command prints them for the current source and GPU.
 A claim file alone does not prove completion: resume requires reusable measurement shards
 and matching provenance. `--no-resume` disables completed-shard reuse.
@@ -337,17 +178,12 @@ and matching provenance. `--no-resume` disables completed-shard reuse.
 (`src/miniworld_engine/autotune/data/` in a checkout). It requires a writable installation
 or checkout and does not automatically commit results. A successful cache build does not
 replace module numerical tests or benchmarks. Full policy:
-[dispatch-cache.md](docs/operations/dispatch-cache.md).
-
+[dispatch-cache.md](docs/autotune/dispatch-cache.md).
 ## Research history
 
-The research capsules that produced the hand-CUDA paths were removed from the tree in 2.2.0;
-only the fastest variant of each lives in `src/` and is selected by default dispatch on H100:
-fused Transition (`kernels/transition/cuda/fused_sm90a.py`, `fused_wide_sm90a.py`), the
-Anthropic-derived TriMul K1/K3 inference (`kernels/trimul_inproj/cuda/h100_inference.py`),
-TriMul training at D64/D128/D256–512 and the wide inference kernels
-(`kernels/trimul_inproj/cuda/`). Where each capsule went, and how to read it back from git,
-is in [docs/records/experiments-archive.md](docs/records/experiments-archive.md).
+Research capsules that produced the hand-CUDA paths were removed from the tree in 2.2.0; only
+the fastest variant of each lives in `src/`. Where each went, and how to read it back from
+git: [docs/records/experiments-archive.md](docs/records/experiments-archive.md).
 
 ## Toolchain
 

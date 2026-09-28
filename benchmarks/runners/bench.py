@@ -3361,7 +3361,7 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
                                 ref="pytorch.autograd", dtype=tname)
 
 
-# A kernel target is named after the kernel FAMILY in `src/miniworld_engine/kernels/registry.csv`
+# A kernel target is named after the kernel FAMILY in `src/miniworld_engine/kernels/registry/registry.csv`
 # that it benches -- `triangle_attention`, `bias_only_attention`, `augmented_attention`,
 # `layernorm`, `adaln`, `conditioned_transition` (whose target benches the
 # post-AdaLN `_tail` of the family). The four exceptions bench a fused OP SHAPE that several

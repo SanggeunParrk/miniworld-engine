@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 PKG = ROOT / "src" / "miniworld_engine"
-REGISTRY = PKG / "kernels" / "registry.csv"
+REGISTRY = PKG / "kernels" / "registry" / "registry.csv"
 CONFIGS = PKG / "autotune" / "configs"
 DATA = PKG / "autotune" / "data"
 #: The set `build all` uses. The others pin whole configs rather than declaring ladders.

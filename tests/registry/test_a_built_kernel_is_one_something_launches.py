@@ -156,7 +156,7 @@ def test_every_built_kernel_is_reachable(analysis) -> None:
         + "\n  ".join(unreachable)
         + "\nIf a kernel is kept deliberately -- a negative result held as reference, a variant "
           "waiting for its path back -- mark it `developed=no` and write the reason in "
-          "kernels/undeveloped.csv. Keeping the code and building it are different decisions.")
+          "kernels/registry/undeveloped.csv. Keeping the code and building it are different decisions.")
 
 
 def test_the_check_is_not_vacuous(analysis) -> None:

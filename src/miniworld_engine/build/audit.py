@@ -370,7 +370,7 @@ def _keys_on_shape_key(op: str) -> bool:
     from miniworld_engine.autotune.builder import _keys_on_shape
 
     root = Path(__file__).resolve().parents[2]
-    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
     if not reg.is_file():
         return True
     for r in csv.DictReader(reg.open()):
@@ -385,7 +385,7 @@ def _declared_dtypes() -> dict:
 
     alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
     out = {}
-    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv"
     if not reg.is_file():
         return out
     for r in csv.DictReader(reg.open()):
@@ -401,7 +401,7 @@ GPU_SPECIFIC = re.compile(r"_sm(\d+)|^transition_b2b")
 
 
 #: kernel -> the buckets whose config the LAUNCHER pins instead of tuning, from
-#: `kernels/untunable.csv`. `"*"` means every bucket, i.e. the autotuner is never reached.
+#: `kernels/registry/untunable.csv`. `"*"` means every bucket, i.e. the autotuner is never reached.
 #:
 #: These are not defects and not gaps. A launcher that calls `kernel.fn[...]` -- the raw JIT
 #: function rather than the autotuned wrapper -- has decided the config itself, so no build can
@@ -412,7 +412,7 @@ GPU_SPECIFIC = re.compile(r"_sm(\d+)|^transition_b2b")
 def _untunable() -> dict[str, set[str]]:
     import csv
 
-    path = Path(__file__).resolve().parents[1] / "kernels" / "untunable.csv"
+    path = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "untunable.csv"
     out: dict[str, set[str]] = {}
     if not path.is_file():
         return out
@@ -455,7 +455,7 @@ def check_reachability(rep: Report, shard_dirs: list[Path]) -> None:
             rep.add("reach", OK, op, "GPU-specific: excluded on this card by policy")
         elif "*" in _untunable().get(op, set()):
             rep.add("reach", OK, op,
-                    "launcher pins the config at every driven width (kernels/untunable.csv)")
+                    "launcher pins the config at every driven width (kernels/registry/untunable.csv)")
         else:
             rep.add("reach", FAIL, op, "registered but NO build ever captured it")
     rep.stats["registered"] = len(reg)
@@ -561,7 +561,7 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
             sk = next((int(x.split("=")[1]) for x in dims.split(",")
                        if x.startswith("shape_key=")), None)
             # The recorded key is PACKED: `shape_key` carries the row/length bucket AND every width
-            # axis the launch folded in (docs/development/product-plan.md G5), so it is a composite integer of order 1e14
+            # axis the launch folded in (docs/records/development/product-plan.md G5), so it is a composite integer of order 1e14
             # while the declared side below holds the bare bucket. Comparing them raw reports every
             # folded op as missing, which after G5 is every op. Unfold it back to the bucket, using
             # the axis count the kernel itself declares -- the same resolution the key-gap audit
@@ -591,13 +591,13 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
 
     # Buckets whose config the LAUNCHER pins -- declared work that no build can capture and no
     # launch ever reads. Subtracted from the denominator rather than counted as a hole, so
-    # `missing_pairs` keeps meaning "coverage a rebuild would fix". See kernels/untunable.csv.
+    # `missing_pairs` keeps meaning "coverage a rebuild would fix". See kernels/registry/untunable.csv.
     untunable = _untunable()
     for op, buckets in untunable.items():
         if op not in want:
             continue
         if "*" in buckets:
-            rep.add("coverage", OK, op, "launcher pins every config (kernels/untunable.csv)")
+            rep.add("coverage", OK, op, "launcher pins every config (kernels/registry/untunable.csv)")
             del want[op]
             continue
         # `want` holds the DECLARED work list, whose bucket is already the bare base that
@@ -612,7 +612,7 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
             want[op] -= drop
             rep.add("coverage", OK, op,
                     f"{len(drop)} bucket(s) excluded: the launcher pins them "
-                    f"(kernels/untunable.csv: {sorted(buckets)})")
+                    f"(kernels/registry/untunable.csv: {sorted(buckets)})")
 
     from miniworld_engine.autotune.builder import dtype_label_serves
 

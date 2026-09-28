@@ -10,7 +10,7 @@ import triton.language as tl
 
 from miniworld_engine.autotune.configs import configs_for
 
-# Both recompute kernels are level=both in kernels/registry.csv, so the key is `both_key(L)` --
+# Both recompute kernels are level=both in kernels/registry/registry.csv, so the key is `both_key(L)` --
 # L is the token/atom count, NOT the row count M these launchers receive (x reaches them already
 # flattened, and M = L*L for a pair view). Both launchers take it from their caller.
 from miniworld_engine.autotune.shape_key import both_key, pack

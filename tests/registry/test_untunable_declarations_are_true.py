@@ -1,4 +1,4 @@
-"""`kernels/untunable.csv` is a claim about the SOURCE, so check it against the source.
+"""`kernels/registry/untunable.csv` is a claim about the SOURCE, so check it against the source.
 
 An exemption list is the most dangerous kind of documentation: it makes an audit go quiet, and a
 quiet audit is indistinguishable from a passing one. Each row here says "the launcher pins this

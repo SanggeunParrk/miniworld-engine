@@ -233,8 +233,8 @@ def test_kind_matches_the_source() -> None:
 
 def test_the_rule_is_written_down() -> None:
     """The rule has to be findable by someone adding a kernel, not only enforced after the fact."""
-    spec = (ROOT / "docs/kernels/naming.md").read_text()
-    assert "registry.csv" in spec, "docs/kernels/naming.md must document the registry requirement"
+    spec = (ROOT / "docs/standards/naming.md").read_text()
+    assert "registry.csv" in spec, "docs/standards/naming.md must document the registry requirement"
 
 
 def test_launch_keywords_match_the_kernel_signature() -> None:

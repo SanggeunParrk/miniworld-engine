@@ -1,9 +1,9 @@
 # 커널 이름 정리 감사 — 발견된 결함
 
-> **기록입니다, 현행 문서가 아닙니다.** 111개 커널을 `docs/kernels/naming.md` 규칙으로
+> **기록입니다, 현행 문서가 아닙니다.** 111개 커널을 `docs/standards/naming.md` 규칙으로
 > 재명명하던 시점의 감사 결과입니다. 여기 나오는 옛 이름들이 이 문서의 *주제*이므로
-> 그대로 둡니다. 현재 이름은 `src/miniworld_engine/kernels/registry.csv`가,
-> 옛 이름 -> 새 이름 대응은 `docs/kernels/rename-map.tsv`가 정본입니다.
+> 그대로 둡니다. 현재 이름은 `src/miniworld_engine/kernels/registry/registry.csv`가,
+> 옛 이름 -> 새 이름 대응은 `docs/records/audits/rename-map.tsv`가 정본입니다.
 
 명명 규칙(`.bench/NAMING.md`)에 맞춰 111개 커널의 이름을 다시 짜는 과정에서, 이름이 아니라
 **코드가** 틀린 것들이 드러났다. 이름을 "실제 계산하는 것"으로 맞추려면 코드를 읽어야 하고,

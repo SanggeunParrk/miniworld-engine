@@ -12,7 +12,7 @@ from miniworld_engine.autotune.module_registry import transition_driver_shapes
 from miniworld_engine.viz import sweep_page
 
 ROOT = Path(__file__).resolve().parents[2]
-REPORT = json.loads((ROOT / "docs/reports/autotune-space-20260916.json").read_text())
+REPORT = json.loads((ROOT / "docs/records/reports/autotune-space-20260916.json").read_text())
 
 
 @pytest.mark.parametrize("record", REPORT["kernels"], ids=lambda r: r["kernel"])

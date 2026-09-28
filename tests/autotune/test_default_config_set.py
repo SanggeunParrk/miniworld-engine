@@ -87,7 +87,7 @@ def test_every_set_has_one_home(tmp_path):
 
 def test_the_ab_sets_are_packaged_too():
     """They were the reason a second root existed."""
-    have = sorted(p.name for p in configs.CONFIG_ROOT.iterdir() if p.is_dir())
+    have = configs.config_set_names()
     for name in ("accuracy", "blk16", "blk128", "warp4", "warp8", "mixed1", "mixed2"):
         assert name in have, f"{name} is not packaged; have {have}"
         assert list(configs.config_set(name).glob("*.csv")), f"{name} is empty"
@@ -134,7 +134,7 @@ def test_every_runtime_data_extension_is_declared_as_package_data():
 
     pkg = Path(configs.__file__).resolve().parents[1]
     runtime = [pkg / "autotune" / "data", pkg / "autotune" / "configs",
-               pkg / "build", pkg / "kernels" / "registry.csv"]
+               pkg / "build", pkg / "kernels" / "registry" / "registry.csv"]
     # Scaffolding and prose, not data the runtime reads.
     skip = {".py", ".pyc"}
     # The writer creates a process synchronization lock; it is not a shipped cache asset.
@@ -183,7 +183,7 @@ def test_the_old_repo_relative_form_still_resolves(given, tmp_path):
 
     resolved = cli.resolve_config_dir(given, tmp_path)
     assert not isinstance(resolved, int), f"{given} did not resolve"
-    assert resolved == configs.CONFIG_ROOT / given.rsplit("/", 1)[-1]
+    assert resolved == configs.config_set(given.rsplit("/", 1)[-1])
 
 
 def test_an_unknown_name_still_fails_in_both_forms(tmp_path, capsys):

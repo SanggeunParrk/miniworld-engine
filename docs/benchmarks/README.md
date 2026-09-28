@@ -1,0 +1,368 @@
+# Benchmarking
+
+## Directory Boundary
+
+`benchmarks/` has three meanings:
+
+- `kernels/<kernel>/`: isolated kernel benchmarks.
+- `modules/<module>/`: composed module benchmarks.
+- `runners/`: shared, kernel-agnostic executable entry points (`bench.py`,
+  `plot_csv.py`, `report_gpu.py`, and any reusable harness usable across targets).
+
+### Per-target subdirectories (strict)
+
+Every `kernels/<k>/` and `modules/<m>/` target uses exactly these subdirs, each
+with one job. Nothing else belongs at the target root.
+
+- `configs/` — Hydra bench config (`bench.yaml`), whose `target:`/`level:` name this
+  very directory: `level` is `kernel` or `module` (the parent dir) and `target` is the
+  folder name. One target owns exactly one directory; no folder is shared. This file is
+  the run's **complete** config, selected by the `target=`/`level=` you pass on the
+  command line — `bench.py` reads that pair off argv and points hydra at this directory,
+  then applies the rest of the command line on top. There is no shared base file and no
+  `defaults:` list, so a key missing here does not exist for this target's runs.
+  (`config_path` used to be the constant `../modules/triangle_multiplication/configs`, so
+  every target loaded that one file and the other 25 configs were read by nothing —
+  `augmented_attention_atom` declared a 128–384 ladder and was swept at 384–1024.
+  `tests/layout/test_bench_config_per_target.py` is what keeps it honest.)
+- `artifacts/` — **generated benchmark outputs only**: `*.csv`, `*.svg`,
+  `*_autotune_summary.txt`. No Python, no profiler captures, no repro trees.
+  (`.gitignore` already drops everything under `artifacts/` except the data
+  file types, so stray code dumped here is silently untracked — do not rely on
+  that; just don't put it here.)
+- `profiles/` — **profiler capture outputs**: `*.nsys-rep`, `*.ncu-rep`,
+  `*.sqlite`. Sibling of `artifacts/`, never nested inside it. Captures are
+  git-ignored (large binaries); the dir is kept via `.gitkeep`.
+
+A target holds **no Python at all** — only `configs/`, `artifacts/`, `profiles/`.
+
+Rules of thumb:
+- **`benchmarks/` contains no target-specific Python.** The ONLY Python is the shared,
+  kernel/module-agnostic harness in `benchmarks/runners/` (`bench.py`, `plot_csv.py`). No
+  per-kernel/per-module bench scripts, no nsys capture-replay scripts, no `diagnostics/`
+  drivers anywhere under `benchmarks/`.
+- **Profiling (nsys/ncu) is instrumented in `src/`, not as a benchmarks script.** If a kernel
+  needs profiling or logging, add the nsys/ncu hooks to that kernel's own
+  `src/miniworld_engine/...` code and drive it through the normal harness — do not drop a
+  one-off capture script under `benchmarks/`. Capture outputs still land in the target's
+  `profiles/`.
+- Profiler capture files go in the target's `profiles/`, never `artifacts/`.
+
+Do not add archive folders or repro source trees under a target. Do not add curated markdown
+reports under `benchmarks/`; write durable explanations under `docs/` and keep generated
+tables/plots under the target's `artifacts/`.
+
+Two markdown files live here anyway, and both are the exception the rule means to allow: a file
+explaining the directory it sits in. `RESULTS.md` states the results/artifacts/plots layout;
+`compile_wrap/README.md` is the measurement behind the `compile_wrap` default and is cited from ten
+places. The two that were NOT that -- `pairformer_{B200,H100}_results.md`, standalone reports under
+`runners/` that nothing cited -- are now `docs/records/`.
+
+## Hard Rule: All Benchmarks Run Compiled
+
+**Every benchmark MUST measure the `torch.compile`d path, never non-compiled PyTorch.**
+Non-compiled PyTorch is launch-bound and gives meaninglessly slow baselines; comparing a
+fused kernel to that path is not a fair or valid result.
+
+- The PyTorch-naive baseline is **always** `torch.compile(ref)` (reduce-overhead /
+  default), warmed up before timing; never the non-compiled module.
+- Time only steady-state (post-warmup) so compilation cost is excluded.
+- TE / cute / triton are already compiled kernels; the rule is mainly about the
+  PyTorch baseline, but the principle is absolute: **no non-compiled numbers in any
+  benchmark table or graph.** A non-compiled measurement is a debug probe, not a result.
+
+## Module training workload
+
+The default module workload is actual `torch.compile`, inference CUDA Graph ON,
+training CUDA Graph OFF, and augmentation A5 for inference / A48 for training.
+Pair modules do not have an augmentation axis.
+
+`dropout=auto` resolves to **0.25 in training** for triangle multiplication
+(outgoing, incoming, sequential and bidirectional) and triangle attention.
+Inference resolves to 0; modules without dropout (transition, adaptive normalization,
+conditioned transition, augmented attention and DiT/SWA variants) resolve to 0.
+Do not add dropout to modules whose architecture has none. The separate Pairformer
+comparison already defaults to `--p-drop 0.25`.
+
+The resolved `dropout` probability is written in both each CSV row and its config
+sidecar. The production forward generates a fresh broadcast dropout mask inside
+every timed step, so random generation, scale application and backward are included.
+Explicit `dropout=0` is available for diagnostics; those numbers are not the default
+training workload. Nonzero dropout with inference, with a module that has no dropout,
+or with training CUDA Graph capture is rejected rather than silently ignored.
+
+For trimul numerical comparisons only, both implementations temporarily receive
+identical per-layer dropout scales with the measured dtype's rounding. The original
+generators are restored before measurement warmup and timing. A shared random seed
+alone cannot align compiled BF16 and FP32 reference RNG streams. Triangle-attention
+benchmarks use reproducible nonzero projections so dropout affects the output and
+the upstream gradients are exercised.
+
+## Hard Rule: Follow The Team-GM Bench Harness
+
+Do **not** invent ad hoc benchmark methodology for this repo unless the user
+explicitly asks for a one-off experiment.
+
+- If an op is already covered by the repo's unified bench harness, use
+  `benchmarks/runners/bench.py` +
+  `benchmarks/modules/<module>/configs/bench.yaml`, launched however your
+  cluster launches things. (`submits/` was removed in 511d905 when its work
+  moved into the package; anything still naming `submits/run_*.sbatch` is a
+  stale reference.)
+- That harness is the descendant of the `team-gm` benchmarking flow. Follow its
+  shapes, dtype mode, compilation policy, and reporting format unless there is a
+  concrete reason not to.
+- Do **not** replace the harness with custom timing loops, notebook cells,
+  random one-off `python - <<'PY'` snippets, or hand-written markdown tables for
+  the "real" benchmark result.
+- If a kernel is **not yet wired** into the unified runner, a temporary
+  kernel-local `bench.py` is acceptable only as migration debt, and it must
+  still mimic the team-gm style:
+  - emit the same parseable log structure (`=== M=.. d_in=.. d_out=.. ===`,
+    backend timing lines, correctness lines),
+  - compare against the canonical baselines for that op,
+  - produce the standard output schema consumed by the shared renderer.
+
+The standard for "done" is: **team-gm-style harness, team-gm-style output,
+benchmark registered under `benchmarks/kernels/<kernel>/` or
+`benchmarks/modules/<module>/`, and generated artifacts under that target's
+`artifacts/`.** Anything else is only a debug probe, not a benchmark result.
+
+**Every benchmark in this repo writes a complete CSV first.** The CSV is the
+source of truth: it must include the method, dimensions, dtype/precision, mode,
+metric, device, compile flag, and measured value. Plots are a separate step that
+read the CSV; benchmark code must not draw figures.
+Shape sweeps are explicit: use `sweep_axis=seq_len` for L sweeps and
+`sweep_axis=d_pair` for channel-width sweeps. The CSV must record both the
+swept axis and the fixed dimensions. If a backend does not support a shape,
+write a `status=failed` row with the error and leave `value` empty so plotting
+can skip that point without hiding the unsupported case.
+For d sweeps, prefer explicit `d_pair_values` when the paper/report only wants
+canonical widths; trimul uses `128, 256, 512` rather than an arithmetic range
+that accidentally includes unsupported or irrelevant intermediate widths.
+
+**Generated benchmark results do not live in package code.** Raw logs, CSVs,
+SVGs, slide exports, and profiler outputs go under
+`benchmarks/kernels/<kernel>/artifacts/` or
+`benchmarks/modules/<module>/artifacts/` by default. Durable interpretation
+belongs in `docs/`, not in a benchmark archive tree.
+
+## Workflow (example: `gemm_epilogue`)
+
+Prefer this exact flow over ad hoc measurement.
+
+Let `A=benchmarks/kernels/gemm_epilogue/artifacts`.
+
+1. **Run** the bench on a GPU compute node. Uses the
+   repo's unified pixi env (`.pixi/`); `--frozen` keeps the cu12 TE core fix in
+   place (a bare `pixi run`/`install` re-pins cu13 — see pyproject `fix-te-cu12`):
+   ```bash
+   srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 \
+     --mem=64G --cpus-per-task=8 --time=00:30:00 \
+     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; python benchmarks/runners/bench.py target=gemm_epilogue level=kernel"'
+   ```
+   This writes a long-form CSV under the target-local artifact directory.
+2. **Render** plots from the CSV into the same artifact directory. **Never run this on the
+   login node** — route it through `srun` (CPU only, no `--gres`). matplotlib is
+   in the unified env; `LD_LIBRARY_PATH` picks up its libstdc++ (`CXXABI_1.3.15`):
+   ```bash
+   srun --account=cssb --qos=cssb_h100 --partition=h100 --mem=16G --cpus-per-task=4 --time=00:10:00 \
+     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
+       python benchmarks/runners/plot_csv.py '"\"$A/<name>.csv\" \"$A\""' --name <name>"'
+   ```
+   This writes grouped bar plots (`*_latency.svg` and `*_speedup.svg`). If
+   `--name` is omitted, the renderer uses short mode-aware names such as
+   `trimul_inference_manual_L_sweep_latency.svg` and
+   `trimul_training_manual_d_sweep_speedup.svg` (the `manual` segment reflects
+   the `cudagraph=manual` deployment config these kernels are benched under).
+   Keep those generated SVGs in
+   artifacts; derive PNG/PDF from SVG only when a downstream tool explicitly
+   needs that format. Summarize durable conclusions in `docs/`.
+   The plot caption must include the fixed sweep dimensions, e.g. `d_pair=128`
+   for an L sweep or `L=384` for a d sweep.
+
+3. **Report** (optional, per GPU). Once the curated tables under
+   `results/<gpu>/tables/` are updated, render the docs page that collects every module's
+   sweeps for that card:
+   ```bash
+   PYTHONPATH=src python benchmarks/runners/report_gpu.py a6000   # -> docs/benchmarks/reports/a6000-module-sweeps.md
+   ```
+   It plots only `measurement_schema=2` tables (older ones are listed as excluded, never
+   drawn), uses the shared style below, and reads the optional repetition columns
+   (`value_min`/`value_max`/`n_repetitions`/`runtime_cache_misses`) for error bars and
+   disclosures. Same rule as `plot_csv.py`: run it through `srun`, not on the login node.
+
+## Visual style (single source of truth)
+
+All figures share one palette/theme so the benchmark
+figures read as **one coherent set** (this matters for the paper: a reviewer
+sees the same backend in the same colour in every plot). Defined once in
+`src/miniworld_engine/viz/style.py` and imported by:
+
+- `benchmarks/runners/plot_csv.py` (grouped bar plots from benchmark CSVs).
+
+Rules baked into the module:
+
+- **Colour by meaning, not by position.** `color_for(name)` maps *any* spelling
+  of a backend (`cuequiv`/`cuequivariance`, `cute`/`cute-fused`/`ours v4`, …) to
+  one canonical identity → one fixed colour. Unknown names get a deterministic
+  hash colour (stable across figures, never index-dependent). Never hand-assign
+  colours in a kernel-local bench — call `color_for` / `style_for`.
+  - **This repo's kernels / cute family → gold** — the repo's kernels are
+    visually fixed across every figure.
+  - **NVIDIA family (cuequivariance / dtv1 / TE) → greens & teal.**
+  - **baselines (pytorch / torch.compile / triton) → grey & blue** (recede).
+- **`apply_theme()`** installs the publication rcParams (fonts, clean spines,
+  y-grid). Call it once before plotting.
+- **SVG-only output.** `save_figure(fig, path)` writes `.svg` only. SVG is the
+  canonical vector artifact; convert it to PNG/PDF outside the benchmark runner
+  if a paper, slide deck, or website requires that derivative format.
+
+## Conventions
+
+- **Generated results go in the target's `artifacts/`**; durable explanations
+  go in `docs/`.
+- **Use the shared style** (`miniworld_engine.viz`) for every figure — never
+  ad-hoc colours.
+- **Both inference and training** when the op is used in training.
+- **CUDA Graph timing regime:** `cudagraph=auto` selects `manual` for inference.
+  Module training latency runs both `disabled` and `manual` in separate processes
+  and CSVs, with compilation enabled by default for both. Kernel training and
+  memory measurements remain ungraphed. Explicit graph requests select one regime
+  and never silently fall back to disabled. Dropout training retains probability
+  0.25 and validates matched-seed outputs/gradients and RNG advancement before timing.
+  On A6000/FA2, SWA no-grad forward uses fixed-capacity packed buffers with true
+  sequence lengths; padding cannot receive softmax probability. This includes the
+  no-grad forward inside a training custom op; its backward recomputation retains
+  the existing differentiable unpad path. FA2 inference capture/replay and downstream
+  training have GPU regression coverage. FA4 uses its existing seqused path; these
+  A6000 tests do not establish FA4 GPU capture support.
+- Latency plots use "lower is better"; speedup plots use "higher is better".
+- Report numerical agreement (max abs error, relative Frobenius error, cosine)
+  alongside latency — never just speed.
+
+## Benchmark Acceptance Checklist
+
+Before treating a benchmark artifact as final, check every item below.
+
+- [ ] **Compile path:** `compiled=True` is present in the CSV, and the run used
+  the repo benchmark entry point with `compile=true`; PyTorch baseline is never
+  non-compiled. For Transition manual CUDA graph artifacts, `compiled=False`
+  means the measured module was captured eagerly because CUDA graph capture is
+  the timing regime; the `cudagraph` column must record `manual`.
+- [ ] **Dtype and autotune:** CSV rows record `input_dtype` and
+  `parameter_dtype`; each CSV has a matching `<run_name>_autotune_summary.txt`
+  for Triton-autotuned kernels, and that file shows both the candidate config
+  set and the selected cache entries for the measured shapes. `autotune_summary.txt`
+  is only the latest-run compatibility copy, not the full audit record.
+- [ ] **Kernel tiling:** repo-developed kernels have an explicit tiling strategy
+  appropriate for the measured shape family. The benchmark notes or autotune
+  summary must make the relevant tile dimensions visible, e.g. `BLOCK_M`,
+  `BLOCK_N`, `BLOCK_K`, warp/stage counts, or the equivalent CuTe/quack tile
+  shape.
+- [ ] **Reference agreement:** CSV rows include `reference`, `output_max_abs`,
+  `output_rel_frob`, and `output_cosine`; training rows also include
+  `grad_max_abs`, `grad_rel_frob`, and `grad_cosine` when the runner has a
+  reference path wired.
+- [ ] **Inference/training separation:** implementation rows identify the
+  `execution_path`, and this repo's kernels must use distinct inference and
+  training paths when the kernel design has separate save/no-save behavior.
+- [ ] **Both modes:** final artifacts include both inference and training CSVs
+  and SVGs for training-relevant ops.
+- [ ] **Both sweeps:** final artifacts include both L sweep (`sweep_axis=seq_len`)
+  and d sweep (`sweep_axis=d_pair`). For trimul, the d sweep uses
+  `d_pair_values=[128,256,512]` at fixed `L=384`.
+- [ ] **All applicable methods:** rows include every applicable implementation,
+  including PyTorch, and the repo-developed kernel is routed through its intended
+  production path rather than a debug/prototype path.
+- [ ] **CUDA graph option:** the benchmark design explicitly decides whether
+  CUDA graph capture is part of the fair regime for each implementation. If it
+  is used, the CSV/report must identify that regime; if it is not used, the
+  docs or benchmark notes must explain why `torch.compile`/steady-state timing
+  is the intended comparison.
+- [ ] **Approved runner and plotter:** CSVs come from
+  `benchmarks/runners/bench.py`; figures come from
+  `benchmarks/runners/plot_csv.py`; benchmark code writes CSV only and plotting
+  remains a separate step. Canonical CSV files should be replaced atomically
+  after a run finishes, not truncated in place at job start.
+
+## Module Benchmark Matrix
+
+`triangle_multiplication_bidirectional` already has its own final artifact set;
+the matrix below is the remaining repo-developed module kernels, one
+`bench.py target=<target> level=module` run each:
+
+| target | implementations | sweeps | modes | notes |
+| --- | --- | --- | --- | --- |
+| `triangle_attention` | `pytorch`, `cuequivariance`, `miniworld` | `seq_len`, `d_pair` | inference, training | Full triangular self-attention (`use_self_attention=True`). MiniWorld maps to the canonical Triton pair-bias attention kernel plus the module LayerNorm/projection/gate path. See `docs/kernels/triangle-attention.md`. |
+| `transition` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | MiniWorld is the repo transition path (fused b2b / split dispatch by card and width); the Team-GM legacy Triton transition is no longer a benchmark implementation. |
+| `conditioned_transition` | `pytorch`, `miniworld` | `seq_len` | inference, training | the token-side block: hidden `d_single_token` (768) conditioned on `d_single` (384), the widths the model's token DiT builds; `d_pair` is not an input, so there is no d sweep. The config used to say `d_single_token: 384`, a width the model never builds and the cache never tuned. |
+| `adaptive_layernorm` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmark treats `d_pair` as the AdaLN hidden/condition width so d sweeps change the real tensor shape. |
+| `augmented_attention_token` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | token path; `d_pair` sweeps pair-bias width. |
+| `augmented_attention_atom` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | atom path; L sweep still includes `L=384`; unsupported/OOM points stay as failed CSV rows. |
+
+Final plots must show a single `Engine` series. If a diagnostic CSV includes
+component aliases such as `cute` plus `miniworld`, the shared plotter collapses
+them to the canonical `miniworld` backend before drawing.
+
+## Runtime Dispatch Caches
+
+Benchmark output and runtime dispatch caches are separate. Generated benchmark
+files stay under target-local `artifacts/`; runtime dispatch caches stay outside
+the repo by default. See `operations/dispatch-cache.md`.
+
+
+Module benchmark augmentation defaults follow the execution mode: `n_augment: auto`
+resolves to **5 for inference** and **48 for training**. An explicit positive integer
+overrides the default for shape sweeps. CSV `n_augment` records the resolved count;
+`input_shapes` records whether that module actually has an augmentation axis.
+Pairformer triangle operations and Transition do not acquire a batch/augmentation
+dimension from this setting. With `cudagraph: auto`, inference timing uses CUDA
+Graphs and module training timing produces both graph OFF and ON results.
+Keep these regimes separate in figures; a graphed module step excludes optimizer,
+input loading and distributed communication and is not whole-training latency.
+
+
+TriangleMultiplication direction is explicit in `trimul_direction` and in each CSV row:
+`outgoing`, `incoming`, or `alternating`. Use `n_layers=2 trimul_direction=alternating`
+to measure an outgoing module followed by an incoming module, including both residuals.
+The bidirectional target computes both contractions from one normalized input and
+normalizes their concatenation once; it is a different architecture from that sequential pair.
+Its cuEquivariance backend composes vendor normalization/gated-projection primitives with
+the same shared output normalization; its output projection/gate use torch because the vendor
+dual-input GEMM requires equal input widths. It is a composition, not a native fused bidirectional API.
+
+`implementation=pytorch` must use torch operations throughout, with FlashAttention the explicit
+exception for SWA attention. SWA now propagates the implementation through its attention core:
+PyTorch uses torch RMSNorm, RoPE, and sigmoid gating; MiniWorld keeps its fused kernels.
+This applies to standalone SWA Attention and SWA DiT. Inductor-generated kernels for torch
+operations are part of the compiled PyTorch baseline, not imported MiniWorld kernels.
+
+
+## SWA DiT component audit
+
+The `swa_dit` module target can measure individual differentiable operations and
+one-at-a-time replacements inside the full block. This is a training-only,
+fullgraph diagnostic using the same timer and provenance as the normal benchmark.
+
+- `+swa_component=modulation|rope|swiglu|residual|sigmoid_gate` selects an isolated
+  operation, including forward and backward. These are operation bundles, not
+  per-launch Triton timings.
+- `+swa_component=block` measures the whole block.
+- `'+swa_kernels=[rope,swiglu]'` enables only the listed engine operations for the
+  `miniworld` row. The `pytorch` row keeps every operation in PyTorch, with the same
+  FA2/FA4 attention core. Lists can contain any of the five operation names.
+- `+swa_active_gates=true` initializes modulation weights with normal std0.01 so
+  attention and FFN branches contribute to output and upstream gradients.
+
+Use `mode=training compile=true n_layers=1`, and pair
+`implementations=[pytorch,miniworld]`. Each pair has identical seeded inputs,
+weights and upstream gradients. Outputs and all applicable gradients are checked
+against compiled PyTorch before timing; the whole-block reference is the production
+`SWADiTBlock`. Run independent process repetitions on one GPU and retain their CSVs.
+The active-gate diagnostic is separate from the normal zero-initialized benchmark.
+
+An isolated modulation uses three projections for one branch; the production
+PyTorch block combines all six projections into one GEMM. Therefore isolated
+speedups and whole-block replacement effects must both be reported, and individual
+replacement gains must not be summed to predict a combined speedup.

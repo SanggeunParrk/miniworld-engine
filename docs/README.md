@@ -1,89 +1,22 @@
 # docs
 
-Index of the written docs. Each page is for a *consumer* — someone using the kernels, building
-the cache, or reading a benchmark — not a changelog. Start with the repo [`README.md`](../README.md)
-for the layout and quickstart; the pages here go deeper.
+Pages are written for a reader using the kernels, building a cache or reading a benchmark.
+Start with the repo [README](../README.md) for the layout and quickstart.
 
-## Start here
-
-| page | what it answers |
+| folder | what it answers |
 |---|---|
-| [supported.md](supported.md) | which cards this has actually been run on |
-| [reproducing-a-report.md](reproducing-a-report.md) | reproduce a committed benchmark on another machine |
-| [troubleshooting.md](troubleshooting.md) | what to do when a step does not do what the README says |
+| [status/](status/README.md) | **per GPU: which op is finished for which shapes** (the judgement column is the maintainer's) — [H100](status/h100.md) · [B200](status/b200.md) · [A100](status/a100.md) |
+| [gpus/](gpus/README.md) | how to run on each GPU cluster: partitions, QoS, env setup, GPU-specific pitfalls — [H100](gpus/h100.md) ([dispatch](gpus/h100-dispatch.md)) · [B200](gpus/b200.md) · [A100](gpus/a100.md) · [A6000/A5000](gpus/ampere-workstation.md) |
+| [getting-started/](getting-started/) | [what has run where](getting-started/supported.md) · [troubleshooting](getting-started/troubleshooting.md) · [reproducing a report](getting-started/reproducing-a-report.md) |
+| [kernels/](kernels/) | per-op design notes ([TriMul module](kernels/triangle-multiplication-module.md), [trimul_inproj](kernels/trimul-inproj.md), [tm1](kernels/tm1.md)/[tm2](kernels/tm2.md), [triangle attention](kernels/triangle-attention.md), [LayerNorm](kernels/layernorm.md), [LN+Linear](kernels/layernorm-linear.md), [RMSNorm-AdaMod](kernels/rmsnorm-adamod.md), [bias-only attention](kernels/bias-only-attention.md)), [numeric thresholds](kernels/thresholds.md), [lab-notebook convention](kernels/lab-notebooks.md) |
+| [autotune/](autotune/) | the dispatch cache ([policy](autotune/dispatch-cache.md)), [key convention](autotune/autotune-key.md), [grid sweep](autotune/grid-sweep.md), [L2 swizzle](autotune/l2-swizzle.md), [training shape policy](autotune/training-shape-policy.md), [sweep-grid page](autotune/sweep-grid.html) |
+| [benchmarks/](benchmarks/README.md) | harness conventions, [cautions](benchmarks/cautions.md), generated [per-GPU reports](benchmarks/reports/a6000-module-sweeps.md) |
+| [anthropic/](anthropic/) | integration of Anthropic's published kernels: [integration](anthropic/integration.md), [payload](anthropic/trimul-payload.md), [H100 audit](anthropic/h100-audit.md), [TriMul analysis](anthropic/trimul-analysis.md), [TriMul training](anthropic/trimul-training.md) |
+| [design/](design/) | forward-looking proposals not yet shipped |
+| [standards/](standards/) | [library](standards/library-standards.md) and [product](standards/product-standards.md) standards, [naming](standards/naming.md), [project direction](standards/project-direction.md) |
+| [releases/](releases/) | what each version changed and its qualification status |
+| [records/](records/README.md) | dated measurements, audits and verdicts — evidence, never edited after the fact |
+| [assets/](assets/README.md) | figures |
 
-## Benchmarking
-
-| page | what it answers |
-|---|---|
-| [benchmarks.md](benchmarks.md) | the benchmark conventions: harness, CSV-is-truth, results/artifacts/plots layout |
-| [benchmarking-cautions.md](benchmarking-cautions.md) | traps: compile vs cudagraph vs reduce-overhead, graph-break kernels, mask cost |
-| [operations/dispatch-cache.md](operations/dispatch-cache.md) | the runtime autotune/dispatch cache: what it is, how it is built, the policy |
-
-## Standards
-
-| page | what it answers |
-|---|---|
-| [library-standards.md](library-standards.md) | what a tier-1 kernel library owes its consumers |
-| [product-standards.md](product-standards.md) | what a product owes someone who is not its author |
-
-## Kernel notes (`kernels/`)
-
-Conventions that span kernels:
-
-| page | what it answers |
-|---|---|
-| [kernels/naming.md](kernels/naming.md) | the kernel naming rules |
-| [kernels/autotune-key.md](kernels/autotune-key.md) | the autotune-key convention (what a cache entry is keyed on) |
-| [kernels/thresholds.md](kernels/thresholds.md) | every numeric literal that decides something, and why |
-| [kernels/grid-sweep.md](kernels/grid-sweep.md) | the full config grid sweep — design and preparation |
-| [kernels/l2-swizzle.md](kernels/l2-swizzle.md) | `GROUP_M`, the L2-swizzle axis, and which kernels skip it |
-| [kernels/cute-autotune-and-config-pinning.md](kernels/cute-autotune-and-config-pinning.md) | the cute autotune bypass and configs pinned for correctness |
-
-Per kernel:
-
-| kernel | page |
-|---|---|
-| tm1 / tm2 (gated GEMMs) | [tm1.md](kernels/tm1.md) · [tm2.md](kernels/tm2.md) |
-| layernorm / layernorm_linear | [layernorm.md](kernels/layernorm.md) · [layernorm-linear.md](kernels/layernorm-linear.md) |
-| rmsnorm_adamod (adaLN ladder) | [rmsnorm-adamod.md](kernels/rmsnorm-adamod.md) |
-| triangle attention | [triangle-attention.md](kernels/triangle-attention.md) |
-| trimul (module / inproj) | [triangle-multiplication-module.md](kernels/triangle-multiplication-module.md) · [trimul-inproj.md](kernels/trimul-inproj.md) |
-| bias-only attention | [bias-only-attention.md](kernels/bias-only-attention.md) |
-
-## Design proposals (`design/`)
-
-Forward-looking plans, not yet the shipped path:
-
-- [design/residual-fusion.md](design/residual-fusion.md) — residual fusion follow-ups
-- [design/layernorm-linear-fused-dgrad-lnbwd.md](design/layernorm-linear-fused-dgrad-lnbwd.md) — fused dgrad GEMM + LN-backward
-- [design/layernorm-linear-warp-specialized-stats.md](design/layernorm-linear-warp-specialized-stats.md) — warp-specialized LN stats
-- [design/quack-0.5.0-cute-port.md](design/quack-0.5.0-cute-port.md) — port the cute backend to quack 0.5.0
-
-## Reports (`reports/`)
-
-Rendered benchmark reports, one per GPU, generated from the tracked results tables by
-`benchmarks/runners/report_gpu.py` (per-module sweep figures, a summary table and a summary
-figure). Regenerate after the tables change; do not hand-edit the numbers.
-
-| page | what it answers |
-|---|---|
-| [reports/a6000-module-sweeps.md](reports/a6000-module-sweeps.md) | every module's L and d_pair sweep on the RTX A6000, inference and training, against compiled PyTorch and the vendor baselines |
-| [reports/swa-dit-component-memory-a6000-20260915.md](reports/swa-dit-component-memory-a6000-20260915.md) | SWA operation memory and one-at-a-time block peak-memory savings |
-| [reports/swa-dit-component-audit-a6000-20260915.md](reports/swa-dit-component-audit-a6000-20260915.md) | SWA operation-by-operation speed and full-block substitution audit |
-| [reports/swa-dit-fullgraph-a6000-20260915.md](reports/swa-dit-fullgraph-a6000-20260915.md) | FA2 fullgraph backward fix and A6000 training rerun |
-| [reports/swa-dit-esmfold2-a6000-20260915.md](reports/swa-dit-esmfold2-a6000-20260915.md) | corrected ESMFold2 SWA DiT: A6000 time and incremental peak memory, three repetitions |
-
-## Anthropic integration (`anthropic/`)
-
-| page | what it answers |
-|---|---|
-| [anthropic/integration.md](anthropic/integration.md) | how the Anthropic-published kernels are integrated |
-| [anthropic/h100-audit.md](anthropic/h100-audit.md) | H100 audit of the integrated kernels |
-| [anthropic/trimul-analysis.md](anthropic/trimul-analysis.md) | TriMul analysis |
-| [anthropic/trimul-training.md](anthropic/trimul-training.md) | TriMul training adaptation |
-
-## Records (`records/`)
-
-Measurement records — a number taken at a point in time, kept for evidence. See
-[records/README.md](records/README.md) for the full list (latency tables, tiling/naming/cache audits).
+Rules: a page reflects the current source (records are the exception); a performance number
+names its GPU, baseline and timing mode; per-GPU facts go in `status/` or `gpus/`, not here.

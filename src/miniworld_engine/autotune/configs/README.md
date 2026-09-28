@@ -2,7 +2,8 @@
 
 - `default/`: small per-kernel starting spaces, selected unless explicitly overridden.
 - `grid/`: the complete declared global domains, selected with `build all grid`.
-- `accuracy`, `blk*`, `warp*`, `mixed*`: historical development comparison sets.
+- `ab/` (`accuracy`, `blk*`, `warp*`, `mixed*`, `gmprobe`): historical development comparison
+  sets. Not shipped in the wheel; short names such as `blk16` still resolve to them.
 
 Every op has a CSV in both default and grid. The global domains and the existing
 resource/shape predictors remain intact. Explicit `MINIWORLD_CONFIG_DIR` selects

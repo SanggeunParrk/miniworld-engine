@@ -1,4 +1,4 @@
-"""Per-target benchmark precision policy, grounded in ``kernels/registry.csv``.
+"""Per-target benchmark precision policy, grounded in ``kernels/registry/registry.csv``.
 
 The rule (user contract): bench every target at the dtype(s) it actually supports.
 
@@ -39,7 +39,7 @@ BF16 = "bf16"
 
 _REGISTRY = (
     Path(__file__).resolve().parents[2]
-    / "src" / "miniworld_engine" / "kernels" / "registry.csv"
+    / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv"
 )
 
 # kernel bench target -> registry family whose dtypes it inherits. A target absent here (the gemm

@@ -1,8 +1,8 @@
 # Contributing to miniworld-engine
 
 The bar this repo holds itself to is written down in
-[`docs/library-standards.md`](docs/library-standards.md), and the open work against it is in
-[`docs/development/product-plan.md`](docs/development/product-plan.md). Read the first before proposing a change to the second.
+[`docs/standards/library-standards.md`](docs/standards/library-standards.md), and the open work against it is in
+[`docs/records/development/product-plan.md`](docs/records/development/product-plan.md). Read the first before proposing a change to the second.
 
 ## The three gates
 
@@ -32,7 +32,7 @@ The CPU suite must stay CPU-only and fast. A test that needs a device goes behin
 gpu-marked tests run zero times there — 1230 CPU tests run, and every claim about what a kernel
 computes comes from someone running `pixi run test-gpu` and `python -m
 miniworld_engine.autotune.run_all` on an allocated card. A self-hosted runner is deliberately out
-of scope (`docs/product-standards.md`, last section).
+of scope (`docs/standards/product-standards.md`, last section).
 
 So: if your change touches a kernel, a tolerance, an arch gate or a dispatch decision, run it on a
 card and say what you saw in the commit message. Two changes on the day this was written — 95
@@ -70,7 +70,7 @@ record; treat it as one.
 | a benchmark target | `benchmarks/{kernels,modules}/<target>/` + a `configs/bench.yaml` | `tests/layout/test_bench_config_per_target.py` |
 | a public name | `kernels/__init__.py` or `ops/__init__.py`, **and** `_CONTRACT` in `tests/compile/test_public_api.py` | `tests/compile/test_public_api.py` |
 
-Every new kernel needs a row in `src/miniworld_engine/kernels/registry.csv`: that file is the
+Every new kernel needs a row in `src/miniworld_engine/kernels/registry/registry.csv`: that file is the
 declared inventory, and coverage is measured against it rather than against whatever ran. A kernel
 with no driver is reported `untested` — a visible hole, never a pass.
 

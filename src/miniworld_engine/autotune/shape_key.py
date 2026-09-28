@@ -33,7 +33,7 @@ so there is nothing to clamp.
     dim     64  128  256  384  512  768
 
 Shape depends on where the model uses the kernel -- the ``level`` column of
-``kernels/registry.csv``:
+``kernels/registry/registry.csv``:
 
     token   128  256  384  512
     atom    256  512  1024  2048  4096  8192
@@ -370,7 +370,7 @@ def shape_bucket(length: int, level: str) -> int:
     except KeyError:
         raise ValueError(
             f"level must be one of {sorted(SHAPES_BY_LEVEL)}, got {level!r}. It comes from the "
-            f"`level` column of kernels/registry.csv and cannot be inferred from the kernel."
+            f"`level` column of kernels/registry/registry.csv and cannot be inferred from the kernel."
         ) from None
     return _floor_clamp(int(length), buckets)
 

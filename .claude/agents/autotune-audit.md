@@ -33,7 +33,7 @@ than the noise floor while 4 beat it by 1.134x.
 
 ## What to look for
 
-Work from `configs/grid/*.csv` (the ladders), `kernels/registry.csv` (level, width, dtypes) and
+Work from `configs/grid/*.csv` (the ladders), `kernels/registry/registry.csv` (level, width, dtypes) and
 `autotune/data/<op>/<card>.json` (`entries[dtype|axes,shape_key=N]` = top-5 configs with `ms`).
 Read them with short inline python via Bash. Do not write a script into the repo.
 

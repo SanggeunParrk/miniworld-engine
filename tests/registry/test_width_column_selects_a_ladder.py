@@ -44,7 +44,7 @@ def test_every_width_value_names_a_known_ladder() -> None:
 
 def test_the_builders_ladder_defines_exactly_these() -> None:
     """The test's vocabulary and the builder's must not drift apart."""
-    src = (REG.parent.parent / "autotune/builder.py").read_text()
+    src = (REG.parent.parent.parent / "autotune/builder.py").read_text()
     defined = set()
     # TWO declarations, because a width class is one of two kinds. `LADDER` holds the STREAM
     # classes, whose rungs are a stream's channel width. `DERIVED_WIDTHS` holds the ones whose
