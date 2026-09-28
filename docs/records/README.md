@@ -1,73 +1,24 @@
-| [experiments-archive.md](experiments-archive.md) | where the removed `experiments/` capsules live (tags/branch) and what each became in `src/` |
 # Records
 
-Dated findings. Each describes what was true when it ran and is **not** updated when the code
-changes — the same rule as `src/miniworld_engine/kernels/<family>/notes/`, for the ones that belong
-to no single kernel.
+Dated findings: each describes what was true when it ran and is **not** updated when the code
+changes. Only records that current docs, code or tests cite are kept in the tree. Everything
+else — the Sept 17–23 Transition/TriMul studies, MPNN and A6000 investigations, release
+verdicts, retired caches, CuTe-era notes — is at tag `archive/docs-20260928`
+(`git show archive/docs-20260928:docs/records/README.md` for the old index; older still:
+`archive/pre-tidy-20260927`). Removed research code: [experiments-archive.md](experiments-archive.md).
 
-Grouped by subject:
-
-| folder | contents |
+| record | cited by |
 |---|---|
-| [ampere/](ampere/) | A100 / A5000 / A6000 audits, cache builds and module investigations |
-| [h100/](h100/) | H100 build preparation, memory-access investigation, retired kernels, the historical Vast workflow, [v2.2.0 measurements](h100/v220-measurements-20260928.md) |
-| [mpnn/](mpnn/) | ProteinMPNN kernel port, optimization and memory records |
-| [transition/](transition/) | dated Transition kernel variant studies (Sept 18–19) |
-| [trimul/](trimul/) | dated TriMul studies, including the Anthropic training adoption |
-| [normalization/](normalization/) | H100 LayerNorm/RMSNorm record |
-| [pairformer/](pairformer/) | Pairformer pair-track latency on H100 and B200 |
-| [cache/](cache/) | tuned-cache builds and patch compatibility records |
-| [audits/](audits/) | naming, tiling and workspace-relocation audits |
-| [verdicts/](verdicts/) | Sept 23 release verdicts and version comparisons (formerly top-level `verdicts/`) |
-| [reports/](reports/) | dated reports (autotune space, cache rebuild inventories, model-shape cleanup, SWA/DiT audits, Sept 27 TriAttn/TriMul config searches) |
-| [development/](development/) | development audits and plans (consolidation, norm CUDA, the Aug 25 product plan) |
-| [anthropic/](anthropic/) | Anthropic-kernel adoption measurements (H100, 2026-09-19) |
-| [cute/](cute/) | CuTe DSL work removed in 2.2.0 (config pinning, SM90 parity, quack port design) |
-| [model-shapes/](model-shapes/) | checkpoint constructor census used by the shape policy |
-
-| | what it records |
-|---|---|
-| [mpnn-handoff-20260913.md](mpnn/mpnn-handoff-20260913.md) | MPNN stopping point: native BF16, exact A6000 cache, latest benchmark links, rejected experiments and remaining scope. |
-| [mpnn-b8-l8192-memory-fit.md](mpnn/mpnn-b8-l8192-memory-fit.md) | B8/L8192 full-model training with checkpoint API forbidden: capped-A6000 memory-fit proxy, two AdamW steps, and compute-policy capacity limits; A5000 direct validation not performed. |
-| [mpnn-batch-accumulation-a6000.md](mpnn/mpnn-batch-accumulation-a6000.md) | Fixed-effective-batch A6000 experiment: full ProteinMPNN and node-message throughput, real accumulation, peak memory, and compiled-gradient parity. |
-| [mpnn-node-compute-a6000.md](mpnn/mpnn-node-compute-a6000.md) | Saved-projection node-message training, A6000 latency and memory tradeoff, tail-mask fix and build-driver coverage. |
-| [mpnn-a6000-optimization.md](mpnn/mpnn-a6000-optimization.md) | MPNN cold-autotune gradient and inference compile fixes, A6000 seven-family comparison, before/after performance and saved-storage tradeoffs. |
-| [a6000-production-audit.md](ampere/a6000-production-audit.md) | Current A6000 final audit: corrected DiT dispatch, strict build/shard checks, package validation and repeated measurements. |
-| [a6000-atom-dit-4096.md](ampere/a6000-atom-dit-4096.md) | Historical ordinary pair-bias atom DiT at 4096 atoms (superseded above), A5 graph inference and A48 no-graph training on one A6000. |
-| [workspace-artifact-relocation.md](audits/workspace-artifact-relocation.md) | Team-GM cleanup: 1,067 MiniWorld work entries relocated into engine scratch; provenance paths and movement manifest. |
-| [a6000-swa-gate-output-fusion.md](ampere/a6000-swa-gate-output-fusion.md) | SWA output GEMM/gate fusion: controlled inference/training experiment, cached inference dispatch, and build-plan status. |
-| [a6000-dit-qk-fusion-cache-audit.md](ampere/a6000-dit-qk-fusion-cache-audit.md) | DiT after the AdaLN repair, paired Q/K RMSNorm+RoPE forward/backward, production cache wiring and workload provenance. |
-| [a6000-swa-inference-attribution.md](ampere/a6000-swa-inference-attribution.md) | SWA inference overhead traced to Q/K copies and separate RMSNorm/RoPE launches; live RoPE cache coverage verified. |
-| [a6000-adaln-ct-training-dispatch.md](ampere/a6000-adaln-ct-training-dispatch.md) | A6000 training slowdown traced to AdaLN forward dispatch, component-swap controls, and SWA backend clarification. |
-| [build-all-production-contract.md](ampere/build-all-production-contract.md) | shared A5/A48 shapes, automatic preflight/plan refresh, A6000 1,007/1,007 coverage, and explicit native-backend gaps. |
-| [a6000-l384-module-bench-latest.md](ampere/a6000-l384-module-bench-latest.md) | historical consolidated module table; newer DiT/build results are above, dropout .25 training, refreshed triangle inference and remaining cross-GPU build gaps. |
-| [a6000-rmsnorm-validation-fix.md](ampere/a6000-rmsnorm-validation-fix.md) | closes the RMSNorm precision qualification with unrounded reference gradients, a justified BF16 forward band, and FP64 checks. |
-| [a6000-training-dropout025.md](ampere/a6000-training-dropout025.md) | real dropout 0.25 training defaults, RNG/gradient validation and L384 native comparisons. |
-| [a6000-trimul-mask-fusion.md](ampere/a6000-trimul-mask-fusion.md) | fused masking for outgoing/incoming/bidirectional, full-gradient validation, paired before/after native timings, and two refreshed A6000 caches. |
-| [a6000-trimul-training-cause.md](ampere/a6000-trimul-training-cause.md) | historical dtype mismatch, training-forward/backward attribution, and a same-GPU mask A/B that reverses the cuEquivariance ranking. |
-| [a6000-trimul-directions-and-pytorch-reference.md](ampere/a6000-trimul-directions-and-pytorch-reference.md) | A6000 outgoing/incoming/sequential/bidirectional comparisons, equivalent cuEquivariance composition, and removal of MiniWorld kernels from the PyTorch SWA reference. |
-| [a6000-small-input-followup.md](ampere/a6000-small-input-followup.md) | deferred L128 launch-overhead investigation, evidence and acceptance conditions. |
-| [a6000-l384-cache-built.md](ampere/a6000-l384-cache-built.md) | four added L384/A48 keys, explicit RMSNorm precision qualification, and the completed native benchmark. |
-| [a6000-l384-cache-missing.md](ampere/a6000-l384-cache-missing.md) | four missing L384/A48 forward/backward cache keys and the augmentation gap in the build plan. |
-| `naming-audit.md` | the defects found while renaming 111 kernels to `docs/standards/naming.md`'s rules. The old names are its *subject*, so they stay. Current names: `registry.csv`; the mapping: `docs/records/audits/rename-map.tsv`. |
-| `tiling-audit.md` | one sweep of every kernel's tile axes. Kernel names are the ones `registry.csv` held at the time. |
-| `pairformer-b200-latency.md` | Pairformer pair-track latency on B200 (sm100). |
-| `pairformer-h100-latency.md` | the same on H100 (sm90). |
-| `where-the-cache-build-spends-its-time-a6000.md` | the compile/bench split of an A6000 rebuild, and the three things that were idling: a second autotune key compiling on one core, a pool at 50% occupancy, and compile never overlapping bench. |
-| `cache-coverage-replay-a6000.md` | the 363 lookups the module matrix asks for and the shipped cache does not serve, against a static coverage check that reports zero missing. Work list for the pending rebuild. |
-
-The two latency files were under `benchmarks/runners/`, which `docs/benchmarks/README.md` forbids —
-"do not add curated markdown reports under `benchmarks/`; write durable explanations under
-`docs/`" — and nothing cited them. They are the only evidence in this repository of anything
-running on sm90 or sm100 hardware, which `docs/getting-started/supported.md` lists as never exercised here, so
-they are kept rather than deleted. They are also not a substitute for a device manifest: no
-`#provenance`, no commit, no way to know what code produced them.
-
-The two audits sat in `docs/kernels/` while each opened by saying it was a record and not current
-documentation. `docs/` is for pages written to be read as true now.
-
-`cache-coverage-replay-a6000.md` is kept for a different reason than the others: it is not
-superseded, it is *pending*. It is the first output of `dev audit --replay`, which had existed
-with no caller, and it stays until a rebuilt cache makes it empty.
-
-- [A6000 AdaLN workload-aware cache repair and SWA fusion](ampere/a6000-adaln-workload-cache-fix.md)
+| [h100/v220-measurements-20260928.md](h100/v220-measurements-20260928.md) — H100 v2.2.0 TriMul CUDA vs Triton and module comparisons | `docs/status/h100.md`, 2.2.0 release |
+| [h100/vast-h100-20260927.md](h100/vast-h100-20260927.md) — rented-H100 workflow (historical) | `docs/gpus/h100.md` |
+| [ampere/a6000-production-audit.md](ampere/a6000-production-audit.md) — A6000 final audit (v2.1) | figure notes |
+| [ampere/cache-coverage-replay-a6000.md](ampere/cache-coverage-replay-a6000.md) — lookups the module matrix asks for that the cache does not serve | autotune builder, product standards |
+| [ampere/a100-internal-gemm-policy.md](ampere/a100-internal-gemm-policy.md) — A100 internal GEMM policy | `docs/status/a100.md` |
+| [pairformer/pairformer-b200-latency.md](pairformer/pairformer-b200-latency.md) — Pairformer pair-track latency on B200 | `docs/status/b200.md` |
+| [reports/model-shape-cleanup-20260916.md](reports/model-shape-cleanup-20260916.md) — model shape policy | README, dispatch cache, sweep page |
+| [reports/autotune-space-20260916.json](reports/autotune-space-20260916.json) — autotune space inventory | `tests/autotune/test_compact_search_space.py` |
+| [model-shapes/checkpoint-shapes-20260915.json](model-shapes/checkpoint-shapes-20260915.json) — checkpoint constructor census | shape-contract tests, sweep page |
+| [audits/tiling-audit.md](audits/tiling-audit.md), [audits/rename-map.tsv](audits/rename-map.tsv) — tile-axis sweep, kernel rename map | autotune docs, capture |
+| [cache/local-patches-20260917/](cache/local-patches-20260917/README.md) — local patch compatibility | CHANGELOG |
+| [cute/trimul-sm90-parity.md](cute/trimul-sm90-parity.md) — CuTe SM90 parity (removed in 2.2.0) | `docs/getting-started/supported.md` |
+| [development/product-plan.md](development/product-plan.md) — Aug 25 product plan | standards, code comments |

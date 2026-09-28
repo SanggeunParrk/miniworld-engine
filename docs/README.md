@@ -10,12 +10,11 @@ Start with the repo [README](../README.md) for the layout and quickstart.
 | [getting-started/](getting-started/) | [what has run where](getting-started/supported.md) · [troubleshooting](getting-started/troubleshooting.md) · [reproducing a report](getting-started/reproducing-a-report.md) |
 | [kernels/](kernels/) | per-op design notes ([TriMul module](kernels/triangle-multiplication-module.md), [trimul_inproj](kernels/trimul-inproj.md), [tm1](kernels/tm1.md)/[tm2](kernels/tm2.md), [triangle attention](kernels/triangle-attention.md), [LayerNorm](kernels/layernorm.md), [LN+Linear](kernels/layernorm-linear.md), [RMSNorm-AdaMod](kernels/rmsnorm-adamod.md), [bias-only attention](kernels/bias-only-attention.md)), [numeric thresholds](kernels/thresholds.md), [lab-notebook convention](kernels/lab-notebooks.md) |
 | [autotune/](autotune/) | the dispatch cache ([policy](autotune/dispatch-cache.md)), [key convention](autotune/autotune-key.md), [grid sweep](autotune/grid-sweep.md), [L2 swizzle](autotune/l2-swizzle.md), [training shape policy](autotune/training-shape-policy.md), [sweep-grid page](autotune/sweep-grid.html) |
-| [benchmarks/](benchmarks/README.md) | harness conventions, [cautions](benchmarks/cautions.md), generated [per-GPU reports](benchmarks/reports/a6000-module-sweeps.md) |
-| [anthropic/](anthropic/) | integration of Anthropic's published kernels: [integration](anthropic/integration.md), [payload](anthropic/trimul-payload.md), [H100 audit](anthropic/h100-audit.md), [TriMul analysis](anthropic/trimul-analysis.md), [TriMul training](anthropic/trimul-training.md) |
-| [design/](design/) | forward-looking proposals not yet shipped |
+| [benchmarks/](benchmarks/README.md) | harness conventions, [cautions](benchmarks/cautions.md), [measurement contract](benchmarks/measurement-contract.md), [results](benchmarks/results.md) |
+| [anthropic/](anthropic/) | integration of Anthropic's published kernels: [integration](anthropic/integration.md), [payload](anthropic/trimul-payload.md) |
 | [standards/](standards/) | [library](standards/library-standards.md) and [product](standards/product-standards.md) standards, [naming](standards/naming.md), [project direction](standards/project-direction.md) |
 | [releases/](releases/) | what each version changed and its qualification status |
-| [records/](records/README.md) | dated measurements, audits and verdicts — evidence, never edited after the fact |
+| [records/](records/README.md) | dated measurements, audits and verdicts — evidence, never edited after the fact. Older records, design proposals and analyses are at tag `archive/docs-20260928` |
 | [assets/](assets/README.md) | figures |
 
 Rules: a page reflects the current source (records are the exception); a performance number

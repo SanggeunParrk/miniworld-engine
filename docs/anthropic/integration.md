@@ -58,7 +58,7 @@ rejects grad-enabled calls before launching, and rejects active training
 dropout. TriMul modules additionally expose an explicit `anthropic_row="native_rebuilt"`
 training baseline: unchanged native K1/K3 forward, PyTorch recomputation/cuBLAS
 backward, external row dropout/residual. Both single-direction and bidirectional
-modules support it. See [training scope and validation](trimul-training.md).
+modules support it. Training scope and validation: `archive/docs-20260928:docs/anthropic/trimul-training.md`.
 The newer `anthropic_row="training_saved"` keeps the previous training fusion
 boundaries and saved tensors, replaces the front/F567 kernels with Anthropic CUDA
 derivatives, and reuses the existing Triton/cuBLAS backward. Both TriMul module
@@ -118,7 +118,7 @@ CUDA Graph timings. A high SM percentage alone is not a roofline conclusion.
 Assess each shape's actual bottleneck; reaching a hardware roof does not rule
 out reducing algorithmic work or memory traffic.
 
-Results and limitations are in [the H100 campaign report](h100-audit.md).
+Results and limitations: the H100 campaign report, `archive/docs-20260928:docs/anthropic/h100-audit.md`.
 For reproducible qualification (set PYTHONPATH and runtime paths for your stack):
 
 ```bash
