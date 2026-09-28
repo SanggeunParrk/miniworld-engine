@@ -115,7 +115,7 @@ GPU qualification of this release is pending.
   residuals and `torch.compile` boundaries.
 - Make explicit backend comparison policy consistent for Transition.
 - Ship selected CUDA sources/includes and write compilation products only to
-  the user cache. [Dispatch contracts](docs/gpus/h100-dispatch.md).
+  the user cache. [Dispatch contracts](../gpus/h100-dispatch.md).
 
 ## [2.0.0] - 2026-09-23
 
@@ -133,7 +133,7 @@ GPU qualification of this release is pending.
 
 - Preserve upstream credit, licenses and provenance. MiniWorld inherits the
   stronger published inference implementation and extends it for training;
-  see `THIRD_PARTY_NOTICES.md`.
+  see `licenses/THIRD_PARTY_NOTICES.md`.
 - Integrate K1/K3 single/bidirectional TriMul inference, fused Transition
   forward/backward and its wide-width ports, MSA OPM/PWA training and
   inference integrations, and token DiT research histories.
@@ -149,7 +149,7 @@ GPU qualification of this release is pending.
   require rebuilding and are not represented as valid 2.0.0 tuning records.
 - Transition adds the parallel LN-gradient reduction and transposed dWs stores.
 
-Release map, migration limits and evidence: [2.0.0](docs/releases/2.0.0.md).
+Release map, migration limits and evidence: [2.0.0](2.0.0.md).
 
 
 ### Added
@@ -171,7 +171,7 @@ Release map, migration limits and evidence: [2.0.0](docs/releases/2.0.0.md).
 - Merge the 24 active MiniWorld consumer patches: packed TriMul buffers, configured
   F567 forward and dual-dgrad/LayerNorm-residual backward fusions, strict Triton
   backend selection, and expanded resumable CuTe/CUDA tuning.
-  See [integration and validation](docs/records/cache/local-patches-20260917/README.md).
+  See [integration and validation](../records/cache/local-patches-20260917/README.md).
 - Retire 37 incompatible H100/A5000/A6000 cache files from runtime selection;
   original measurements and checksums remain in the integration archive.
 

@@ -65,7 +65,7 @@ The research histories remain available under `experiments/`; source hashes for
 the selected CUDA bodies are in
 `kernels/trimul_inproj/cuda/h100_sources/PROVENANCE.json` within the package.
 Anthropic attribution and Apache-2.0 terms apply as described in
-[third-party notices](../../THIRD_PARTY_NOTICES.md).
+[third-party notices](../../licenses/THIRD_PARTY_NOTICES.md).
 
 ## Validation
 

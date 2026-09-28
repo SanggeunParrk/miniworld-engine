@@ -1,8 +1,8 @@
 # Contributing to miniworld-engine
 
 The bar this repo holds itself to is written down in
-[`docs/standards/library-standards.md`](docs/standards/library-standards.md), and the open work against it is in
-[`docs/records/development/product-plan.md`](docs/records/development/product-plan.md). Read the first before proposing a change to the second.
+[`docs/standards/library-standards.md`](library-standards.md), and the open work against it is in
+[`docs/records/development/product-plan.md`](../records/development/product-plan.md). Read the first before proposing a change to the second.
 
 ## The three gates
 

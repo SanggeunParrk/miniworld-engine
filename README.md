@@ -14,8 +14,8 @@ else**, and a PyTorch reference that defines what "correct" means.
 > team-gm's `docs/ARCHITECTURE.md`.
 
 **Version 2.2.0** — CUDA + Triton only (CuTe/quack removed), torch 2.13 / cu129,
-cuequivariance 0.12. [Changelog](CHANGELOG.md) · [releases](docs/releases/) ·
-[attribution](THIRD_PARTY_NOTICES.md).
+cuequivariance 0.12. [Changelog](docs/releases/CHANGELOG.md) · [releases](docs/releases/) ·
+[attribution](licenses/THIRD_PARTY_NOTICES.md).
 
 | I want to… | go to |
 |---|---|

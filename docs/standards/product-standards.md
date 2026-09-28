@@ -217,7 +217,7 @@ whose only section is `[Unreleased]`, and an x.0.0 with no Breaking entry.
 
 ### I3. The changelog describes released things
 
-`CHANGELOG.md` exists, is 264 lines, is written well, and is **entirely** under
+`docs/releases/CHANGELOG.md` exists, is 264 lines, is written well, and is **entirely** under
 `## [Unreleased]`. It documents a public-API contract enforced by `tests/compile/test_public_api.py`
 (A1) — for a package that has never published a version.
 
@@ -462,10 +462,10 @@ moment you would otherwise stop looking, which is what `git status` does not do.
 
 *Prevents:* a bus factor of one.
 
-*Enforced by:* `CONTRIBUTING.md` exists and F6 is met for the mechanics — clone, gates, how to
+*Enforced by:* `docs/standards/contributing.md` exists and F6 is met for the mechanics — clone, gates, how to
 run the suite. Untested by any second person.
 
-*Status:* **partially met.** `CONTRIBUTING.md` covers the mechanics and the quickstart is now
+*Status:* **partially met.** `docs/standards/contributing.md` covers the mechanics and the quickstart is now
 executed rather than described. Still untested by any second person.
 
 ### M3. Nothing is retained that nobody can explain

@@ -60,7 +60,7 @@ THIRD-PARTY MATERIAL OUTSIDE stock/
 
 Third-party source also lives inside the packages' own directories. Every such
 file is listed — with its upstream path, licence and copyright line — in the
-package's THIRD_PARTY_NOTICES.md (common/opt_core/THIRD_PARTY_NOTICES.md for
+package's licenses/THIRD_PARTY_NOTICES.md (common/opt_core/THIRD_PARTY_NOTICES.md for
 the shared library), and its licence text is under the package's
 third_party_licenses/ or beside the file. The classes and their locations:
 
@@ -127,7 +127,7 @@ third_party_licenses/ or beside the file. The classes and their locations:
     common/opt_core; they derive from the project the package wraps and in
     places from further projects (AlphaFold 2 and 3, OpenFold3, Protenix,
     FlashAttention, PyTorch, xFormers, CPython), and each is attributed in
-    the package's THIRD_PARTY_NOTICES.md with the upstream file it derives
+    the package's licenses/THIRD_PARTY_NOTICES.md with the upstream file it derives
     from. Several Protenix-derived directories in protenix_v1, protenix_v2,
     pxdesign and opendde, and the OpenFold3-derived directories under
     openfold3/opt/forward/ and openfold3_ob0/opt/forward/, carry a copy of the
@@ -190,7 +190,7 @@ files, MIT and CC BY 4.0, and a CC BY 4.0 trigram table), borzoi (Baskerville
 archive: tests/data/eval/model.h5, a small trained test model released with
 Baskerville, Apache-2.0) and enformer (enformer-pytorch's
 precomputed/tf_gammas.pt, a table of positional constants, MIT). They are
-listed in those packages' THIRD_PARTY_NOTICES.md files.
+listed in those packages' licenses/THIRD_PARTY_NOTICES.md files.
 
 DATA FILES IN CARRIED RELEASES AND IN THE PACKAGES
 

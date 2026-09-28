@@ -1,6 +1,6 @@
 """Render one GPU's curated module results into a docs/reports page.
 
-Input is the tracked layout from ``benchmarks/RESULTS.md``:
+Input is the tracked layout from ``docs/benchmarks/results.md``:
 ``benchmarks/modules/<target>/results/<gpu>/tables/<mode>_<axis>[_<variant>].csv``. Output is
 one markdown page plus SVG figures: a sweep figure per module (latency and speedup for every
 mode/axis table), a summary table at the anchor shape, and one summary figure across modules.

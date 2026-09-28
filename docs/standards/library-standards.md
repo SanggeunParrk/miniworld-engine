@@ -199,7 +199,7 @@ against it.
 *Prevents:* a doc that outlives its measurement.
 
 *Enforced by:* not yet. Candidate: a test that every `N.NN ms`-shaped claim in
-`benchmarks/RESULTS.md` matches a value in a committed table.
+`docs/benchmarks/results.md` matches a value in a committed table.
 
 *Status:* **NOT met.** -> `docs/records/development/product-plan.md` P9.
 

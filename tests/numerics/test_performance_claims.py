@@ -29,9 +29,9 @@ REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml"
 #: judgement, and it belongs in one visible list instead of a path heuristic.
 LIVE_DOCS = (
     "README.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
-    "benchmarks/RESULTS.md",
+    "docs/releases/CHANGELOG.md",
+    "docs/standards/contributing.md",
+    "docs/benchmarks/results.md",
     "docs/benchmarks/README.md",
     "docs/benchmarks/cautions.md",
     "docs/autotune/dispatch-cache.md",

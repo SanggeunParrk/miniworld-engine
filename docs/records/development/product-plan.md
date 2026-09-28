@@ -31,7 +31,7 @@ everything else moot, and the cheap fix that unblocks other machines.
 | P10 | D4 | `configs/grid` duplication ended |
 | P11 | F4 | stale reference docs |
 | P12 | F5 | `todo.md` removed from the repo |
-| P13 | F6 | `CONTRIBUTING.md` |
+| P13 | F6 | `docs/standards/contributing.md` |
 | P14 | A4 | Python floor (3.10) actually tested in CI |
 | P15 | E2 | stale JIT build lock no longer hangs forever |
 | P16 | B1, F2 | vendored-body lint exemption hid a guaranteed `NameError` |
@@ -49,13 +49,13 @@ rename**. `git tag` holds `archive/gate-fuse-v1` and `archive/ln-bwd-cuda-v1` an
 tag. The consumer's pinned tree declares `name = "miniworld-kernels", version = "0.1.0"`; main
 declares `name = "miniworld-engine", version = "0.1.0"`. `import miniworld_kernels` →
 `ModuleNotFoundError`. Nothing in either package's metadata lets a consumer tell them apart.
-`CHANGELOG.md` is 264 good lines, all under `[Unreleased]`.
+`docs/releases/CHANGELOG.md` is 264 good lines, all under `[Unreleased]`.
 
 *Action:* the rename is a breaking change, so the next version is **1.0.0**, not 0.2.0 — a
 0.x bump would understate it. Move `[Unreleased]` to `## [1.0.0] - 2026-08-25` with an
 explicit **Breaking** section naming `miniworld-kernels` → `miniworld-engine` and the import
 path change. Tag `v1.0.0`. Add `tests/layout/test_version_is_released.py`: the version in
-`pyproject.toml` must have a matching `## [<version>]` heading in `CHANGELOG.md`, and
+`pyproject.toml` must have a matching `## [<version>]` heading in `docs/releases/CHANGELOG.md`, and
 `[Unreleased]` must not be the only section.
 
 *Done when:* the test fails on a version bump without a changelog entry, `git tag -l 'v*'`
@@ -151,7 +151,7 @@ that and is **excluded by decision** -- it needs a runner token, a resident daem
 node, and that node's capacity held for CI. So J1 is met in the only sense available here: the
 evidence exists, it is dated, and its absence fails a release.
 
-The cost is written where it can mislead. `CONTRIBUTING.md` now says a green CI means nothing about
+The cost is written where it can mislead. `docs/standards/contributing.md` now says a green CI means nothing about
 the kernels, with the day's own example: 95 tolerance bands narrowed 5x and three kernels ungated
 from sm100, both green before and after, both would have been green if wrong.
 

@@ -94,5 +94,5 @@ and `race.sbatch` for sanitizer checks. Sources/builders import only packaged
 engine code. Diagnostic probes retain the initial generic implementation.
 
 Anthropic Apache-2.0 attribution is preserved in derived CUDA sources and
-`THIRD_PARTY_NOTICES.md`. The work extends that implementation to training.
+`licenses/THIRD_PARTY_NOTICES.md`. The work extends that implementation to training.
 
