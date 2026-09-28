@@ -16,6 +16,7 @@ d_pair_step: 128
 d_pair_values:
   - 128
   - 256
+  - 384
   - 512
 sweep_axis: seq_len
 sweep_seq_len: 384

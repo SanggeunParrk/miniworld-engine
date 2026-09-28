@@ -1,0 +1,375 @@
+{
+  "status": "qualified_explicit_research_only",
+  "production_dispatch_changed": false,
+  "selection": {
+    "D": 512,
+    "L": 384,
+    "activation_dtype": "bfloat16",
+    "affine_dtype": "float32",
+    "input_splits": 4,
+    "lt_index": 0,
+    "entry": "selected_vast.make_plan"
+  },
+  "reference": "wide_checkpoint24.Training",
+  "strict_relative_l2_limits": {
+    "weights": 0.0005,
+    "affine": 5e-06
+  },
+  "source_sha256": {
+    "input_split.py": "0d97b4abf9d800cc3e2be8200ddc8fd15a954053d2e57359b64d4d0d6e59ec60",
+    "selected_vast.py": "f53541778f957e02a9295a6efdde2d42153eebc083be8862c2445793e3fa1133",
+    "runtime.py": "98508ccb45e5a8c26ccd4de8785569bffd63367c379bb3d6f1d067c35b6f7262",
+    "qualify_input_split.py": "c3ef93a341c500b3497c3849280007ba5cd3edb21cbc2322e37f38caef97429e",
+    "sanitize.sh": "569c7e88798ec5e7aaba27c3475fbbd3f04500e2d8ff7e4dfb0faba632e958a0"
+  },
+  "snapshot_manifest_sha256": "6f786fab2f408de99751188c0f6ea43985e507e4ccc9131cbe02d376b6db3495",
+  "evidence": {
+    "shape": {
+      "D": 512,
+      "L": 384
+    },
+    "input_splits": 4,
+    "lt_index": 0,
+    "repeats": [
+      {
+        "file": "repeat-input-split-gpu0.json",
+        "repeat": 0,
+        "complete": true,
+        "baseline_full": 7065.5999183654785,
+        "candidate_full": 7000.895977020264,
+        "baseline_bwd": 4470.528125762939,
+        "candidate_bwd": 4413.504123687744,
+        "full_reduction_percent": 0.9157600499998697,
+        "bwd_reduction_percent": 1.2755540390535725
+      },
+      {
+        "file": "repeat-input-split-gpu0.json",
+        "repeat": 1,
+        "complete": true,
+        "baseline_full": 7189.888000488281,
+        "candidate_full": 7166.079998016357,
+        "baseline_bwd": 4505.951881408691,
+        "candidate_bwd": 4475.584030151367,
+        "full_reduction_percent": 0.331131757133174,
+        "bwd_reduction_percent": 0.6739497459486876
+      },
+      {
+        "file": "repeat-input-split-gpu0.json",
+        "repeat": 2,
+        "complete": true,
+        "baseline_full": 7225.9840965271,
+        "candidate_full": 7194.816112518311,
+        "baseline_bwd": 4515.77615737915,
+        "candidate_bwd": 4482.560157775879,
+        "full_reduction_percent": 0.43133203162969425,
+        "bwd_reduction_percent": 0.7355546077941422
+      },
+      {
+        "file": "repeat-input-split-gpu1.json",
+        "repeat": 0,
+        "complete": true,
+        "baseline_full": 6996.319770812988,
+        "candidate_full": 6904.99210357666,
+        "baseline_bwd": 4453.472137451172,
+        "candidate_bwd": 4364.384174346924,
+        "full_reduction_percent": 1.3053672534712568,
+        "bwd_reduction_percent": 2.0004158632782043
+      },
+      {
+        "file": "repeat-input-split-gpu1.json",
+        "repeat": 1,
+        "complete": true,
+        "baseline_full": 7103.551864624023,
+        "candidate_full": 7034.624099731445,
+        "baseline_bwd": 4441.440105438232,
+        "candidate_bwd": 4405.407905578613,
+        "full_reduction_percent": 0.9703281711201606,
+        "bwd_reduction_percent": 0.8112728980742112
+      },
+      {
+        "file": "repeat-input-split-gpu1.json",
+        "repeat": 2,
+        "complete": true,
+        "baseline_full": 7181.471824645996,
+        "candidate_full": 7112.639904022217,
+        "baseline_bwd": 4465.504169464111,
+        "candidate_bwd": 4433.055877685547,
+        "full_reduction_percent": 0.9584653717857106,
+        "bwd_reduction_percent": 0.7266434101764196
+      }
+    ],
+    "sanitizers": {
+      "memcheck": {
+        "passed": true,
+        "log": "split4-memcheck.log"
+      },
+      "racecheck": {
+        "passed": true,
+        "log": "split4-racecheck.log"
+      },
+      "synccheck": {
+        "passed": true,
+        "log": "split4-synccheck.log"
+      }
+    },
+    "validation": {
+      "file": "validation-wide-checkpoint24-D512-L384-vast-split4-index0.json",
+      "complete": true,
+      "stress_count": 5,
+      "stress_passed": true,
+      "configuration": {
+        "source": "fused_contraction_gp_then_split_input_dw",
+        "input_reduce": [
+          "tma",
+          16,
+          128,
+          4
+        ],
+        "output_ln": [
+          "tma",
+          16,
+          128,
+          2
+        ],
+        "output": [
+          "tile",
+          16,
+          128
+        ],
+        "dwp_algo": null,
+        "lt": {
+          "proj": {
+            "index": 3,
+            "algo": [
+              124554051650,
+              4294967331,
+              0,
+              844424930131969,
+              518849229225985,
+              60129542158,
+              292058693646,
+              0
+            ]
+          },
+          "gate": {
+            "index": 2,
+            "algo": [
+              124554051650,
+              4294967331,
+              0,
+              844424930131969,
+              518849229225985,
+              60129542158,
+              292058693646,
+              0
+            ]
+          },
+          "dn": {
+            "index": 3,
+            "algo": [
+              124554051650,
+              4294967331,
+              0,
+              844424930131969,
+              518849229225985,
+              60129542158,
+              292058693646,
+              0
+            ]
+          },
+          "dx": {
+            "index": 3,
+            "algo": [
+              124554051650,
+              4294967331,
+              0,
+              844424930131969,
+              518849229225985,
+              60129542158,
+              292058693646,
+              0
+            ]
+          },
+          "fw0": {
+            "index": 2,
+            "algo": [
+              137438953538,
+              4294967331,
+              0,
+              1407374883553286,
+              518849229225985,
+              60129542158,
+              292058693646,
+              0
+            ]
+          },
+          "bc2": {
+            "index": 1,
+            "algo": [
+              133143986242,
+              4294967331,
+              0,
+              844424930131973,
+              518849229225985,
+              60129542158,
+              292058693646,
+              0
+            ]
+          }
+        },
+        "ln_gamma": "shared",
+        "input_splits": 4,
+        "front": "overlapped_channel_major_preactivation_tma",
+        "saved_bytes": 1207959552,
+        "source_lt": {
+          "index": 0,
+          "algo": [
+            103079215170,
+            4294967331,
+            0,
+            1407374883553287,
+            518849229225985,
+            60129542158,
+            292057776128,
+            0
+          ]
+        },
+        "source_gp": {
+          "packed": true,
+          "input_slots": 2,
+          "rank_major": true,
+          "grid_factor": 4
+        },
+        "source_tile": [
+          128,
+          128
+        ],
+        "source_groups": 2,
+        "source_channel_group": 1,
+        "output_gate": {
+          "layout": "column_major_direct_dx_prefix",
+          "grid_factor": 4,
+          "dwg": {
+            "index": 0,
+            "algo": [
+              85899345986,
+              34359738403,
+              2,
+              844424930131969,
+              518849229225985,
+              60129542158,
+              292058693646,
+              0
+            ]
+          }
+        },
+        "joint_input_gate_dw": null,
+        "delta_normalization": {
+          "cached_affine": true,
+          "unswitch": true,
+          "minblocks": 3,
+          "patch_capacity": 36864,
+          "row_capacity": 2304,
+          "projection_algo": [
+            124554051650,
+            4294967331,
+            0,
+            844424930131969,
+            518849229225985,
+            60129542158,
+            292058693646,
+            0
+          ],
+          "rows": 32,
+          "threads": 128,
+          "input_reload": true
+        },
+        "contraction_order": "pair_tiles",
+        "output_ln_stats": {
+          "tma": true,
+          "rows": 16,
+          "kind": "CachedLN",
+          "smem": 70528
+        },
+        "contraction_epilogue": "load_gate_and_projection_into_retired_mma_slots",
+        "fixed_contraction_length": null,
+        "contraction_k_unroll": null,
+        "input_weight_overlap": {
+          "enabled": false,
+          "order": "dw_first",
+          "explicit_fork_join_events": true,
+          "separate_workspaces": true
+        },
+        "output_ln_transfer": "one_3d_map_per_tensor_original_shared_layout",
+        "output_ln_operands": "exact_bf16_pairs_retained_between_scalar_passes",
+        "early_affines": {
+          "enabled": true,
+          "initialization": "preceding_gate",
+          "output_grid": 396,
+          "input_grid": 528,
+          "packed_weights": true,
+          "ordered_pair": true,
+          "pair_local_barriers": false,
+          "pair_sum_storage": "disjoint_prefix_and_final"
+        },
+        "contraction_loader": {
+          "threads": 288,
+          "loader_warps": 1,
+          "compute_groups": 2,
+          "input_maps": "whole4d",
+          "epilogue_maps": "whole4d",
+          "unroll": false,
+          "resident_ctas": 2
+        },
+        "vast_input_split": {
+          "splits": 4,
+          "index": 0,
+          "algo": [
+            103079215170,
+            4294967331,
+            0,
+            1407374883553287,
+            518849229225985,
+            60129542158,
+            292057776128,
+            0
+          ]
+        },
+        "vast_sources": {
+          "input_split.py": "0d97b4abf9d800cc3e2be8200ddc8fd15a954053d2e57359b64d4d0d6e59ec60",
+          "qualify_input_split.py": "c3ef93a341c500b3497c3849280007ba5cd3edb21cbc2322e37f38caef97429e",
+          "runtime.py": "98508ccb45e5a8c26ccd4de8785569bffd63367c379bb3d6f1d067c35b6f7262"
+        }
+      }
+    },
+    "entry_check": {
+      "passed": true,
+      "width": 512,
+      "length": 384,
+      "input_splits": 4,
+      "lt_index": 0,
+      "graph_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "dWL": 0.0,
+        "dWLg": 0.0,
+        "dWR": 0.0,
+        "dWRg": 0.0,
+        "dWgate": 0.0,
+        "dWproj": 0.0,
+        "dgamma_in": 4.979189043297083e-07,
+        "dbeta_in": 4.556718522508163e-07,
+        "dgamma_out": 4.543291822756146e-07,
+        "dbeta_out": 4.718501713796286e-07
+      },
+      "selected_sha256": "f53541778f957e02a9295a6efdde2d42153eebc083be8862c2445793e3fa1133",
+      "input_split_sha256": "0d97b4abf9d800cc3e2be8200ddc8fd15a954053d2e57359b64d4d0d6e59ec60"
+    },
+    "sanitizer_version": "NVIDIA (R) Compute Sanitizer\nCopyright (c) 2020-2026 NVIDIA Corporation\nVersion 2026.1.1.0 (build 38000597) (public-release)\n",
+    "source_match": true,
+    "qualified_explicit": true
+  },
+  "results_remote": "/workspace/vast-results/trimul-large-d",
+  "ncu_measured": false,
+  "sol_measured": false
+}

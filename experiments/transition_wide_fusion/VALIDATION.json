@@ -1,0 +1,368 @@
+{
+  "status": "qualified explicit experiment; production unchanged",
+  "rows": [
+    {
+      "D": 128,
+      "L": 384,
+      "baseline": 0.5284000039100647,
+      "candidate": 0.5296319723129272,
+      "pytorch": 1.1935680508613586,
+      "speedup_native": 0.9976739161016234,
+      "speedup_pytorch": 2.2535800579579663,
+      "median_paired_ratio": 0.9981065154279499,
+      "paired_wins": 30,
+      "paired_samples": 100,
+      "paired_ratio_p10": 0.9898132780668788,
+      "paired_ratio_p90": 1.003066784125428
+    },
+    {
+      "D": 128,
+      "L": 768,
+      "baseline": 2.031424045562744,
+      "candidate": 2.031551957130432,
+      "pytorch": 4.505967855453491,
+      "speedup_native": 0.9999370375110324,
+      "speedup_pytorch": 2.21799291897913,
+      "median_paired_ratio": 0.9998812236371697,
+      "paired_wins": 49,
+      "paired_samples": 100,
+      "paired_ratio_p10": 0.9922469245932116,
+      "paired_ratio_p90": 1.0073569367450004
+    },
+    {
+      "D": 256,
+      "L": 384,
+      "baseline": 1.8298880457878113,
+      "candidate": 1.8314239978790283,
+      "pytorch": 2.3581759929656982,
+      "speedup_native": 0.9991613345172959,
+      "speedup_pytorch": 1.2876188122994463,
+      "median_paired_ratio": 0.9990391630111957,
+      "paired_wins": 42,
+      "paired_samples": 100,
+      "paired_ratio_p10": 0.9927401578756534,
+      "paired_ratio_p90": 1.0063745902079442
+    },
+    {
+      "D": 256,
+      "L": 768,
+      "baseline": 7.11955189704895,
+      "candidate": 7.1319520473480225,
+      "pytorch": 9.075488090515137,
+      "speedup_native": 0.9982613244989942,
+      "speedup_pytorch": 1.2725110923719416,
+      "median_paired_ratio": 0.9999729374469635,
+      "paired_wins": 50,
+      "paired_samples": 100,
+      "paired_ratio_p10": 0.9905800202779683,
+      "paired_ratio_p90": 1.0082345218968078
+    },
+    {
+      "D": 384,
+      "L": 384,
+      "baseline": 3.7714240550994873,
+      "candidate": 3.651584029197693,
+      "pytorch": 4.208048105239868,
+      "speedup_native": 1.032818641155062,
+      "speedup_pytorch": 1.152389777037238,
+      "median_paired_ratio": 1.0326886624594551,
+      "paired_wins": 98,
+      "paired_samples": 100,
+      "paired_ratio_p10": 1.0282334556274908,
+      "paired_ratio_p90": 1.0380572759953863
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "baseline": 14.62988805770874,
+      "candidate": 14.22875165939331,
+      "pytorch": 16.306655883789062,
+      "speedup_native": 1.0281919600480633,
+      "speedup_pytorch": 1.1460355956823516,
+      "median_paired_ratio": 1.0268760645219417,
+      "paired_wins": 92,
+      "paired_samples": 100,
+      "paired_ratio_p10": 1.0021679176839975,
+      "paired_ratio_p90": 1.038584308433827
+    },
+    {
+      "D": 512,
+      "L": 384,
+      "baseline": 6.135632038116455,
+      "candidate": 5.919600009918213,
+      "pytorch": 6.4524641036987305,
+      "speedup_native": 1.036494362429266,
+      "speedup_pytorch": 1.090016908724865,
+      "median_paired_ratio": 1.0348179063539835,
+      "paired_wins": 98,
+      "paired_samples": 100,
+      "paired_ratio_p10": 1.0206245699230987,
+      "paired_ratio_p90": 1.0461410926556498
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "baseline": 23.97327995300293,
+      "candidate": 23.343952178955078,
+      "pytorch": 25.29364776611328,
+      "speedup_native": 1.0269589214895325,
+      "speedup_pytorch": 1.0835203727377356,
+      "median_paired_ratio": 1.0291484711737384,
+      "paired_wins": 93,
+      "paired_samples": 100,
+      "paired_ratio_p10": 1.006359818038296,
+      "paired_ratio_p90": 1.047564695280401
+    }
+  ],
+  "qualification": [
+    {
+      "path": ".bench/transition-wide-local/qualification/D128-L384.json",
+      "job": "19775",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    },
+    {
+      "path": ".bench/transition-wide-local/qualification/D128-L768.json",
+      "job": "19775",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    },
+    {
+      "path": ".bench/transition-wide-local/qualification/D256-L384.json",
+      "job": "19749",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    },
+    {
+      "path": ".bench/transition-wide-local/qualification/D256-L768.json",
+      "job": "19749",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 0.0,
+        "ln_in.weight": 0.0,
+        "ln_in.bias": 0.0,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    },
+    {
+      "path": ".bench/transition-wide-local/qualification/D384-L384.json",
+      "job": "19749",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 8.798600902082399e-06,
+        "ln_in.weight": 2.626247237458301e-07,
+        "ln_in.bias": 1.1820407053164672e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 8.226780664699618e-06,
+        "ln_in.weight": 2.501323876913375e-07,
+        "ln_in.bias": 1.1148198808541565e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    },
+    {
+      "path": ".bench/transition-wide-local/qualification/D384-L768.json",
+      "job": "19749",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 9.31372596824076e-06,
+        "ln_in.weight": 3.938478414511337e-07,
+        "ln_in.bias": 1.606438502221863e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 6.878869044157909e-06,
+        "ln_in.weight": 3.767465841519879e-07,
+        "ln_in.bias": 1.6305466488120146e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    },
+    {
+      "path": ".bench/transition-wide-local/qualification/D512-L384.json",
+      "job": "19749",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 8.069977411651053e-06,
+        "ln_in.weight": 2.0609144257832668e-07,
+        "ln_in.bias": 1.0144074025220107e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 8.383631211472675e-06,
+        "ln_in.weight": 2.1687085904886771e-07,
+        "ln_in.bias": 1.009486396696957e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    },
+    {
+      "path": ".bench/transition-wide-local/qualification/D512-L768.json",
+      "job": "19749",
+      "candidate_errors": {
+        "y": 0.0,
+        "dx": 9.139565008808859e-06,
+        "ln_in.weight": 3.320372456983023e-07,
+        "ln_in.bias": 1.3300314094522037e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      },
+      "changed_candidate_errors": {
+        "y": 0.0,
+        "dx": 7.21621154298191e-06,
+        "ln_in.weight": 3.4423410966155643e-07,
+        "ln_in.bias": 1.3572486068369471e-07,
+        "expand_a.weight": 0.0,
+        "expand_b.weight": 0.0,
+        "squeeze.weight": 0.0
+      }
+    }
+  ],
+  "sanitizers": [
+    {
+      "D": 384,
+      "L": 768,
+      "tool": "memcheck",
+      "scope": "full module F+B",
+      "compiled": false,
+      "path": ".bench/transition-wide-local/sanitize/D384-L768-memcheck.json",
+      "job": "19751"
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "tool": "racecheck",
+      "scope": "changed epilogue kernels",
+      "compiled": false,
+      "path": ".bench/transition-wide-local/sanitize/D384-L768-racecheck.json",
+      "job": "19751"
+    },
+    {
+      "D": 384,
+      "L": 768,
+      "tool": "synccheck",
+      "scope": "changed epilogue kernels",
+      "compiled": false,
+      "path": ".bench/transition-wide-local/sanitize/D384-L768-synccheck.json",
+      "job": "19751"
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "tool": "memcheck",
+      "scope": "full module F+B",
+      "compiled": true,
+      "path": ".bench/transition-wide-local/sanitize/D512-L768-memcheck.json",
+      "job": "19763"
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "tool": "racecheck",
+      "scope": "changed epilogue kernels",
+      "compiled": false,
+      "path": ".bench/transition-wide-local/sanitize/D512-L768-racecheck.json",
+      "job": "19763"
+    },
+    {
+      "D": 512,
+      "L": 768,
+      "tool": "synccheck",
+      "scope": "changed epilogue kernels",
+      "compiled": false,
+      "path": ".bench/transition-wide-local/sanitize/D512-L768-synccheck.json",
+      "job": "19763"
+    }
+  ],
+  "runtime_sources": {
+    "experiments/transition_wide_fusion/selected.py": "d5d7cc2e1ac4dfd3f8135390b3dc713bc9e140edc1480abcefc3ef70676a9255",
+    "experiments/transition_wide_fusion/ln_residual.py": "feb005ae0ff1519cf3edd5434a064c5483a24adb5a8c0596eb07d827b7b5ef61",
+    "experiments/transition_wide_fusion/common.py": "29de0e37c908152f6de8a06c0bd0a9d3476bdc1a7d14d3ab0af210ad9f476adb"
+  },
+  "retained_harness_failure_logs": [
+    ".bench/transition-wide-local/sanitize/D384-L768-memcheck-job19750-stream-failure.txt",
+    ".bench/transition-wide-local/sanitize/D512-L768-memcheck-job19751-allocation-failure.txt",
+    ".bench/transition-wide-local/sanitize/D512-L768-memcheck-job19752-allocation-failure.txt",
+    ".bench/transition-wide-local/sanitize/D512-L768-memcheck-job19753-allocation-failure.txt",
+    ".bench/transition-wide-local/sanitize/D512-L768-memcheck-job19754-allocation-failure.txt"
+  ],
+  "limitations": [
+    "D128 and D256 unchanged; D128 added as a comparison row, new D256 fusion candidates rejected",
+    "No full-module racecheck claim for unchanged kernels",
+    "No hardware-counter or SOL claim"
+  ]
+}

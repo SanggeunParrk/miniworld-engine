@@ -1,0 +1,247 @@
+{
+  "benchmarks": [
+    {
+      "path": "transition-shapes-v2/gpu0/D128-L384.json",
+      "sha256": "25c6a5d25693ef5529c98db038b480114f57cc0ff99970378b2bc9220175358b"
+    },
+    {
+      "path": "transition-shapes-v2/gpu0/D128-L768.json",
+      "sha256": "fd292be1dd496e8bf69cedcae67147ec8178b4a2c078afaaa082acfa94b4c84d"
+    },
+    {
+      "path": "transition-shapes-v1/gpu1/D256-L384.json",
+      "sha256": "67c2abcff6d255c21e0f8306b86cdc2eb13443a40b2e679b0a54ed4a256d22db"
+    },
+    {
+      "path": "transition-shapes-v1/gpu1/D256-L768.json",
+      "sha256": "917da4e444736f218eaa465299b0e1c5ec6e1b53833fb8c8291cd23b3b1d3f7f"
+    },
+    {
+      "path": "transition-shapes-v1/gpu0/D384-L384.json",
+      "sha256": "a9492762d748bb5b9dc57702d3c98756094e04cf94f532fe74027a0b3add88f4"
+    },
+    {
+      "path": "transition-shapes-v1/gpu0/D384-L768.json",
+      "sha256": "aea92d6cdef4e8c3e1cb57e2aa5e59a89cf1249189512e1a4bedb3cb9a02ec0a"
+    },
+    {
+      "path": "transition-shapes-v1/gpu1/D512-L384.json",
+      "sha256": "6c4a95005ea1029e80ab41e7f9087b1e53bbc4983c0dd92ba03c4b3f95cdfcd8"
+    },
+    {
+      "path": "transition-shapes-v1/gpu1/D512-L768.json",
+      "sha256": "bf4cb0db4928c5a6bbc2d4861a22c3162d1dba4562d17afdaec56bc765cf1940"
+    }
+  ],
+  "sanitizers": [
+    {
+      "path": "transition-sanitize-fixed/gpu0/memcheck/D128-L384.json",
+      "sha256": "631d3ccedaa5a37533400a8ea22dbf1425c3016747a0075b405a77d9517ace40",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/memcheck-D128-L384.log",
+        "sha256": "4d9ae092535263438c32bfb75f9a76ebb9f2107b71768ff7291ad493e2e96b9f"
+      }
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/memcheck/D128-L768.json",
+      "sha256": "fbe8cc50d8f363c0b9a1562ca307d563deea8d8feba538ac4a4d32b22083bf40",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/memcheck-D128-L768.log",
+        "sha256": "148940bc18d77ffd5574504ce35a713688a1210a181b036ebd7afaee85b66ebd"
+      }
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/racecheck/D128-L768.json",
+      "sha256": "fbe8cc50d8f363c0b9a1562ca307d563deea8d8feba538ac4a4d32b22083bf40",
+      "tool": "racecheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/racecheck-D128-L768.log",
+        "sha256": "d48af02ef4397c98d7358b347316b1c8280bfae94dfaf1dd2372dfba97092c33"
+      }
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/synccheck/D128-L768.json",
+      "sha256": "fbe8cc50d8f363c0b9a1562ca307d563deea8d8feba538ac4a4d32b22083bf40",
+      "tool": "synccheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/synccheck-D128-L768.log",
+        "sha256": "d2ff674b5f7b35ebe7dd5d9928d01201bc614e489bdc45aec9783ab0ccd8a60c"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/memcheck/D256-L384.json",
+      "sha256": "05f519780cf0a20b5d74c206ef1ab2086940499cd1f4afac4ab7c465ce82b63b",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize/gpu1/memcheck-D256-L384.log",
+        "sha256": "49b7587f2a18f048be2312f62e14c496c18e92a0999eacdefa9578c5e55befb4"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/memcheck/D256-L768.json",
+      "sha256": "1388ee6a5b258131a63135ec8964542d68a86efacb0439e81183ac3794c4375a",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize/gpu1/memcheck-D256-L768.log",
+        "sha256": "f42731e6c105a0882737599f71421d0c073d0101639023499612ecf611e8b863"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/race-once/D256-L768.json",
+      "sha256": "73aa5fe918d3999d5d93e5e416405099013281f9c75d706ced82eb25c03deb35",
+      "tool": "racecheck",
+      "scope": "one full F+B per save-h variant",
+      "log": {
+        "path": "transition-sanitize/gpu1/race-once-D256-L768.log",
+        "sha256": "93b38bd2b9559a4425ca94a4d16fac4b54217f757d478e594b25c8742248a4ed"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/synccheck/D256-L768.json",
+      "sha256": "69bcc6f950a9532fbe9ac4b58fa2e16fdf8525b3f2cadee2e29ed8487d344f07",
+      "tool": "synccheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize/gpu1/synccheck-D256-L768.log",
+        "sha256": "21896502343c187e2763c1295fa3b6520ba86704f6233ce46dfa51485c9349bf"
+      }
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/memcheck/D384-L384.json",
+      "sha256": "7a030a66de2ff929a96517e904863c62719b9bbfa4cb18676b422fea55369f4c",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/memcheck-D384-L384.log",
+        "sha256": "e4035b59bb5668afe656c4d2dee9aa0f7b1eb7a5fa80eac34873d9f6ab6721c9"
+      }
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/memcheck/D384-L768.json",
+      "sha256": "bfe8a58ce372e9ccd0593d67932619e9312c1c52dc5686072c7c6e3f5ceb6e1e",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/memcheck-D384-L768.log",
+        "sha256": "4849ba14c32f4786b045616d11c582c6913a7c383144c416c6fecbf0477b415b"
+      }
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/race-isolated-v2/D384-L768.json",
+      "sha256": "f6d5511455d0dfe57905eff7241c53cec5b5b85ee53254ef50fe949b5cf6d1f4",
+      "tool": "racecheck",
+      "scope": "isolated native forward, squeeze, gate and no-h gate kernels",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/race-isolated-v2-D384-L768.log",
+        "sha256": "19b4d0e79006362776c2b11f637a2f9df60c702860eaa63ee50daf8e589a96fc"
+      }
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/synccheck/D384-L768.json",
+      "sha256": "49abd443002db45c34a2ef3e8fdae02d3ac7fb5d7698692fa5744c8c73e48860",
+      "tool": "synccheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize-fixed/gpu0/synccheck-D384-L768.log",
+        "sha256": "8c40b6fe3c9c9061d8a8fd821b964dda9ad258766a2a3b86a5445884b6bb03b4"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/memcheck/D512-L384.json",
+      "sha256": "1da30baf09ec06cc902a949c851a82593e6d4538cf8c5c0bda4d0dd61b13856d",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize/gpu1/memcheck-D512-L384.log",
+        "sha256": "ed2f264df4fb5717562814c2c7f6a62b75bee7353502819c99701cc97d371bbb"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/memcheck/D512-L768.json",
+      "sha256": "b8e2617d2a27bf676079bb9d2f7e3adb336da171042da32373f6ec78917a1c91",
+      "tool": "memcheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize/gpu1/memcheck-D512-L768.log",
+        "sha256": "a74637846a03a1c668a4075a21cfeafe24f11755a8537438ca9718783dfdb6e3"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/race-isolated-v2/D512-L768.json",
+      "sha256": "54acea46cc60b6a1c536a480d710db3a8c16fb22331030aad3238579245c8803",
+      "tool": "racecheck",
+      "scope": "isolated native forward, squeeze, gate and no-h gate kernels",
+      "log": {
+        "path": "transition-sanitize/gpu1/race-isolated-v2-D512-L768.log",
+        "sha256": "6247ce991cc569af5e96af72adb26b6783c47b03289feb31409ff23c38d1cb0f"
+      }
+    },
+    {
+      "path": "transition-sanitize/gpu1/synccheck/D512-L768.json",
+      "sha256": "b256401bde7b2d14118e311c13d58287e0235828f11cd987b1647d2eff8d8aff",
+      "tool": "synccheck",
+      "scope": "forward + input and all parameter gradients",
+      "log": {
+        "path": "transition-sanitize/gpu1/synccheck-D512-L768.log",
+        "sha256": "01224e3d1c24f850c7543c101cda428495a835cc92ac1aa633b5135b2d3e1192"
+      }
+    }
+  ],
+  "pytest": [
+    {
+      "path": "transition-tests-gpu0.xml",
+      "sha256": "c0195320367ee13f14c391463d91d0a620a5da0ebe5307c38519cccf45076458",
+      "tests": 22
+    },
+    {
+      "path": "transition-tests-gpu1.xml",
+      "sha256": "ca4f8213f476efa7790647b100bd8036215c5154909acdcf8e0bd5be2cdd07ed",
+      "tests": 16
+    },
+    {
+      "path": "transition-tests-d128-fixed.xml",
+      "sha256": "b66a4c1d6859b3ae70ee165835e8056e1e5a0ba3222accebc9b126f3ae59f3d3",
+      "tests": 13
+    }
+  ],
+  "before_after": [
+    {
+      "path": "transition-d128-fix-paired/D128-L384.json",
+      "sha256": "cb9d0e06d793c895e6766069eb91955f0319e845fa6beb34b8dbcd8b4c6894c7"
+    },
+    {
+      "path": "transition-d128-fix-paired/D128-L768.json",
+      "sha256": "1794fef5607a8ed0520d44930aac8ca16002be7fcc09f60e73bc61d4cb9063c9"
+    }
+  ],
+  "complete": true,
+  "limits": [
+    "D384/512 racecheck is isolated handwritten CUDA kernels at L768. Full-module filtered racecheck hit Internal Sanitizer Error followed by CUBLAS_STATUS_EXECUTION_FAILED; it is not qualified. Unfiltered memcheck/synccheck and ordinary full-gradient/graph checks passed."
+  ],
+  "retained_failures": [
+    {
+      "path": "transition-sanitize/gpu0/racecheck-D128-L768.log",
+      "sha256": "5b1af7034fa690bb8ea822a44710eada76c4d88788c214ebb5132fbc68db19ea"
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/race-native-D384-L768.log",
+      "sha256": "edb5f384e4431742ce3ab0466dc9994ff28c86568030f77a87b8769a6b145df1"
+    },
+    {
+      "path": "transition-sanitize-fixed/gpu0/race-old-D384-L768.log",
+      "sha256": "edb5f384e4431742ce3ab0466dc9994ff28c86568030f77a87b8769a6b145df1"
+    },
+    {
+      "path": "transition-sanitize/gpu1/race-native-D512-L768.log",
+      "sha256": "3e9c2c4be71e5323f9b6573b8807924799524ef773f570d8f4df5827bbf092c6"
+    }
+  ]
+}

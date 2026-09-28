@@ -125,3 +125,8 @@ src/miniworld_engine/autotune/data/.merge.lock
 
 # Local H100 wiring validation build products
 /verdicts/h100-jit/
+
+# Portable Vast large-D experiment harness and handoff.
+!experiments/trimul_large_d_vast/
+!experiments/transition_shapes_vast/
+!experiments/transition_wide_fusion/
