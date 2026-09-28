@@ -269,12 +269,6 @@ def record(unit: DeriveUnit, cases: dict) -> tuple[list, str | None]:
     compute = getattr(torch, unit.compute) if unit.compute else None
     sink: list = []
     install_recorder(sink)
-    # FakeTensor data pointers are all zero; never reuse another unit's folded weights.
-    import sys
-    inference = sys.modules.get("miniworld_engine.kernels.adaln.triton.inference")
-    if inference is not None:
-        inference._LNFOLD_CACHE.clear()
-
     # A ShapeEnv, so a data-dependent shape becomes an unbacked symint instead of an exception.
     # Without one, `aten.nonzero` raises DynamicOutputShapeException and takes the WHOLE module
     # down: SWA packs its varlen batch with a nonzero over the valid mask, so every swa unit died
@@ -378,6 +372,18 @@ def install_native_recorders() -> None:
             ("kernels.trimul_inproj.cuda.h100_training", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
             ("kernels.trimul_inproj.cuda.h100_single", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
             ("kernels.trimul_inproj.cuda.h100_inference", (("inference", "_inference_fake"),)),
+            ("kernels.trimul_inproj.cuda.h100_d64_training", (("forward", "_forward_fake"), ("backward", "_backward_fake"),
+                                                              ("forward_nograd", "_forward_nograd_fake"))),
+            ("kernels.trimul_inproj.cuda.h100_wide_inference", (("wide_inference", "_wide_inference_fake"),)),
+            ("kernels.trimul_inproj.cuda.h100_uni_wide_inference", (("uni_wide_inference", "_uni_wide_inference_fake"),)),
+            # TriangleAttention's prebuilt extensions (their opaque wrappers run eagerly here).
+            ("kernels.triangle_attention.cuda", (("_dgrad", "_fake"),)),
+            ("kernels.triangle_attention.cuda.ln_backward", (("_backward", "_fake"),)),
+            ("kernels.triangle_attention.cuda.wgrad_backward", (("_backward", "_fake"),)),
+            ("kernels.triangle_attention.cuda.gate_backward", (("gate_backward", "_gate_fake"),)),
+            ("kernels.triangle_attention.cuda.q_projection_attention", (("native", "_fake"),)),
+            ("kernels.triangle_attention.cuda.qg_projection_attention", (("native", "_fake"),)),
+            ("kernels.triangle_attention.cuda.qkv_projection_attention", (("native", "_fake"),)),
         )
 
         def native_contract(fake, selector=None):
@@ -394,6 +400,30 @@ def install_native_recorders() -> None:
             for entry, fake in functions:
                 selector = getattr(module, "_select_config", None) if module_name.endswith("h100_inference") else None
                 setattr(module, entry, native_contract(getattr(module, fake), selector))
+
+        # TriangleAttention leaf extension calls without a fake of their own. Shapes and dtypes
+        # mirror training_forward.cu / bias_fusion.cu / dq.cu: BF16 [1,L,L,128] buffers viewed
+        # as (1,4,L,L,32) projection layout, FP32 logsumexp, BF16 bias gradient.
+        from miniworld_engine.kernels.triangle_attention.cuda import (
+            bias_backward as tri_bias,
+        )
+        from miniworld_engine.kernels.triangle_attention.cuda import (
+            dq_backward as tri_dq,
+        )
+        from miniworld_engine.kernels.triangle_attention.cuda import (
+            training_forward as tri_fwd,
+        )
+
+        def projection_like(q):
+            require_fake(q)
+            L = q.shape[2]
+            return q.new_empty((1, L, L, 128)).view(1, L, L, 4, 32).permute(0, 3, 1, 2, 4)
+
+        tri_fwd.forward = lambda q, k, v, b: (
+            projection_like(q), q.new_empty((1, 4, q.shape[2], q.shape[2]), dtype=torch.float32))
+        tri_bias.native_backward = lambda q, k, v, b, m, delta, dy: (
+            projection_like(q), projection_like(q), torch.empty_like(b))
+        tri_dq.backward = lambda q, k, v, b, m, delta, dy: projection_like(q)
 
     class TransitionExtension:
         def transition_b2b_fwd(self, x, rstd, c1, g, beta, wa, wb, ws, residual=True):
