@@ -1,0 +1,14 @@
+{
+  "baseline-L384.json": {
+    "sha256": "719b8257b68fc40852e940c2ecf59d76775eb509663be69eb3e35a47f0ef5c95",
+    "script_sha256": "f577fb9f67a55c8994500e0da00dd58b72d1e5020ec0525758bc0832348318d9",
+    "source_files": 73,
+    "local_source_mismatches": []
+  },
+  "baseline-L768.json": {
+    "sha256": "d0f095dd4056a359a0de7e1f49afce0fb62fdf32cbad759ac4e909651b15bfe3",
+    "script_sha256": "f577fb9f67a55c8994500e0da00dd58b72d1e5020ec0525758bc0832348318d9",
+    "source_files": 73,
+    "local_source_mismatches": []
+  }
+}

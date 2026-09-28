@@ -1,0 +1,24 @@
+ninja: no work to do.
+PASS {'kind': 'none', 'magnitude': 1, 'old_fp64_rel': 0.002388400311578944, 'new_fp64_rel': 0.0029098155142566677, 'incremental_rel': 0.0026232909737797555, 'dkdv_bitwise': True, 'max_db': 29.125}
+PASS {'kind': 'none', 'magnitude': 65536, 'old_fp64_rel': 0.0023678006572645893, 'new_fp64_rel': 0.002890369556842601, 'incremental_rel': 0.0026964976363999344, 'dkdv_bitwise': True, 'max_db': 2179072.0}
+PASS {'kind': 'mixed', 'magnitude': 1, 'old_fp64_rel': 0.002363567223978794, 'new_fp64_rel': 0.0028837295993663567, 'incremental_rel': 0.002649118834361613, 'dkdv_bitwise': True, 'max_db': 28.25}
+PASS {'kind': 'mixed', 'magnitude': 65536, 'old_fp64_rel': 0.0023686497471208973, 'new_fp64_rel': 0.0028836581578751473, 'incremental_rel': 0.002657839766712512, 'dkdv_bitwise': True, 'max_db': 1949696.0}
+PASS {'kind': 'one_key', 'magnitude': 1, 'old_fp64_rel': 1.414560137070596e+26, 'new_fp64_rel': 1.414560137070596e+26, 'incremental_rel': 0.0, 'dkdv_bitwise': True, 'max_db': 2.7060508728027344e-05}
+PASS {'kind': 'one_key', 'magnitude': 65536, 'old_fp64_rel': 9.328578918761136e+30, 'new_fp64_rel': 9.328565628660839e+30, 'incremental_rel': 0.0002093700462856116, 'dkdv_bitwise': True, 'max_db': 1.625}
+PASS {'kind': 'all_masked', 'magnitude': 1, 'old_fp64_rel': 0.0, 'new_fp64_rel': 0.0, 'incremental_rel': 0.0, 'dkdv_bitwise': True, 'max_db': 0.0}
+PASS {'kind': 'all_masked', 'magnitude': 65536, 'old_fp64_rel': 0.0, 'new_fp64_rel': 0.0, 'incremental_rel': 0.0, 'dkdv_bitwise': True, 'max_db': 0.0}
+PASS {'kind': 'zero', 'magnitude': 1, 'old_fp64_rel': 0.0, 'new_fp64_rel': 0.0, 'incremental_rel': 0.0, 'dkdv_bitwise': True, 'max_db': 0.0}
+PASS {'kind': 'zero', 'magnitude': 65536, 'old_fp64_rel': 0.0, 'new_fp64_rel': 0.0, 'incremental_rel': 0.0, 'dkdv_bitwise': True, 'max_db': 0.0}
+ninja: no work to do.
+BUILD 384 True engine
+/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+READY 384 True engine
+BUILD 384 True compact
+READY 384 True compact
+TIMES 384 True {'engine': 1.2324000000953674, 'compact': 1.2103999853134155}
+BUILD 384 False engine
+READY 384 False engine
+BUILD 384 False compact
+READY 384 False compact
+TIMES 384 False {'engine': 1.254319965839386, 'compact': 1.2311680316925049}

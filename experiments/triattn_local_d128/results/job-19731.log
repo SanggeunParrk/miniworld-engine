@@ -1,0 +1,38 @@
+[1/2] /usr/local/cuda-12.9/bin/nvcc --generate-dependencies-with-compile --dependency-output bias_compact.cuda.o.d -DTORCH_EXTENSION_NAME=triattn_d128_compact -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine/experiments/triattn_local_d128 -I/home/psk6950/MiniWorld/runs/anthropic_adoption_20260919/cutlass-4.2/include -isystem /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/include -isystem /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-12.9/include -isystem /home/psk6950/MiniWorld/.pixi/envs/cu128/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_90a,code=sm_90a --compiler-options '-fPIC' -O3 --objdir-as-tempdir -std=c++17 --expt-relaxed-constexpr --expt-extended-lambda -lineinfo -Xptxas=-v -c /home/psk6950/miniworld-engine/experiments/triattn_local_d128/bias_compact.cu -o bias_compact.cuda.o 
+/home/psk6950/miniworld-engine/experiments/triattn_local_d128/bias_compact.cu(231): warning #177-D: variable "row" was declared but never referenced
+        int r=wg*C::RP+rr,row=group*R+r;
+                          ^
+          detected during instantiation of "std::vector<at::Tensor, std::allocator<at::Tensor>> launch<R>(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) [with R=8]" at line 404
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : 30 bytes gmem
+ptxas info    : Compiling entry function '_Z20grouped_dkdv_compactILi8EEvN6ConfigIXT_EE6ParamsE' for 'sm_90a'
+ptxas info    : Function properties for _Z20grouped_dkdv_compactILi8EEvN6ConfigIXT_EE6ParamsE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 16 barriers
+ptxas info    : Compile time = 150.104 ms
+ptxas info    : Compiling entry function '_Z17reduce_bias_smallPKN7cutlass10bfloat16_tEPS0_ii' for 'sm_90a'
+ptxas info    : Function properties for _Z17reduce_bias_smallPKN7cutlass10bfloat16_tEPS0_ii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+ptxas info    : Compile time = 11.046 ms
+ptxas info    : Compiling entry function '_Z11reduce_biasPKN7cutlass10bfloat16_tEPS0_ii' for 'sm_90a'
+ptxas info    : Function properties for _Z11reduce_biasPKN7cutlass10bfloat16_tEPS0_ii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+ptxas info    : Compile time = 13.614 ms
+[2/2] c++ bias_compact.cuda.o -shared -L/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda-12.9/lib64 -lcudart -o triattn_d128_compact.so
+ninja: no work to do.
+BUILD 768 True engine
+/home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+READY 768 True engine
+BUILD 768 True compact
+READY 768 True compact
+TIMES 768 True {'engine': 6.58951997756958, 'compact': 6.470704078674316}
+BUILD 768 False engine
+READY 768 False engine
+BUILD 768 False compact
+READY 768 False compact
+TIMES 768 False {'engine': 6.735584020614624, 'compact': 6.604304075241089}

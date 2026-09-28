@@ -1,0 +1,1228 @@
+{
+  "followup-L384.json": {
+    "complete": false,
+    "count": 1,
+    "statuses": {
+      "pending": 1
+    },
+    "execution_status": "terminated_by_owner",
+    "sha256": "21e9fb94beb297d8d548cf945955f1d120fb89b67d8dc16f7f509c479c8833ee",
+    "best": []
+  },
+  "isolated-b1-joint-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "0ed39873cc99685b2f08cb1b099bf2abe267e54b56b0e64ad688bf37e1b5c456",
+    "best": [
+      {
+        "label": "b1-joint",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 2,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 128,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 8,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 12,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "b1-joint"
+        },
+        "speedup": 0.9997960914548235,
+        "baseline_us": 1019.6639895439148,
+        "candidate_us": 1019.8719501495361
+      }
+    ]
+  },
+  "isolated-b1-joint-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "1c3b8389c98394338457cb0cb5942ea0d2dc2b8d38ba9e4bb204c8c8eb3cd5b3",
+    "best": [
+      {
+        "label": "b1-joint",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 2,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 128,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 8,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 12,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "b1-joint"
+        },
+        "speedup": 0.99852629756991,
+        "baseline_us": 4043.759822845459,
+        "candidate_us": 4049.7279167175293
+      }
+    ]
+  },
+  "isolated-mode53-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "b195de4530dae9ab15f6d8156d7819f3ec28eddfe6b38e2c9219794f0e540199",
+    "best": [
+      {
+        "label": "mode53",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 32,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 12,
+            "clusters": 10,
+            "mode": 53
+          },
+          "label": "mode53"
+        },
+        "speedup": 0.999624686121776,
+        "baseline_us": 1022.6880311965942,
+        "candidate_us": 1023.0720043182373
+      }
+    ]
+  },
+  "isolated-mode53-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "98c55e80347864c356a2b45330f267051c2f36ff4886b301df904fb68ff8a72b",
+    "best": [
+      {
+        "label": "mode53",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 12,
+            "clusters": 10,
+            "mode": 53
+          },
+          "label": "mode53"
+        },
+        "speedup": 0.9989107800254278,
+        "baseline_us": 3873.728036880493,
+        "candidate_us": 3877.951979637146
+      }
+    ]
+  },
+  "isolated-mode54-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "numeric_reject": 1
+    },
+    "execution_status": 0,
+    "sha256": "03a16026fb94ad0fa4f180f1ae0f0a623d71ea3bb51bae5cd05a44be58bf9082",
+    "best": []
+  },
+  "isolated-mode54-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "numeric_reject": 1
+    },
+    "execution_status": 0,
+    "sha256": "4afb855b004c7c32239400f2cff407df5af6529d0a9bd3fbacdff54cf247319b",
+    "best": []
+  },
+  "isolated-mode55-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "numeric_reject": 1
+    },
+    "execution_status": 0,
+    "sha256": "25b9bee58055aa6ecd35260d1cc7762efebe02a7acb2730c6fd80b5cd6b7127a",
+    "best": []
+  },
+  "isolated-mode55-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "numeric_reject": 1
+    },
+    "execution_status": 0,
+    "sha256": "57e508fbadced1c15378ea356ee2fcd1bcac3a12abf0d6e7d580c1b0df7b46f5",
+    "best": []
+  },
+  "isolated-mode60-L384.json": {
+    "complete": false,
+    "count": 1,
+    "statuses": {
+      "pending": 1
+    },
+    "execution_status": "timeout",
+    "sha256": "68f8ee0ee3c3be02c310099e56702c52d497ccb128d6ced76d42257435ee4e8f",
+    "best": []
+  },
+  "isolated-mode60-L768.json": {
+    "complete": false,
+    "count": 1,
+    "statuses": {
+      "pending": 1
+    },
+    "execution_status": "timeout",
+    "sha256": "84a5967c1210dce34c2201f14aeef80ac63ce1fa3a21682e032e4c217e5fa4e6",
+    "best": []
+  },
+  "isolated-rings10-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "28f77a2d4e87c2fbbc9326b31eac80098f9fdefa5fe6e49b7d92f6e881f3f99e",
+    "best": [
+      {
+        "label": "rings10",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 32,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 10,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "rings10"
+        },
+        "speedup": 0.9958717827427809,
+        "baseline_us": 1022.8320360183716,
+        "candidate_us": 1027.072012424469
+      }
+    ]
+  },
+  "isolated-rings10-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "70310ad9bb04b3a173158841aa5b6fe30463d2381783126e9976bc17b4c2dc44",
+    "best": [
+      {
+        "label": "rings10",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 10,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "rings10"
+        },
+        "speedup": 0.9964422571104591,
+        "baseline_us": 4064.4960403442383,
+        "candidate_us": 4079.008102416992
+      }
+    ]
+  },
+  "isolated-rings14-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "a614012957870f75d42207faf0591b7e70117fec75f636cf0e257605e6476abb",
+    "best": [
+      {
+        "label": "rings14",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 32,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 14,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "rings14"
+        },
+        "speedup": 0.989985289997724,
+        "baseline_us": 1021.7440128326416,
+        "candidate_us": 1032.0799946784973
+      }
+    ]
+  },
+  "isolated-rings14-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "aa1960e149a2a240375d4c8400c213f64086d78728d5d85b8370310f47c87e1c",
+    "best": [
+      {
+        "label": "rings14",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 14,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "rings14"
+        },
+        "speedup": 0.9945401432211416,
+        "baseline_us": 4077.3441791534424,
+        "candidate_us": 4099.728107452393
+      }
+    ]
+  },
+  "isolated-rings20-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "62e1f5034e2eb2468aa71d78f7cf50a8250b4096e610d6b16f368482e7ab2016",
+    "best": [
+      {
+        "label": "rings20",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 32,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 20,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "rings20"
+        },
+        "speedup": 0.9746150121341248,
+        "baseline_us": 1019.7280049324036,
+        "candidate_us": 1046.288013458252
+      }
+    ]
+  },
+  "isolated-rings20-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": 0,
+    "sha256": "25a27e46777b72a68326e1f6349c8f6eabe55e4ef78939fe9058cc25ece072b4",
+    "best": [
+      {
+        "label": "rings20",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 20,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "rings20"
+        },
+        "speedup": 0.977528135465707,
+        "baseline_us": 4079.263925552368,
+        "candidate_us": 4173.03991317749
+      }
+    ]
+  },
+  "repeat-L384.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": null,
+    "sha256": "1c15f60c67d9a2ebc8b5feb54c9aeb17a0e27cbc9938e4c479d0af6d09ee9c87",
+    "best": [
+      {
+        "label": "store128",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 128,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 12,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "store128"
+        },
+        "speedup": 0.9993588574883546,
+        "baseline_us": 1022.6239562034607,
+        "candidate_us": 1023.2800245285034
+      }
+    ]
+  },
+  "repeat-L768.json": {
+    "complete": true,
+    "count": 1,
+    "statuses": {
+      "measured": 1
+    },
+    "execution_status": null,
+    "sha256": "2515ecbf1c8595ee2afd002216f46fc0e3440508d4fa6fb4bad0aaf157077e58",
+    "best": [
+      {
+        "label": "store128",
+        "config": {
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 128,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 12,
+            "clusters": 10,
+            "mode": 52
+          },
+          "label": "store128"
+        },
+        "speedup": 0.9981730227700363,
+        "baseline_us": 4065.039873123169,
+        "candidate_us": 4072.4802017211914
+      }
+    ]
+  },
+  "search-L384.json": {
+    "complete": true,
+    "count": 51,
+    "statuses": {
+      "measured": 51
+    },
+    "execution_status": null,
+    "sha256": "3f1afd4b40eac9f37e1f9a3b50e2d131d0e27ec397a049c3162b6f3de8135612",
+    "best": [
+      {
+        "label": "B1_DTRI_STORE_C-128",
+        "config": {
+          "label": "B1_DTRI_STORE_C-128",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 128,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          }
+        },
+        "speedup": 1.0002511872031261,
+        "baseline_us": 1019.4239616394043,
+        "candidate_us": 1019.167959690094
+      },
+      {
+        "label": "B1_TMA_PRIORITY-1",
+        "config": {
+          "label": "B1_TMA_PRIORITY-1",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 32,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 1,
+              "B1_GATE_DEMOTE": 3
+            }
+          }
+        },
+        "speedup": 0.9996992594884073,
+        "baseline_us": 1010.479986667633,
+        "candidate_us": 1010.7839703559875
+      },
+      {
+        "label": "B1_TMA_PRIORITY-3",
+        "config": {
+          "label": "B1_TMA_PRIORITY-3",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 32,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 3,
+              "B1_GATE_DEMOTE": 3
+            }
+          }
+        },
+        "speedup": 0.9984768790627819,
+        "baseline_us": 1017.3600316047668,
+        "candidate_us": 1018.9119577407837
+      },
+      {
+        "label": "B1_DTRI_STORE_C-64",
+        "config": {
+          "label": "B1_DTRI_STORE_C-64",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 3
+            }
+          }
+        },
+        "speedup": 0.9982830050597921,
+        "baseline_us": 1013.9679908752441,
+        "candidate_us": 1015.7119631767273
+      },
+      {
+        "label": "B1_TMA_PRIORITY-6",
+        "config": {
+          "label": "B1_TMA_PRIORITY-6",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 4,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 32,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 6,
+              "B1_GATE_DEMOTE": 3
+            }
+          }
+        },
+        "speedup": 0.9982376502159194,
+        "baseline_us": 1015.0399804115295,
+        "candidate_us": 1016.8319940567017
+      }
+    ]
+  },
+  "search-L768.json": {
+    "complete": true,
+    "count": 51,
+    "statuses": {
+      "measured": 51
+    },
+    "execution_status": null,
+    "sha256": "1914c6990c75613585361e14e7afaceeaeb31acf9af37b07eb798f9cf57d7ea4",
+    "best": [
+      {
+        "label": "B1_DTRI_STORE_C-128",
+        "config": {
+          "label": "B1_DTRI_STORE_C-128",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 128,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          }
+        },
+        "speedup": 1.001910771033807,
+        "baseline_us": 4001.840114593506,
+        "candidate_us": 3994.2080974578857
+      },
+      {
+        "label": "B1_STREAM_AFFINE_UNROLL-2",
+        "config": {
+          "label": "B1_STREAM_AFFINE_UNROLL-2",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 2,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          }
+        },
+        "speedup": 1.0013773749246406,
+        "baseline_us": 4001.5199184417725,
+        "candidate_us": 3996.0159063339233
+      },
+      {
+        "label": "B1_PARAM_UNROLL-8",
+        "config": {
+          "label": "B1_PARAM_UNROLL-8",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 8,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          }
+        },
+        "speedup": 1.0013621513789148,
+        "baseline_us": 3999.119997024536,
+        "candidate_us": 3993.680000305176
+      },
+      {
+        "label": "baseline",
+        "config": {
+          "label": "baseline",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 2,
+              "B1_GATE_DEMOTE": 1
+            }
+          },
+          "b7": {
+            "consumers": 10,
+            "rings": 12,
+            "clusters": 10,
+            "mode": 52
+          }
+        },
+        "speedup": 1.0002901474494872,
+        "baseline_us": 3971.6800451278687,
+        "candidate_us": 3970.52800655365
+      },
+      {
+        "label": "B1_TMA_PRIORITY-1",
+        "config": {
+          "label": "B1_TMA_PRIORITY-1",
+          "b1": {
+            "count": 132,
+            "part": 2,
+            "defines": {
+              "GATE_PHASE": 1,
+              "LOWREG": 1,
+              "STREAM_LN": 1,
+              "B1_STREAM_AFFINE_UNROLL": 8,
+              "XHAT_FP32": -1,
+              "B1_DIRECT_DP": 1,
+              "B1_NO_REDUNDANT_SYNC": 1,
+              "PAIR_WP": 1,
+              "B1_EARLY_RAW": 1,
+              "B1_PREFETCH_DY": 0,
+              "B1_SPLIT_DN": 1,
+              "B1_AFFINE_BOTH": 1,
+              "B1_DTRI_STORE_C": 64,
+              "B1_DN_PAIR": 1,
+              "B1_DN_REG": 1,
+              "B1_REG_EARLY_RAW": 1,
+              "B1_PARAM_SHARED": 1,
+              "B1_PARAM_UNROLL": 4,
+              "B1_DTRI_ASYNC_EPI": 1,
+              "B1_LOCAL_GATE": 1,
+              "B1_ASYNC_WP_DN": 0,
+              "B1_DEFER_DG_STORE": 1,
+              "B1_WG_PARAM_SYNC": 0,
+              "B1_SKIP_FINAL_GROUP_SYNC": 1,
+              "B1_LATE_WEIGHT": 3,
+              "B1_TMA_PRIORITY": 1,
+              "B1_GATE_DEMOTE": 1
+            }
+          }
+        },
+        "speedup": 0.999665709854517,
+        "baseline_us": 3971.5999364852905,
+        "candidate_us": 3972.928047180176
+      }
+    ]
+  }
+}

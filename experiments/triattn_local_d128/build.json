@@ -1,0 +1,12 @@
+{
+  "torch": "2.10.0+cu128",
+  "binary": "/home/psk6950/miniworld-engine/experiments/triattn_local_d128/build/triattn_d128_compact.so",
+  "smem": [
+    175104
+  ],
+  "files": {
+    "/home/psk6950/miniworld-engine/experiments/triattn_local_d128/bias_compact.cu": "298de21eb851e2c53727f071d8a8f6c5bf7f686c8ea178b6b8a7659d95b96896",
+    "/home/psk6950/miniworld-engine/experiments/triattn_local_d128/fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
+    "/home/psk6950/miniworld-engine/experiments/triattn_local_d128/build/triattn_d128_compact.so": "a8717394add8b3fe9ff0bd2e8d956096ef9cbe2b86271d0b47fb2d3883b2565a"
+  }
+}

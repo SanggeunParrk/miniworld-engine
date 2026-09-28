@@ -1,0 +1,14 @@
+{
+  "complete": true,
+  "rows": [
+    {
+      "kind": "mixed",
+      "magnitude": 1,
+      "old_fp64_rel": 0.002347676642496438,
+      "new_fp64_rel": 0.0028754533609693968,
+      "incremental_rel": 0.0025785113837676634,
+      "dkdv_bitwise": true,
+      "max_db": 24.125
+    }
+  ]
+}
