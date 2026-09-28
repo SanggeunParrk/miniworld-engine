@@ -14,7 +14,7 @@ blob and SHA-256 of every imported file; [INVENTORY.md](../../third_party/anthro
 lists source files containing GPU-kernel syntax, including variants and test
 sources. This source inventory does not mean every file has been executed.
 
-`scripts/anthropic/import_anthropic.py CHECKOUT third_party/anthropic` verifies the pinned
+`miniworld-engine dev import-anthropic CHECKOUT third_party/anthropic` verifies the pinned
 revision and original bytes before copying. Do not rerun it over a runtime tree
 containing local builds without preserving those build artifacts first.
 Compiled binaries are local artifacts, excluded from Git. On another stack,
@@ -122,12 +122,12 @@ Results and limitations: the H100 campaign report, `archive/docs-20260928:docs/a
 For reproducible qualification (set PYTHONPATH and runtime paths for your stack):
 
 ```bash
-python scripts/anthropic/bench_anthropic.py --family trimul --length 384 --width 128 \
+python benchmarks/runners/bench_anthropic.py --family trimul --length 384 --width 128 \
   --row native_rebuilt --output /tmp/adoption/results/trimul.json
-python scripts/anthropic/bench_anthropic.py --family triattn --module --length 768 \
+python benchmarks/runners/bench_anthropic.py --family triattn --module --length 768 \
   --row block:triattn_native --output /tmp/adoption/results/attention.json
-python scripts/anthropic/profile_anthropic.py --run-dir /tmp/adoption --lanes 1 --only trimul
-python scripts/anthropic/profile_anthropic.py --run-dir /tmp/adoption --lanes 1 --only triattn --modules
+python benchmarks/runners/profile_anthropic.py --run-dir /tmp/adoption --lanes 1 --only trimul
+python benchmarks/runners/profile_anthropic.py --run-dir /tmp/adoption --lanes 1 --only triattn --modules
 ```
 
 Gather attention's `ensure_sorted=True` performs a host boolean check of GPU

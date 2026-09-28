@@ -1219,6 +1219,26 @@ def cmd_buckets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_anthropic(args: argparse.Namespace) -> int:
+    """`dev import-anthropic`: see ``tools/import_anthropic.py``."""
+    from miniworld_engine.tools import import_anthropic
+    import_anthropic.main([args.source, args.destination])
+    return 0
+
+
+def cmd_make_default_configs(args: argparse.Namespace) -> int:
+    """`dev make-default-configs`: see ``tools/make_default_configs.py``."""
+    from miniworld_engine.tools import make_default_configs
+    make_default_configs.generate()
+    return 0
+
+
+def cmd_audit_thresholds(args: argparse.Namespace) -> int:
+    """`dev audit-thresholds`: see ``tools/audit_thresholds.py``."""
+    from miniworld_engine.tools import audit_thresholds
+    return audit_thresholds.main()
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """Is the built cache exactly what `registry_kernel.csv` says it should be?
 
@@ -1893,6 +1913,23 @@ def build_parser() -> argparse.ArgumentParser:
     cov.add_argument("--gpu", default="NVIDIA RTX A6000 (sm86)",
                      help="cache key of the card whose entries to check")
     cov.set_defaults(func=cmd_coverage)
+
+    imp = dev.add_parser("import-anthropic",
+                         help="import the pinned Anthropic release into third_party/anthropic with its "
+                              "attribution and file inventory (compute node)")
+    imp.add_argument("source", help="checkout of the pinned upstream revision")
+    imp.add_argument("destination", help="usually third_party/anthropic")
+    imp.set_defaults(func=cmd_import_anthropic)
+
+    mdc = dev.add_parser("make-default-configs",
+                         help="regenerate autotune/configs/default from the global grid domains "
+                              "(edits default/ only)")
+    mdc.set_defaults(func=cmd_make_default_configs)
+
+    thr = dev.add_parser("audit-thresholds",
+                         help="list numeric literals that decide dispatch in kernel launchers "
+                              "(input for docs/kernels/thresholds.md)")
+    thr.set_defaults(func=cmd_audit_thresholds)
 
     der = dev.add_parser("derive",
                          help="derive registry_kernel.csv from registry_module.csv by running the "

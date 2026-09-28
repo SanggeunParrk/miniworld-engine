@@ -51,7 +51,7 @@ GPU qualification of this release is pending.
   `kernels/registry/`; A/B config sets to `autotune/configs/ab/` (short names such as `blk16`
   still resolve); docs regrouped into `status/` (per-GPU completion, maintainer-judged),
   `gpus/` (per-cluster how-to), `getting-started/`, `autotune/`, `benchmarks/`, `standards/`,
-  with dated reports and development notes under `records/`; one root `AGENTS.md`.
+  with dated reports and development notes under `records/`; agent rules in `.claude/CLAUDE.md`; `scripts/` folded into `miniworld-engine dev` commands (`tools/`) and `benchmarks/runners/`, unused bring-up scripts at tag `archive/scripts-20260928`.
 - Bidirectional TriMul H100 training at D256/384/512 (L384/768) is a new flattened hand-CUDA +
   cuBLASLt port of the qualified large-width research plans (`h100_wide_training`, 29 frozen
   kernels in `h100_sources/wide_train`): 1.44-1.62x the Triton path in paired CUDA-graph fwd+bwd

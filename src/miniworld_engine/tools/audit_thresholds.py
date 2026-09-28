@@ -1,8 +1,8 @@
 """Find every numeric literal that decides something in a kernel launcher.
 
-Regenerates the table in `docs/kernels/thresholds.md`. Run from the repo root:
+Regenerates the table in `docs/kernels/thresholds.md`:
 
-    python scripts/audit/audit_thresholds.py
+    miniworld-engine dev audit-thresholds
 
 Comparisons INSIDE a ``@triton.jit`` body are skipped: there a constexpr comparison is
 tile algebra, not policy. Values under 8, and 0/1/2/-1/100/1000, are skipped as noise.
@@ -14,7 +14,7 @@ import json
 import pathlib
 import sys
 
-ROOT = pathlib.Path("src/miniworld_engine/kernels")
+ROOT = pathlib.Path(__file__).resolve().parents[1] / "kernels"
 SKIP = {0, 1, 2, -1, 100, 1000}
 
 class Finder(ast.NodeVisitor):
@@ -35,14 +35,21 @@ class Finder(ast.NodeVisitor):
                                       ast.unparse(node)))
         self.generic_visit(node)
 
-rows = []
-for path in sorted(ROOT.rglob("*.py")):
-    rel = str(path.relative_to(ROOT))
-    try:
-        tree = ast.parse(path.read_text())
-    except SyntaxError:
-        continue
-    f = Finder(path.read_text(), rel); f.visit(tree)
-    rows.extend(f.hits)
-print(json.dumps(rows, indent=0))
-print(len(rows), file=sys.stderr)
+
+def main(argv=None):
+    rows = []
+    for path in sorted(ROOT.rglob("*.py")):
+        rel = str(path.relative_to(ROOT))
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        f = Finder(path.read_text(), rel); f.visit(tree)
+        rows.extend(f.hits)
+    print(json.dumps(rows, indent=0))
+    print(len(rows), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    main()

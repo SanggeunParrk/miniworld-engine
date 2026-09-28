@@ -1,13 +1,13 @@
 """Generate initial v2.1 per-kernel defaults from the retained global domains.
 
-Run on a compute node. This edits ONLY configs/default, never configs/grid or
+Run on a compute node (`miniworld-engine dev make-default-configs`). This edits ONLY configs/default, never configs/grid or
 measured caches. The result is a starting search space, not a tuning result.
 """
 import csv
 import itertools
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1] / "src/miniworld_engine/autotune/configs"
+ROOT = Path(__file__).resolve().parents[1] / "autotune" / "configs"
 
 
 def preference(axis):
@@ -64,7 +64,7 @@ def generate():
             combos.extend(itertools.product(*(d[:2] for d in domains)))
             selected, seen = [], set()
             for combo in combos:
-                values = dict(zip(names, combo))
+                values = dict(zip(names, combo, strict=False))
                 tiles = [v for k, v in values.items() if k.startswith("BLOCK")]
                 product = 1
                 for value in tiles:

@@ -3,7 +3,7 @@
 Derived, not hand-written. An AST pass over `src/miniworld_engine/kernels/**` collects numeric
 literals appearing in comparisons **outside** `@triton.jit` bodies — inside a kernel a constexpr
 comparison is tile algebra, not policy. 0/1/2/-1 and anything under 8 are skipped, as are 100
-and 1000. Script: [`audit_thresholds.py`](../../scripts/audit/audit_thresholds.py), run from the repo root.
+and 1000. Regenerate with `miniworld-engine dev audit-thresholds` ([source](../../src/miniworld_engine/tools/audit_thresholds.py)).
 
 **48 sites.** The audit was looking for numbers that route work without saying why. Most of these
 turn out not to be that. Three were. Two of those turned out to be documented

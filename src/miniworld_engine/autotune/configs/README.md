@@ -15,6 +15,6 @@ space after source/environment/key, global-domain and resource validation. A mis
 still searches the compact default set. Custom directories use only their own
 declared candidates.
 
-`scripts/make_default_configs.py` generates the initial compact declarations. Review
+`miniworld-engine dev make-default-configs` (`tools/make_default_configs.py`) generates the initial compact declarations. Review
 per-kernel changes and retain measured fast shapes before promotion; generation
 never rewrites grid or measured caches. See [v2.1 policy](../../../../docs/project/release-2.1.0.md).

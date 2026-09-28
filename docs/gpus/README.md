@@ -13,7 +13,7 @@ The maintainer makes that call; the pages record it.
 ## Common to all
 
 
-- Nothing runs on a login node (see `AGENTS.md`). Always pass `--mem`.
+- Nothing runs on a login node (see `.claude/CLAUDE.md`). Always pass `--mem`.
 - Install the pixi env on a CPU allocation of the cluster you will run on
   (`pixi install`, `pixi run fix-te-cu12`, `miniworld-engine dev install-flash --arch <sm>`).
   Conda prefixes are absolute paths: an env built in one checkout cannot be moved to another.

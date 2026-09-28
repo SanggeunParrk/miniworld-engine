@@ -21,7 +21,7 @@ cuequivariance 0.12. [Changelog](docs/project/CHANGELOG.md) · [releases](docs/p
 |---|---|
 | run on a GPU, or see what is finished there for which shapes | [docs/gpus/](docs/gpus/README.md) |
 | read everything else | [docs/README.md](docs/README.md) |
-| work on this repo as an agent | [AGENTS.md](AGENTS.md) |
+| work on this repo as an agent | [.claude/CLAUDE.md](.claude/CLAUDE.md) |
 
 ## Quickstart
 
@@ -91,11 +91,11 @@ src/miniworld_engine/
 ├── autotune/           tuner, cache reader/builder · configs/{default,grid,ab/} · data/ (per-GPU caches)
 ├── build/              cache-build matrix and audits
 ├── ops/                whole-op public API (`from miniworld_engine import ops`)
+├── tools/              maintenance commands behind `miniworld-engine dev …` (import-anthropic, …)
 ├── viz/  cli.py  settings.py
 benchmarks/             runners/bench.py + {kernels,modules}/<target>/configs · results/<gpu>/
 tests/                  CPU contracts; `@pytest.mark.gpu` for device tests
 docs/                   see docs/README.md
-scripts/                one-off maintenance scripts (anthropic/, hopper/, slurm/, audit/)
 third_party/  licenses/ upstream provenance and license texts
 ```
 

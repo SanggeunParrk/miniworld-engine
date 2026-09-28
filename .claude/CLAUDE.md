@@ -1,5 +1,7 @@
 # Agent instructions — miniworld-engine
 
+<!-- Loaded automatically by Claude Code from .claude/CLAUDE.md. Other agents: read this file first. -->
+
 GPU kernel library for MiniWorld / AF3-style ops: hand-written CUDA where it exists, a Triton
 fallback everywhere else, a PyTorch reference for each op. Layout and quickstart: `README.md`.
 Docs index: `docs/README.md`.
