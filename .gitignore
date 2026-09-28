@@ -60,9 +60,8 @@ src/**/benchmark/
 # local scratch/vendor workspaces kept outside package boundaries
 _ct_tmp/
 _trans_tmp/
-# experiments/ was removed in 2.2.0 (docs/records/experiments-archive.md); keep stray runs out.
+# experiments/ was removed in 2.2.0 (README "Research history"); keep stray runs out.
 /experiments/
-# Local scratch (ncu dumps, kernel backups, one-off probes) lives under .bench/local/ (ignored).
 # vendored CUTLASS checkout (166M) — build dependency, never tracked
 
 # editor
@@ -86,10 +85,7 @@ _fold_t.py
 # job logs (SLURM .out etc.) — sibling of artifacts/
 benchmarks/**/logs/
 
-# --- .bench: audit scratch, never tracked -----------------------------------------------------
-# One-off probes, per-run logs, result CSVs and sbatch wrappers. The audit tools worth keeping
-# live in src/miniworld_engine/tools/ instead, because docs/records/tiling-audit.md cites them by path and
-# the audit it records has to stay reproducible from a clean checkout.
+# Local scratch belongs outside the checkout (~/miniworld-engine-scratch); keep strays out.
 .bench/
 
 benchmarks/*/*/results/*/plots/

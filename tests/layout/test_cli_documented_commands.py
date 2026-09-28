@@ -19,7 +19,7 @@ from paths import ROOT
 
 from miniworld_engine.cli import build_parser
 
-DOCS = [ROOT / "README.md", ROOT / "docs" / "guides" / "autotune-dispatch-cache.md",
+DOCS = [ROOT / "README.md", ROOT / "docs" / "kernels" / "autotune-dispatch-cache.md",
         ROOT / "src" / "miniworld_engine" / "cli.py"]
 
 #: `<placeholder>` arguments cannot be parsed as themselves; substitute something real.

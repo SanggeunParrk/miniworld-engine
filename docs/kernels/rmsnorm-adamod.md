@@ -98,7 +98,7 @@ The family runs bf16 and fp32, like layernorm (`dtypes=bf16|fp32`). The pure-red
 uses TF32 tensor cores in fp32 io (~9e-4), the same "fp32 io with TF32" the layernorm_linear
 family documents. Per-precision bands are in registry.csv.
 
-Tile axes follow docs/guides/autotune-grid-sweep.md's prefix rule (`BLOCK_M*`->M, `BLOCK_N*`->N,
+Tile axes follow docs/kernels/autotune-grid-sweep.md's prefix rule (`BLOCK_M*`->M, `BLOCK_N*`->N,
 `BLOCK_K*`->K). adamod is the GEMM `c[M,d_cond] @ W[d_cond,d_model]`, so `BLOCK_N` tiles d_model,
 `BLOCK_K` tiles the d_cond contraction, `BLOCK_M1` the rows. Its three `tl.dot` axes floor at 16
 (Triton's minimum); the reduce/elem kernels floor their rows at 1. Plain rmsnorm keeps `BLOCK_K`

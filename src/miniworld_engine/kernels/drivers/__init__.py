@@ -159,10 +159,10 @@ def driver_width(default: int) -> int:
     """The base channel WIDTH this driver should build its tensors at.
 
     The shape key carries the whole shape now -- the width axes are packed into it rather than
-    standing beside it in ``key=[...]`` (docs/records/product-plan.md G5) -- so a bucket is a (rows, widths) pair and a
+    standing beside it in ``key=[...]`` (archive/records-20260928:docs/records/product-plan.md G5) -- so a bucket is a (rows, widths) pair and a
     driver frozen at one width can only ever tune the widths its own harness happened to build.
     That is what left 363 lookups uncovered across 42 of 91 ops
-    (docs/records/cache-coverage-replay-a6000.md) and what made a second, module-driven pass
+    (archive/records-20260928:docs/records/cache-coverage-replay-a6000.md) and what made a second, module-driven pass
     necessary to reach them.
 
     ONE number, not one per axis, because that is how the modules do it. A family derives every

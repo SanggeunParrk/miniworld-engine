@@ -22,7 +22,7 @@ GPU qualification of this release is pending.
 
 - `experiments/`: every capsule is either ported to `src/` (fastest variant only) or history.
   The tree is at tag `archive/experiments-20260928` (and branch `wip/main-20260928` for the
-  Sept 27–28 local-H100 research); see `docs/records/experiments-archive.md`. The Anthropic
+  Sept 27–28 local-H100 research); see README "Research history". The Anthropic
   `NOTICE` and v5 source hashes moved to `licenses/`.
 - Every CuTe DSL / nvidia-cutlass-dsl / quack kernel and the `cute` extra: `kernels/*/cute`
   (tm1, tm2, transition, layernorm, layernorm_linear, trimul_inproj), the `fused_ln_mask`
@@ -115,7 +115,7 @@ GPU qualification of this release is pending.
   residuals and `torch.compile` boundaries.
 - Make explicit backend comparison policy consistent for Transition.
 - Ship selected CUDA sources/includes and write compilation products only to
-  the user cache. [Dispatch contracts](../gpus/h100-dispatch.md).
+  the user cache. [Dispatch contracts](gpus/h100-dispatch.md).
 
 ## [2.0.0] - 2026-09-23
 
@@ -149,7 +149,7 @@ GPU qualification of this release is pending.
   require rebuilding and are not represented as valid 2.0.0 tuning records.
 - Transition adds the parallel LN-gradient reduction and transposed dWs stores.
 
-Release map, migration limits and evidence: [2.0.0](release-2.0.0.md).
+Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:docs/project/release-2.0.0.md`).
 
 
 ### Added
@@ -171,7 +171,7 @@ Release map, migration limits and evidence: [2.0.0](release-2.0.0.md).
 - Merge the 24 active MiniWorld consumer patches: packed TriMul buffers, configured
   F567 forward and dual-dgrad/LayerNorm-residual backward fusions, strict Triton
   backend selection, and expanded resumable CuTe/CUDA tuning.
-  See [integration and validation](../records/local-patches-20260917.md).
+  See integration and validation (`archive/records-20260928:docs/records/local-patches-20260917.md`).
 - Retire 37 incompatible H100/A5000/A6000 cache files from runtime selection;
   original measurements and checksums remain in the integration archive.
 

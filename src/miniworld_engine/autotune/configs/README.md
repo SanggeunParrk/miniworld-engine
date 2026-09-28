@@ -17,4 +17,4 @@ declared candidates.
 
 `miniworld-engine dev make-default-configs` (`tools/make_default_configs.py`) generates the initial compact declarations. Review
 per-kernel changes and retain measured fast shapes before promotion; generation
-never rewrites grid or measured caches. See [v2.1 policy](../../../../docs/project/release-2.1.0.md).
+never rewrites grid or measured caches. See v2.1 policy (`archive/records-20260928:docs/project/release-2.1.0.md`).

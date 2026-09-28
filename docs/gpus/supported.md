@@ -55,7 +55,7 @@ the manifest it cites, so this table cannot age past its evidence again.
 | sm100 | 0 | nothing declares sm100 since v2.2.0 removed the CuTe DSL kernels |
 
 No full-registry manifest has been run on sm90 yet. The three TriMul parity kernels the
-[SM90 report](../records/trimul-sm90-parity.md) covered were CuTe kernels and left the registry in
+SM90 report (`archive/records-20260928:docs/records/trimul-sm90-parity.md`) covered were CuTe kernels and left the registry in
 v2.2.0, so that report is history, not evidence for the current source. For paths without
 execution evidence, `arch` means "written for", not "verified on".
 

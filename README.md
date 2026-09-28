@@ -1,9 +1,5 @@
 # miniworld-engine
 
-![MiniWorld Engine graphical abstract: model operations, GPU kernel fusion, hardware-specific tuning and cache reuse, with A6000 DiT results.](docs/project/graphical-abstract.png)
-
-[Figure details and measurement scope](docs/project/graphical-abstract.md).
-
 GPU kernel library for MiniWorld / AF3-style ops. Each op is cut out of the model and
 optimized in isolation: **hand-written CUDA where it exists, a Triton fallback everywhere
 else**, and a PyTorch reference that defines what "correct" means.
@@ -14,7 +10,7 @@ else**, and a PyTorch reference that defines what "correct" means.
 > team-gm's `docs/ARCHITECTURE.md`.
 
 **Version 2.2.0** — CUDA + Triton only (CuTe/quack removed), torch 2.13 / cu129,
-cuequivariance 0.12. [Changelog](docs/project/CHANGELOG.md) · [releases](docs/project/) ·
+cuequivariance 0.12. [Changelog](docs/CHANGELOG.md) ·
 [attribution](licenses/THIRD_PARTY_NOTICES.md).
 
 | I want to… | go to |
@@ -69,8 +65,8 @@ python -m miniworld_engine.autotune.run_all
 The summary reports `declared`, `driven`, `ok`, `failed`, and `skipped` counts for the
 current registry and device. `skipped` distinguishes unsupported architecture/dtype cases;
 missing drivers and execution failures are reported separately. See
-[docs/guides/supported.md](docs/guides/supported.md) for what has actually been run, and
-[docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) when a step does not do this.
+[docs/gpus/supported.md](docs/gpus/supported.md) for what has actually been run, and
+[docs/gpus/troubleshooting.md](docs/gpus/troubleshooting.md) when a step does not do this.
 
 **Then:** using the kernels means `from miniworld_engine import ops` — eight whole-op entry points
 that take the same arguments as their torch equivalents. Getting them *fast* on your card means
@@ -109,7 +105,7 @@ public door), optional `dispatch.py` (a choice among implementations) and `whole
 One entry point: `benchmarks/runners/bench.py` with a target's `configs/bench.yaml`
 (`target=<name> level=module|kernel`). Final numbers are compiled and CUDA-graph timed; the
 CSV is the source of truth and plots are rendered from it. Conventions:
-[docs/benchmarks/](docs/guides/benchmarks.md) · traps: [cautions](docs/guides/benchmarks-cautions.md) ·
+[docs/benchmarks/](benchmarks/README.md) · traps: [cautions](benchmarks/cautions.md) ·
 cluster commands per GPU: [docs/gpus/](docs/gpus/README.md).
 
 ## torch.compile
@@ -168,7 +164,7 @@ miniworld-engine dev audit            # registry, tuning and build-system contra
 `build all` runs only the configured FoldForge/MiniWorld module shapes, then checks
 required cache coverage after merging. Unreachable diagnostic kernels are not appended to
 the default build; use explicit `--per-op` for a separate kernel experiment.
-[Model shape policy](docs/records/model-shape-cleanup-20260916.md). Declared invocations, selected work and cache keys
+Model shape policy (`archive/records-20260928:docs/records/model-shape-cleanup-20260916.md`). Declared invocations, selected work and cache keys
 are different counts; the command prints them for the current source and GPU.
 A claim file alone does not prove completion: resume requires reusable measurement shards
 and matching provenance. `--no-resume` disables completed-shard reuse.
@@ -177,12 +173,37 @@ and matching provenance. `--no-resume` disables completed-shard reuse.
 (`src/miniworld_engine/autotune/data/` in a checkout). It requires a writable installation
 or checkout and does not automatically commit results. A successful cache build does not
 replace module numerical tests or benchmarks. Full policy:
-[dispatch-cache.md](docs/guides/autotune-dispatch-cache.md).
+[dispatch-cache.md](docs/kernels/autotune-dispatch-cache.md).
 ## Research history
 
-Research capsules that produced the hand-CUDA paths were removed from the tree in 2.2.0; only
-the fastest variant of each lives in `src/`. Where each went, and how to read it back from
-git: [docs/records/experiments-archive.md](docs/records/experiments-archive.md).
+Research capsules and older docs were removed from the tree; only the fastest variant of each
+kernel lives in `src/`. Everything is still in git:
+
+| where | contains |
+|---|---|
+| tag `archive/experiments-20260928` | the last tree with `experiments/`: `transition_fused`, `trimul_b7b12`, `trimul_k1k3_inference`, `token_dit_fused`, `token_dit_overlap`, `token_dit_train` |
+| branch `wip/main-20260928` | the Sept 27–28 local-H100/Vast research: `trimul_large_d_vast`, `transition_wide_fusion`, `transition_shapes_vast`, `triattn_baseline_20260927`, `triattn_compare_20260927`, `triattn_local_d128`, `trimul_config_audit_20260927`, `trimul_d128_config_20260927` |
+| tag `archive/pre-tidy-20260927` | `trimul_training_v2` (2.0.0 training capsule, 6,625 run files), `legacy_branches`, `legacy_h100_runtime`, retired cache blobs |
+| tag `archive/docs-20260928`, `archive/records-20260928` | removed docs: dated records, verdicts, design proposals, analyses, release pages |
+| tag `archive/scripts-20260928` | the Sept H100 bring-up scripts |
+
+```sh
+git show archive/experiments-20260928:experiments/transition_fused/README.md
+git archive archive/experiments-20260928 experiments/trimul_k1k3_inference | tar -x -C /tmp/restore
+git show wip/main-20260928:experiments/trimul_large_d_vast/LATENCY_TABLE.md
+```
+
+Where each capsule ended up in `src/`:
+
+| capsule | production code |
+|---|---|
+| `transition_fused`, `transition_shapes_vast` | `kernels/transition/cuda/fused_sm90a.py`, `fused_wide_sm90a.py` |
+| `trimul_k1k3_inference` | `kernels/trimul_inproj/cuda/h100_inference.py` (byte-identical K1/K3 overlay sources) |
+| `trimul_b7b12`, `trimul_training_v2` | `kernels/trimul_inproj/cuda/h100_training.py` (D128 B1/B7) |
+| `trimul_large_d_vast` | `kernels/trimul_inproj/cuda/h100_wide_training.py` (D256/384/512 training) |
+| `token_dit_train` | `kernels/augmented_attention/cuda/` |
+| `token_dit_fused`, `token_dit_overlap` | not yet ported (quack-GEMM dependent); see the v2.2.0 pending list in `docs/CHANGELOG.md` |
+| `transition_wide_fusion` | not ported (explicit 1.03x D384/512 candidate) |
 
 ## Toolchain
 

@@ -1,4 +1,4 @@
-"""`docs/project/naming.md` declares a CLOSED vocabulary. Nothing enforced it.
+"""`docs/kernels/naming.md` declares a CLOSED vocabulary. Nothing enforced it.
 
 The document fixes `<func>_<role>[_<detail>]_<backend>`, lists every legal token for each slot,
 and even records the tokens it threw out and why. `test_registry_complete` validates `kind`,
@@ -29,7 +29,7 @@ import pytest
 from paths import REGISTRY as REG
 from paths import ROOT
 
-SPEC = ROOT / "docs/project/naming.md"
+SPEC = ROOT / "docs/kernels/naming.md"
 
 #: Declared here rather than parsed out of the prose, and pinned to the prose by
 #: `test_every_token_is_in_the_document` below -- so a token deleted from the document fails, and
@@ -90,7 +90,7 @@ def test_there_are_names_to_check() -> None:
 
 def test_every_name_parses_into_declared_tokens() -> None:
     bad = {n: why for n in _names() if (why := _fault(n))}
-    assert not bad, ("names outside docs/project/naming.md's vocabulary:\n  "
+    assert not bad, ("names outside docs/kernels/naming.md's vocabulary:\n  "
                      + "\n  ".join(f"{n}: {why}" for n, why in sorted(bad.items())))
 
 

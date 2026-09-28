@@ -1,4 +1,4 @@
-"""`docs/guides/supported.md` is a support claim, and every number in it must come from a manifest.
+"""`docs/gpus/supported.md` is a support claim, and every number in it must come from a manifest.
 
 The page opens by saying a claim that outruns its measurements is how a consumer books time on
 hardware the library has never touched. It then said `driven 94, ok 94, failed 0, skipped 9` for an
@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from paths import ROOT, registry_rows
 
-PAGE = ROOT / "docs" / "guides" / "supported.md"
+PAGE = ROOT / "docs" / "gpus" / "supported.md"
 MANIFESTS = ROOT / "src" / "miniworld_engine" / "autotune" / "manifests"
 
 #: `card (arch)` in the page's first column -> the manifest file that is its evidence. Declared,

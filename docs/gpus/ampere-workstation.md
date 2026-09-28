@@ -22,7 +22,7 @@ srun -p gpu --gres=gpu:A6000:8 --exclusive \
 The cache build replaced `CAPTURE_TARGET=all submits/run_autotune_capture_ampere.sbatch`:
 capture used to be driven per bench target, which reached 48 of 91 triton kernels because a
 module only fires the kernels its own shapes dispatch to. `build all` drives the DECLARED work
-list instead — see the README CLI section and `docs/guides/autotune-dispatch-cache.md`.
+list instead — see the README CLI section and `docs/kernels/autotune-dispatch-cache.md`.
 
 The A5000's 24 GB may OOM at the top of the sweep (L=1024, d=512); `bench.py` records those
 points as `status=failed` rows rather than aborting, so the CSV still shows the memory cliff.

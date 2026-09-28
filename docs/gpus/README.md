@@ -20,7 +20,7 @@ The maintainer makes that call; the pages record it.
 - Give each GPU/checkout its own JIT cache (`MINIWORLD_ENGINE_JIT_ROOT`); prebuilt
   TriangleAttention `.so` files are tied to the torch/python they were built with and the
   CUDA path silently falls back to Triton when they do not match
-  (rebuild: `.bench/v220-env/triattn_rebuild.py`, see [h100.md](h100.md)).
+  (rebuild: see [h100.md](h100.md)).
 - Autotune caches are keyed by GPU name **and** toolchain (`env_identity`): a cache built
   under another torch/triton is ignored. Check with `miniworld-engine dev cache-status --gpu <name>`.
 
@@ -44,6 +44,6 @@ Rules:
   differs inside a range (e.g. uni TriMul training: CUDA at D128, Triton at D64/256/384),
   split the row.
 - Numbers without a GPU, a baseline and a timing mode are not allowed (see
-  `docs/guides/benchmarks-cautions.md`).
+  `benchmarks/cautions.md`).
 - Shapes come from the model shape policy (`src/miniworld_engine/kernels/registry/registry_module.csv`,
-  `docs/guides/autotune-training-shape-policy.md`); training lengths are L384/L768.
+  `docs/kernels/autotune-training-shape-policy.md`); training lengths are L384/L768.

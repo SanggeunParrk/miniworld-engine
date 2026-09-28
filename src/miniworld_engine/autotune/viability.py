@@ -16,7 +16,7 @@ the answer -- it does not change what has to be true for the answer to be truste
 What IS card-specific is the EVIDENCE. Every number quoted in this module was measured on sm86
 (A5000 and A6000, both 101,376 B). Whether a fit stays byte-exact on sm90 or sm100, where the
 compiler has TMA and clusters and 227 KB to work with, is not known here and cannot be: no such
-card is reachable from this cluster (`docs/guides/supported.md`). The gates are what make that safe
+card is reachable from this cluster (`docs/gpus/supported.md`). The gates are what make that safe
 rather than merely unknown -- a shape that stops holding stops being used, and the fallback is to
 compile everything, which is what the build did before any of this existed.
 

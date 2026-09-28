@@ -9,7 +9,7 @@ pairformer blocks is not silent in the model.
 `registry.csv` now carries an `rtol` column. Blank means "the default applies", never "unchecked".
 These tests cover the mechanism with synthetic checkers -- no GPU, no kernel -- so the band logic is
 verified independently of whether any particular kernel currently meets a tighter one. Calibrating
-the per-kernel values is a separate step and needs a device (docs/records/product-plan.md P2b).
+the per-kernel values is a separate step and needs a device (archive/records-20260928:docs/records/product-plan.md P2b).
 """
 from __future__ import annotations
 

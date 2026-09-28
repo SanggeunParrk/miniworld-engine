@@ -34,10 +34,10 @@ torch 2.13 + cu129, triton 3.7, Transformer Engine, cuequivariance 0.12, FlashAt
 - New kernels: `src/miniworld_engine/kernels/<family>/{cuda,triton}/` + `reference.py` +
   `interface.py`; modules only connect kernels (`src/miniworld_engine/modules/<op>/`).
 - Benchmarks: only `benchmarks/runners/bench.py` + `benchmarks/modules/<module>/configs/bench.yaml`.
-  One-off probes stay untracked under `.bench/` (ignored). Timings are CUDA-graph or compiled —
+  One-off probes stay outside the checkout (e.g. `~/miniworld-engine-scratch/`). Timings are CUDA-graph or compiled —
   never eager for final numbers.
 - Per-GPU completion status (which op is finished for which shapes): `docs/gpus/<gpu>.md` (section "Completion status").
   The **judgement** column is filled by the maintainer, not by an agent.
 - Dated measurements and audits: `docs/records/`, never edited after the fact.
-- Local scratch: `.bench/` (ignored). Removed research lives in git (see
-  `docs/records/experiments-archive.md`).
+- Local scratch lives outside the checkout. Removed research lives in git (see
+  README "Research history").

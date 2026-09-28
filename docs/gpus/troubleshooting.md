@@ -100,7 +100,7 @@ rather than against the registry. `git pull`.
 Two reasons, one line, and neither is a failure — the kernel was never launched.
 
 **Wrong card**: its `arch` is above yours. Nine kernels are declared sm90/sm100; see
-`docs/guides/supported.md` for which, and note that `tuned_for` is informational while `arch` is the
+`docs/gpus/supported.md` for which, and note that `tuned_for` is informational while `arch` is the
 enforced gate.
 
 **Not declared at this precision**: `registry.csv`'s `dtypes` column says which precisions the

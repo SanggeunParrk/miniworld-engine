@@ -1012,7 +1012,7 @@ def _warn_once(op: str, gk: str, tag: str, reason: str, fallback: str = "") -> N
         f"[miniworld.autotune] {reason} for op '{op}' on '{gk}' ({tag}). Falling back to "
         f"{what} — this run may be slower and the chosen config may be suboptimal. "
         f"Build a tuned cache for this GPU with the autotune cache-builder "
-        f"(see docs/guides/autotune-dispatch-cache.md).",
+        f"(see docs/kernels/autotune-dispatch-cache.md).",
         stacklevel=4,
     )
 

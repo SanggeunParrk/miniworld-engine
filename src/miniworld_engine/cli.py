@@ -1864,7 +1864,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="bench against the cache already in data/, skipping the "
                                   "pre-bench build (use after `build all` + a clean `audit`)")
         # bench.py's config defaults to seq_len, so without this every run swept one axis and the
-        # d_pair half of the matrix -- which docs/guides/benchmarks.md and the README both call for, and
+        # d_pair half of the matrix -- which benchmarks/README.md and the README both call for, and
         # which is where the width-dependent kernels separate -- could only be reached by
         # invoking bench.py directly.
         parser_.add_argument("--sweep-axis", default="seq_len", choices=("seq_len", "d_pair"),

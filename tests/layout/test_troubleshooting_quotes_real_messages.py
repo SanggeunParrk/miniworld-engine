@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
-PAGE = REPO / "docs" / "guides" / "troubleshooting.md"
+PAGE = REPO / "docs" / "gpus" / "troubleshooting.md"
 
 #: heading -> the literal that must still exist in src/, or None when the message is not ours.
 ANCHORS: dict[str, str | None] = {
@@ -57,7 +57,7 @@ def test_every_message_we_own_is_still_emitted() -> None:
         if found.returncode != 0:
             missing.append(f"{heading!r}: src/ no longer contains {anchor!r}")
     assert not missing, (
-        "docs/guides/troubleshooting.md quotes a message src/ no longer emits. Either it was reworded -- "
+        "docs/gpus/troubleshooting.md quotes a message src/ no longer emits. Either it was reworded -- "
         "update the page and the anchor -- or the failure is gone and the section should go with "
         "it:\n  " + "\n  ".join(missing))
 

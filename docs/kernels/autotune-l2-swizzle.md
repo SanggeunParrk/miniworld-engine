@@ -2,7 +2,7 @@
 
 > **Current reference.** Every op name below is a `registry.csv` kernel and every cited path
 > is the file that registry row names — both checked. It was not always: this file carried 21
-> pre-rename names until they were mapped through `docs/records/rename-map.tsv`.
+> pre-rename names until they were mapped through `archive/records-20260928:docs/records/rename-map.tsv`.
 
 ## What the axis is
 
