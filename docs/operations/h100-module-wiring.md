@@ -69,7 +69,7 @@ Anthropic attribution and Apache-2.0 terms apply as described in
 
 ## Validation
 
-[Validation record](../../verdicts/h100-module-wiring.json): 46 H100 test
+[Validation record](../records/verdicts/h100-module-wiring.json): 46 H100 test
 executions passed, including a separate wheel installation on CUDA device 1,
 all ten TriMul training width/length combinations, masked/dropout gradients,
 live-weight CUDA graph replay, token DiT inference graphs, and MSA repeated
@@ -79,7 +79,7 @@ successful checks after fixing their static analysis.
 
 ## Production-module performance audit
 
-The [four-backend H100 comparison](../../verdicts/version-compare-20260923/README.md)
+The [four-backend H100 comparison](../records/verdicts/version-compare-20260923/README.md)
 records the actual `miniworld` / `auto` module paths with masks, residuals and
 training dropout, alongside PyTorch, cuEquivariance and the literal v1.0.0 tag.
 The audit found that Transition's availability probe attempted to trace the
@@ -114,7 +114,7 @@ align_optimizer_state_layout_(optimizer)  # before capturing any training graph
 This only copies same-shape state tensors whose strides differ from their
 parameter; it preserves values and scalar step counters. Fresh optimizers
 already initialize state with the right layout. See the
-[paired preparation benchmark](../../verdicts/trimul-preparation-20260923/README.md).
+[paired preparation benchmark](../records/verdicts/trimul-preparation-20260923/README.md).
 
 ## Single-direction training
 
@@ -137,7 +137,7 @@ The measured local search covers 6 K1 tiles, 6 K3 schedules, 4 B1 CTA counts and
 10 B7 producer/consumer/ring combinations per length. This is a bounded search,
 not a claim of exhaustive configuration tuning or 90% speed-of-light.
 D64/256/384/512 **single-direction training** retains the general path.
-See [measurements and validation](../../verdicts/trimul-single-20260923/README.md).
+See [measurements and validation](../records/verdicts/trimul-single-20260923/README.md).
 
 ## Wide bidirectional training (D256/384/512)
 

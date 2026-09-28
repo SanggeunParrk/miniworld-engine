@@ -206,7 +206,7 @@ here: 2 % of the one width that only the two-block template trunk uses did not j
 Needs an allocated H100 (sm_90a), nvcc 12.x, PyTorch CUDA with `cuda.bindings` or `libcuda.so.1` for the driver binding, and the
 upstream package `common/opt_core/opt_core/kernels/trimul/native/pkg/v5` of
 [anthropics/uplifting-biomolecular-modeling](https://github.com/anthropics/uplifting-biomolecular-modeling) at revision
-`f4f62fa6592ae4938d49b1757bea0cfeff9f468e` (the engine's `scripts/import_anthropic.py` on the `perf/trimul-sm90-parity` line fetches it
+`f4f62fa6592ae4938d49b1757bea0cfeff9f468e` (the engine's `scripts/anthropic/import_anthropic.py` on the `perf/trimul-sm90-parity` line fetches it
 and sets `MINIWORLD_ANTHROPIC_ROOT`). Build and test-vector generation compile and run kernels: do them on a compute node.
 
 ```bash

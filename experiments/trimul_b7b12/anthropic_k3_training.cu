@@ -4,7 +4,7 @@
 // Upstream SHA256: 953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6
 // MiniWorld changes: prenormalized input, output LN saves, projection/gate saves,
 // shared-row dropout and separate residual; preserves upstream TMA/WGMMA pipeline.
-// Original vendored source is unchanged. See docs/anthropic-trimul-training.md.
+// Original vendored source is unchanged. See docs/anthropic/trimul-training.md.
 #include "tmn_kernels.cuh"
 namespace tmn { namespace sm90 {
 struct TrainParams {

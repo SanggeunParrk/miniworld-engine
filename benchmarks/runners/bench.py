@@ -1070,7 +1070,7 @@ def bench_module_triangle_attention(
     fabric: FabricLike,
 ):
     anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
-    #: The row of the upstream block adapter (docs/anthropic-h100-audit.md: upstream prologue v3 +
+    #: The row of the upstream block adapter (docs/anthropic/h100-audit.md: upstream prologue v3 +
     #: epilogue v2 around the triattn_native core; the engine adds the residual out of place).
     anthropic_row = "block:triattn_native"
     layer_cls = TriangleAttention
@@ -1200,7 +1200,7 @@ def bench_module_transition(
     fabric: FabricLike,
 ):
     anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
-    #: Upstream transition row per pair width, as qualified in docs/anthropic-h100-audit.md
+    #: Upstream transition row per pair width, as qualified in docs/anthropic/h100-audit.md
     #: (v2 at C=128, esm_t16 at C=256, pf at C=384; C=512 has no supporting upstream row).
     anthropic_rows = {128: "v2", 256: "esm_t16", 384: "pf"}
     layer_cls = Transition

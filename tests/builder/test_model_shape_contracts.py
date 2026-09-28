@@ -9,7 +9,7 @@ from miniworld_engine.autotune import builder, checkpoint_cases, module_registry
 from miniworld_engine.viz import sweep_page
 
 ROOT = Path(__file__).resolve().parents[2]
-CENSUS = json.loads((ROOT / "docs/checkpoint-shapes-20260915.json").read_text())["groups"]
+CENSUS = json.loads((ROOT / "docs/records/model-shapes/checkpoint-shapes-20260915.json").read_text())["groups"]
 
 
 def test_all_affine_checkpoint_norm_dimensions_survive():

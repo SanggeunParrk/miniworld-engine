@@ -68,7 +68,7 @@ The retained historical benchmark can catch errors and return exit code zero:
 inspect the per-mode JSON `error` fields, not just the process exit code.
 
 Historical module comparisons reuse the unchanged
-`verdicts/version-compare-20260923/bench.py` in a separate result directory.
+`docs/records/verdicts/version-compare-20260923/bench.py` in a separate result directory.
 The regular `benchmarks/runners/bench.py` produces current CSV/provenance records.
 Compare only matched shapes, dtypes, gradients, dropout, compilation and graph regimes.
 Older records may predate later source improvements, especially single-direction TriMul.

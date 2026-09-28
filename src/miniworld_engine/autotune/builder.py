@@ -574,7 +574,7 @@ class OpUnit:
     op: str
     length: int
     dtype: str = "bfloat16"
-    #: Base channel WIDTH to drive at. The shape key carries the whole shape (plan.md G5), so a
+    #: Base channel WIDTH to drive at. The shape key carries the whole shape (docs/development/product-plan.md G5), so a
     #: bucket is a (rows, widths) pair and a sweep that varies only the length reaches exactly one
     #: width per op -- whichever its driver happens to build. That is the 363 uncovered lookups the
     #: module pass exists to reach. One number per unit, not one per axis: a driver derives its
@@ -803,11 +803,11 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         raise ValueError(msg)
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
-    # The WIDTHS to drive each op at. The shape key carries the whole shape now (plan.md G5), so a
+    # The WIDTHS to drive each op at. The shape key carries the whole shape now (docs/development/product-plan.md G5), so a
     # sweep that varies only the length tunes one width per op -- whichever the driver happens to
     # build -- and every other width the model uses falls back to the grid at runtime. Measured on
     # an A6000: 363 such lookups across 42 of 91 ops
-    # (docs/records/cache-coverage-replay-a6000.md), which is precisely what the module pass was
+    # (docs/records/ampere/cache-coverage-replay-a6000.md), which is precisely what the module pass was
     # added to reach.
     #
     # These are the model's own widths, not DIM_BUCKETS. `cases()` states them -- d_pair 128,
