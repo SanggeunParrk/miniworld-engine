@@ -62,11 +62,7 @@ _ct_tmp/
 _trans_tmp/
 # experiments/ was removed in 2.2.0 (docs/records/experiments-archive.md); keep stray runs out.
 /experiments/
-# dev/ holds development scratch, research probes, ncu harnesses (never shipped: the wheel is
-# src/ only). dev/scratchpad_ncu/ is local scratch (ncu dumps, kernel .cu backups, optimizer
-# prompt logs) — kept ignored as it was under the old scratchpad_ncu/ path; a handful of files
-# there stay tracked (they were committed before the move). dev/research and dev/bench are tracked.
-dev/scratchpad_ncu/
+# Local scratch (ncu dumps, kernel backups, one-off probes) lives under .bench/local/ (ignored).
 # vendored CUTLASS checkout (166M) — build dependency, never tracked
 
 # editor
