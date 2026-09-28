@@ -1,6 +1,6 @@
 # What a product owes someone who is not its author
 
-`docs/standards/library-standards.md` asked whether this code is a good library. Every one of its 30
+`docs/project/library-standards.md` asked whether this code is a good library. Every one of its 30
 criteria is about the code itself: is the surface frozen, is the tolerance declared, does the
 name mean one thing. That was the right question and it is nearly answered.
 
@@ -23,7 +23,7 @@ there isn't one.
 **The check must fail for the right reason.** Also inherited, and on **2026-08-25** it turned out
 to be the most-violated rule here. Running the things this repository says it does -- a clean
 clone, the GPU-marked suite, the build-system audit, the coverage replay -- produced nine defects
-(`docs/records/development/product-plan.md` §H), and seven were checks that could not fail, could not pass, or answered a question
+(`docs/records/product-plan.md` §H), and seven were checks that could not fail, could not pass, or answered a question
 nobody asked: a gate asserting per-clone git config that only the author's machine has; an audit
 printing 139 findings about its own missing arguments and exiting 1 every run; a marker documented
 as "needs a CUDA device" that failed instead of skipping without one; a `missing_pairs 0` that
@@ -76,7 +76,7 @@ kernel was ever *run* on the arch it names. In practice everything has been veri
 process.
 
 *Status:* **partially met.** Coherence enforced, execution still unverified for sm90/sm100 --
-`docs/getting-started/supported.md` says which. The conflation is gone: `arch` is the enforced minimum and
+`docs/guides/supported.md` says which. The conflation is gone: `arch` is the enforced minimum and
 `tuned_for` is what a kernel was written against, so the three triton kernels that lived inside
 sm100-named cute modules are now launched and checked on sm86 (`driven` 94 -> 97, `skipped`
 9 -> 6).
@@ -101,7 +101,7 @@ have. The other-cluster failure was a clean clone that could not do what this ch
 
 *Prevents:* a working repository that is only working here.
 
-*Enforced by:* `docs/getting-started/reproducing-a-report.md` gives the recipe and it is run rather than described.
+*Enforced by:* `docs/guides/reproducing-a-report.md` gives the recipe and it is run rather than described.
 Two known causes were also removed: import-time nvcc builds (`test_no_build_at_import.py`) and
 stale JIT locks (`test_jit_build_lock.py`).
 
@@ -154,7 +154,7 @@ consumer gets.
 *Status:* **met for the floor that exists.** `triton>=3.3` is declared with the code evidence
 behind it; `einops`/`jaxtyping`/`numpy` stay unbounded deliberately, because no version of this
 repo has been exercised against an older release and a guessed floor reads like evidence.
-`docs/getting-started/supported.md` states what was actually run.
+`docs/guides/supported.md` states what was actually run.
 
 ### H3. Installation is documented for the case where the author is not present
 
@@ -165,7 +165,7 @@ installation section written for someone starting from an empty machine, and no 
 them what to do when nvcc/mathdx/CUDA is missing.
 
 *Status:* **met.** `## Quickstart` is four steps at the top of the README, three of them
-GPU-free, executed by `tests/layout/test_quickstart_runs.py`; `docs/getting-started/troubleshooting.md` covers
+GPU-free, executed by `tests/layout/test_quickstart_runs.py`; `docs/guides/troubleshooting.md` covers
 what goes wrong, tied to the message literals in `src/`.
 
 ### H4. The name is one name, everywhere, including in the consumer
@@ -217,7 +217,7 @@ whose only section is `[Unreleased]`, and an x.0.0 with no Breaking entry.
 
 ### I3. The changelog describes released things
 
-`docs/releases/CHANGELOG.md` exists, is 264 lines, is written well, and is **entirely** under
+`docs/project/CHANGELOG.md` exists, is 264 lines, is written well, and is **entirely** under
 `## [Unreleased]`. It documents a public-API contract enforced by `tests/compile/test_public_api.py`
 (A1) — for a package that has never published a version.
 
@@ -261,7 +261,7 @@ moment it matters.
 manifest from six months and two rewrites ago being read as current.
 
 *Enforced by:* `run_all` writes `autotune/manifests/<card>.csv` with a `#provenance` row (version,
-commit, clean/dirty, date); `docs/getting-started/supported.md` cites those manifests;
+commit, clean/dirty, date); `docs/guides/supported.md` cites those manifests;
 `tests/registry/test_a_release_has_been_run_on_a_card.py` fails a release whose version appears in
 no manifest, or only in one produced from a dirty tree.
 
@@ -292,7 +292,7 @@ true, on the same shipped cache on an A6000:
 - declared coverage: **91 OK, missing_pairs 0** -- every (op, dtype, shape bucket) `op_units`
   enumerates is present.
 - the replay: **363 lookups the module matrix asks for and the cache does not serve, across 42 of
-  91 ops** (`docs/records/ampere/cache-coverage-replay-a6000.md`).
+  91 ops** (`docs/records/cache-coverage-replay-a6000.md`).
 
 The cache key carries each kernel's constexprs and no declared work list enumerates them, so the
 first number cannot see the second. `build all` with no flags now runs both work lists rather than
@@ -381,7 +381,7 @@ ties a module or step-level number to a released version.
 *Prevents:* today's ten-hour A100 loss, which took a session of analysis to attribute because
 the failing environment could not be reproduced on this cluster.
 
-*Enforced by:* `docs/getting-started/reproducing-a-report.md` -- isolate the four caches that carry state between
+*Enforced by:* `docs/guides/reproducing-a-report.md` -- isolate the four caches that carry state between
 runs, ask the CPU-only question first, take a card last. Demonstrated on the report that motivated
 it: `0854ac4^` gives 527 units, main gives 859, no GPU involved. The count is now pinned by
 `tests/builder/test_build_matrix.py`.
@@ -423,7 +423,7 @@ artifact. `kernels/NOTES.md` states what the tree is and that it is not maintain
 *Prevents:* a stale JIT lock, a missing mathdx include, a cache miss, or an unsupported arch
 each costing a consumer a day.
 
-*Enforced by:* E4 requires error messages to name the fix, and `docs/getting-started/troubleshooting.md` gives
+*Enforced by:* E4 requires error messages to name the fix, and `docs/guides/troubleshooting.md` gives
 each failure a section: what produces it and the command that ends it.
 `tests/layout/test_troubleshooting_quotes_real_messages.py` fails when a quoted message stops
 existing in `src/`, so a reworded message cannot leave a section describing something that no
@@ -435,7 +435,7 @@ longer happens.
 
 *Prevents:* ambiguity about which card, driver, torch, and CUDA are inside the promise.
 
-*Enforced by:* `docs/getting-started/supported.md`, where every row cites the artifact behind it -- a device
+*Enforced by:* `docs/guides/supported.md`, where every row cites the artifact behind it -- a device
 manifest in `autotune/manifests/` or a CI job -- and the nine kernels declared for sm90/sm100 are
 listed under "GPU that has NOT been run".
 
@@ -462,10 +462,10 @@ moment you would otherwise stop looking, which is what `git status` does not do.
 
 *Prevents:* a bus factor of one.
 
-*Enforced by:* `docs/standards/contributing.md` exists and F6 is met for the mechanics — clone, gates, how to
+*Enforced by:* `docs/project/contributing.md` exists and F6 is met for the mechanics — clone, gates, how to
 run the suite. Untested by any second person.
 
-*Status:* **partially met.** `docs/standards/contributing.md` covers the mechanics and the quickstart is now
+*Status:* **partially met.** `docs/project/contributing.md` covers the mechanics and the quickstart is now
 executed rather than described. Still untested by any second person.
 
 ### M3. Nothing is retained that nobody can explain
@@ -514,4 +514,4 @@ Every criterion above is a component of one sentence:
 > version, installs it, runs the suite, upgrades `team-gm` to that tag, and gets the same
 > numerical result and a measured step-time improvement — using only what is written down.
 
-Today that sentence fails at the first clause. `docs/records/development/product-plan.md` is the ordered work to make it true.
+Today that sentence fails at the first clause. `docs/records/product-plan.md` is the ordered work to make it true.

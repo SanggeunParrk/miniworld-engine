@@ -229,7 +229,7 @@ registry 행·별도 캐시 파일을 갖는다.** gate/preact 저장 여부는 
 
 이름표는 파일 기준이 아니라 **launch 지점 기준**으로 열거한다. 파일 기준으로 세면 `.cu` 커널과
 cute collective 클래스가 통째로 빠진다(현재 최소 6개 CUDA 커널이 이름표에 없다 —
-[../records/naming-audit.md](../docs/records/../records/naming-audit.md) §2 참조).
+`archive/docs-20260928:docs/records/audits/naming-audit.md` §2 참조).
 
 ---
 

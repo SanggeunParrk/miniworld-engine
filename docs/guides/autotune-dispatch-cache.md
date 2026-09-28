@@ -1,6 +1,6 @@
 # Runtime Dispatch Caches
 
-Current policy: [v2.1.0](../releases/2.1.0.md). Historical full-grid measurements below
+Current policy: [v2.1.0](../project/release-2.1.0.md). Historical full-grid measurements below
 are retained as evidence, not as the default build recommendation.
 
 Some kernels choose among multiple correct implementations at runtime. Those
@@ -596,7 +596,7 @@ CSV flag or configuring another process does not apply `torch.compile` to the ti
 **2. One kernel, or one module.** There is no second builder — there used to be
 (`python -m miniworld_engine.autotune.build --op ...`, two hand-written pilot builders) and it was
 removed: it stored under `transition_split_fwd` / `trimul_bidir_front`, names retired in the kernel
-rename (see `docs/records/audits/rename-map.tsv`), so nothing could read what it wrote. Both ops are
+rename (see `docs/records/rename-map.tsv`), so nothing could read what it wrote. Both ops are
 covered now, with a driver, a checker and a shipped cache under their current names. Use the one
 builder, narrowed:
 
@@ -613,7 +613,7 @@ not appended through a second, Cartesian driver sweep.
 
 `fill_gaps` and workload-attributed shared tuning records reuse compatible measurements.
 `--per-op` remains an explicit diagnostic workload; `--per-module` makes the default
-module selection explicit. See [model shape policy](../records/reports/model-shape-cleanup-20260916.md).
+module selection explicit. See [model shape policy](../records/model-shape-cleanup-20260916.md).
 
 Use `dev coverage` for required-key coverage of the current verified plan, `dev audit`
 for build-system contracts, and `dev audit --replay` for actual GPU lookup behavior.
@@ -666,7 +666,7 @@ An unknown GPU with no cache warns like: *"[miniworld.autotune] no tuned autotun
 '<op>' on '<gpu>' (<dtype>). Falling back to a heuristic 24 of 1944 configs (run
 `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen
 config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see
-docs/autotune/dispatch-cache.md)."*
+docs/guides/autotune-dispatch-cache.md)."*
 
 The same exit reports a STALE cache, and names which of the four identities moved: the kernel's
 config grid, the toolchain (`env_identity` — triton / cuda / ptxas), the kernel source or its

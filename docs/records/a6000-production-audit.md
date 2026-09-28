@@ -94,7 +94,7 @@ Its hash, inventory, import and construction evidence are embedded in the JSON r
 Build coverage certifies declared Triton keys and usable cached candidates. It does not prove
 an independently optimal tile for every physical workload. Six CuTe tuner families remain
 outside the shared builder; H100/B200 native execution and numerical qualification are not
-claimed. See [the build command contract](../../autotune/dispatch-cache.md#what-build-all-verifies).
+claimed. See [the build command contract](../guides/autotune-dispatch-cache.md#what-build-all-verifies).
 
 Read-only wheels can consume shipped caches, but tuned-cache build/merge requires a writable
 installation. Automatic approval review rejected a proposed cache overlay because changing

@@ -2,7 +2,7 @@
 
 The four scripts that produced every number quoted in the `compile_wrap="custom_op"` change --
 in the commit messages, in `kernels/_compile.py`, in `settings.py`, and in
-`docs/benchmarks/cautions.md`.
+`docs/guides/benchmarks-cautions.md`.
 
 They live here rather than in a scratch directory on purpose. This repo already learned that
 lesson once for the autotune sweeps: a claim whose measurement script is not in the tree cannot

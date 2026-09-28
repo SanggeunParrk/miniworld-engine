@@ -175,7 +175,7 @@ def device_arch() -> str:
 def meets_arch(row: dict, device: str | None = None) -> bool:
     """Can the card run what this row declares it needs?
 
-    Reads the DECLARED minimum (`registry.csv`'s `arch`, see docs/standards/library-standards.md A5) rather
+    Reads the DECLARED minimum (`registry.csv`'s `arch`, see docs/project/library-standards.md A5) rather
     than matching an exception after the fact, so a kernel that cannot run here is never launched
     and never compiled. `is_arch_gated` stays as a backstop for a row whose declaration is wrong or
     missing -- and a row that passes this check and then fails with an arch error is exactly that,
@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", default="", help="comma list of families to run")
     ap.add_argument("--verbose", action="store_true", help="print the traceback for each failure")
     ap.add_argument("--json", default="", metavar="PATH",
-                    help="also write the counts as JSON, for a release verdict (docs/records/development/product-plan.md B1)")
+                    help="also write the counts as JSON, for a release verdict (docs/records/product-plan.md B1)")
     args = ap.parse_args(argv)
 
     want = {f for f in args.only.split(",") if f}
@@ -380,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         # The same numbers the summary above prints, as data. A release verdict has to be
-        # machine-checkable (docs/records/development/product-plan.md B1); re-parsing the human summary would break the moment
+        # machine-checkable (docs/records/product-plan.md B1); re-parsing the human summary would break the moment
         # its wording changed, which is the kind of check that fails for the wrong reason.
         import json
         payload = {

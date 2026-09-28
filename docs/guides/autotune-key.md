@@ -10,7 +10,7 @@
     shape   커널의 level에 따라 (아래)            토큰/원자 개수 L
 
 `level`은 [`kernels/registry/registry.csv`](../../src/miniworld_engine/kernels/registry/registry.csv)의 열이고
-개발자가 직접 채운다 ([naming.md](../standards/naming.md)의 등록 규칙 참조).
+개발자가 직접 채운다 ([naming.md](../project/naming.md)의 등록 규칙 참조).
 
     token   128  256  384  512                                    L (토큰 수)
     atom    256  512  1024  2048  4096  8192                     A (원자 수)

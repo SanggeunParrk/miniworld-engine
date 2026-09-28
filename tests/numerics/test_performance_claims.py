@@ -1,11 +1,11 @@
 """A latency in a live doc must say what machine it came from.
 
-`docs/standards/library-standards.md` C1: a benchmark number is a claim about a machine, a config set, a
+`docs/project/library-standards.md` C1: a benchmark number is a claim about a machine, a config set, a
 dtype, a compile mode and a version, and detached from those it is folklore. The committed CSVs
 carry all of it per row. Prose does not, and prose is what people read.
 
 This is enforced at FILE level, not per claim, and the reason is worth stating: the attribution for
-an old number is often not recoverable. `docs/benchmarks/cautions.md` carried 17 latencies and
+an old number is often not recoverable. `docs/guides/benchmarks-cautions.md` carried 17 latencies and
 named a device once; back-filling the rest would mean guessing which card a 2026-07 trimul run
 used, which is worse than saying it is unknown. So the rule is that a live doc making performance
 claims must state the hardware behind them somewhere — which a provenance paragraph satisfies,
@@ -29,19 +29,19 @@ REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml"
 #: judgement, and it belongs in one visible list instead of a path heuristic.
 LIVE_DOCS = (
     "README.md",
-    "docs/releases/CHANGELOG.md",
-    "docs/standards/contributing.md",
-    "docs/benchmarks/results.md",
-    "docs/benchmarks/README.md",
-    "docs/benchmarks/cautions.md",
-    "docs/autotune/dispatch-cache.md",
+    "docs/project/CHANGELOG.md",
+    "docs/project/contributing.md",
+    "docs/guides/benchmarks-results.md",
+    "docs/guides/benchmarks.md",
+    "docs/guides/benchmarks-cautions.md",
+    "docs/guides/autotune-dispatch-cache.md",
     # Written the day the product standard was, and every one of them quotes measurements: the
     # cards a release ran on, the error a stack accumulates, the unit count a stale clone reports.
-    "docs/getting-started/supported.md",
-    "docs/getting-started/troubleshooting.md",
-    "docs/getting-started/reproducing-a-report.md",
-    "docs/standards/product-standards.md",
-    "docs/standards/library-standards.md",
+    "docs/guides/supported.md",
+    "docs/guides/troubleshooting.md",
+    "docs/guides/reproducing-a-report.md",
+    "docs/project/product-standards.md",
+    "docs/project/library-standards.md",
 )
 
 #: A latency or a speedup. Deliberately narrow: version numbers, tolerances and counts are not

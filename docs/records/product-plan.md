@@ -1,11 +1,11 @@
-# docs/records/development/product-plan.md — the work to become a product
+# docs/records/product-plan.md — the work to become a product
 
-Derived from `docs/standards/product-standards.md`. Every item states the criterion it answers, **the
+Derived from `docs/project/product-standards.md`. Every item states the criterion it answers, **the
 gap as measured** (not as guessed), the action, and what makes it done. An item is done when
 the check fails before the change and passes after it; if there is no check, the item's first
 job is to build one.
 
-Rewritten **2026-08-25**. The previous docs/records/development/product-plan.md worked the library standard (`docs/standards/library-standards.md`,
+Rewritten **2026-08-25**. The previous docs/records/product-plan.md worked the library standard (`docs/project/library-standards.md`,
 criteria A–F) and is 17/20 closed. That work was necessary and is not repeated here — it is
 summarised in **§0** and its three open items are carried forward as **C1–C3** because product
 criteria depend on them.
@@ -31,7 +31,7 @@ everything else moot, and the cheap fix that unblocks other machines.
 | P10 | D4 | `configs/grid` duplication ended |
 | P11 | F4 | stale reference docs |
 | P12 | F5 | `todo.md` removed from the repo |
-| P13 | F6 | `docs/standards/contributing.md` |
+| P13 | F6 | `docs/project/contributing.md` |
 | P14 | A4 | Python floor (3.10) actually tested in CI |
 | P15 | E2 | stale JIT build lock no longer hangs forever |
 | P16 | B1, F2 | vendored-body lint exemption hid a guaranteed `NameError` |
@@ -49,13 +49,13 @@ rename**. `git tag` holds `archive/gate-fuse-v1` and `archive/ln-bwd-cuda-v1` an
 tag. The consumer's pinned tree declares `name = "miniworld-kernels", version = "0.1.0"`; main
 declares `name = "miniworld-engine", version = "0.1.0"`. `import miniworld_kernels` →
 `ModuleNotFoundError`. Nothing in either package's metadata lets a consumer tell them apart.
-`docs/releases/CHANGELOG.md` is 264 good lines, all under `[Unreleased]`.
+`docs/project/CHANGELOG.md` is 264 good lines, all under `[Unreleased]`.
 
 *Action:* the rename is a breaking change, so the next version is **1.0.0**, not 0.2.0 — a
 0.x bump would understate it. Move `[Unreleased]` to `## [1.0.0] - 2026-08-25` with an
 explicit **Breaking** section naming `miniworld-kernels` → `miniworld-engine` and the import
 path change. Tag `v1.0.0`. Add `tests/layout/test_version_is_released.py`: the version in
-`pyproject.toml` must have a matching `## [<version>]` heading in `docs/releases/CHANGELOG.md`, and
+`pyproject.toml` must have a matching `## [<version>]` heading in `docs/project/CHANGELOG.md`, and
 `[Unreleased]` must not be the only section.
 
 *Done when:* the test fails on a version bump without a changelog entry, `git tag -l 'v*'`
@@ -133,7 +133,7 @@ fails when the newest verdict does not match `HEAD` or is older than N days. Tha
 *Where it stands:* the verdict system was built and cut -- a script plus a five-test gate was more
 apparatus than the problem justified. The smaller answer reuses the artifact that already exists:
 `run_all` writes a per-card manifest, it is committed, and it now carries a `#provenance` row with
-the version, commit, tree state and date. `docs/getting-started/supported.md` cites those manifests, so a support
+the version, commit, tree state and date. `docs/guides/supported.md` cites those manifests, so a support
 claim now points at a dated artifact naming the code it was produced against.
 
 *Closed, scoped to the release.* `tests/registry/test_a_release_has_been_run_on_a_card.py` is one
@@ -151,7 +151,7 @@ that and is **excluded by decision** -- it needs a runner token, a resident daem
 node, and that node's capacity held for CI. So J1 is met in the only sense available here: the
 evidence exists, it is dated, and its absence fails a release.
 
-The cost is written where it can mislead. `docs/standards/contributing.md` now says a green CI means nothing about
+The cost is written where it can mislead. `docs/project/contributing.md` now says a green CI means nothing about
 the kernels, with the day's own example: 95 tolerance bands narrowed 5x and three kernels ungated
 from sm100, both green before and after, both would have been green if wrong.
 
@@ -203,7 +203,7 @@ asks for; do not claim untested ones.
 *Done when:* `pyproject.toml` has no unbounded-below dependency and the supported-set page
 lists only combinations something ran.
 
-*Closed as far as evidence allows.* `triton>=3.3` from code evidence; einops/jaxtyping/numpy keep no floor deliberately, because nothing has run against an older release of any of them and a guessed floor reads like a measured one. `docs/getting-started/supported.md` states what ran.
+*Closed as far as evidence allows.* `triton>=3.3` from code evidence; einops/jaxtyping/numpy keep no floor deliberately, because nothing has run against an older release of any of them and a guessed floor reads like a measured one. `docs/guides/supported.md` states what ran.
 
 ---
 
@@ -301,7 +301,7 @@ citing the B1 verdict that tested it. Untested rows are marked untested.
 
 *Done when:* it cites verdicts rather than asserting.
 
-*Closed.* `docs/getting-started/supported.md`. Every row names its artifact, and a section lists what has NOT been run -- the 9 kernels declared sm90/sm100 that nothing here has executed.
+*Closed.* `docs/guides/supported.md`. Every row names its artifact, and a section lists what has NOT been run -- the 9 kernels declared sm90/sm100 that nothing here has executed.
 
 ---
 
@@ -593,7 +593,7 @@ own failing.
 | H5 | the `gpu` marker is documented as "needs a CUDA device" and CI only ever excludes it, so nothing exercised what it means: `pytest tests/` on a login node produced 11 failures reading "Found no NVIDIA driver" | `tests/conftest.py` skips them without a card. Collection untouched, so `--collect-only -m gpu` still reports its 100 |
 | H6 | the audit's brute/prune/keys checks -- 264 findings over 88 live autotuners -- ran nowhere automatic. They could not: H4 made the command exit 1 every time | a CI step, after H4 |
 | H7 | `cache.py` documents `_CACHE_MISSES` as "the only direct measure of whether the cache covers a workload" and pointed at `miniworld-engine audit`, which is the STATIC check and never reads it. The replay it meant, `builder.audit`, had **no caller in src, tests or benchmarks** | `dev audit --replay`, refusing without a card rather than reporting an empty miss set as a pass; a test pins the wiring |
-| H8 | `missing_pairs 0` read as "the cache covers the workload" when it means "every declared bucket is present". Declared work is (op, dtype, shape bucket); the cache key also carries each kernel's constexprs. Measured on an A6000: **363 lookups the module matrix asks for and the cache does not serve, across 42 of 91 ops** | the number carries its own limit next to it; the 363 recorded in `docs/records/ampere/cache-coverage-replay-a6000.md` as the rebuild's work list |
+| H8 | `missing_pairs 0` read as "the cache covers the workload" when it means "every declared bucket is present". Declared work is (op, dtype, shape bucket); the cache key also carries each kernel's constexprs. Measured on an A6000: **363 lookups the module matrix asks for and the cache does not serve, across 42 of 91 ops** | the number carries its own limit next to it; the 363 recorded in `docs/records/cache-coverage-replay-a6000.md` as the rebuild's work list |
 | H10 | one unit reported `grid=864` and, under it, `527 configs, best 0.0338ms`. The other 337 appeared nowhere -- 39% of the searched space, in a build whose purpose is to search it. The EXCLUSIONS are legitimate, and traced on the card: of the 54 `BLOCK_M1=256,BLOCK_M2=256` configs, 26 exceed the 60s compile budget (register spill, all of `num_warps` 1 and 2) and the other 28 compile and then fail at launch -- `OutOfResources: shared memory, Required: 196608, Hardware limit: 101376`, and at `num_stages=1` too, so it is the tile, not the staging. What was the defect is that none of it was recoverable afterwards: `prune_configs` returns the full list so nothing is pruned, triton swallows the OutOfResources itself so no exception reaches the capture layer, and a config scoring +inf is correctly not stored. I published two wrong reconstructions before measuring, and a third from a probe whose config pin had not applied | counted where the drop happens and printed: `unusable=337 (39% of the searched space could not run on this card)`, stated even when 0. Cost: four GPU jobs to establish that the exclusions themselves were fine, which the first reading had already said |
 | H9 | `_CACHE_MISSES` only ever grew, so a before/after over one process returned the before twice -- it could not observe a filled cache. Found by exactly that happening: a scoped fill covered four keys, merged, and the second replay named the same four in 0s | `clear_cache_misses()`, called by `builder.audit`; the docstring names what the clear cannot fix (triton memoises per autotuner instance, so the replay must be a fresh process) |
 

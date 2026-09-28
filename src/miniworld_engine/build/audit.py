@@ -561,7 +561,7 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
             sk = next((int(x.split("=")[1]) for x in dims.split(",")
                        if x.startswith("shape_key=")), None)
             # The recorded key is PACKED: `shape_key` carries the row/length bucket AND every width
-            # axis the launch folded in (docs/records/development/product-plan.md G5), so it is a composite integer of order 1e14
+            # axis the launch folded in (docs/records/product-plan.md G5), so it is a composite integer of order 1e14
             # while the declared side below holds the bare bucket. Comparing them raw reports every
             # folded op as missing, which after G5 is every op. Unfold it back to the bucket, using
             # the axis count the kernel itself declares -- the same resolution the key-gap audit

@@ -8,8 +8,8 @@ PyTorch reference and comparison baselines. Full list of changes: [CHANGELOG](CH
   the `experiments/` tree (kept in git, see [archive](../records/experiments-archive.md)).
 - New H100 CUDA: TriMul D64 bidirectional training, wide bidirectional inference (D256–512),
   single-direction D512 inference; wide bidirectional training port (D256–512).
-- Status per GPU and shape: [docs/status/](../status/README.md). Measurements:
-  [H100 2026-09-28](../records/h100/v220-measurements-20260928.md).
+- Status per GPU and shape: [docs/gpus/](../gpus/README.md). Measurements:
+  [H100 2026-09-28](../records/v220-measurements-20260928.md).
 
 Qualification: CPU suite and targeted H100 GPU tests pass; the full GPU suite and autotune cache
 rebuilds (all GPUs, stale since the torch upgrade) are pending, so no release tag exists yet.

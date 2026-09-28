@@ -51,7 +51,7 @@ implementations:
 #   the loader error); ANTHROPIC_TRIMUL_BUILD_DIR can name a local rebuild of the unmodified sources.
 #   anthropic_hybrid -- the same module path on the payload the CALLER exported in
 #   TRIMUL_NATIVE_BUILD_DIR, e.g. this repo's K1/K3 overlay build
-#   (built from tag archive/experiments-20260928, see docs/anthropic/trimul-payload.md).
+#   (built from tag archive/experiments-20260928, see docs/guides/anthropic-trimul-payload.md).
 #   Run it in a separate invocation from `anthropic`: one process loads one payload.
 #   Every other row runs with the payload variables masked, so miniworld stays our kernels.
 mode: inference        # inference | training

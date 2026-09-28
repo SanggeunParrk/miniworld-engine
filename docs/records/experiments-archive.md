@@ -25,7 +25,7 @@ Where each capsule ended up in `src/`:
 | `trimul_b7b12`, `trimul_training_v2` | `kernels/trimul_inproj/cuda/h100_training.py` (D128 B1/B7) |
 | `trimul_large_d_vast` | `kernels/trimul_inproj/cuda/h100_wide_training.py` (D256/384/512 training) |
 | `token_dit_train` | `kernels/augmented_attention/cuda/` |
-| `token_dit_fused`, `token_dit_overlap` | not yet ported (quack-GEMM dependent); see the v2.2.0 pending list in `docs/releases/CHANGELOG.md` |
+| `token_dit_fused`, `token_dit_overlap` | not yet ported (quack-GEMM dependent); see the v2.2.0 pending list in `docs/project/CHANGELOG.md` |
 | `transition_wide_fusion` | not ported (explicit 1.03x D384/512 candidate) |
 
 `kernels/trimul_inproj/cuda/h100_sources/PROVENANCE.json` and the `.cu` provenance headers name

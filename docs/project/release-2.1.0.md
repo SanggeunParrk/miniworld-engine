@@ -111,7 +111,7 @@ The full CPU run (19676) reported 3,967 passed, 16 failed, 279 skipped, with
 1,002 GPU tests deselected. Follow-up checks resolved two new policy/registry
 failures. The v2.1-focused run (19680) passed 164 tests, with one skip, and
 the syntax/undefined-name lint passed. Follow-up registry checks are recorded
-in [the validation record](2.1.0-cpu-validation.json).
+in [the validation record](../records/release-2.1.0-cpu-validation.json).
 
 Thirteen pre-existing failures remain: stale dispatch-derived sweep evidence,
 cache identity/MPNN dropout coverage, legacy JIT/compile-wrapper/layout contracts,

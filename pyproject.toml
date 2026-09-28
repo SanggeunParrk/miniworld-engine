@@ -128,7 +128,7 @@ exclude = [
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
-  # Scratch under a bench target, per docs/benchmarks/README.md: "A target holds no Python at all --
+  # Scratch under a bench target, per docs/guides/benchmarks.md: "A target holds no Python at all --
   # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
   # them; excluding only artifacts meant a working tree with local profiler captures reported
   # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
@@ -263,7 +263,7 @@ exclude = [
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
-  # Scratch under a bench target, per docs/benchmarks/README.md: "A target holds no Python at all --
+  # Scratch under a bench target, per docs/guides/benchmarks.md: "A target holds no Python at all --
   # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
   # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
   # A kernel's optimization log: the write-up per round and the scratch .py a version was
@@ -292,7 +292,7 @@ exclude = [
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
-  # Scratch under a bench target, per docs/benchmarks/README.md: "A target holds no Python at all --
+  # Scratch under a bench target, per docs/guides/benchmarks.md: "A target holds no Python at all --
   # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
   # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
   # A kernel's optimization log: the write-up per round and the scratch .py a version was
@@ -340,7 +340,7 @@ extra-paths = ["benchmarks/runners", "tests", "tests/layout"]
 # pixi — single unified environment for the whole repo (triton + Transformer
 # Engine cu12 + cuequivariance + benching). Replaces the old
 # per-backend cute-env/ and te-env/ folders. The materialized `.pixi/` is
-# gitignored. See docs/benchmarks/README.md and docs/kernels/.
+# gitignored. See docs/guides/benchmarks.md and docs/kernels/.
 #
 # Cluster notes (CSSB H100, driver 575 = CUDA 12.9-max):
 #   - MUST be cu12, never cu13 (transformer_engine_cu12 + core-cu12 extra).

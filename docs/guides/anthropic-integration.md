@@ -1,7 +1,7 @@
 # Anthropic inference integration
 
 This integration builds on [Anthropic's biomolecular inference work](https://github.com/anthropics/uplifting-biomolecular-modeling),
-pinned at `f4f62fa6592ae4938d49b1757bea0cfeff9f468e`. See [project direction](../standards/project-direction.md)
+pinned at `f4f62fa6592ae4938d49b1757bea0cfeff9f468e`. See [project direction](../project/project-direction.md)
 for the acknowledgment and the distinction between upstream and our contribution.
 
 ## Source and attribution

@@ -1,8 +1,8 @@
 # miniworld-engine
 
-![MiniWorld Engine graphical abstract: model operations, GPU kernel fusion, hardware-specific tuning and cache reuse, with A6000 DiT results.](docs/assets/miniworld-engine-graphical-abstract.png)
+![MiniWorld Engine graphical abstract: model operations, GPU kernel fusion, hardware-specific tuning and cache reuse, with A6000 DiT results.](docs/project/graphical-abstract.png)
 
-[Figure details and measurement scope](docs/assets/README.md).
+[Figure details and measurement scope](docs/project/graphical-abstract.md).
 
 GPU kernel library for MiniWorld / AF3-style ops. Each op is cut out of the model and
 optimized in isolation: **hand-written CUDA where it exists, a Triton fallback everywhere
@@ -14,13 +14,12 @@ else**, and a PyTorch reference that defines what "correct" means.
 > team-gm's `docs/ARCHITECTURE.md`.
 
 **Version 2.2.0** — CUDA + Triton only (CuTe/quack removed), torch 2.13 / cu129,
-cuequivariance 0.12. [Changelog](docs/releases/CHANGELOG.md) · [releases](docs/releases/) ·
+cuequivariance 0.12. [Changelog](docs/project/CHANGELOG.md) · [releases](docs/project/) ·
 [attribution](licenses/THIRD_PARTY_NOTICES.md).
 
 | I want to… | go to |
 |---|---|
-| know what is finished on a GPU, for which shapes | [docs/status/](docs/status/README.md) |
-| run on a specific GPU cluster | [docs/gpus/](docs/gpus/README.md) |
+| run on a GPU, or see what is finished there for which shapes | [docs/gpus/](docs/gpus/README.md) |
 | read everything else | [docs/README.md](docs/README.md) |
 | work on this repo as an agent | [AGENTS.md](AGENTS.md) |
 
@@ -70,8 +69,8 @@ python -m miniworld_engine.autotune.run_all
 The summary reports `declared`, `driven`, `ok`, `failed`, and `skipped` counts for the
 current registry and device. `skipped` distinguishes unsupported architecture/dtype cases;
 missing drivers and execution failures are reported separately. See
-[docs/getting-started/supported.md](docs/getting-started/supported.md) for what has actually been run, and
-[docs/getting-started/troubleshooting.md](docs/getting-started/troubleshooting.md) when a step does not do this.
+[docs/guides/supported.md](docs/guides/supported.md) for what has actually been run, and
+[docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) when a step does not do this.
 
 **Then:** using the kernels means `from miniworld_engine import ops` — eight whole-op entry points
 that take the same arguments as their torch equivalents. Getting them *fast* on your card means
@@ -110,7 +109,7 @@ public door), optional `dispatch.py` (a choice among implementations) and `whole
 One entry point: `benchmarks/runners/bench.py` with a target's `configs/bench.yaml`
 (`target=<name> level=module|kernel`). Final numbers are compiled and CUDA-graph timed; the
 CSV is the source of truth and plots are rendered from it. Conventions:
-[docs/benchmarks/](docs/benchmarks/README.md) · traps: [cautions](docs/benchmarks/cautions.md) ·
+[docs/benchmarks/](docs/guides/benchmarks.md) · traps: [cautions](docs/guides/benchmarks-cautions.md) ·
 cluster commands per GPU: [docs/gpus/](docs/gpus/README.md).
 
 ## torch.compile
@@ -169,7 +168,7 @@ miniworld-engine dev audit            # registry, tuning and build-system contra
 `build all` runs only the configured FoldForge/MiniWorld module shapes, then checks
 required cache coverage after merging. Unreachable diagnostic kernels are not appended to
 the default build; use explicit `--per-op` for a separate kernel experiment.
-[Model shape policy](docs/records/reports/model-shape-cleanup-20260916.md). Declared invocations, selected work and cache keys
+[Model shape policy](docs/records/model-shape-cleanup-20260916.md). Declared invocations, selected work and cache keys
 are different counts; the command prints them for the current source and GPU.
 A claim file alone does not prove completion: resume requires reusable measurement shards
 and matching provenance. `--no-resume` disables completed-shard reuse.
@@ -178,7 +177,7 @@ and matching provenance. `--no-resume` disables completed-shard reuse.
 (`src/miniworld_engine/autotune/data/` in a checkout). It requires a writable installation
 or checkout and does not automatically commit results. A successful cache build does not
 replace module numerical tests or benchmarks. Full policy:
-[dispatch-cache.md](docs/autotune/dispatch-cache.md).
+[dispatch-cache.md](docs/guides/autotune-dispatch-cache.md).
 ## Research history
 
 Research capsules that produced the hand-CUDA paths were removed from the tree in 2.2.0; only

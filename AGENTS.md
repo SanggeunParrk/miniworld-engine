@@ -34,7 +34,7 @@ torch 2.13 + cu129, triton 3.7, Transformer Engine, cuequivariance 0.12, FlashAt
 - Benchmarks: only `benchmarks/runners/bench.py` + `benchmarks/modules/<module>/configs/bench.yaml`.
   One-off probes stay untracked under `.bench/` (ignored). Timings are CUDA-graph or compiled —
   never eager for final numbers.
-- Per-GPU completion status (which op is finished for which shapes): `docs/status/<gpu>.md`.
+- Per-GPU completion status (which op is finished for which shapes): `docs/gpus/<gpu>.md` (section "Completion status").
   The **judgement** column is filled by the maintainer, not by an agent.
 - Dated measurements and audits: `docs/records/`, never edited after the fact.
 - Local scratch: `.bench/` (ignored). Removed research lives in git (see

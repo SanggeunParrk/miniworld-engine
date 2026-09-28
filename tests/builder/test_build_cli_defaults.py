@@ -211,7 +211,7 @@ def test_the_sweep_axis_reaches_bench_py():
     """Without this the CLI could only ever sweep seq_len.
 
     bench.py's config defaults to `sweep_axis: seq_len` and the CLI never passed one, so the
-    d_pair half of the matrix -- which docs/benchmarks/README.md and the README both call for, and where
+    d_pair half of the matrix -- which docs/guides/benchmarks.md and the README both call for, and where
     the width-dependent kernels separate -- was reachable only by invoking bench.py directly.
     """
     import argparse

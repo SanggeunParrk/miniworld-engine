@@ -5,12 +5,12 @@ Hard-won lessons from benchmarking the trimul kernels. These ops are
 so they are **host/launch-bound at small problem sizes**. That makes them very
 easy to mis-measure. Read this before trusting any trimul number.
 
-See also `docs/benchmarks/README.md` for the harness/CSV/plot convention.
+See also `docs/guides/benchmarks.md` for the harness/CSV/plot convention.
 
 ## Provenance of the numbers in this file
 
 Every figure below is a measurement, and a latency without a machine is not a result
-(`docs/standards/library-standards.md` C1). Where a section names its device, that is the device. Where it
+(`docs/project/library-standards.md` C1). Where a section names its device, that is the device. Where it
 does not, **the device was not recorded at the time** — those numbers are evidence for the *effect*
 being described (a regime changes the answer; a fold removes a pass) and must not be compared
 against a number measured elsewhere. They are kept rather than deleted because the lesson survives

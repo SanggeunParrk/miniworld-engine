@@ -149,7 +149,7 @@ GPU qualification of this release is pending.
   require rebuilding and are not represented as valid 2.0.0 tuning records.
 - Transition adds the parallel LN-gradient reduction and transposed dWs stores.
 
-Release map, migration limits and evidence: [2.0.0](2.0.0.md).
+Release map, migration limits and evidence: [2.0.0](release-2.0.0.md).
 
 
 ### Added
@@ -171,7 +171,7 @@ Release map, migration limits and evidence: [2.0.0](2.0.0.md).
 - Merge the 24 active MiniWorld consumer patches: packed TriMul buffers, configured
   F567 forward and dual-dgrad/LayerNorm-residual backward fusions, strict Triton
   backend selection, and expanded resumable CuTe/CUDA tuning.
-  See [integration and validation](../records/cache/local-patches-20260917/README.md).
+  See [integration and validation](../records/local-patches-20260917.md).
 - Retire 37 incompatible H100/A5000/A6000 cache files from runtime selection;
   original measurements and checksums remain in the integration archive.
 

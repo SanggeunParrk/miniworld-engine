@@ -2,11 +2,11 @@
 
 > **A record of one audit, not a current reference.** Kernel names here are the ones in
 > `registry.csv` at the time it ran; where a kernel has since been renamed,
-> `docs/records/audits/rename-map.tsv` maps it. The *findings* — which axes are covered, which
+> `docs/records/rename-map.tsv` maps it. The *findings* — which axes are covered, which
 > extents were never ragged — are what this file is for, and those still hold.
 
 Every kernel the repo declares, measured against the tile configuration rather than the shape.
-`docs/standards/naming.md` covers what the kernels are called; this covers whether their tiling is
+`docs/project/naming.md` covers what the kernels are called; this covers whether their tiling is
 right. Nothing here is inferred from reading a kernel and deciding it looks correct — each row is
 either a run on an A6000 (sm86) or an AST fact, and the two are labelled differently.
 
@@ -808,6 +808,6 @@ and this extension has no caller in the repo. Root cause not identified; the `ex
 `squeeze_work` staging copies in the forward are the place to look.
 
 * The rename orphaned 128 tuned cache JSONs; 109 map to a current op through
-  `docs/records/audits/rename-map.tsv`, but all 109 carry a `config_space_hash` that no longer matches the
+  `docs/records/rename-map.tsv`, but all 109 carry a `config_space_hash` that no longer matches the
   current single-row config space, so `select_config` would reject them as stale. They remain in
   git history. sm80 / sm90 / sm100 tuning cannot be regenerated on this cluster.

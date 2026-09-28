@@ -21,7 +21,7 @@ from importlib import import_module
 #: Removing a name from :data:`__all__` fails ``tests/compile/test_public_api.py`` on purpose, which is
 #: the right guard and was also the whole mechanism -- so in practice nothing was ever removed.
 #: This is the missing half. A name listed here still resolves and still works exactly as before;
-#: it just says, once per process, that it is going away. See docs/standards/contributing.md ("Deprecation"):
+#: it just says, once per process, that it is going away. See docs/project/contributing.md ("Deprecation"):
 #: deprecated in release N, removed no earlier than N+2, listed under `### Deprecated` in the
 #: CHANGELOG for both.
 #:

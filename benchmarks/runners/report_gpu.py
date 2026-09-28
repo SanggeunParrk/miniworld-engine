@@ -1,6 +1,6 @@
 """Render one GPU's curated module results into a docs/reports page.
 
-Input is the tracked layout from ``docs/benchmarks/results.md``:
+Input is the tracked layout from ``docs/guides/benchmarks-results.md``:
 ``benchmarks/modules/<target>/results/<gpu>/tables/<mode>_<axis>[_<variant>].csv``. Output is
 one markdown page plus SVG figures: a sweep figure per module (latency and speedup for every
 mode/axis table), a summary table at the anchor shape, and one summary figure across modules.
@@ -472,7 +472,7 @@ def main() -> None:
                         help="figure directory (default <out stem>/ next to the markdown)")
     parser.add_argument("--title", default=None)
     args = parser.parse_args()
-    out_md = args.out or REPO / "docs" / "benchmarks" / "reports" / f"{args.gpu}-module-sweeps.md"
+    out_md = args.out or REPO / "docs" / "records" / f"{args.gpu}-module-sweeps.md"
     figure_dir = args.figures or out_md.with_suffix("")
     build(args.gpu, out_md, figure_dir, args.title)
 

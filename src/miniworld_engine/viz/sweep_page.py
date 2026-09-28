@@ -1,6 +1,6 @@
 """One page describing the whole autotune sweep: every kernel, one row.
 
-`python -m miniworld_engine.viz.sweep_page` writes `docs/autotune/sweep-grid.html`.
+`python -m miniworld_engine.viz.sweep_page` writes `docs/guides/autotune-sweep-grid.html`.
 
 It reads the repository, never a snapshot: `registry.csv` for what a kernel is, `op_units()` for
 the shapes a build drives it at, `autotune/configs/grid/` for the ladders it searches, and
@@ -385,8 +385,8 @@ axis values. Transition B2B applies its existing covering prune using the record
  Paired dimensions are decoded from actual cache keys; they are not Cartesian axes.
  Stream labels identify the caller workload: an MSA call also launches pair-tensor kernels.
  A stale plan must be regenerated with <code>dev derive</code> before rendering this page.
- <a href="../records/model-shapes/checkpoint-shapes-20260915.json">Constructor census</a> ·
- <a href="../records/reports/model-shape-cleanup-20260916.md">Model shape cleanup</a></p>
+ <a href="../records/checkpoint-shapes-20260915.json">Constructor census</a> ·
+ <a href="../records/model-shape-cleanup-20260916.md">Model shape cleanup</a></p>
 <p class="lede">Tile, warp and stage grids remain unchanged. Costs include only the explicitly identified prune,
  not measured build ETAs; existing usable cache entries reduce the remaining work.</p>
 <dl class="gm">
@@ -492,7 +492,7 @@ def render(rows: list[dict], totals: dict) -> str:
                  f'<td class="lad faint" title="{e(r["exempt"])}">&mdash;</td>')
         dt = "".join(f'<span class="dt {e(x)}">{e(x)}</span>' for x in r["dtypes"].split("|"))
         shape_note = (
-            '<div class="fam"><a href="../records/reports/autotune-space-20260916.md#atomic-layernorm-shape-audit">'
+            '<div class="fam"><a href="../records/autotune-space-20260916.md#atomic-layernorm-shape-audit">'
             'Fallback shape audit: includes extrapolated widths; misses checkpoint widths</a></div>'
             if r["kernel"] == "layernorm_bwd_atomic_triton" and not r["coverage_verified"] else "")
         body.append(
@@ -518,7 +518,7 @@ def render(rows: list[dict], totals: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", type=Path,
-                    default=PKG.parents[1] / "docs" / "autotune" / "sweep-grid.html")
+                    default=PKG.parents[1] / "docs" / "guides" / "autotune-sweep-grid.html")
     args = ap.parse_args(argv)
     rows, totals = collect()
     args.out.parent.mkdir(parents=True, exist_ok=True)

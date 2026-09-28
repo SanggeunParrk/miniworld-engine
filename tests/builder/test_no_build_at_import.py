@@ -1,6 +1,6 @@
 """Importing a kernel package must not compile anything.
 
-`docs/standards/library-standards.md` A2: an import must not compile a kernel, touch a GPU, read a cache, or
+`docs/project/library-standards.md` A2: an import must not compile a kernel, touch a GPU, read a cache, or
 spend seconds. The package as a whole satisfied that only because nothing imported the two CUDA
 subpackages eagerly -- each of them called `torch.utils.cpp_extension.load` at module scope, and
 `transition/cuda` built THREE extensions that way, one of them compiled for `sm_90a`.

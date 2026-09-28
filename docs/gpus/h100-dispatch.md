@@ -20,7 +20,7 @@ bidirectional CUDA training path at D64/128/256/384/512 (D64: its own fused path
 CUDA-graph replay. Inference: the packaged K1/K3 table (D64/128, uni D256/384), the
 wide bidirectional K1/K3 `h100_wide_inference` (D256/384/512, 1.89-2.04x) and the
 single-direction D512 path `h100_uni_wide_inference` (1.80x). Single-direction training
-stays D128-only; other widths train on Triton. Per-shape status: `docs/status/h100.md`.
+stays D128-only; other widths train on Triton. Per-shape status: `docs/gpus/h100.md`.
 
 ## Retained values and execution
 
