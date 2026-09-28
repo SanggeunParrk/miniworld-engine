@@ -188,8 +188,7 @@ def test_persistent_input_refill_graph(monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(engine_backend="auto", transition_residual_fusion=True,
-                       transition_fused_sm90a=True)
+    settings.configure(engine_backend="auto", transition_fused_sm90a=True)
     module, x, dy = _build((1, 384, 384, 128))
     with torch.no_grad():
         module.ln_in.weight.copy_(1 + 0.2 * torch.randn_like(module.ln_in.weight))
