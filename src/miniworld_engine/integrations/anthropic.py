@@ -21,7 +21,7 @@ def configure(root=None):
                 Path(__file__).resolve().parents[3] / "third_party/anthropic/upstream").resolve()
     core = root / "common/opt_core"
     if not (core / "opt_core/__init__.py").is_file():
-        raise RuntimeError("Anthropic sources missing: run scripts/import_anthropic.py or set MINIWORLD_ANTHROPIC_ROOT")
+        raise RuntimeError("Anthropic sources missing: run scripts/anthropic/import_anthropic.py or set MINIWORLD_ANTHROPIC_ROOT")
     loaded = sys.modules.get("opt_core")
     if loaded is not None and Path(loaded.__file__).resolve().parent != core / "opt_core":
         raise RuntimeError(f"opt_core already loaded from a different source: {loaded.__file__}")

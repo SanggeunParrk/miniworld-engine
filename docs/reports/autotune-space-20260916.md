@@ -160,7 +160,7 @@ complete runtime coverage certificate; the stale module registry trace cannot su
 that certificate either.
 
 Current local model defaults and conditioning code were cross-checked with the actual
-constructor census in `docs/checkpoint-shapes-20260915.json`:
+constructor census in `docs/records/model-shapes/checkpoint-shapes-20260915.json`:
 
 | Model/config | Trunk pair width | Pair-conditioning LayerNorm width | Pair LN D=768 found? |
 |---|---:|---:|---|

@@ -126,8 +126,8 @@ run in Triton's CPU interpreter for 72 FP32 tail/mask/layout cases. The harness
 locally adapts Triton's scalar-index conversion to the installed NumPy version.
 Neither method validates BF16 GPU instructions or synchronization.
 
-Reproduction entry points: `scripts/check-hopper-candidate-matrix.py` and
-`scripts/check-hopper-triton-helpers-cpu.py`. Run these on CPU compute nodes.
+Reproduction entry points: `scripts/hopper/check-hopper-candidate-matrix.py` and
+`scripts/hopper/check-hopper-triton-helpers-cpu.py`. Run these on CPU compute nodes.
 The candidate matrix saves each request, compiler log and result independently,
 plus a JSON summary. The build job shares its persistent Quack and CUDA-extension
 cache paths with this audit. No GPU job was submitted during the follow-up.
@@ -174,7 +174,7 @@ Three additional CPU-reproducible gaps were corrected:
    original driver's cache-eviction provider. Previously its installed provider
    could remain active with a live zero-MB setting, disabling eviction.
 
-The new `scripts/check-hopper-cache-reuse-cpu.py` warms thirteen real CuTe
+The new `scripts/hopper/check-hopper-cache-reuse-cpu.py` warms thirteen real CuTe
 compile contracts across six persistent-cache families (including all eight
 M2 layout/gate/workspace branches). It then starts a fresh Python process for
 each, with `cute.compile` replaced by a failure. Success requires an actual

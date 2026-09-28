@@ -92,7 +92,7 @@ global-memory masks/strides do not establish an out-of-bounds access.
 
 ## CPU code generation evidence
 
-`scripts/check-h100-memory-codegen.py` reconstructs the recorded ABI and compiles
+`scripts/hopper/check-h100-memory-codegen.py` reconstructs the recorded ABI and compiles
 eight candidates with the build's isolated Triton 3.6.0 environment for sm90:
 
 | Operation | Warps | Stages | Shared bytes | WGMMA instructions in PTX |
@@ -146,7 +146,7 @@ Compute Sanitizer probes, then four focused original-unit sweeps. It does not
 publish or merge caches. Output: `.scratch/h100-memory-debug/267377/` and
 `.scratch/h100-memory-debug/slurm-267377.log`.
 
-`scripts/repro-h100-memory.py` recreates original tensor shapes/strides/dtypes,
+`scripts/hopper/repro-h100-memory.py` recreates original tensor shapes/strides/dtypes,
 regenerates data, invokes one unwrapped JIT candidate, synchronizes, and compares
 outputs/gradients to a torch reference. Each candidate runs in a fresh process.
 

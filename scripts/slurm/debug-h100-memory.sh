@@ -49,7 +49,7 @@ def run(index):
     for stages in ('1', '2'):
         probe = f'{family}-w{warps}-s{stages}'
         command = ['compute-sanitizer', '--tool', 'memcheck', '--error-exitcode', '99',
-                   sys.executable, 'scripts/repro-h100-memory.py', family,
+                   sys.executable, 'scripts/hopper/repro-h100-memory.py', family,
                    '--warps', warps, '--stages', stages]
         with (out / f'{probe}.log').open('w') as log:
             try:

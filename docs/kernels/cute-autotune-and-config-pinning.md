@@ -88,7 +88,7 @@ whose row-scale and affine gradients match the mathematical reference.
 CPU unit tests exercise actual configuration selection/capture, failure handling,
 exact workload keys, build-plan inclusion, mask gradients, and epilogue setup.
 CPU-only nvcc/CuTe compilation checks are in `scripts/check-hopper-*-compile.py`
-and `scripts/check-hopper-config-variants.py`. They do not launch GPU kernels.
+and `scripts/hopper/check-hopper-config-variants.py`. They do not launch GPU kernels.
 
 GPU numerical comparisons, synchronization/race checks and measured winning
 configs for this revision remain pending. CPU compilation cannot establish those
@@ -119,7 +119,7 @@ out-of-bounds risk from zero-stride gradients such as `output.sum().backward()`.
 Regression tests exercise actual native capture -> shard -> filtered merge ->
 runtime lookup for all twelve registered native operations, native staleness and
 resume invalidation, requested driver widths, and gradient layout handling.
-`scripts/check-hopper-family-compile.py` additionally lowers the maintained CuTe
+`scripts/hopper/check-hopper-family-compile.py` additionally lowers the maintained CuTe
 families using fake tensors without launching GPU work.
 
 That compilation audit reproduced a compiler abort at TM2 output tile N=24.
@@ -152,8 +152,8 @@ Forty-eight trimul autograd reference cases and 72 real Triton helper body cases
 
 Use the project environment with `PYTHONNOUSERSITE=1` and `PYTHONPATH="$PWD/src"`
 on a CPU compute node. The audit entry points are
-`scripts/check-hopper-candidate-matrix.py --backend all --jobs 32 --output <dir>`
-and `scripts/check-hopper-triton-helpers-cpu.py`. Matrix logs/results are in
+`scripts/hopper/check-hopper-candidate-matrix.py --backend all --jobs 32 --output <dir>`
+and `scripts/hopper/check-hopper-triton-helpers-cpu.py`. Matrix logs/results are in
 `.scratch/hopper-cpu-cute-final/` and `.scratch/hopper-cpu-cuda-final/`.
 
 The final full CPU suite passed 2,818 tests (32 skipped, 222 GPU tests deselected).

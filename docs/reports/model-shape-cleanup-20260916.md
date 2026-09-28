@@ -1,6 +1,6 @@
 # Model-derived build shapes — 2026-09-16
 
-Scope: FoldForge AF3 default, Protenix v1 and v2, OpenDDE default, installed ESMFold2 checkpoint configuration, and MiniWorld debug/small/medium/large dimensions. Evidence: [constructor census](../checkpoint-shapes-20260915.json), connected module source and MiniWorld model configs. This is shape coverage, not a new performance or numerical-accuracy claim.
+Scope: FoldForge AF3 default, Protenix v1 and v2, OpenDDE default, installed ESMFold2 checkpoint configuration, and MiniWorld debug/small/medium/large dimensions. Evidence: [constructor census](../records/model-shapes/checkpoint-shapes-20260915.json), connected module source and MiniWorld model configs. This is shape coverage, not a new performance or numerical-accuracy claim.
 
 ## Changes
 
