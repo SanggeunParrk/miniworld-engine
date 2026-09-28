@@ -259,6 +259,10 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     "adaptive_layernorm": KernelBackend.TRITON,
     "conditioned_transition": KernelBackend.TRITON,
     "augmented_attention": KernelBackend.TRITON,
+    # The MSA pair. Their native H100 paths (integrations.opm_train / pwa_train) and the Anthropic payload are chosen inside
+    # the modules before this is asked; what is resolved here is the portable path every other GPU gets.
+    "outer_product_mean": KernelBackend.TRITON,
+    "msa_pair_weighted_averaging": KernelBackend.TRITON,
 }
 
 

@@ -28,6 +28,8 @@
     gated_projection     y = sigma(gate) * proj 계열 (게이트 단독 / GEMM 융합 모두)
     rmsnorm              RMSNorm 계열 (평균을 빼지 않는 LayerNorm; 변조 포함)
     rmsnorm_adamod       RMSNorm + adaLN-Zero 변조 + 조건부 투영 GEMM 을 한 커널에서
+    outer_product_mean   OuterProductMean (MSA -> pair: LN, 좌/우 투영, 마스크, MSA 행 평균 외적, c_hidden^2 -> c_z 투영)
+    pair_weighted_averaging  MSAPairWeightedAveraging (pair 로 만든 softmax 가중치로 MSA value 를 평균, 게이트, 출력 투영)
 
 ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이고, 아래 3개는 다른 모델의
 연산이다. `mpnn_` 접두는 `fused_` 와 달리 정보가 있다 — 어느 모델의 연산인지가 곧 어떤 형상을
@@ -74,6 +76,7 @@ ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이�
     swiglu             SiLU(a) * b
     expand squeeze     Transition 의 확장/축소 GEMM
     layernorm          커널 안에서 수행하는 LN 단계
+    softmax            키 축 softmax (로짓 -> 가중치; 역전파는 w (dw - sum w dw))
     epilogue           본 GEMM 밖의 후처리 단계
     transpose          레이아웃 변환만
     fold               가중치/텐서 프리폴드

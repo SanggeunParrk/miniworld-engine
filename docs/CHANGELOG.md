@@ -21,7 +21,7 @@ GPU qualification of this release is pending.
 ### Removed
 
 - `experiments/`: every capsule is either ported to `src/` (fastest variant only) or history.
-  The tree is at tag `archive/experiments-20260928` (and branch `wip/main-20260928` for the
+  The tree is at tag `archive/experiments-20260928` (and tag `archive/wip-main-20260928` for the
   Sept 27–28 local-H100 research); see README "Research history". The Anthropic
   `NOTICE` and v5 source hashes moved to `licenses/`.
 - Every CuTe DSL / nvidia-cutlass-dsl / quack kernel and the `cute` extra: `kernels/*/cute`
@@ -47,18 +47,35 @@ GPU qualification of this release is pending.
 
 ### Changed
 
-- Repository layout (no behaviour change): registry CSVs and evidence files moved to
-  `kernels/registry/`; A/B config sets to `autotune/configs/ab/` (short names such as `blk16`
-  still resolve); docs regrouped into `status/` (per-GPU completion, maintainer-judged),
-  `gpus/` (per-cluster how-to), `getting-started/`, `autotune/`, `benchmarks/`, `standards/`,
-  with dated reports and development notes under `records/`; agent rules in `.claude/CLAUDE.md`; `scripts/` folded into `miniworld-engine dev` commands (`tools/`) and `benchmarks/runners/`, unused bring-up scripts at tag `archive/scripts-20260928`.
+- Add portable Triton OuterProductMean and MSAPairWeightedAveraging (forward and
+  backward; kernel families `outer_product_mean`, `pair_weighted_averaging`, 12
+  autotuned kernels). `miniworld` now takes them on every GPU and width the
+  native H100 paths do not serve, and under `engine_backend="triton"`; before,
+  those calls ran the module's PyTorch statements. `implementation="triton"` on
+  either module used to run the same statements silently and now runs the
+  kernels or raises `NotImplementedError` naming the reason (CPU input, non-bf16,
+  interchain masking, d_msa / d_hidden not a power of two, OPM d_pair not a
+  multiple of 32). Their autotune grids ship at full ladder width; no cache is
+  built yet, so a first call uses the bounded miss fallback.
+- `build.launch_bind` reads a kernel's tuned axes from the shipped grid spec of
+  its `configs_for("<op>")`, so axes not spelled `BLOCK_*` are recognised.
+- A100 (sm_80): hand-CUDA fused Transition for D128/n=4 bf16 (`kernels/transition/cuda/fused_sm80.py`,
+  forward + two-kernel backward, training step about 1.44x the Triton residual path on A100).
+  The sm_80 CUDA TriMul and the other A100 research runners are not ported to `src/`; they are
+  at tag `archive/a100-sm80-branch-20260928` (`experiments/a100_*`).
+- Repository layout (no behaviour change): registry CSVs and evidence files in `kernels/registry/`;
+  A/B config sets in `autotune/configs/ab/` (short names such as `blk16` still resolve); docs are
+  `docs/gpus/` (per-GPU how-to and completion tables, judged by the maintainer) and `docs/kernels/`,
+  plus `docs/CHANGELOG.md` and `docs/standards.md`; benchmark docs beside `benchmarks/`; agent rules in
+  `.claude/CLAUDE.md`; `scripts/` folded into `miniworld-engine dev` commands (`tools/`) and
+  `benchmarks/runners/`. Removed records, experiments and scripts are listed in README "Research history".
 - Bidirectional TriMul H100 training at D256/384/512 (L384/768) is a new flattened hand-CUDA +
   cuBLASLt port of the qualified large-width research plans (`h100_wide_training`, 29 frozen
   kernels in `h100_sources/wide_train`): 1.44-1.62x the Triton path in paired CUDA-graph fwd+bwd
   replay on H100 (was 0.69-0.75x). Its retained activations are larger than the old port's
   (D512/L768 11.3 GiB) and equal to or below the Triton path's. cuBLASLt algorithms frozen under 12.8.4 are matched by configuration against the
   running cuBLASLt (`lt_selection.json`), falling back to the first heuristic with a warning.
-  See docs/operations/h100-module-wiring.md.
+  See docs/gpus/h100-dispatch.md.
 - `trimul_h100_training_widths` defaults to `(128, 256, 384, 512)`; D64 bidirectional training
   runs on Triton (its CUDA port measured 0.61x of Triton in graph replay).
 - The H100 training opaque ops are renamed (`trimul_h100_train_{fwd,bwd}_wide_port`,
@@ -93,6 +110,7 @@ GPU qualification of this release is pending.
 - GPU qualification of the new tuning integrations remains pending.
 
 ### Consolidated work since 2.0.0
+
 
 - Fuse OPM/PWA training dropout and residual epilogues, retain live-weight graph
   replay, and record MSA comparisons with the standard depth of 1024.

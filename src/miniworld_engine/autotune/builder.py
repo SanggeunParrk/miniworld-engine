@@ -1886,7 +1886,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     Five percent and not more, and the log says why: one unit spent 3,962 s waiting on the other's
     bench lock. The ceiling is the bench, ~18% of a unit's wall, and half of it went to queueing.
     Cheapening the bench (`bench_rep_ms`) should raise this ceiling; the two have not been
-    measured together. See docs/operations/dispatch-cache.md.
+    measured together. See docs/kernels/autotune-dispatch-cache.md.
     """
     import concurrent.futures as cf
 

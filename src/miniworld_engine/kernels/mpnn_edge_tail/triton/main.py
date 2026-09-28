@@ -129,7 +129,7 @@ def _configs(
 
     Configurations that exceed shared memory or registers are skipped by the tuner, so
     offering them costs first-call compile time and nothing else.  That cost is what
-    the repository's autotune cache exists for; see docs/operations/dispatch-cache.md.
+    the repository's autotune cache exists for; see docs/kernels/autotune-dispatch-cache.md.
     """
     return [
         triton.Config(

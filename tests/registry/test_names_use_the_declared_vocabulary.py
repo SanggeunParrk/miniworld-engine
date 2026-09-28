@@ -34,7 +34,8 @@ SPEC = ROOT / "docs/kernels/naming.md"
 #: Declared here rather than parsed out of the prose, and pinned to the prose by
 #: `test_every_token_is_in_the_document` below -- so a token deleted from the document fails, and
 #: a name using a token missing from here fails. Longest first: the tokenizer is greedy.
-FUNCS = ("mpnn_relative_position", "mpnn_node_message", "mpnn_edge_tail",
+FUNCS = ("outer_product_mean", "pair_weighted_averaging",
+         "mpnn_relative_position", "mpnn_node_message", "mpnn_edge_tail",
          "mpnn_edge_dropout", "mpnn_edge_mlp", "mpnn_message",
          "qk_norm_rope", "swa_gate_out", "rope", "layernorm_linear", "cond_transition", "trimul_outproj", "triangle_attention",
          "augmented_attention", "bias_only_attention", "gated_projection", "layernorm",
@@ -42,7 +43,7 @@ FUNCS = ("mpnn_relative_position", "mpnn_node_message", "mpnn_edge_tail",
          "rmsnorm_adamod", "rmsnorm",
          "transition", "trimul", "adaln")
 ROLES = ("reduce", "gelu", "input", "output", "inproj", "bwd_reduce", "bwd_pre", "transpose", "epilogue", "layernorm", "sigmoid", "squeeze",
-         "swiglu", "expand", "stats", "dbias", "dkdv", "dlnw", "gemm", "gate", "fold", "cast",
+         "swiglu", "expand", "softmax", "stats", "dbias", "dkdv", "dlnw", "gemm", "gate", "fold", "cast",
          "fwd", "bwd", "dx", "dw", "dq", "dk", "dv")
 DETAILS = ("gather", "dual", "ln", "residual", "masked", "rows", "f567", "train", "recompute", "foldstats", "noaffine", "rowscale", "dropres", "inplace", "ktiled",
            "strided", "mmajor", "extern", "packed", "atomic", "contig", "split", "flat", "fp32",

@@ -136,7 +136,7 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 106 | triton 100, cuda 6 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 118 | triton 112, cuda 6 |
 | **sm90+** | H100 | 10 | cuda 6, triton 4 |
 <!-- END GENERATED: hardware-support -->
 
@@ -182,15 +182,17 @@ kernel lives in `src/`. Everything is still in git:
 | where | contains |
 |---|---|
 | tag `archive/experiments-20260928` | the last tree with `experiments/`: `transition_fused`, `trimul_b7b12`, `trimul_k1k3_inference`, `token_dit_fused`, `token_dit_overlap`, `token_dit_train` |
-| branch `wip/main-20260928` | the Sept 27–28 local-H100/Vast research: `trimul_large_d_vast`, `transition_wide_fusion`, `transition_shapes_vast`, `triattn_baseline_20260927`, `triattn_compare_20260927`, `triattn_local_d128`, `trimul_config_audit_20260927`, `trimul_d128_config_20260927` |
+| tag `archive/wip-main-20260928` | the Sept 27–28 local-H100/Vast research: `trimul_large_d_vast`, `transition_wide_fusion`, `transition_shapes_vast`, `triattn_baseline_20260927`, `triattn_compare_20260927`, `triattn_local_d128`, `trimul_config_audit_20260927`, `trimul_d128_config_20260927` |
 | tag `archive/pre-tidy-20260927` | `trimul_training_v2` (2.0.0 training capsule, 6,625 run files), `legacy_branches`, `legacy_h100_runtime`, retired cache blobs |
 | tag `archive/docs-20260928`, `archive/records-20260928` | removed docs: dated records, verdicts, design proposals, analyses, release pages |
 | tag `archive/scripts-20260928` | the Sept H100 bring-up scripts |
+| tag `archive/a100-sm80-branch-20260928` | the A100 branch as merged: `experiments/a100_trimul_fwd` (sm_80 CUDA TriMul, not ported), `a100_transition_*`, `a100_msa_fwd`, `a100_anthropic_baseline`, `a100_trimul_triton`, `msa_triton` |
+| tag `archive/wip-main-20260928` | the Sept 27–28 local-H100/Vast research (was tag `archive/wip-main-20260928`) |
 
 ```sh
 git show archive/experiments-20260928:experiments/transition_fused/README.md
 git archive archive/experiments-20260928 experiments/trimul_k1k3_inference | tar -x -C /tmp/restore
-git show wip/main-20260928:experiments/trimul_large_d_vast/LATENCY_TABLE.md
+git show archive/wip-main-20260928:experiments/trimul_large_d_vast/LATENCY_TABLE.md
 ```
 
 Where each capsule ended up in `src/`:
