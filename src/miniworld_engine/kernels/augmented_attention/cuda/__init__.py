@@ -2,7 +2,7 @@
 
 The token DiT's attention (16 heads x 48, one pair bias per head shared by all A augmented samples) run as four
 hand-written wgmma/TMA kernels, developed in the research branch ``research/token-dit-overlap``
-(``experiments/token_dit_train``). Measured on an H100 SXM at A = 48 (do_bench, L2 evicted), against this engine's bf16
+(``archive/experiments-20260928:experiments/token_dit_train``). Measured on an H100 SXM at A = 48 (do_bench, L2 evicted), against this engine's bf16
 Triton core and torch SDPA:
 
     op                    L=384      L=768

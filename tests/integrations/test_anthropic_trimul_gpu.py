@@ -1,6 +1,6 @@
 """The wiring against a real payload: what it computes, that the auto option finds it, and that training never takes it.
 
-Needs an H100 and a payload (`TRIMUL_NATIVE_BUILD_DIR`, built by `experiments/trimul_k1k3_inference/build_payload.py` with both
+Needs an H100 and a payload (`TRIMUL_NATIVE_BUILD_DIR`, built by `archive/experiments-20260928:experiments/trimul_k1k3_inference/build_payload.py` with both
 `tmn90_z128_h128` and `tmn90_z128_h256`); skips without either. The reference is the module's own fp32 pytorch path, and the bound is the
 payload's tolerance class, not bitwise equality -- the release rounds differently from our kernels by design.
 """

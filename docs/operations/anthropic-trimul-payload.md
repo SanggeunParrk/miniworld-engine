@@ -1,14 +1,19 @@
 # Running TriMul from the Anthropic payload
 
-The TriMul kernels of Anthropic's `uplifting-biomolecular-modeling` release are faster than ours on H100, so the module layer can
-run them instead of its own. The kernels are not vendored here: a *payload* is assembled from the pinned upstream package plus this
-repo's overlay by `experiments/trimul_k1k3_inference/build_payload.py`, and named at runtime.
+> **2.2.0:** the default H100 dispatch already runs the same K1/K3 sources natively
+> (`kernels/trimul_inproj/cuda/h100_inference.py`), so this payload is only needed to benchmark
+> or reproduce the external route. Its builder was archived with `experiments/`.
+
+The TriMul kernels of Anthropic's `uplifting-biomolecular-modeling` release can be run by the module layer
+instead of its own. The kernels are not vendored here: a *payload* is assembled from the pinned upstream package plus this
+repo's overlay by `archive/experiments-20260928:experiments/trimul_k1k3_inference/build_payload.py`, and named at runtime.
 
 ```bash
-e=experiments/trimul_k1k3_inference
+mkdir -p /tmp/k1k3 && git archive archive/experiments-20260928 experiments/trimul_k1k3_inference | tar -x -C /tmp/k1k3| tar -x -C /tmp/k1k3
+e=/tmp/k1k3/experiments/trimul_k1k3_inference
 python $e/build_payload.py --upstream <pkg/v5> --jobs 8 --out $e/payload \
   --unit tmn90_z128_h128,tmn90_z128_h256,tmn90_z64_h64,tmn90_z64_h128
-export TRIMUL_NATIVE_BUILD_DIR=$PWD/$e/payload/build     # this is the opt-in
+export TRIMUL_NATIVE_BUILD_DIR=$e/payload/build     # this is the opt-in
 ```
 
 One payload can carry several units and a process loads exactly one payload, so build every width the model uses into it. A unit is
@@ -87,5 +92,5 @@ reference at the same rel-RMS, so this is a like-for-like timing):
 Round spread 0.1–4.0 µs. The ceiling is the contraction: it is a third of the op, already at its DRAM/tensor balance point, and
 untouched by any of this — K1 is 19 % faster and K3 9 %, and that is what 10–14 % of the whole op looks like.
 
-`experiments/trimul_k1k3_inference/README.md` has the per-kernel breakdown, the tile choices and the rejected candidates;
+`archive/experiments-20260928:experiments/trimul_k1k3_inference/README.md` has the per-kernel breakdown, the tile choices and the rejected candidates;
 `records/bidirectional/` has the raw rows.

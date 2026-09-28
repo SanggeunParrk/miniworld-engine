@@ -1,6 +1,6 @@
 """Hand-CUDA sm_90a Transition for the channel widths other than 128: D = 64, 256, 384, 512 (n = 4, bf16).
 
-The companion of ``fused_sm90a`` (D = 128), developed in ``experiments/transition_fused`` (record:
+The companion of ``fused_sm90a`` (D = 128), developed in ``archive/experiments-20260928:experiments/transition_fused`` (record:
 ``records/widths.md``). What runs depends on the width, because what fits the register file does:
 
     D     forward                              backward

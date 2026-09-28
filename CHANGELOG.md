@@ -20,6 +20,10 @@ GPU qualification of this release is pending.
 
 ### Removed
 
+- `experiments/`: every capsule is either ported to `src/` (fastest variant only) or history.
+  The tree is at tag `archive/experiments-20260928` (and branch `wip/main-20260928` for the
+  Sept 27–28 local-H100 research); see `docs/records/experiments-archive.md`. The Anthropic
+  `NOTICE` and v5 source hashes moved to `licenses/`.
 - Every CuTe DSL / nvidia-cutlass-dsl / quack kernel and the `cute` extra: `kernels/*/cute`
   (tm1, tm2, transition, layernorm, layernorm_linear, trimul_inproj), the `fused_ln_mask`
   family, `_quack_compat`, the autotune CuTe candidate spaces and compile paths, and the

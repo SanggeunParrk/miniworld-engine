@@ -1,8 +1,8 @@
 """Serve TriangleMultiplication from Anthropic's native TriMul payload (inference only).
 
 The payload is the `trimul_native` package of Anthropic's `uplifting-biomolecular-modeling` release, optionally with this repo's
-`experiments/trimul_k1k3_inference` overlay; it is NOT vendored here. It is named at runtime by `TRIMUL_NATIVE_BUILD_DIR`, which points at
-a payload's `build/` directory (its `python/`, `csrc/` and `testvectors/` sit beside it — `experiments/trimul_k1k3_inference/build_payload.py`
+`archive/experiments-20260928:experiments/trimul_k1k3_inference` overlay; it is NOT vendored here. It is named at runtime by `TRIMUL_NATIVE_BUILD_DIR`, which points at
+a payload's `build/` directory (its `python/`, `csrc/` and `testvectors/` sit beside it — `archive/experiments-20260928:experiments/trimul_k1k3_inference/build_payload.py`
 assembles one). Setting that variable is the opt-in: with it set, a module built with `implementation="miniworld"` uses the payload for the
 forward passes it can serve and its own kernels for everything else; `implementation="anthropic"` demands it and refuses rather than reroute.
 

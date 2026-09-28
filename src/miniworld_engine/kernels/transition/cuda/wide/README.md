@@ -3,8 +3,8 @@
 Wired through `../fused_wide_sm90a.py`, dispatched from `modules/transition/module.py::_residual_forward` right after the
 D = 128 path, under the same `transition_fused_sm90a` setting; opt out with `MINIWORLD_TRANSITION_WIDE_SM90A=0`.
 
-`kernels/` holds the kernel sources exactly as developed in `experiments/transition_fused/src/` (record:
-`experiments/transition_fused/records/widths.md`); some keep experiment switches that default off. Each `*.cu` at this
+`kernels/` holds the kernel sources exactly as developed in `archive/experiments-20260928:experiments/transition_fused/src/` (record:
+`archive/experiments-20260928:experiments/transition_fused/records/widths.md`); some keep experiment switches that default off. Each `*.cu` at this
 level is one kernel INSTANCE: it pins the build flags of the measured-best variant, renames the kernel symbol per width
 and adds a host launcher. `bind.cu` is the torch binding; `-DWIDE_D` selects which launchers a build has, `-DWIDE_SMS`
 sizes the persistent grids. One extension per (width, SM count).

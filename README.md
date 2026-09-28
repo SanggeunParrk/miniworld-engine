@@ -28,7 +28,7 @@ imply that every inference shape has been re-tuned.
 This release builds on Anthropic's stronger published inference kernels and adds
 training implementations. [Release map and migration](docs/releases/2.0.0.md) ·
 [Attribution](THIRD_PARTY_NOTICES.md) ·
-[Latest TriMul training evidence](experiments/README.md#archived) (archived research capsule).
+[Archived research capsules](docs/records/experiments-archive.md).
 The latest TriMul CUDA training route is now connected automatically on supported
 H100 inputs, alongside Transition, MSA and token DiT inference.
 [Current module dispatch and limits](docs/operations/h100-module-wiring.md) ·
@@ -339,36 +339,15 @@ or checkout and does not automatically commit results. A successful cache build 
 replace module numerical tests or benchmarks. Full policy:
 [dispatch-cache.md](docs/operations/dispatch-cache.md).
 
-## Research checkpoints
+## Research history
 
-The [H100 TriMul B7–B12 checkpoint](experiments/trimul_b7b12/README.md)
-contains the Anthropic-derived CUDA training extension, wiring diagram,
-reproducible runners and validation/performance evidence. It is an explicit
-experiment; installing the engine does not select it automatically.
-
-The [H100 TriMul K1/K3 inference optimisation](experiments/trimul_k1k3_inference/README.md)
-rebuilds Anthropic's native v5 inference kernels with a small compile-switch
-overlay (tanh sigmoid, K1 LayerNorm class, bf16x2 residual, resident-weight wait
-skip, K3 three consumer warpgroups, templated mask element type, programmatic
-dependent launch): engine-path TriMul op −12.8 % at L384 and −10.0 % at L768,
-bit-identical outputs across the last two rounds. It is served through
-`TRIMUL_NATIVE_BUILD_DIR`, not by default dispatch. The same overlay serves the **bidirectional** shape (`c_hidden = 256`, one shared
-output LayerNorm): there it is 2.51x (L384) and 2.12x (L768) the engine's own CuTe path, with the 192-token K1 tile and an
-8-slot K3 ring as the measured defaults — that ring exists only because K3's slots are now sized per kind, which frees the 16 KB the
-uniform layout wasted on gate slots wherever the projection is the wider one.
-
-The [fused Transition](experiments/transition_fused/README.md) replaces both halves
-of the D=128 pair Transition with one CUDA kernel each, keeping the intermediates
-(`h`, `dh`, `dA`, `dB`) in registers instead of HBM: the backward's five launches
-become one and the forward's three become one. It is **wired in and on by
-default** wherever the shape fits (sm_90, bf16, `d_hidden` 128 with `n` 4, whole
-128-row tiles); `modules.Transition` dispatches to it and everything else keeps
-the Triton path. Through the real module, forward plus backward is 1074 -> 562 us
-at L384 and 4022 -> 2092 us at L768, which is 1.9x the Triton residual path, 2.2x
-`torch.compile` and 3.2x eager PyTorch, at the same distance from an fp32
-reference as the path it replaces and with bit-reproducible outputs. Turn it off
-with `transition_fused_sm90a=False`. The development record, the designs that
-lost, and what is still open are in its README.
+The research capsules that produced the hand-CUDA paths were removed from the tree in 2.2.0;
+only the fastest variant of each lives in `src/` and is selected by default dispatch on H100:
+fused Transition (`kernels/transition/cuda/fused_sm90a.py`, `fused_wide_sm90a.py`), the
+Anthropic-derived TriMul K1/K3 inference (`kernels/trimul_inproj/cuda/h100_inference.py`),
+TriMul training at D64/D128/D256–512 and the wide inference kernels
+(`kernels/trimul_inproj/cuda/`). Where each capsule went, and how to read it back from git,
+is in [docs/records/experiments-archive.md](docs/records/experiments-archive.md).
 
 ## Toolchain
 

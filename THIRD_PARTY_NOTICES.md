@@ -10,18 +10,17 @@ implementation as independent MiniWorld work, or universal superiority over it.
 Upstream: https://github.com/anthropics/uplifting-biomolecular-modeling
 Pinned revision: `f4f62fa6592ae4938d49b1757bea0cfeff9f468e`.
 The exact original repository URL and source hashes are also recorded in
-`experiments/trimul_b7b12/vendor/anthropic_v5/UPSTREAM.json`.
+[`licenses/anthropic-trimul-native-v5-UPSTREAM.json`](licenses/anthropic-trimul-native-v5-UPSTREAM.json).
 
 Anthropic native v5 sources and derived TMA/WGMMA device code retain Apache-2.0
-terms. See [the license](licenses/Anthropic-Apache-2.0.txt) and the preserved
-`NOTICE`, `LICENSE` and `UPSTREAM.json` files in the vendored experiment. This
-includes Transition's `cuda/anthropic_v5/` headers and the research capsule's
-upstream snapshot. Original notices in source files remain in place. Other
-MiniWorld code remains under the root MIT license. The isolated engine snapshot
-in the research capsule retains that same MIT license for engine-owned code.
+terms. See [the license](licenses/Anthropic-Apache-2.0.txt) and the preserved upstream
+[`NOTICE`](licenses/Anthropic-NOTICE). This includes Transition's `cuda/anthropic_v5/`
+headers. The research capsules that vendored the upstream snapshot were removed from the
+tree in 2.2.0 and remain at tag `archive/experiments-20260928`. Original notices in source files remain in place. Other
+MiniWorld code remains under the root MIT license.
 
 The installed TriMul runtime also includes selected native v5/overlay sources in
 `src/miniworld_engine/kernels/trimul_inproj/cuda/h100_sources/` and adapted native
 Python driver/launch helpers in its parent directory. `PROVENANCE.json` maps
-selected source bodies to the preserved experiment archives and their hashes.
+selected source bodies to the archived experiments (tag `archive/experiments-20260928`) and their hashes.
 The corresponding Apache-2.0 license applies to these inherited portions.

@@ -206,7 +206,7 @@ and start the watcher for the newly authorized period.
 NCU is intentionally omitted at the user's request. No host support request or
 privilege escalation is required for ordinary optimization work. Actual timings,
 CUDA Graph replay, PyTorch/CUPTI kernel traces and compute-sanitizer remain usable.
-The current large-D work is documented under `experiments/trimul_large_d_vast/`.
+The large-D work is on branch `wip/main-20260928` under `experiments/trimul_large_d_vast/` (ported to `h100_wide_training.py`).
 The subsequent Transition L384/768 x D128/256/384/512 coverage, PyTorch comparison,
 and validation commands are in `experiments/transition_shapes_vast/README.md`.
 That work fixed a D128 backward input-slot release race and uses the new

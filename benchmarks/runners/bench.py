@@ -658,7 +658,7 @@ def pristine_trimul_build_dir() -> str | None:
 def trimul_payload_provenance(pristine: bool) -> str:
     """Describe the TriMul payload a row is about to use, refusing an overlay build for `anthropic`.
 
-    A payload assembled by experiments/trimul_k1k3_inference/build_payload.py carries OVERLAY.json
+    A payload assembled by archive/experiments-20260928:experiments/trimul_k1k3_inference/build_payload.py carries OVERLAY.json
     beside build/ (this repo's K1/K3 changes applied over upstream v5); the shipped one does not.
     """
     import json

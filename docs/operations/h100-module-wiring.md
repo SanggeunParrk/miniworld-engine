@@ -143,7 +143,7 @@ See [measurements and validation](../records/verdicts/trimul-single-20260923/REA
 
 `kernels/trimul_inproj/cuda/h100_wide_training.py` is a flattened port of the
 qualified research selections recorded in
-`experiments/trimul_large_d_vast` (September 27): D256 `d256_pool_checkpoint`,
+`wip/main-20260928:experiments/trimul_large_d_vast` (September 27): D256 `d256_pool_checkpoint`,
 D384 `wide_checkpoint23`, D512 `wide_checkpoint24`, and D512/L384 with the 4-way
 input-weight split. The research checkpoint chains, runtime text patching and
 `quack`/CuTe imports are gone: each of the 29 kernels is a frozen `.cu` file under

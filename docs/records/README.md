@@ -1,3 +1,4 @@
+| [experiments-archive.md](experiments-archive.md) | where the removed `experiments/` capsules live (tags/branch) and what each became in `src/` |
 # Records
 
 Dated findings. Each describes what was true when it ran and is **not** updated when the code

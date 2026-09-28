@@ -24,7 +24,7 @@ Merge decisions:
   cache-grid compatibility check and MPNN's validation-before-pruning behavior.
 - Superseded cache snapshots, wheel-path fixes and the pre-rebase MPNN branch are
   recorded in `experiments/legacy_branches/` (archived 2026-09-27, see
-  [experiments/README.md](../../experiments/README.md#archived)); their history is merged without
+  [experiments/README.md](../records/experiments-archive.md)); their history is merged without
   rolling current APIs back to obsolete implementations.
 
 This integration is not a new GPU qualification. No GPU, benchmark, installation or

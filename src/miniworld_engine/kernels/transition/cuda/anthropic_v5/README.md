@@ -7,8 +7,8 @@ Three device headers from Anthropic's `trimul` native v5 kernel package, upstrea
 
 They live inside the package, not under `experiments/`, so the wired kernel builds from an
 installed engine and not only from a source checkout. The copy under
-`experiments/trimul_b7b12/vendor/anthropic_v5/csrc/` is the same three files and is what
-`experiments/transition_fused/verify_package.py` hashes.
+`archive/experiments-20260928:experiments/trimul_b7b12/vendor/anthropic_v5/csrc/` is the same three files and is what
+`archive/experiments-20260928:experiments/transition_fused/verify_package.py` hashes.
 
     sha256  953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6  tmn_kernels.cuh
     sha256  f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa  tmn_ptx.cuh

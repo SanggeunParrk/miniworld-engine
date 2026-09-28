@@ -1,7 +1,7 @@
 """Fused sm_90a Transition: one kernel for the forward, one (plus a partial reduction) for the
 backward.
 
-This is the hand-CUDA path developed in ``experiments/transition_fused``. It replaces five
+This is the hand-CUDA path developed in ``archive/experiments-20260928:experiments/transition_fused``. It replaces five
 launches -- LayerNorm, expand-SwiGLU, squeeze+residual on the way forward, and the
 squeeze/SwiGLU/LN backward chain on the way back -- with two, keeping the whole op resident in
 shared memory and registers. Measured on an H100 SXM against the engine's own Triton residual
@@ -37,7 +37,7 @@ _dir = Path(__file__).parent
 #: Row tile of the persistent grid. ``M`` must be a whole number of these.
 ROWS = 128
 #: Hidden slice replicas in the backward's weight role: NDW = 8 * DW_REPL weight CTAs.
-#: 8 measured fastest at both lengths; see ``experiments/transition_fused/records/``.
+#: 8 measured fastest at both lengths; see ``archive/experiments-20260928:experiments/transition_fused/records/``.
 DW_REPL = 8
 
 
