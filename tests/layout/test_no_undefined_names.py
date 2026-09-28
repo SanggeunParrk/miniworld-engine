@@ -1,6 +1,6 @@
 """No undefined name anywhere in the package, including the vendored kernel bodies.
 
-`pyproject.toml` excludes `kernels/**/{triton,cute,cuda}/` and the `baseline_dtv1*` modules from
+`pyproject.toml` excludes `kernels/**/{triton,cuda}/` and the `baseline_dtv1*` modules from
 ruff with `= ["ALL"]`. That is the right call for STYLE -- they are faithful ports and a diff
 against upstream is worth more than local consistency (see docs/library-standards.md F2). But
 `["ALL"]` cannot be un-ignored per rule, so it also switched off `F821 undefined-name`, which is

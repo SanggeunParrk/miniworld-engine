@@ -27,13 +27,9 @@ them easy to get wrong:
   GEMMs; those checkers launch the kernel at its own launch site (copied from the autograd
   ``backward`` verbatim) so a failure localizes to the kernel and not to a matmul around it.
 
-The four cute kernels in this group (``trimul_gemm_gate_sm100_cute``, ``trimul_gemm_sm100_cute``,
-``trimul_gemm_gate_packed_sm100_cute``, ``trimul_outproj_gemm_gate_sm90_cute``) have no checker:
-their drivers do not reach a launch on this card, so there is no output to compare. See SKIPPED.
-
-Imports stay LAZY inside each checker, for the reason ``drivers_trimul`` gives: some of these
-modules import ``quack`` at module scope, and a top-level import here would make one missing
-dependency fail every checker in the file instead of the one it belongs to.
+Imports stay LAZY inside each checker, for the reason ``drivers_trimul`` gives: a top-level
+import here would make one missing dependency fail every checker in the file instead of the one
+it belongs to.
 """
 from __future__ import annotations
 
@@ -48,24 +44,10 @@ EPS = 1e-5      # trimul_back_triton's own default
 
 # ── trimul_inproj: front / back (triton) ─────────────────────────────────────────────────────
 
-def gated_projection_gate_res_triton():
-    """gate_elem.py _gate_mul_infer_kernel: y = res + sigmoid(glogit) * proj.
-
-    The INFERENCE kernel: no dropout, no saved gate, and no flags -- so there is one program to
-    check, not a matrix of them.
-    """
-    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_infer
-
-    x_n, proj, Wg, res = _rows(), _rows(), _w(), _rows()
-    y = gate_elem_infer(x_n, proj, Wg, res, seq_len=L)
-    g = torch.sigmoid(_f(x_n) @ _f(Wg))
-    return {"y": (y, _f(res) + g * _f(proj))}
-
-
 def gated_projection_gate_dropres_triton():
     """gate_elem.py _gate_mul_train_kernel: y = res + ds * (sigmoid(glogit) * proj), gate saved.
 
-    The TRAINING kernel, also flagless: the drop scale and the gate store are both unconditional.
+    The TRAINING kernel, flagless: the drop scale and the gate store are both unconditional.
     ``ds`` is the row-broadcast drop scale [L, N] indexed by ``m % L``; it is filled with distinct
     positive values rather than a 0/1 mask so a wrong row index cannot pass.
     """
@@ -280,10 +262,6 @@ def trimul_bwd_gate_packed_recompute_triton():
             "d_pR": (dconc[3 * D:], dR * sgR)}
 
 
-# ── trimul_inproj/cute: the two @triton.jit kernels living under cute/ ───────────────────────
-
-
-
 from miniworld_engine.kernels.drivers.trimul_inproj import (
     _dual_operands,
     _ln_residual_operands,
@@ -333,42 +311,3 @@ def trimul_output_f567_train():
     rows = torch.arange(norm.shape[0], device=norm.device) % length
     expected = residual.float() + p * g * ds.float()[rows]
     return {"y": (y, expected), "proj": (proj, p), "gate": (gate, g)}
-
-
-def trimul_parity_f567_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import output_f567_sm90
-    norm, x, wp, wg, residual, ds, length = args = _output_f567_operands()
-    y, proj, gate = output_f567_sm90(*args)
-    p = (norm.float() @ wp.float().t()).to(norm.dtype)
-    g = torch.sigmoid((x.float() @ wg.float()).to(x.dtype).float())
-    rows = torch.arange(norm.shape[0], device=norm.device) % length
-    expected = (residual.float() + p.float() * g * ds.float()[rows]).to(x.dtype)
-    return {"y": (y, expected), "proj": (proj, p), "gate": (gate, g.to(x.dtype))}
-
-
-def trimul_parity_dual_bwd_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import (
-        input_dual_bwd_sm90,
-    )
-    g, f, w, v, _length = args = _dual_operands()
-    y = input_dual_bwd_sm90(*args)
-    ref = ((g.float() @ w.float()).to(g.dtype).float() + f.float() @ v.float()).to(g.dtype)
-    return {"dx": (y, ref)}
-
-
-def trimul_parity_front_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_front import (
-        bidir_front_sm90,
-    )
-    h2 = 2 * D
-    x = _x(); weights = [_w(h2) for _ in range(4)]
-    mask = (torch.rand(M, device=x.device) > .2).to(x.dtype)
-    left, right, preact = bidir_front_sm90(x, *weights, pair_mask=mask)
-    xf = x.reshape(M, D).float()
-    pl, gl, pr, gr = [xf @ w.float() for w in weights]
-    def gated(p, g):
-        return ((p * torch.sigmoid(g)).to(x.dtype).float() * mask[:, None].float()).to(x.dtype).t()
-    raw = torch.cat([torch.stack([gl, pl], dim=2).reshape(M, 2*h2),
-                     torch.stack([gr, pr], dim=2).reshape(M, 2*h2)], dim=1).to(x.dtype).t()
-    return {"left": (left.reshape(h2, M), gated(pl, gl)),
-            "right": (right.reshape(h2, M), gated(pr, gr)), "preact": (preact, raw)}

@@ -106,6 +106,10 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
         ("triangle_multiplication_bidirectional",)),
     "triangle_attention": ModuleTarget(
         ("triangle_attention_bidirectional", "triangle_attention_heads")),
+    # The MSA module's two ops and the pair-bias attention, benched on their own (v2.2.0).
+    "outer_product": ModuleTarget(("outer_product_mean",)),
+    "msa_pair_weighted_averaging": ModuleTarget(("msa_pair_weighted_averaging",)),
+    "attention_pair_bias": ModuleTarget(("attention_pair_bias",)),
     # fp32 stays -- every file in this kernel family states "fp32 io with TF32 tensor cores".
     # `d_single_token=384` does NOT: the bench builds ConditionedTransition(d_hidden=768,
     # d_cond=384), the model's `token_dit`, and pinning d_single_token to 384 made it 384/384 --
@@ -545,7 +549,7 @@ def apply_config_dir(directory: Path) -> int:
 #: Kernel-level bench target -> the build case(s) that drive the same kernels.
 #:
 #: A kernel target is named after the kernel FAMILY in ``kernels/registry.csv`` that it benches --
-#: `triangle_attention`, `bias_only_attention`, `augmented_attention`, `fused_ln_mask`,
+#: `triangle_attention`, `bias_only_attention`, `augmented_attention`,
 #: `layernorm`, `adaln` -- except for the four that bench a fused op SHAPE implemented by several
 #: families rather than one family (`dual_gemm_epilogue`, `gemm_epilogue`, `gemm_gate`,
 #: `transition_b2b`), which are named after the shape. No abbreviations, in either case: the
@@ -577,7 +581,6 @@ KERNEL_TARGETS: dict[str, tuple[str, ...]] = {
     "transition_b2b_bwd": ("transition",),
     "layernorm": ("layernorm_native", "triangle_multiplication"),
     "layernorm_bwd": ("layernorm_native", "triangle_multiplication"),
-    "fused_ln_mask": ("triangle_multiplication",),
     "adaln": ("adaptive_layernorm", "layernorm_linear_native"),
     "adaln_bwd": ("adaptive_layernorm",),
     "triangle_attention": ("triangle_attention_bidirectional", "triangle_attention_heads"),
@@ -1572,8 +1575,8 @@ def cmd_bench_kernel(args: argparse.Namespace) -> int:
     # unit list is a cross product over impls, dtypes, shapes, train/eval and setting switches --
     # hundreds of module runs that say nothing about whether a pinned config computes the right
     # answer. Building here also imports the failure modes of paths the run does not even use
-    # (a cute impl the card cannot run, a case whose arguments are mis-ordered), and a single bad
-    # unit aborts a measurement that would otherwise have succeeded.
+    # (an arch-specific impl the card cannot run, a case whose arguments are mis-ordered), and a
+    # single bad unit aborts a measurement that would otherwise have succeeded.
     if args.config_type:
         directory = resolve_config_dir(args.config_type, repo)
         if isinstance(directory, int):

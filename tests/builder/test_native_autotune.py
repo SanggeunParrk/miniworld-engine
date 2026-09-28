@@ -155,22 +155,6 @@ def test_layout_and_reduction_widths_have_distinct_keys():
     assert native.tensor_key(x) != native.tensor_key(x.to(torch.bfloat16))
 
 
-def test_cute_space_excludes_unused_swap_and_respects_reduction_contract():
-    from miniworld_engine.autotune.cute_config import (
-        lnbwd_candidates,
-        plain_sm90_candidates,
-    )
-    assert all(not c.swap_ab for c in plain_sm90_candidates())
-    from miniworld_engine.autotune.cute_config import LNBWD_TILE_N_MAX
-    for width in (128, 192, 256, 512):
-        for c in lnbwd_candidates(width):
-            assert c.tile_n == width <= LNBWD_TILE_N_MAX[c.tile_m]
-            assert c.pingpong
-            assert c.cluster_n == 1
-            assert not c.swap_ab
-    assert {c.tile_m for c in lnbwd_candidates(256)} == {64}
-
-
 def test_cuda_defines_are_validated_and_change_with_config():
     from miniworld_engine.autotune.hopper_cuda_config import candidates, defines
     grid = candidates("expand_gate", 128)
@@ -197,7 +181,7 @@ def test_layernorm_ragged_mask_gradients_match_autograd():
 
 def test_native_units_survive_triton_config_directory_filter(tmp_path):
     from miniworld_engine.autotune.builder import op_units
-    units = op_units(only={"transition_swiglu_fwd_sm90_cute"}, config_dir=tmp_path)
+    units = op_units(only={"transition_bwd_gate_sm90_cuda"}, config_dir=tmp_path)
     assert units
     assert len({u.length for u in units}) > 1
     assert {u.side for u in units} == {"pair", "token"}
@@ -207,7 +191,7 @@ def test_build_all_requests_native_drivers_even_if_module_reaches_them(monkeypat
     from miniworld_engine.autotune import derive
     monkeypatch.setattr(derive, "kernel_rows", lambda _: [{"kernel": k} for k in native.BUILD_OPS])
     assert derive.uncovered_kernels("sm90") >= native.BUILD_OPS
-    assert "transition_swiglu_fwd_sm90_cute" not in derive.uncovered_kernels("sm86")
+    assert "transition_bwd_gate_sm90_cuda" not in derive.uncovered_kernels("sm86")
 
 
 def test_runtime_reader_accepts_native_grid_and_invalidates_source(monkeypatch):
@@ -224,65 +208,6 @@ def test_runtime_reader_accepts_native_grid_and_invalidates_source(monkeypatch):
     data["op_identity"] = "old-source"
     with pytest.warns(UserWarning, match="source/environment changed"):
         assert native.choose_config("x", configs, dtype="bf16", bucket="shape") == configs[0]
-
-
-def test_separate_trimul_inference_masks_projections_and_preserves_eps(monkeypatch):
-    import inspect
-
-    from miniworld_engine.kernels.trimul_inproj.cute import inference
-    pair = torch.randn(1, 3, 3, 4)
-    gamma, beta = torch.rand(4), torch.rand(4)
-    mask = torch.rand(9)
-    def ln(x, w, b, eps):
-        return torch.nn.functional.layer_norm(x, (4,), w, b, eps)
-    normalized = ln(pair, gamma, beta, 0.03)
-    def front(x, *args, **kwargs):
-        torch.testing.assert_close(x, normalized)
-        value = x.permute(0, 3, 1, 2)
-        return value, value, None
-    def back(tri, xn, wp, wg, lw, lb, eps, residual):
-        torch.testing.assert_close(xn, normalized)
-        masked = normalized.permute(0, 3, 1, 2) * mask.view(1, 1, 3, 3)
-        torch.testing.assert_close(tri, torch.einsum("bdik,bdjk->bdij", masked, masked))
-        assert eps == 0.07
-        return residual.clone()
-    monkeypatch.setattr(inference, "triton_layernorm", ln)
-    monkeypatch.setattr(inference, "trimul_inproj_cute_forward", front)
-    monkeypatch.setattr(inference, "trimul_back_triton", back)
-    w = torch.eye(4)
-    inspect.unwrap(inference.trimul_inproj_inference)(
-        pair, w, w, w, w, w, w, gamma, beta, gamma, beta, 0.03, w, mask, 0.07)
-
-
-def test_back_half_honors_legacy_config_dictionary(monkeypatch):
-    from miniworld_engine.kernels.trimul_inproj.cute import back_split
-    seen = []
-    def lnl(view, *args, **kwargs):
-        seen.append(kwargs["config"])
-        return torch.zeros_like(view)
-    monkeypatch.setattr(back_split, "layernorm_linear_cute", lnl)
-    monkeypatch.setattr(back_split.dispatch, "pick", lambda *args, **kwargs: torch.zeros(9, 4))
-    pair, w = torch.zeros(1, 3, 3, 4), torch.eye(4)
-    back_split.trimul_back_split(pair.permute(0, 3, 1, 2), pair, w, w,
-                                torch.ones(4), torch.zeros(4), pair,
-                                lnl_config={"tile_m": 64, "tile_n": 64,
-                                            "cluster_m": 1, "cluster_n": 1, "pingpong": True})
-    assert seen[0].tile_m == seen[0].tile_n == 64
-
-
-def test_portable_cuda_tuning_does_not_require_quack(monkeypatch):
-    import builtins
-
-    import triton.testing
-    original = builtins.__import__
-    def without_quack(name, *args, **kwargs):
-        if name == "quack.cache":
-            raise ImportError("CuTe is not installed")
-        return original(name, *args, **kwargs)
-    monkeypatch.setattr(builtins, "__import__", without_quack)
-    monkeypatch.setattr(triton.testing, "do_bench", lambda fn, **_: fn())
-    assert native.choose_config("portable", [{"block": 128}], dtype="bf16",
-                                bucket="shape", run=lambda _: 1.0) == {"block": 128}
 
 
 @pytest.mark.parametrize("op", sorted(native.BUILD_OPS))
@@ -330,57 +255,10 @@ def test_native_launchers_use_registered_measurement_names():
                     op = node.args[0].value
                     assert op in native.BUILD_OPS, (path, op)
                     seen.add(op)
-    from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS
-    # Parity resolves through trimul_sm90_config, whose op is a parameter.
-    assert set(TRITON_OPS) <= native.BUILD_OPS
     dynamic = {"transition_fwd_b2b_sm90_cuda", "transition_expand_gate_sm90_cuda",
                "transition_bwd_gate_sm90_cuda", "transition_fwd_residual_sm90_cuda",
                "transition_bwd_residual_sm90_cuda"}
-    assert seen | set(TRITON_OPS) | dynamic == set(native.BUILD_OPS)
-
-
-def test_m2_rejects_unused_architecture_fields_before_compilation(monkeypatch):
-    from miniworld_engine.autotune.cute_config import fused_lnl_candidates
-    from miniworld_engine.kernels.layernorm_linear.cute import (
-        gemm_layernorm_linear_fused as m2,
-    )
-    monkeypatch.setattr(m2, "get_device_capacity", lambda _: (9, 0))
-    x = torch.empty(8, 128)
-    for changes in ({"tile_k": 64}, {"num_warps": 4}, {"device_capacity": 10},
-                    {"cluster_k": 2}, {"use_tma_gather": True}):
-        with pytest.raises(ValueError, match="Hopper"):
-            m2.gemm_lnl_fused(x, x, x, x, x,
-                              config=replace(fused_lnl_candidates()[0], **changes))
-
-
-@pytest.mark.parametrize("width", [0, 8, 24, 264])
-def test_tm2_rejects_unsafe_output_layout_before_compiler(width):
-    from miniworld_engine.kernels.tm2.cute.tm2_cute_kernel import TM2DualKernel
-    with pytest.raises(ValueError, match="SW32/STSM"):
-        TM2DualKernel(N=width, K=64, tile_m=64)
-
-
-def test_tm2_pads_all_tails_and_crops_original_shape(monkeypatch):
-    import inspect
-    from types import SimpleNamespace
-
-    from miniworld_engine.kernels.tm2.cute import tm2_cute_kernel as tm2
-    launch = inspect.unwrap(tm2.tm2_dual_from_scratch)
-    x1, x2 = torch.randn(7, 19).bfloat16(), torch.randn(7, 19).bfloat16()
-    w1, w2 = torch.randn(23, 19).bfloat16(), torch.randn(23, 19).bfloat16()
-    monkeypatch.setattr(torch.cuda, "get_device_properties",
-                        lambda _: SimpleNamespace(shared_memory_per_block_optin=232448))
-    def padded(a, b, wg, wp, *, tile_m):
-        assert a.shape == b.shape == (64, 64)
-        assert wg.shape == wp.shape == (32, 64)
-        assert tile_m == 64
-        return (torch.sigmoid(a.float() @ wg.float().t()) * (b.float() @ wp.float().t())).bfloat16()
-    monkeypatch.setattr(tm2, "tm2_dual_from_scratch", padded)
-    actual = launch(x1, x2, w1, w2, tile_m=64)
-    reference = (torch.sigmoid(x1.float() @ w1.float().t()) * (x2.float() @ w2.float().t())).bfloat16()
-    assert actual.shape == (7, 23)
-    assert actual.is_contiguous()
-    torch.testing.assert_close(actual, reference)
+    assert seen | dynamic == set(native.BUILD_OPS)
 
 
 def test_cuda_layernorm_driver_uses_requested_width(monkeypatch):
@@ -415,8 +293,8 @@ def test_native_policy_changes_invalidate_resume_generation(monkeypatch):
 
 def test_one_native_cache_entry_cannot_skip_other_workloads():
     from miniworld_engine.autotune import builder
-    op = "layernorm_linear_fwd_foldstats_sm90_cute"
-    unit = builder.OpUnit(op=op, length=384, dtype="bfloat16", side="pair", width=256)
+    op = "transition_fwd_residual_sm90_cuda"
+    unit = builder.OpUnit(op=op, length=384, dtype="bfloat16", side="pair", width=128)
     assert not builder._cache_answers(unit, {op})
 
 

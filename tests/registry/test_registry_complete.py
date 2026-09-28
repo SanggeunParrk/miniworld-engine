@@ -254,7 +254,7 @@ def test_launch_keywords_match_the_kernel_signature() -> None:
 
     Scope: only calls whose callee name is a kernel defined somewhere in the package, and only
     keyword arguments. A `**kwargs` forward is skipped rather than guessed at, and so is any name
-    the calling file REBINDS -- `from .cute import layernorm_linear as _fwd` makes the local `_fwd`
+    the calling file REBINDS -- `from .backend import layernorm_linear as _fwd` makes the local `_fwd`
     a different function from the package's `_fwd`, and resolving by bare name cannot tell them
     apart. Without that exclusion this reported three false positives.
     """

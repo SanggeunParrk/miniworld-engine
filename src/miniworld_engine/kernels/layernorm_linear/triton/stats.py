@@ -99,8 +99,8 @@ def stats_triton(x: torch.Tensor, eps: float, shape_key: int | None = None,
         x, rstd, c1, M, K, eps,
         x.stride(0), x.stride(1),
         # shape_key = both_key(rows_of(<pre-flatten shape>)) from the caller that still has
-        # it (transition/triton/fused.py, transition/cute/fused.py). None = a caller not yet
-        # threaded (transition/cuda/__init__.py, gemm_transition_swiglu.py, drivers/checks --
+        # it (transition/triton/fused.py). None = a caller not yet
+        # threaded (transition/cuda/__init__.py, drivers/checks --
         # all outside this change's file set); it buckets the flattened ROW count, the L-vs-L*L
         # ambiguity autotune.shape_key removes.
         shape_key=both_key(M, K=K) if shape_key is None else pack(shape_key, K=K),

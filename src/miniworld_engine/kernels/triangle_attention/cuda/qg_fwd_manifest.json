@@ -7,13 +7,13 @@
     768,
     1024
   ],
-  "torch": "2.10.0+cu128",
-  "python_abi": "cpython-310",
+  "torch": "2.13.0+cu129",
+  "python_abi": "cpython-312",
   "baseline_promotion": 17774,
   "files": {
     "qg_projection_attention.py": "fd4c6934b2e8e5512ecca41a6f0bdceec84c0598f69245025aa11ecaa68ddd9b",
     "qg_projection_attention.cu": "3ab75326bb94cff16a8037b0ce5f4e8b1408e577b5299b102cda08a836fb729a",
-    "triattn_training_qg_scoped.so": "190008b18dd52a986f7add85b18f1e1e3b62965063c6c8c5eb7a66a6c36a23ed"
+    "triattn_training_qg_scoped.so": "f573926ff0b4de75f118f0c3fcfda4004a82bd98437179e416e2b9518d87e945"
   },
   "promotion": "18006",
   "evidence": {

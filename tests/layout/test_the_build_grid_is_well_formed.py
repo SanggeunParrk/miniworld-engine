@@ -164,9 +164,9 @@ def test_the_unit_count_is_not_quietly_collapsing(units, rows):
         f"{sorted(ops - want)}")
     thin = [op for op in ops if sum(1 for u in units if u.op == op) < 2]
     # One unit IS the whole cache for a kernel whose key carries neither axis the sweep varies.
-    # `transition_fold_triton` keys on `['N', 'K']` -- no `shape_key`, so `_keys_on_shape` already
-    # collapses its lengths -- and `dev buckets` measured its three declared widths filing into the
-    # single bucket `K=128,N=512`. Two more units would be two more writes to that one entry.
+    # A weight-only kernel keyed on e.g. `['N', 'K']` -- no `shape_key`, so `_keys_on_shape`
+    # already collapses its lengths -- files every declared width into one bucket, and more
+    # units would be more writes to that one entry.
     # Checked, not listed: an op is excused here only while both facts hold of it.
     unexplained = []
     for op in sorted(thin):

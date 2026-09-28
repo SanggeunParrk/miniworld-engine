@@ -7,5 +7,4 @@
 >
 > Columns: case,impl,dtype,build,reason
 case,impl,dtype,build,reason
-*,cute,*,no,"quack/CuTe GEMM is WGMMA/TMA-only and dispatches by arch: 'NotImplementedError: Gemm Sm80 is not implemented yet'. All 60 units compiled and benchmarked the full autotune grid before dying -- 7-14 GPU-h per shard, zero entries (builds 1628031/1628032)."
 *,cuda,*,no,"the hand-CUDA extensions are compiled -gencode arch=compute_90,code=sm_90a: 'Error building extension transition_b2b_cuda'."

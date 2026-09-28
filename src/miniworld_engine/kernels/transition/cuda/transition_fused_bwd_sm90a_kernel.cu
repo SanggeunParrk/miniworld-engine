@@ -368,6 +368,10 @@ TMN_DEVI void input_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg,
         row[128 + col] += dbp[2 * g]; row[128 + col + 1] += dbp[2 * g + 1];
       }
     }
+    // All four warps must finish the scalar x/dy reads before the leader
+    // releases this slot for TMA refill. WGMMA retirement above does not
+    // synchronize these later scalar epilogue reads across the warpgroup.
+    named_bar_sync(2 + wg, 128);
     if (wtid == 0) mbar_arrive(in_free + buf);
     if (tid == 0 && i + 2 < n_local) { mbar_wait(in_free + buf, (i >> 1) & 1); issue_in(i + 2); }
   }

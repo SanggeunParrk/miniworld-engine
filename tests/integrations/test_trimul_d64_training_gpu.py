@@ -1,0 +1,214 @@
+"""Bidirectional TriMul D64 native training (h100_d64_training): numerics, graphs, compile."""
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+from miniworld_engine.kernels.trimul_inproj.cuda import h100_d64_training as H
+
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
+D = 64
+NAMES = ["y-x", "dx", "dWl", "dWlg", "dWr", "dWrg", "dWg", "dWp", "dgi", "dbi", "dgo", "dbo"]
+
+
+def _hopper():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("Hopper required")
+
+
+def _leaves(n, seed, requires_grad=True):
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    r = lambda *s: torch.randn(*s, generator=g)
+    x = r(1, n, n, D).to("cuda", torch.bfloat16)
+    w = [r(2 * D, D) * D**-0.5 for _ in range(4)] + [r(D, D) * D**-0.5, r(D, 2 * D) * (2 * D) ** -0.5]
+    w = [t.to("cuda", torch.bfloat16) for t in w]
+    ln = [(1 + 0.1 * r(D)), 0.1 * r(D), (1 + 0.1 * r(2 * D)), 0.1 * r(2 * D)]
+    leaves = [x, *w, *[t.to("cuda") for t in ln]]
+    return [t.requires_grad_(requires_grad) for t in leaves]
+
+
+def _reference(x, w, ln, pair_mask, ds):
+    """fp32 copy of BidirectionalTriangleMultiplication (PYTORCH) with a fixed drop_row scale."""
+    wl, wlg, wr, wrg, wg, wp = w
+    gi, bi, go, bo = ln
+    z = F.layer_norm(x, (D,), gi, bi, 1e-5)
+    m = pair_mask[None, :, :, None]
+    left = torch.sigmoid(z @ wlg.t()) * (z @ wl.t()) * m
+    right = torch.sigmoid(z @ wrg.t()) * (z @ wr.t()) * m
+    o = torch.einsum("bikd,bjkd->bijd", left[..., :D], right[..., :D])
+    i = torch.einsum("bkid,bkjd->bijd", left[..., D:], right[..., D:])
+    o = F.layer_norm(torch.cat([o, i], -1), (2 * D,), go, bo, 1e-5)
+    return x + torch.sigmoid(z @ wg.t()) * (o @ wp.t()) * ds[None, None]
+
+
+def _rel(a, b):
+    a, b = a.detach().float(), b.detach().float()
+    return ((a - b).norm() / b.norm().clamp_min(1e-30)).item()
+
+
+def _inputs(n, masked, dropout, seed=0):
+    torch.manual_seed(seed)
+    if masked:
+        keep = torch.ones(n, dtype=torch.bool, device="cuda")
+        keep[n - n // 7:] = False
+        keep[5] = False
+        pm = (keep[:, None] & keep[None, :]).to(torch.bfloat16)
+    else:
+        pm = torch.ones(n, n, device="cuda", dtype=torch.bfloat16)
+    if dropout:
+        ds = (torch.rand(n, D, device="cuda") > 0.25).to(torch.bfloat16) / 0.75
+    else:
+        ds = torch.ones(n, D, device="cuda", dtype=torch.bfloat16)
+    return pm, ds
+
+
+@pytest.mark.parametrize("n", [384, 768])
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("dropout", [False, True])
+def test_matches_fp32_reference(n, masked, dropout):
+    _hopper()
+    if n == 768 and (masked != dropout):
+        pytest.skip("L768 runs the two corner cases only")
+    leaves = _leaves(n, 3)
+    pm, ds = _inputs(n, masked, dropout)
+    dy = torch.randn_like(leaves[0])
+    y = H.bidirectional_trimul(*leaves, pm, ds)
+    grads = torch.autograd.grad(y, leaves, dy)
+    ref_leaves = [t.detach().float().requires_grad_() for t in leaves]
+    yr = _reference(ref_leaves[0], ref_leaves[1:7], ref_leaves[7:], pm.float(), ds.float())
+    gr = torch.autograd.grad(yr, ref_leaves, dy.float())
+    x = leaves[0].detach().float()
+    errors = [_rel(y.float() - x, yr - x)] + [_rel(a, b) for a, b in zip(grads, gr)]
+    # Measured (L384, every mask/dropout case): update 3-6e-3, gradients 1.7-5.4e-3, each
+    # below the Triton path's error against the same reference.
+    for name, e in zip(NAMES, errors):
+        assert e < 1.2e-2, (name, e)
+    assert all(torch.isfinite(g).all() for g in grads)
+    assert all(g.dtype == t.dtype and g.shape == t.shape for g, t in zip(grads, leaves))
+
+
+def test_graph_replay_follows_changed_inputs_and_weights():
+    _hopper()
+    n = 384
+    static = _leaves(n, 5)
+    pm, ds = _inputs(n, True, True)
+    dy = torch.randn_like(static[0])
+
+    def step(args):
+        y = H.bidirectional_trimul(*args, pm, ds)
+        return [y.detach(), *torch.autograd.grad(y, args, dy)]
+
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(2):
+            step(static)
+    torch.cuda.current_stream().wait_stream(s)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = step(static)
+    for seed in (11, 12):
+        fresh = _leaves(n, seed)
+        with torch.no_grad():
+            for dst, src in zip(static, fresh):
+                dst.copy_(src)
+        graph.replay()
+        expected = step(fresh)
+        for i, (a, b) in enumerate(zip(out, expected)):
+            if b.dtype == torch.float32:
+                # LN affine sums use shared-memory atomics inside a CTA (order not fixed).
+                assert _rel(a, b) < 1e-5, i
+            else:
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_independent_forwards_and_nograd_match():
+    _hopper()
+    n = 384
+    leaves = _leaves(n, 7)
+    pm, ds = _inputs(n, True, True)
+    dy = torch.randn_like(leaves[0])
+    a = H.bidirectional_trimul(*leaves, pm, ds)
+    b = H.bidirectional_trimul(*leaves, pm, ds)
+    ga = torch.autograd.grad(a, leaves, dy)
+    gb = torch.autograd.grad(b, leaves, dy)
+    torch.testing.assert_close(a, b, rtol=0, atol=0)
+    for u, v in zip(ga, gb):
+        assert _rel(u, v) < 1e-5
+    with torch.no_grad():
+        c = H.bidirectional_trimul(*leaves, pm, ds)
+    torch.testing.assert_close(c, a.detach(), rtol=0, atol=0)
+
+
+def test_compile_fullgraph_matches_eager():
+    _hopper()
+    n = 384
+    leaves = _leaves(n, 9)
+    pm = torch.ones(n, n, device="cuda", dtype=torch.float32)  # fp32 callers must not alias
+    _, ds = _inputs(n, False, True)
+    dy = torch.randn_like(leaves[0])
+    y = H.bidirectional_trimul(*leaves, pm, ds)
+    grads = torch.autograd.grad(y, leaves, dy)
+    compiled = torch.compile(H.bidirectional_trimul, fullgraph=True,
+                             options={"triton.cudagraphs": False})
+    z = compiled(*leaves, pm, ds)
+    actual = torch.autograd.grad(z, leaves, dy)
+    for a, b in zip((z, *actual), (y, *grads), strict=True):
+        assert _rel(a, b) < 2e-6
+
+
+def test_module_wiring_matches_pytorch_reference(monkeypatch):
+    """The module through the default integrations.trimul_h100.update D64 route matches the module's own PYTORCH implementation (fp32 copy)."""
+    _hopper()
+    from miniworld_engine import settings
+    from miniworld_engine.integrations import trimul_h100
+    from miniworld_engine.modules.exceptions import ImplementationType as I
+    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+        BidirectionalTriangleMultiplication,
+    )
+
+    widths = trimul_h100.TRAINING_WIDTHS
+    real = H.bidirectional_trimul
+    calls = []
+
+    def spy(*args):
+        calls.append(1)
+        return real(*args)
+
+    monkeypatch.setattr(H, "bidirectional_trimul", spy)
+    previous = settings.configure(engine_backend="auto", trimul_h100_training_widths=widths)
+    try:
+        n = 384
+        torch.manual_seed(21)
+        m = BidirectionalTriangleMultiplication(D, implementation=I.MINIWORLD, p_drop=0.0).cuda().train()
+        with torch.no_grad():
+            for name, p in m.named_parameters():
+                if p.ndim == 1:
+                    p.copy_((1.0 if name.endswith("weight") else 0.0) + 0.1 * torch.randn_like(p))
+                else:
+                    p.copy_(torch.randn_like(p) * p.shape[-1] ** -0.5)
+                    p.data = p.data.to(torch.bfloat16)
+        ref = BidirectionalTriangleMultiplication(D, implementation=I.PYTORCH, p_drop=0.0).cuda().train()
+        with torch.no_grad():
+            for p, q in zip(ref.parameters(), m.parameters()):
+                p.copy_(q.float())
+        mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+        mask[:, n - 40:] = False
+        x = torch.randn(1, n, n, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        dy = torch.randn_like(x)
+        y = m(x, mask)
+        grads = torch.autograd.grad(y, [x, *m.parameters()], dy)
+        assert calls, "the D64 native path was not taken"
+        xr = x.detach().float().requires_grad_()
+        yr = ref(xr, mask)
+        gr = torch.autograd.grad(yr, [xr, *ref.parameters()], dy.float())
+        xf = x.detach().float()
+        assert _rel(y.float() - xf, yr - xf) < 1.2e-2
+        for a, b in zip(grads, gr):
+            assert a.shape == b.shape
+            assert _rel(a, b) < 1.2e-2
+    finally:
+        settings.configure(**{f: getattr(previous, f) for f in ("engine_backend", "trimul_h100_training_widths")})

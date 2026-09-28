@@ -1,8 +1,6 @@
 """Triton entry point for the fused LayerNorm + Linear kernel.
 
-This is the **portable** backend: the cute path forks quack's ``GemmSm90`` (WGMMA +
-TMA + clusters) and is SM90/Hopper-only, so this Triton kernel is the general
-fallback that runs on any Triton-supported arch (Ampere/Ada/Hopper/Blackwell/ROCm).
+This Triton kernel runs on any Triton-supported arch (Ampere/Ada/Hopper/Blackwell/ROCm).
 It computes ``LayerNorm(x) @ W^T + b`` in one fused kernel — LN stats reduced on-chip,
 then the projection GEMM — so eager ``LayerNorm`` -> ``Linear``'s extra HBM round trip
 is avoided. See ``triton/fused.py``.

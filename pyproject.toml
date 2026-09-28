@@ -1,16 +1,16 @@
 [project]
 name = "miniworld-engine"
-version = "2.1.0"
+version = "2.2.0"
 requires-python = ">=3.10"
-description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
+description = "MiniWorld GPU kernel development repo — Triton / CUDA kernels + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
 license = "MIT AND Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/Anthropic-Apache-2.0.txt"]
 dependencies = [
   # Lean runtime core. This is the PUBLIC CONTRACT surface a parent (team-gm)
   # inherits when it consumes miniworld-engine as a submodule / dependency:
   # only what `miniworld_engine.kernels.*` needs to import and run its Triton
-  # entry points. Bench harness, comparison baselines, and the CuTeDSL backend
-  # are optional extras below so the parent never drags them in.
+  # entry points. Bench harness and comparison baselines are optional extras below
+  # so the parent never drags them in.
   "torch>=2.8",
   # From code, not from a test: `autotune/cache.py` prefers
   # `triton.backends.nvidia.compiler.get_ptxas_version`, which exists from 3.3, and falls
@@ -25,18 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# CuTeDSL / quack backends (the .cute kernel paths). cutlass ships as the
-# `nvidia-cutlass-dsl` wheel — no git submodule needed (see CONTRIBUTING.md).
-# Pinned to the quack 0.5.0 / cutlass-dsl 4.5.2 set so the cute kernels coexist with
-# FlashAttention-4 (which requires quack-kernels>=0.5.0). The cute launch path was
-# migrated to cutlass-dsl 4.5.2's TVM-FFI convention; the quack-import shim
-# (kernels/_quack_compat.py) additionally keeps quack 0.3.11 importable, but the
-# supported/tested runtime is this set. Do NOT bump quack to 0.6.x: it drags torch
-# 2.10 -> 2.13 and breaks the cu130 stack.
-cute = ["nvidia-cutlass-dsl==4.5.2", "quack-kernels==0.5.0"]
 # Comparison baselines only (CUEQUIVARIANCE impl path + reference helpers).
 # NOT required to use the miniworld kernels.
-baselines = ["cuequivariance-torch>=0.9,<0.10"]
+baselines = ["cuequivariance-torch>=0.12,<0.13"]
 # Benchmark harness (benchmarks/runners/bench.py, team-gm hydra style) + plots.
 bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
 # Dev: tests, lint, static typing. `ty`, not pyright -- pyright cannot parse jaxtyping shape
@@ -135,7 +126,6 @@ target-version = "py310"
 # package path that only exists when the repo root is on sys.path, which it never is.
 src = ["src"]
 exclude = [
-  "_ct_cutlass",
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
@@ -243,10 +233,9 @@ ban-relative-imports = "all"
 # connecting/reference code that lives under kernels/ (interface.py, reference.py).
 "src/miniworld_engine/kernels/**/*.py" = []
 # Vendored kernel *bodies* are faithful copies (triton main/perf/miniworld,
-# CuTeDSL, CUDA) from team-gm branches + FlashAttentionBias — not linted, exactly
+# CUDA) from team-gm branches + FlashAttentionBias — not linted, exactly
 # as the originals are not held to this repo's standards.
 "src/miniworld_engine/kernels/**/triton/*.py" = ["ALL"]
-"src/miniworld_engine/kernels/**/cute/*.py" = ["ALL"]
 "src/miniworld_engine/kernels/**/cuda/*.py" = ["ALL"]
 # dtv1 is the vendored perf/trimul fused kernel kept as a baseline.
 "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
@@ -272,9 +261,6 @@ exclude = [
   ".pixi",
   "**/.pixi",
   "**/__pycache__",
-  "cute-env",
-  "**/cute/**",
-  "_ct_cutlass",
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
@@ -304,9 +290,6 @@ exclude = [
   ".pixi",
   "**/.pixi",
   "**/__pycache__",
-  "cute-env",
-  "**/cute/**",
-  "_ct_cutlass",
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
@@ -326,7 +309,6 @@ exclude = [
   # to this repo's standards". Holding them to a type checker but not a linter was an
   # inconsistency, not a decision.
   "src/miniworld_engine/kernels/**/triton/**",
-  "src/miniworld_engine/kernels/**/cute/**",
   "src/miniworld_engine/kernels/**/cuda/**",
 ]
 
@@ -357,7 +339,7 @@ extra-paths = ["benchmarks/runners", "tests", "tests/layout"]
 
 # ----------------------------------------------------------------------------
 # pixi — single unified environment for the whole repo (triton + Transformer
-# Engine cu12 + CuTeDSL/quack + cuequivariance + benching). Replaces the old
+# Engine cu12 + cuequivariance + benching). Replaces the old
 # per-backend cute-env/ and te-env/ folders. The materialized `.pixi/` is
 # gitignored. See docs/benchmarks.md and docs/kernels/.
 #
@@ -374,11 +356,12 @@ platforms = ["linux-64"]
 [tool.pixi.dependencies]
 python = "3.12.*"
 pip = "*"
-# CUDA toolchain to compile transformer_engine_torch from source (cu12.8).
-cuda-toolkit = "12.8.*"
+# CUDA toolchain to compile transformer_engine_torch from source (cu12.9, the newest the
+# cluster's 575 driver runs; matches torch 2.13.0+cu129).
+cuda-toolkit = "12.9.*"
 cudnn = "*"
 nccl = "*"
-cuda-nvtx-dev = "12.8.*"
+cuda-nvtx-dev = "12.9.*"
 ninja = "*"
 cmake = "*"
 setuptools = "*"
@@ -386,22 +369,25 @@ wheel = "*"
 pybind11 = "*"
 
 [tool.pixi.pypi-options]
-extra-index-urls = ["https://download.pytorch.org/whl/cu128"]
+extra-index-urls = ["https://download.pytorch.org/whl/cu129"]
 no-build-isolation = ["transformer-engine-torch"]
 
 # The dev environment installs the package WITH ALL EXTRAS so the full bench +
-# baseline + cute + dev stack is present here, even though the published
+# baseline + dev stack is present here, even though the published
 # `[project.dependencies]` core stays lean for downstream consumers (team-gm).
 # `[project.dependencies]` (torch, triton, einops, jaxtyping, numpy) plus every
-# extra (cute/baselines/bench/dev) are pulled via the editable install below.
+# extra (baselines/bench/dev) are pulled via the editable install below.
 [tool.pixi.pypi-dependencies]
-miniworld-engine = { path = ".", editable = true, extras = ["cute", "baselines", "bench", "dev"] }
+miniworld-engine = { path = ".", editable = true, extras = ["baselines", "bench", "dev"] }
+# v2.2.0 runtime: torch 2.13.0+cu129 (triton 3.7.1), the newest pair the 575 driver runs and
+# inside cuequivariance 0.12's torch 2.11-2.13 support window.
+torch = { version = "==2.13.0", index = "https://download.pytorch.org/whl/cu129" }
 # Transformer Engine (cu12) is dev-only and needs the special no-build-isolation
 # handling above, so it stays an explicit pixi dep rather than a package extra.
-transformer-engine = { version = "*", extras = ["pytorch", "core-cu12"] }
-transformer-engine-cu12 = "*"
+transformer-engine = { version = "==2.19.*", extras = ["pytorch", "core-cu12"] }
+transformer-engine-cu12 = "==2.19.*"
 # cu12 ops backend for the cuequivariance baseline (pairs with the [baselines] extra).
-cuequivariance-ops-torch-cu12 = "*"
+cuequivariance-ops-torch-cu12 = "==0.12.*"
 
 [tool.pixi.activation.env]
 PYTHONNOUSERSITE = "1"
@@ -413,14 +399,13 @@ CUDA_HOME = "$CONDA_PREFIX"
 # driver can't run cu13. `fix-te-cu12` reinstalls the cu12 core last so it wins.
 # RUN IT AFTER EVERY `pixi install`.
 [tool.pixi.tasks]
-fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==2.16.0"
+fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==2.19.0"
 # FlashAttention, picked from the CARD rather than from the reader: FA4 is sm90+, FA2 is
 # sm80+, and the wrong one installs fine and then never loads. Needs a visible GPU (or
 # `--arch sm80`), and FA2 compiles from source, so it is a task and not a dependency.
 flash = "miniworld-engine dev install-flash"
 smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
 smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
-smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
 ruff-check = "ruff check src tests benchmarks"
 ruff-format = "ruff format src tests benchmarks"
 # benchmarks too: `[tool.ty.src].include` has always listed it, but the command checked

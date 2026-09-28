@@ -68,8 +68,8 @@ def test_no_bare_opaque_site_remains() -> None:
 def _is_launch(node: ast.AST) -> bool:
     """Is this ``kernel[grid](...)``, a Triton launch?
 
-    Narrower than "a call whose func is a Subscript": ``candidates[idx][1]()`` in the cute
-    dispatcher is that too, and it is a thunk, not a launch. A launch subscripts a plain NAME (the
+    Narrower than "a call whose func is a Subscript": ``candidates[idx][1]()`` in a
+    config dispatcher is that too, and it is a thunk, not a launch. A launch subscripts a plain NAME (the
     kernel) and is called WITH arguments.
     """
     return (isinstance(node, ast.Call)
@@ -182,7 +182,6 @@ OP_FAMILIES = (
     "augmented_attention",
     "bias_only_attention",
     "conditioned_transition",
-    "fused_ln_mask",
     "gated_projection",
     "gated_residual",      # adaLN-Zero residual multiply/add, without a projection
     "layernorm_linear",     # before "layernorm": it is the longer, more specific prefix
@@ -318,12 +317,12 @@ def test_custom_op_mode_registers_every_site(wrap: str) -> None:
 
     A REGISTRATION failure is distinguished from a missing dependency by where it was raised. The
     first version of this caught everything except "needs a fake implementation" and passed the
-    rest, on the reasoning that a CPU runner has no CuTeDSL -- and that swallowed a real one:
-    ``trimul_inproj/cute/inference.py`` had ``@torch.no_grad()`` between ``@opaque`` and its
+    rest, on the reasoning that a CPU runner has no CuTeDSL -- and that swallowed a real one: the
+    (since removed) CuTeDSL trimul inference front had ``@torch.no_grad()`` between ``@opaque`` and its
     function, so ``infer_schema`` could not resolve the string annotations and the op failed to
     register on EVERY machine. It looked green for as long as the exception was discarded. Now
     anything raised from inside ``torch/_library`` or ``torch/library.py`` fails the test, and only
-    exceptions from elsewhere (an absent CUDA/CuTeDSL extension) are tolerated.
+    exceptions from elsewhere (an absent CUDA extension) are tolerated.
 
     A subprocess per mode is not fussiness: ``kernels._compile`` reads ``compile_wrap`` when the
     decorator RUNS, so a single interpreter can only ever hold one of the two.

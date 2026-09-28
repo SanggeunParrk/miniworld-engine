@@ -2,8 +2,6 @@ from pathlib import Path
 import torch
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
-R = T.SOURCES / "wide"
-
 
 @T.device_cache
 def headers():

@@ -3,7 +3,6 @@
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cute import contract as cute_contract
 from miniworld_engine.kernels.trimul_inproj.triton import contract as triton_contract
 from miniworld_engine.modules import BidirectionalTriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -53,7 +52,7 @@ def check(name, a, b):
         (384, 128, True),
     ],
 )
-@pytest.mark.parametrize("contract", [cute_contract, triton_contract])
+@pytest.mark.parametrize("contract", [triton_contract])
 def test_packed_contractions(length, hidden, strided, contract):
     torch.manual_seed(479)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -64,14 +63,6 @@ def test_packed_contractions(length, hidden, strided, contract):
     if strided:
         tensors = [t.transpose(1, 2) for t in tensors]
     left, right, grad = tensors
-    use_quack = (
-        length in (384, 768)
-        and hidden == 128
-        and not strided
-        and torch.cuda.get_device_name() == "NVIDIA H100 80GB HBM3"
-    )
-    if contract is cute_contract:
-        assert contract._use_quack(*tensors) == use_quack
     saved = [t.clone() for t in tensors]
     tri = contract.packed_forward(left, right, hidden)
     dl, dr = contract.packed_backward(grad, left, right, hidden)

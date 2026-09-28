@@ -41,7 +41,7 @@ def test_default_is_build(sm):
 def test_unknown_card_builds_everything():
     """No file is not a deny -- the only safe default for an unrecognised GPU is the expensive one."""
     assert "sm_123" not in matrix.known_gpus()
-    assert matrix.allows("sm_123", "triangle_multiplication", "cute", "bfloat16")
+    assert matrix.allows("sm_123", "triangle_multiplication", "cuda", "bfloat16")
 
 
 def test_common_rules_apply_to_every_card():
@@ -52,10 +52,10 @@ def test_common_rules_apply_to_every_card():
 
 
 def test_arch_specific_denies_are_arch_specific():
-    """cute is the whole reason this directory exists: dead below sm_90, fastest path on it."""
-    assert not matrix.allows("sm_80", "triangle_multiplication", "cute", "bfloat16")
-    assert not matrix.allows("sm_86", "triangle_multiplication", "cute", "bfloat16")
-    assert matrix.allows("sm_90", "triangle_multiplication", "cute", "bfloat16")
+    """Hand-CUDA is the whole reason this directory exists: sm_90a-only, fastest path on it."""
+    assert not matrix.allows("sm_80", "triangle_multiplication", "cuda", "bfloat16")
+    assert not matrix.allows("sm_86", "triangle_multiplication", "cuda", "bfloat16")
+    assert matrix.allows("sm_90", "triangle_multiplication", "cuda", "bfloat16")
 
 
 def test_sm_tag_is_the_file_stem():
@@ -66,7 +66,7 @@ def test_sm_tag_is_the_file_stem():
 
 @pytest.mark.parametrize(("sm", "expected_impls"), [
     ("sm_86", {"miniworld", "triton"}),
-    ("sm_90", {"miniworld", "triton", "cute"}),
+    ("sm_90", {"miniworld", "triton"}),
 ])
 def test_units_drop_only_the_unbuildable_impls(sm, expected_impls, monkeypatch):
     monkeypatch.setattr(builder, "device_sm", lambda: sm)
@@ -88,7 +88,7 @@ def test_no_cuda_means_no_filtering(monkeypatch):
 def test_skips_are_reported_with_reasons():
     """A dropped unit must be announced -- a silent skip reads as 'covered' in the build log."""
     skipped = builder.skipped_units(builder.cases(), "sm_86")
-    assert any("cute" in label for label, _ in skipped)
+    assert any("float32" in label for label, _ in skipped)
     assert all(reason for _, reason in skipped)
 
 

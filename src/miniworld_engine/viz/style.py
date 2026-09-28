@@ -9,7 +9,7 @@ plotting paths import from here:
 
 Design philosophy (so figures read as one coherent set, paper-ready):
 
-- **This repo's kernels / cute family → dark gold.** The thing we built is always the same
+- **This repo's kernels → dark gold.** The thing we built is always the same
   blackened-gold series so it is immediately recognisable.
 - **NVIDIA family (cuequivariance / dtv1 / Transformer Engine) → greens & teal.**
   NVIDIA's brand green, kept together so "the NVIDIA kernels" are visually a group.
@@ -17,7 +17,7 @@ Design philosophy (so figures read as one coherent set, paper-ready):
   The naive baseline recedes; it is the reference, not the story.
 
 Backend names are wildly inconsistent across the repo's logs and reports
-(``cuequivariance`` / ``cuequiv``, ``cute`` / ``cute-fused`` / ``ours v4`` /
+(``cuequivariance`` / ``cuequiv``, ``ours`` / ``ours v4`` /
 ``v2``, ``nvidia dtv1`` / ``dt-v1`` …). :func:`canonical` normalises any of
 these to one identity, so the same *thing* always gets the same colour even when
 a different log spells it differently. Unknown names fall back to a
@@ -166,13 +166,13 @@ _ALIASES: dict[str, str] = {
     "cuda": "cuda",
     # miniworld family (canonical = miniworld, displayed "ours"; variants -alt / -alt2).
     # Every authorship spelling we've ever emitted resolves here, so old .out logs and
-    # the one-off bench scripts that print "ours"/"cute"/"v4"/... need no changes.
+    # the one-off bench scripts that print "ours"/"v4"/... need no changes.
     "miniworld": "miniworld", "mwk": "miniworld", "miniworldkernels": "miniworld",
-    "ours": "miniworld", "oursv4": "miniworld", "cute": "miniworld", "cutefused": "miniworld",
-    "cutefwd": "miniworld", "v4": "miniworld", "layernormkernel": "miniworld",
+    "ours": "miniworld", "oursv4": "miniworld",
+    "v4": "miniworld", "layernormkernel": "miniworld",
     "layernormdispatch": "layernorm-dispatch", "autodispatch": "layernorm-dispatch",
     "layernormdispatchcompile": "layernorm-dispatch-compile",
-    "oursv5": "miniworld-alt", "cutetrain": "miniworld-alt", "v5": "miniworld-alt",
+    "oursv5": "miniworld-alt", "v5": "miniworld-alt",
     "partialbuffer": "triton-partial", "partialreduction": "triton-partial",
     "v2": "miniworld-alt2", "oursv2": "miniworld-alt2", "v3": "miniworld-alt2",
 }
@@ -182,30 +182,22 @@ _ALIASES: dict[str, str] = {
 # --------------------------------------------------------------------------- #
 # Each developed OR deprecated implementation of an op is its own CSV row. Register a stable
 # identity + colour for every one so sibling variants that share a substring the canonical
-# heuristics collapse (`cute`/`miniworld`) never overwrite each other in a single figure.
-# (identity, display, colour). Triton kernels → blues; cute/quack → golds; TE → green;
+# heuristics collapse (`ours`/`miniworld`) never overwrite each other in a single figure.
+# (identity, display, colour). Triton kernels → blues; hand-CUDA → golds; TE → green;
 # deprecated/negative-result variants → muted grey/orange.
 _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     # dual_gemm_epilogue (front) + gemm_gate/tm2 + gemm_epilogue (LN+linear)
     "trimulfronttriton": ("trimul-front-triton", "Triton front", "#2E6FDB"),
     "tritontm1": ("triton-tm1", "Triton tm1", "#5B8FF9"),
     "tritongated": ("triton-gated", "Triton gated (dep)", "#7FB0FF"),
-    "trimulinprojcute": ("trimul-inproj-cute", "cute front", "#D4AF37"),
-    "tm1cute": ("tm1-cute", "cute tm1", "#F2C94C"),
-    "trimulfrontsm100": ("trimul-front-sm100", "cute SM100 (dep)", "#8A6A14"),
     "layernormlineartriton": ("layernorm-linear-triton", "Triton LN+linear", "#2E6FDB"),
-    "layernormlinearcute": ("layernorm-linear-cute", "cute LN+linear M1", "#D4AF37"),
-    "layernormlinearcutefused": ("layernorm-linear-cute-fused", "cute LN+linear M2", "#F2C94C"),
     "layernormlinearte": ("layernorm-linear-te", "TE-style", "#3F6B1B"),
-    "tm2cute": ("tm2-cute", "cute tm2", "#D4AF37"),
     "tritontm2": ("triton-tm2", "Triton tm2", "#2E6FDB"),
     # transition_b2b
     "tritontransitionfused": ("triton-transition-fused", "Triton transition", "#2E6FDB"),
-    "cutetransitionfused": ("cute-transition-fused", "cute transition", "#D4AF37"),
     "transitionb2bktiled": ("transition-b2b-ktiled", "Triton k-tiled (unver)", "#7FB0FF"),
     # layernorm (+ bwd)
     "tritonlayernorm": ("triton-layernorm", "Triton LN", "#2E6FDB"),
-    "quackcute": ("quack-cute", "quack cute", "#D4AF37"),
     "tritonlayernormlowreg": ("triton-layernorm-lowreg", "Triton LN low-reg (dep)", "#7A86A1"),
     "tritonpersistent": ("triton-persistent", "Triton persistent", "#11A6A0"),
     # adaln (+ bwd)
@@ -213,7 +205,6 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     "tritonadaln": ("triton-adaln", "Triton adaLN", "#5B8FF9"),
     "adalnfused3": ("adaln-fused3", "Triton adaLN fused3", "#7FB0FF"),
     "adalntrain": ("adaln-train", "Triton adaLN train", "#5B8FF9"),
-    "adalnlnfold": ("adaln-lnfold", "Triton adaLN LN-fold", "#3D7BE0"),
     # attentions
     "tritontriangleattention": ("triton-triangle-attention", "Triton tri-attn", "#2E6FDB"),
     "tritontriangleattentionatomic":
@@ -233,8 +224,18 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     # `aug_attn_compute_efficient` keeps its old spelling: it is a historical label in the
     # committed tables with no code path today, so renaming it would orphan those rows.
     "augattncomputeefficient": ("aug-attn-compute-efficient", "Triton aug (comp-eff)", "#7A86A1"),
-    # fused_ln_mask, conditioned_transition_tail, misc bwd
-    "fusedlnmask": ("fused-ln-mask", "fused LN+mask", "#D4AF37"),
+    # Retired in v2.2.0 (the CuTe DSL / quack backend was removed). These labels exist only in the
+    # committed historical result tables; they keep a pinned, muted identity so old figures still
+    # draw them distinctly instead of letting `canonical()` guess.
+    "trimulinprojcute": ("trimul-inproj-cute", "cute front (retired)", "#9A8F6A"),
+    "tm1cute": ("tm1-cute", "cute tm1 (retired)", "#B3A77E"),
+    "trimulfrontsm100": ("trimul-front-sm100", "cute SM100 (retired)", "#8A7F5A"),
+    "layernormlinearcute": ("layernorm-linear-cute", "cute LN+linear M1 (retired)", "#9A8F6A"),
+    "layernormlinearcutefused": ("layernorm-linear-cute-fused", "cute LN+linear M2 (retired)", "#B3A77E"),
+    "tm2cute": ("tm2-cute", "cute tm2 (retired)", "#9A8F6A"),
+    "cutetransitionfused": ("cute-transition-fused", "cute transition (retired)", "#9A8F6A"),
+    "quackcute": ("quack-cute", "quack cute (retired)", "#9A8F6A"),
+    # conditioned_transition_tail, misc bwd
     "tritoncondtransition": ("triton-cond-transition", "Triton cond-transition", "#2E6FDB"),
     "gateelembwd": ("gate-elem-bwd", "Triton gate bwd", "#2E6FDB"),
     "frontbwdfused": ("front-bwd-fused", "Triton front bwd", "#2E6FDB"),
@@ -251,7 +252,7 @@ _NORM_RE = re.compile(r"[\s_\-./]+")
 
 
 def _norm(name: str) -> str:
-    """Lowercase and strip separators so 'cute-fused' == 'cute_fused' == 'cute fused'."""
+    """Lowercase and strip separators so 'ours-v4' == 'ours_v4' == 'ours v4'."""
     return _NORM_RE.sub("", name.strip().lower())
 
 
@@ -264,12 +265,12 @@ def canonical(name: str) -> str:
     key = _norm(name)
     if key in _ALIASES:
         return _ALIASES[key]
-    # substring heuristics for compound labels ("ours-trimul-fwd", "cute-v2", …)
+    # substring heuristics for compound labels ("ours-trimul-fwd", "miniworld-v2", …)
     if "cuequiv" in key or "cueq" in key:
         return "cuequivariance"
     if "dtv1" in key:
         return "dtv1"
-    if "ours" in key or "cute" in key or "miniworld" in key:
+    if "ours" in key or "miniworld" in key:
         return "miniworld"
     if "compile" in key:
         return "torch.compile"

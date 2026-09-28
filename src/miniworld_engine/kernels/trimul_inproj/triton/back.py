@@ -79,7 +79,7 @@ def _back_kernel(
     # contracts. They were ONE axis, which is what made this kernel refuse the bidirectional
     # trimul: there the tri block is 2*d_hidden wide while x_n stays d_pair, so a single K cannot
     # describe both and the module fell back to a split back half -- `_te_forward` (LN+GEMM) then
-    # `gate_elem_infer`, two passes over M x N with a materialised (M, N) proj between them.
+    # a separate gate pass (since removed), two passes over M x N with a materialised (M, N) proj.
     # Measured on an A6000 at L=1024, d_pair=128: split 5.06 ms (2.79 + 2.27) against 1.68 ms for
     # this kernel at K = N = 128, while the whole module sat 1.2 ms behind cuequivariance.
     # KG == K reproduces the old kernel exactly: every loop below is single-trip in that case.

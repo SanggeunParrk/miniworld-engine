@@ -83,8 +83,7 @@ def _run(module, x, dy, *, fused, fp32=False):
     if fp32:
         mod = mod.float()
         x, dy = x.float(), dy.float()
-    settings.configure(engine_backend="auto" if fused else "triton", transition_residual_fusion=True,
-                       transition_fused_sm90a=fused)
+    settings.configure(engine_backend="auto" if fused else "triton", transition_fused_sm90a=fused)
     xx = x.clone().requires_grad_()
     y = mod(xx)
     y.backward(dy)
@@ -176,3 +175,42 @@ def test_replay_is_bit_identical():
 
     first, second = once(), once()
     assert all(torch.equal(a, b) for a, b in zip(first, second, strict=False))
+
+
+@needs_hopper
+def test_persistent_input_refill_graph(monkeypatch):
+    """Many CTA refills must wait for every warp's scalar LN epilogue reads.
+
+    Run this under racecheck as well: instrumentation exposed a leader releasing
+    the input slot while another warp still read x, corrupting dx and dgamma
+    even though the tool reported zero hazards. Small one-tile tests miss it.
+    """
+    from miniworld_engine import settings
+
+    monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    settings.configure(engine_backend="auto", transition_residual_fusion=True,
+                       transition_fused_sm90a=True)
+    module, x, dy = _build((1, 384, 384, 128))
+    with torch.no_grad():
+        module.ln_in.weight.copy_(1 + 0.2 * torch.randn_like(module.ln_in.weight))
+        module.ln_in.bias.normal_(std=0.2)
+    x.requires_grad_()
+    leaves = (x, *module.parameters())
+
+    def step():
+        y = module(x)
+        return (y, *torch.autograd.grad(y, leaves, dy))
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        expected = tuple(t.detach().clone() for t in step())
+        step()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            outputs = step()
+    torch.cuda.current_stream().wait_stream(stream)
+    for _ in range(3):
+        graph.replay()
+        for got, want in zip(outputs, expected, strict=True):
+            torch.testing.assert_close(got, want, rtol=0, atol=0)

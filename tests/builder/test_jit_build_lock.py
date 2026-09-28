@@ -26,37 +26,60 @@ import pytest
 from miniworld_engine.kernels._nvcc import (
     LOCK_WAIT_SECONDS,
     STALE_LOCK_SECONDS,
+    _build_lock,
     clear_stale_lock,
     wait_for_lock,
 )
 
 
-def _lock(tmp_path: Path, age_seconds: float) -> Path:
+def _lock(tmp_path: Path, age_seconds: float, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A lock created now, seen `age_seconds` later.
+
+    The clock moves rather than the file's timestamps: `os.utime` rewrites mtime but also bumps
+    ctime to now, and the guard reads max(mtime, ctime) -- a leftover lock is old on BOTH.
+    """
     lock = tmp_path / "lock"
     lock.touch()
-    stamp = time.time() - age_seconds
-    os.utime(lock, (stamp, stamp))
+    later = time.time() + age_seconds
+    monkeypatch.setattr(time, "time", lambda: later)
     return lock
 
 
-def test_a_stale_lock_is_reclaimed(tmp_path: Path) -> None:
+def test_a_stale_lock_is_reclaimed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The exact shape of the incident: 13 hours old, no process behind it."""
-    lock = _lock(tmp_path, 13 * 3600)
+    lock = _lock(tmp_path, 13 * 3600, monkeypatch)
     assert clear_stale_lock(lock) is True
     assert not lock.exists()
 
 
-def test_a_fresh_lock_is_left_alone(tmp_path: Path) -> None:
+def test_a_fresh_lock_is_left_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A live build owns its lock. Reclaiming it would corrupt a concurrent compile, which is a
     worse failure than the one being fixed."""
-    lock = _lock(tmp_path, 5.0)
+    lock = _lock(tmp_path, 5.0, monkeypatch)
     assert clear_stale_lock(lock) is False
     assert lock.exists()
 
 
-def test_the_boundary_is_the_declared_threshold(tmp_path: Path) -> None:
-    assert clear_stale_lock(_lock(tmp_path, STALE_LOCK_SECONDS + 60)) is True
-    assert clear_stale_lock(_lock(tmp_path, STALE_LOCK_SECONDS - 60)) is False
+def test_the_boundary_is_the_declared_threshold(tmp_path: Path,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    assert clear_stale_lock(_lock(tmp_path, STALE_LOCK_SECONDS + 60, monkeypatch)) is True
+    assert clear_stale_lock(_lock(tmp_path, STALE_LOCK_SECONDS - 60, monkeypatch)) is False
+
+
+def test_an_nfs_exclusive_create_mtime_does_not_make_a_live_lock_stale(tmp_path: Path) -> None:
+    """NFSv3 O_EXCL create stores its verifier in mtime: a lock made a second ago reads as 1981.
+    Trusting mtime deleted a live rank's lock mid-build and hung the job (2026-09-27)."""
+    lock = tmp_path / "lock"
+    lock.touch()
+    os.utime(lock, (375402281, 375402281))   # the mtime the compute node reported
+    assert clear_stale_lock(lock) is False
+    assert lock.exists()
+
+
+def test_the_lock_is_looked_for_in_the_build_directory_it_uses(tmp_path: Path) -> None:
+    """`load(build_directory=...)` batons there; guarding TORCH_EXTENSIONS_DIR instead left a
+    days-old leftover unguarded and torch waited on it forever (2026-09-28)."""
+    assert _build_lock("any_ext", str(tmp_path)) == tmp_path / "lock"
 
 
 def test_a_missing_lock_is_not_an_error(tmp_path: Path) -> None:
@@ -71,7 +94,8 @@ def test_no_lock_means_no_wait(tmp_path: Path) -> None:
 
 def test_a_fresh_lock_that_never_clears_raises_and_names_the_file(tmp_path: Path) -> None:
     """The whole point: the previous behaviour here was to poll until the job's time limit."""
-    lock = _lock(tmp_path, 1.0)
+    lock = tmp_path / "lock"
+    lock.touch()
     started = time.monotonic()
     with pytest.raises(TimeoutError, match=r"rm .*lock"):
         wait_for_lock(lock, limit=3.0)
@@ -81,7 +105,8 @@ def test_a_fresh_lock_that_never_clears_raises_and_names_the_file(tmp_path: Path
 
 def test_the_message_says_what_to_do(tmp_path: Path) -> None:
     """A message that names the problem but not the remedy would still cost an investigation."""
-    lock = _lock(tmp_path, 1.0)
+    lock = tmp_path / "lock"
+    lock.touch()
     with pytest.raises(TimeoutError) as excinfo:
         wait_for_lock(lock, limit=1.0)
     text = str(excinfo.value)

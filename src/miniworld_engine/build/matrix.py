@@ -1,11 +1,10 @@
 """Which autotune-cache units a given GPU may build: one CSV per architecture in gpu_to_kernels/.
 
 The rule this encodes is narrow and always the same: an implementation written for one architecture
-produces NOTHING on another. It does not degrade, it raises -- quack/CuTe's ``Gemm Sm80 is not
-implemented yet``, or the hand-CUDA extension failing to build off sm_90a. The unit still pays for
-itself in full first, because the failure lands after the autotune grid has been compiled and
-benchmarked: on sm_86 the ``cute`` units of a from-scratch build cost 7-14 GPU-hours per shard and
-wrote zero entries.
+produces NOTHING on another. It does not degrade, it raises -- e.g. the hand-CUDA extension failing
+to build off sm_90a. The unit still pays for itself in full first, because the failure lands after
+the autotune grid has been compiled and benchmarked: on sm_86 the arch-specific units of a
+from-scratch build once cost 7-14 GPU-hours per shard and wrote zero entries.
 
 One file per card rather than one table with an ``sm`` column, matching how ``autotune/data``
 already keys its caches per GPU: the question people actually arrive with is "what does THIS card

@@ -2,7 +2,7 @@
 ``cuequivariance_ops_torch.fused_layer_norm_torch.layer_norm_transpose``.
 
 Built on our own Triton LayerNorm, at the HBM bandwidth wall. Supports the two
-layouts the trimul cute path uses:
+layouts the trimul paths use:
 
     "nd->nd"   : x (M, D) -> LN over D -> (M, D)          (LN_in; our triton_layernorm)
     "dbn->bnd" : x (D, B, N) -> LN over D -> (B, N, D)    (LN_out; FUSED transpose-LN kernel)

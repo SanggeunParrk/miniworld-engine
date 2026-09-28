@@ -4,7 +4,7 @@ A single ``autograd.Function`` whose forward mirrors the trimul math (in torch,
 incl. the bdll layout flip) and whose backward implements the gradient by hand
 (stages ①-④ below). This is the *oracle*: its manual backward is checked against
 torch autograd of the same forward. Once it is bit-correct, individual stages get
-swapped for the cute/triton kernels while this stays as the reference.
+swapped for the triton / CUDA kernels while this stays as the reference.
 
 Forward (outgoing):
     x_n  = LN_in(x)

@@ -7,7 +7,7 @@ import pytest
 from miniworld_engine import settings
 from miniworld_engine.autotune import cache, capture, native
 
-OP = "layernorm_linear_fwd_foldstats_sm90_cute"
+OP = "transition_bwd_gate_sm90_cuda"
 GRID = [{"tile_m": 64}, {"tile_m": 128}]
 
 

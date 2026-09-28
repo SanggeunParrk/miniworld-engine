@@ -50,6 +50,9 @@ from miniworld_engine.autotune.shape_key import length_of, pack, token_key
 # entries (the 12 that measured `SAVE_GATE=1, USE_DROPOUT=0`, a p_drop=0 training launch, are
 # gone: the training kernel below always carries a drop scale, ones when p_drop is 0).
 #
+# v2.2.0 removed the inference half (`gate_elem_infer` / `_gate_mul_infer_kernel`): its only
+# callers were the retired CuTe paths, so the training kernel below is the one left.
+#
 # The training kernel costs nothing for that unconditional drop scale -- measured on the old
 # flagged kernel, same shapes, A100: L=384 0.1837 ms without the dropout branch vs 0.1841 with,
 # L=768 0.6825 vs 0.6826. The scale is [L, N], not [M, N]; it stays in L2.
@@ -66,27 +69,6 @@ from miniworld_engine.autotune.shape_key import length_of, pack, token_key
 #   further 1.35x on top of it in training. The fused form is also the more ACCURATE one --
 #   it accumulates in fp32 and rounds to bf16 once, where the split path rounds twice:
 #   rel_err vs an fp32 reference 1.4e-03 (A) against 1.7e-03 (B/C).
-@triton.autotune(configs=configs_for("gated_projection_gate_res_triton"), key=['shape_key'])
-@triton.jit
-def _gate_mul_infer_kernel(glogit_ptr, proj_ptr, y_ptr, res_ptr, M,
-                           N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-                           shape_key):
-    """INFERENCE: y = residual + proj ⊙ sigmoid(glogit). No dropout, no saved gate.
-
-    ``res_ptr`` is the module input pair [M, N] and is never absent -- the residual is part of
-    what the op is, not an option on it (see the measurement above)."""
-    rm = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
-    mmask = rm < M
-    for n0 in range(0, N, BLOCK_K):
-        rn = n0 + tl.arange(0, BLOCK_K)
-        mask = mmask[:, None] & (rn < N)[None, :]
-        off = rm[:, None] * N + rn[None, :]
-        g = tl.sigmoid(tl.load(glogit_ptr + off, mask=mask, other=0.0).to(tl.float32))
-        p = tl.load(proj_ptr + off, mask=mask, other=0.0).to(tl.float32)
-        y = p * g + tl.load(res_ptr + off, mask=mask, other=0.0).to(tl.float32)
-        tl.store(y_ptr + off, y.to(y_ptr.dtype.element_ty), mask=mask)
-
-
 @triton.autotune(configs=configs_for("gated_projection_gate_dropres_triton"), key=['shape_key'])
 @triton.jit
 def _gate_mul_train_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
@@ -140,7 +122,7 @@ def _gate_elem_bwd_ew_kernel(
     """Fused elementwise: d_proj = dy⊙gate ; d_glogit = dy⊙proj⊙gate⊙(1-gate).
     One pass over (dy, proj, gate). If FROM_PREACT, `gate_ptr` holds the PREACT
     (glogit=x_n@Wg) instead of gate, and gate=sigmoid(preact) is recomputed here —
-    lets the fused fwd (gate_elem_quack_fused) save preact instead of gate.
+    for a forward that saved preact instead of gate.
 
     The incoming grad is scaled by the row-broadcast drop scale (dy_eff = dy ⊙ ds[m%L, n])
     before the gate backward — the grad of y = ds ⊙ (proj⊙gate). ``ds`` is never absent; a model
@@ -186,39 +168,6 @@ def _shape_key(seq_len, x_n=None) -> int:
     return token_key(0)
 
 
-def _gate_elem_infer_fake(x_n, proj, Wg, residual, seq_len):
-    """``y`` (M, N) over ``x_n``'s flattened row count."""
-    return x_n.new_empty((x_n.numel() // x_n.shape[-1], proj.shape[-1]))
-
-
-@opaque(fake=_gate_elem_infer_fake, name="trimul_gate_elem_fwd_infer")
-def gate_elem_infer(
-    x_n: torch.Tensor,
-    proj: torch.Tensor,
-    Wg: torch.Tensor,
-    residual: torch.Tensor,
-    seq_len: int | None = None,
-) -> torch.Tensor:
-    """INFERENCE gate: ``y = residual + proj ⊙ sigmoid(x_n @ Wg)``, one tensor out.
-
-    x_n:(M,K) or (B,L,L,K); proj:(M,N); Wg:(K,N)=to_gate.weight.T; residual:[M,N]. B=1.
-    ``seq_len`` (L) is what the autotune shape key is bucketed from (see ``_shape_key``) --
-    pass it whenever ``x_n`` arrives already flattened to (M, K).
-
-    No ``return_gate`` and no ``dropscale``: this is the inference kernel, and the two things
-    those flags selected are exactly what makes a launch a TRAINING launch. Use
-    ``gate_elem_train`` there.
-    """
-    xn_flat = x_n.reshape(-1, x_n.shape[-1])
-    M, N = xn_flat.shape[0], proj.shape[-1]
-    glogit = xn_flat @ Wg                                          # (M, N) cuBLAS
-    y = torch.empty(M, N, device=xn_flat.device, dtype=xn_flat.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
-    _gate_mul_infer_kernel[grid](glogit, proj.reshape(M, N), y, residual.reshape(M, N), M, N=N,
-                                 shape_key=pack(_shape_key(seq_len, x_n), N=N))
-    return y
-
-
 def _gate_elem_train_fake(x_n, proj, Wg, residual, dropscale, seq_len):
     """``(y, gate)``, both (M, N) over ``x_n``'s flattened row count."""
     m, n = x_n.numel() // x_n.shape[-1], proj.shape[-1]
@@ -262,40 +211,6 @@ def ones_dropscale(seq_len: int, n: int, like: torch.Tensor) -> torch.Tensor:
     (measured; see the note above the kernels) -- cheaper than the flag it replaces.
     """
     return torch.ones(seq_len, n, device=like.device, dtype=like.dtype)
-
-
-def gate_elem_quack(x_n, proj, Wg, *, return_gate: bool = False):
-    """Same as gate_elem_triton but the gate GEMM+sigmoid is ONE quack `gemm_act` launch
-    (sigmoid fused into the GEMM epilogue → no separate glogit HBM round-trip), then a single
-    elementwise `y = proj ⊙ gate`. x_n:(M,K)/(B,L,L,K); proj:(M,N); Wg:(K,N). B=1."""
-    from quack.gemm_interface import gemm_act
-
-    from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch
-    _bdll_patch.ensure_sigmoid_act()                       # register "sigmoid" in quack act map
-    xn_flat = x_n.reshape(-1, x_n.shape[-1])               # (M, K), contiguous
-    M, N = xn_flat.shape[0], proj.shape[-1]
-    proj_flat = proj.reshape(M, N)
-    _, gate = gemm_act(A=xn_flat, B=Wg, activation="sigmoid", store_preact=False)  # σ(x_n@Wg)
-    gate = gate.reshape(M, N)
-    y = proj_flat * gate                                   # elementwise mul (one aten kernel)
-    return (y, gate) if return_gate else y
-
-
-def gate_elem_quack_fused(x_n, proj, Wg, *, return_preact: bool = False):
-    """FULLY-FUSED gate in ONE quack launch: y = sigmoid(x_n @ Wg) ⊙ proj, via the custom
-    `act(A@B)⊙C` epilogue (C=proj). Kills the separate mul + the gate (M,N) round-trip.
-    Returns y, or (y, preact=x_n@Wg) if return_preact (backward recomputes gate=σ(preact))."""
-    from quack.gemm_interface import gemm_act
-
-    from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch
-    _bdll_patch.ensure_sigmoid_act()
-    _gate_mul_patch.apply()
-    xn_flat = x_n.reshape(-1, x_n.shape[-1])
-    M, N = xn_flat.shape[0], proj.shape[-1]
-    proj_flat = proj.reshape(M, N)
-    preact, y = gemm_act(A=xn_flat, B=Wg, C=proj_flat, activation="sigmoid",
-                         store_preact=return_preact)
-    return (y.reshape(M, N), preact) if return_preact else y.reshape(M, N)
 
 
 def _gate_elem_bwd_ew_fake(dy, proj, gate, dropscale, seq_len, from_preact=False):
@@ -380,10 +295,8 @@ class GateElem(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x_n, proj, Wg, residual, dropscale, seq_len):
         # TRAINING: triton gate (cuBLAS gemm + one triton sigmoid·mul pass, gate saved FREE).
-        # The fully-fused quack gate (gate_elem_quack_fused) is an INFERENCE-only win: training
-        # needs `gate` for the bwd, and the fused path forces an extra preact write + a bwd
-        # σ(preact) recompute that together cost MORE than the fwd fusion saves (measured
-        # regression: d128 L1024 15.25→16.04). So keep triton for the GateElem autograd path.
+        # Training needs `gate` for the bwd, so it is saved here rather than recomputed from a
+        # preact (measured: the preact write + bwd σ recompute cost more than a fused fwd saves).
         y, gate = gate_elem_train(x_n, proj, Wg, residual, dropscale, seq_len)
         ctx.save_for_backward(x_n, proj, gate, Wg, dropscale)
         ctx.seq_len = seq_len

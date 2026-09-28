@@ -2,7 +2,7 @@
 
 One module, not three, because the three families share one shape: a graph of `N` nodes with `k`
 nearest neighbours each, at a channel width of 128. `_graph` builds it once and every driver below
-takes its slice, the same way `drivers/fused_ln_mask.py` borrows `layernorm_linear`'s.
+takes its slice, the same way `drivers/layernorm.py` borrows `layernorm_linear`'s.
 
 The LENGTH a unit drives is the NODE count, never the row count. An edge launch iterates `N * k`
 rows -- 98,304 at the shipped crop of 2,048 -- and that is what `both_key` buckets, but it is not a

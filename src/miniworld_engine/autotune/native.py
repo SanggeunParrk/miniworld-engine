@@ -27,17 +27,9 @@ _WINNERS: dict = {}
 BUILD_OPS = frozenset({
     "trimul_fwd_sm90_cuda",
     "transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda",
-    "trimul_output_bwd_rows_sm90_cute",
-    "trimul_inproj_masked_sm90_cute",
-    "transition_squeeze_residual_sm90_cute",
-    "layernorm_linear_fwd_foldstats_sm90_cute", "layernorm_linear_fwd_sm90_cute",
-    "transition_swiglu_fwd_sm90_cute", "transition_gate_bwd_sm90_cute",
-    "transition_bwd_dx_sm90_cute", "layernorm_linear_bwd_dx_sm90_cute",
-    "trimul_outproj_gemm_gate_sm90_cute", "transition_fwd_b2b_sm90_cuda",
+    "transition_fwd_b2b_sm90_cuda",
     "transition_expand_gate_sm90_cuda", "transition_bwd_gate_sm90_cuda",
     "layernorm_fwd_cuda", "layernorm_bwd_split_cuda",
-    "trimul_inproj_gemm_gate_mmajor_sm90_cute", "trimul_output_f567_train_sm90_cute",
-    "trimul_input_dual_bwd_sm90_cute",
 })
 
 
@@ -54,19 +46,8 @@ def native_shape_supported(op, width, dtype):
         return width <= 1024 and dtype in ("bfloat16", "float32")
     if dtype != "bfloat16":
         return False
-    if op == "trimul_output_bwd_rows_sm90_cute":
-        return width == 128
-    if op == "transition_squeeze_residual_sm90_cute":
-        return width == 512  # only this width is enabled in production dispatch
     if op.endswith("sm90_cuda"):
         return width in ((128, 256) if "b2b" in op else (128, 256, 512))
-    if op in ("transition_bwd_dx_sm90_cute", "layernorm_linear_bwd_dx_sm90_cute"):
-        return width <= 256  # full-N WGMMA epilogue reduction
-    if op == "trimul_outproj_gemm_gate_sm90_cute":
-        # Smallest m64 CTA: all four operands plus output staging must fit
-        # Hopper's 227 KiB opt-in limit. This is an allocation constraint.
-        padded = ((width + 63) // 64) * 64
-        return (2 * (64 + padded) * padded + 64 * padded) * 2 + 4096 <= 232448
     return True
 
 
@@ -87,7 +68,7 @@ def source_identity() -> str:
     root = Path(__file__).resolve().parents[1]
     digest = hashlib.sha256()
     from importlib.metadata import PackageNotFoundError, version
-    for package in ("quack-kernels", "nvidia-cutlass-dsl", "nvidia-mathdx"):
+    for package in ("nvidia-mathdx",):
         try:
             installed = version(package)
         except PackageNotFoundError:
@@ -95,41 +76,23 @@ def source_identity() -> str:
         digest.update(f"{package}={installed}".encode())
     paths = sorted((root / "kernels").rglob("*.py"))
     paths += sorted((root / "kernels").rglob("*.cu"))
-    paths += [Path(__file__), Path(__file__).with_name("cute_config.py"),
+    paths += [Path(__file__),
               Path(__file__).with_name("hopper_cuda_config.py"),
               Path(__file__).with_name("native_compile.py"),
               Path(__file__).with_name("native_history.py"),
-              Path(__file__).with_name("trimul_sm90_config.py"),
               Path(__file__).with_name("fused_config.py")]
     for path in paths:
         if "notes" not in path.parts:
             digest.update(str(path.relative_to(root)).encode())
-            if path.name == "cute_config.py":
-                tree = ast.parse(path.read_text())
-                # These helpers affect what a stored kwargs dictionary executes.
-                keep = {"_TUNABLE_FIELDS", "config_to_kwargs", "kwargs_to_config",
-                        "validate_hopper_config", "resolve_config", "_CandidateKwargs",
-                        "_cached_candidate_signatures"}
-                for node in tree.body:
-                    names = {getattr(node, "name", "")}
-                    if isinstance(node, ast.Assign):
-                        names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
-                    if names & keep:
-                        digest.update(ast.dump(node, include_attributes=False).encode())
-            else:
-                digest.update(path.read_bytes())
+            digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
 def policy_identity():
     """Search policy invalidates completed build units, never compatible timings."""
     digest = hashlib.sha256()
-    for name in ("cute_config.py", "hopper_cuda_config.py", "trimul_sm90_config.py", "fused_config.py"):
+    for name in ("hopper_cuda_config.py", "fused_config.py"):
         digest.update(Path(__file__).with_name(name).read_bytes())
-    from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS
-    for name in sorted(TRITON_OPS.values()):
-        digest.update(name.encode())
-        digest.update((Path(__file__).with_name("configs") / "grid" / (name + ".csv")).read_bytes())
     return digest.hexdigest()
 
 
@@ -142,34 +105,7 @@ def candidates_for(op, bucket):
     if op in ("transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda"):
         from miniworld_engine.autotune.fused_config import transition_candidates
         return transition_candidates(extra[-1], backward="bwd" in op)
-    from miniworld_engine.autotune.trimul_sm90_config import (
-        TRITON_OPS,
-        partition_for_bucket,
-    )
-    if op in TRITON_OPS:
-        return partition_for_bucket(op, bucket)[0]
     from miniworld_engine.autotune import hopper_cuda_config as cuda
-    tensors, _extra = ast.literal_eval(bucket)
-    if op.endswith("sm90_cute"):
-        from miniworld_engine.autotune import cute_config as cute
-        if op in ("trimul_inproj_masked_sm90_cute", "transition_swiglu_fwd_sm90_cute",
-                  "transition_gate_bwd_sm90_cute"):
-            grid = cute.gated_sm90_candidates()
-        elif op in ("trimul_output_bwd_rows_sm90_cute", "layernorm_linear_fwd_foldstats_sm90_cute",
-                    "transition_squeeze_residual_sm90_cute"):
-            grid = cute.plain_sm90_candidates()
-        elif op == "layernorm_linear_fwd_sm90_cute":
-            grid = cute.fused_lnl_candidates()
-        elif op in ("layernorm_linear_bwd_dx_sm90_cute", "transition_bwd_dx_sm90_cute"):
-            grid = cute.lnbwd_candidates(tensors[1][0][-1])
-        elif op == "trimul_outproj_gemm_gate_sm90_cute":
-            k, n = tensors[0][0][-1], tensors[2][0][0]
-            kp, npad = (k + 63) // 64 * 64, (n + 15) // 16 * 16
-            return [{"tile_m": c.tile_m} for c in cute.tm2_candidates()
-                    if (2 * (c.tile_m + npad) * kp + c.tile_m * npad) * 2 + 4096 <= 232448]
-        else:
-            raise ValueError(f"no native grid for {op}")
-        return [cute.config_to_kwargs(c) for c in grid]
     width = tensors[0][0][-1]
     if op.startswith("layernorm_"):
         kind = "fwd" if op == "layernorm_fwd_cuda" else "bwd"
@@ -243,17 +179,9 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None,
     # them. No selected-config memoization: publication/invalidation stays live.
     grid = list(_CacheConfigView(candidates))
 
-    from miniworld_engine.autotune import capture
-    # Portable CUDA builds also use this selector in environments without CuTe.
-    try:
-        from quack.cache import is_compile_only
-    except ImportError:
-        is_compile_only = None
-    if is_compile_only is not None and is_compile_only():
-        return dict(candidates[0])
     from triton.testing import do_bench
 
-    from miniworld_engine.autotune import cache, native_history
+    from miniworld_engine.autotune import cache, capture, native_history
     from miniworld_engine.autotune.native_compile import precompile
 
     measurement = {"scheme": 1, "kind": "native", "implementation": identity,

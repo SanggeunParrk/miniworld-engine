@@ -9,7 +9,7 @@ been got wrong four times in one day, each time in a way a test like this would 
     WHICH buckets get built;
   * demoting ``op_identity`` without a reset made the reader refuse a rebuild's own fresh entries
     (stamp kept) or serve a pre-edit winner as current (stamp rewritten);
-  * dropping the grid from the reset predicate let the cute reader hand back a config the live
+  * dropping the grid from the reset predicate let the native reader hand back a config the live
     grid no longer contains;
   * ``int(x or 1)`` read a stored ``build_rev`` of 0 as 1, so revision 0 and 1 compared equal.
 
@@ -161,7 +161,8 @@ def test_the_reader_refuses_when_every_tuned_config_was_cut(root, monkeypatch):
 
 
 def test_select_config_refuses_an_entry_the_candidate_space_lost(root):
-    """CuTe path -- the hole the review found: it returned entry[0] with no membership check.
+    """Native (select_config) path -- the hole the review found: it returned entry[0] with no
+    membership check.
 
     Constructed so the cut is certain rather than incidental: the stored winners and the live
     candidates are disjoint.

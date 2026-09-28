@@ -58,8 +58,10 @@ def _ext(ctas: int, dw_repl: int, save: bool):
     (bit-identical output), and it still allocates no M x 128 tensor it does not return.
     """
     ensure_cuda_home()
+    # The input-slot release now waits for all epilogue readers. Keep a distinct
+    # identity so an older prebuilt kernel cannot satisfy the corrected build.
     return load_extension(
-        name=f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}",
+        name=f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1",
         sources=[str(_dir / "transition_fused_sm90a.cu"),
                  str(_dir / "transition_fused_fwd_sm90a_kernel.cu"),
                  str(_dir / "transition_fused_bwd_sm90a_kernel.cu")],

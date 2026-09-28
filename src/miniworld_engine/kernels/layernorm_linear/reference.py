@@ -2,7 +2,7 @@
 
 Mirrors NVIDIA Transformer Engine's `te.LayerNormLinear`: a LayerNorm over the
 last dim immediately followed by a `Linear` (GEMM + bias). This is the math our
-Triton/CuTeDSL kernels must match; it is also the `torch.compile` baseline the
+Triton kernels must match; it is also the `torch.compile` baseline the
 kernels are measured against.
 
 Both a functional form (`layernorm_linear_pytorch`) and an `nn.Module` form
@@ -76,7 +76,7 @@ def layernorm_linear_folded(
 ) -> torch.Tensor:
     """Folded-form reference — a faithful CPU/GPU mirror of the fused kernel.
 
-    Validates the math before the CuTeDSL kernel exists: raw ``X @ W2`` with the
+    Validates the folded math: raw ``X @ W2`` with the
     LayerNorm mean/rstd applied in the epilogue, instead of normalizing X first.
     Stats use FP32 naive variance ``E[x^2] - E[x]^2`` (the kernel's formula) so
     this also exposes the same cancellation behaviour.

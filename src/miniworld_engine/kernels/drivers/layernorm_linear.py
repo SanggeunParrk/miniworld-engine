@@ -1,7 +1,6 @@
-"""Drivers for the ``layernorm_linear`` family -- and the shape block ``layernorm`` and
-``fused_ln_mask`` import.
+"""Drivers for the ``layernorm_linear`` family -- and the shape block ``layernorm`` imports.
 
-The three families were one module (``drivers_ln.py``) and still share
+The families were one module (``drivers_ln.py``) and still share
 ``_L``/``_IS_PAIR``/``_M``/``_D``/``_PAIR_N``/``_act``; the block lives here because
 layernorm_linear has the most kernels reading it.
 """
@@ -189,26 +188,3 @@ def layernorm_linear_bwd_fp32_triton() -> None:
     lnw, pw = vec(_D), torch.randn(_NH, _D, device=dev(), dtype=BF16)
     out, mean, rstd = _fwd_op(x, lnw, pw, 1e-5)
     _bwd_op(torch.randn_like(out), x2, lnw, pw, mean, rstd, shape_key=_SHAPE_KEY)
-
-
-def gemm_lnl_fused_sm90_kernel() -> None:
-    from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
-        layernorm_linear_cute_fused,
-    )
-
-    w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)
-    x, gamma, beta = rows2d(_M, _D), vec(_D), vec(_D)
-    gate = torch.randn_like(x)
-    for view in (x, x.t().contiguous().t()):
-        for gate_arg in (None, gate):
-            layernorm_linear_cute_fused(view, gamma, beta, w, None, 1e-5, gate=gate_arg)
-
-
-def layernorm_linear_m1():
-    from miniworld_engine.kernels.drivers import hopper
-    return hopper.layernorm_linear_m1()
-
-
-def dgrad_lnbwd():
-    from miniworld_engine.kernels.drivers import hopper
-    return hopper.dgrad_lnbwd()

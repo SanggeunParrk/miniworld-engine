@@ -1,10 +1,10 @@
-"""Preparation reuse must preserve live values and per-forward ownership."""
+"""Wide training preparation: one weight pack per step, owned saves, FP32 masks."""
 
 import pytest
 import torch
 
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_training as H
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_width as W
+from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as W
 
 pytestmark = [
     pytest.mark.gpu,
@@ -12,7 +12,7 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("width", [64, 256, 384, 512])
+@pytest.mark.parametrize("width", [256, 384, 512])
 @pytest.mark.parametrize("batched_mask", [False, True])
 def test_packing_once_and_fp32_mask_owned(width, batched_mask, monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
@@ -31,7 +31,8 @@ def test_packing_once_and_fp32_mask_owned(width, batched_mask, monkeypatch):
         ).requires_grad_()
         for i, c in enumerate((d, d, 2 * d, 2 * d))
     ]
-    # Already-FP32 callers must not make a custom-op output alias an input.
+    # Already-FP32 callers must not make a custom-op output alias an input; the wide
+    # kernels read a BF16 copy of the pair mask.
     mask = torch.ones(n, n, device="cuda", dtype=torch.float32)
     if batched_mask:
         mask = mask.unsqueeze(0)

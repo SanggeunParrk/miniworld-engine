@@ -1,8 +1,8 @@
 {
   "module_name": "triattn_dq_rs_softmax_overlap",
   "binary": "triattn_dq_rs_softmax_overlap.so",
-  "torch": "2.10.0+cu128",
-  "python_abi": "cpython-310",
+  "torch": "2.13.0+cu129",
+  "python_abi": "cpython-312",
   "lengths": [
     384,
     768,
@@ -15,7 +15,7 @@
     "dq.cu": "3b50549c448fc97a6ba36cf4f3f26dfd1750102cff12272b3e6ba2c55d270abf",
     "dq_backward.py": "8b9b9142076757249b0a26b896c9e22d6aa75ee7ad8c34fc7da4c3efb250a335",
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
-    "triattn_dq_rs_softmax_overlap.so": "2477359467dd79a1a92bfa162822082f57ea12eb11f7db2d5b4ee8da31612f2b"
+    "triattn_dq_rs_softmax_overlap.so": "0b5f2ff5729e81f0a609149bd3c984ea2d4cc5ca542f3999eb5b0d88833a3647"
   },
   "below80_combined_job": 16576,
   "core90_combined_job": 17057,

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import importlib.util
 import subprocess
 import threading
@@ -166,76 +165,6 @@ def test_sbatch_propagates_phase_pipeline_and_postprocess_failures(script):
         done = subprocess.run(["bash", "-c", setup + "\n" + body], capture_output=True, text=True)
         assert done.returncode != 0
         assert "false-success" not in done.stdout
-
-
-def blackwell_main(capsys, **overrides):
-    path = REPO / "src/miniworld_engine/kernels/tm1/cute/_blackwell_dense_gemm.py"
-    tree = ast.parse(path.read_text())
-    main = next(node for node in tree.body if isinstance(node, ast.If)
-                and ast.unparse(node.test) == "__name__ == '__main__'")
-    args = SimpleNamespace(mnkl=(128, 128, 128, 1), ab_dtype="BF16", c_dtype="FP16", acc_dtype="FP32",
-                           a_major="k", b_major="k", c_major="n", mma_tiler_mn=(128, 128),
-                           cluster_shape_mn=(1, 1), use_2cta_instrs=False, use_tma_store=True,
-                           tolerance=0.1, iterations=1, warmup_iterations=0, benchmark="default",
-                           use_cold_l2=False, skip_ref_check=False)
-    vars(args).update(overrides)
-    class Parser:
-        def add_argument(self, *args, **kwargs):
-            pass
-        def parse_args(self):
-            return args
-        def error(self, message):
-            raise ValueError(message)
-    calls = []
-    env = {"prepare_parser": Parser, "_parse_comma_separated_ints": lambda x: x,
-           "run": lambda *args: calls.append(args) or 2.5}
-    exec(compile(ast.Module(body=main.body, type_ignores=[]), str(path), "exec"), env)
-    return calls, capsys.readouterr().out
-
-
-def test_blackwell_standalone_reports_actual_dtypes_and_skipped_reference(capsys):
-    calls, output = blackwell_main(capsys, skip_ref_check=True)
-    assert len(calls) == 1
-    assert "A dtype: BF16, B dtype: BF16, C dtype: FP16, Acc dtype: FP32" in output
-    assert "REFERENCE CHECK SKIPPED" in output
-    assert "time_us=2.500000" in output
-    assert "PASS" not in output
-
-
-@pytest.mark.parametrize(("overrides", "match"), [
-    ({"use_cold_l2": True}, "same storage"),
-    ({"benchmark": "none", "skip_ref_check": True}, "no kernel execution"),
-    ({"iterations": 0}, "positive"),
-])
-def test_blackwell_standalone_rejects_unmeasurable_claims(capsys, overrides, match):
-    with pytest.raises(ValueError, match=match):
-        blackwell_main(capsys, **overrides)
-
-
-@pytest.mark.parametrize("relative", [
-    "trimul_cuequiv_free_b200/v1/bench_module.py",
-    "triangle_multiplication_tm1_cute/v12/bench_bidir.py",
-])
-def test_retired_benchmarks_stop_before_importing_gpu_dependencies(relative):
-    import runpy
-    with pytest.raises(SystemExit, match="RETIRED benchmark"):
-        runpy.run_path(str(REPO / "src/miniworld_engine/kernels/tm1/notes" / relative), run_name="__main__")
-
-
-@pytest.mark.parametrize("filename", ["probe_collective.py", "probe_mmajor.py"])
-def test_external_feasibility_probe_propagates_config_failures(filename):
-    path = REPO / "src/miniworld_engine/kernels/tm1/notes/triangle_multiplication_tm1_cute/v14" / filename
-    tree = ast.parse(path.read_text())
-    body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.For, ast.Raise))]
-    def failed_run(*args, **kwargs):
-        raise RuntimeError("injected config failure")
-    env = {"failures": 0, "refp": SimpleNamespace(run=failed_run),
-               "cutlass": SimpleNamespace(BFloat16="bf16", Float32="fp32"),
-               "M": 128, "N": 128, "K": 128, "L": 1, "mnkl": (128, 128, 128, 1),
-               "configs": [((128, 128), (1, 1), False)]}
-    with pytest.raises(SystemExit) as result:
-        exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), env)
-    assert result.value.code == 1
 
 
 @pytest.mark.parametrize("old_probability", ["", "0.0"])

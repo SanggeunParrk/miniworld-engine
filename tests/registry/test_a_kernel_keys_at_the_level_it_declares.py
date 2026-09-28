@@ -3,7 +3,8 @@
 `shape_key.py` states the contract in the docstrings: `token_key` is "for a token/pair-level
 kernel (`level=token` in registry.csv)", `atom_key` for `level=atom`, and `both_key` is "for a
 kernel used at both levels (`level=both`), from its ROW COUNT". Nothing enforced it, and
-`fused_ln_mask` drifted: declared `level=token`, it keyed through `both_key(rows_of(x.shape))`.
+`fused_ln_mask` (a family removed in v2.2.0) drifted: declared `level=token`, it keyed through
+`both_key(rows_of(x.shape))`.
 
 The two functions bucket different quantities. A pair activation of side L has L*L rows, so the
 cache recorded 16384/65536/147456/262144 where every other level=token kernel records

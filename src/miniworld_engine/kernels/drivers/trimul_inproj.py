@@ -21,9 +21,8 @@ ends in a partial tile at once -- the channel/contraction axis D, both spatial a
 (L appears twice), and the flattened row count ``M = L*L`` (4096 -> 3721). Unset, the extents are
 exactly the repo values above.
 
-Every kernel import is LAZY (inside the driver). Some of these modules import ``quack`` at module
-scope (tm1/cute/launch.py, trimul_inproj/cute/front_train_sm100.py); a top-level import here would
-make one missing dependency take down all 25 drivers instead of the one it belongs to.
+Every kernel import is LAZY (inside the driver). A top-level import here would make one missing
+native dependency take down all of the drivers instead of the one it belongs to.
 """
 from __future__ import annotations
 
@@ -108,7 +107,7 @@ def _bdll(c: int = D) -> torch.Tensor:
 
 
 def _sm100() -> bool:
-    """Is this the card whose merged-training cute paths pass `from_preact=True`?
+    """Is this an sm100 card, where the `from_preact=True` gate backward is driven too?
 
     Lazy import so the module stays importable with no CUDA (the CPU suite imports every driver).
     """
@@ -128,7 +127,7 @@ def trimul_outproj_layernorm_gemm_gate_triton() -> None:
     """back.py _back_kernel, via trimul_back_triton (LN_out + proj + gate), fp32 norm affine.
 
     This fused back is the INFERENCE-only path (``_uni_infer`` on A100/sm86,
-    ``_forward_cute_free`` on H100 sm90; training uses ``_UniBackHalfTriton``). There is no
+    the free path on H100 sm90; training uses ``_UniBackHalfTriton``). There is no
     residual flag left to drive both sides of -- ``residual`` is a required argument and the add
     is unconditional -- so one probe covers the kernel."""
     from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
@@ -174,30 +173,13 @@ def trimul_gemm_gate_mmajor_triton() -> None:
         bidir_front_triton(_x(), _w(h), _w(h), _w(h), _w(h), save_preact=False)  # inference
 
 
-def gated_projection_gate_res_triton() -> None:
-    """gate_elem.py _gate_mul_infer_kernel via gate_elem_infer -- the INFERENCE gate store.
-
-    One probe, because the kernel has no flags: no dropout (inference), no saved gate (nothing
-    backpropagates through it). Its whole coverage is the shape ladder, and a missing shape shows
-    up as a missing cache entry rather than as an unbuilt flag value.
-    """
-    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_infer
-
-    # x_n as _x(): gate_elem_infer documents (M,K) OR (B,L,L,K) and its ``_shape_key`` reads
-    # ``length_of`` off a 4-D x_n; a 2-D x_n with no seq_len has no L in it and falls to
-    # ``token_key(0)`` -> the smallest bucket (128). It flattens x_n itself, so the launch is
-    # unchanged. seq_len=L is passed too, which is what every production caller does.
-    # Launch sites: bidirectional.py `_bidir_infer`, cute/back_split{,_sm100}.py.
-    gate_elem_infer(_x(), _rows(), _w(), _rows(), seq_len=L)
-
-
 def gated_projection_gate_dropres_triton() -> None:
     """gate_elem.py _gate_mul_train_kernel via gate_elem_train -- the TRAINING gate store.
 
-    One probe, for the same reason: the flags are gone. This kernel always writes the gate (the
+    One probe, because the flags are gone. This kernel always writes the gate (the
     backward needs it) and always applies a drop scale (ones when the model's p_drop is 0), so
     there is no second side to drive. Launch sites: unidirectional.py / bidirectional.py training
-    Functions, cute v6_training_merged / bidir_training.
+    Functions.
     """
     from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_train
 
@@ -217,11 +199,9 @@ def gated_projection_bwd_gate_dropres_triton() -> None:
     # There is no USE_DROPOUT to drive both sides of: this is the TRAINING backward and every
     # training launch carries a drop scale (ones when the model's p_drop is 0).
     # FROM_PREACT is CARD-DEPENDENT and the branch has to be here, because the registry row is
-    # `arch=sm80` and so this driver runs on every card. The =1 side is passed only by the sm100
-    # merged-training paths (cute/bidir_training_sm100.py:82, cute/v6_training_merged_sm100.py:68),
-    # which `dispatch` selects only there; below sm90 it is a program nothing can launch. Saying
-    # "it must be driven on an sm100 build" and then not gating it is how a B200 cache ends up
-    # missing half of its training backward.
+    # `arch=sm80` and so this driver runs on every card. The =1 side was passed only by the
+    # sm100 merged-training paths (removed in v2.2.0); the kernel still carries the branch, so
+    # it is still driven on an sm100 build rather than left out of a B200 cache.
     ds = torch.rand(L, D, device=dev(), dtype=BF16)
     gate_elem_bwd_ew(_rows(), _rows(), _rows(), ds, L)                        # FROM_PREACT=0
     if _sm100():
@@ -254,35 +234,6 @@ def trimul_bwd_gate_packed_recompute_triton() -> None:
 
     front_bwd_dW_sig(_bdll(), _bdll(), _bdll(), _bdll(), _bdll(2 * D), _x(_DIN),
                      _w(D, _DIN), _w(D, _DIN), _w(D, _DIN), _w(D, _DIN))
-
-
-# ── trimul_inproj/cute: the two @triton.jit kernels living under cute/ ───────────────────────
-
-def fused_preact_gemm_kernel() -> None:
-    """FusedPreactGemmKernel.kernel, via fused_front_gemm (A (M,K); Bp/Bg (2H,K) -> lr, preact)."""
-    from miniworld_engine.kernels.trimul_inproj.cute.front_fused_gemm_sm100 import (
-        fused_front_gemm,
-    )
-
-    h = D
-    b = (torch.randn(2 * h, D, device=dev(), dtype=BF16) * (D**-0.5)).contiguous()
-    lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
-    preact = torch.empty(4 * h, M, device=dev(), dtype=BF16)
-    fused_front_gemm(_rows(), b, b.clone(), lr, preact)
-
-
-def masked_front_sm90():
-    """Actual per-side inference and stacked training projection contracts."""
-    from miniworld_engine.kernels.trimul_inproj.cute.masked_front import masked_front
-    a = _rows(D)
-    mask = torch.ones(M, device=dev(), dtype=torch.bool)
-    mask[::3] = False
-    # Inference calls left/right separately, each with gate+value (2D).
-    # Training stacks both sides (4D), or both sides and directions (8D).
-    for projected, save in ((2 * D, False), (4 * D, True), (8 * D, True)):
-        weight = torch.randn(D, projected, device=dev(), dtype=BF16)
-        masked_front(a, weight, mask, save)
-
 
 
 def _ln_residual_operands():
@@ -350,43 +301,6 @@ def trimul_output_f567_train():
     )
 
     launch(*_output_f567_operands())
-
-
-def trimul_output_bwd_rows_sm90():
-    from miniworld_engine.kernels.layernorm_linear.cute.dgrad_ln_rows import (
-        dgrad_ln_rows,
-    )
-    m,n=driver_length(128)**2,driver_width(128)
-    k=2*n
-    dy=torch.randn(m,n,device=dev(),dtype=BF16)
-    w=torch.randn(n,k,device=dev(),dtype=BF16)
-    xhat=torch.randn(m,k,device=dev(),dtype=BF16)
-    gamma=torch.randn(k,device=dev(),dtype=BF16)
-    stats=[torch.randn(m,device=dev(),dtype=torch.float32) for _ in range(3)]
-    dgrad_ln_rows(dy,w,xhat,gamma,*stats)
-
-
-def trimul_parity_f567_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import output_f567_sm90
-    output_f567_sm90(*_output_f567_operands())
-
-
-def trimul_parity_dual_bwd_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import (
-        input_dual_bwd_sm90,
-    )
-    input_dual_bwd_sm90(*_dual_operands())
-
-
-def trimul_parity_front_sm90():
-    from miniworld_engine.kernels.trimul_inproj.cute.parity_front import (
-        bidir_front_sm90,
-    )
-    args = (_x(), _w(2 * D), _w(2 * D), _w(2 * D), _w(2 * D))
-    mask = (torch.rand(M, device=dev()) > .2).to(BF16)
-    for save in (False, True):
-        for pair_mask in (None, mask):
-            bidir_front_sm90(*args, save_preact=save, pair_mask=pair_mask)
 
 
 def trimul_fwd_sm90_cuda():

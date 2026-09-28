@@ -66,7 +66,6 @@ from miniworld_engine.modules.triangle_multiplication.baseline_dtv1_bidir import
 from miniworld_engine.modules.triangle_multiplication.bidirectional import (
     BidirectionalTriangleMultiplication,
 )
-from miniworld_engine.modules.triangle_multiplication.module import _load_cute_fns
 
 DTV1_IMPL = "dtv1"
 MINIWORLD_IMPL = "miniworld"
@@ -77,6 +76,32 @@ MINIWORLD_IMPL = "miniworld"
 #: The bias is (B, L, L, H) and carries no augmentation axis, so ONE softmax serves all A samples
 #: where the full path computes A of them -- most of the training saving is there.
 BIAS_ONLY_V_IMPL = "bias_only_v"
+#: Anthropic's uplifting-biomolecular-modeling payloads (integrations/anthropic*.py). Every one of
+#: them is FORWARD-ONLY, so a training row for this label is an explicit `unsupported` row.
+#: Compared through `ImplementationType.ANTHROPIC.value` inside the bench functions (the CPU
+#: contract tests execute those functions in a namespace that does not carry this constant).
+ANTHROPIC_IMPL = "anthropic"
+#: `anthropic` means Anthropic's code AS SHIPPED (pristine upstream entry points and binaries).
+#: `anthropic_hybrid` is the engine's integration where it mixes in this repo's code: the TriMul
+#: payload named by the caller's TRIMUL_NATIVE_BUILD_DIR (e.g. the K1/K3 overlay build), and
+#: integrations.anthropic_msa (upstream OPM prologue + OUR csrc/opm_epilogue.cu; upstream PWA cell
+#: + OUR fused pair LayerNorm). Kept only as a separately labelled comparison.
+ANTHROPIC_HYBRID_IMPL = "anthropic_hybrid"
+#: The shipped (sealed) TriMul payload inside the upstream checkout named by MINIWORLD_ANTHROPIC_ROOT.
+_PRISTINE_TRIMUL_BUILD = "common/opt_core/opt_core/kernels/trimul/native/pkg/v5/build"
+#: Upstream tile-config overrides. Unset for pristine rows, so the shipped default config runs
+#: (integrations.anthropic_msa sets FPF_PWA_CFG=g_fo4p process-wide when it loads).
+_UPSTREAM_CFG_ENV = ("FPF_OPM_CFG", "FPF_PWA_CFG")
+#: Environment variables that name an Anthropic payload. A module built with implementation=
+#: "miniworld" USES a named payload where it can (integrations.anthropic_trimul / anthropic_msa
+#: `wanted()`), which would put Anthropic kernels in the "ours" row. Every non-anthropic row runs
+#: with these masked; see `implementation_environment`.
+_ANTHROPIC_PAYLOAD_ENV = ("TRIMUL_NATIVE_BUILD_DIR", "OPT_CORE_DIR")
+#: The engine's own packaged MSA paths serve implementation="anthropic" TOO (opm_train.wanted and
+#: pwa_train.wanted accept ANTHROPIC and are consulted BEFORE the Anthropic payload), so an
+#: unpinned "anthropic" OuterProductMean / MSAPairWeightedAveraging row would time this engine's
+#: kernels. Anthropic rows run with these switched off.
+_ENGINE_MSA_PATH_ENV = ("MINIWORLD_OPM_TRAIN", "MINIWORLD_PWA_TRAIN", "MINIWORLD_PWA_INFER")
 if not torch.cuda.is_available():
     msg = "CUDA is not available. Please run on a machine with a CUDA-capable GPU."
     raise RuntimeError(msg)
@@ -167,6 +192,11 @@ class BenchConfig(BaseModel):
     swa_component: Literal["block", "modulation", "rope", "swiglu", "residual", "sigmoid_gate"] = "block"
     swa_kernels: list[str] | None = None
     swa_active_gates: bool = False
+    #: MSA depth (rows S) of the outer_product / msa_pair_weighted_averaging targets. 1024 is
+    #: MiniWorld v1.2's msa_subsample_per_recycle and the depth of every OPM/PWA comparison in
+    #: MiniWorld runs/msa_bench_20260921; v1.1's bucket_msa_multiple used 2048. Not a yaml key
+    #: (every target's yaml carries one key set), so override it with `+n_msa=2048`.
+    n_msa: int = 1024
 
     @model_validator(mode="before")
     @classmethod
@@ -180,12 +210,15 @@ class BenchConfig(BaseModel):
         if isinstance(values, (dict, DictConfig)):
             values = dict(values)
             if values.get("dropout", "auto") == "auto":
-                active = (values.get("level") == "module"
-                          and values.get("mode") != "inference"
-                          and values.get("target") in {
-                              "triangle_multiplication", "triangle_multiplication_bidirectional",
-                              "triangle_attention"})
-                values["dropout"] = 0.25 if active else 0.0
+                training = (values.get("level") == "module"
+                            and values.get("mode") != "inference")
+                # AF3 pair dropout 0.25 on the triangle updates; MiniWorld's MSA module trains
+                # MSAPairWeightedAveraging with p_drop_msa=0.15 (mini_msa_module.py).
+                probability = {
+                    "triangle_multiplication": 0.25, "triangle_multiplication_bidirectional": 0.25,
+                    "triangle_attention": 0.25, "msa_pair_weighted_averaging": 0.15,
+                }.get(values.get("target"), 0.0)
+                values["dropout"] = probability if training else 0.0
         return values
 
     @model_validator(mode="after")
@@ -201,7 +234,7 @@ class BenchConfig(BaseModel):
             raise ValueError("dropout must be in [0, 1)")
         if self.level == "module" and self.dropout:
             if self.target not in {"triangle_multiplication", "triangle_multiplication_bidirectional",
-                                   "triangle_attention"}:
+                                   "triangle_attention", "msa_pair_weighted_averaging"}:
                 raise ValueError(f"{self.target} has no module dropout")
             if is_inference_mode(self.mode):
                 raise ValueError("inference requires dropout=0 (or auto)")
@@ -308,8 +341,6 @@ def triton_miniworld_spec(raw: str) -> ImplementationSpec:
 
 def parse_implementation_spec(raw: str) -> ImplementationSpec:
     key = raw.strip().lower()
-    if key == MINIWORLD_IMPL:
-        return ImplementationSpec(ImplementationType.CUTE, None, raw)
     if key in {impl.value for impl in ImplementationType}:
         return ImplementationSpec(ImplementationType(key), None, key)
     if key in {"triton_pytorch_ln", "triton-ln-pytorch", "triton_ln_pytorch"}:
@@ -541,11 +572,135 @@ def forward_stream(conf) -> "contextlib.AbstractContextManager":
     return torch.cuda.stream(side)
 
 
+def _payload_refusal(exc: BaseException) -> str | None:
+    """The reason, if ``exc`` (or anything it chains to) is an Anthropic payload refusing a call."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if (type(current).__name__ == "PayloadUnavailable"
+                and type(current).__module__.startswith("miniworld_engine.integrations.anthropic")):
+            return f"{type(current).__module__}.PayloadUnavailable: {current}"
+        if type(current).__name__ == "FPFFallback":      # an upstream opt_core op declining the call
+            return f"opt_core FPFFallback (upstream declines this call): {current}"
+        current = current.__cause__ or current.__context__
+    return None
+
+
+@contextlib.contextmanager
+def implementation_environment(implementation: str):
+    """Pin the environment switches that decide which vendor's kernels a row can reach.
+
+    * ``anthropic``: this engine's packaged MSA paths (opm_train / pwa_train) accept
+      implementation="anthropic" and run BEFORE the Anthropic payload is consulted, so they are
+      switched off -- otherwise the anthropic row would time this engine's own kernels.
+    * every other label: the Anthropic payload variables are removed for the row, so
+      implementation="miniworld" (auto) cannot route into Anthropic kernels and the "ours" row
+      stays this engine's hand-CUDA/Triton path.
+
+    Both modules read these variables at call time, so pinning them for the duration of one row
+    (construction, correctness probe, compile, capture, timing) is sufficient; the previous values
+    are restored afterwards. A payload refusal raised inside the row becomes an explicit
+    `unsupported` row carrying the payload's own reason, never a silent reroute.
+    """
+    key = implementation.strip().lower()
+    names = (*_ANTHROPIC_PAYLOAD_ENV, *_ENGINE_MSA_PATH_ENV, *_UPSTREAM_CFG_ENV)
+    saved = {name: os.environ.get(name) for name in names}
+    try:
+        if key in {ANTHROPIC_IMPL, ANTHROPIC_HYBRID_IMPL}:
+            for name in _ENGINE_MSA_PATH_ENV:
+                os.environ[name] = "0"
+        if key == ANTHROPIC_IMPL:
+            # Pristine: the shipped TriMul payload (never the caller's TRIMUL_NATIVE_BUILD_DIR, which
+            # may be an overlay build), no OPT_CORE_DIR (the hybrid MSA path), upstream default tiles.
+            pristine = pristine_trimul_build_dir()
+            if pristine:
+                os.environ["TRIMUL_NATIVE_BUILD_DIR"] = pristine
+            else:
+                os.environ.pop("TRIMUL_NATIVE_BUILD_DIR", None)
+            for name in ("OPT_CORE_DIR", *_UPSTREAM_CFG_ENV):
+                os.environ.pop(name, None)
+        elif key == ANTHROPIC_HYBRID_IMPL:
+            pass                                    # the caller's payload variables, as exported
+        else:
+            masked = [name for name in _ANTHROPIC_PAYLOAD_ENV if os.environ.pop(name, None)]
+            if masked and key == MINIWORLD_IMPL:
+                print(f"  [{implementation}] masked {', '.join(masked)} for this row: 'ours' must not "
+                      "route into the Anthropic payload", flush=True)
+        try:
+            yield
+        except UnsupportedBenchmark:
+            raise
+        except Exception as exc:
+            reason = _payload_refusal(exc)
+            if reason is not None:
+                raise UnsupportedBenchmark(reason) from exc
+            raise
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def pristine_trimul_build_dir() -> str | None:
+    """The shipped TriMul payload's build/ dir: ANTHROPIC_TRIMUL_BUILD_DIR if set (e.g. a local rebuild
+    of the UNMODIFIED upstream sources for a driver that cannot load the shipped CUDA-13 cubins), else
+    $MINIWORLD_ANTHROPIC_ROOT/common/opt_core/.../trimul/native/pkg/v5/build. None if neither is set."""
+    explicit = os.environ.get("ANTHROPIC_TRIMUL_BUILD_DIR")
+    if explicit:
+        return explicit
+    root = os.environ.get("MINIWORLD_ANTHROPIC_ROOT")
+    return str(Path(root) / _PRISTINE_TRIMUL_BUILD) if root else None
+
+
+def trimul_payload_provenance(pristine: bool) -> str:
+    """Describe the TriMul payload a row is about to use, refusing an overlay build for `anthropic`.
+
+    A payload assembled by experiments/trimul_k1k3_inference/build_payload.py carries OVERLAY.json
+    beside build/ (this repo's K1/K3 changes applied over upstream v5); the shipped one does not.
+    """
+    import json
+
+    build = os.environ.get("TRIMUL_NATIVE_BUILD_DIR")
+    if not build:
+        raise UnsupportedBenchmark(
+            "no TriMul payload: set MINIWORLD_ANTHROPIC_ROOT (pristine) or TRIMUL_NATIVE_BUILD_DIR (hybrid)")
+    build_dir = Path(build).resolve()
+    overlay = (build_dir.parent / "OVERLAY.json").is_file()
+    if pristine and overlay:
+        raise UnsupportedBenchmark(
+            f"{build_dir} is an overlay payload (OVERLAY.json beside build/), not Anthropic's shipped code; "
+            "use the `anthropic_hybrid` label for it")
+    try:
+        nvcc = json.loads((build_dir / "manifest.json").read_text()).get("nvcc", {}).get("release", "?")
+    except (OSError, ValueError):
+        nvcc = "?"
+    kind = "overlay" if overlay else "no overlay"
+    return f"payload={build_dir} ({kind}; nvcc {nvcc.split(',')[-1].strip()})"
+
+
+def _anthropic_upstream_or_unsupported():
+    """`integrations.anthropic`, configured against the upstream tree, or an `unsupported` row.
+
+    The module-adapter rows (TriangleAttention, Transition) need the release's `common/opt_core`
+    runtime: `MINIWORLD_ANTHROPIC_ROOT` names the checkout that contains `common/opt_core`.
+    """
+    from miniworld_engine.integrations import anthropic as upstream
+
+    try:
+        upstream.configure()
+    except RuntimeError as exc:
+        raise UnsupportedBenchmark(f"Anthropic upstream runtime unavailable: {exc}") from exc
+    return upstream
+
+
 def capture_cudagraph(step: Callable, params: list, is_train: bool,
                       warmup_iters: int = 8) -> "torch.cuda.CUDAGraph":
     """Capture `step` (the existing training_step = fwd + fabric.backward, or inference_step = fwd)
     in a per-shape CUDA graph and return it; replay reruns the captured kernels with zero
-    host/launch overhead — the deployment regime for graph-break cute/triton kernels. Reusing the
+    host/launch overhead — the deployment regime for graph-break CUDA/Triton kernels. Reusing the
     harness's own step keeps the backward path consistent (fabric.backward, required by the
     fabric/precision strategy). The measured_result wrapper clears gradients inside the captured
     step, so replay writes fresh gradients to static buffers. Module-scoped — `step` excludes the optimizer. Inputs must be the same static
@@ -611,183 +766,6 @@ def tensor_metrics(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float,
     return max_abs, rel_frob, cosine
 
 
-@torch.compiler.disable()
-@torch.no_grad()
-def _miniworld_inference(
-    pair: torch.Tensor,
-    w_left: torch.Tensor,
-    w_left_gate: torch.Tensor,
-    w_right: torch.Tensor,
-    w_right_gate: torch.Tensor,
-    w_gate: torch.Tensor,
-    w_out: torch.Tensor,
-    w_out_nn: torch.Tensor,
-    norm_in_weight: torch.Tensor,
-    norm_in_bias: torch.Tensor,
-    norm_out_weight: torch.Tensor,
-    norm_out_bias: torch.Tensor,
-    eps: float,
-    packed_left_right: torch.Tensor,
-    row_mask: torch.Tensor | None,
-) -> torch.Tensor:
-    from miniworld_engine.kernels.trimul_inproj.cute.inference import (
-        trimul_inproj_inference,
-    )
-
-    if pair.shape[-1] <= 128:
-        return trimul_inproj_inference(
-            pair,
-            w_left,
-            w_left_gate,
-            w_right,
-            w_right_gate,
-            w_gate,
-            w_out,
-            norm_in_weight,
-            norm_in_bias,
-            norm_out_weight,
-            norm_out_bias,
-            eps,
-            packed_left_right,
-            row_mask,
-        )
-
-    from miniworld_engine.kernels.layernorm.triton.main import (
-        triton_layernorm,
-        triton_layernorm_masked,
-    )
-    from miniworld_engine.kernels.trimul_inproj.cute.back_split import (
-        trimul_back_split,
-    )
-    from miniworld_engine.kernels.trimul_inproj.cute.launch import (
-        trimul_inproj_cute_forward,
-    )
-
-    batch, left_len, right_len, d_pair = pair.shape
-    flat_pair = pair.reshape(batch * left_len * right_len, d_pair)
-    if row_mask is None:
-        x_normed = triton_layernorm(flat_pair, norm_in_weight, norm_in_bias, eps)
-    else:
-        x_normed = triton_layernorm_masked(
-            flat_pair,
-            norm_in_weight,
-            norm_in_bias,
-            eps,
-            row_mask,
-        )
-    x_normed = x_normed.view(batch, left_len, right_len, d_pair)
-    left, right, _gate = trimul_inproj_cute_forward(
-        x_normed,
-        w_left,
-        w_left_gate,
-        w_right,
-        w_right_gate,
-        None,
-        bdll_direct=True,
-        compute_gate=False,
-        b_lr=packed_left_right,
-    )
-    triangle = torch.einsum("bdik,bdjk->bdij", left, right)
-    return trimul_back_split(
-        triangle,
-        x_normed,
-        w_out_nn,
-        w_gate,
-        norm_out_weight,
-        norm_out_bias,
-        pair,          # the residual: every trimul back half returns `pair + trimul(pair)`
-        eps,
-    )
-
-
-class FusedTriangleMultiplicationInference(nn.Module):
-    def __init__(self, base: TriangleMultiplication) -> None:
-        super().__init__()
-        from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch
-        from miniworld_engine.kernels.trimul_inproj.cute.launch import (
-            prepack_lr_operand,
-        )
-
-        _bdll_patch.apply()
-        _load_cute_fns()
-
-        base = base.to(device=DEVICE, dtype=torch.bfloat16)
-        self.left_weight = base.to_left.weight.T
-        self.left_gate_weight = base.to_left_gate.weight.T
-        self.right_weight = base.to_right.weight.T
-        self.right_gate_weight = base.to_right_gate.weight.T
-        self.gate_weight = base.to_gate.weight.T.contiguous()
-        self.out_weight = base.to_out.weight.T.contiguous()
-        self.out_weight_nn = base.to_out.weight
-        self.norm_in_weight = base.ln_pair.weight
-        self.norm_in_bias = base.ln_pair.bias
-        self.norm_out_weight = base.ln_out.weight
-        self.norm_out_bias = base.ln_out.bias
-        self.eps = base.ln_pair.eps
-        self.packed_left_right = prepack_lr_operand(
-            self.left_weight,
-            self.left_gate_weight,
-            self.right_weight,
-            self.right_gate_weight,
-        )
-
-    def forward(
-        self,
-        pair: torch.Tensor,
-        mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        pair = pair.to(torch.bfloat16)
-        row_mask = None
-        if mask is not None:
-            row_mask = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).reshape(-1).to(pair.dtype)
-        return _miniworld_inference(
-            pair,
-            self.left_weight,
-            self.left_gate_weight,
-            self.right_weight,
-            self.right_gate_weight,
-            self.gate_weight,
-            self.out_weight,
-            self.out_weight_nn,
-            self.norm_in_weight,
-            self.norm_in_bias,
-            self.norm_out_weight,
-            self.norm_out_bias,
-            self.eps,
-            self.packed_left_right,
-            row_mask,
-        )
-
-
-class FusedTriangleMultiplicationTraining(nn.Module):
-    def __init__(self, base: TriangleMultiplication) -> None:
-        super().__init__()
-        from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged import (
-            V6TriMulMerged as V6TriMul,
-        )
-
-        self.impl = V6TriMul(base.to(torch.bfloat16))
-
-    def forward(
-        self,
-        pair: torch.Tensor,
-        mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        return self.impl(pair.to(torch.bfloat16), mask)
-
-
-def triangle_multiplication_path(implementation: str, mode: str, d_pair: int) -> str:
-    if implementation == MINIWORLD_IMPL and is_inference_mode(mode):
-        if d_pair <= 128:
-            return "miniworld.trimul_inproj_inference"
-        return "miniworld.forward_only_front+split_back"
-    if implementation == MINIWORLD_IMPL:
-        return "miniworld.v6_training_merged"
-    if implementation == DTV1_IMPL:
-        return "dtv1.fused_triangle_multiplicative_update"
-    return implementation
-
-
 @contextlib.contextmanager
 def _paired_trimul_dropout(model, reference, pair, probability):
     """Give accuracy calls identical representable scales; never used by the timer.
@@ -830,6 +808,21 @@ def bench_module_triangle_multiplication(
     base_cls = BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
     if bidirectional and conf.trimul_direction != "outgoing":
         raise UnsupportedBenchmark("bidirectional already includes both directions")
+    hybrid = implementation.strip().lower() == ImplementationType.ANTHROPIC.value + "_hybrid"
+    anthropic = hybrid or implementation.strip().lower() == ImplementationType.ANTHROPIC.value
+    if anthropic and not is_inference_mode(conf.mode):
+        # The module refuses grad-enabled calls itself (anthropic_trimul.refusal); say so up front
+        # instead of paying for the reference model first. integrations/anthropic_training.py is a
+        # PyTorch-recompute correctness baseline that no module dispatches to -- not a backend.
+        raise UnsupportedBenchmark(
+            "anthropic TriMul is inference-only: integrations.anthropic_trimul serves forward-only "
+            "payload calls (no autograd, no live dropout scale)")
+    payload = ""
+    if anthropic:
+        # Both labels run the module's implementation="anthropic" path; they differ only in WHICH
+        # payload the harness put in TRIMUL_NATIVE_BUILD_DIR for the row (implementation_environment).
+        payload = trimul_payload_provenance(pristine=not hybrid)
+        implementation = ImplementationType.ANTHROPIC.value
 
     def make_layer(index, **kwargs):
         if not bidirectional:
@@ -863,14 +856,10 @@ def bench_module_triangle_multiplication(
                     layer.load_state_dict(state)
                 return
             if raw_implementation == MINIWORLD_IMPL:
-                # Use the real production module (implementation=MINIWORLD): its per-GPU
-                # dispatch runs the sm100-native cute path on B200 (tcgen05 front + split
-                # sm100 out-projection), correct at every d. The prior hand-wired wrappers
-                # (Fused*Inference/Training, BidirV6TriMul) called the H100 quack /
-                # back_split kernels, which are numerically WRONG on sm_100 (out-cosine
-                # ~0.05-0.7 vs pytorch) and assert "SM90 only" at d>=256.
-                # cute path is bf16-only (asserts on fp32 weights); pin bf16 like the
-                # old wrappers did. load_state_dict casts the fp32 reference state.
+                # Use the real production module (implementation=MINIWORLD): it tries the
+                # hand-written CUDA H100 kernels first and otherwise resolves to the Triton
+                # path on every arch. Pin bf16 (the deployment dtype); load_state_dict
+                # casts the fp32 reference state.
                 self.layers = nn.ModuleList(
                     [
                         make_layer(
@@ -1057,7 +1046,14 @@ def bench_module_triangle_multiplication(
         params=list(model.parameters()), is_train=not is_inference_mode(conf.mode),
         input_dtype=str(pair.dtype).replace("torch.", ""),
         parameter_dtype=parameter_dtype_of(model),
-        execution_path=("dtv1.fused_bidirectional_triangle_multiplicative_update"
+        execution_path=(("integrations.anthropic_trimul.update_bidirectional[upstream trimul_native.ops "
+                         "planes(K1) + 2 torch.bmm + epilogue(K3), composed by the engine: upstream has "
+                         "no bidirectional entry; unit z{0}_h{1}; {2}]" if bidirectional else
+                         "integrations.anthropic_trimul.update_unidirectional[upstream "
+                         "trimul_native.face.serve; unit z{0}_h{1}; {2}]"
+                         ).format(conf.d_pair, (2 if bidirectional else 1) * conf.d_pair, payload)
+                        if anthropic else
+                        "dtv1.fused_bidirectional_triangle_multiplicative_update"
                         if bidirectional and implementation == DTV1_IMPL else
                         "dtv1.fused_triangle_multiplicative_update"
                         if implementation == DTV1_IMPL else
@@ -1073,20 +1069,49 @@ def bench_module_triangle_attention(
     implementation: str,
     fabric: FabricLike,
 ):
-    spec = triton_miniworld_spec(implementation)
+    anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
+    #: The row of the upstream block adapter (docs/anthropic-h100-audit.md: upstream prologue v3 +
+    #: epilogue v2 around the triattn_native core; the engine adds the residual out of place).
+    anthropic_row = "block:triattn_native"
+    layer_cls = TriangleAttention
+    if anthropic:
+        # dispatch.resolve() rejects implementation="anthropic" for triangle_attention, so the
+        # module-level route is closed; the integration's own module adapter is called instead,
+        # on a TriangleAttention holding the SAME parameters (built as the pytorch module, whose
+        # weights it packs). Forward-only upstream code: training is an explicit unsupported row.
+        if not is_inference_mode(conf.mode):
+            raise UnsupportedBenchmark(
+                "anthropic TriangleAttention is inference-only: integrations.anthropic."
+                "module_triangle_attention requires torch.no_grad() (no backward)")
+        upstream = _anthropic_upstream_or_unsupported()
+
+        class AnthropicTriangleAttention(TriangleAttention):
+            def forward(self, pair, mask=None):
+                return upstream.module_triangle_attention(self, pair, mask)
+
+        layer_cls = AnthropicTriangleAttention
+        spec = ImplementationSpec(ImplementationType.PYTORCH, None, implementation)
+    else:
+        spec = triton_miniworld_spec(implementation)
+        if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
+                             ImplementationType.CUEQUIVARIANCE}:
+            raise UnsupportedBenchmark(
+                f"triangle_attention implements pytorch, triton, miniworld, cuequivariance and "
+                f"anthropic, not {implementation!r}")
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class MultiTriangleAttention(nn.Module):
-        def __init__(self) -> None:
+        def __init__(self, cls=layer_cls, impl=spec.impl) -> None:
             super().__init__()
             self.layers = nn.ModuleList(
                 [
-                    TriangleAttention(
+                    cls(
                         conf.d_pair,
-                        implementation=spec.impl,
+                        implementation=impl,
                         use_self_attention=True,
                         p_drop=conf.dropout,
+                        anthropic_row=anthropic_row,
                     )
                     for _ in range(conf.n_layers)
                 ],
@@ -1137,6 +1162,24 @@ def bench_module_triangle_attention(
         ),
         ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
     }.get(spec.impl, spec.impl.value)
+    accuracy: AccuracyFields = {}
+    if anthropic:
+        execution_path = (f"integrations.anthropic.module_triangle_attention[{anthropic_row}] -> upstream "
+                          "opt_core.attn.pair_fused.pack_triattn_weights + tri_attn_block(impl=fpf, "
+                          f"core=tier:{anthropic_row.removeprefix('block:')}, ln=fused (upstream in-kernel LN), "
+                          "residual=False)+engine_residual")
+        # The adapter bypasses the module's own dispatch, so show that it computes the module's
+        # function: the same parameters through the pytorch module, in fp32, no grad.
+        reference = MultiTriangleAttention(TriangleAttention, ImplementationType.PYTORCH).to(DEVICE)
+        reference.load_state_dict({k: v.float() for k, v in model.state_dict().items()})
+        reference.eval()
+        with torch.no_grad():
+            accuracy = _acc_fwd(model(pair, mask), reference(pair.float(), mask))
+        del reference
+        # What the upstream planner actually selected on that call (row, surround plan, residual).
+        selection = getattr(model.layers[0], "anthropic_selection", None)
+        if selection is not None:
+            execution_path += " selected=" + " ".join(str(selection).split())[:400]
     return measured_result(
         conf=conf,
         func=func,
@@ -1147,7 +1190,7 @@ def bench_module_triangle_attention(
         parameter_dtype=parameter_dtype_of(model),
         execution_path=execution_path,
         reference="module.reference.torch",
-    )
+    )._replace(**accuracy)
 
 
 def bench_module_transition(
@@ -1156,15 +1199,48 @@ def bench_module_transition(
     implementation: str,
     fabric: FabricLike,
 ):
-    spec = module_miniworld_spec(implementation)
+    anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
+    #: Upstream transition row per pair width, as qualified in docs/anthropic-h100-audit.md
+    #: (v2 at C=128, esm_t16 at C=256, pf at C=384; C=512 has no supporting upstream row).
+    anthropic_rows = {128: "v2", 256: "esm_t16", 384: "pf"}
+    layer_cls = Transition
+    if anthropic:
+        # dispatch.resolve() rejects implementation="anthropic" for transition; the integration's
+        # module adapter runs on a Transition holding the same parameters instead.
+        if not is_inference_mode(conf.mode):
+            raise UnsupportedBenchmark(
+                "anthropic Transition is inference-only: integrations.anthropic.module_transition "
+                "requires torch.no_grad() (no backward)")
+        if conf.d_pair not in anthropic_rows:
+            raise UnsupportedBenchmark(
+                f"no qualified Anthropic transition row for d={conf.d_pair} "
+                f"(qualified: {sorted(anthropic_rows)})")
+        upstream = _anthropic_upstream_or_unsupported()
+
+        class AnthropicTransition(Transition):
+            anthropic_row = anthropic_rows[conf.d_pair]
+
+            def forward(self, x):
+                return upstream.module_transition(self, x)
+
+        layer_cls = AnthropicTransition
+        spec = ImplementationSpec(ImplementationType.PYTORCH, None, implementation)
+    else:
+        spec = module_miniworld_spec(implementation)
+        if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
+                             ImplementationType.MINIWORLD}:
+            # cuequivariance has no Transition kernel (resolve() maps it to the reference), and
+            # cuda is the same residual-fused path miniworld/triton already time.
+            raise UnsupportedBenchmark(
+                f"transition implements pytorch, triton, miniworld and anthropic, not {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class MultiTransition(nn.Module):
-        def __init__(self, layer_spec: ImplementationSpec) -> None:
+        def __init__(self, layer_spec: ImplementationSpec, cls=Transition) -> None:
             super().__init__()
             self.layers = nn.ModuleList(
                 [
-                    Transition(conf.d_pair, implementation=layer_spec.impl)
+                    cls(conf.d_pair, implementation=layer_spec.impl)
                     for _ in range(conf.n_layers)
                 ],
             )
@@ -1175,12 +1251,16 @@ def bench_module_transition(
             return x
 
     torch.manual_seed(0)
-    layer_states = [
-        Transition(conf.d_pair, implementation=ImplementationType.PYTORCH).state_dict()
-        for _ in range(conf.n_layers)
-    ]
+    layer_states = []
+    for _ in range(conf.n_layers):
+        base = Transition(conf.d_pair, implementation=ImplementationType.PYTORCH)
+        # `squeeze` is zero-initialised, which makes every output equal to its residual input and
+        # every accuracy column vacuous (an implementation computing any update at all would
+        # still match). Non-zero weights make the comparison against the reference mean something.
+        nn.init.normal_(base.squeeze.weight, std=(conf.d_pair * base.n) ** -0.5)
+        layer_states.append(base.state_dict())
 
-    model = MultiTransition(spec).to(DEVICE)
+    model = MultiTransition(spec, layer_cls).to(DEVICE)
     for layer, state in zip(model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
     model.to(dtype=dtype)
@@ -1252,10 +1332,18 @@ def bench_module_transition(
         item.grad = None
 
     execution_path = (
+        (f"integrations.anthropic.module_transition[row={anthropic_rows[conf.d_pair]}] -> upstream "
+         f"opt_core.kernels.transition.pack + transition(word={anthropic_rows[conf.d_pair]}, residual=True)")
+        if anthropic else
         "module.reference.torch"
         if spec.impl in {ImplementationType.PYTORCH, ImplementationType.CUEQUIVARIANCE}
         else "modules.transition.module.Transition"
     )
+    if anthropic:
+        # the upstream Selection of the correctness call: row / variant / cfg / tier actually served
+        selection = getattr(model.layers[0], "anthropic_selection", None)
+        if selection is not None:
+            execution_path += " selected=" + " ".join(str(selection).split())[:400]
     return measured_result(
         conf=conf,
         func=func,
@@ -1279,9 +1367,10 @@ def bench_module_conditioned_transition(
     if spec.impl not in {
         ImplementationType.PYTORCH,
         ImplementationType.TRITON,
-        ImplementationType.CUEQUIVARIANCE,
         ImplementationType.MINIWORLD,
     }:
+        # No CUEQUIVARIANCE: dispatch.resolve() maps it to the PyTorch reference for this op, so
+        # a `cuequivariance` row would time the reference under the vendor's name.
         raise UnsupportedBenchmark(f"conditioned_transition does not implement {implementation!r}")
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
@@ -1516,6 +1605,11 @@ def bench_module_augmented_attention_token(
     fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+        # cuequivariance: resolve() maps it to the PyTorch reference for augmented attention (its
+        # AdaLN + conditioning-gate contract is not cuet.attention_pair_bias); cuda/anthropic have
+        # no module path here. Refuse rather than time the reference under another name.
+        raise UnsupportedBenchmark(f"augmented attention does not implement {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class BiasOnlyValue(AugmentedAttentionPairBias):
@@ -1700,6 +1794,11 @@ def bench_module_augmented_attention_atom(
     fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+        # cuequivariance: resolve() maps it to the PyTorch reference for augmented attention (its
+        # AdaLN + conditioning-gate contract is not cuet.attention_pair_bias); cuda/anthropic have
+        # no module path here. Refuse rather than time the reference under another name.
+        raise UnsupportedBenchmark(f"augmented attention does not implement {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class MultiAtomAttention(nn.Module):
@@ -1769,6 +1868,521 @@ def bench_module_triangle_multiplication_bidirectional(conf, seq_len, implementa
     return bench_module_triangle_multiplication(conf, seq_len, implementation, fabric, bidirectional=True)
 
 
+class _StockLayerNorm:
+    """`torch.nn.LayerNorm.forward` on a module's own LayerNorm parameters, for the pristine upstream
+    MSA ops: they call the stock module's norm (or read its weight / bias / eps), and the engine's
+    LayerNorm primitive would route MINIWORLD/TRITON requests into this repo's own kernels. Under
+    the bf16 autocast the upstream ops run in, this is exactly the stock fp32 LayerNorm."""
+
+    def __init__(self, ln: nn.LayerNorm) -> None:
+        self.ln = ln
+
+    weight = property(lambda self: self.ln.weight)
+    bias = property(lambda self: self.ln.bias)
+    eps = property(lambda self: self.ln.eps)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        import torch.nn.functional as F
+
+        return F.layer_norm(x, tuple(self.ln.normalized_shape), self.ln.weight, self.ln.bias, self.ln.eps)
+
+
+def _nondefault_parameters(model: nn.Module) -> None:
+    """Replace the modules' zero / identity initialisations before an accuracy comparison.
+
+    `to_out` is zero-initialised in these modules (the update would be exactly zero and every
+    output equal to its residual), and LayerNorm starts at gamma=1 / beta=0, which hides a
+    dropped or mis-routed affine. Timing does not depend on the values.
+    """
+    for module in model.modules():
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, std=module.weight.shape[1] ** -0.5)
+            if module.bias is not None:
+                nn.init.normal_(module.bias, std=0.02)
+        elif isinstance(module, nn.LayerNorm) and module.weight is not None:
+            nn.init.normal_(module.weight, mean=1.0, std=0.1)
+            if module.bias is not None:
+                nn.init.normal_(module.bias, std=0.1)
+
+
+def bench_module_outer_product(conf, seq_len, implementation, fabric):
+    """OuterProductMean at MiniWorld's MSA-module width, `modules/outer_product`.
+
+    `pair = opm(msa, mask, residual=pair)` exactly as MiniWorld's MSA block calls it: d_msa=64,
+    d_hidden=32, d_pair=`conf.d_pair` (128), S=`conf.n_msa` (1024) rows, L=`seq_len` tokens, B=1,
+    and the running pair as the cross-tensor residual (fused by the engine's training path).
+
+    * pytorch   -- the module's own statements (einsum outer product, fp32 mask count).
+    * miniworld -- implementation="miniworld": integrations.opm_train (fused Triton prologue,
+      cuBLAS grouped outer product, csrc/opm_epilogue.cu; forward AND backward) where its contract
+      holds, else the module's statements. Which one served is recorded in `execution_path`.
+    * anthropic -- integrations.anthropic_msa.outer_product_mean: the release's msa_opm fused
+      prologue + cuBLAS + this repo's OPM epilogue. Forward-only, so training is `unsupported`.
+      Needs OPT_CORE_DIR; the engine's own opm_train is pinned off for this row (it would
+      otherwise serve implementation="anthropic" first).
+    cuequivariance has no OuterProductMean kernel, and triton/cuda are not separate module
+    options here (the module only swaps its LayerNorm for them), so both are `unsupported`.
+    """
+    from miniworld_engine.integrations import anthropic_msa, opm_train
+    from miniworld_engine.modules import OuterProductMean
+
+    key = implementation.strip().lower()
+    anthropic_key = ImplementationType.ANTHROPIC.value
+    if key not in {"pytorch", MINIWORLD_IMPL, anthropic_key, anthropic_key + "_hybrid"}:
+        raise UnsupportedBenchmark(
+            f"outer_product implements pytorch, miniworld, anthropic and anthropic_hybrid, not "
+            f"{implementation!r} (cuequivariance ships no OuterProductMean kernel)")
+    pristine = key == anthropic_key
+    hybrid = key == anthropic_key + "_hybrid"
+    anthropic = pristine or hybrid
+    is_train = not is_inference_mode(conf.mode)
+    if anthropic and is_train:
+        raise UnsupportedBenchmark(
+            "anthropic OuterProductMean is inference-only: opt_core.ops.msa_opm (and "
+            "integrations.anthropic_msa built on it) has no backward")
+    # pristine: a pytorch-built module whose forward is the upstream op; hybrid: the module's own
+    # implementation="anthropic" path (integrations.anthropic_msa).
+    impl = (ImplementationType.PYTORCH if pristine else
+            ImplementationType.ANTHROPIC if hybrid else ImplementationType(key))
+    d_msa, d_hidden = 64, 32
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    layer_cls = OuterProductMean
+    if pristine:
+        msa_opm = _anthropic_upstream_or_unsupported().operation("msa_opm")
+        from types import SimpleNamespace
+
+        class UpstreamOuterProductMean(OuterProductMean):
+            """opt_core.ops.msa_opm.forward_mask_norm as shipped, on this module's parameters.
+
+            The release's 'mask_norm' form is this module's function (LN -> proj_a/proj_b -> * mask ->
+            outer product over S -> / clamp(count, 1) -> proj_o + bias, AF3 order); its attribute
+            schema is norm / proj_a / proj_b / proj_o, handed over as a view of the same tensors. Run
+            under bf16 autocast, the regime the op is written against; residual added by the engine.
+            """
+
+            def forward(self, msa, mask=None, token_asym_id=None, residual=None):
+                view = self.__dict__.get("_upstream_view")
+                if view is None:
+                    view = SimpleNamespace(norm=_StockLayerNorm(self.ln_msa), proj_a=self.to_left,
+                                           proj_b=self.to_right, proj_o=self.to_out)
+                    self._upstream_view = view
+                if mask is None:
+                    mask = torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    # a float 0/1 mask: the fused prologue reads a non-floating mask as int64
+                    update = msa_opm.forward_mask_norm(view, msa, mask.to(torch.bfloat16), chunk_size=None)
+                update = update.to(msa.dtype)
+                return update if residual is None else residual + update
+
+        layer_cls = UpstreamOuterProductMean
+
+    class MultiOuterProductMean(nn.Module):
+        def __init__(self, layer_impl, cls=OuterProductMean) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([
+                cls(d_msa, conf.d_pair, d_hidden, implementation=layer_impl)
+                for _ in range(conf.n_layers)])
+
+        def forward(self, msa, mask, pair):
+            for layer in self.layers:
+                pair = layer(msa, mask, residual=pair)
+            return pair
+
+    torch.manual_seed(0)
+    reference = MultiOuterProductMean(ImplementationType.PYTORCH)
+    _nondefault_parameters(reference)
+    state = reference.state_dict()
+    reference = reference.to(DEVICE).train(is_train)
+    model = MultiOuterProductMean(impl, layer_cls)
+    model.load_state_dict(state)
+    model = model.to(device=DEVICE, dtype=dtype).train(is_train)
+
+    torch.manual_seed(1)
+    n_msa = conf.n_msa
+    msa = torch.randn(1, n_msa, seq_len, d_msa, device=DEVICE, dtype=dtype)
+    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    # MiniWorld's OPM mask: MSA row mask x token mask.
+    row_mask = torch.rand(1, n_msa, device=DEVICE) > conf.mask_prob
+    token_mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
+    mask = row_mask[:, :, None] & token_mask[:, None, :]
+    dy = torch.randn_like(pair)
+
+    if pristine:
+        cfg, source = msa_opm.cfg_for("mask_norm", conf.d_pair, msa.device)
+        execution_path = (f"opt_core.ops.msa_opm.forward_mask_norm[shipped, cfg={msa_opm.cfg_name(cfg) or cfg} "
+                          f"({source}), fused_prologue={bool(cfg.get('FP'))}, bf16 autocast, stock "
+                          "F.layer_norm params]+engine_residual")
+    elif hybrid:
+        why = anthropic_msa.opm_refusal(msa, d_hidden, conf.d_pair, grad=False, interchain=False)
+        if why is not None:
+            raise UnsupportedBenchmark(f"the anthropic OPM path cannot serve this call: {why}")
+        execution_path = ("HYBRID integrations.anthropic_msa.outer_product_mean[upstream msa_opm "
+                          "fused_prologue + cuBLAS + OUR csrc/opm_epilogue.cu]")
+    elif impl == ImplementationType.MINIWORLD:
+        why = (None if opm_train.wanted(impl) else "disabled (MINIWORLD_OPM_TRAIN=0 or engine_backend=triton)")
+        why = why or opm_train.refusal(msa, d_msa, d_hidden, conf.d_pair, interchain=False,
+                                       normalize_before_proj=True)
+        execution_path = ("integrations.opm_train.outer_product_mean" if why is None else
+                          f"modules.outer_product.OuterProductMean[statements; opm_train refused: {why}]")
+    else:
+        execution_path = "module.reference.torch"
+
+    def correctness() -> AccuracyFields:
+        m_ref = msa.detach().float().requires_grad_(is_train)
+        p_ref = pair.detach().float().requires_grad_(is_train)
+        m_impl = msa.detach().clone().requires_grad_(is_train)
+        p_impl = pair.detach().clone().requires_grad_(is_train)
+        with contextlib.nullcontext() if is_train else torch.no_grad():
+            actual = model(m_impl, mask, p_impl)
+            expected = reference(m_ref, mask, p_ref)
+        out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+        fields: AccuracyFields = {"output_max_abs": out_max, "output_rel_frob": out_rel,
+                                  "output_cosine": out_cos}
+        if is_train:
+            actual.backward(dy)
+            expected.backward(dy.float())
+            assert m_impl.grad is not None and m_ref.grad is not None
+            grads = tensor_metrics(torch.cat([m_impl.grad.flatten(), p_impl.grad.flatten()]),
+                                   torch.cat([m_ref.grad.flatten(), p_ref.grad.flatten()]))
+            fields.update({"grad_max_abs": grads[0], "grad_rel_frob": grads[1], "grad_cosine": grads[2]})
+        return fields
+
+    accuracy = correctness()
+    for item in [*model.parameters(), *reference.parameters()]:
+        item.grad = None
+    del reference
+    if conf.compile:
+        compile_module_for_benchmark(model)
+    model = fabric.setup_module(model)
+    msa.requires_grad_(is_train)
+    pair.requires_grad_(is_train)
+
+    def inference_step() -> torch.Tensor:
+        return model(msa, mask, pair)
+
+    def training_step() -> torch.Tensor:
+        y = model(msa, mask, pair)
+        fabric.backward(y, dy)
+        return y
+
+    return measured_result(
+        conf=conf, func=training_step if is_train else inference_step,
+        grad_to_none=[msa, pair, *list(model.parameters())], params=list(model.parameters()),
+        is_train=is_train, input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model), execution_path=execution_path,
+        reference="module.reference.torch[fp32]",
+    )._replace(**accuracy)
+
+
+def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabric):
+    """MSAPairWeightedAveraging at MiniWorld's MSA-module shape, `modules/msa_pair_weighted_averaging`.
+
+    d_msa=64, d_pair=`conf.d_pair` (128), 8 heads x 32 (MiniWorld passes d_hidden_msa=32), S=
+    `conf.n_msa` (1024) rows, L=`seq_len`, B=1, token key mask; residual inside the module.
+    Training uses MiniWorld's p_drop_msa=0.15 row dropout (dropout=auto).
+
+    * pytorch   -- the module's own statements.
+    * miniworld -- implementation="miniworld": integrations.pwa_train (CUDA pair_fwd3 / ln_vg /
+      pwa_fwd2 forward, fused backward; dropout and residual in-kernel) where its contract holds,
+      else the statements; recorded in `execution_path`.
+    * anthropic -- integrations.anthropic_msa.pair_weighted_averaging: the release's msa_pwa cell
+      (config g_fo4p) with this engine's fused pair LayerNorm. Forward-only: training is
+      `unsupported`. Needs OPT_CORE_DIR; pwa_train is pinned off for the row (it would otherwise
+      serve implementation="anthropic" first).
+    """
+    from miniworld_engine.integrations import anthropic_msa, pwa_train
+    from miniworld_engine.modules import MSAPairWeightedAveraging
+
+    key = implementation.strip().lower()
+    anthropic_key = ImplementationType.ANTHROPIC.value
+    if key not in {"pytorch", MINIWORLD_IMPL, anthropic_key, anthropic_key + "_hybrid"}:
+        raise UnsupportedBenchmark(
+            f"msa_pair_weighted_averaging implements pytorch, miniworld, anthropic and anthropic_hybrid, "
+            f"not {implementation!r} (cuequivariance ships no pair-weighted-averaging kernel)")
+    pristine = key == anthropic_key
+    hybrid = key == anthropic_key + "_hybrid"
+    anthropic = pristine or hybrid
+    is_train = not is_inference_mode(conf.mode)
+    if anthropic and is_train:
+        raise UnsupportedBenchmark(
+            "anthropic MSAPairWeightedAveraging is inference-only: opt_core.ops.msa_pwa (and "
+            "integrations.anthropic_msa built on it) has no backward, and refuses a live dropout scale")
+    impl = (ImplementationType.PYTORCH if pristine else
+            ImplementationType.ANTHROPIC if hybrid else ImplementationType(key))
+    d_msa, n_head, d_hidden = 64, 8, 32
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    layer_cls = MSAPairWeightedAveraging
+    if pristine:
+        msa_pwa = _anthropic_upstream_or_unsupported().operation("msa_pwa")
+        from types import SimpleNamespace
+
+        class UpstreamPWA(MSAPairWeightedAveraging):
+            """opt_core.ops.msa_pwa.forward_masked as shipped, on this module's parameters.
+
+            The release's 'masked' form (PairWeightedAveraging(c_m=64, c_z=128, c_h=32, 8 heads):
+            norm_m / proj_m / proj_g / norm_z / proj_z / proj_o / inf) is this module's function;
+            norm_z and norm_m are the STOCK LayerNorm on the module's parameters (not this engine's
+            fused LayerNorm), the key mask is the module's [B, L] mask broadcast over the query axis,
+            and the shipped default tile config runs (FPF_PWA_CFG is unset for the row). Run under
+            bf16 autocast; the module's residual is added by the engine.
+            """
+
+            def forward(self, msa, pair, mask=None):
+                view = self.__dict__.get("_upstream_view")
+                if view is None:
+                    view = SimpleNamespace(
+                        norm_m=_StockLayerNorm(self.ln_msa), proj_m=self.to_value, proj_g=self.to_gate,
+                        norm_z=_StockLayerNorm(self.ln_pair), proj_z=self.to_bias, proj_o=self.to_out,
+                        inf=1e6, num_heads=self.n_head, c_h=self.to_value.weight.shape[0] // self.n_head)
+                    self._upstream_view = view
+                n = msa.shape[2]
+                if mask is None:
+                    mask = torch.ones(msa.shape[0], n, dtype=torch.bool, device=msa.device)
+                pair_mask = mask[:, None, :].expand(-1, n, -1).to(torch.bfloat16)   # masks key axis j
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    update = msa_pwa.forward_masked(view, msa, pair, pair_mask, chunk_heads=False)
+                return msa + update.to(msa.dtype)
+
+        layer_cls = UpstreamPWA
+
+    class MultiPWA(nn.Module):
+        def __init__(self, layer_impl, cls=MSAPairWeightedAveraging) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([
+                cls(d_msa, conf.d_pair, n_head, d_hidden,
+                    implementation=layer_impl, p_drop=conf.dropout)
+                for _ in range(conf.n_layers)])
+
+        def forward(self, msa, pair, mask):
+            for layer in self.layers:
+                msa = layer(msa, pair, mask)
+            return msa
+
+    torch.manual_seed(0)
+    reference = MultiPWA(ImplementationType.PYTORCH)
+    _nondefault_parameters(reference)
+    state = reference.state_dict()
+    reference = reference.to(DEVICE).train(is_train)
+    model = MultiPWA(impl, layer_cls)
+    model.load_state_dict(state)
+    model = model.to(device=DEVICE, dtype=dtype).train(is_train)
+
+    torch.manual_seed(1)
+    msa = torch.randn(1, conf.n_msa, seq_len, d_msa, device=DEVICE, dtype=dtype)
+    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
+    dy = torch.randn_like(msa)
+
+    dims = (d_msa, conf.d_pair, n_head, d_hidden)
+    if pristine:
+        cfg = msa_pwa._cfg_override() or msa_pwa._CFG[d_hidden]
+        execution_path = (f"opt_core.ops.msa_pwa.forward_masked[shipped, cfg=_CFG[{d_hidden}] "
+                          f"kernel={cfg.get('kernel')} pro={cfg.get('pro')}, stock norm_z/norm_m "
+                          "F.layer_norm, bf16 autocast]+engine_residual")
+    elif hybrid:
+        why = anthropic_msa.pwa_refusal(msa, *dims, grad=False, dropout=False)
+        if why is not None:
+            raise UnsupportedBenchmark(f"the anthropic PWA path cannot serve this call: {why}")
+        execution_path = ("HYBRID integrations.anthropic_msa.pair_weighted_averaging[upstream msa_pwa "
+                          "cell g_fo4p with OUR fused LayerNorm as norm_z]")
+    elif impl == ImplementationType.MINIWORLD:
+        with contextlib.nullcontext() if is_train else torch.no_grad():   # wanted() reads the grad mode
+            why = None if pwa_train.wanted(impl) else "disabled (MINIWORLD_PWA_TRAIN/_INFER=0 or engine_backend=triton)"
+            why = why or pwa_train.refusal(msa, pair, *dims)
+        execution_path = (("integrations.pwa_train.pair_weighted_averaging" if is_train else
+                           "integrations.pwa_train.pair_weighted_averaging_inference") if why is None else
+                          f"modules.msa_pair_weighted_averaging[statements; pwa_train refused: {why}]")
+    else:
+        execution_path = "module.reference.torch"
+
+    def correctness() -> AccuracyFields:
+        m_ref = msa.detach().float().requires_grad_(is_train)
+        p_ref = pair.detach().float().requires_grad_(is_train)
+        m_impl = msa.detach().clone().requires_grad_(is_train)
+        p_impl = pair.detach().clone().requires_grad_(is_train)
+        with contextlib.nullcontext() if is_train else torch.no_grad():
+            actual = model(m_impl, p_impl, mask)
+            expected = reference(m_ref, p_ref, mask)
+        out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+        fields: AccuracyFields = {"output_max_abs": out_max, "output_rel_frob": out_rel,
+                                  "output_cosine": out_cos}
+        if is_train:
+            actual.backward(dy)
+            expected.backward(dy.float())
+            assert m_impl.grad is not None and m_ref.grad is not None
+            grads = tensor_metrics(torch.cat([m_impl.grad.flatten(), p_impl.grad.flatten()]),
+                                   torch.cat([m_ref.grad.flatten(), p_ref.grad.flatten()]))
+            fields.update({"grad_max_abs": grads[0], "grad_rel_frob": grads[1], "grad_cosine": grads[2]})
+        return fields
+
+    # Row dropout draws independent masks in the two models, so an accuracy comparison is only
+    # meaningful without it; with dropout the columns stay blank (no reference comparison made).
+    accuracy: AccuracyFields = correctness() if not (is_train and conf.dropout) else {}
+    for item in [*model.parameters(), *reference.parameters()]:
+        item.grad = None
+    del reference
+    if conf.compile:
+        compile_module_for_benchmark(model)
+    model = fabric.setup_module(model)
+    msa.requires_grad_(is_train)
+    pair.requires_grad_(is_train)
+
+    def inference_step() -> torch.Tensor:
+        return model(msa, pair, mask)
+
+    def training_step() -> torch.Tensor:
+        y = model(msa, pair, mask)
+        fabric.backward(y, dy)
+        return y
+
+    return measured_result(
+        conf=conf, func=training_step if is_train else inference_step,
+        grad_to_none=[msa, pair, *list(model.parameters())], params=list(model.parameters()),
+        is_train=is_train, input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model), execution_path=execution_path,
+        reference="module.reference.torch[fp32]",
+    )._replace(**accuracy)
+
+
+def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
+    """AttentionPairBias (the Pairformer single track), `modules/attention_pair_bias`.
+
+    MiniWorld's shape (registry_module.csv): d_single=`conf.d_single` (384), d_pair=`conf.d_pair`
+    (128), 8 heads x 48, B=1, L=`seq_len`, token key mask, use_qk_norm=False; residual inside.
+
+    * pytorch        -- the module's statements (SDPA with the additive pair bias).
+    * triton         -- implementation="triton": Triton LayerNorms + the augmented-attention
+      QK+pair-bias kernel at one augmentation.
+    * miniworld      -- implementation="miniworld" (auto): resolves to the same attention kernel,
+      with the engine's auto LayerNorm.
+    * cuequivariance -- `cuequivariance_torch.attention_pair_bias` called with THIS module's
+      parameters, plus the module's residual. Same function as the module when use_qk_norm=False:
+      LN(single) -> q (with bias) / k / v / gate projections, bias = to_bias(LN(pair)), key mask as
+      an additive penalty (-1e6 vs the module's finfo.min: identical unless a whole key row is
+      masked), scale 1/sqrt(head_dim), sigmoid gate, to_out without bias. The output accuracy
+      columns compare it against the fp32 pytorch module. The fp32-pinned LayerNorm affines are
+      handed to cueq in the activation dtype, which is the storage contract its compiled BF16
+      whole-op route admits (cuequivariance_ops_torch attention_pair_bias._compiled_bf16_dtype_contract);
+      cueq's own router still picks its route per shape/mode (on sm90 compiled INFERENCE it keeps
+      its native PyTorch composition by policy).
+    anthropic has no module-level AttentionPairBias integration (integrations.anthropic only
+    exposes the core `pair_bias_attention` primitive), so it is `unsupported`.
+    """
+    from miniworld_engine.modules import AttentionPairBias
+
+    key = implementation.strip().lower()
+    supported = {"pytorch", "triton", MINIWORLD_IMPL, ImplementationType.CUEQUIVARIANCE.value}
+    if key not in supported:
+        raise UnsupportedBenchmark(
+            f"attention_pair_bias implements {sorted(supported)}, not {implementation!r} "
+            "(anthropic has no module-level AttentionPairBias integration)")
+    cueq = key == ImplementationType.CUEQUIVARIANCE.value
+    is_train = not is_inference_mode(conf.mode)
+    n_head = 8
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+
+    class CueqAttentionPairBias(AttentionPairBias):
+        def forward(self, single, pair, mask=None):
+            import cuequivariance_torch as cuet
+
+            act = single.dtype
+
+            def as_act(t):
+                return None if t is None else t.to(act)
+
+            out, _ = cuet.attention_pair_bias(
+                single, pair, None if mask is None else mask.to(act), self.n_head,
+                as_act(self.ln_single.weight), as_act(self.ln_single.bias),
+                self.to_query.weight, self.to_query.bias, self.to_key.weight,
+                self.to_value.weight, self.to_gate.weight, self.to_out.weight,
+                w_proj_z=self.to_bias.weight,
+                w_ln_z=as_act(self.ln_pair.weight), b_ln_z=as_act(self.ln_pair.bias),
+                eps=self.ln_single.eps)
+            return single + out
+
+    class MultiAPB(nn.Module):
+        def __init__(self, layer_impl, cls=AttentionPairBias) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([
+                cls(conf.d_single, conf.d_pair, n_head, implementation=layer_impl)
+                for _ in range(conf.n_layers)])
+
+        def forward(self, single, pair, mask):
+            for layer in self.layers:
+                single = layer(single, pair, mask)
+            return single
+
+    torch.manual_seed(0)
+    reference = MultiAPB(ImplementationType.PYTORCH)
+    _nondefault_parameters(reference)
+    for layer in reference.layers:
+        if layer.use_qk_norm or layer.ln_single.eps != layer.ln_pair.eps:
+            raise UnsupportedBenchmark("cuet.attention_pair_bias takes one eps and no per-head qk norm")
+    state = reference.state_dict()
+    reference = reference.to(DEVICE).train(is_train)
+    model = (MultiAPB(ImplementationType.PYTORCH, CueqAttentionPairBias) if cueq
+             else MultiAPB(ImplementationType(key)))
+    model.load_state_dict(state)
+    model = model.to(device=DEVICE, dtype=dtype).train(is_train)
+
+    torch.manual_seed(1)
+    single = torch.randn(1, seq_len, conf.d_single, device=DEVICE, dtype=dtype)
+    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
+    dy = torch.randn_like(single)
+
+    def correctness() -> AccuracyFields:
+        s_ref = single.detach().float().requires_grad_(is_train)
+        p_ref = pair.detach().float().requires_grad_(is_train)
+        s_impl = single.detach().clone().requires_grad_(is_train)
+        p_impl = pair.detach().clone().requires_grad_(is_train)
+        with contextlib.nullcontext() if is_train else torch.no_grad():
+            actual = model(s_impl, p_impl, mask)
+            expected = reference(s_ref, p_ref, mask)
+        out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+        fields: AccuracyFields = {"output_max_abs": out_max, "output_rel_frob": out_rel,
+                                  "output_cosine": out_cos}
+        if is_train:
+            actual.backward(dy)
+            expected.backward(dy.float())
+            assert s_impl.grad is not None and s_ref.grad is not None
+            grads = tensor_metrics(torch.cat([s_impl.grad.flatten(), p_impl.grad.flatten()]),
+                                   torch.cat([s_ref.grad.flatten(), p_ref.grad.flatten()]))
+            fields.update({"grad_max_abs": grads[0], "grad_rel_frob": grads[1], "grad_cosine": grads[2]})
+        return fields
+
+    accuracy = correctness()
+    for item in [*model.parameters(), *reference.parameters()]:
+        item.grad = None
+    del reference
+    if conf.compile:
+        compile_module_for_benchmark(model)
+    model = fabric.setup_module(model)
+    single.requires_grad_(is_train)
+    pair.requires_grad_(is_train)
+
+    def inference_step() -> torch.Tensor:
+        return model(single, pair, mask)
+
+    def training_step() -> torch.Tensor:
+        y = model(single, pair, mask)
+        fabric.backward(y, dy)
+        return y
+
+    execution_path = {
+        "pytorch": "module.reference.torch",
+        "triton": "modules.attention_pair_bias[triton LN + triton_augmented_attention_pair_bias]",
+        MINIWORLD_IMPL: "modules.attention_pair_bias[auto LN + triton_augmented_attention_pair_bias]",
+    }.get(key, "cuequivariance_torch.attention_pair_bias+module_residual")
+    return measured_result(
+        conf=conf, func=training_step if is_train else inference_step,
+        grad_to_none=[single, pair, *list(model.parameters())], params=list(model.parameters()),
+        is_train=is_train, input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model), execution_path=execution_path,
+        reference="module.reference.torch[fp32]",
+    )._replace(**accuracy)
+
+
 # =============================================================================================
 # KERNEL FUNCTION-OPERATION benches. One target == one compute-operation; the folder name is the
 # operation's intrinsic nature, NOT a module. Each function benches ALL implementations of that op
@@ -1831,7 +2445,7 @@ def _bwd_autograd_result(conf, out, leaves, dy, ref_grads, *, path, ref, dtype):
 # ---- FORWARD operations -----------------------------------------------------------------------
 def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
     """Gated dual-GEMM in-projection (trimul front): left=(x@WL)*sigma(x@WLg), right=..., gate=sigma(x@Wg).
-    Rows: pytorch, trimul_inproj_cute, tm1_cute, triton_tm1. Variants without a gate compare
+    Rows: pytorch, triton_tm1. Variants without a gate compare
     left|right only.
 
     `trimul_front_triton` and `trimul_front_sm100` are gone: 38575f1a deleted the five fronts
@@ -1861,31 +2475,11 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
     def ref_gate(x):
         return torch.sigmoid(x.reshape(L * L, D) @ wg)
 
-    def bdll_to_md(t):
-        return t.permute(0, 2, 3, 1).reshape(L * L, -1)
-
     if implementation == "pytorch":
         def run(x):
             left, right = ref_lr(x)
             return left, right, ref_gate(x)
         path = "pytorch"
-    elif implementation == "trimul_inproj_cute":
-        from miniworld_engine.kernels.trimul_inproj.cute.launch import (
-            trimul_inproj_cute_forward,
-        )
-
-        def run(x):
-            left, right, gate = trimul_inproj_cute_forward(x, wl, wlg, wr, wrg, wg, compute_gate=True)
-            assert gate is not None      # compute_gate=True; None is the compute_gate=False shape
-            return bdll_to_md(left), bdll_to_md(right), gate.reshape(L * L, D)
-        path = "kernels.trimul_inproj.cute.launch"
-    elif implementation == "tm1_cute":
-        from miniworld_engine.kernels.tm1.cute.launch import tm1_cute_forward
-
-        def run(x):
-            left, right = tm1_cute_forward(x, wl, wlg, wr, wrg, out_layout="bdll")
-            return bdll_to_md(left), bdll_to_md(right)
-        path = "kernels.tm1.cute.launch"
     elif implementation == "triton_tm1":
         from miniworld_engine.kernels.tm1.triton.main import triton_tm1
 
@@ -1911,7 +2505,7 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
 
 def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
     """Fused LayerNorm+Linear (GEMM w/ LN epilogue): Y = LN(x) @ W^T. N=K=d. Rows: pytorch,
-    layernorm_linear_triton, layernorm_linear_cute(M1), layernorm_linear_cute_fused(M2), layernorm_linear_te."""
+    layernorm_linear_triton, layernorm_linear_te."""
     if conf.precision == FP32_PRECISION and implementation != "pytorch":
         raise UnsupportedBenchmark(
             f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
@@ -1947,20 +2541,6 @@ def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
         )
         kfn = lambda x: layernorm_linear_triton(x, lw, lb, w, None, eps)
         path = "kernels.layernorm_linear.triton.fused"
-    elif implementation == "layernorm_linear_cute":
-        from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
-            layernorm_linear_cute,
-        )
-        kfn = lambda x: layernorm_linear_cute(
-            x.reshape(-1, D), lw, lb, w, None, eps).reshape(x.shape)
-        path = "kernels.layernorm_linear.cute.gemm_layernorm_linear"
-    elif implementation == "layernorm_linear_cute_fused":
-        from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
-            layernorm_linear_cute_fused,
-        )
-        kfn = lambda x: layernorm_linear_cute_fused(
-            x.reshape(-1, D), lw, lb, w, None, eps).reshape(x.shape)
-        path = "kernels.layernorm_linear.cute.gemm_layernorm_linear_fused"
     elif implementation == "layernorm_linear_te":
         from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
             layernorm_linear_te_fn,
@@ -1979,7 +2559,7 @@ def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
 
 def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
     """SwiGLU MLP (transition, back-to-back): out = squeeze(silu(LN(x)@Wa)*(LN(x)@Wb)). Rows: pytorch,
-    triton_transition_fused, cute_transition_fused, transition_b2b_ktiled(unverified)."""
+    triton_transition_fused, transition_b2b_ktiled(unverified)."""
     if conf.compile and implementation == "transition_b2b_ktiled":
         raise UnsupportedBenchmark(
             "transition_b2b_ktiled has no opaque compile entry; its direct Triton launcher "
@@ -2007,9 +2587,9 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
 
     # The Transition op INCLUDES the residual -- `triton_transition_fused` folds `+x` into its
     # squeeze epilogue and there is no flag to turn that off. So the reference has to include it
-    # too, and the two rows below that compute the raw op (`cute_transition_fused` has no residual
-    # epilogue; `transition_b2b_ktiled` is the K>128 tile, not the Transition entry) get an
-    # explicit `+ x` so all four rows are timed and scored on the SAME function.
+    # too, and the row below that computes the raw op (`transition_b2b_ktiled` is the K>128 tile,
+    # not the Transition entry) gets an explicit `+ x` so all three rows are timed and scored on
+    # the SAME function.
     ref_fn = lambda x: ref_mod._torch_forward(x) + x
     if implementation == "pytorch":
         kfn, path = ref_fn, "module.reference.torch"
@@ -2017,10 +2597,6 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels import triton_transition_fused
         kfn = lambda x: triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.triton.fused"
-    elif implementation == "cute_transition_fused":
-        from miniworld_engine.kernels import cute_transition_fused
-        kfn = lambda x: cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps) + x
-        path = "kernels.transition.cute.fused"
     elif implementation == "transition_b2b_ktiled":
         from miniworld_engine.kernels.transition.triton.fused import (
             transition_b2b_ktiled,
@@ -2037,7 +2613,7 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
 
 def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
     """LayerNorm forward: y = LN(x)*w + b. Rows: pytorch, triton_layernorm, layernorm_dispatch,
-    quack_cute, triton_layernorm_lowreg(dep)."""
+    triton_layernorm_lowreg(dep)."""
     import torch.nn.functional as F
 
     D, L = conf.d_pair, seq_len
@@ -2065,12 +2641,6 @@ def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
         kfn = lambda x: layernorm_kernel(x, w, b, eps)
         path = "kernels.layernorm.interface"
-    elif implementation == "quack_cute":
-        from miniworld_engine.kernels.layernorm.cute.quack_adapter import (
-            quack_layernorm_fwd,
-        )
-        kfn = lambda x: quack_layernorm_fwd(x, w, b, eps)
-        path = "kernels.layernorm.cute.quack"
     elif implementation == "triton_layernorm_lowreg":
         from miniworld_engine.kernels.layernorm.triton.lowreg import (
             triton_layernorm_lowreg,
@@ -2087,7 +2657,7 @@ def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
 
 def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     """Adaptive LayerNorm forward: y = sigma(scale)*LN(x) + bias, scale/bias = Linear(LN(cond)).
-    Rows: pytorch, adaln_inference, adaln_lnfold. `triton_adaln` and `adaln_fused3` are
+    Rows: pytorch, adaln_inference. `triton_adaln` and `adaln_fused3` are
     gone: no module dispatched to either, so they were deleted with main.py and fused3.py."""
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
@@ -2138,17 +2708,6 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels.adaln.triton.inference import adaln_inference
         kfn = lambda x, c: adaln_inference(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.inference"
-    elif implementation == "adaln_lnfold":
-        from miniworld_engine.kernels.adaln.triton.inference import (
-            adaln_inference_lnfold,
-        )
-        from miniworld_engine.kernels.layernorm_linear.cute import fold_for_gemm
-        _wcat = torch.cat([sw, bw], dim=0).contiguous()
-        _bcat = torch.cat([sb, sb.new_zeros(D)], dim=0).contiguous()
-        _pf = fold_for_gemm(_wcat, clw, clw.new_zeros(clw.shape), _bcat, w2_dtype=dtype)
-        kfn = lambda x, c: adaln_inference_lnfold(
-            x, c, clw, sw, sb, bw, ex, ec, weight_cat=_wcat, bias_cat=_bcat, prefolded=_pf)
-        path = "kernels.adaln.triton.inference.lnfold"
     else:
         raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
@@ -2297,48 +2856,9 @@ def bench_kernel_augmented_attention(conf, seq_len, implementation, fabric):
     return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype=tname, parameter_dtype="")
 
 
-def bench_kernel_fused_ln_mask(conf, seq_len, implementation, fabric):
-    """Fused LayerNorm+mask: out = LN(x)*mask (per-row scale). Rows: pytorch, fused_ln_mask."""
-    if conf.precision == FP32_PRECISION and implementation != "pytorch":
-        raise UnsupportedBenchmark(
-            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
-    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
-    tname = str(dtype).replace("torch.", "")
-    import torch.nn.functional as F
-
-    D, L = conf.d_pair, seq_len
-    torch.manual_seed(0)
-    w = torch.randn(D, device=DEVICE, dtype=dtype)
-    b = torch.randn(D, device=DEVICE, dtype=dtype)
-    eps = 1e-5
-
-    def mk():
-        torch.manual_seed(1)
-        x = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
-        mask = (torch.rand(1, L, L, device=DEVICE) > conf.mask_prob).to(dtype)
-        return x, mask
-
-    def ref(x, mask):
-        return F.layer_norm(x, (D,), w, b, eps) * mask[..., None]
-
-    if implementation == "pytorch":
-        kfn, path = ref, "pytorch"
-    elif implementation == "fused_ln_mask":
-        from miniworld_engine.kernels.fused_ln_mask.cute.fused_ln_mask import (
-            fused_ln_mask,
-        )
-        kfn = lambda x, m: fused_ln_mask(x, w, b, m, eps)
-        path = "kernels.fused_ln_mask.cute"
-    else:
-        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
-
-    acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype=tname)
-
-
 def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
     """Gated output projection (tm2 back half): out = sigma(xg@Wg^T)*(xo@Wp^T). Rows: pytorch,
-    tm2_cute, triton_tm2."""
+    triton_tm2."""
     if conf.precision == FP32_PRECISION and implementation != "pytorch":
         raise UnsupportedBenchmark(
             f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
@@ -2359,13 +2879,6 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
 
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
-    elif implementation == "tm2_cute":
-        # cuequiv wrapper deleted 2026-08-04 — this now benches OUR from-scratch tm2 kernel.
-        from miniworld_engine.kernels.tm2.cute.tm2_cute_kernel import (
-            tm2_dual_from_scratch,
-        )
-        kfn = lambda xg, xo: tm2_dual_from_scratch(xg, xo, wg, wp)  # (wg/wp are (N,K))
-        path = "kernels.tm2.cute"
     elif implementation == "triton_tm2":
         from miniworld_engine.kernels.tm2.triton.main import triton_tm2
         wgt, wpt = wg.t().contiguous(), wp.t().contiguous()  # kernel computes x@W (K,N form)
@@ -2737,8 +3250,8 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
 
 
 def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
-    """Transition backward (autograd, backward-only). Rows: pytorch, triton_transition_fused,
-    cute_transition_fused. Cosine on dx vs pytorch autograd."""
+    """Transition backward (autograd, backward-only). Rows: pytorch, triton_transition_fused.
+    Cosine on dx vs pytorch autograd."""
     if conf.compile:
         raise UnsupportedBenchmark(
             "backward-only autograd uses a prebuilt eager graph; compiled backward is unsupported")
@@ -2783,10 +3296,6 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels import triton_transition_fused
         out = triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.triton.fused"
-    elif implementation == "cute_transition_fused":
-        from miniworld_engine.kernels import cute_transition_fused
-        out = cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps) + x
-        path = "kernels.transition.cute.fused"
     else:
         raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
     # EVERY leaf, not just x. `torch.autograd.grad(out, leaves, ...)` prunes what no leaf needs,
@@ -2801,8 +3310,8 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
 
 
 def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
-    """LayerNorm+Linear backward (autograd, backward-only). Rows: pytorch, layernorm_linear_te,
-    layernorm_linear_cute. Cosine on dx vs pytorch autograd."""
+    """LayerNorm+Linear backward (autograd, backward-only). Rows: pytorch, layernorm_linear_te.
+    Cosine on dx vs pytorch autograd."""
     if conf.compile:
         raise UnsupportedBenchmark(
             "backward-only autograd uses a prebuilt eager graph; compiled backward is unsupported")
@@ -2846,12 +3355,6 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
         )
         out = layernorm_linear_te_fn(x, lw, lb, w, None, eps, length=L)  # x is (L*L, D)
         path = "kernels.layernorm_linear.triton.te_style"
-    elif implementation == "layernorm_linear_cute":
-        from miniworld_engine.kernels.layernorm_linear.autograd import (
-            layernorm_linear_fn,
-        )
-        out = layernorm_linear_fn(x, lw, lb, w, None, eps, length=L)  # x is (L*L, D)
-        path = "kernels.layernorm_linear.autograd.cute"
     else:
         raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
     return _bwd_autograd_result(conf, out, [x, lw, lb, w], dy, ref_grads, path=path,
@@ -2860,7 +3363,7 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
 
 # A kernel target is named after the kernel FAMILY in `src/miniworld_engine/kernels/registry.csv`
 # that it benches -- `triangle_attention`, `bias_only_attention`, `augmented_attention`,
-# `fused_ln_mask`, `layernorm`, `adaln`, `conditioned_transition` (whose target benches the
+# `layernorm`, `adaln`, `conditioned_transition` (whose target benches the
 # post-AdaLN `_tail` of the family). The four exceptions bench a fused OP SHAPE that several
 # families implement rather than one family -- `dual_gemm_epilogue`, `gemm_epilogue`, `gemm_gate`,
 # `transition_b2b` -- and are named after the shape. No abbreviations: the name is spelled the way
@@ -2877,7 +3380,6 @@ KERNEL_TARGETS = {
     "triangle_attention": bench_kernel_triangle_attention,
     "bias_only_attention": bench_kernel_bias_only_attention,
     "augmented_attention": bench_kernel_augmented_attention,
-    "fused_ln_mask": bench_kernel_fused_ln_mask,
     "gemm_gate": bench_kernel_gemm_gate,
     "conditioned_transition_tail": bench_kernel_conditioned_transition_tail,
     # kernel function-operations: backward
@@ -2897,6 +3399,28 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     opaque `custom_op`, so a per-part bench pays its launch overhead once and a block pays it
     once per part -- while `torch.compile` fuses ACROSS parts in the reference and cannot fuse
     across our opaque ops. Both effects only land here.
+
+    * pytorch / triton / miniworld -- `modules.dit.DiTBlock` with that implementation. For
+      miniworld the block first asks `integrations.token_dit.serves()` whether the fused H100
+      token runner (`kernels.conditioned_transition.triton.token_dit_runner.FusedTokenDiT`) takes
+      the call, else it runs the module composition; `execution_path` says which one ran.
+    * anthropic -- Anthropic's release AS SHIPPED (MINIWORLD_ANTHROPIC_ROOT), composed into one
+      AF3 Alg. 23 block over this bench's weights the way their kits compose it (the 2026-09-22
+      MiniWorld runs/diffusion_vs_anthropic_20260922 recipe): torch GEMMs with q|k|v|g as ONE
+      GEMM, `ln_proj.pair_bias` (head-major planes), `apb` row fpf_apb `apb_views` with the
+      sigmoid gate fused, the `dit_fast` row kernels (adaln / resgate_adaln / swiglu / resgate)
+      and an fp32 residual stream. Only upstream entry points (opt_core.kernels.apb's
+      `carried_module` / `dit_block_rows` / `fold_mask`); nothing of this repo runs in the row.
+      Conditioning dedup is OFF: this target draws a DIFFERENT conditioning per sample
+      (`cond` is [A, 1, L, d_cond] random), so reading it once per token (Ns = L) would compute
+      another function; every row-modulo operand gets Ns = A * L rows, the same work the engine
+      rows do. Forward-only, so training is `unsupported`. At atom widths the pair bias producer
+      refuses c_pair (ln_proj serves 64 / 128), which becomes an explicit `unsupported` row;
+      Anthropic's own atom attention (apb row fpf_atom) is the AF3 32x128 WINDOWED op, a
+      different function from this dense block, and is not substituted.
+
+    Inference rows carry accuracy columns against an fp32 `DiTBlock(implementation=PYTORCH)` on
+    the same (non-default) weights and inputs.
     """
     from miniworld_engine.modules.dit import DiTBlock
 
@@ -2907,40 +3431,140 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     d_pair = conf.d_pair_atom if atom else conf.d_pair
     n_head = 4 if atom else 16
 
-    spec = triton_miniworld_spec(implementation)
-    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
-                         ImplementationType.MINIWORLD}:
-        raise UnsupportedBenchmark(f"dit does not implement {implementation!r}")
+    anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
+    upstream = None
+    if anthropic:
+        if not is_inference_mode(conf.mode):
+            raise UnsupportedBenchmark(
+                "anthropic DiT block is inference-only: opt_core's ln_proj.pair_bias, apb_views and "
+                "the dit_fast row kernels have no backward")
+        upstream = _anthropic_upstream_or_unsupported()
+        # the module holds the parameters; its forward is replaced by the upstream composition
+        spec = ImplementationSpec(ImplementationType.PYTORCH, None, implementation)
+    else:
+        spec = triton_miniworld_spec(implementation)
+        if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
+                             ImplementationType.MINIWORLD}:
+            raise UnsupportedBenchmark(f"dit does not implement {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    is_train = not is_inference_mode(conf.mode)
 
     class MultiDiT(nn.Module):
-        def __init__(self) -> None:
+        def __init__(self, impl) -> None:
             super().__init__()
             self.layers = nn.ModuleList([
                 DiTBlock(d_single=d_single, d_cond=d_cond,
-                         d_pair=d_pair, n_head=n_head, implementation=spec.impl)
+                         d_pair=d_pair, n_head=n_head, implementation=impl)
                 for _ in range(conf.n_layers)])
+            self.composed = None
 
         def forward(self, single, cond, pair, mask=None):
+            if self.composed is not None:
+                return self.composed(single, cond, pair, mask)
             for layer in self.layers:
                 single = layer(single, cond, pair, mask)
             return single
 
-    model = MultiDiT().to(device=DEVICE, dtype=dtype)
-    model.train(not is_inference_mode(conf.mode))
+    model = MultiDiT(spec.impl)
+    # `to_out`, `squeeze` and `to_bias` are zero-initialised and the norms start at identity,
+    # which would make every accuracy column vacuous. Timing does not depend on the values.
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for prm in model.parameters():
+            if prm.ndim == 2:
+                prm.normal_(std=prm.shape[1] ** -0.5)
+            elif prm.ndim == 1 and prm.numel() > 1:
+                prm.add_(torch.randn_like(prm) * 0.1)
+    state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    model = model.to(device=DEVICE, dtype=dtype)
+    model.train(is_train)
+
+    torch.manual_seed(1)
+    single = torch.randn(conf.n_augment, 1, length, d_single,
+                         device=DEVICE, dtype=dtype, requires_grad=is_train)
+    cond = torch.randn(conf.n_augment, 1, length, d_cond,
+                       device=DEVICE, dtype=dtype, requires_grad=is_train)
+    pair = torch.randn(1, length, length, d_pair, device=DEVICE, dtype=dtype,
+                       requires_grad=is_train)
+    mask = torch.rand(1, length, device=DEVICE) > conf.mask_prob
+    dy = torch.randn_like(single)
+
+    def token_dit_refusal(block) -> str | None:
+        """None when `integrations.token_dit.serves()` takes this call (the fused H100 token
+        runner), else why not, named from the conditions `serves()` checks. Nested: the CPU
+        contract tests execute the bench_module_* functions in a namespace of their own."""
+        from miniworld_engine import settings
+        from miniworld_engine.integrations import token_dit
+
+        with torch.set_grad_enabled(is_train):     # the grad mode the timed step runs in
+            if token_dit.serves(block, single, cond, pair):
+                return None
+        att = block.attention
+        reasons = ["autograd (the runner is inference-only)"] if is_train else []
+        if settings.current().engine_backend == "triton":
+            reasons.append("engine_backend=triton")
+        if att.use_qk_norm:
+            reasons.append("use_qk_norm")
+        widths = (single.shape[-1], att.n_head, cond.shape[-1], pair.shape[-1])
+        if widths != (768, 16, 384, 128):
+            reasons.append(f"widths d/heads/cond/pair={widths}, runner serves (768, 16, 384, 128)")
+        if single.shape[2] % 128:
+            reasons.append(f"L={single.shape[2]} not a multiple of 128")
+        if cond.shape[0] != 1 and cond.stride(0) != 0:
+            reasons.append(f"per-sample conditioning (cond has {cond.shape[0]} distinct samples; the "
+                           "runner requires one conditioning shared by every sample)")
+        if single.is_cuda and torch.cuda.get_device_capability(single.device) != (9, 0):
+            reasons.append("not sm_90")
+        return "; ".join(reasons) or "integrations.token_dit.serves() declined"
+
+    if anthropic:
+        assert upstream is not None
+        execution_path = _anthropic_dit_composition(upstream, model, mask, conf.n_augment, length, dtype)
+    elif spec.impl == ImplementationType.PYTORCH:
+        execution_path = "module.reference.torch"
+    elif spec.impl == ImplementationType.MINIWORLD:
+        why = token_dit_refusal(model.layers[0])
+        execution_path = (
+            "modules.dit.DiTBlock -> integrations.token_dit.update -> kernels.conditioned_transition.triton."
+            "token_dit_runner.FusedTokenDiT[fused runner, v2.2.0 src: cuBLAS GEMMs + Triton gated2 core + "
+            "Triton row passes; weights packed and pair bias hoisted inside every call]"
+            if why is None else
+            "modules.dit.DiTBlock[module composition: AugmentedAttentionPairBias (Triton augmented_attention "
+            "core; compute_dtype not passed, so not the bf16 sm90 CUDA core) + ConditionedTransition; "
+            f"fused token runner not taken: {why}]")
+    else:
+        execution_path = "modules.dit.DiTBlock[module composition]"
+
+    accuracy: AccuracyFields = {}
+    reference = "module.reference.torch"
+    if not is_train and single.is_cuda:
+        # fp32 reference on the same weights and inputs, IEEE (TF32 off for its matmuls even when
+        # the run allows TF32). Eager and uncompiled: it is a yardstick.
+        tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+        try:
+            ref_model = MultiDiT(ImplementationType.PYTORCH)
+            ref_model.load_state_dict(state)
+            ref_model = ref_model.to(DEVICE).eval()
+            with torch.no_grad():
+                torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+                try:
+                    expected = ref_model(single.float(), cond.float(), pair.float(), mask)
+                finally:
+                    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+                del ref_model
+                actual = model(single, cond, pair, mask)
+            out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+            accuracy = {"output_max_abs": out_max, "output_rel_frob": out_rel, "output_cosine": out_cos}
+            reference = "module.reference.torch[fp32 IEEE]"
+            del actual, expected
+        except torch.cuda.OutOfMemoryError:
+            print(f"  [{implementation}] fp32 reference did not fit at L={length}: no accuracy columns",
+                  flush=True)
+        torch.cuda.empty_cache()
+
     if conf.compile:
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
-
-    wants_grad = not is_inference_mode(conf.mode)
-    single = torch.randn(conf.n_augment, 1, length, d_single,
-                         device=DEVICE, dtype=dtype, requires_grad=wants_grad)
-    cond = torch.randn(conf.n_augment, 1, length, d_cond,
-                       device=DEVICE, dtype=dtype, requires_grad=wants_grad)
-    pair = torch.randn(1, length, length, d_pair, device=DEVICE, dtype=dtype,
-                       requires_grad=wants_grad)
-    mask = torch.rand(1, length, device=DEVICE) > conf.mask_prob
-    dy = torch.randn_like(single)
 
     def inference_step():
         with torch.no_grad():
@@ -2953,16 +3577,130 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
 
     return measured_result(
         conf=conf,
-        func=inference_step if is_inference_mode(conf.mode) else training_step,
+        func=inference_step if not is_train else training_step,
         grad_to_none=[single, cond, pair, *list(model.parameters())],
         params=list(model.parameters()),
-        is_train=wants_grad,
+        is_train=is_train,
         input_dtype=str(dtype).replace("torch.", ""),
         parameter_dtype=parameter_dtype_of(model),
-        execution_path=("modules.dit.DiTBlock" if spec.impl != ImplementationType.PYTORCH
-                        else "module.reference.torch"),
-        reference="module.reference.torch",
-    )
+        execution_path=execution_path,
+        reference=reference,
+    )._replace(**accuracy)
+
+
+def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
+                               act: "torch.dtype") -> str:
+    """Install Anthropic's shipped DiT-block composition as `model.composed`; return its execution path.
+
+    Every kernel is an upstream entry point of the checkout `upstream.configure()` resolved:
+    `opt_core.kernels.apb` (the pair-bias-attention provider) hands out `ln_proj` (pair bias
+    producer), row `fpf_apb` (`apb_views`, gate fused), row `dit_fast` via `dit_block_rows`
+    (adaln / resgate_adaln / swiglu / resgate) and `fold_mask`; everything between them is torch
+    (F.linear / F.layer_norm), as in their kits. Weights are packed ONCE here from the module's
+    parameters, as a kit packs at install time. Upstream calls run under
+    `torch.compiler.disable`, so a compiled row compiles only the torch glue between them.
+    """
+    import torch.nn.functional as F
+
+    root = upstream.configure()
+    apb = upstream.provider("apb")
+    try:
+        lnp = apb.carried_module("ln_proj")
+        core = apb.carried_module("fpf_apb")
+        rows, selection = apb.dit_block_rows(word="dit_fast", dtype=str(act),
+                                             n_tokens=length, samples=samples)
+    except apb.Refusal as exc:
+        raise UnsupportedBenchmark(f"opt_core.kernels.apb refuses: {exc}") from exc
+    try:
+        commit = (Path(root) / "UPSTREAM_COMMIT.txt").read_text().split()[0][:12]
+    except (OSError, IndexError):
+        commit = "?"
+    blocks = list(model.layers)
+    at0 = blocks[0].attention
+    if at0.use_qk_norm:
+        raise UnsupportedBenchmark("the Anthropic DiT composition has no q/k RMSNorm")
+    d = at0.to_query.weight.shape[0]
+    heads = at0.n_head
+    head_dim = d // heads
+    d_cond = at0.ada_ln_in.ln_cond.weight.shape[0]
+
+    def w(t):
+        return t.detach().to(act).contiguous()
+
+    def wf(t):
+        return t.detach().float().contiguous()
+
+    packs = []
+    for block in blocks:
+        at, tr = block.attention, block.transition
+        try:
+            pair_bias_pack = lnp.pack_pair_bias_weights(wf(at.ln_pair.weight), None, w(at.to_bias.weight),
+                                                        at.ln_pair.eps, at.to_bias.weight.device)
+        except lnp.Unsupported as exc:
+            raise UnsupportedBenchmark(
+                f"Anthropic has no dense pair-bias DiT block at these widths: {exc} (served c_pair "
+                f"{lnp.SERVED_C_PAIR}); its atom attention (apb row fpf_atom) is the AF3 32x128 windowed "
+                "op, a different function, and is not substituted") from exc
+        packs.append(dict(
+            lnc_a=wf(at.ada_ln_in.ln_cond.weight), eps_ca=at.ada_ln_in.ln_cond.eps, eps_a=at.ada_ln_in.ln_in.eps,
+            ws_a=w(at.ada_ln_in.to_scale.weight), bs_a=w(at.ada_ln_in.to_scale.bias), wb_a=w(at.ada_ln_in.to_bias.weight),
+            wqkvg=torch.cat([w(at.to_query.weight), w(at.to_key.weight), w(at.to_value.weight),
+                             w(at.to_gate.weight)], 0).contiguous(),
+            bqkvg=torch.cat([w(at.to_query.bias), torch.zeros(3 * d, device=at.to_query.bias.device,
+                                                              dtype=act)]).contiguous(),
+            pair_bias=pair_bias_pack,
+            wo=w(at.to_out.weight), wsc_a=w(at.to_scale.weight), bsc_a=w(at.to_scale.bias),
+            lnc_t=wf(tr.ada_ln_in.ln_cond.weight), eps_ct=tr.ada_ln_in.ln_cond.eps, eps_t=tr.ada_ln_in.ln_in.eps,
+            ws_t=w(tr.ada_ln_in.to_scale.weight), bs_t=w(tr.ada_ln_in.to_scale.bias), wb_t=w(tr.ada_ln_in.to_bias.weight),
+            wab=torch.cat([w(tr.expand_a.weight), w(tr.expand_b.weight)], 0).contiguous(),
+            wsq=w(tr.squeeze.weight), wsc_t=w(tr.to_scale.weight), bsc_t=w(tr.to_scale.bias)))
+
+    # A key mask is folded into the bias by upstream's own recipe (the mask-free rows take it that
+    # way); an all-true mask is not folded. Decided once here: the bench's mask is a fixed tensor.
+    key_mask = None if bool(mask.all()) else mask.reshape(1, -1)
+    pair_bias = torch.compiler.disable(lnp.pair_bias)
+    apb_views = torch.compiler.disable(core.apb_views)
+    fold_mask = torch.compiler.disable(apb.fold_mask)
+    adaln = torch.compiler.disable(rows.adaln)
+    resgate_adaln = torch.compiler.disable(rows.resgate_adaln)
+    swiglu = torch.compiler.disable(rows.swiglu)
+    resgate = torch.compiler.disable(rows.resgate)
+
+    def composed(single, cond, pair, mask_arg=None):
+        a, b, n, _ = single.shape
+        if b != 1:
+            raise UnsupportedBenchmark("the Anthropic DiT composition shares one pair bias: B must be 1")
+        rows_m = a * n
+        # NO conditioning dedup: every sample has its own conditioning here (Ns = A * L)
+        c = cond.reshape(rows_m, d_cond).to(act)
+        # fp32 residual stream, updated in place: always a copy, never the (fp32) input itself
+        res = single.reshape(rows_m, d).to(torch.float32, copy=True)
+        for p in packs:
+            cn = F.layer_norm(c.float(), (d_cond,), p["lnc_a"], None, p["eps_ca"]).to(act)
+            xa = adaln(res, F.linear(cn, p["ws_a"], p["bs_a"]), F.linear(cn, p["wb_a"]), act, eps=p["eps_a"])
+            qkvg = F.linear(xa, p["wqkvg"], p["bqkvg"]).view(a, n, 4 * d)
+            q, k, v, g = (qkvg[:, :, i * d:(i + 1) * d].unflatten(2, (heads, head_dim)) for i in range(4))
+            bias = pair_bias(pair, p["pair_bias"], out_layout="bhij")          # [1, H, L, L] view
+            if key_mask is not None:
+                bias = fold_mask(bias, key_mask)
+            o = apb_views(q, k, v, bias, g, scale=head_dim ** -0.5)             # sigmoid(g) * attention
+            o2 = F.linear(o.reshape(rows_m, d), p["wo"])
+            gl_a = F.linear(c, p["wsc_a"], p["bsc_a"])
+            cn_t = F.layer_norm(c.float(), (d_cond,), p["lnc_t"], None, p["eps_ct"]).to(act)
+            xt = resgate_adaln(gl_a, o2, res, F.linear(cn_t, p["ws_t"], p["bs_t"]), F.linear(cn_t, p["wb_t"]),
+                               act, eps=p["eps_t"])                            # res += sig(gl_a) o2; xt = AdaLN(res)
+            h = swiglu(F.linear(xt, p["wab"]), act)
+            t = F.linear(h, p["wsq"])
+            res = resgate(F.linear(c, p["wsc_t"], p["bsc_t"]), t, res, out=res)
+        return res.view(a, b, n, d).to(single.dtype)
+
+    model.composed = composed
+    return (f"anthropic[pristine opt_core {commit} at {root}]: torch F.linear/F.layer_norm glue + "
+            f"opt_core.kernels.ln_proj.pair_bias (every layer, every call) + apb row fpf_apb apb_views "
+            f"(gate fused, bias shared by the S samples) + apb row {selection.row} "
+            f"{rows.__name__} adaln/resgate_adaln/swiglu/resgate; fp32 residual; q|k|v|g one GEMM; "
+            f"cond dedup OFF (Ns=A*L: per-sample conditioning); key mask "
+            f"{'none' if key_mask is None else 'folded by apb.fold_mask (fp32 bias)'}; weights packed once")
 
 
 def bench_module_dit_atom(conf, seq_len, implementation, fabric):
@@ -3257,6 +3995,9 @@ MODULE_TARGETS = {
     "dit": bench_module_dit,
     "dit_atom": bench_module_dit_atom,
     "swa_dit": bench_module_swa_dit,
+    "outer_product": bench_module_outer_product,
+    "msa_pair_weighted_averaging": bench_module_msa_pair_weighted_averaging,
+    "attention_pair_bias": bench_module_attention_pair_bias,
 }
 
 # The naming rules above are checked here, not just written down: a target whose function is named
@@ -3302,17 +4043,27 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
     # unsupported labels and duplicate reference implementations in ordinary `all` runs.
     if level == "module":
         supported = {
-            "triangle_multiplication": ("pytorch", "triton", "miniworld", "cuequivariance", "cute", "dtv1"),
-            "triangle_multiplication_bidirectional": ("pytorch", "triton", "miniworld", "cuequivariance", "cute", "dtv1"),
-            "triangle_attention": ("pytorch", "triton", "miniworld", "cuequivariance"),
-            "transition": ("pytorch", "triton", "miniworld", "cute"),
+            # `anthropic` is listed where a real Anthropic path exists. Every one is
+            # forward-only, so its training rows are explicit `unsupported` rows.
+            "triangle_multiplication": ("pytorch", "triton", "miniworld", "cuequivariance", "dtv1",
+                                        ANTHROPIC_IMPL, ANTHROPIC_HYBRID_IMPL),
+            "triangle_multiplication_bidirectional": ("pytorch", "triton", "miniworld", "cuequivariance",
+                                                      "dtv1", ANTHROPIC_IMPL, ANTHROPIC_HYBRID_IMPL),
+            "triangle_attention": ("pytorch", "triton", "miniworld", "cuequivariance", ANTHROPIC_IMPL),
+            "transition": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
+            "outer_product": ("pytorch", "miniworld", ANTHROPIC_IMPL, ANTHROPIC_HYBRID_IMPL),
+            "msa_pair_weighted_averaging": ("pytorch", "miniworld", ANTHROPIC_IMPL, ANTHROPIC_HYBRID_IMPL),
+            "attention_pair_bias": ("pytorch", "triton", "miniworld", "cuequivariance"),
             "conditioned_transition": ("pytorch", "triton", "miniworld"),
             "adaptive_layernorm": ("pytorch", "triton", "miniworld"),
             "augmented_attention_token": ("pytorch", "triton", "miniworld"),
             "augmented_attention_atom": ("pytorch", "triton", "miniworld"),
             "swa_atom_attention": ("pytorch", "miniworld"),
-            "dit": ("pytorch", "triton", "miniworld"),
-            "dit_atom": ("pytorch", "triton", "miniworld"),
+            "dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
+            # anthropic here is an explicit `unsupported` row at the default atom pair width (16):
+            # ln_proj.pair_bias serves c_pair 64 / 128, and Anthropic's atom attention is the
+            # 32x128 windowed op, not this dense block (see bench_module_dit).
+            "dit_atom": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             "swa_dit": ("pytorch", "triton", "miniworld"),
         }
         if set(supported) != set(MODULE_TARGETS):
@@ -3359,26 +4110,10 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
 #: `miniworld_engine.kernels` re-export (16 of 32). So it is declared, and a test holds every key
 #: against the real target and implementation names so it cannot drift into naming nothing.
 #:
-#: Every entry below is the message that card actually produced, not a guess. An implementation
+#: Every entry must be the message that card actually produced, not a guess. An implementation
 #: absent from this table is offered everywhere, which is the behaviour that was there before.
-IMPL_MIN_ARCH: dict[tuple[str, str], str] = {
-    # AssertionError: first version targets SM90 (H100)
-    ("adaln", "adaln_lnfold"): "sm90",
-    ("gemm_epilogue", "layernorm_linear_cute"): "sm90",
-    # AssertionError: SM90 (H100) only
-    ("gemm_epilogue", "layernorm_linear_cute_fused"): "sm90",
-    ("transition", "cute"): "sm90",
-    ("transition_b2b", "cute_transition_fused"): "sm90",
-    # OpError: expects arch to be sm_90a, but got sm_80
-    ("gemm_gate", "tm2_cute"): "sm90",
-    # NotImplementedError: Gemm Sm80 is not implemented yet
-    ("dual_gemm_epilogue", "tm1_cute"): "sm90",
-    ("dual_gemm_epilogue", "trimul_inproj_cute"): "sm90",
-    # Both module variants reach the CuTe GEMM path; Ampere reports
-    # NotImplementedError: Gemm Sm80 is not implemented yet.
-    ("triangle_multiplication", "cute"): "sm90",
-    ("triangle_multiplication_bidirectional", "cute"): "sm90",
-}
+#: Empty since v2.2.0: every entry gated a row of the CuTe DSL backend, which was removed.
+IMPL_MIN_ARCH: dict[tuple[str, str], str] = {}
 
 
 def min_arch_for(target: str, implementation: str) -> str | None:
@@ -3402,7 +4137,7 @@ def runnable_here(target: str, implementation: str) -> bool:
     A `*_bwd` target falls back to its forward sibling's entry. `transition_b2b_bwd` benches the
     backward of the kernels `transition_b2b` benches, so an implementation the card cannot run one
     way it cannot run the other -- and keying both separately means every future entry has to be
-    written twice, which is exactly how `cute_transition_fused` stayed ungated on the backward
+    written twice, which is exactly how a CuTe transition row once stayed ungated on the backward
     target after the forward one was fixed.
     """
     from miniworld_engine.autotune.run_all import meets_arch
@@ -4009,7 +4744,7 @@ def main(cfg: DictConfig) -> None:
                 error = ""
                 try:
                     require_source_identity(provenance["source_hash"])
-                    with forward_stream(conf):
+                    with implementation_environment(implementation), forward_stream(conf):
                         result = bench_func(conf, seq_len, implementation, fabric)
                     require_source_identity(provenance["source_hash"])
                     capture_autotune_state(

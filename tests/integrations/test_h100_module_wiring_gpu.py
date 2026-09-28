@@ -163,6 +163,18 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
 
 
 
+def test_trimul_d64_training_uses_cuda():
+    """D64 trains on its own fused CUDA path by default; the width policy can still opt out."""
+    m = BidirectionalTriangleMultiplication(64, implementation=ImplementationType.MINIWORLD).cuda()
+    x = torch.randn(1, 384, 384, 64, device="cuda", dtype=torch.bfloat16)
+    assert trimul_h100.serves(m, x)
+    old = settings.configure(trimul_h100_training_widths=(128, 256, 384, 512))
+    try:
+        assert not trimul_h100.serves(m, x)
+    finally:
+        settings.configure(**vars(old))
+
+
 @pytest.mark.parametrize("D", [64, 128, 256, 384, 512])
 @pytest.mark.parametrize("L", [384, 768])
 def test_trimul_width_training(D, L, monkeypatch):
@@ -237,7 +249,7 @@ def test_trimul_width_training(D, L, monkeypatch):
     assert max(e[1:]) < 0.01
 
 
-@pytest.mark.parametrize("width", [64, 128])
+@pytest.mark.parametrize("width", [128, 256, 384, 512])
 def test_trimul_training_graph_replay_live_weights(width, monkeypatch):
     """A captured backward must initialize its own scratch and read live weights."""
     torch.compiler.reset()

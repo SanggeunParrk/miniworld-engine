@@ -5,9 +5,9 @@ Two facts, two sources, no inference between them:
   * WHAT EXISTS is declared by the repo in ``kernels/registry.csv``. It is data, not something
     to be discovered. The previous version inferred it by walking the AST for
     ``@triton.autotune`` decorators plus whatever symbols the bench happened to import, and that
-    guessing produced a string of wrong answers: backends read off the directory name (nine
-    Triton kernels living under ``cute/`` were labelled cute), six ``__global__`` kernels in .cu
-    files and six ``@cute.kernel`` collectives missing entirely, and host launchers counted as
+    guessing produced a string of wrong answers: backends read off the directory name (Triton
+    kernels were labelled by their parent directory), ``__global__`` kernels in .cu
+    files missing entirely, and host launchers counted as
     kernels.
 
   * WHAT RUNS is decided by running it. Not by scanning for ``assert capability == 9``, not by

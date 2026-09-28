@@ -1,7 +1,7 @@
 """Fused front-backward: EW (gated-GEMM bwd) fused INTO the two grad GEMMs so the
 (M,4D) d_preact intermediate never hits HBM (dt-v1 materializes it; we don't).
 
-Inputs are channel-major (matches the cute front's bdll output + saved preact):
+Inputs are channel-major (the bdll front output + saved preact):
   d_lr   : (2D, M)  grads of [left|right]            (= d_lr.reshape(2D,M))
   preact : (4D, M)  pre-GLU logits, interleaved [g,p] per col, left then right
   x_n    : (M, D)
@@ -117,7 +117,7 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, *, pair_mask=No
     """The front bwd EXCEPT the final dxn GEMM: builds d_concat (elementwise), the 4 weight
     grads (cuBLAS huge-K, STAYS cuBLAS), and the stacked W operand. Returns
     (dconc (4H,M), dWL, dWLg, dWR, dWRg, W_stack (4H,Din)). The caller forms dxn = dconcᵀ@W_stack
-    (and `BidirBackHalf` fuses the gate's dx_gate add into that GEMM in cute)."""
+    (the bidirectional back half fuses the gate's dx_gate add into that GEMM)."""
     B, H, L, _ = d_left.shape   # per-side hidden width
     Din = WL.shape[0]           # input width (= d_pair); may differ from H (bidirectional)
     M = B * L * L
@@ -129,10 +129,8 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, *, pair_mask=No
     pair_mask = None if pair_mask is None else pair_mask.to(d_left.dtype).reshape(M).contiguous()
     dconc = _dconcat(dL2, dR2, preact2, M, H, token_key(L), pair_mask)
 
-    # dW: (4H,M)@(M,Din) — dispatched (huge-K reduction reliably picks cuBLAS; quack 2.6-5x
-    # slower there — measured. dispatch confirms + self-documents).
-    from miniworld_engine.kernels.trimul_inproj.cute import dispatch
-    dWs = dispatch.mm("dWs", dconc, xf)
+    # dW: (4H,M)@(M,Din) — cuBLAS (the huge-K reduction; the measured winner over quack 2.6-5x).
+    dWs = dconc @ xf
     dWLg = dWs[:H].t().contiguous()
     dWL = dWs[H:2 * H].t().contiguous()
     dWRg = dWs[2 * H:3 * H].t().contiguous()
@@ -202,8 +200,7 @@ def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
 
     dconc = _dconcat_sig(dL2, dR2, lrL, lrR, sg2, M, H, token_key(L))
 
-    from miniworld_engine.kernels.trimul_inproj.cute import dispatch
-    dWs = dispatch.mm("dWs", dconc, xf)
+    dWs = dconc @ xf
     dWLg = dWs[:H].t().contiguous()
     dWL = dWs[H:2 * H].t().contiguous()
     dWRg = dWs[2 * H:3 * H].t().contiguous()

@@ -1,8 +1,8 @@
 {
   "module_name": "triattn_bias_rs8_async_q4",
   "binary": "triattn_bias_rs8_async_q4.so",
-  "torch": "2.10.0+cu128",
-  "python_abi": "cpython-310",
+  "torch": "2.13.0+cu129",
+  "python_abi": "cpython-312",
   "lengths": [
     384,
     768,
@@ -17,7 +17,7 @@
     "bias_fusion.cu": "401b3c654c2e0b2d34bb843966c92c05ce7d9eed7d76d46ab8f25045343ac8e2",
     "build_bias.py": "4f740ab6c0ac5e246ce2b27902a9d2e8110d384470a510ad442884a8a090b18c",
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
-    "triattn_bias_rs8_async_q4.so": "0b377f05a587d59913f5db7166e6a95b922d09d4124f851d85489950bcbb5065"
+    "triattn_bias_rs8_async_q4.so": "d5b5bbd86ef6d629b4c0a1a8f811f67203a7e09ffbefff1c546a2ab6d9271394"
   },
   "dq_artifact": "rs_softmax_overlap",
   "below80_combined_job": 16576,

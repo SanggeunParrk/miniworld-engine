@@ -17,10 +17,10 @@ The shape, and what each part is for:
                    that until this rule was enforced.
 ``dispatch.py``    a CHOICE among implementations, at whatever level the choice lives: per-GPU
                    calibration (``layernorm``, ``bias_only_attention``), a d-aware pick between
-                   triton variants (``conditioned_transition/triton``), cuBLAS-vs-quack
-                   (``trimul_inproj/cute``). Optional, and NOT the same thing as an interface --
-                   the two were briefly the same filename, which is why this rule is written down.
-``triton/`` ``cute/`` ``cuda/`` ``cutlass/``   backends. Optional, but each is a package.
+                   triton variants (``conditioned_transition/triton``). Optional, and NOT the same
+                   thing as an interface -- the two were briefly the same filename, which is why
+                   this rule is written down.
+``triton/`` ``cuda/``   backends. Optional, but each is a package.
 ``whole_op.py``    a whole model-layer op with weights as arguments (LN -> ... -> gate in one
                    call). Only some families expose one; it is a property of the layer, not of
                    the folder.
@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 
 KERNELS = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine" / "kernels"
-BACKENDS = {"triton", "cute", "cuda", "cutlass"}
+BACKENDS = {"triton", "cuda"}
 
 #: The only imports one ``drivers/<family>.py`` may take from another, and the shape group each
 #: one shares. The harness is one module per family, but the SHAPES are per group -- the three
@@ -57,7 +57,6 @@ DRIVER_SHAPE_OWNERS = {
     "augmented_attention": "triangle_attention",
     "bias_only_attention": "triangle_attention",
     "adaln": "conditioned_transition",
-    "fused_ln_mask": "layernorm_linear",
     "layernorm": "layernorm_linear",
     "gated_projection": "trimul_inproj",
     "rmsnorm_adamod": "rmsnorm",

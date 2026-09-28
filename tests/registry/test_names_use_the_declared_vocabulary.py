@@ -16,7 +16,7 @@ Two of 103 names were outside it when this test was written:
     key, which the same rule that excludes SAVE_GATE/SAVE_PREACT says earns no token. What that
     kernel actually contracts for is the prefolded `c1 = mean*rstd` it reads, so it is
     `layernorm_bwd_foldstats_triton` now -- the token its sibling
-    `layernorm_fwd_recompute_foldstats_triton` already uses.
+    `layernorm_fwd_recompute_foldstats_triton` used (that sibling was removed in v2.2.0).
 
 Drift direction this catches: a name using a token the document does not declare. The reverse --
 a token added to the document and never used -- is not an error, so it is not checked.
@@ -47,7 +47,7 @@ ROLES = ("reduce", "gelu", "input", "output", "inproj", "bwd_reduce", "bwd_pre",
 DETAILS = ("gather", "dual", "ln", "residual", "masked", "rows", "f567", "train", "recompute", "foldstats", "noaffine", "rowscale", "dropres", "inplace", "ktiled",
            "strided", "mmajor", "extern", "packed", "atomic", "contig", "split", "flat", "fp32",
            "sm100", "sm90", "b2b", "saveact", "res")
-BACKENDS = ("triton", "cutlass", "cute", "cuda")
+BACKENDS = ("triton", "cuda")
 
 _PIECES = tuple(sorted(set(ROLES) | set(DETAILS), key=len, reverse=True))
 

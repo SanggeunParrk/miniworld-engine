@@ -11,7 +11,7 @@ and *those* resolve it to the best concrete kernel for the running GPU:
                             (trimul, triangle-attention); modules without one
                             (transition) fall back to their own auto path
     * ``miniworld``      -> ours: each module auto-routes to its fastest internal
-                            impl (triton / cute / hand-CUDA) per shape and arch
+                            impl (triton / hand-CUDA) per shape and arch
 
 This mirrors the team-gm Pairformer but keeps only the **pair track** (the part
 with our kernels). The single track (OuterProduct / AttentionPairBias / single

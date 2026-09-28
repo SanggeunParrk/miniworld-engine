@@ -146,26 +146,12 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
     # covered by the unpinned unit, so pinning both would double the build for nothing.
     "ln_bwd_path": (("persistent", "atomic", "cuda"), ("train",)),
     "ln_out_bwd_path": (("split", "fused"), ("train",)),
-    "transition_force_split": ((True,), ("eval", "train")),
-    "transition_residual_fusion": ((True,), ("eval", "train")),
-    "transition_cuda_b2b": ((False,), ("eval",)),
-    "transition_fuse_stats": ((True,), ("eval", "train")),
-    "transition_savedxn_split_bwd": ((True,), ("train",)),
-    "transition_dab_lnbwd": ((True,), ("train",)),
-    "transition_lnbwd_privatize": ((False,), ("train",)),
-    "trimul_impl": (("triton", "cute"), ("eval", "train")),
+    "trimul_impl": (("triton",), ("eval", "train")),
     # The rest of settings.py's backend selectors. They were left out when SWITCHES was written
     # and each one is a set of kernels no unit ever reached: measured against the shipped A6000
     # cache, 26 kernels with working drivers were in the cache and in NO derived unit, and the
     # far side of these switches is where most of them live.
-    "transition_large_d_training": (("triton", "cute"), ("train",)),
-    "transition_cute_backward": (("cute",), ("train",)),
-    "transition_gatebwd_wgmma": ((False,), ("train",)),
-    "transition_lnbwd_cuda": ((False,), ("train",)),
     "layernorm_cuda_bwd": ((True,), ("train",)),
-    "trimul_cute_dispatch": ((False,), ("eval", "train")),
-    "trimul_train_front_fused": ((False,), ("train",)),
-    "trimul_out_layout": (("bdll_direct", "bdll_direct_wide"), ("eval", "train")),
 }
 
 #: switch name -> the ``settings`` field it pins, and how to parse the CLI string back to a value.
@@ -177,22 +163,8 @@ SWITCH_SETTINGS: dict[str, tuple[str, Callable[[str], object]]] = {
     "infer_concat": ("pin_infer_concat", lambda v: v == "True"),
     "ln_bwd_path": ("layernorm_bwd_path", str),
     "ln_out_bwd_path": ("layernorm_out_bwd_path", str),
-    "transition_force_split": ("transition_force_split", lambda v: v == "True"),
-    "transition_residual_fusion": ("transition_residual_fusion", lambda v: v == "True"),
-    "transition_cuda_b2b": ("transition_cuda_b2b", lambda v: v == "True"),
-    "transition_fuse_stats": ("transition_fuse_stats", lambda v: v == "True"),
-    "transition_savedxn_split_bwd": ("transition_savedxn_split_bwd", lambda v: v == "True"),
-    "transition_dab_lnbwd": ("transition_dab_lnbwd", lambda v: v == "True"),
-    "transition_lnbwd_privatize": ("transition_lnbwd_privatize", lambda v: v == "True"),
     "trimul_impl": ("trimul_impl", str),
-    "transition_large_d_training": ("transition_large_d_training", str),
-    "transition_cute_backward": ("transition_cute_backward", str),
-    "transition_gatebwd_wgmma": ("transition_gatebwd_wgmma", lambda v: v == "True"),
-    "transition_lnbwd_cuda": ("transition_lnbwd_cuda", lambda v: v == "True"),
     "layernorm_cuda_bwd": ("layernorm_cuda_bwd", lambda v: v == "True"),
-    "trimul_cute_dispatch": ("trimul_cute_dispatch", lambda v: v == "True"),
-    "trimul_train_front_fused": ("trimul_train_front_fused", lambda v: v == "True"),
-    "trimul_out_layout": ("trimul_out_layout", str),
 }
 
 
@@ -1145,9 +1117,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         if r["kernel"] not in BUILD_OPS and not _keys_on_shape(
                 Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):
             # A kernel that does not key on shape_key has no per-shape cache to build, so driving
-            # it at every length would tune one identical bucket N times. transition_fold_triton is
-            # the only one today, and correctly so: it reads the WEIGHTS (Wa, Wb (N,K), gamma,
-            # beta (K,)) and never touches the activation, so N and K are its whole shape.
+            # it at every length would tune one identical bucket N times -- e.g. a weight-only
+            # kernel, whose N and K are its whole shape.
             sided = sided[:1]
         alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
         dtypes = [alias.get(x, x) for x in (r.get("dtypes") or "bf16").split("|") if x]
@@ -1168,13 +1139,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # drawer the builder never filled. Rows genuinely pinned to the atom width say `width=atom`
         # (cond_transition's b2b pair, which `dispatch.ATOM_D_MAX` routes only at d <= 128).
         def _widths(side: str, _k=klass, _lvl=r["level"], _shared=_shared,
-                    _axis=_axis, _axis_drives=_axis_drives, _op=r["kernel"]) -> tuple:
+                    _axis=_axis, _axis_drives=_axis_drives) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
-            # The explicit Hopper squeeze dispatch is qualified at D=512, outside
-            # the current model widths. Keep its standalone cache build reachable.
-            if _op == "transition_squeeze_residual_sm90_cute":
-                return (512,)
             # The axis ladder REPLACES the stream ladder only where the driver takes that axis as
             # its width -- `driver_width` returns the head dim itself, or the per-side hidden
             # width, or ND -- because then no stream rung is the right number and no side changes
@@ -1373,8 +1340,8 @@ def units(selected: list[Case]) -> list[Unit]:
                                     u.mode == "train", u.dtype, switch, value, u.impl, u.compute))
             continue
         # build/gpu_to_kernels/<sm>.csv, not a list trimmed in cases(): the sweep is shared across
-        # cards, so dropping "cute" from Case.impls to protect sm_86 would also stop building it
-        # on an H100, where it is the fastest path there is.
+        # cards, so dropping an arch-specific impl from Case.impls to protect sm_86 would also stop
+        # building it on an H100, where it is the fastest path there is.
         allowed = {(i, str(d).replace("torch.", "")) for i in case.impls for d in case.dtypes
                    if sm is None or build_matrix.allows(
                        sm, case.name, i, str(d).replace("torch.", ""))}
@@ -2134,13 +2101,12 @@ def audit(selected: list[Case]) -> list[tuple]:
                             # a case that aborts is production doing no such thing: the lookups it
                             # made before the exception are for a shape this card never reaches.
                             #
-                            # 31 of one A6000 replay's misses came from `cases()` forcing
-                            # `implementation="cute"` on triangle_multiplication, every one of them
-                            # followed immediately by `NotImplementedError: Gemm Sm80 is not
-                            # implemented yet`. They cannot be built here -- the case that would
-                            # capture them dies at the same line -- so counting them made the
-                            # number unactionable and sent a 1,220-unit build after keys no unit
-                            # could ever produce.
+                            # A replay once counted misses from a case forced onto an
+                            # implementation the card cannot run, every one of them followed
+                            # immediately by an unsupported-arch error. They cannot be built here --
+                            # the case that would capture them dies at the same line -- so counting
+                            # them made the number unactionable and sent a 1,220-unit build after
+                            # keys no unit could ever produce.
                             before = set(cache_misses())
                             if run_case(case, length, di, train=train, impl=impl, dtype=dtype):
                                 continue

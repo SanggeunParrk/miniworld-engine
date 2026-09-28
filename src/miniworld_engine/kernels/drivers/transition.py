@@ -163,14 +163,6 @@ def transition_expand_swiglu_triton() -> None:
     triton_transition(_pair_x(K_FROM_ND), wa, wb, ws, N_EXPAND)
 
 
-def transition_fold_triton() -> None:
-    """_fold_kernel via fold_swiglu_triton: Wa/Wb (ND, K), gamma/beta (K,)."""
-    from miniworld_engine.kernels.transition.triton.fold import fold_swiglu_triton
-
-    _, g, b, wa, wb, _ = _transition_operands()
-    fold_swiglu_triton(wa, wb, g, b)
-
-
 def transition_layernorm_expand_swiglu_triton() -> None:
     """_transition_expand_gate_kernel via transition_expand_gate. SAVE_XN=0 ONLY.
 
@@ -239,8 +231,8 @@ def transition_bwd_swiglu_recompute_triton() -> None:
     # whole saved-xn half of this kernel ran on the heuristic subset.
     _transition_expand_gatebwd_savedxn(x2, wa, wb, grad_expand, store_h=True,
                                        shape_key=SHAPE_KEY)          # NORMALIZE=0, STORE_H=1
-    # STORE_H=0 is NOT driven: fused.py:1052 defaults `store_h=True` and both callers take that
-    # default (cute/fused.py:216 passes it explicitly, fused.py:1573 implicitly). NORMALIZE=0 is,
+    # STORE_H=0 is NOT driven: fused.py:1052 defaults `store_h=True` and its caller takes that
+    # default (fused.py:1573, implicitly). NORMALIZE=0 is,
     # because the saved-xn backward really runs it -- replay asked for (NORMALIZE=0, STORE_H=1)
     # six times.
 
@@ -255,70 +247,24 @@ def layernorm_bwd_foldstats_triton() -> None:
 
     x2, g, _, _, _, _ = _transition_operands()
     rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
-    previous = settings.current().transition_lnbwd_cuda
-    prev_priv = settings.current().transition_lnbwd_privatize
-    settings.configure(transition_lnbwd_cuda=False)
+    # PRIVATIZE_DGDB=1 only: `settings.transition_lnbwd_privatize` defaults True and nothing in
+    # production sets it, so =0 is reachable only from a build-harness pin. Both pins are applied
+    # only while the settings still declare them (v2.2.0 retires the legacy transition_* switches).
+    current = settings.current()
+    pins = {name: value for name, value in (("transition_lnbwd_cuda", False),
+                                            ("transition_lnbwd_privatize", True))
+            if hasattr(current, name)}
+    previous = {name: getattr(current, name) for name in pins}
+    if pins:
+        settings.configure(**pins)
     try:
-        # PRIVATIZE_DGDB=1 only. The kernel's comment (fused.py:1141-1143) says "the autotune
-        # builder sweeps the off-default False side (builder.SWITCHES)" -- true of the MODULE
-        # pass, false of `build all`, which has no switch axis. But the conclusion is to drive the
-        # DEFAULT, not both: `settings.transition_lnbwd_privatize` defaults True (settings.py:213)
-        # and nothing in production sets it, so =0 is reachable only from a build-harness pin.
-        settings.configure(transition_lnbwd_privatize=True)
         _transition_ln_bwd(torch.empty_like(x2).normal_(), x2, rstd, c1, g,
                            shape_key=SHAPE_KEY)
     finally:
-        # BOTH restored: the loop above leaves `transition_lnbwd_privatize` on its last value, and
-        # a driver that mutates global settings past its own return changes what every LATER
-        # driver in the same build process tunes.
-        settings.configure(transition_lnbwd_cuda=previous,
-                           transition_lnbwd_privatize=prev_priv)
-
-
-def layernorm_fwd_recompute_foldstats_triton() -> None:
-    """_xn_recompute_kernel via _xn_recompute (cute/fused.py backward's xn re-materialization)."""
-    from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
-    from miniworld_engine.kernels.transition.cute.fused import _xn_recompute
-
-    x2, g, b, _, _, _ = _transition_operands()
-    rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
-    _xn_recompute(x2, rstd, c1, g, b, shape_key=SHAPE_KEY)
-
-
-def transition_bwd_epilogue_triton() -> None:
-    """_grad_mul_kernel via _grad_mul_inplace: dA, dB, grad_expand all (M, ND) bf16 contiguous."""
-    from miniworld_engine.kernels.transition.cute.gatebwd_sm100 import _grad_mul_inplace
-
-    _grad_mul_inplace(rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL),
-                      shape_key=SHAPE_KEY)
-
-
-def transition_bwd_transpose_packed_triton() -> None:
-    """_cdup_interleave_kernel via _cdup_interleave: grad_expand (M, ND) -> (M, 2*ND)."""
-    from miniworld_engine.kernels.transition.cute.backward_gatebwd import (
-        _cdup_interleave,
-    )
-
-    _cdup_interleave(rows2d(ROWS, ND_SMALL), shape_key=SHAPE_KEY)
-
-
-def swiglu_gate_bwd_sm100() -> None:
-    """SwiGLUGateBwdKernel.kernel via its host entry transition_expand_gatebwd_sm100.
-    xn (M, K), wa/wb (ND, K), grad_expand (M, ND) bf16.
-
-    This is a cutlass-DSL SM100 GEMM (``mma_tiler_mn=(128, 128)``, TMA store, operands marked
-    ``assumed_align=16``; gatebwd_sm100.py:806-830), so its M/ND alignment needs are a plausible
-    but UNPROVEN requirement -- nothing in the host entry asserts one. It is therefore left
-    ragged rather than wrapped in ``aligned_only``: if the shape matters, the failure is the
-    finding. It cannot be settled on the sm86 cards this sweep runs on, where the kernel does
-    not launch at all for reasons that have nothing to do with the shape.
-    """
-    from miniworld_engine.kernels.transition.cute.gatebwd_sm100 import (
-        transition_expand_gatebwd_sm100,
-    )
-
-    xn, _, _, wa, wb, _ = _transition_operands()
-    transition_expand_gatebwd_sm100(xn, wa, wb, rows2d(ROWS, wa.shape[0]), shape_key=SHAPE_KEY)
+        # Restored: a driver that mutates global settings past its own return changes what
+        # every LATER driver in the same build process tunes.
+        if previous:
+            settings.configure(**previous)
 
 
 # ── the vendored transition_cuda extension ───────────────────────────────────────────────────
@@ -415,21 +361,6 @@ def transition_bwd_cuda() -> None:
     ext.backward(torch.randn_like(x).contiguous(), x, wa, wb, ws, _CUDA_N)
 
 
-def transition_swiglu_fwd():
-    from miniworld_engine.kernels.drivers import hopper
-    return hopper.transition_swiglu_fwd()
-
-
-def transition_gate_bwd():
-    from miniworld_engine.kernels.drivers import hopper
-    return hopper.transition_gate_bwd()
-
-
-def dab_lnbwd():
-    from miniworld_engine.kernels.drivers import hopper
-    return hopper.dab_lnbwd()
-
-
 def transition_fwd_b2b_sm90_cuda():
     from miniworld_engine.kernels.drivers import hopper
     return hopper.transition_fwd_b2b_sm90_cuda()
@@ -443,18 +374,6 @@ def transition_expand_gate_sm90_cuda():
 def transition_bwd_gate_sm90_cuda():
     from miniworld_engine.kernels.drivers import hopper
     return hopper.transition_bwd_gate_sm90_cuda()
-
-
-def squeeze_residual_sm90():
-    """Squeeze epilogue with the residual as an independent read-only C operand."""
-    from miniworld_engine.kernels.transition.cute.squeeze_residual import (
-        squeeze_residual,
-    )
-    width = 512
-    expand = torch.randn(ROWS, 4 * width, device=dev(), dtype=BF16)
-    weight = torch.randn(width, 4 * width, device=dev(), dtype=BF16)
-    residual = torch.randn(ROWS, width, device=dev(), dtype=BF16)
-    squeeze_residual(expand, weight, residual)
 
 
 def transition_squeeze_residual_triton():

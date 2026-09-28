@@ -39,10 +39,10 @@ REDUCE = ((r"\btl\.(sum|max|min)\b", "tl.reduce"), (r"__shfl\w*", "shfl"),
 def _py_bodies(text: str) -> dict[str, tuple[str, set[str]]]:
     """name -> (source, names it calls), for every function in a python file.
 
-    Methods are recorded under BOTH ``method`` and ``Class.method``: six registry symbols are the
-    dotted form (the cute kernels are classes whose entry point is ``.kernel``), and a bare-name
+    Methods are recorded under BOTH ``method`` and ``Class.method``: registry symbols may use the
+    dotted form (a kernel class whose entry point is ``.kernel``), and a bare-name
     lookup silently missed them -- one came back "elementwise" for a fused LayerNorm+GEMM.
-    Attribute calls (``self.helper(...)``, ``cute.gemm(...)``) are followed by their attribute name
+    Attribute calls (``self.helper(...)``, ``module.gemm(...)``) are followed by their attribute name
     too, since an inlined helper is usually reached that way.
     """
     out: dict[str, tuple[str, set[str]]] = {}

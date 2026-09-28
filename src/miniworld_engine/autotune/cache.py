@@ -145,7 +145,7 @@ def as_cfg_dict(config) -> dict:
     """Normalize a config from ANY backend to ``{kwargs, num_warps, num_stages}``.
 
     - triton.Config: ``.kwargs`` / ``.num_warps`` / ``.num_stages``.
-    - plain dict (cute/cuda tile params, e.g. ``{"tile_m":128,"tile_n":128,"cluster":(1,1)}``):
+    - plain dict (native CUDA tile params, e.g. ``{"tile_m":128,"tile_n":128,"cluster":(1,1)}``):
       the whole dict is the kwargs; num_warps/num_stages default 0 (unused off-Triton).
       A dict already shaped ``{"kwargs":..., "num_warps":..., "num_stages":...}`` passes through.
     """
@@ -162,7 +162,7 @@ def as_cfg_dict(config) -> dict:
 
 
 def _json_safe(kwargs: dict) -> dict:
-    """cute configs may carry tuples (cluster shapes); JSON has no tuples -> lists."""
+    """native configs may carry tuples (cluster shapes); JSON has no tuples -> lists."""
     return {k: (list(v) if isinstance(v, tuple) else v) for k, v in kwargs.items()}
 
 
@@ -1448,7 +1448,7 @@ def install_cache_reader() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# backend-agnostic config selection (cute / cuda: pick ONE, no autotune loop)
+# backend-agnostic config selection (native CUDA: pick ONE, no autotune loop)
 # --------------------------------------------------------------------------- #
 def select_config(
     op: str, *, dtype: str, bucket: str, candidates=None, device_index: int | None = None,
@@ -1457,7 +1457,7 @@ def select_config(
     """Return the cached **best** config (``{kwargs, num_warps, num_stages}``) for the running
     ``(gpu, dtype, shape-bucket)``, or ``None`` (warn-once) on a miss/stale cache.
 
-    This is the cute/cuda counterpart of :func:`configs_for`: those backends fix their
+    This is the native-CUDA counterpart of :func:`configs_for`: those backends fix their
     tile/cluster/stage config at build time and have no Triton autotune loop, so they call this
     to *pick one* config from the shipped cache instead of narrowing a grid. Callers apply the
     returned ``kwargs`` (e.g. ``tile_m``/``tile_n``/``cluster``) and, on ``None``, fall back to
@@ -1506,7 +1506,7 @@ def select_config(
     # the space it came from. Now that a grid edit is non-destructive, a narrowed ladder can leave
     # entries naming configs this kernel can no longer be launched with, and returning the fastest
     # stored one would hand the launcher a config that is not on its list.
-    # `candidates` arrives as cache dicts (`cute_config._as_cache_dicts`), so one shape only.
+    # `candidates` arrives as cache dicts (`native._CacheConfigView`), so one shape only.
     prepared = getattr(candidates, "cache_signatures", None)
     live = (prepared() if prepared is not None
             else {_sig_from_dict(as_cfg_dict(c)) for c in (candidates or [])})

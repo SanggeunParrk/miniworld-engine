@@ -355,22 +355,6 @@ def install_native_recorders() -> None:
     from miniworld_engine.kernels.layernorm import cuda as ln_cuda
     from miniworld_engine.kernels.transition import cuda as transition_cuda
 
-    # Ampere builds must retain the lean Triton dependency set. The CuTe
-    # recorder is needed only when the target architecture can dispatch CuTe.
-    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9:
-        import cutlass.cute as cute
-        import quack.cache as quack_cache
-        import quack.cute_dsl_utils as cute_utils
-
-        # Preserve Python buffers and nested Triton calls; suppress binary JIT,
-        # disk-cache reads/writes and occupancy kernels on fake inputs.
-        quack_cache.CACHE_ENABLED = False
-        # Shape-only recorder: no compiled native callable is returned.
-        cute.compile = lambda *args, **kwargs: (lambda *args, **kwargs: None)  # ty: ignore[invalid-assignment]
-        multiprocessors = torch.cuda.get_device_properties(0).multi_processor_count
-        cute_utils.get_max_active_clusters = lambda cluster_size, device_capacity=None, device_id=0: max(  # ty: ignore[invalid-assignment]
-            # Replace the lru-cached native occupancy query for fake dispatch.
-            1, multiprocessors // cluster_size)
     # Some pure tensor helpers carry @torch.compile. Their eager bodies are what
     # the recorder needs; Dynamo would create another, incompatible FakeTensorMode.
     torch._dynamo.config.disable = True

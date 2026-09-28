@@ -44,28 +44,6 @@ def attention_in_place(q, k, v, bias, mask, m, key):
     return q
 
 
-_QUACK = []
-
-
-def _quack_gemm_act():
-    """quack's gemm_act, imported directly: quack.gemm_interface does not import under this torch (its custom-op
-    schema has an enum default the schema parser rejects), and it is only a registration layer over this."""
-    if not _QUACK:
-        try:
-            from quack.gemm_act import gemm_act
-            _QUACK.append(gemm_act)
-        except Exception:  # noqa: BLE001
-            _QUACK.append(None)
-    return _QUACK[0]
-
-
-# (tile_M, tile_N, cluster_M, pingpong); tile_N <= 208 with pingpong. Measured at M = 1920 / 3840, K 768, N 2 x 1536.
-GATED_CFGS = ((128, 192, 2, True), (128, 192, 1, True), (128, 128, 2, True), (128, 256, 1, False))
-# plain GEMM candidates for _mm (tile_M, tile_N, cluster_M, pingpong); cuBLAS is always a candidate too
-PLAIN_CFGS = ((128, 128, 1, True), (128, 128, 2, True), (128, 192, 1, True), (128, 192, 2, True),
-              (128, 256, 1, False), (128, 256, 2, False))
-
-
 class FusedTokenDiT:
     def __init__(self, blocks, dtype=torch.bfloat16, core="gated2", prescale=True, core_precision="tf32"):
         """``dtype`` is the activation / weight dtype of the whole path: bf16, or fp32 (MiniWorld's v1 diffusion recipe).
@@ -114,10 +92,7 @@ class FusedTokenDiT:
                 # v2 operands, nn.Linear layout [out, in] for torch.addmm(b, x, W.t())
                 wqkvg=wqkvg.detach().to(dtype).contiguous(), wo=at.to_out.weight.detach().to(dtype).contiguous(),
                 wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0).detach().to(dtype).contiguous(),
-                ws=tr.squeeze.weight.detach().to(dtype).contiguous(),
-                # expand for the SwiGLU-epilogue GEMM: rows a0, b0, a1, b1, ... (quack's gate/up interleave)
-                wab_i=torch.stack([tr.expand_a.weight, tr.expand_b.weight], 1).reshape(-1, self.d)
-                .detach().to(dtype).contiguous()[None]))
+                ws=tr.squeeze.weight.detach().to(dtype).contiguous()))
         self.w1 = torch.cat(w1, 0).to(dtype).contiguous()          # [nb*4*d, dc]
         self.b1 = torch.cat(b1, 0).to(dtype).contiguous()
         self.w2 = torch.cat(w2, 0).to(dtype).contiguous()          # [nb*2*d, dc]
@@ -129,11 +104,7 @@ class FusedTokenDiT:
         self.dtype = dtype
         self._buf = {}
         self.streams = 1
-        self._mm_cfg = {}
         self._streams = []
-        # SwiGLU in the expand GEMM's epilogue (quack gemm_act, sm90): bf16 only; fp32 keeps cuBLAS + swiglu_rows
-        self.gated_gemm = dtype == torch.bfloat16 and _quack_gemm_act() is not None
-        self._gated_cfg = {}
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -237,11 +208,8 @@ class FusedTokenDiT:
                 K.gate_rows(qkvg[:, :D], qkvg[:, 3 * D:], a)            # o sits where q was
                 torch.mm(a, p["wo"].t(), out=y)
             K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, self.eps)
-            if self.gated_gemm:
-                self._expand_swiglu(xa, p["wab_i"], h)
-            else:
-                torch.mm(xa, p["wab"].t(), out=ab)
-                K.swiglu_rows(ab, h)
+            torch.mm(xa, p["wab"].t(), out=ab)
+            K.swiglu_rows(ab, h)
             self._mm(h, p["ws"], y)
             last = b + 1 == self.nb
             K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
@@ -249,72 +217,8 @@ class FusedTokenDiT:
         return x
 
     def _mm(self, A, W, out, bias=None):
-        """out = A @ W^T (+ bias): cuBLAS or a quack tile config, whichever measured fastest for this (M, N, K) on its
-        first call (before any capture). quack wins only some shapes (q|k|v|g at M = 3840), so neither is the default."""
-        key = (A.shape[0], W.shape[0], A.shape[1], bias is not None)
-        choice = self._mm_cfg.get(key)
-        if choice is None:
-            choice = self._pick_mm(A, W, out, bias)
-            self._mm_cfg[key] = choice
-        if choice == "cublas":
-            if bias is None:
-                torch.mm(A, W.t(), out=out)
-            else:
-                torch.addmm(bias, A, W.t(), out=out)
+        """out = A @ W^T (+ bias), cuBLAS."""
+        if bias is None:
+            torch.mm(A, W.t(), out=out)
         else:
-            self._quack_mm(A, W, out, bias, choice)
-
-    def _quack_mm(self, A, W, out, bias, c):
-        _quack_gemm_act()(A[None], W[None], None, None, out[None], None, None, c[0], c[1], c[2], 1, pingpong=c[3],
-                          rowvec_bias=None if bias is None else bias[None])
-
-    def _pick_mm(self, A, W, out, bias):
-        def timed(fn):
-            fn()
-            torch.cuda.synchronize()
-            st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-            st.record()
-            for _ in range(10):
-                fn()
-            en.record()
-            torch.cuda.synchronize()
-            return st.elapsed_time(en)
-        cands = {"cublas": lambda: (torch.mm(A, W.t(), out=out) if bias is None else torch.addmm(bias, A, W.t(), out=out))}
-        if A.dtype in (torch.bfloat16, torch.float16) and _quack_gemm_act() is not None:
-            for c in PLAIN_CFGS:
-                cands[c] = lambda c=c: self._quack_mm(A, W, out, bias, c)
-        best, best_t = "cublas", None
-        for name, fn in cands.items():
-            try:
-                t = timed(fn)
-            except Exception:  # noqa: BLE001 -- a config this shape cannot run
-                continue
-            if best_t is None or t < best_t:
-                best, best_t = name, t
-        return best
-
-    def _expand_swiglu(self, xa, wab_i, h):
-        """h = silu(xa @ Wa^T) * (xa @ Wb^T) with the SwiGLU in the GEMM epilogue: ab never reaches HBM."""
-        gemm_act = _quack_gemm_act()
-        M = xa.shape[0]
-        run = lambda c: gemm_act(xa[None], wab_i, None, None, h[None], None, "swiglu", c[0], c[1], c[2], 1, pingpong=c[3])
-        cfg = self._gated_cfg.get(M)
-        if cfg is None:                                   # first call for this M: time the candidates (before any capture)
-            best = None
-            for c in GATED_CFGS:
-                try:
-                    run(c)
-                    torch.cuda.synchronize()
-                    st, en = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-                    st.record()
-                    for _ in range(10):
-                        run(c)
-                    en.record()
-                    torch.cuda.synchronize()
-                    t = st.elapsed_time(en)
-                    if best is None or t < best[0]:
-                        best = (t, c)
-                except Exception:  # noqa: BLE001 -- a config the card or shape cannot take
-                    continue
-            cfg = self._gated_cfg[M] = best[1]
-        run(cfg)
+            torch.addmm(bias, A, W.t(), out=out)

@@ -8,7 +8,7 @@ constexpr value, so nothing fails -- the cache just cannot tell them apart.
 Resolution is by the registry's (file, symbol) PAIR, never by the bare symbol. An earlier
 throwaway version of this check keyed a `name -> constexprs` dict and unioned across files, which
 silently merged the two different kernels both called `_gate_mul_kernel`
-(`tm1/cute/launch.py` takes `BLOCK_E`; `trimul_inproj/triton/gate_elem.py` takes
+(a since-removed tm1 launcher took `BLOCK_E`; `trimul_inproj/triton/gate_elem.py` takes
 `N, BLOCK_M1, BLOCK_K, SAVE_GATE, ADD_RESIDUAL, USE_DROPOUT` -- ADD_RESIDUAL has since been
 removed from that kernel). Each then appeared to be missing
 the other's parameters, producing two entirely fabricated findings and a third false conclusion --

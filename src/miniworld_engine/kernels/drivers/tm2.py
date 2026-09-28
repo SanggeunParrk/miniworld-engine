@@ -27,9 +27,3 @@ def trimul_outproj_bwd_gate_recompute_triton() -> None:
     # _x(): same reason as the forward -- ctx.original_shape is what the backward keys on.
     x, y = _x().requires_grad_(), _x().requires_grad_()
     triton_tm2(x, y, _w(), _w()).sum().backward()
-
-
-def tm2_dual_kernel() -> None:
-    """Drive the same configurable/padded launcher used by production."""
-    from miniworld_engine.kernels.tm2.cute.tm2_cute_kernel import tm2_dual_from_scratch
-    tm2_dual_from_scratch(_x(), _x(), _w().t().contiguous(), _w().t().contiguous())

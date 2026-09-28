@@ -1,8 +1,8 @@
 {
   "module_name": "triattn_ln_warp_packed",
   "binary": "triattn_ln_warp_packed.so",
-  "torch": "2.10.0+cu128",
-  "python_abi": "cpython-310",
+  "torch": "2.13.0+cu129",
+  "python_abi": "cpython-312",
   "lengths": [
     384,
     768,
@@ -15,7 +15,7 @@
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
     "ln_backward.py": "7b9a1610c238de2a88cc6ae3e0299f08404743d63b3f347ff6763a2cfc258089",
     "ln_residual.cu": "cabd03e537012a204018fde8962ee62d3115098cfb6b02343ce9b1dc8955220c",
-    "triattn_ln_warp_packed.so": "046cf013e9124aaabdbcd76c3fec2dea6139faa940c10d7189ad9a7c079b1fac"
+    "triattn_ln_warp_packed.so": "682fb35c2bd0b6b84ba529f09d6dd31a1c040872a370103b3e2a446c7016556b"
   },
   "gate_artifact": "n64_staged",
   "below80_combined_job": 16576,

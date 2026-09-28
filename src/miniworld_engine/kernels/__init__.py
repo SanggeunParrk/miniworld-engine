@@ -7,7 +7,7 @@ Model code should consume ``ops.*`` (whole model-layer ops), never reach in here
 
 Each name resolves lazily to the canonical Triton entry point for that op, without
 knowing the per-op / per-backend folder layout. Import stays side-effect-free (no
-triton/cutlass loaded until a name is first accessed); the name set is pinned by
+triton loaded until a name is first accessed); the name set is pinned by
 ``tests/compile/test_public_api.py`` for internal stability.
 """
 
@@ -27,14 +27,7 @@ from importlib import import_module
 #:
 #: Keep the message actionable. "Deprecated" alone makes a consumer grep this repo to find out
 #: what to do; the replacement is the point.
-_DEPRECATED: dict[str, str] = {
-    "cuda_transition": (
-        "it has never had an implementation -- it deferred to transition/cuda's "
-        "`cuda_transition`, which git has no record of, and calling it raises "
-        "NotImplementedError. Use `implementation='triton'` on the Transition module, or "
-        "`kernels.cuda_transition_b2b` for the hand-CUDA LN-fused path."
-    ),
-}
+_DEPRECATED: dict[str, str] = {}
 
 
 def _warn_deprecated(name: str) -> None:
@@ -110,52 +103,11 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
 
 
-def cuda_transition(*args, **kwargs):  # signature kept for the frozen surface
-    """NOT IMPLEMENTED. Kept as a name because the public surface is frozen.
-
-    This wrapper deferred to ``transition.cuda.cuda_transition``, which has never existed in this
-    repo -- git has no record of it, and the module binds only ``cuda_transition_b2b`` and
-    ``cuda_transition_expand_gate``, both of which fuse the LayerNorm and take ``eps``. The
-    ``Transition`` module's ``KernelBackend.CUDA`` branch calls this with an already-normalised
-    ``x`` and an expansion factor ``n``, a signature nothing here provides.
-
-    It raised ``ImportError`` from inside a forward. Raising here instead says what is wrong and
-    what does exist; ``tests/builder/test_lazy_import_targets.py`` keeps any other lazy wrapper from
-    reaching the same state.
-    """
-    _warn_deprecated("cuda_transition")
-    msg = ("kernels.cuda_transition is not implemented: transition/cuda exposes only "
-           "cuda_transition_b2b (LN-fused b2b, fixed shapes) and cuda_transition_expand_gate. "
-           "Use implementation='triton' for Transition, or call one of those directly.")
-    raise NotImplementedError(msg)
-
-
-def cuda_transition_b2b(*args, **kwargs):
-    """Hand-CUDA fused b2b Transition forward. See ``transition.interface``, where it lives."""
-    from miniworld_engine.kernels.transition.interface import (
-        cuda_transition_b2b as _impl,
-    )
-
-    return _impl(*args, **kwargs)
-
-
-def cute_transition_fused(*args, **kwargs):
-    """Cute (quack SM90 WGMMA) Transition fwd+bwd. See ``transition.interface``."""
-    from miniworld_engine.kernels.transition.interface import (
-        cute_transition_fused as _impl,
-    )
-
-    return _impl(*args, **kwargs)
-
-
 __all__ = [
     "adaln_inference",
     "adaln_train",
     "cond_transition_inference_dispatch",
     "cond_transition_train",
-    "cuda_transition",
-    "cuda_transition_b2b",
-    "cute_transition_fused",
     "fused_gate_out",
     "layernorm_kernel",
     "sigmoid_gate_fused",

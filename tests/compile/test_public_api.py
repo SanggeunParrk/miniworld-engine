@@ -32,9 +32,6 @@ _CONTRACT = frozenset(
         "adaln_train",
         "cond_transition_inference_dispatch",
         "cond_transition_train",
-        "cuda_transition",
-        "cuda_transition_b2b",
-        "cute_transition_fused",
         "fused_gate_out",
         "sigmoid_gate_fused",
         "layernorm_kernel",
@@ -54,7 +51,7 @@ _CONTRACT = frozenset(
 )
 
 # Backends that must NOT be imported just by importing the package.
-_HEAVY = ("triton", "cutlass", "cuequivariance", "lightning", "hydra", "quack", "cuda.tile")
+_HEAVY = ("triton", "cutlass", "cuequivariance", "lightning", "hydra", "cuda.tile")
 
 
 def test_public_kernel_surface_is_frozen() -> None:
@@ -90,9 +87,13 @@ def test_import_is_side_effect_free() -> None:
     heavy = ", ".join(repr(h) for h in _HEAVY)
     code = (
         "import sys\n"
+        # Interpreter startup can already hold a heavy module (a .pth hook installed by a
+        # dependency, e.g. nvidia_cutlass_dsl_packages.pth via Transformer Engine); only what
+        # THIS import adds is ours to answer for.
+        "_before = set(sys.modules)\n"
         "import miniworld_engine.kernels as k\n"
         f"_heavy = ({heavy},)\n"
-        "leaked = sorted({m.split('.')[0] for m in sys.modules "
+        "leaked = sorted({m.split('.')[0] for m in set(sys.modules) - _before "
         "for h in _heavy if h in m})\n"
         "assert not leaked, f'kernels import pulled heavy backends: {leaked}'\n"
         "assert 'triton_tm1' in dir(k)\n"
@@ -138,9 +139,13 @@ def test_ops_import_is_side_effect_free() -> None:
     heavy = ", ".join(repr(h) for h in _HEAVY)
     code = (
         "import sys\n"
+        # Interpreter startup can already hold a heavy module (a .pth hook installed by a
+        # dependency, e.g. nvidia_cutlass_dsl_packages.pth via Transformer Engine); only what
+        # THIS import adds is ours to answer for.
+        "_before = set(sys.modules)\n"
         "import miniworld_engine.ops as o\n"
         f"_heavy = ({heavy},)\n"
-        "leaked = sorted({m.split('.')[0] for m in sys.modules "
+        "leaked = sorted({m.split('.')[0] for m in set(sys.modules) - _before "
         "for h in _heavy if h in m})\n"
         "assert not leaked, f'ops import pulled heavy backends: {leaked}'\n"
         "assert 'triangle_multiplicative_update' in dir(o)\n"
@@ -186,10 +191,9 @@ def test_a_deprecated_name_warns_when_it_is_used(name: str) -> None:
     """The rule: a deprecated name warns when it is USED, and use has two shapes here.
 
     Most of this surface resolves through `__getattr__`, so for those *resolution is the use* and
-    the warning fires on attribute access. Three names are plain module-level functions
-    (`cuda_transition`, `cuda_transition_b2b`, `cute_transition_fused`); `__getattr__` never runs
-    for them, and access alone is not use anyway -- `hasattr`, `dir()` and a re-export would all
-    warn for nothing. For those the call is the use.
+    the warning fires on attribute access. A plain module-level function is different:
+    `__getattr__` never runs for it, and access alone is not use anyway -- `hasattr`, `dir()` and
+    a re-export would all warn for nothing. For those the call is the use.
 
     So this accepts either, and requires at least one: a name that warns on neither is not
     actually deprecated to anybody.
@@ -201,7 +205,7 @@ def test_a_deprecated_name_warns_when_it_is_used(name: str) -> None:
     def kinds(fn) -> list[str]:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            # A deprecated name is allowed to raise -- `cuda_transition` does, by design. The
+            # A deprecated name is allowed to raise (a stub that names its replacement). The
             # warning is what is under test and it is emitted before the body runs.
             with contextlib.suppress(Exception):
                 fn()
@@ -224,7 +228,7 @@ def test_a_deprecated_name_is_still_reachable(name: str) -> None:
 
 
 def test_the_mechanism_works_for_a_lazy_name(monkeypatch) -> None:
-    """The live entry is a plain function; most of the surface resolves through `__getattr__`.
+    """Most of the surface resolves through `__getattr__`.
 
     A synthetic entry covers that path, so this file still proves the mechanism when
     `_DEPRECATED` holds nothing (or nothing lazy).

@@ -293,16 +293,15 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 113 | triton 107, cuda 6 |
-| **sm90+** | H100 | 24 | cute 13, cuda 6, triton 5 |
-| **sm100+** | B200 | 4 | cute 4 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 106 | triton 100, cuda 6 |
+| **sm90+** | H100 | 10 | cuda 6, triton 4 |
 <!-- END GENERATED: hardware-support -->
 
 **The minimum supported architecture is sm80.** The generated table above states each
 registered kernel's minimum architecture; it is not a numerical qualification for every
-listed GPU. Portable Triton paths and higher-architecture Triton/CuTe alternatives are
+listed GPU. Portable Triton paths and higher-architecture Triton/CUDA alternatives are
 selected by `modules/dispatch.py`. `implementation='triton'` explicitly selects the
-Triton backend; native CUDA and CuTe variants can require a newer architecture.
+Triton backend; native CUDA variants can require a newer architecture.
 
 One extension is **not** in the table because it is not in the registry: `transition_b2b_cuda`,
 which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on

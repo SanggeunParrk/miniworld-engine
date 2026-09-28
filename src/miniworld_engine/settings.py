@@ -200,17 +200,13 @@ class Settings:
 
     #: Process-wide application policy; configure before constructing models.
     engine_backend: Literal["auto", "triton"] = "auto"
-    #: Connected CUDA training widths; width-specific performance tuning is tracked separately.
+    #: Connected CUDA bidirectional training widths (subset of 64/128/256/384/512). D64 uses its
+    #: own fused path (h100_d64_training), about 2.0x Triton under CUDA-graph replay at L384/768.
     trimul_h100_training_widths: tuple[int, ...] = (64, 128, 256, 384, 512)
 
     # ---- transition backend selection ------------------------------------------------------ #
-    #: Force the split path (ln_in + non-fused triton_transition) over the fused kernels. An
-    #: escape hatch and A/B lever; the fused large-d path is the default. Formerly
-    #: MINIWORLD_TRANSITION_FORCE_SPLIT.
-    transition_force_split: bool = False
-    #: Fuse split-path squeeze/residual and LN-backward/residual (Triton only).
-    transition_residual_fusion: bool = True
-    #: Route d=128/n=4 inference through the hand-CUDA fused b2b kernel (~1.29x the Triton b2b).
+    #: Route the sm_90 d in {128,256}/n=4 case of ``triton_transition_fused`` (the raw-op Triton
+    #: kernel behind benches / ConditionedTransition) through the hand-CUDA b2b forward.
     #: Formerly MINIWORLD_TRANSITION_CUDA_B2B.
     transition_cuda_b2b: bool = True
     #: Route d=128/n=4 bf16 Transition on sm_90 through the fused hand-CUDA forward and
@@ -223,12 +219,6 @@ class Settings:
     #: (kernels/augmented_attention/cuda: fwd+bwd 2.5x the bf16 Triton core at L=768, A=48, peak memory -1.9 GB).
     #: Falls back on anything else. MINIWORLD_AUGATTN_BF16_SM90=0 also turns it off.
     augmented_attention_bf16_sm90: bool = True
-    #: Large-d training backend: None = torch fallback, "triton" = cute+triton hybrid, "cute" =
-    #: all-cute. Formerly MINIWORLD_TRANSITION_LARGE_D_TRAINING.
-    transition_large_d_training: Literal["triton", "cute"] | None = None
-    #: Backward backend when the cute path is engaged. Formerly MINIWORLD_TRANSITION_CUTE_BACKWARD.
-    transition_cute_backward: Literal["triton", "cute"] = "triton"
-
     #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
     #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.
     transition_gatebwd_wgmma: bool = True
@@ -241,8 +231,6 @@ class Settings:
     #: Version-B backward that saves xn instead of recomputing it. Formerly
     #: TRANSITION_SAVEDXN_SPLIT_BWD.
     transition_savedxn_split_bwd: bool = False
-    #: Fold dA/dB into the layernorm backward. Formerly TRANSITION_DAB_LNBWD.
-    transition_dab_lnbwd: bool = False
     #: Privatised dgamma/dbeta accumulators in the transition LN backward (1.31x at L=1024; the
     #: alternative is a single-accumulator atomic path). Formerly
     #: MINIWORLD_TRANSITION_LNBWD_PRIVATIZE.
@@ -263,24 +251,6 @@ class Settings:
     # ---- triangle-multiplication backend selection ----------------------------------------- #
     #: Override the trimul implementation choice. Formerly MINIWORLD_TRIMUL_IMPL.
     trimul_impl: str | None = None
-    #: Override the trimul output layout. Formerly MINIWORLD_TRIMUL_OUT_LAYOUT.
-    trimul_out_layout: str | None = None
-    #: Engage the cute in-projection dispatch at all. Formerly TRIMUL_DISPATCH.
-    trimul_cute_dispatch: bool = True
-    #: Replace individual kernels inside the Triton bidirectional algorithm with
-    #: SM90 TMA/WGMMA implementations. Configure before model compilation.
-    #: Empty preserves the measured Triton baseline; no legacy CuTe algorithm dispatch.
-    trimul_sm90_kernels: frozenset[str] = frozenset()
-    #: Fused training front for the sm100 in-projection. Formerly MINIWORLD_TRAIN_FRONT_FUSED.
-    trimul_train_front_fused: bool = True
-
-    # ---- sm100 (B200) bring-up knobs -------------------------------------------------------- #
-    # Debug/bring-up levers for the cute sm100 kernels, moved off MW_* / LNL_* environment
-    # variables. These were migrated mechanically: sm_100 has no execution path on the Ampere
-    # cards available here, so only import and lint are verified — the kernels' use of these
-    # values is not.
-    #: Warp-specialised stats production path. Formerly LNL_WS.
-    lnl_ws: int = 0
 
     # ---- diagnostics ----------------------------------------------------------------------- #
     #: jaxtyped+beartype decoration on annotated functions. Off by default: it is a per-call cost.
@@ -334,12 +304,6 @@ def configure(**kwargs) -> Settings:
     unknown = set(kwargs) - fields
     if unknown:
         raise TypeError(f"unknown setting(s): {', '.join(sorted(unknown))}")
-    if "trimul_sm90_kernels" in kwargs:
-        names = frozenset(kwargs["trimul_sm90_kernels"])
-        unknown = names - {"front", "f567", "dual_bwd"}
-        if unknown:
-            raise ValueError(f"Unknown SM90 TriMul kernels: {sorted(unknown)}")
-        kwargs["trimul_sm90_kernels"] = names
     if "autotune_kernels" in kwargs and kwargs["autotune_kernels"] is not None:
         names = frozenset(kwargs["autotune_kernels"])
         known = frozenset(get_args(AutotuneKernel))

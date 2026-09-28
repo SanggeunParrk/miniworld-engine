@@ -12,16 +12,14 @@ gate+projection+mul). Pulling ``gate`` to the front lets the back half fold the
 final mul into the layernorm-linear epilogue — see
 ``docs/kernels/trimul-inproj.md``.
 
-Three execution paths (import directly to avoid forcing the quack import):
+Execution paths (v2.2.0):
 
-  - ``cute.inference.trimul_inproj_inference`` — forward-only, saves NOTHING,
-    maximally fused (single fused back kernel). Lowest latency; NOT for training.
-  - ``cute.training.TriMulInproj`` — trainable module. ``.forward`` is the
-    training path (autograd.Function: forward SAVES the tensors its backward
-    needs; what it saves is co-designed with the backward) and ``.inference``
-    dispatches to the forward-only path above.
+  - ``cuda/`` — the hand-written H100 kernels (``integrations.trimul_h100`` states the
+    qualified training / inference contract: widths, lengths, B=1, sm_90).
+  - ``triton/`` — the portable fused pipeline (``unidirectional.trimul_triton`` /
+    ``bidirectional.bidirectional_trimul_triton``), autograd-capable, every arch; the
+    fallback for any shape the CUDA kernels do not serve.
+  - ``reference.py`` / ``autograd.py`` — the PyTorch oracle and the manual-backward scaffold.
 
-The split matters because *what the forward saves* changes the backward's
-algorithm and speed (save-vs-recompute); the inference forward, saving nothing,
-is free to fuse/discard everything the training forward cannot.
+``whole_op.py`` exposes the cuequivariance-signature facade over the Triton pipeline.
 """

@@ -40,7 +40,6 @@ from miniworld_engine.kernels.drivers.transition import (
     K_LARGE,
     K_SMALL,
     N_EXPAND,
-    ND_SMALL,
     ROWS,
     _pair_x,
     _transition_operands,
@@ -58,8 +57,7 @@ def _xn(x2, rstd, c1, gamma, beta) -> torch.Tensor:
     """LN from saved stats, fp32, still fp32 on return (cast at the call site if the kernel does).
 
     This is the kernels' contract verbatim: ``xn = (x*rstd - c1)*g + beta`` with
-    ``c1 = mean*rstd`` -- NOT ``mean``. (transition/cute/fused.py:65,
-    transition/triton/fused.py:120.)
+    ``c1 = mean*rstd`` -- NOT ``mean``. (transition/triton/fused.py:120.)
     """
     return (x2.float() * rstd[:, None] - c1[:, None]) * gamma.float() + beta.float()
 
@@ -142,26 +140,6 @@ def transition_fwd_b2b_ktiled_triton():
     return out, h.float() @ ws.float().T
 
 
-def transition_fold_triton():
-    """Weight prefold. The reference recomputes what the source computes, term for term
-    (fold.py:64-81), including two details a "looks right" reference gets wrong:
-      * S is the rowsum of the fp32 gamma-scaled weight, taken BEFORE B's bf16 cast;
-      * B2 contracts the RAW W with beta (no gamma), unlike B and S.
-    Both outputs are interleaved gate/up per j: row 2j from Wa, row 2j+1 from Wb."""
-    from miniworld_engine.kernels.transition.triton.fold import fold_swiglu_triton
-
-    _, g, beta, wa, wb, _ = _transition_operands()
-    B, S, B2 = fold_swiglu_triton(wa, wb, g, beta)
-
-    n, k = wa.shape
-    gf, bef = g.float(), beta.float()
-    ba, bb = wa.float() * gf, wb.float() * gf
-    b_ref = torch.stack((ba.to(B.dtype), bb.to(B.dtype)), dim=1).reshape(2 * n, k)
-    s_ref = torch.stack((ba.sum(dim=1), bb.sum(dim=1)), dim=1).reshape(2 * n)
-    b2_ref = torch.stack((wa.float() @ bef, wb.float() @ bef), dim=1).reshape(2 * n)
-    return {"B": (B, b_ref), "S": (S, s_ref), "B2": (B2, b2_ref)}
-
-
 # --------------------------------------------------------------------------- transition bwd
 
 
@@ -188,54 +166,6 @@ def transition_bwd_swiglu_recompute_triton():
     }
 
 
-def swiglu_gate_bwd_sm100():
-    """SM100 cute gate-backward. Same three outputs as the Triton recompute kernel above
-    (h, dA, dB), from the SAVED xn -- no LN inside -- so the reference is the plain
-    dual-projection + SwiGLU-backward epilogue (gatebwd_sm100.py:700-705)."""
-    from miniworld_engine.kernels.transition.cute.gatebwd_sm100 import (
-        transition_expand_gatebwd_sm100,
-    )
-
-    xn, _, _, wa, wb, _ = _transition_operands()
-    ge = rows2d(ROWS, wa.shape[0])
-    h, dA, dB = transition_expand_gatebwd_sm100(xn, wa, wb, ge)
-
-    a, b = _proj(xn, wa, wb)
-    h_ref, dA_ref, dB_ref = _swiglu_bwd(a, b, ge)
-    return {"h": (h, h_ref), "dA": (dA, dA_ref), "dB": (dB, dB_ref)}
-
-
-def transition_bwd_epilogue_triton():
-    """In-place ``dA *= ge; dB *= ge``. The kernel is IN-PLACE, so the reference has to hold
-    a copy of the pre-launch dA/dB; ``restore_value`` on the autotuner means the multiply
-    lands exactly once no matter how many configs it benchmarks."""
-    from miniworld_engine.kernels.transition.cute.gatebwd_sm100 import _grad_mul_inplace
-
-    dA, dB, ge = (rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL))
-    dA0, dB0 = dA.clone(), dB.clone()
-    _grad_mul_inplace(dA, dB, ge)
-
-    gf = ge.float()
-    return {"dA": (dA, dA0.float() * gf), "dB": (dB, dB0.float() * gf)}
-
-
-def transition_bwd_transpose_packed_triton():
-    """Pure layout: (M, ND) -> (M, 2*ND) with out[m, 2j] = out[m, 2j+1] = ge[m, j], i.e.
-    ``repeat_interleave(2, dim=1)`` -- exact, not approximate. The second pair feeds a
-    transposed VIEW (column stride != 1), which the launcher explicitly supports
-    (backward_gatebwd.py:94) and which the contiguous case cannot exercise."""
-    from miniworld_engine.kernels.transition.cute.backward_gatebwd import (
-        _cdup_interleave,
-    )
-
-    ge = rows2d(ROWS, ND_SMALL)
-    view = rows2d(ND_SMALL, ROWS).T                 # (ROWS, ND_SMALL), stride (1, ROWS)
-    return {
-        "contiguous": (_cdup_interleave(ge), ge.repeat_interleave(2, dim=1)),
-        "strided_view": (_cdup_interleave(view), view.repeat_interleave(2, dim=1)),
-    }
-
-
 def layernorm_bwd_foldstats_triton():
     """LN backward from saved stats -> (dx, dgamma, dbeta), the dgamma/dbeta column partials
     scattered over NUM_REPLICAS fp32 buffers and summed by the launcher.
@@ -252,35 +182,23 @@ def layernorm_bwd_foldstats_triton():
     rstd, c1 = _stats(x2)
     dxn = torch.empty_like(x2).normal_()
 
-    previous = settings.current().transition_lnbwd_cuda
-    settings.configure(transition_lnbwd_cuda=False)
+    # Pinned only while the settings still declare it (v2.2.0 retires the legacy transition_*
+    # switches); the driver applies the same guard.
+    pinned = hasattr(settings.current(), "transition_lnbwd_cuda")
+    if pinned:
+        previous = settings.current().transition_lnbwd_cuda
+        settings.configure(transition_lnbwd_cuda=False)
     try:
         dx, dgamma, dbeta = _transition_ln_bwd(dxn, x2, rstd, c1, g)
     finally:
-        settings.configure(transition_lnbwd_cuda=previous)
+        if pinned:
+            settings.configure(transition_lnbwd_cuda=previous)
 
     xf = x2.float().requires_grad_(True)
     gf = g.float().requires_grad_(True)
     bf = torch.zeros_like(gf).requires_grad_(True)
     F.layer_norm(xf, (x2.shape[1],), gf, bf, EPS).backward(dxn.float())
     return {"dx": (dx, xf.grad), "dgamma": (dgamma, gf.grad), "dbeta": (dbeta, bf.grad)}
-
-
-def layernorm_fwd_recompute_foldstats_triton():
-    """xn re-materialization from FOLDED stats: the kernel is handed ``c1 = mean*rstd``, not
-    ``mean``, and computes ``x*rstd - c1`` (cute/fused.py:65). Two pairs:
-      * ``xn``  -- that contract literally, with the same rstd/c1 the kernel got;
-      * ``vs_layer_norm`` -- the same output against a real fp32 LayerNorm, which is what
-        proves the folded form ``x*rstd - c1 == (x-mean)*rstd`` rather than assuming it."""
-    from miniworld_engine.kernels.transition.cute.fused import _xn_recompute
-
-    x2, g, beta, _, _, _ = _transition_operands()
-    rstd, c1 = _stats(x2)
-    xn = _xn_recompute(x2, rstd, c1, g, beta)
-
-    contract = _xn(x2, rstd, c1, g, beta)
-    ln = F.layer_norm(x2.float(), (x2.shape[1],), g.float(), beta.float(), EPS)
-    return {"xn": (xn, contract), "vs_layer_norm": (xn, ln)}
 
 
 # ── the vendored transition_cuda extension ───────────────────────────────────────────────────

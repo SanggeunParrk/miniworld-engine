@@ -22,7 +22,6 @@ eager/compiled path runs — one launch, cond_aff read once, TF32 policy for fp3
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from miniworld_engine.autotune.configs import configs_for
 
 # The weighted-LayerNorm kernel that used to live here was fused3.py's `_ln_kernel` with
@@ -56,19 +55,6 @@ def set_fp32_matmul_precision(mode: str) -> None:
 # bf16 operands (fp32 accumulate) for the fp32 GEMM — ~1.6× faster than TF32, cos≈0.9999.
 _GEMM_BF16 = False
 
-# Cache for adaln_inference_lnfold's prefolded GEMM operands, keyed on (fixed) weight identities +
-# dtype. Inference weights are static, so folding once and reusing avoids a per-forward fold pass.
-#: Folded GEMM operands, keyed on the weights' identity AND their version counters, with the source
-#: tensors held so the key cannot go stale under it. Bounded, oldest-out.
-#:
-#: `data_ptr()` alone was two silent-wrong-answer paths. A weight mutated IN PLACE -- a checkpoint
-#: load into a live module, or `.eval()` after an optimizer step -- keeps its address, so the key
-#: does not move and the stale fold is served. And a freed tensor's allocation, reused at the same
-#: address by another module of the same dtype, hits the previous module's entry. `_version` catches
-#: the first; holding the source tensors catches the second, because the allocator cannot hand that
-#: address to anyone else while this dict is alive.
-_LNFOLD_MAX = 32
-_LNFOLD_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 
 
 def set_gemm_bf16(flag: bool) -> None:
@@ -215,7 +201,7 @@ def _adaln_epilogue_fake(x, sb, eps, shape_key=None):
 def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
                     shape_key: int | None = None) -> torch.Tensor:
     """y = sigmoid(scale)*LayerNorm(x) + bias, taking scale and bias from the packed (M, 2N) sb.
-    Step 3 of both inference paths (materialize and lnfold): fusing LN(x) into the gate keeps
+    Step 3 of the materialize inference path: fusing LN(x) into the gate keeps
     x_norm out of HBM, and nothing is saved because inference has no backward.
     """
     M, N = x.shape
@@ -393,74 +379,6 @@ def adaln_inference_materialize(
     return y.reshape(orig_x_shape)
 
 
-def adaln_inference_lnfold(
-    x: torch.Tensor,
-    cond: torch.Tensor,
-    cond_ln_weight: torch.Tensor,   # lnw, (NC,)
-    scale_weight: torch.Tensor,     # (NX, NC)
-    scale_bias: torch.Tensor,       # (NX,)
-    bias_weight: torch.Tensor,      # (NX, NC)
-    eps_x: float,
-    eps_cond: float,
-    *,
-    weight_cat: torch.Tensor | None = None,   # cached cat([Wscale,Wbias],0) (2NX,NC)
-    bias_cat: torch.Tensor | None = None,       # cached cat([scale_b,0])    (2NX,)
-    prefolded=None,                             # cached fold_for_gemm(weight_cat, lnw, 0, bias_cat)
-) -> torch.Tensor:
-    """Inference adaLN via FUSED LN(cond)+GEMM (kernel A, cute layernorm_linear) + fused epilogue
-    (kernel B, _adaln_epilogue). The cond LayerNorm is folded into the GEMM prologue, so cond_aff
-    never hits HBM — the materialize pass of ``adaln_inference_materialize`` is gone. Best at token
-    d (>=256); LOSES to materialize at atom d=128 (cute stats+launch overhead > the small
-    materialize saving there). Weights fixed → prefold once and pass ``weight_cat``/``prefolded``."""
-    from miniworld_engine.kernels.layernorm_linear.cute import fold_for_gemm, layernorm_linear
-
-    orig_x_shape = x.shape
-    nx = orig_x_shape[-1]
-    x2d = x.reshape(-1, nx)
-    cond2d = cond.reshape(-1, cond.shape[-1])
-    if x2d.stride(-1) != 1:
-        x2d = x2d.contiguous()
-    if cond2d.stride(-1) != 1:
-        cond2d = cond2d.contiguous()
-
-    # Prefold the (fixed-weight) GEMM operands ONCE. Doing it per call adds a ~(2NX,NC) fold pass
-    # every forward (captured & re-run on each cudagraph replay) which erases the win — so cache it
-    # keyed on the weight identities + dtype (inference weights are static). Callers may also pass
-    # weight_cat/bias_cat/prefolded explicitly to bypass the cache.
-    if prefolded is None and weight_cat is None:
-        srcs = (scale_weight, bias_weight, scale_bias, cond_ln_weight)
-        key = (tuple((t.data_ptr(), t._version) for t in srcs), x.dtype)
-        hit = _LNFOLD_CACHE.get(key)
-        if hit is None:
-            weight_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
-            bias_cat = torch.cat([scale_bias, scale_bias.new_zeros(nx)], dim=0)  # (2NX,)
-            ln_bias = cond_ln_weight.new_zeros(cond_ln_weight.shape)             # cond LN: no bias
-            prefolded = fold_for_gemm(weight_cat, cond_ln_weight, ln_bias, bias_cat, w2_dtype=x.dtype)
-            # `srcs` rides along unused: it is what keeps the allocator from reusing these
-            # addresses for another module while this entry stands.
-            _LNFOLD_CACHE[key] = (weight_cat, bias_cat, prefolded, srcs)
-            while len(_LNFOLD_CACHE) > _LNFOLD_MAX:
-                _LNFOLD_CACHE.popitem(last=False)
-        else:
-            weight_cat, bias_cat, prefolded, _ = hit
-    else:
-        if weight_cat is None:
-            weight_cat = torch.cat([scale_weight, bias_weight], dim=0)
-        if bias_cat is None:
-            bias_cat = torch.cat([scale_bias, scale_bias.new_zeros(nx)], dim=0)
-        if prefolded is None:
-            ln_bias = cond_ln_weight.new_zeros(cond_ln_weight.shape)
-            prefolded = fold_for_gemm(weight_cat, cond_ln_weight, ln_bias, bias_cat, w2_dtype=x.dtype)
-    ln_bias = cond_ln_weight.new_zeros(cond_ln_weight.shape)
-
-    # kernel A: [scale|bias] = LN(cond) @ [Wscale|Wbias]ᵀ + [scale_b|0], LN folded into prologue.
-    sb = layernorm_linear(cond2d, cond_ln_weight, ln_bias, weight_cat, bias_cat, eps_cond,
-                          prefolded=prefolded)                              # (M, 2NX)
-    y = _adaln_epilogue(x2d, sb, eps_x,
-                        shape_key=atom_key(length_of(orig_x_shape)))         # kernel B
-    return y.reshape(orig_x_shape)
-
-
 # ───────────────── single-fused inference kernel (best at small d, e.g. atom d=128) ─────────────
 # One kernel: LN(cond)·lnw, in-kernel GEMM → scale,bias, LN(x), sigmoid-gate → Y. Writes ONLY Y
 # (no x_hat/cond_norm/gate/rstd saves), so it strips the backward-materialization traffic the
@@ -608,10 +526,8 @@ def adaln_inference_fused(
 #: Width at or below which the single fused kernel beats materialize+cuBLAS.
 #:
 #: It was a bare literal with the magic-value lint rule suppressed beside it and no measurement
-#: anywhere. The docstring below justifies the `> 256` side with "beats the materialize path
-#: 1.12-1.21x", but that is the lnfold CUTE path -- SM90 only, and therefore not the branch an
-#: Ampere card takes. The number was deciding A5000/A6000 routing on the strength of an H100
-#: result.
+#: anywhere; it was deciding A5000/A6000 routing on the strength of an H100 result from a path
+#: that no longer exists.
 #:
 #: Measured on an A5000 (bf16), fused vs materialize, ms:
 #:
@@ -631,28 +547,14 @@ _FUSED_D_MAX = 256
 
 def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                     eps_x, eps_cond, **kw):
-    """Dispatch: small d (≤256) → single fused kernel; token d (>256) → LN-folded cute GEMM
-    (kernel A) + fused epilogue (kernel B), which beats the materialize path 1.12-1.21x by
-    dropping the cond_aff HBM round-trip. ``kw`` (weight_cat/bias_cat/prefolded) is forwarded so
-    a caller with fixed weights can prefold once.
-
-    lnfold's cute GEMM (quack SM90) is 16/8-bit ONLY, so fp32 falls back to materialize+cuBLAS —
-    there is no fast fused fp32/TF32 GEMM here (triton's TF32 GEMM is ~0.5× cuBLAS)."""
+    """Dispatch: small d (≤256) → single fused kernel; wide d → LN(cond) + one fused GEMM+gate
+    kernel (``adaln_inference_gemm_gate``) for 16-bit and TF32 fp32, else materialize + cuBLAS.
+    ``kw`` (weight_cat/bias_cat) is forwarded to the materialize path so a caller with fixed
+    weights can concatenate once."""
     if x.shape[-1] <= _FUSED_D_MAX:
         return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                      bias_weight, eps_x, eps_cond)
-    # lnfold's fused GEMM is the cute quack path imported directly from
-    # layernorm_linear.cute (SM90 WGMMA/TMA, sm_90a-only) with NO internal fallback — unlike
-    # the top-level layernorm_linear(), it does not self-dispatch by arch. So gate it on
-    # Hopper *exactly* (major == 9); on pre-Hopper (sm_80 / A100) and Blackwell (sm_100) use
-    # the portable materialize + cuBLAS path. Without this, bf16/fp16 d>256 crashes on A100.
-    if x.dtype in (torch.float16, torch.bfloat16) and (
-        torch.cuda.is_available()
-        and torch.cuda.get_device_capability(x.device)[0] == 9  # noqa: PLR2004
-    ):
-        return adaln_inference_lnfold(x, cond, cond_ln_weight, scale_weight, scale_bias,
-                                      bias_weight, eps_x, eps_cond, **kw)
-    # Pre-Hopper wide d: LN(cond) once, then ONE kernel for the projections and the gate.
+    # Wide d: LN(cond) once, then ONE kernel for the projections and the gate.
     #
     # Measured on an A5000, bf16, the token shape the model presents (A=48, L=768, d_hidden=768,
     # d_cond=384, M=36864 rows):

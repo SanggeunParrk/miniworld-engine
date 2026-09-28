@@ -1,6 +1,6 @@
 """Drivers for the ``layernorm`` family.
 
-layernorm, layernorm_linear and fused_ln_mask were one module (``drivers_ln.py``) and still
+layernorm and layernorm_linear were one module (``drivers_ln.py``) and still
 share the ``_L``/``_IS_PAIR``/``_M``/``_D``/``_PAIR_N``/``_act`` block, which lives in
 ``drivers/layernorm_linear.py``. ``_D_CUDA_BWD`` follows the requested width, including
 ragged widths handled by the CUDA launcher's scalar fallback.
@@ -30,7 +30,7 @@ _D_CUDA_BWD = _D
 
 
 def _sm90plus() -> bool:
-    """Is this card one where the cute paths -- the only producers of a row-scaled LN -- run?
+    """Is this an sm90+ card, where the row-scaled LN side is driven too?
 
     `dispatch.is_sm90plus`, imported lazily so a driver module stays importable on a machine with
     no CUDA (the CPU test suite imports every driver).
@@ -50,17 +50,15 @@ def layernorm_fwd_saveact_triton() -> None:
 
     x = _act()
     # HAS_ROWSCALE is CARD-DEPENDENT, so this driver branches on the card rather than picking one
-    # side for every build. The =1 program folds the AF pair-mask into the LN epilogue, and every
-    # producer of it is a cute path -- `cute/v6_training_merged.py:144`, `cute/bidir_training.py`,
-    # `cute/inference.py` -- which `dispatch` selects only at sm90+.
+    # side for every build. The =1 program folds the AF pair-mask into the LN epilogue; its
+    # production producers were the sm90+ trimul paths retired in v2.2.0, and the launcher still
+    # accepts ``row_scale``, so the sm90+ side keeps it tuned.
     #
     #   sm80/sm86: =0 only. The triton trimul deliberately does NOT fold the mask into LN_in
-    #     (unidirectional.py:225-227). `dev audit --replay` on an A100 DID show `HAS_ROWSCALE=1`
-    #     lookups, and each is immediately followed by `NotImplementedError: Gemm Sm80 is not
-    #     implemented yet` -- `builder.cases()` forces `implementation="cute"` and the case aborts.
-    #     A lookup from a path that cannot run is not a bucket worth tuning.
-    #   sm90+: =1 is production. Pinning this driver to =0 would ship an H100/B200 cache with the
-    #     masked LN -- the normal case there -- permanently on the heuristic subset.
+    #     (unidirectional.py:225-227). A lookup from a path that cannot run is not a bucket worth
+    #     tuning.
+    #   sm90+: =1 is driven too, so an H100/B200 cache never leaves the masked LN on the
+    #     heuristic subset.
     #
     # The registry row is `arch=sm80`, i.e. built on every card, so the branch has to live here.
     triton_layernorm(x, vec(_D), vec(_D), 1e-5)                              # HAS_ROWSCALE=0
@@ -82,7 +80,7 @@ def layernorm_bwd_atomic_triton() -> None:
     # routing bf16 with 128 <= N <= 512 to the hand-CUDA backward -- but "usually" is not "never":
     # that branch is wrapped in a bare `except Exception: pass`, so any nvcc/JIT failure falls
     # through to the triton launch, and the width guard does not cover the MSA width 64 the build
-    # now drives. Cheap insurance on the card where the cute paths make it production anyway.
+    # now drives. Cheap insurance on sm90+.
     _bwd_atomic_impl(torch.randn_like(x), x, vec(_D), mean, rstd)            # HAS_ROWSCALE=0
     if _sm90plus():
         from miniworld_engine import settings

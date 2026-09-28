@@ -10,8 +10,8 @@ table goes stale, so this file regenerates it and compares: change a kernel's `a
 touching the README and the diff shows up here.
 
 The `arch` value is a MINIMUM, and the check below pins it to evidence rather than to taste: a
-kernel whose name or file says `sm100` may not claim `sm80`, and a CuTeDSL kernel may not claim the
-Triton floor.
+kernel whose name or file says `sm100` may not claim `sm80`, and a hand-CUDA sm_90a kernel may not
+claim the Triton floor.
 """
 from __future__ import annotations
 
@@ -71,12 +71,12 @@ def test_the_declared_arch_matches_the_evidence_in_the_name() -> None:
     `arch` is the ENFORCED minimum -- below it the kernel is not launched. `tuned_for` is what it
     was written against. The name is evidence for one of them, and the check is which.
 
-    They used to be one column, and the conflation cost coverage: three triton kernels live inside
-    sm100-named cute modules (`_grad_mul_inplace` in `transition/cute/gatebwd_sm100.py` and two
-    like it), and their drivers launch the triton kernel directly rather than building the cute
-    pipeline around it. Gating on the module's name skipped them on sm86, where they run fine --
-    measured, before this was relaxed: launch ok, check ok, `rel dA=1.99e-03` against a `1e-02`
-    band. `driven` went 94 -> 97 and `skipped` 9 -> 6.
+    They used to be one column, and the conflation cost coverage: three triton kernels lived inside
+    sm100-named CuTeDSL modules (`_grad_mul_inplace` in the since-removed `gatebwd_sm100.py` and two
+    like it), and their drivers launched the triton kernel directly rather than building the
+    CuTeDSL pipeline around it. Gating on the module's name skipped them on sm86, where they ran
+    fine -- measured, before this was relaxed: launch ok, check ok, `rel dA=1.99e-03` against a
+    `1e-02` band. `driven` went 94 -> 97 and `skipped` 9 -> 6.
     """
     wrong = []
     for r in _rows():
@@ -107,10 +107,11 @@ def test_tuned_for_is_only_used_to_relax_not_to_tighten() -> None:
         + "\n  ".join(bad))
 
 
-def test_no_cutedsl_kernel_claims_the_triton_floor() -> None:
-    """CuTeDSL/quack GEMMs are Hopper-and-later. One claiming sm80 would put it in the row a
-    consumer reads as "runs on my A6000"."""
-    bad = [r["kernel"] for r in _rows() if r["backend"] == "cute" and r["arch"] == "sm80"]
+def test_no_hopper_cuda_kernel_claims_the_triton_floor() -> None:
+    """The hand-CUDA WGMMA/TMA kernels (`*_sm90_cuda`) are sm_90a builds. One claiming sm80 would
+    put it in the row a consumer reads as "runs on my A6000"."""
+    bad = [r["kernel"] for r in _rows()
+           if r["backend"] == "cuda" and "sm90" in r["kernel"] and r["arch"] == "sm80"]
     assert not bad, bad
 
 

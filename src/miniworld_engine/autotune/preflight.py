@@ -36,11 +36,6 @@ def native_dependencies(arch: str) -> None:
     major = int(normalise_arch(arch)[2:]) // 10
     errors = []
     if major >= 9:
-        for name in ("cutlass.cute", "quack.gemm_config"):
-            try:
-                importlib.import_module(name)
-            except Exception as exc:  # noqa: PERF203 - report every broken dependency
-                errors.append(f"{name}: {type(exc).__name__}: {exc}")
         from miniworld_engine.kernels._nvcc import mathdx_includes
         try:
             mathdx_includes()

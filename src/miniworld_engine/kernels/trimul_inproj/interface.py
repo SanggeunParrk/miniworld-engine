@@ -1,43 +1,16 @@
-"""Public entry point for the fused trimul input-projection kernel.
+"""Public entry points for the trimul_inproj family (the fused triangle multiplicative update).
 
-Single import surface so callers don't need to know the backend folder layout::
-
-    from miniworld_engine.kernels.trimul_inproj.interface import trimul_inproj_cute
-    left_bdll, right_bdll, gate_blld = trimul_inproj_cute(x_normed, WL, WLg, WR, WRg, Wg)
-
-The cute backend is imported lazily so importing this module doesn't require the
-cute toolchain (cutlass-dsl + quack).
+Triton, every arch: :func:`trimul_triton` (single direction) and
+:func:`bidirectional_trimul_triton` (outgoing + incoming in one block), both weights-as-args
+autograd Functions with a forward-only inference path. The hand-CUDA H100 kernels under
+``cuda/`` are reached through ``integrations.trimul_h100``, which states their contract.
 """
 
 from __future__ import annotations
 
-import torch
+from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
+    bidirectional_trimul_triton,
+)
+from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import trimul_triton
 
-
-def trimul_inproj_cute(
-    x: torch.Tensor,  # normalized pair; (B,L,L,D) if hidden_dim=-1/3, (B,D,L,L) if hidden_dim=1
-    WL: torch.Tensor,  # (D, D)  — to_left.weight.T
-    WLg: torch.Tensor,  # (D, D)  — to_left_gate.weight.T
-    WR: torch.Tensor,  # (D, D)  — to_right.weight.T
-    WRg: torch.Tensor,  # (D, D)  — to_right_gate.weight.T
-    Wg: torch.Tensor,  # (D, D)  — to_gate.weight.T
-    *,
-    hidden_dim: int = -1,  # channel (D) axis position: -1/3 -> BLLD, 1 -> BDLL
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Returns ``(left_bdll, right_bdll, gate_blld)``. See ``reference.py``.
-
-    ``hidden_dim`` lets the pair come in channel-last (BLLD, default) or channel-first
-    (BDLL, ``hidden_dim=1``); the BDLL input is read via an M-major GEMM operand with no
-    pre-permute. Output layout is unchanged.
-    """
-    from miniworld_engine.kernels.trimul_inproj.cute.launch import (
-        trimul_inproj_cute_forward,
-    )
-
-    left, right, gate = trimul_inproj_cute_forward(
-        x, WL, WLg, WR, WRg, Wg, hidden_dim=hidden_dim
-    )
-    # `Wg` is required by this entry point, so the backend always computes the gate. It
-    # returns None only for its `Wg=None` / `compute_gate=False` variant, not exposed here.
-    assert gate is not None
-    return left, right, gate
+__all__ = ["bidirectional_trimul_triton", "trimul_triton"]

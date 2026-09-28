@@ -5,13 +5,13 @@
   "lengths": [
     1024
   ],
-  "torch": "2.10.0+cu128",
-  "python_abi": "cpython-310",
+  "torch": "2.13.0+cu129",
+  "python_abi": "cpython-312",
   "baseline_promotion": 18006,
   "files": {
     "qkv_projection_attention.py": "b0aa2c88412a46857c9c1b2ab5f0800ba5890da21c8a2f4820ad33a1a11985e5",
     "qkv_projection_attention.cu": "22c9363c7df465938d847ef275f867e3bd68c44c72e1aa9cfadc42ea0f80df45",
-    "triattn_training_qkv_compact_retire6.so": "fd75100f530f2a2f07ef20dda802352c48c2957f44e1581a4b057d14ed4faeac"
+    "triattn_training_qkv_compact_retire6.so": "4b613d7ac02eefd5b90c96b8d90efc707c8ee8e7bf9fe3df71f7604e44448b8c"
   },
   "promotion": "18246",
   "evidence": {

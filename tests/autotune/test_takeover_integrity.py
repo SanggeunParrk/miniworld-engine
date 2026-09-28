@@ -62,7 +62,8 @@ def test_build_and_derivation_enumerate_identical_gpu_units(monkeypatch):
     actual = {plan.label(u, by_name[u.case]) for u in builder.units(cases)}
     expected = {u.label for u in derive.units(derive.module_rows(), arch="sm86")}
     assert actual == expected
-    assert not any(u.impl == "cute" or u.option == ("trimul_impl", "cute")
+    # The sm_90a-only hand-CUDA impl must never be derived for an Ampere card.
+    assert not any(u.impl == "cuda" or u.option == ("trimul_impl", "cuda")
                    for u in derive.units(derive.module_rows(), arch="sm86"))
 
 

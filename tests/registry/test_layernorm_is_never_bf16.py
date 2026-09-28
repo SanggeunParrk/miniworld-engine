@@ -38,10 +38,11 @@ PKG = ROOT / "src" / "miniworld_engine"
 KERNELS = PKG / "kernels"
 #: Where a LayerNorm actually lives -- DERIVED, not listed. It was `("layernorm", "layernorm_linear")`
 #: written out, which covered two of the seven families that normalise: `adaln` computes the
-#: statistics for the DiT, `fused_ln_mask` is layernorm_fwd with a row scale, `transition` owns
-#: `layernorm_bwd_foldstats`, `trimul_inproj` owns `trimul_outproj_layernorm_gemm_gate`, and
-#: `mpnn_edge_tail` folds the normalisation into its third projection. Eleven kernels with the
-#: `layernorm` role sat outside the check, including three added this month.
+#: statistics for the DiT, `fused_ln_mask` (removed in v2.2.0) was layernorm_fwd with a row
+#: scale, `transition` owns `layernorm_bwd_foldstats`, `trimul_inproj` owns
+#: `trimul_outproj_layernorm_gemm_gate`, and `mpnn_edge_tail` folds the normalisation into its
+#: third projection. Eleven kernels with the `layernorm` role sat outside the check, including
+#: three added this month.
 #:
 #: `notes/` is scratch and reference.py is the fp64/bf16 oracle a checker compares against, so
 #: neither is a path production takes.
@@ -53,7 +54,7 @@ def _dirs() -> tuple[str, ...]:
 
 DIRS = _dirs()
 #: A NARROWING of a tensor, which is the thing that loses precision. A `dtype=torch.bfloat16`
-#: annotation or default is a declaration about someone else's operand -- the cute GEMM's second
+#: annotation or default is a declaration about someone else's operand -- a GEMM's second
 #: weight, say -- and says nothing about the normalisation, so it is not matched here.
 NARROW = re.compile(r"\.to\(\s*torch\.bfloat16\s*\)|\.bfloat16\(\)")
 #: Narrowings that are NOT a normalisation's input, with the reason each is not. The rule is about

@@ -22,7 +22,7 @@ class ImplementationType(str, Enum):
         and it refuses rather than silently reroute; ``miniworld`` uses the same payloads
         where it can and falls back where it cannot.
 
-    ``triton`` / ``cute`` / ``cuda`` are the concrete *technology* backends that
+    ``triton`` / ``cuda`` are the concrete *technology* backends that
     ``miniworld`` resolves to. They are INTERNAL — the module layer resolves to a
     :class:`~miniworld_engine.modules.dispatch.KernelBackend` and never branches on
     ``ImplementationType`` in ``forward``. They remain accepted here only so the
@@ -32,7 +32,6 @@ class ImplementationType(str, Enum):
     PYTORCH = "pytorch"
     TRITON = "triton"
     CUDA = "cuda"
-    CUTE = "cute"
     CUEQUIVARIANCE = "cuequivariance"
     MINIWORLD = "miniworld"
     ANTHROPIC = "anthropic"

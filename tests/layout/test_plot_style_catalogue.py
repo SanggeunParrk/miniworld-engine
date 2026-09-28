@@ -2,7 +2,7 @@
 
 ``viz/style.py`` maps each backend label to an identity, a display name and a colour, and its own
 comment says why: "so sibling variants that share a substring the canonical heuristics collapse
-(`cute`/`miniworld`) never overwrite each other in a single figure". The mapping is keyed by the
+(`ours`/`miniworld`) never overwrite each other in a single figure". The mapping is keyed by the
 label with separators stripped, so a label rename on the bench side silently orphans its entry —
 and then `canonical()` falls through to the substring heuristics.
 

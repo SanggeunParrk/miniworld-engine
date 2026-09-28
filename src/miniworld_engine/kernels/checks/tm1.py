@@ -13,8 +13,7 @@ import torch
 from miniworld_engine.autotune.shape_key import token_key
 from miniworld_engine.kernels._tiles import tile_grid
 from miniworld_engine.kernels.checks import _exact_fp32_matmul, _f
-from miniworld_engine.kernels.drivers import BF16, dev
-from miniworld_engine.kernels.drivers.trimul_inproj import D, L, M, _bdll, _rows, _w, _x
+from miniworld_engine.kernels.drivers.trimul_inproj import D, L, M, _rows, _w, _x
 
 # ── tm1 ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -76,33 +75,3 @@ def trimul_bwd_gate_recompute_triton():
             "dLB": (dLB, dl * Lg),
             "dRA": (dRA, dr * RB * Rg * (1.0 - Rg)),
             "dRB": (dRB, dr * Rg)}
-
-
-def gated_projection_gate_inplace_flat_triton():
-    """tm1/cute/launch.py _gate_mul_kernel: IN-PLACE proj *= sigmoid(gate) over a flat buffer.
-
-    proj is both operand and destination, so the reference is taken from a copy made before the
-    launch. (The kernel's @autotune carries ``restore_value=['proj_ptr']``, so the tuning sweep
-    itself does not compound the multiply -- exactly one application survives.)
-    """
-    from miniworld_engine.kernels.tm1.cute.launch import _fused_gate_mul
-
-    proj, gate = _bdll().contiguous(), _bdll().contiguous()
-    ref = torch.sigmoid(_f(gate)) * _f(proj)
-    _fused_gate_mul(proj, gate)
-    return proj, ref
-
-
-def gated_projection_gate_packed_flat_triton():
-    """tm1/cute/launch.py _glu_wide_kernel: the two operands are HALVES OF ONE (1, 2D, L, L).
-
-    Flattened, ``wide`` is the gate channels [0:D] then the proj channels [D:2D], each L*L long;
-    the kernel pairs flat element e with e + D*L*L. Slicing the channel axis reproduces exactly
-    that pairing on the reference side.
-    """
-    from miniworld_engine.kernels.tm1.cute.launch import _glu_wide
-
-    wide = _bdll(2 * D)
-    out = torch.empty(1, D, L, L, device=dev(), dtype=BF16)
-    _glu_wide(out, wide, D, L)
-    return out, torch.sigmoid(_f(wide[:, :D])) * _f(wide[:, D:])

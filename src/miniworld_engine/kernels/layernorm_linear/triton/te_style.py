@@ -1,6 +1,6 @@
 """TE-style trainable LayerNormLinear: split forward/backward, materialize-then-GEMM (no fold).
 
-Why this exists alongside the fold-based `layernorm_linear_fn`: the inference path folds
+Why this exists alongside the fold-based inference forward: the inference path folds
 `W2=γ⊙W` and runs a custom epilogue GEMM — great for inference (fold cached), but in TRAINING
 the fold is recomputed every step (weights change) and the full fwd+bwd loses to Transformer
 Engine. TE's structure is materialize `x_normed=LN(x)` then a plain cuBLAS GEMM; we mirror that.
@@ -18,7 +18,7 @@ where it matters: the LN kernels autotune per byte-width (fp32 vs 16-bit), and f
 TF32-vs-true-fp32 policy (`set_fp32_matmul_precision`, default 'high'=TF32). v1 requires X and W to
 share a dtype (no mixed bf16-act/fp32-weight yet).
 
-Structure (all cuBLAS GEMMs = TE-parity; LN kernels are Triton = portable, no quack/SM90 dep):
+Structure (all cuBLAS GEMMs = TE-parity; LN kernels are Triton = portable):
   forward  : x_normed = LN(x)              (Triton, strided x → contiguous x_normed + mean,rstd)
              Y = x_normed @ Wᵀ + b         (F.linear / cuBLAS)
              save: x (strided view, no copy), mean, rstd, γ, β, W
@@ -27,7 +27,7 @@ Structure (all cuBLAS GEMMs = TE-parity; LN kernels are Triton = portable, no qu
              T = dYᵀ @ x̂                   (cuBLAS wgrad; x̂ recomputed from saved stats)
              db = Σ_m dY ; dW = γ⊙T + outer(db,β) ; dγ = (W⊙T).sum(0) ; dβ = db @ W
 The T-decomposition gives dW/dγ/dβ/db from ONE wgrad GEMM with no in-kernel M-reduction and no
-x_normed materialization (see kernels/.../cute/dgrad_lnbwd.py for the same identity, derived).
+x_normed materialization.
 """
 
 from __future__ import annotations
@@ -311,7 +311,7 @@ def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias, *,
 
 class LayerNormLinearTEFn(torch.autograd.Function):
     """TE-style trainable `Y = LayerNorm(x)@Wᵀ + b`, stride-transparent (m-major in → m-major out).
-    Portable: cuBLAS GEMMs + Triton LN kernels, no quack/SM90 dependency.
+    Portable: cuBLAS GEMMs + Triton LN kernels.
 
 
     ``length`` (L, the pre-flatten token/atom count) is a POSITIONAL input because

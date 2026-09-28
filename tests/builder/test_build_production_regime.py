@@ -51,20 +51,14 @@ def test_augmentation_changes_the_plan_identity():
 
 
 def test_native_recorder_does_not_compile_and_retains_dtype_restrictions(monkeypatch):
-    import cutlass.cute as cute
-    import quack.cache as quack_cache
-    import quack.cute_dsl_utils as cute_utils
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     from miniworld_engine.kernels.layernorm import cuda
     from miniworld_engine.modules.swa_atom_attention import module as swa
-    monkeypatch.setattr(quack_cache, "CACHE_ENABLED", quack_cache.CACHE_ENABLED)
     monkeypatch.setattr(swa, "_flash_window_core", swa._flash_window_core)
     monkeypatch.setattr(swa, "_FA2_SPEC", False)
     monkeypatch.setattr(swa, "_FA4_SPEC", False)
     from miniworld_engine.kernels.transition import cuda as transition_cuda
-    monkeypatch.setattr(cute, "compile", cute.compile)
-    monkeypatch.setattr(cute_utils, "get_max_active_clusters", cute_utils.get_max_active_clusters)
     monkeypatch.setattr(transition_cuda, "_ext", transition_cuda._ext)
     monkeypatch.setattr(torch._dynamo.config, "disable", torch._dynamo.config.disable)
     original = cuda.layer_norm_bwd_cuda

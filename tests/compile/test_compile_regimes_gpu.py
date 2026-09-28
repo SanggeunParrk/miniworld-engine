@@ -79,7 +79,8 @@ def test_pairformer_block_is_one_graph():
     """The invariant. Under ``disable`` this block is 27 graphs / 26 breaks.
 
     Deliberately COLD -- no eager call before the trace. A warm-up hides any break whose cause is
-    a first-call side effect, which is exactly the bug this test found in the cute dispatcher.
+    a first-call side effect, which is exactly the bug this test found in the (since removed)
+    CuTeDSL dispatcher.
     """
     _requires_custom_op()
     model, pair = _block(), _pair()

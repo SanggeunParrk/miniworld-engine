@@ -24,6 +24,9 @@ level: module
 implementations:
   - pytorch
   - miniworld
+  # anthropic (not in the default list): integrations.anthropic.module_transition (row v2 at
+  # d=128, esm_t16 at 256, pf at 384; 512 unsupported) on the module's own parameters. INFERENCE
+  # ONLY. Needs MINIWORLD_ANTHROPIC_ROOT (cssb: /home/psk6950/ext/uplifting-biomolecular-modeling).
 mode: inference
 metric: time
 compile: true

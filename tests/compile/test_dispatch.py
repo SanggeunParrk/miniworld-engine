@@ -28,7 +28,6 @@ def test_kernelbackend_has_only_concrete_backends():
         "pytorch",
         "triton",
         "cuda",
-        "cute",
         "cuequivariance",
         # A vendored payload, like a vendor library, is a concrete thing a module can execute:
         # integrations.anthropic_trimul runs the TriMul kernels of Anthropic's release.
@@ -39,7 +38,7 @@ def test_kernelbackend_has_only_concrete_backends():
 
 
 def test_to_kernel_backend_rejects_miniworld():
-    assert dispatch.to_kernel_backend(ImplementationType.CUTE) is KernelBackend.CUTE
+    assert dispatch.to_kernel_backend(ImplementationType.CUDA) is KernelBackend.CUDA
     with pytest.raises(InvalidImplementationError):
         dispatch.to_kernel_backend(ImplementationType.MINIWORLD)
 
@@ -130,28 +129,21 @@ def arch(monkeypatch):
 def test_trimul_arch_policy(arch):
     mw = ImplementationType.MINIWORLD
 
-    arch(10)  # Blackwell / B200
-    assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.CUTE
-    assert dispatch.trimul_out_layout() == "bdll_sm100"
-
-    arch(9)  # Hopper / H100
-    assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.CUTE
-    assert dispatch.trimul_out_layout() == "bdll_direct_wide"
-
-    arch(8)  # pre-Hopper -> no cute GEMM -> triton
-    assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.TRITON
-    assert dispatch.trimul_out_layout() == "bdll_direct_wide"
+    # TRITON family on every arch: the hand-CUDA H100 kernels are tried inside the modules,
+    # before backend dispatch, so they are not a module-layer backend.
+    for major in (8, 9, 10):
+        arch(major)
+        assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.TRITON
 
 
 def test_trimul_settings_override_wins(arch):
-    """An explicit setting beats the arch policy (was MINIWORLD_TRIMUL_IMPL / _OUT_LAYOUT)."""
-    arch(10)
-    previous = settings.configure(trimul_impl="triton", trimul_out_layout="blld")
+    """An explicit setting beats the arch policy (was MINIWORLD_TRIMUL_IMPL)."""
+    arch(9)
+    previous = settings.configure(trimul_impl="pytorch")
     try:
         assert dispatch.resolve_triangle_multiplication(ImplementationType.MINIWORLD) is (
-            KernelBackend.TRITON
+            KernelBackend.PYTORCH
         )
-        assert dispatch.trimul_out_layout() == "blld"
     finally:
         settings.configure(**dataclasses.asdict(previous))
 

@@ -1,15 +1,16 @@
 """Selected H100 bidirectional training kernels, callable from installed modules.
 
-Forward saves x_n, left/right, tri, output LN statistics, and packed weights. Backward
-uses the selected CUDA B1/B7 bodies and four cuBLAS contractions. Every call
-owns its saved tensors; there is no global activation or weight cache.
+D128 forward saves x_n, left/right, tri, output LN statistics, and packed weights;
+its backward uses the selected CUDA B1/B7 bodies and four cuBLAS contractions.
+D256/384/512 use ``h100_wide_training`` (its own saved set). Every call owns its
+saved tensors; there is no global activation or weight cache.
 """
 
-import json
 import torch
 from torch.autograd.function import once_differentiable
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as WIDE
 
 
 def _data(leaves, mask, ds, *, packed=None, for_backward=False):
@@ -44,18 +45,22 @@ def _forward_fake(leaves, mask, ds):
     x = leaves[0]
     n = x.shape[1]
     d = x.shape[-1]
+    if WIDE.supports(d, n):
+        return [torch.empty_like(x), *WIDE.saved_like(x)]
     return [
         torch.empty_like(x),
         x.new_empty((4 * d, n, n)),
         x.new_empty((2 * d, n, n)),
         torch.empty_like(x),
-        x.new_empty((2 * n * n if d == 128 else 0,), dtype=torch.float32),
+        x.new_empty((2 * n * n,), dtype=torch.float32),
         x.new_empty((8 * d, d)),
-        x.new_empty((0,) if d == 128 else (n, n), dtype=torch.float32),
+        x.new_empty((0,), dtype=torch.float32),
     ]
 
 
-@opaque(fake=_forward_fake, name="trimul_h100_train_fwd_prepared_allwidths")
+# Op names carry the saved-tensor contract: the wide port replaced the old wide saves,
+# so previously compiled artifacts must not bind to these operators.
+@opaque(fake=_forward_fake, name="trimul_h100_train_fwd_wide_port")
 def forward(
     leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor
 ) -> list[torch.Tensor]:
@@ -64,19 +69,8 @@ def forward(
     n = x.shape[1]
     D = x.shape[-1]
     with T.native_context(x.device):
-        if D != 128:
-            from miniworld_engine.kernels.trimul_inproj.cuda.h100_width import Training
-
-            model = Training(*leaves, mask, ds, None, forward_only=True)
-            return [
-                model.forward(),
-                model.front.ab,
-                model.tri,
-                model.xn.reshape_as(x),
-                x.new_empty((0,), dtype=torch.float32),
-                model.w1,
-                model.mask,
-            ]
+        if WIDE.supports(D, n):
+            return WIDE.forward(leaves, mask, ds)
         from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
 
         d = _data(leaves, mask, ds)
@@ -91,15 +85,14 @@ def forward(
 
 
 @opaque(fake=lambda leaves, mask, ds: torch.empty_like(leaves[0]),
-        name="trimul_h100_dropout_nograd")
+        name="trimul_h100_dropout_nograd_wide_port")
 def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor) -> torch.Tensor:
     """Preserve training dropout/residual without backward-only D128 saves."""
     x = leaves[0]
     n, width = x.shape[1], x.shape[-1]
     with T.native_context(x.device):
-        if width != 128:
-            from miniworld_engine.kernels.trimul_inproj.cuda.h100_width import Training
-            return Training(*leaves, mask, ds, None, forward_only=True).forward()
+        if WIDE.supports(width, n):
+            return WIDE.forward(leaves, mask, ds)[0]
         from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
         d = _data(leaves, mask, ds)
         ab, _ = O.front(d)
@@ -121,7 +114,7 @@ def _backward_fake(leaves, mask, ds, saved, dy):
     return grads
 
 
-@opaque(fake=_backward_fake, name="trimul_h100_train_bwd_prepared_allwidths")
+@opaque(fake=_backward_fake, name="trimul_h100_train_bwd_wide_port")
 def backward(
     leaves: list[torch.Tensor],
     mask: torch.Tensor,
@@ -133,15 +126,12 @@ def backward(
     x = leaves[0]
     n = x.shape[1]
     D = x.shape[-1]
-    ab, tri, xn, stats, packed, prepared_mask = saved
+    if WIDE.supports(D, n):
+        with T.native_context(x.device):
+            return WIDE.backward(leaves, mask, ds, saved, dy)
+    ab, tri, xn, stats, packed, _ = saved
     dy = dy.contiguous()
     with T.native_context(x.device):
-        if D != 128:
-            from miniworld_engine.kernels.trimul_inproj.cuda.h100_width import Training
-
-            model = Training(*leaves, mask, ds, dy, saved=(ab, tri, xn),
-                             packed=packed, prepared_mask=prepared_mask)
-            return list(model.backward(dy))
         from miniworld_engine.kernels.trimul_inproj.cuda import (
             h100_b1 as B1,
             h100_b7 as B7,

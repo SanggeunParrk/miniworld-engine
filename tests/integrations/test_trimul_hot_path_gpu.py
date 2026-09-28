@@ -7,7 +7,7 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')]
 
-@pytest.mark.parametrize('d', [64, 128])
+@pytest.mark.parametrize('d', [128, 256, 512])
 def test_warm_native_path_has_no_source_io(d, monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip('Hopper required')
@@ -40,8 +40,8 @@ def test_warm_native_path_has_no_source_io(d, monkeypatch):
     torch.testing.assert_close(a,y,rtol=0,atol=0)
     for ref,first,last in zip(expected,actual,second):
         for got in (first,last):
-            if d == 64 and ref.dtype == torch.float32:
-                # The unchanged wide LN reduction uses atomicAdd; its summation
+            if d != 128 and ref.dtype == torch.float32:
+                # The wide LN affine reductions use atomicAdd; their summation
                 # order is not bitwise deterministic across launches.
                 error=(got-ref).norm()/ref.norm().clamp_min(1e-12)
                 assert error < 1e-4, error.item()

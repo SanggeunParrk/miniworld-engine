@@ -5,9 +5,7 @@ gated projections ``(sigmoid(x@WLg)·(x@WL), sigmoid(x@WRg)·(x@WR))`` in a sing
 so the four GEMMs share one read of ``x`` and the gates never round-trip through HBM.
 :mod:`.reference` holds the PyTorch definition the kernel is checked against.
 
-Only the Triton path is exported. ``tm1/cute`` is an SM100-only dense-GEMM experiment
-that is not wired into a dispatch and would drag cutlass in at import, so it stays out
-of this door; import is therefore side-effect free with a plain module-level import.
+Only the Triton path exists; import is side-effect free with a plain module-level import.
 """
 
 from __future__ import annotations

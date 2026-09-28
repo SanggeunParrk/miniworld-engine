@@ -264,27 +264,3 @@ def layernorm_linear_bwd_fp32_triton():
     layernorm_linear_pytorch(xf, lf, None, pf, None, _EPS).backward(
         dout.reshape(-1, _NH).float())
     return {"dx": (dx, xf.grad), "dln_weight": (dlnw, lf.grad), "dproj_weight": (dpw, pf.grad)}
-
-
-# ── layernorm_linear: fused LN + GEMM (cute, SM90) ───────────────────────────────────────────
-
-
-def layernorm_linear_fwd_sm90_cute():
-    """GemmLNLFusedSm90.kernel: Y = LN(x)@weight.T (+ bias), stats computed inside the GEMM.
-
-    The launcher folds the LN affine into the GEMM operands via ``fold_for_gemm``, so the
-    reference is the unfused composition it is meant to equal. weight is (N, K); bias is None
-    here, matching the driver.
-    """
-    from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
-        layernorm_linear_cute_fused,
-    )
-    from miniworld_engine.kernels.layernorm_linear.reference import (
-        layernorm_linear_pytorch,
-    )
-
-    x, lw, lb = rows2d(_M, _D), vec(_D), vec(_D)
-    w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)
-    y = layernorm_linear_cute_fused(x, lw, lb, w, None, _EPS)
-    ry = layernorm_linear_pytorch(x.float(), lw.float(), lb.float(), w.float(), None, _EPS)
-    return y, ry

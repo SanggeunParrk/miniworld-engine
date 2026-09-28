@@ -3,8 +3,8 @@
 Measures **inference** and **training** as two separate cases (never a single
 "forward" number):
   * inference = eval + no_grad (the forward-only kernel paths)
-  * training  = fwd + bwd (autograd; ours-trimul dispatches to the v6 merged
-                training kernel inside the module)
+  * training  = fwd + bwd (autograd; ours-trimul dispatches to its training
+                kernels inside the module)
 
 The Pairformer is a pure shell (miniworld_engine.modules.Pairformer): it only
 forwards ``implementation`` to its sub-modules, which each dispatch to the
@@ -50,13 +50,13 @@ IMPLS = {
 def apply_stability_workarounds() -> list[str]:
     """Make every backend cudagraph-capturable so all three are timed identically.
 
-    cudagraph is required: the cute (trimul) kernels have large per-launch host
+    cudagraph is required: the custom (trimul) kernels have large per-launch host
     overhead in eager mode (~10-30 ms/call), so only graph replay reflects GPU
     time. Two capture blockers are worked around here (both orthogonal to the
     Pairformer wiring):
-      1. sm_100 only: the transition hand-CUDA b2b kernel hardcodes Hopper
-         (sm_90a) cutlass include paths and does not build on Blackwell -> route
-         transition through the triton-family path.
+      1. sm_100 only: the transition hand-CUDA b2b kernel is Hopper (sm_90a)
+         only and does not build on Blackwell -> route transition through the
+         triton-family path.
       2. at L >= the use_kernels threshold, triangle-attention's LayerNorm routes
          to the autotuned triton kernel; that autotuner runs a synchronizing
          do_bench during capture (only when combined with the fused gate-out
@@ -86,10 +86,9 @@ def build(impl: ImplementationType, cfg: PairformerConfig) -> Pairformer:
 
 
 def make_inputs(B: int, L: int, d_pair: int):
-    # Dense (no padding): mask=None. An all-ones mask is semantically a no-op but
-    # routes the trimul cute path away from the sm100 cuequiv-free kernel (which is
-    # gated on `mask is None`), so None is required to benchmark the developed
-    # sm100/b200 kernels. Also avoids the b200 bidir backward's masked path.
+    # Dense (no padding): mask=None. An all-ones mask is semantically a no-op, but
+    # kernels gated on `mask is None` would take a different path, so None keeps
+    # every backend on its dense fast path.
     torch.manual_seed(1)
     pair = torch.randn(B, L, L, d_pair, device=DEVICE, dtype=torch.bfloat16)
     return pair, None
@@ -136,7 +135,7 @@ def training_time(model: nn.Module, pair, mask, cudagraph: bool) -> float:
         out.float().sum().backward()
 
     if cudagraph:
-        # Warm up FIRST (builds the lazy v6 training submodule + autotunes), THEN
+        # Warm up FIRST (builds lazy training submodules + autotunes), THEN
         # collect params so the lazily-created ones are included, zero their grad
         # buffers (static addresses for capture), and capture fwd+bwd.
         side = torch.cuda.Stream()
@@ -246,8 +245,8 @@ def main() -> None:
     ap.add_argument("--impls", nargs="+", default=list(IMPLS), choices=list(IMPLS))
     ap.add_argument("--no-cudagraph", dest="cudagraph", action="store_false")
     ap.add_argument("--compile", action="store_true",
-                    help="wrap each model in torch.compile (default inductor mode; our cute/"
-                         "triton kernels stay opaque via @torch.compiler.disable, so inductor "
+                    help="wrap each model in torch.compile (default inductor mode; our CUDA/"
+                         "Triton kernels stay opaque via @torch.compiler.disable, so inductor "
                          "only fuses the shell residual+dropout elementwise glue)")
     ap.add_argument("--check", action="store_true", help="report inference cosine vs pytorch")
     args = ap.parse_args()

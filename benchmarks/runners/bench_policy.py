@@ -50,7 +50,6 @@ KERNEL_TARGET_FAMILY: dict[str, str] = {
     "augmented_attention": "augmented_attention",
     "bias_only_attention": "bias_only_attention",
     "conditioned_transition_tail": "conditioned_transition",
-    "fused_ln_mask": "fused_ln_mask",
     "layernorm": "layernorm",
     "layernorm_bwd": "layernorm",
     "transition_b2b": "transition",
@@ -74,6 +73,13 @@ MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
     "dit_atom": "the same pair-bias DiT block at atom widths; both components support bf16|fp32",
     "swa_dit": "the SWA atom DiT block wraps swa_atom_attention, so it inherits its flash bf16-only "
                "core even though the adaLN and the transition around it are bf16|fp32",
+    "outer_product": "no registry family of its own: the fused path (integrations/opm_train.py, "
+                     "csrc/opm_epilogue.cu) and the Anthropic path are bf16-only; fp32 falls to "
+                     "the module's statements",
+    "msa_pair_weighted_averaging": "no registry family of its own: integrations/pwa_train.py and "
+                                   "the Anthropic msa_pwa cell are bf16-only",
+    "attention_pair_bias": "no registry family of its own; benched at bf16 like the trunk it sits "
+                           "in (cuequivariance's compiled whole-op route is a BF16 contract)",
 }
 
 # module bench target -> does miniworld have an end-to-end fp32 kernel? The diffusion blocks do
@@ -93,6 +99,9 @@ MODULE_SUPPORTS_FP32: dict[str, bool] = {
     "dit": True,
     "dit_atom": True,
     "swa_dit": False,
+    "outer_product": False,
+    "msa_pair_weighted_averaging": False,
+    "attention_pair_bias": False,
 }
 
 

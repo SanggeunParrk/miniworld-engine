@@ -7,6 +7,9 @@ import torch
 from miniworld_engine import settings
 from miniworld_engine.modules.exceptions import ImplementationType
 
+#: Widths with a packaged bidirectional CUDA training path (D64, D128 and the wide port).
+TRAINING_WIDTHS = (64, 128, 256, 384, 512)
+
 
 def serves(module, pair: torch.Tensor) -> bool:
     """Check the mathematical and resource contract before touching CUDA builders."""
@@ -16,7 +19,10 @@ def serves(module, pair: torch.Tensor) -> bool:
         or policy.engine_backend == "triton"
     ):
         return False
-    if pair.shape[-1] not in policy.trimul_h100_training_widths:
+    if (
+        pair.shape[-1] not in policy.trimul_h100_training_widths
+        or pair.shape[-1] not in TRAINING_WIDTHS
+    ):
         return False
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or not pair.is_contiguous():
         return False
@@ -85,10 +91,16 @@ def update(
         module.to_gate.weight,
         module.to_out.weight,
     )
-    if bidirectional:
+    if bidirectional and d == 64:
+        from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_training import (
+            bidirectional_trimul as apply,
+        )
+    elif bidirectional:
         apply = bidirectional_trimul
     else:
-        from miniworld_engine.kernels.trimul_inproj.cuda.h100_single import single_trimul
+        from miniworld_engine.kernels.trimul_inproj.cuda.h100_single import (
+            single_trimul,
+        )
         def apply(*args):
             return single_trimul(module.outgoing, *args)
     return apply(
@@ -127,6 +139,10 @@ def serves_inference(
         return False
     if torch.cuda.get_device_capability(pair.device) != (9, 0):
         return False
+    if bidirectional and _wide_inference_ok(module, pair):
+        return True
+    if not bidirectional and _uni_wide_inference_ok(module, pair):
+        return True
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as table
 
     hidden = module.d_hidden * (2 if bidirectional else 1)
@@ -160,10 +176,42 @@ def update_inference(module, pair, mask, *, bidirectional):
         module.ln_out.weight.float().contiguous(),
         module.ln_out.bias.float().contiguous(),
     ]
+    if bidirectional and _wide_inference_ok(module, pair):
+        from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import (
+            wide_inference,
+        )
+        return wide_inference(pair, weights, pm)
+    if not bidirectional and _uni_wide_inference_ok(module, pair):
+        from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_inference import (
+            uni_wide_inference,
+        )
+
+        return uni_wide_inference(pair, weights, pm, module.outgoing)
     direction = 0 if bidirectional else 1 if module.outgoing else 2
     return inference(pair, weights, pm, direction, module.ln_pair.eps)
+
+
+def _wide_inference_ok(module, pair: torch.Tensor) -> bool:
+    """Bidirectional D256/384/512 at L384/768: fused wide K1/K3 (hidden = D per direction)."""
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import supports
+
+    return (
+        supports(pair.shape[-1], pair.shape[1])
+        and module.d_hidden == pair.shape[-1]
+        and module.ln_pair.eps == 1e-5
+        and module.ln_out.eps == 1e-5
+    )
 
 
 def serves_single(module, pair: torch.Tensor) -> bool:
     """Qualified single-direction native training contract; inference is separate."""
     return pair.shape[-1] == 128 and serves(module, pair)
+
+
+def _uni_wide_inference_ok(module, pair: torch.Tensor) -> bool:
+    """Single-direction D512 at L384/768: LN + K1 + contraction + gate GEMM + folded K3."""
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_inference import (
+        serves,
+    )
+
+    return serves(module, pair)

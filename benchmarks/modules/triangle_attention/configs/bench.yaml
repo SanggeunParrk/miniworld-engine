@@ -24,6 +24,11 @@ level: module
 implementations:
   - pytorch
   # cuequivariance runs the real cet.triangle_attention kernel (0.10.0), wired via _CUEQ_OPS.
+  # anthropic (not in the default list): integrations.anthropic.module_triangle_attention, row
+  # block:triattn_native, on the module's own parameters (dispatch rejects the option at module
+  # level, so the bench calls the integration adapter; the accuracy columns check it against the
+  # fp32 pytorch module). INFERENCE ONLY. Needs MINIWORLD_ANTHROPIC_ROOT=<checkout containing
+  # common/opt_core>; on cssb /home/psk6950/ext/uplifting-biomolecular-modeling.
   - cuequivariance
   - miniworld
 mode: inference

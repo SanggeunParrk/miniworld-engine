@@ -7,24 +7,26 @@ policy before constructing/compiling models.
 
 | Module | Inference | Training | Native contract |
 |---|---|---|---|
-| Bidirectional TriMul | Anthropic-derived native K1 → two cuBLAS contractions → K3/residual | Selected CUDA forward + B1–B4 + four cuBLAS contractions + B7–B12 | BF16, batch 1; training L384/768, direction hidden=D, D64/128/256/384/512; D128 requires a full 132-SM H100 |
+| Bidirectional TriMul | Anthropic-derived native K1 → two cuBLAS contractions → K3/residual | D128: selected CUDA forward + B1–B4 + four cuBLAS contractions + B7–B12. D256/384/512: flattened port of the qualified large-width research plans (below) | BF16, batch 1; training L384/768, direction hidden=D, D128/256/384/512 (D64 trains on Triton); D128 requires a full 132-SM H100 |
 | Single-direction TriMul | Packaged K1 → contraction → K3/residual | Native K1/K3, fused CUDA B1, two cuBLAS gradient contractions, streamed producer-consumer B7 | Training: BF16, batch 1, D=hidden=128, L384/768, full 132-SM H100; both outgoing and incoming. Inference: width/hidden pair in the native tile table |
 | Transition | Existing residual-fused hand-CUDA path | Same forward with native backward | BF16, n=4, D64/128/256/384/512 and each kernel's resource guards |
 | OuterProductMean | Packaged OPM with residual in the CUDA epilogue, no LN statistics saved | Residual-fused forward and native backward; residual gradient is passed through | BF16, batch 1, MSA64/hidden32/pair128, L multiple of 64, MSA depth multiple of 256; normalization before projection; no interchain masking |
 | MSAPairWeightedAveraging | Packaged forward without training saves | Packaged forward/backward, residual and row dropout | BF16, batch 1, MSA64/pair128, 8 heads × 32, L multiple of 128, even MSA depth |
 | Token DiT | Fused inference row kernels, attention/gate and GEMM path | Existing general autograd route | BF16/FP32, batch 1, single768/condition384/pair128, 16 heads, expansion1536, L multiple of 128, shared sample conditioning, no QK norm |
 
-Unsupported contracts retain the general implementation. `auto` selects these
-connected bidirectional CUDA training ports at all five TriMul widths; it does **not** assert
-that all widths are faster. D128 has the selected optimization; additional
-D64/256/384/512 performance tuning remains deferred. Inference width/hidden
-coverage follows the packaged K1/K3 table and differs from training coverage.
+Unsupported contracts retain the general implementation. `auto` selects the
+bidirectional CUDA training path at D128/256/384/512; each is faster than the
+Triton path under CUDA-graph replay (D256–D512 numbers below). D64 has no CUDA
+training route: the former port measured 0.61x of Triton at L384 and L768 and was
+removed. Inference width/hidden coverage follows the packaged K1/K3 table and
+differs from training coverage.
 
 ## Retained values and execution
 
-TriMul training retains input `x_n`, left/right, `tri`, and packed front weights.
+D128 TriMul training retains input `x_n`, left/right, `tri`, and packed front weights.
 Bidirectional D128 additionally retains output-LN statistics; single-direction
-D128 recomputes output-LN statistics in B1. Projection/gate intermediates are recomputed in backward. Every forward
+D128 recomputes output-LN statistics in B1; D128 projection/gate intermediates are
+recomputed in backward. The D256/384/512 saved set is listed in the wide section below. Every forward
 owns its saved tensors, and original parameters participate in PyTorch's
 saved-tensor version checking. Parameter packing is live on every call, including
 CUDA graph replay. There is no process-global activation or weight snapshot.
@@ -50,7 +52,8 @@ opt-out of these automatic paths, including residual-fused Transition.
 `MINIWORLD_OPM_TRAIN=0`, `MINIWORLD_PWA_TRAIN=0` and
 `MINIWORLD_PWA_INFER=0` disable their respective integrations.
 `trimul_h100_training_widths` can restrict the connected CUDA training widths;
-its default includes all five widths above.
+its default is `(128, 256, 384, 512)`. Adding 64 has no effect: no D64 CUDA
+training route exists.
 
 This change connects already-selected implementations. It is **not** a complete
 retune or rebuild of all native/Triton caches. Native TriMul ships measured tile
@@ -136,21 +139,83 @@ not a claim of exhaustive configuration tuning or 90% speed-of-light.
 D64/256/384/512 **single-direction training** retains the general path.
 See [measurements and validation](../../verdicts/trimul-single-20260923/README.md).
 
-## Preparation reuse at D64/256/384/512
+## Wide bidirectional training (D256/384/512)
 
-Bidirectional training now packs front weights once in forward and retains the
-pack and converted FP32 mask for its own backward. This replaces three pack
-calls per forward+backward with one. D512's separate input LN now runs once,
-rather than both during plan construction and during forward. Existing weight
-strides and optimizer-state layouts at these widths are unchanged; the D128
-layout migration above does not apply to this extension.
+`kernels/trimul_inproj/cuda/h100_wide_training.py` is a flattened port of the
+qualified research selections recorded in
+`experiments/trimul_large_d_vast` (September 27): D256 `d256_pool_checkpoint`,
+D384 `wide_checkpoint23`, D512 `wide_checkpoint24`, and D512/L384 with the 4-way
+input-weight split. The research checkpoint chains, runtime text patching and
+`quack`/CuTe imports are gone: each of the 29 kernels is a frozen `.cu` file under
+`h100_sources/wide_train` (the final generated text of its chain, hashes in
+`PROVENANCE.json`). The D256 chain constructed a CuTe/quack GEMM that the selected
+path never launched; the port has no CuTe/quack/cutlass-DSL dependency.
 
-The wide forward also returns `x_n` with the declared batch dimension. Previously
-its real 3D tensor disagreed with the opaque operator's 4D fake metadata and
-could fail compiled execution. Revised opaque operator names keep old Inductor
-cache artifacts from reusing the previous saved-tensor contract.
+Stages per call (grids, shared memory and tensor maps match the research plans):
 
-Extra retained memory: BF16 packed weights of `16*D²` bytes plus the FP32 pair
-mask of `4*L²` bytes (at most 6.25 MiB for D512/L768). This replaces recomputation
-within a step; weights remain live across optimizer steps and CUDA graph replay.
-See [wide preparation checks and timings](../../verdicts/trimul-wide-preparation-20260923/README.md).
+- Forward: packed front K1 (D256 also writes input-LN stats; D384/D512 also save
+  channel-major projection pre-activations; D512 normalizes `x` first), two
+  contraction GEMMs, output LN (D512: packed normalization plus exact-scalar patch
+  records), cuBLASLt projection and gate GEMMs, gate/dropout/residual epilogue.
+- Backward: D512 patch application, fallback and row-compacted re-projection;
+  output-gate kernel (L384 also zeroes the LN affine sums); dN GEMM; dWproj/dWgate
+  (cuBLASLt, split FP32 with a native reduction at D512/L768, torch.mm where the plan
+  used it); output-LN backward (cooperative at L768); contraction plus
+  gate/projection gradients (D256: native contraction + register-budget or bulk-mask
+  source; D384/D512: fused contraction/GP); split-K input-weight partials; one dX GEMM;
+  input-LN backward with the ordered partial reductions. D256/L384 overlaps
+  dWproj/dWgate with the source kernel and D512/L768 overlaps the joint input dW with
+  the dX GEMM on a side stream (graph-capturable fork/join).
+- D256/L384's source kernel uses `setmaxnreg` 32/208; its cubin's `.nv.info` launch
+  register count is lowered to 120 (two resident CTAs) only after a control-flow walk
+  of the SASS (`cuobjdump`) proves every register operand fits each allocation state.
+  Without `cuobjdump` or on a failed check the original cubin runs (one CTA/SM).
+
+Saved per forward (owned by that call): `ab`, `tri`, `x_n`, the normalized output-LN
+rows, projection and gate products, output-LN mean/rstd; plus D256 packed front
+weights, or D384/D512 channel-major pre-activations `[8D, L²]` (plus D512 patch
+records). Measured forward-retained memory (saves plus output) equals the Triton
+path's at D384/D512 (D512/L768 11.26 vs 11.27 GiB) and is 40% lower at D256
+(L768 3.38 vs 5.64 GiB); the removed port retained about 4.5 GiB at D512/L768.
+Peak fwd+bwd step memory is within -7%/+10% of Triton (D512/L768 20.7 vs 19.4 GiB).
+
+**cuBLASLt algorithms.** The research plans froze heuristic indices and asserted the
+algorithm words under cuBLASLt 12.8.4. torch 2.13+cu129 loads cuBLASLt 12.9.1, whose
+lists differ and whose algorithm word 4 is runtime metadata, so those assertions
+could not pass unchanged. `h100_sources/wide_train/lt_selection.json` keeps each
+frozen algorithm; at first use the port selects the heuristic whose other seven words
+match exactly and otherwise uses cuBLASLt's first heuristic with a one-time
+`RuntimeWarning` (currently only D256/L384 dWgate). The compacted D512 re-projection
+reuses the projection's algorithm after `cublasLtMatmulAlgoCheck`. Validation under
+12.9.1: with the research plans' indices both implementations produce bitwise-equal
+output, dX and weight gradients; all launched kernels have identical SASS. Reselection
+check: the matched frozen configurations are 0.4–3.6% faster end to end than taking
+cuBLASLt's first heuristic for every GEMM (paired graph replay, all six cells), so they
+remain selected. `h100_wide_training.LT_SELECTION` switches the policy for such checks.
+
+**Measurements (H100 SXM, torch 2.13.0+cu129, module fwd+bwd, B1, BF16).**
+Paired CUDA-graph replay medians, one process per GPU:
+
+| D | L | Triton ms | CUDA ms | Speedup | Vast H100 research (Triton / native ms) |
+|---:|---:|---:|---:|---:|---|
+| 256 | 384 | 3.742 | 2.592 | 1.44x | 3.680 / 2.600 |
+| 256 | 768 | 16.640 | 10.584 | 1.57x | 18.286 / 10.441 |
+| 384 | 384 | 6.637 | 4.563 | 1.45x | 6.483 / 4.504 |
+| 384 | 768 | 29.162 | 18.938 | 1.54x | 28.499 / 18.656 |
+| 512 | 384 | 10.089 | 6.927 | 1.46x | 9.845 / 6.858 |
+| 512 | 768 | 45.765 | 28.278 | 1.62x | 44.529 / 28.023 |
+| 64 (old port) | 384 | 0.828 | 1.354 | 0.61x | removed |
+| 64 (old port) | 768 | 3.042 | 4.984 | 0.61x | removed |
+
+Eager medians track graph replay within 1–3% at D256–D512 (for example D512/L768
+28.94 vs 43.89 ms). The previous wide port measured 0.69–0.75x of Triton. D64's
+old port was 1.2x faster than Triton only in eager L384 (1.37 vs 1.66 ms, launch
+overhead) and slower in every other mode.
+
+Validation: strict gradients of every leaf against an FP32 PyTorch reference with
+random LN affine parameters, a 15% masked pair mask and 25% dropout scale (errors
+equal to or below Triton's, e.g. dX 0.0040 vs 0.0043 relative); changed-input CUDA
+graph replay after mutating input, every weight, LN affine, mask, dropout scale and
+upstream gradient (outputs and weight gradients bitwise; LN affine gradients within
+7e-7 because their sums use float atomics); `torch.compile(fullgraph=True)`;
+outstanding forwards with independent saves; FP32 caller masks.

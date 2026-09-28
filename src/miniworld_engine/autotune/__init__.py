@@ -1,4 +1,4 @@
-"""Per-GPU autotune-config cache (backend-agnostic: Triton / CuTe / CUDA).
+"""Per-GPU autotune-config cache (backend-agnostic: Triton / CUDA).
 
 Ship the top-K tuned configs per ``(gpu, dtype, op, shape-bucket)`` so runs do not pay the
 full-grid autotune tax and performance is reproducible across machines. Two runtime entry
@@ -9,13 +9,13 @@ points share one cache format and one storage layer:
   top-K for the shape actually running. That reader is installed HERE, at package import, because
   it patches ``Autotuner.__init__`` and every kernel module imports this package before declaring
   an autotuner.
-* **CuTe / CUDA** — these fix their tile/cluster/stage config at build time and have no autotune
-  loop, so they call :func:`select_config` to *pick one* cached config (falling back to the
-  kernel's own ``default_config`` on a miss).
+* **CUDA** — hand-written kernels fix their tile/cluster/stage config at build time and have
+  no autotune loop, so they call :func:`select_config` to *pick one* cached config (falling back
+  to the kernel's own ``default_config`` on a miss).
 
 Both warn ONCE on a miss (unknown GPU, unseen shape, or a stale cache — detected via
 ``config_space_hash``). A triton miss falls back to a BOUNDED heuristic subset
-(``settings.autotune_miss_cap``, 24 by default), not to the 205,266-config grid; a cute miss
+(``settings.autotune_miss_cap``, 24 by default), not to the 205,266-config grid; a native miss
 falls back to the kernel's ``default_config``. ``settings.configure(run_autotune=True)`` ignores
 the cache and lifts the cap (full re-tune / no pin).
 

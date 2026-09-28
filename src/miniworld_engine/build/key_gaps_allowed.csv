@@ -1,6 +1,5 @@
 op,param,reason
 adaln_fwd_triton,USE_LOW,"pure function of X's dtype (use_low = x.dtype in (bf16,fp16)) and the cache keys dtype separately and more finely; inference.py never consults autocast so they cannot diverge"
-layernorm_fwd_rowscale_triton,EPS,"numeric tolerance: only use is rstd = 1/sqrt(var + EPS); gates no branch, changes no trip count"
 layernorm_fwd_saveact_triton,eps,numeric tolerance: only use is rstd = 1/sqrt(var + eps)
 layernorm_bwd_split_mmajor_triton,VEC_HINT,"sole launch site passes N=K and VEC_HINT=(K<=128), so VEC_HINT == (N<=128) and N is already keyed"
 layernorm_linear_bwd_fp32_triton,USE_DOT,"sole launch site passes USE_DOT=(nh>=MIN_TL_DOT_DIM) with NH=nh, so it is a pure function of the keyed NH"

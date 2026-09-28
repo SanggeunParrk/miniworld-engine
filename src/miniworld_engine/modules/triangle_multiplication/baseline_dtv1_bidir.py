@@ -3,7 +3,7 @@
 The stock `fused_triangle_multiplicative_update_dtv1` is single-direction. Running it TWICE
 (outgoing + incoming) double-counts the shared work (2× LN_in, 2× input GEMM launch, 2 output
 blocks). This composes ONE fused bidirectional block with the SAME architecture as ours
-(`cute/bidir_training.py`) so the comparison is apples-to-apples:
+(one shared LN_in, one gated front, a shared 2h back) so the comparison is apples-to-apples:
 
     x_n   = LN_in(x)                                            # dt-v1 fused input kernel
     L,R   = sigmoid(x_n@g_in)·(x_n@p_in), each 2h wide          #   (one (4h,M) gated GEMM)

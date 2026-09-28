@@ -8,7 +8,7 @@ from miniworld_engine.kernels import _nvcc
 from miniworld_engine.modules.swa_atom_attention import module as swa
 
 
-def test_ampere_does_not_require_mathdx_or_cute(monkeypatch):
+def test_ampere_does_not_require_mathdx(monkeypatch):
     monkeypatch.setattr(swa, "_flash_backend", lambda: "fa2")
     seen = []
     def load(name):
@@ -18,6 +18,21 @@ def test_ampere_does_not_require_mathdx_or_cute(monkeypatch):
     monkeypatch.setattr(_nvcc, "mathdx_includes", lambda: pytest.fail("Ampere requested mathdx"))
     preflight.native_dependencies("sm86")
     assert seen == ["flash_attn.flash_attn_interface"]
+
+
+def test_hopper_imports_only_the_selected_flash_backend(monkeypatch):
+    """No CuTeDSL import is a Hopper build dependency any more; the mathdx headers are."""
+    monkeypatch.setattr(swa, "_flash_backend", lambda: "fa2")
+    seen = []
+    def load(name):
+        seen.append(name)
+        return SimpleNamespace(flash_attn_varlen_func=lambda: None)
+    monkeypatch.setattr(preflight.importlib, "import_module", load)
+    headers = []
+    monkeypatch.setattr(_nvcc, "mathdx_includes", lambda: headers.append(True))
+    preflight.native_dependencies("sm90")
+    assert seen == ["flash_attn.flash_attn_interface"]
+    assert headers
 
 
 def test_foreign_native_failures_are_reported_together(monkeypatch):

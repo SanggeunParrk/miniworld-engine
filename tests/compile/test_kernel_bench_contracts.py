@@ -12,7 +12,7 @@ import torch
 
 BENCH = Path(__file__).resolve().parents[2] / "benchmarks" / "runners" / "bench.py"
 FIXED_BEFORE = {"dual_gemm_epilogue", "gemm_epilogue", "transition_b2b", "triangle_attention",
-                "bias_only_attention", "augmented_attention", "fused_ln_mask", "gemm_gate",
+                "bias_only_attention", "augmented_attention", "gemm_gate",
                 "gemm_gate_bwd", "dual_gemm_epilogue_bwd", "transition_b2b_bwd", "gemm_epilogue_bwd"}
 AUTOGRAD = {"adaln_bwd", "transition_b2b_bwd", "gemm_epilogue_bwd"}
 
@@ -140,12 +140,6 @@ def test_attention_does_not_silently_round_requested_width(target, runner):
         namespace[f"bench_kernel_{target}"](config(target, d_pair=33), 2, "pytorch", None)
 
 
-def test_mask_probability_controls_actual_mask(runner):
-    namespace, seen = runner
-    namespace["bench_kernel_fused_ln_mask"](config("fused_ln_mask", mask_prob=1.0), 2, "pytorch", None)
-    assert torch.count_nonzero(seen[-1][1]).item() == 0
-
-
 def test_tail_normalizes_during_setup_only(runner, monkeypatch):
     from miniworld_engine.modules.conditioned_transition.module import (
         ConditionedTransition,
@@ -176,8 +170,8 @@ def test_autograd_helper_detects_parameter_gradient_error_with_correct_dx(runner
 
 
 def test_audit_covers_every_registered_target_and_implementation():
-    assert len(TARGETS) == 17
-    assert sum(len(implementations(target)) for target in TARGETS) == 52
+    assert len(TARGETS) == 16
+    assert sum(len(implementations(target)) for target in TARGETS) == 40
 
 
 def test_gate_backward_passes_required_row_scale_and_sequence_length(runner, monkeypatch):

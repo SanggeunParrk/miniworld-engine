@@ -17,10 +17,13 @@ in the current checkout.
 
 | card | precision | torch | CUDA | triton | Python | result | evidence |
 |---|---|---|---|---|---|---|---|
-| RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 92, ok 85, failed 7, skipped 6` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
-| RTX A6000 (sm86) | fp32 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 33, ok 33, failed 0, skipped 2` | same file, `dtype` column |
-| RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 101, ok 94, failed 7, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
+| RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 85, ok 78, failed 7, skipped 0, untested 1` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
+| RTX A6000 (sm86) | fp32 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 33, ok 33, failed 0, skipped 0` | same file, `dtype` column |
+| RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 94, ok 87, failed 7, skipped 0` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
 | RTX A5000 (sm86) | fp32 | — | — | — | — | **not run** | no fp32 pass has been made on this card |
+
+v2.2.0 (torch 2.13.0+cu129, triton 3.7.1) has not yet been run on a GPU: every row above is a
+record from an earlier version and says nothing about the current dependency set.
 
 The seven bf16 failures are the newly registered mpnn kernels, from those recorded runs: five are outside the
 default 5e-02 band with no `rtol` declared, and two would not launch
@@ -30,14 +33,15 @@ fell from 40 because seven kernels stopped declaring fp32 — `layernorm_*_folds
 `transition_*` rows are `bf16` only now, so their fp32 records were a precision nothing claims and
 `devices.record` dropped them.
 
-Every skip is a kernel whose declared `arch` is above sm86. It is not launched, so it costs nothing
-and is not a failure — the manifest says `skipped` with the reason, in its own column, rather than
-carrying a stale verdict from before the arch gate existed.
+There are no skips left in these rows. The kernels these runs skipped for declaring an `arch` above
+sm86 were the CuTe DSL kernels that v2.2.0 removed, and their manifest rows went with them; the
+same release dropped the rows of the Triton kernels that lived in those CuTe files or had no caller
+left without them. The A6000's one `untested` bf16 row (`cond_transition_fwd_b2b_saveact_triton`)
+has no recorded result.
 
 The A5000's seven failures are the same seven the A6000 has, and for the same two reasons -- five
-mpnn kernels outside a band nothing declares, two that will not launch on an untuned card. Its six
-arch-gated kernels were relabelled from `failed` to `skipped` from the refusal message they already
-carried. Its fp32 half has never been run, so read the row as bf16 evidence and nothing more.
+mpnn kernels outside a band nothing declares, two that will not launch on an untuned card. Its fp32
+half has never been run, so read the row as bf16 evidence and nothing more.
 
 `tests/registry/test_the_support_page_counts_its_own_evidence.py` checks every number above against
 the manifest it cites, so this table cannot age past its evidence again.
@@ -46,13 +50,14 @@ the manifest it cites, so this table cannot age past its evidence again.
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 113 | yes, on sm86 (which satisfies sm80) |
-| sm90 | 24 | partial: three [TriMul parity kernels](kernels/trimul-sm90-parity.md) |
-| sm100 | 4 | **no** |
+| sm80 | 106 | yes, on sm86 (which satisfies sm80) |
+| sm90 | 10 | **no**: the H100 manifest lists them `untested` or not at all |
+| sm100 | 0 | nothing declares sm100 since v2.2.0 removed the CuTe DSL kernels |
 
-Full-registry manifests are still missing for sm90 and sm100. The linked SM90 report
-covers the three opt-in TriMul parity kernels, not every H100 implementation.
-For paths without execution evidence, `arch` means "written for", not "verified on".
+No full-registry manifest has been run on sm90 yet. The three TriMul parity kernels the
+[SM90 report](kernels/trimul-sm90-parity.md) covered were CuTe kernels and left the registry in
+v2.2.0, so that report is history, not evidence for the current source. For paths without
+execution evidence, `arch` means "written for", not "verified on".
 
 ## CPU
 

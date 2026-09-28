@@ -1,7 +1,7 @@
 """The shipped cache must actually narrow a Triton autotuner's grid, under the SAME key it was
 written with.
 
-Since fcd3c7a nothing read it. `select_config` is the only other reader and only the CuTe/CUDA
+Since fcd3c7a nothing read it. `select_config` is the only other reader and only the native (CUDA)
 paths call it, so every process re-benched the full grid in-process while the committed
 `data/*.json` was written and never read back. Nothing looked wrong because every shipped config
 set holds ONE config per op, which makes a full sweep free -- and it stops being free the moment a
@@ -397,12 +397,12 @@ def test_candidate_growth_is_not_a_proved_narrowing():
     assert not cache.grid_compatible({}, GRID[:2])
 
 
-def test_cute_dict_candidates_reuse_a_narrowed_grid(tmp_path, monkeypatch):
+def test_native_dict_candidates_reuse_a_narrowed_grid(tmp_path, monkeypatch):
     monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path)
     cache._load_cache.clear()
-    # Actual CuTe callers omit unused Triton warp/stage fields.
+    # Actual native (CUDA) callers omit unused Triton warp/stage fields.
     candidates = [{"kwargs": {"tile_m": m, "cluster": (1, 1)}} for m in (64, 128, 256)]
-    op = "cute_probe"
+    op = "native_probe"
     cache.store_ranked_configs(
         op, cache.gpu_key(), "bfloat16", "shape_key=128",
         [(candidates[1], 1.0)], cache.config_space_hash(candidates), configs=candidates)

@@ -332,8 +332,8 @@ def check_key_spread(rep: Report, shard_dirs: list[Path]) -> None:
         if len(shapes) <= 1:
             # One bucket is CORRECT for a kernel whose autotune key carries no shape_key: it has
             # no per-shape cache to build, and the builder already drives it at one length only
-            # (see `_keys_on_shape` there). transition_fold_triton is the one today -- it reads
-            # the weights and never touches the activation, so N and K are its whole shape.
+            # (see `_keys_on_shape` there) -- e.g. a weight-only kernel whose N and K are its
+            # whole shape.
             # Judged by the same function the builder uses, so the two cannot drift apart.
             if not _keys_on_shape_key(op):
                 rep.add("spread", OK, op,

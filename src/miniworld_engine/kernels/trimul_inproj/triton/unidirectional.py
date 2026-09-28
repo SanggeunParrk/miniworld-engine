@@ -37,7 +37,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 
 def _contract(lf, rf, outgoing):
     """The single triangle contraction on the BDLL tensors (channel-major bmm =
-    cuBLAS, exactly cute's dispatch.bmm). lf/rf:(D,L,L).
+    cuBLAS). lf/rf:(D,L,L).
       outgoing  O[d,i,j] = Σ_k lf[d,i,k]·rf[d,j,k]  = bmm(lf, rfᵀ)
       incoming  O[d,i,j] = Σ_k lf[d,k,i]·rf[d,k,j]  = bmm(lfᵀ, rf)
     """
@@ -150,7 +150,7 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
                residual=None):
     """Forward-only single-direction back-half — SAME kernel structure as the merged
     Function but NO autograd.Function / saved tensors and NO preact side output, so
-    it cudagraphs at cute's speed (the merged Function's saves are used only under
+    it cudagraphs cheaply (the merged Function's saves are used only under
     grad). Mirrors the bidir ``_bidir_infer``."""
     B, L, _, D = x_n.shape
     left, right, _ = bidir_front_triton(
@@ -160,8 +160,7 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     rf = right.reshape(H, L, L)
     tri = _contract(lf, rf, outgoing)                           # (H, L, L)
     # Fused back-half: LN_out + proj-gemm + gate-gemm + mul in ONE kernel (``trimul_back_triton``),
-    # the exact kernel the H100 sm90 cute path already uses (module ``_forward_cute_free``). It
-    # replaces the 2-kernel ``_te_forward`` (LN_out+proj) + ``gate_elem_triton`` (gate+mul) split:
+    # which replaces the 2-kernel ``_te_forward`` (LN_out+proj) + ``gate_elem_triton`` (gate+mul) split:
     # one fewer launch and one fewer HBM round-trip of the [L,L,D] proj tensor. All triton, so it
     # runs on A100/sm86 as well as the Hopper path it came from.
     #
@@ -211,8 +210,7 @@ def trimul_triton(
     mask=None,                   # (B,L) residue OR (B,L,L) pair mask, optional (folded into LN_in)
     dropscale=None,              # drop_row scale [B,1,L,D] (== mask/(1-p)); training only
 ):
-    """Faithful triton mirror of the single-direction cute trimul. Returns
-    (B, L, L, d_pair). Mirrors cute's dispatch exactly: LN_in (triton, row_scale
+    """Single-direction Triton trimul. Returns (B, L, L, d_pair): LN_in (triton, row_scale
     mask), then a forward-only path for inference (``_uni_infer``) and the merged
     autograd Function for training (``_UniBackHalfTriton``). All-triton/cuBLAS;
     requires d_hidden == d_pair (the front produces per-side width d_hidden).
@@ -247,10 +245,10 @@ def trimul_triton(
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
     if not torch.is_grad_enabled() and ds_2d is None:
-        # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed. Also gate on
+        # INFERENCE: forward-only (no saved tensors). Also gate on
         # ds_2d is None: a live dropout scale (train() under no_grad, p_drop>0) must take the
         # TRAINING apply below (which folds dropout into the gate epilogue) — the inference path
-        # has no dropscale and would silently skip dropout. Mirrors the cute dispatch's guard.
+        # has no dropscale and would silently skip dropout.
         return _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
                           ln_out_w, ln_out_b, eps_out, outgoing, mask=m2d, residual=residual_flat)
     # The training path ALWAYS carries a drop scale, ones when the model's p_drop is 0. That is

@@ -6,6 +6,70 @@ here. Format loosely follows
 
 The public surface is enforced by `tests/compile/test_public_api.py`.
 
+## [2.2.0] - 2026-09-28
+
+Two tiers per op: hand-written CUDA where it exists, a Triton fallback everywhere else, plus the
+PyTorch reference and the comparison baselines (cuequivariance, Anthropic payload, dtv1).
+GPU qualification of this release is pending.
+
+### Runtime
+
+- torch 2.13.0+cu129 (triton 3.7.1, CUDA toolkit 12.9 — the newest pair the cluster's 575
+  driver runs), cuequivariance / cuequivariance-ops-torch-cu12 0.12.0, Transformer Engine 2.19.
+  Tuned autotune caches are keyed on the torch version and need rebuilding.
+
+### Removed
+
+- Every CuTe DSL / nvidia-cutlass-dsl / quack kernel and the `cute` extra: `kernels/*/cute`
+  (tm1, tm2, transition, layernorm, layernorm_linear, trimul_inproj), the `fused_ln_mask`
+  family, `_quack_compat`, the autotune CuTe candidate spaces and compile paths, and the
+  unused CUTLASS C++ trees `kernels/adaln/cutlass`, `kernels/conditioned_transition/cutlass`
+  and `transition_b2b_sm100_kernel.cu`. Hand-CUDA kernels that include CUTLASS C++ headers
+  (triangle-attention CUDA, transition b2b/expand-gate/gate-bwd) are kept.
+- `ImplementationType.CUTE` / `KernelBackend.CUTE`, `modules.dispatch.trimul_out_layout`.
+- Public kernels `cuda_transition` (never implemented), `cuda_transition_b2b`,
+  `cute_transition_fused`; `layernorm_linear_fn` / `LayerNormLinearFn`; `tm2_cute`;
+  `trimul_inproj_cute`; `adaln_inference_lnfold`.
+- Intermediate module paths: TriMul CuTe training/inference and the `trimul_sm90_kernels`
+  parity hooks; Transition's split / b2b-inference / CuTe routes (`_old_triton_forward`,
+  `_inference_forward`, `_training_forward`).
+- The previous wide/D64 H100 TriMul training port: `h100_width`, `h100_width_base`, `h100_gp`,
+  the unused `h100_wide_forward` plan and their `h100_sources/wide`, `wide_base`, `wide_forward`
+  sources.
+- Settings: `trimul_out_layout`, `trimul_cute_dispatch`, `trimul_sm90_kernels`,
+  `trimul_train_front_fused`, `lnl_ws`, `transition_force_split`,
+  `transition_residual_fusion`, `transition_large_d_training`, `transition_cute_backward`,
+  `transition_dab_lnbwd`.
+
+### Changed
+
+- Bidirectional TriMul H100 training at D256/384/512 (L384/768) is a new flattened hand-CUDA +
+  cuBLASLt port of the qualified large-width research plans (`h100_wide_training`, 29 frozen
+  kernels in `h100_sources/wide_train`): 1.44-1.62x the Triton path in paired CUDA-graph fwd+bwd
+  replay on H100 (was 0.69-0.75x). Its retained activations are larger than the old port's
+  (D512/L768 11.3 GiB) and equal to or below the Triton path's. cuBLASLt algorithms frozen under 12.8.4 are matched by configuration against the
+  running cuBLASLt (`lt_selection.json`), falling back to the first heuristic with a warning.
+  See docs/operations/h100-module-wiring.md.
+- `trimul_h100_training_widths` defaults to `(128, 256, 384, 512)`; D64 bidirectional training
+  runs on Triton (its CUDA port measured 0.61x of Triton in graph replay).
+- The H100 training opaque ops are renamed (`trimul_h100_train_{fwd,bwd}_wide_port`,
+  `trimul_h100_dropout_nograd_wide_port`) because the wide saved-tensor contract changed.
+- `miniworld` TriMul resolves to the Triton family on every arch; the hand-CUDA H100 kernels
+  are still tried first inside the modules. Both TriMul modules now run the Triton path plane
+  by plane for B > 1 (the CuTe path used to be the only one that looped).
+- `Transition` and `ops.transition` always take the residual path: hand-CUDA `fused_sm90a` /
+  `fused_wide_sm90a` on sm_90, else Triton `transition_residual`.
+- `layernorm_linear` is Triton on every arch; adaLN wide-d inference uses the fused
+  GEMM+gate kernel on every arch; token DiT uses cuBLAS for all GEMMs.
+- Triton TriMul front backward computes its weight gradient with cuBLAS directly.
+
+### Fixed
+
+- JIT build lock guard (`kernels._nvcc`): honour `load(build_directory=...)` when locating the
+  lock, and do not trust an NFSv3 exclusive-create mtime (read back as 1981) when deciding a
+  lock is stale -- use max(mtime, ctime) and never reclaim a pre-2000 stamp. Both hung
+  multi-rank training jobs on the cluster's NFS home.
+
 ## [2.1.0] - 2026-09-27
 
 - Follow production backend dispatch when building caches; force alternative

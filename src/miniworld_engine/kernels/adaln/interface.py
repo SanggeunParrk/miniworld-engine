@@ -10,9 +10,8 @@ forward with a symmetric GEMM backward. original single-autograd-Function kernel
 implementation the two specialised paths are benchmarked and checked against.
 
 Everything reachable from here is Triton, so the imports are eager: Triton is a hard
-dependency and none of these modules touch the GPU at import time. The family's cutlass
-sources (``adaln/cutlass``) are build inputs of the inference path, not importable
-entry points, so nothing here needs a deferred import.
+dependency and none of these modules touch the GPU at import time, so nothing here needs a
+deferred import.
 """
 
 from __future__ import annotations

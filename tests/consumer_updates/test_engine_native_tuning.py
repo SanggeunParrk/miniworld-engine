@@ -1,8 +1,6 @@
 """Native tuning must retain measured evidence across processes and grid edits."""
 
 import json
-from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,13 +9,13 @@ from miniworld_engine import settings
 from miniworld_engine.autotune import (
     cache,
     capture,
-    cute_config,
+    hopper_cuda_config,
     native,
     native_compile,
     native_history,
 )
 
-OP = "trimul_inproj_masked_sm90_cute"
+OP = "transition_bwd_gate_sm90_cuda"
 
 
 @pytest.fixture
@@ -156,82 +154,16 @@ def test_corrupt_journal_rebuilds(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("factory", "count"),
-    [
-        ("gated_sm90_candidates", 448),
-        ("plain_sm90_candidates", 512),
-        ("fused_lnl_candidates", 240),
-        ("lnbwd_pp_candidates", 48),
-        ("tm2_candidates", 4),
-    ],
+    ("kind", "width"),
+    [("b2b", 128), ("b2b", 256), ("expand_gate", 128), ("expand_gate", 512),
+     ("gatebwd", 128), ("gatebwd", 256), ("gatebwd", 512)],
 )
-def test_grid_is_unique_and_roundtrips(factory, count):
-    configs = getattr(cute_config, factory)()
-    assert len(configs) == count
-    rows = [cute_config.config_to_kwargs(c) for c in configs]
-    assert len({json.dumps(c, sort_keys=True) for c in rows}) == count
-    assert [cute_config.kwargs_to_config(c) for c in rows] == configs
-    for c in configs:
-        cute_config.validate_hopper_config(c)
-        assert c.cluster_m * c.cluster_n <= 4
-
-
-def test_fixed_epilogue_constraints():
-    assert all(
-        not c.is_dynamic_persistent and c.tile_m != 192
-        for c in cute_config.fused_lnl_candidates()
-    )
-    assert len(cute_config.lnbwd_candidates(128)) == 48
-    assert len(cute_config.lnbwd_candidates(192)) == 32
-    assert len(cute_config.lnbwd_candidates(256)) == 16
-    assert not cute_config.lnbwd_candidates(272)
-    assert all(
-        c.cluster_n == 1 and c.pingpong for c in cute_config.lnbwd_pp_candidates()
-    )
-    assert all(c.tile_n % 32 == 0 for c in cute_config.gated_sm90_candidates())
-
-
-def test_swizzle_compile_dedup_keeps_scheduler_distinct():
-    c = cute_config.gated_sm90_candidates()[0]
-    bucket = repr(
-        (
-            (
-                ((264, 128), (128, 1), "torch.bfloat16"),
-                ((128, 512), (512, 1), "torch.bfloat16"),
-                ((1, 264), (264, 1), "torch.float32"),
-            ),
-            (True,),
-        )
-    )
-    task = lambda cfg: native_compile.task_for(
-        OP, cute_config.config_to_kwargs(cfg), bucket
-    )
-    assert native_compile.task_id(task(c)) == native_compile.task_id(
-        task(replace(c, max_swizzle_size=1))
-    )
-    assert native_compile.task_id(task(c)) != native_compile.task_id(
-        task(replace(c, is_dynamic_persistent=True))
-    )
-
-
-def test_policy_edit_does_not_invalidate_source_identity(monkeypatch):
-    original = Path.read_text
-    native.source_identity.cache_clear()
-    before = native.source_identity()
-
-    def changed(path, *a, **kw):
-        text = original(path, *a, **kw)
-        return (
-            text.replace("SWIZZLES = (1, 2, 4, 8)", "SWIZZLES = (1, 8)")
-            if path.name == "cute_config.py"
-            else text
-        )
-
-    monkeypatch.setattr(Path, "read_text", changed)
-    native.source_identity.cache_clear()
-    assert native.source_identity() == before
-    monkeypatch.undo()
-    native.source_identity.cache_clear()
+def test_grid_is_unique_and_every_config_compiles_distinctly(kind, width):
+    configs = hopper_cuda_config.candidates(kind, width)
+    assert configs
+    assert len({json.dumps(c, sort_keys=True) for c in configs}) == len(configs)
+    flags = {tuple(hopper_cuda_config.defines(kind, width, c)) for c in configs}
+    assert len(flags) == len(configs)
 
 
 def test_failure_provenance_and_rebuild_invalidates_old_winner(tuner, tmp_path):
@@ -255,43 +187,17 @@ def test_failure_provenance_and_rebuild_invalidates_old_winner(tuner, tmp_path):
     )
 
 
-def test_policy_change_reopens_units_without_dropping_measurements(monkeypatch):
-    from miniworld_engine.autotune import builder, plan, shard
-
-    original = Path.read_bytes
-    monkeypatch.setattr(plan, "source_identity", lambda: "dispatch")
-    monkeypatch.setattr(shard, "provenance", lambda: {"gpu": "test"})
-    native.source_identity.cache_clear()
-    implementation = native.source_identity()
-    generation = builder._generation_for_work(None)
-
-    def changed(path, *a, **kw):
-        data = original(path, *a, **kw)
-        return (
-            data + b"\n# larger candidate policy\n"
-            if path.name == "cute_config.py"
-            else data
-        )
-
-    monkeypatch.setattr(Path, "read_bytes", changed)
-    assert builder._generation_for_work(None) != generation
-    native.source_identity.cache_clear()
-    assert native.source_identity() == implementation
-    monkeypatch.undo()
-    native.source_identity.cache_clear()
-
-
 def test_coverage_uses_exact_entry_space():
-    c = cute_config.config_to_kwargs(cute_config.gated_sm90_candidates()[0])
-    cfg = cache.as_cfg_dict({"kwargs": c})
+    bucket = repr(((((264, 128), (128, 1), "torch.bfloat16"),), ()))
+    declared = native.candidates_for(OP, bucket)
+    cfg = cache.as_cfg_dict({"kwargs": declared[0]})
     grid = [cfg]
     h = cache.config_space_hash(grid)
-    bucket = repr(((((264, 128), (128, 1), "torch.bfloat16"),), ()))
     key = "bfloat16|" + bucket
     data = {"entries": {key: [cfg]}, "config_space": [repr(cache._sig_from_dict(cfg))]}
-    assert native.pending_candidates(OP, data) == 448
+    assert native.pending_candidates(OP, data) == len(declared)
     data.update(grids={h: data["config_space"]}, entry_grids={key: [h]})
-    assert native.pending_candidates(OP, data) == 447
+    assert native.pending_candidates(OP, data) == len(declared) - 1
 
 
 def test_runtime_uses_explicit_last_native_profile(tuner, monkeypatch):
@@ -317,10 +223,10 @@ def test_runtime_uses_explicit_last_native_profile(tuner, monkeypatch):
 
 
 def test_cached_grid_cannot_be_mutated_by_callers():
-    first = cute_config.gated_sm90_candidates()
+    count = len(hopper_cuda_config.candidates("gatebwd", 128))
+    first = hopper_cuda_config.candidates("gatebwd", 128)
+    first[0]["bn"] = -1
     first.clear()
-    second = cute_config.gated_sm90_candidates()
-    assert len(second) == 448
-    first = cute_config.lnbwd_candidates(128)
-    first.pop()
-    assert len(cute_config.lnbwd_candidates(128)) == 48
+    second = hopper_cuda_config.candidates("gatebwd", 128)
+    assert len(second) == count
+    assert second[0]["bn"] != -1

@@ -91,7 +91,7 @@ def test_no_bench_target_abbreviates_a_name_the_engine_spells_out() -> None:
 
     Every kernel target names a kernel FAMILY from kernels/registry.csv, except four that bench a
     fused op SHAPE implemented by several families and are named after the shape. Anything else --
-    `tri_attn` for `triangle_attention`, `ln_mask` for `fused_ln_mask` -- fails here.
+    `tri_attn` for `triangle_attention`, `ln_linear` for `layernorm_linear` -- fails here.
     """
     import csv
 

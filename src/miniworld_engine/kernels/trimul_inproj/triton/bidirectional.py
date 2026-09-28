@@ -8,7 +8,6 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
-from miniworld_engine import settings
 
 from miniworld_engine.kernels._compile import opaque
 import triton
@@ -29,7 +28,6 @@ from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_d
 from miniworld_engine.kernels.trimul_inproj.triton.contract import packed_forward, packed_backward
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
     gate_elem_bwd_ew,
-    gate_elem_infer,
     gate_elem_train,
     ones_dropscale,
 )
@@ -145,11 +143,7 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True, pair_mask=Non
     """x_n:(B,L,L,K); WL/WLg/WR/WRg:(K, 2h) x@W form. Returns
     left,right:(B,2h,L,L) bdll and preact:(4*2h, M) interleaved (front_bwd_dW layout).
     ``save_preact=False`` (inference) skips the preact tensor + its stores — the
-    backward-only side output cute's forward-only front also omits."""
-    if "front" in settings.current().trimul_sm90_kernels:
-        from miniworld_engine.kernels.trimul_inproj.cute.parity_front import bidir_front_sm90
-        return bidir_front_sm90(x_n, WL, WLg, WR, WRg,
-                                save_preact=save_preact, pair_mask=pair_mask)
+    backward-only side output."""
     # B==1 by design: bdll intermediates put batch OUTSIDE the channel dim. B>1 was implemented
     # (batched grid axis + einsum channel-last contraction) + verified correct, but is SLOWER
     # than looping this B==1 path per batch — the large bdll intermediates (~300 MB at B=8,L=384)
@@ -218,10 +212,10 @@ def _bidir_front_launch(
     return left, right, preact
 
 
-# ── merged back-half (mirror of cute BidirBackHalf), fwd + manual bwd ─────────
+# ── merged back-half, fwd + manual bwd ─────────
 class _BidirBackHalfTriton(torch.autograd.Function):
     """front → 2 contractions (outgoing [:h] / incoming [h:]) → LN_out+@Wp → gate,
-    as ONE Function so the backward matches cute's fused structure (gate dx_n add
+    as ONE Function so the backward keeps the fused structure (gate dx_n add
     folded into the front dxn GEMM). Weights x@W form; Wp is nn.Linear (N,K) form."""
 
     @staticmethod
@@ -241,11 +235,7 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         if x_n.dtype == torch.bfloat16:
             te_xn, mean_out, rstd_out = _ln_materialize(
                 view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
-            output_kernel = output_f567_train
-            if "f567" in settings.current().trimul_sm90_kernels:
-                from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import output_f567_sm90
-                output_kernel = output_f567_sm90
-            y, proj, gate = output_kernel(
+            y, proj, gate = output_f567_train(
                 te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
         else:
             # The registered F567 kernel is BF16; retain the existing dtype coverage.
@@ -255,7 +245,6 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.h, ctx.mm = eps, h, mm
-        ctx.sm90_dual_bwd = "dual_bwd" in settings.current().trimul_sm90_kernels
         ctx.dropscale, ctx.seq_len = dropscale, L
         return y.reshape(B, L, L, D)
 
@@ -297,11 +286,7 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
         if x_n.dtype == torch.bfloat16:
-            input_kernel = input_dual_bwd
-            if ctx.sm90_dual_bwd:
-                from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import input_dual_bwd_sm90
-                input_kernel = input_dual_bwd_sm90
-            dx = input_kernel(d_glogit, dconc.t(), Wg.t(), W_stack, L)
+            dx = input_dual_bwd(d_glogit, dconc.t(), Wg.t(), W_stack, L)
         else:
             dx = torch.mm(d_glogit, Wg.t())
             dx.addmm_(dconc.t(), W_stack)
@@ -314,11 +299,9 @@ class _BidirBackHalfTriton(torch.autograd.Function):
 @torch.no_grad()
 def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h, mask,
                  residual):
-    """Forward-only bidir back-half — the SAME kernel structure as cute's inference
-    ``bidirectional_trimul_sm100`` (front → 2 bmm → LN_out+@Wp → gate), but NO
-    autograd.Function / saved tensors and NO preact side output. This is why the
-    inference path cudagraphs at cute's speed; the merged Function (with its saves)
-    is used only under grad."""
+    """Forward-only bidir back-half (front → 2 bmm → LN_out+@Wp → gate), with NO
+    autograd.Function / saved tensors and NO preact side output, so the inference path
+    cudagraphs cheaply; the merged Function (with its saves) is used only under grad."""
     B, L, _, D = x_n.shape
     M = B * L * L
     H = 2 * h
@@ -330,11 +313,11 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
     # into disjoint slices of the final buffer, with no intermediate cat copy.
     tri = packed_forward(lf, rf, h)                            # (H, L, L)
     # ONE pass: LN_out(H) + proj GEMM (H -> D) + gate GEMM (D -> D) + residual. This used to be
-    # `_te_forward` (LN+GEMM) followed by `gate_elem_infer`, because `trimul_back_triton` gated
-    # over the same axis it normalised and so refused H != D. It takes the gate's width separately
-    # now. Measured on an A6000 at L=1024, d_pair=128: the split pair cost 5.06 ms (2.79 + 2.27)
-    # and materialised an (M, D) proj between the two, while this module sat 1.2 ms behind
-    # cuequivariance for the whole forward.
+    # `_te_forward` (LN+GEMM) followed by a separate gate pass (since removed), because
+    # `trimul_back_triton` gated over the same axis it normalised and so refused H != D. It takes
+    # the gate's width separately now. Measured on an A6000 at L=1024, d_pair=128: the split pair
+    # cost 5.06 ms (2.79 + 2.27) and materialised an (M, D) proj between the two, while this
+    # module sat 1.2 ms behind cuequivariance for the whole forward.
     return trimul_back_triton(
         tri.reshape(1, H, L, L), x_n, Wp.t().contiguous(), Wgt,
         ln_out_w, ln_out_b, eps, residual.view(B, L, L, D),
@@ -349,12 +332,11 @@ def bidirectional_trimul_triton(
     ln_in_w, ln_in_b,            # (d_pair,)
     ln_out_w, ln_out_b,          # (2h,)
     eps_in, eps_out, d_hidden,
-    mask=None,                   # (B, L) residue mask, optional (folded into LN_in like cute)
+    mask=None,                   # (B, L) residue mask, optional (folded into LN_in)
     dropscale=None,              # drop_row scale [B,1,L,D] (== mask/(1-p)); training only
 ):
-    """Faithful triton mirror of the cute bidir. Returns (B, L, L, d_pair).
-    Mirrors cute's dispatch exactly: LN_in (triton, row_scale mask), then — as cute
-    does — a forward-only path for inference (``_bidir_infer``) and the merged
+    """Bidirectional Triton trimul. Returns (B, L, L, d_pair): LN_in (triton, row_scale
+    mask), then a forward-only path for inference (``_bidir_infer``) and the merged
     autograd Function for training (``_BidirBackHalfTriton``). All-triton/cuBLAS;
     requires d_hidden == d_pair (the front produces per-side width 2*d_hidden)."""
     d = pair.shape[-1]
@@ -383,10 +365,10 @@ def bidirectional_trimul_triton(
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
     if not torch.is_grad_enabled() and ds_2d is None:
-        # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed. Also gate on
+        # INFERENCE: forward-only (no saved tensors). Also gate on
         # ds_2d is None: a live dropout scale (train() under no_grad, p_drop>0) must take the
         # TRAINING apply below (which folds dropout into the gate epilogue) — the inference path
-        # has no dropscale and would silently skip dropout. Mirrors the cute dispatch's guard.
+        # has no dropscale and would silently skip dropout.
         return _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
                             ln_out_w, ln_out_b, eps_out, d_hidden, mask=m2d, residual=residual_flat)
     # The training path ALWAYS carries a drop scale, ones when the model's p_drop is 0. That is

@@ -164,7 +164,7 @@ def test_measurement_oom_propagates_to_failed_row_handler(runner, target):
         namespace[f"bench_module_{target}"](config(namespace, target), 2, "pytorch", fabric)
 
 
-@pytest.mark.parametrize("implementation", ["triton", "cute", "cuda", "cuequivariance"])
+@pytest.mark.parametrize("implementation", ["triton", "cuda", "cuequivariance", "anthropic"])
 def test_swa_rejects_labels_with_no_separate_implementation(runner, implementation):
     namespace, seen, fabric = runner
     with pytest.raises(UnsupportedBenchmark, match="implements pytorch and miniworld"):
@@ -209,8 +209,8 @@ def test_token_conditioning_uses_declared_condition_width(runner):
 
 
 @pytest.mark.parametrize(("target", "implementation"), [
-    ("conditioned_transition", "cute"),
-    ("adaptive_layernorm", "cuda"), ("dit", "cuequivariance"), ("swa_dit", "cute"),
+    ("conditioned_transition", "cuda"),
+    ("adaptive_layernorm", "cuda"), ("dit", "cuequivariance"), ("swa_dit", "anthropic"),
 ])
 def test_unsupported_modules_raise_explicit_status_instead_of_nan(runner, target, implementation):
     namespace, seen, fabric = runner

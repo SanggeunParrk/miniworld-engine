@@ -2,8 +2,8 @@
   "module_name": "triattn_training_cooperative_head2",
   "binary": "triattn_training_cooperative_head2.so",
   "artifact": "cooperative_head2",
-  "torch": "2.10.0+cu128",
-  "python_abi": "cpython-310",
+  "torch": "2.13.0+cu129",
+  "python_abi": "cpython-312",
   "arch": "sm_90a",
   "lengths": [
     384,
@@ -27,7 +27,7 @@
   "files": {
     "training_forward.py": "10f00912a7010da430948af391ad634fb699004b1be34b8e0269ccc3c2d1e3a7",
     "training_forward.cu": "3f3bc13616174712be492f62bf77d2abb4786ab3c7b7b147bf2b577e1bfcd753",
-    "triattn_training_cooperative_head2.so": "34e365e2a18bcf29e4e07d5f424396722f3f1b6d9e9cd9c97fe83d557d21af9f",
+    "triattn_training_cooperative_head2.so": "c724f0448370a1e48464a1084300886295b72e0e457bf533866aa0a4ffd74b6b",
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc"
   },
   "baseline_promotion": 17345

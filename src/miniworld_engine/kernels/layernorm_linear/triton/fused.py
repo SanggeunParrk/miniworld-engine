@@ -1,10 +1,8 @@
 """Portable Triton fused LayerNorm + Linear forward.
 
-This is the GENERAL fallback for the LayerNormLinear op: the cute backend
-(`gemm_layernorm_linear*.py`) forks quack's ``GemmSm90`` and uses WGMMA + TMA +
-clusters, so it is **SM90 (Hopper: H100/H200) only** and asserts on anything
-else. Triton compiles per-arch, so this kernel runs on Ampere (sm_80), Ada
-(sm_89), Hopper, Blackwell, and ROCm — wherever Triton + tl.dot are supported.
+This is the LayerNormLinear forward on every arch: Triton compiles per-arch, so it
+runs on Ampere (sm_80), Ada (sm_89), Hopper, Blackwell, and ROCm — wherever Triton +
+tl.dot are supported.
 
 Computes ``Y = LayerNorm(x) @ W^T + b`` directly (no parameter fold): each
 program loads its M rows' full K=d_in vector, reduces mean/var on-chip (one pass,

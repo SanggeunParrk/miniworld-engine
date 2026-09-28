@@ -1,9 +1,9 @@
 """Accuracy checks for the ``layernorm`` family.
 
-layernorm, layernorm_linear and fused_ln_mask were one module (``checks_ln.py``). The two rules
+layernorm and layernorm_linear were one module (``checks_ln.py``). The two rules
 these references follow -- built from the same inputs the kernel saw, in fp32, and fed the same
 saved statistics the kernel consumed -- are written out in ``checks/layernorm_linear.py``; the
-helpers all three use are in ``checks/__init__.py``.
+helpers both use are in ``checks/__init__.py``.
 """
 from __future__ import annotations
 

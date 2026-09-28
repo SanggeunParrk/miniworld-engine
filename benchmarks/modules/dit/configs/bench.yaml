@@ -24,6 +24,7 @@ level: module
 implementations:
   - pytorch
   - miniworld
+  - anthropic
 mode: inference
 metric: time
 compile: true

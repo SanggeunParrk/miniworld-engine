@@ -33,11 +33,11 @@ def test_squeeze_residual_strides_tails_rounding(tile, shape, monkeypatch):
 @pytest.mark.parametrize("shape", [(2, 17, 96), (1, 128, 128), (1, 128, 384)])
 @pytest.mark.parametrize("n", [2, 4])
 def test_transition_residual_all_gradients(shape, n, monkeypatch):
-    from miniworld_engine import settings
+    from miniworld_engine import kernels, settings
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(engine_backend="triton", transition_residual_fusion=True)
+    settings.configure(engine_backend="triton")
     torch.manual_seed(72)
     module = Transition(shape[-1], n=n, implementation=ImplementationType.TRITON).cuda().bfloat16()
     with torch.no_grad():
@@ -47,7 +47,10 @@ def test_transition_residual_all_gradients(shape, n, monkeypatch):
     x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     dy = torch.randn_like(x)
     params = [x, *module.parameters()]
-    reference = module._old_triton_forward(x) + x
+    # The unfused split (input LN, then triton_transition) plus an explicit residual add: the
+    # rounding the residual-fused path must keep.
+    wa, wb, ws = (m.weight.to(x.dtype) for m in (module.expand_a, module.expand_b, module.squeeze))
+    reference = kernels.triton_transition(module.ln_in(x), wa, wb, ws, module.n) + x
     expected_grads = torch.autograd.grad(reference, params, dy)
     actual = module(x)
     actual_grads = torch.autograd.grad(actual, params, dy)

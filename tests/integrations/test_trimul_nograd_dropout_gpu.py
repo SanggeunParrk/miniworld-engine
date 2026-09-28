@@ -5,7 +5,7 @@ from miniworld_engine.kernels.trimul_inproj.cuda import h100_training as H
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 
-@pytest.mark.parametrize("width", [64, 128])
+@pytest.mark.parametrize("width", [128, 256])
 def test_nograd_dropout_matches_saved_forward(width):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
@@ -22,10 +22,6 @@ def test_nograd_dropout_matches_saved_forward(width):
     mask = (torch.rand(n, n, device="cuda") > .1).to(x.dtype)
     scale = (torch.rand(n, d, device="cuda") > .25).to(x.dtype) / .75
     expected = H.forward(leaves, mask, scale)[0]
-    if d != 128:
-        from miniworld_engine.kernels.trimul_inproj.cuda.h100_width import Training
-        legacy = Training(*leaves, mask, scale, torch.empty_like(x)).forward()
-        torch.testing.assert_close(expected, legacy, rtol=0, atol=0)
     with torch.no_grad():
         actual = H.bidirectional_trimul(*leaves, mask, scale)
         compiled = torch.compile(H.bidirectional_trimul, fullgraph=True,

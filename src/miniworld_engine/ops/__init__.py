@@ -10,7 +10,7 @@ Contrast with :mod:`miniworld_engine.kernels`, which holds the **primitive** fus
 units (per-GEMM / LN / gate kernels). Those are an implementation detail of these ops
 and are not part of the consumed contract.
 
-Import stays cheap and side-effect-free: heavy backends (triton / cutlass) load lazily
+Import stays cheap and side-effect-free: heavy backends (triton / nvcc builds) load lazily
 on first *call*, not on import (see ``tests/compile/test_public_api.py``).
 """
 

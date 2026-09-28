@@ -17,7 +17,7 @@ accumulates the squeeze ``out[BM, D] += h_chunk @ Ws[:, chunk]^T`` in registers 
 
 fp32 inputs with TF32 tensor-core matmuls (input_precision="tf32"). Practical when K
 (= d_hidden) fits one BLOCK_K and the working set fits smem — i.e. the atom stream
-(d_hidden=128). The token stream (d_hidden=768) routes to the cute TF32 path.
+(d_hidden=128). The token stream (d_hidden=768) routes to ``composed.cond_transition_inference_composed``
 """
 
 from __future__ import annotations

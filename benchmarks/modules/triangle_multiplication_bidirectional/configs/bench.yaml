@@ -37,9 +37,20 @@ implementations:
   - pytorch
   - cuequivariance
   - miniworld
-# miniworld auto-routes to the triton path on A100 (sm_80) and the cute path on Hopper+
-# (see modules/dispatch.py). TriangleMultiplication also accepts, explicitly:
-#   triton | dtv1 | triton_pytorch_ln | triton_ln | cute
+# miniworld tries the hand-written CUDA H100 kernels first and otherwise resolves to the
+# triton path on every arch (see modules/dispatch.py). TriangleMultiplication also accepts,
+# explicitly:
+#   triton | dtv1 | triton_pytorch_ln | triton_ln
+#   anthropic -- Anthropic's SHIPPED trimul_native v5 payload (unit tmn90_z128_h256: the
+#   bidirectional module is ONE unit at twice the hidden width). Upstream has no bidirectional
+#   entry point, so integrations/anthropic_trimul.update_bidirectional composes upstream primitives
+#   (ops.planes = K1, two torch.bmm contractions, ops.epilogue = K3): upstream kernels, engine
+#   composition. INFERENCE ONLY. The harness sets TRIMUL_NATIVE_BUILD_DIR for the row to
+#   $ANTHROPIC_TRIMUL_BUILD_DIR or $MINIWORLD_ANTHROPIC_ROOT/common/opt_core/opt_core/kernels/
+#   trimul/native/pkg/v5/build and refuses an overlay payload; the shipped cubins are nvcc 13.0.
+#   anthropic_hybrid -- the payload the caller exported in TRIMUL_NATIVE_BUILD_DIR (an overlay
+#   build needs the tmn90_z128_h256 unit: build_payload.py --unit tmn90_z128_h256). Separate
+#   invocation from `anthropic`. Masked for every non-anthropic row.
 mode: inference        # inference | training
 dropout: auto  # training: 0.25; inference: 0
 metric: time           # time | memory

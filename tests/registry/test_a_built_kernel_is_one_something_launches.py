@@ -2,8 +2,9 @@
 
 `developed=yes` costs real GPU hours -- the sweep compiles and benches every config of it at every
 shape -- and ships a cache entry. That is only worth paying for a kernel some path leads to. Five
-were not: superseded front variants in `trimul_inproj`, left behind when the front moved to cute,
-still tuned in every build and checked in every numerics run because nothing said otherwise.
+were not: superseded front variants in `trimul_inproj`, left behind when the front moved to
+CuTeDSL (itself removed in v2.2.0), still tuned in every build and checked in every numerics run
+because nothing said otherwise.
 
 Nothing could say otherwise, because nothing looked. `undeveloped.csv` records the judgement "this
 one is not worth tuning", and it is hand-maintained on purpose -- bias_only_attention is held out

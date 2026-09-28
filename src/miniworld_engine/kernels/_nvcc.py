@@ -278,8 +278,16 @@ STALE_LOCK_SECONDS = 1800.0
 LOCK_WAIT_SECONDS = 600.0
 
 
-def _build_lock(name: str) -> Path | None:
-    """The lock file `torch.utils.cpp_extension.load` will use for `name`, if it can be located."""
+def _build_lock(name: str, build_directory: str | None = None) -> Path | None:
+    """The lock file `torch.utils.cpp_extension.load` will use for `name`, if it can be located.
+
+    `load(build_directory=...)` puts the baton there, not under TORCH_EXTENSIONS_DIR. Checking the
+    default dir instead left a 3-day-old leftover in ~/.cache/miniworld_engine_jit/miniworld_pwa_ctr
+    unguarded, and every rank of a MiniWorld training job sat in torch's unbounded
+    FileBaton.wait() (2026-09-28).
+    """
+    if build_directory:
+        return Path(build_directory) / "lock"
     try:
         from torch.utils.cpp_extension import _get_build_directory
     except ImportError:      # torch too old / not installed: let `load` do whatever it does
@@ -295,9 +303,18 @@ def clear_stale_lock(lock: Path, stale_after: float = STALE_LOCK_SECONDS) -> boo
     import time
 
     try:
-        age = time.time() - lock.stat().st_mtime
+        st = lock.stat()
     except OSError:
         return False
+    # NFSv3 exclusive create (torch's FileBaton uses O_CREAT|O_EXCL) stores the create verifier
+    # in atime/mtime, so a LIVE lock on an NFS home can show an mtime in 1981. Trusting it deleted
+    # another rank's lock mid-build (2026-09-27): the builder's baton.release() raised
+    # FileNotFoundError and the job hung. ctime is set by the server; take the newer of the two,
+    # and never reclaim a timestamp from before 2000.
+    stamp = max(st.st_mtime, st.st_ctime)
+    if stamp < 946684800:
+        return False
+    age = time.time() - stamp
     if age < stale_after:
         return False
     try:
@@ -337,7 +354,7 @@ def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
     """
     from torch.utils.cpp_extension import load
 
-    lock = _build_lock(name)
+    lock = _build_lock(name, kwargs.get("build_directory"))
     if lock is not None and not clear_stale_lock(lock):
         wait_for_lock(lock)
     try:

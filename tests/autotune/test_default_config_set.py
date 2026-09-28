@@ -95,10 +95,10 @@ def test_the_ab_sets_are_packaged_too():
 
 def test_ops_get_configs_with_no_environment_variable(monkeypatch):
     monkeypatch.delenv("MINIWORLD_CONFIG_DIR", raising=False)
-    assert len(configs.configs_for("transition_fold_triton")) > 1
+    assert len(configs.configs_for("layernorm_fwd_mmajor_triton")) > 1
 
 
-@pytest.mark.parametrize("op", ["transition_fold_triton", "layernorm_fwd_mmajor_triton"])
+@pytest.mark.parametrize("op", ["layernorm_fwd_mmajor_triton"])
 def test_a_shipped_cache_entry_still_exists_in_the_default_config_set(op):
     """The intersection the reader performs must be non-empty, or the cache buys nothing."""
     files = sorted((DATA / op).glob("*.json")) if (DATA / op).is_dir() else []

@@ -66,36 +66,36 @@ ONE_SIDED: dict[tuple[str, str], str] = {
         "baseline_dtv1.py:733, same process-global as above on the output GEMM",
     # ---- settings whose off-default side `build all` can never reach -------------------------
     ("transition_fwd_b2b_triton", "FUSE_STATS"):
-        "settings.py:201 `transition_fuse_stats: bool = False`; read only at fused.py:1412, and "
-        "its only setter is builder.SWITCHES, which the per-op `build all` pass never consults",
+        "settings.py `transition_fuse_stats: bool = False`; read only by fused.py's "
+        "`_transition_fuse_stats_enabled`, and no build switch sets it (it left builder.SWITCHES "
+        "in v2.2.0), so the per-op `build all` pass never reaches the True side",
     # ---- flags with no caller for the other value --------------------------------------------
     ("transition_fwd_b2b_triton", "SAVE_XN"):
-        "every caller passes save_xn=False: modules/transition/module.py:265, :326, "
-        "kernels/transition/whole_op.py:79",
-    ("transition_layernorm_expand_swiglu_triton", "SAVE_XN"): "same three call sites",
+        "every caller passes save_xn=False (see drivers/transition.py's SAVE_XN note); "
+        "the Transition module itself now takes the residual path and never calls this kernel",
+    ("transition_layernorm_expand_swiglu_triton", "SAVE_XN"): "same call sites",
     ("transition_bwd_swiglu_recompute_triton", "STORE_H"):
-        "fused.py:1052 defaults store_h=True and both callers take it -- cute/fused.py:216 "
-        "explicitly, fused.py:1573 by default. No caller anywhere passes False",
+        "fused.py defaults store_h=True and its one caller (the savedxn backward in fused.py) "
+        "takes the default. No caller anywhere passes False",
     ("adaln_epilogue_saveact_triton", "HAS_SB"):
         "training.py:206 keys on `scale_bias is not None`, and the sole launcher (training.py:699) "
         "always passes to_scale.bias -- built at modules/adaptive_layernorm/module.py:42 with "
         "primitives' default bias=True. Replay: 9 lookups, all =1",
     # ---- reachable only on another architecture ----------------------------------------------
-    # `row_scale` folds the AF pair-mask into the LN epilogue and every producer of it is a cute
-    # path, which `dispatch` selects only at sm90+. The driver therefore branches on the card
-    # (`drivers/layernorm.py:_sm90plus`), so the sm80/sm86 caches are legitimately =0 only and an
-    # H100 cache will hold both. When that lands, `test_one_sided_entries_are_still_one_sided`
-    # retires these two entries on its own.
+    # `row_scale` folds the AF pair-mask into the LN epilogue. Every producer of it was a CuTeDSL
+    # path (removed in v2.2.0), which `dispatch` selected only at sm90+. The driver therefore
+    # branches on the card (`drivers/layernorm.py:_sm90plus`), so the sm80/sm86 caches are
+    # legitimately =0 only and an H100 cache will hold both. When that lands,
+    # `test_one_sided_entries_are_still_one_sided` retires these two entries on its own.
     ("layernorm_fwd_saveact_triton", "HAS_ROWSCALE"):
         "drivers/layernorm.py:91-94 drives =1 only when `_sm90plus()`; below sm90 the triton "
-        "trimul deliberately does not fold the mask into LN_in (unidirectional.py:225-227), and "
-        "the =1 lookups an A100 replay shows come from `builder.cases()` forcing "
-        "implementation='cute', which then aborts with `Gemm Sm80 is not implemented yet`",
+        "trimul deliberately does not fold the mask into LN_in, and no module passes row_scale "
+        "since the CuTeDSL producers were removed in v2.2.0",
     ("gated_projection_bwd_gate_dropres_triton", "FROM_PREACT"):
         "drivers/trimul_inproj.py gates the =1 probe on `_sm100()`. The preact form is passed only "
-        "by the sm100 merged-training paths (cute/bidir_training_sm100.py, "
-        "cute/v6_training_merged_sm100.py), which `dispatch` selects only on B200; below sm90 it "
-        "is a program nothing can launch. This entry retires itself when a B200 cache lands",
+        "by the checker since the sm100 CuTeDSL merged-training paths that launched it were removed "
+        "in v2.2.0; below sm100 it is a program nothing can launch. This entry retires itself "
+        "when a B200 cache lands",
 
 }
 
@@ -186,10 +186,9 @@ def test_the_live_key_parser_still_matches() -> None:
     live = _live_key_flags()
     assert live.get("transition_bwd_swiglu_recompute_triton") == {"NORMALIZE", "STORE_H"}, live.get(
         "transition_bwd_swiglu_recompute_triton")
-    # gate_elem is now two flagless kernels (inference / training), so its keys are bare.
+    # gate_elem's forward is one flagless training kernel, so its key is bare.
     assert live.get("gated_projection_gate_dropres_triton") == set(), live.get(
         "gated_projection_gate_dropres_triton")
-    assert live.get("gated_projection_gate_res_triton") == set()
     assert live.get("gated_projection_bwd_gate_dropres_triton") == {"FROM_PREACT"}, live.get(
         "gated_projection_bwd_gate_dropres_triton")
     assert live.get("trimul_gemm_gate_saveact_triton") == {

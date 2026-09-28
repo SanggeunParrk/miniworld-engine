@@ -4,7 +4,7 @@ A ``fake`` is what the compiler believes about a kernel it cannot see: the shape
 arity of the outputs. If it disagrees with the real body, eager stays correct -- the fake never
 runs there -- and only the COMPILED path goes wrong, on whichever shape or card reaches the
 disagreeing branch. Numerics parity cannot see it (both sides run eager) and ``opcheck`` only
-covers ops the test machine can actually launch, which excludes every sm90/sm100 CuTeDSL path.
+covers ops the test machine can actually launch, which excludes every sm90 hand-CUDA path.
 
 So this reads instead of running, and it is not hypothetical: it found ``layernorm_bwd``'s
 hand-CUDA fast path still returning the pre-split 5-tuple ``(dx, dw, db, None, None)`` against a

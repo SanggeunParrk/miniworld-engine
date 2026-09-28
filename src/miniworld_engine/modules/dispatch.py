@@ -11,7 +11,7 @@ This is the single home for two things the modules used to each re-implement:
        running GPU / shape / mode. This is what production should select.
      * ``CUEQUIVARIANCE`` — the vendor baseline (comparison only).
 
-   The concrete *technology* backends (``TRITON`` / ``CUTE`` / ``CUDA``) remain
+   The concrete *technology* backends (``TRITON`` / ``CUDA``) remain
    accepted for explicit per-impl benchmarking, but they are **internal**: the
    module never branches on ``ImplementationType`` directly in ``forward`` — it
    resolves to a :class:`KernelBackend` here and dispatches on that.
@@ -21,7 +21,7 @@ This is the single home for two things the modules used to each re-implement:
    four different files (trimul dispatch, transition fused, layernorm_linear, the
    calibration gates). The capability helpers below are now the single source of
    truth for the *module layer*. (Kernel-internal shape/arch sub-dispatch — e.g.
-   transition's b2b-vs-cute-vs-triton-by-d, the cute sm100-vs-sm90 kernel pick —
+   transition's CUDA-vs-Triton-by-d, trimul's hand-CUDA contract —
    still lives next to those kernels; this module only resolves the *family*.)
 
 Selecting ``MINIWORLD`` can only ever pick a *correct* backend: every resolver
@@ -70,7 +70,6 @@ class KernelBackend(_StrEnum):
     PYTORCH = "pytorch"
     TRITON = "triton"
     CUDA = "cuda"
-    CUTE = "cute"
     CUEQUIVARIANCE = "cuequivariance"
     ANTHROPIC = "anthropic"
 
@@ -139,15 +138,15 @@ def is_sm100(device: torch.device | None = None) -> bool:
 
 
 def is_sm90plus(device: torch.device | None = None) -> bool:
-    """True on Hopper (sm_90) and newer — i.e. archs with a supported cute GEMM."""
+    """True on Hopper (sm_90) and newer."""
     return capability(device)[0] >= 9
 
 
 def is_sm90(device: torch.device | None = None) -> bool:
     """True on Hopper *exactly* (sm_9x, major == 9) — NOT Blackwell.
 
-    Distinct from :func:`is_sm90plus` (>= 9): the hand-CUDA b2b and the quack cute
-    ``transition_fused`` kernels are Hopper WGMMA/TMA (sm_90a) code that neither
+    Distinct from :func:`is_sm90plus` (>= 9): the hand-CUDA kernels are Hopper WGMMA/TMA
+    (sm_90a) code that neither
     builds/launches on pre-Hopper (sm_80 / A100) nor on Blackwell (sm_100). Guards
     that route to those kernels must use this, not ``not is_sm100`` — otherwise
     pre-Hopper GPUs (which are also "not sm100") get routed into a Hopper-only
@@ -175,7 +174,6 @@ _CONCRETE = {
     ImplementationType.PYTORCH: KernelBackend.PYTORCH,
     ImplementationType.TRITON: KernelBackend.TRITON,
     ImplementationType.CUDA: KernelBackend.CUDA,
-    ImplementationType.CUTE: KernelBackend.CUTE,
     ImplementationType.CUEQUIVARIANCE: KernelBackend.CUEQUIVARIANCE,
     ImplementationType.ANTHROPIC: KernelBackend.ANTHROPIC,
 }
@@ -205,7 +203,7 @@ def _coerce(impl: ImplementationType | str) -> ImplementationType:
 # for arch-dependent choices. An op that is absent — or a GPU the callable does not specially
 # recognize — falls back to ``_DEFAULT_BACKEND`` (TRITON), the portable path: brand-new GPUs
 # get Triton by default, while op/arch pairs the repo has developed + measured a faster
-# backend for (e.g. trimul cute on Hopper+) follow that. This encodes ONLY the module-layer
+# backend for follow that. This encodes ONLY the module-layer
 # family choice; kernel-internal shape/arch sub-dispatch still lives next to the kernels.
 #
 # Concrete (non-MINIWORLD) requests pass straight through ``to_kernel_backend``.
@@ -230,14 +228,16 @@ _CUEQ_OPS = frozenset({"triangle_multiplication", "triangle_attention"})
 
 
 def _trimul_known_best(device: torch.device | None) -> KernelBackend:
-    """trimul: cute on Hopper+ (the measured winner; out_layout via ``trimul_out_layout``),
-    Triton pre-Hopper. ``settings.trimul_impl`` pins a backend for debug/A-B."""
+    """trimul: TRITON family on every arch. The hand-CUDA H100 kernels are not a module-layer
+    backend: the modules try ``integrations.trimul_h100`` first and fall through to this
+    family for every shape it does not serve. ``settings.trimul_impl`` pins a backend for
+    debug/A-B."""
     from miniworld_engine import settings
 
     override = settings.current().trimul_impl
     if override:
         return to_kernel_backend(ImplementationType(override.strip().lower()))
-    return KernelBackend.CUTE if is_sm90plus(device) else KernelBackend.TRITON
+    return KernelBackend.TRITON
 
 
 #: A fixed backend, or a device-dependent chooser. Spelled out rather than `object` so that
@@ -252,7 +252,7 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     "layernorm": KernelBackend.CUDA,
     "rmsnorm": KernelBackend.TRITON,
     # These have no faster module-layer backend than the TRITON family (whose kernels do
-    # their own shape/arch sub-dispatch, incl. cute on Hopper+ internally). Listed
+    # their own shape/arch sub-dispatch, incl. hand-CUDA on H100 internally). Listed
     # explicitly so the policy is auditable rather than implicit-by-omission.
     "transition": KernelBackend.TRITON,
     "triangle_attention": KernelBackend.TRITON,
@@ -273,7 +273,7 @@ def resolve(
     impl = _coerce(impl)
     from miniworld_engine import settings
     if settings.current().engine_backend == "triton":
-        if impl in {ImplementationType.CUTE, ImplementationType.CUDA, ImplementationType.ANTHROPIC}:
+        if impl in {ImplementationType.CUDA, ImplementationType.ANTHROPIC}:
             raise ValueError(f"{op}: {impl.value} conflicts with engine_backend=triton")
         if impl == ImplementationType.MINIWORLD:
             return KernelBackend.TRITON
@@ -328,7 +328,7 @@ def resolve_triangle_multiplication(impl, device=None):
 # --------------------------------------------------------------------------- #
 # dtype correctness-guard
 #
-# The fused kernels (triton / cute / hand-CUDA) are bf16-only. If a module is
+# The fused kernels (triton / hand-CUDA) are bf16-only. If a module is
 # asked to run a fast backend on an input dtype the kernel can't handle, we must
 # fall back to a dtype-agnostic path (the pytorch reference) rather than hand the
 # wrong dtype to the kernel — a wrong backend for the dtype is a correctness bug,
@@ -367,26 +367,3 @@ def guard_dtype(
             stacklevel=3,
         )
     return KernelBackend.PYTORCH
-
-
-def trimul_out_layout(device: torch.device | None = None) -> str:
-    """cute tm1 ``out_layout`` for the running GPU: ``bdll_sm100`` on sm_100 (the hand-rolled
-    tcgen05 dual-B gated collective — one A load, dual-TMEM proj+gate accumulators, fused GLU
-    epilogue, M-major TMA store straight into d-major [B,D,L,L]); ``bdll_direct_wide`` elsewhere
-    (one wide quack ``gemm_act`` + triton GLU fold).
-
-    The bdll_sm100 collective's launch was migrated to cutlass-dsl 4.5.2's TVM-FFI convention
-    (``make_fake_stream(use_tvm_ffi_env_stream=True)`` at compile, ``options='--enable-tvm-ffi'``,
-    ``from_dlpack(enable_tvm_ffi=True)`` tensors, and a runtime call of the data tensors only —
-    stream via env, max_active_clusters baked as Constexpr). The DEVICE kernel/algorithm is
-    unchanged; only the launch ABI moved. Result on quack 0.5.0 / cutlass 4.5.2, L=384 inference:
-    ``bdll_sm100`` 0.115 ms (fastest — beats even the old 4.4.2 bdll_sm100 at 0.160 ms),
-    ``bdll_direct_wide`` 0.184 ms, ``bdll_direct`` 0.194 ms, triton 0.284 ms, pytorch 1.14 ms.
-    d-major [B,D,L,L] feeds the efficient d-major einsum (the d-last ``blld`` einsum is ~9x
-    slower). Overridable via ``settings.trimul_out_layout`` for debug/A-B."""
-    from miniworld_engine import settings
-
-    override = settings.current().trimul_out_layout
-    if override:
-        return override.strip()
-    return "bdll_sm100" if is_sm100(device) else "bdll_direct_wide"

@@ -14,7 +14,7 @@ nothing at all), because a ``custom_op`` with a Python implementation is dispatc
 CustomOpDef wrapper before any dispatch-mode key is consulted.
 
 Ops outside these cases are reported, not asserted on. They include alternative A6000 paths
-as well as sm90/sm100 CuTeDSL paths; absence alone does not establish an architecture restriction.
+as well as sm90 hand-CUDA paths; absence alone does not establish an architecture restriction.
 The cases include inference and training, current token/atom widths, and SWA preprocessing.
 """
 from __future__ import annotations

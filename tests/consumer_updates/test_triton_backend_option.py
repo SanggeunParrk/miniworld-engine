@@ -22,15 +22,16 @@ def restore_policy():
 def test_h100_auto_and_strict_resolution(monkeypatch):
     monkeypatch.setattr(dispatch, "is_sm90plus", lambda *_: True)
     configure_engine_backend("auto")
-    assert dispatch.resolve("triangle_multiplication", "miniworld").value == "cute"
+    # The hand-CUDA H100 kernels are tried inside the modules, not by backend dispatch.
+    assert dispatch.resolve("triangle_multiplication", "miniworld").value == "triton"
     configure_engine_backend("triton")
     # Even the old per-op pin cannot override the process's strict policy.
-    settings.configure(trimul_impl="cute")
+    settings.configure(trimul_impl="cuda")
     for op in dispatch._MINIWORLD_KNOWN_BEST:
         assert dispatch.resolve(op, "miniworld").value == "triton"
         assert dispatch.resolve(op, "pytorch").value == "pytorch"
     with pytest.raises(ValueError, match="conflicts"):
-        dispatch.resolve("transition", "cute")
+        dispatch.resolve("transition", "cuda")
 
 
 def test_standalone_layernorm_cannot_select_cuda():
@@ -48,22 +49,27 @@ def test_standalone_layernorm_cannot_select_cuda():
 
 @pytest.mark.parametrize("training", [True, False])
 def test_transition_policy_precedes_internal_h100_dispatch(monkeypatch, training):
+    from miniworld_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
+    from miniworld_engine.kernels.transition.triton import residual
     from miniworld_engine.modules import Transition
 
     configure_engine_backend("triton")
     module = Transition(128, implementation=EngineImpl.MINIWORLD).train(training)
-    monkeypatch.setattr(module, "_old_triton_forward", lambda x: x * 3)
-    settings.configure(transition_residual_fusion=False)
+    # The residual path returns x + transition(x) itself, so the stub stands for the whole
+    # output: transition(x) = 3x.
+    monkeypatch.setattr(residual, "transition_residual", lambda x, *args: x * 4)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Native/fused auto path was entered")
 
-    for name in [
-        "cute_transition_fused",
-        "cuda_transition_b2b",
-        "triton_transition_fused",
+    for mod, name in [
+        (fused_sm90a, "available"),
+        (fused_sm90a, "transition_fused_sm90a"),
+        (fused_wide_sm90a, "available"),
+        (fused_wide_sm90a, "transition_wide_sm90a"),
     ]:
-        monkeypatch.setattr(kernels, name, forbidden)
+        monkeypatch.setattr(mod, name, forbidden)
+    monkeypatch.setattr(kernels, "triton_transition_fused", forbidden)
     x = torch.ones(2, 128, dtype=torch.bfloat16)
     assert torch.equal(module(x), x * 4)
 
@@ -92,17 +98,19 @@ def test_cuda_training_and_graph_no_native_engine_calls(monkeypatch, kind, width
 
     monkeypatch.setattr(native, "choose_config", forbidden)
     monkeypatch.setattr(ln_cuda, "layer_norm_bwd_cuda", forbidden)
-    for name in [
-        "cute_transition_fused",
-        "cuda_transition_b2b",
-        "triton_transition_fused",
+    from miniworld_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
+
+    for mod, name in [
+        (fused_sm90a, "transition_fused_sm90a"),
+        (fused_wide_sm90a, "transition_wide_sm90a"),
+        (kernels, "triton_transition_fused"),
     ]:
-        monkeypatch.setattr(kernels, name, forbidden)
+        monkeypatch.setattr(mod, name, forbidden)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         torch.manual_seed(9)
-        # Includes wide Transition's unconditional CuTe branch in the old auto route.
+        # Width 512 covers the wide hand-CUDA Transition build the auto route would take.
         layer = (
             BidirectionalTriangleMultiplication(
                 width, implementation=EngineImpl.MINIWORLD, p_drop=0.0

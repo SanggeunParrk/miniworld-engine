@@ -160,7 +160,7 @@ for name, build in TARGETS.items():
     # Explain before this target's parity check. Dynamo is reset, but kernels
     # shared with earlier targets in this process can already be cached.
     # Order matters and used to be wrong: the parity call below warms caches whose miss path
-    # graph-breaks (trimul_inproj/cute/dispatch.py::pick did exactly that), so explaining after
+    # graph-breaks (the since-removed trimul_inproj dispatch `pick` did exactly that), so explaining after
     # it measured a graph real training never gets -- its first compiled step is a cold trace.
     dynamo.reset()
     try:

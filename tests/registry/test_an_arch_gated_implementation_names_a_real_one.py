@@ -49,7 +49,7 @@ def _gated() -> list[tuple[str, str, str]]:
         assert len(k.elts) == 2, "an IMPL_MIN_ARCH key has exactly two parts"
         target, impl = k.elts
         # Literals, asserted rather than assumed. Reading `.value` off an `ast.expr` is how a
-        # computed entry -- `(NAME, f"{x}_cute")` -- would silently become `None` here and pass
+        # computed entry -- `(NAME, f"{x}_cuda")` -- would silently become `None` here and pass
         # this test by naming an implementation nobody declared.
         why = "IMPL_MIN_ARCH entries must be str literals; this test reads them out of the source"
         assert isinstance(target, ast.Constant), why

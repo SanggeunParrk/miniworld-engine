@@ -6,11 +6,10 @@ channels; the hidden channels split in half — first ``d_hidden`` compute the
 product (``bkid,bkjd->bijd``). The two are concatenated to ``2 * d_hidden`` and
 projected down to ``d_pair``.
 
-PYTORCH is the reference. The fused path (CUTE) reuses the trimul_inproj pipeline
-with bidirectional dims: one wider gated GEMM front (left/right each ``2*d_hidden``),
-two einsums (outgoing on the first half, incoming on the second), then the split
-back (cute LayerNormLinear over ``2*d_hidden`` + triton GateElem). See
-``kernels/trimul_inproj/cute/bidirectional.py``.
+PYTORCH is the reference. On H100 the hand-CUDA kernels (``integrations.trimul_h100``)
+serve the qualified training/inference shapes; everything else runs the Triton pipeline
+(``kernels/trimul_inproj/triton/bidirectional.py``): one wider gated GEMM front
+(left/right each ``2*d_hidden``), two contractions, and a shared ``2*d_hidden`` back.
 """
 
 from __future__ import annotations
@@ -19,11 +18,9 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
-from miniworld_engine import settings
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
 from miniworld_engine.integrations import trimul_h100 as _h100
-from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
 )
@@ -36,9 +33,6 @@ from miniworld_engine.modules.exceptions import (
 )
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
-from miniworld_engine.modules.triangle_multiplication.dispatch import (
-    resolve_out_layout as _resolve_trimul_out_layout,
-)
 
 
 class BidirectionalTriangleMultiplication(nn.Module):
@@ -58,17 +52,6 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # GPU arch is resolved ONCE into self._backend; forward routes on that.
         self.implementation = ImplementationType(implementation)
         self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
-        if self._backend == KernelBackend.CUTE:
-            from miniworld_engine.kernels.trimul_inproj.cute import (
-                _bdll_patch,
-                _gate_mul_patch,
-            )
-            _bdll_patch.apply()
-            _gate_mul_patch.apply()
-            from miniworld_engine.modules.triangle_multiplication.module import (
-                _load_cute_fns,
-            )
-            _load_cute_fns()
         # ======================================================================================
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).
         # The residual connection is UNCONDITIONAL (AF3 default; residual is the domain standard) —
@@ -131,7 +114,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         dropout_p: float | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass. ALWAYS returns the residual output ``pair + drop_row(bidir_trimul(pair))``,
-        fused in the gate/back on sm90 (see the constructor comment). Routes on the resolved
+        fused in the gate/back (see the constructor comment). Routes on the resolved
         backend (self._backend); self.implementation stays the public option. The residual is
         UNCONDITIONAL (no flag — domain standard, fused FOR SPEED). The row-broadcast DROPOUT is
         OPTIONAL: ``dropout_p`` overrides the instance ``p_drop`` per call (None -> ``self.p_drop``)
@@ -153,10 +136,6 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if _h100.serves_inference(self, pair, bidirectional=True, dropscale=_ds):
             return _h100.update_inference(self, pair, mask, bidirectional=True)
 
-        if settings.current().trimul_sm90_kernels and self._backend != KernelBackend.PYTORCH:
-            # Explicit kernel-level overrides preserve the Triton algorithm;
-            # never enter the legacy CuTe projection-aware backward here.
-            return self._forward_triton(pair, mask, _ds)
         # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
         # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls
@@ -170,20 +149,13 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         if self._backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
-        if self._backend == KernelBackend.CUTE:
-            # Inference: forward-only fused sm100 kernels. Training (grad) OR a live dropout
-            # scale: the v6-faithful fused bidirectional training kernel (residual+dropout fused
-            # in the gate) — it is the path that consumes _ds.
-            if torch.is_grad_enabled() or _ds is not None:
-                return self._forward_cute_train(pair, mask, _ds)
-            return self._forward_cute(pair, mask)  # inference: residual fused in-gate
         if self._backend == KernelBackend.TRITON:
             # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
             # path serves inference and training (grad flows through the composed
             # autograd pieces). See kernels/trimul_inproj/triton/bidirectional.py.
-            # residual + row-broadcast dropout are now FUSED into the triton gate store
-            # (same gate_elem epilogue the cute path uses) — no external _r() add.
+            # residual + row-broadcast dropout are FUSED into the triton gate store
+            # (gate_elem epilogue) — no external _r() add.
             return self._forward_triton(pair, mask, _ds)
         if self._backend != KernelBackend.PYTORCH:
             raise InvalidImplementationError(self.implementation)
@@ -260,7 +232,19 @@ class BidirectionalTriangleMultiplication(nn.Module):
         ``GateElem`` back) plus torch einsum/cat/LayerNorm. Same code path for
         inference and training; every stage is autograd-capable so the backward is
         obtained by composition. Requires ``d_hidden == d_pair`` (as the
-        single-direction triton trimul does). bf16 / fp32, B>=1."""
+        single-direction triton trimul does). bf16 / fp32.
+
+        The Triton kernels take one square plane (B=1); a batched input is run plane by plane
+        here so the public module keeps its ``[B, L, L, d]`` contract on every arch."""
+        if pair.shape[0] > 1:
+            return torch.cat([
+                self._forward_triton(
+                    pair[i:i + 1],
+                    None if mask is None else mask[i:i + 1],
+                    None if dropscale is None else
+                    (dropscale if dropscale.shape[0] == 1 else dropscale[i:i + 1]),
+                ) for i in range(pair.shape[0])
+            ], dim=0)
         from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
             bidirectional_trimul_triton,
         )
@@ -275,209 +259,4 @@ class BidirectionalTriangleMultiplication(nn.Module):
             self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
             mask=mask,
             dropscale=dropscale,
-        )
-
-    def _forward_cute_train(
-        self,
-        pair: torch.Tensor,
-        mask: torch.Tensor | None,
-        dropscale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """MINIWORLD (ours) TRAINING path: the v6-faithful fused-bidirectional trimul
-        training kernel (fwd+bwd, autograd-capable) — sm_100 ``bidir_forward_sm100`` on
-        Blackwell, else sm90 ``bidir_forward``. Same kernel stack as the single-direction
-        v6 path (m-major front, te LN_out+@Wp, fused gate; 0 transposes), applied to both
-        directions with a shared 2h back-half.
-
-        Calls the weights-as-args kernel with THIS module's OWN parameters by reference
-        (the ``.t().contiguous()`` transposes stay in the autograd graph), so gradients
-        flow straight back to ``self.to_left.weight.to(pair.dtype)`` / ``ln_pair.weight`` / … and the
-        optimizer trains them. The former ``BidirV6TriMul*`` wrapper cloned the weights
-        into fresh, first-forward-created Parameters — leaving this module's registered
-        params grad-less (dead) and the live copies invisible to an optimizer built over
-        ``model.parameters()`` before the first forward. The native kernel is B=1;
-        batch slicing below preserves the public module's batched contract."""
-        if pair.shape[0] > 1:
-            return torch.cat([
-                self._forward_cute_train(
-                    pair[i:i + 1],
-                    None if mask is None else mask[i:i + 1],
-                    None if dropscale is None else
-                    (dropscale if dropscale.shape[0] == 1 else dropscale[i:i + 1]),
-                ) for i in range(pair.shape[0])
-            ], dim=0)
-        major = (
-            torch.cuda.get_device_capability(pair.device)[0]
-            if torch.cuda.is_available()
-            else 0
-        )
-        if major >= 10:
-            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
-                bidir_forward_sm100 as _fwd,
-            )
-            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
-                prepack_lr_operand_sm100 as _prepack,
-            )
-        else:
-            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training import (
-                bidir_forward as _fwd,
-            )
-            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training import (
-                prepack_lr_operand as _prepack,
-            )
-        # Differentiable compute-dtype casts keep FP32 master weights compatible
-        # with the BF16 native kernels; transposes retain the parameter gradient path.
-        WL = self.to_left.weight.to(pair.dtype).t().contiguous()
-        WLg = self.to_left_gate.weight.to(pair.dtype).t().contiguous()
-        WR = self.to_right.weight.to(pair.dtype).t().contiguous()
-        WRg = self.to_right_gate.weight.to(pair.dtype).t().contiguous()
-        Wg = self.to_gate.weight.to(pair.dtype).t().contiguous()
-        b_lr = _prepack(WL, WLg, WR, WRg)
-        row_scale = None
-        if mask is not None:
-            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)  # [B, L, L]
-            row_scale = m.reshape(-1).to(pair.dtype)     # [M]
-        if major < 10:  # sm90 bidir_forward fuses residual+dropout in the gate
-            # `_fwd` is one of two functions picked by arch above, and only the sm90 one takes
-            # `dropscale` -- which is what this branch is. ty cannot correlate the `major < 10`
-            # guard with which function `_fwd` is bound to, so it checks the call against the
-            # union of both signatures and flags the sm100 variant.
-            return _fwd(
-                pair, WL, WLg, WR, WRg, Wg, self.to_out.weight.to(pair.dtype),
-                self.ln_pair.weight, self.ln_pair.bias,
-                self.ln_out.weight, self.ln_out.bias,
-                self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
-                dropscale=dropscale, eps_out=self.ln_out.eps,  # ty: ignore[unknown-argument]
-            )
-        out = _fwd(
-            pair, WL, WLg, WR, WRg, Wg, self.to_out.weight.to(pair.dtype),
-            self.ln_pair.weight, self.ln_pair.bias,
-            self.ln_out.weight, self.ln_out.bias,
-            self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
-        )
-        if dropscale is not None:  # sm100 bidir: apply residual+dropout explicitly
-            out = out * dropscale
-        return out + pair
-
-    # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
-    # so Dynamo traces straight through this. It could never have BEEN an op itself -- see
-    # ``kernels._compile`` -- but it does not need to be.
-    def _forward_cute(
-        self,
-        pair: torch.Tensor,
-        mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """CUTE bidirectional path: compose the single-direction tm1 ``bdll_sm100``
-        gate-GEMM+einsum for BOTH directions (outgoing on the first ``d_hidden``
-        channels, incoming on the second), then the SHARED ln_out(2h) + to_out + gate
-        back. Avoids the broken quack gated-M-major front of trimul_inproj/cute.
-
-        incoming = outgoing with the k<->contraction index flipped, handled directly
-        by the incoming einsum (no input transpose needed since we control the einsum).
-        Same math as the pytorch reference; bf16 in / fp32 acc / bf16 out.
-        """
-        if pair.shape[0] > 1:
-            return torch.cat([
-                self._forward_cute(
-                    pair[i:i + 1], None if mask is None else mask[i:i + 1]
-                ) for i in range(pair.shape[0])
-            ], dim=0)
-        # The free inference implementation is SM100-only. Hopper retains its own stack;
-        # process environment must not silently select a foreign architecture's kernels.
-        if _dispatch.is_sm100(pair.device):
-            return self._forward_cute_free(pair, mask)
-
-        from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
-            gate_elem_infer,
-        )
-        from miniworld_engine.modules.triangle_multiplication.module import (
-            _load_cute_fns,
-        )
-
-        tm1_cute_forward, _fused_ln_mask, layer_norm_transpose = _load_cute_fns()
-        b, l1, l2, d = pair.shape
-        h = self.d_hidden
-        M = b * l1 * l2
-
-        from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
-
-        x = triton_layernorm(pair, self.ln_pair.weight, self.ln_pair.bias, self.ln_pair.eps)
-        pair_scale = None if mask is None else (mask.unsqueeze(-1) & mask.unsqueeze(-2))[:, None]
-
-        def _front(sl: slice):
-            left, right = tm1_cute_forward(
-                x,
-                self.to_left.weight.to(pair.dtype)[sl].T.contiguous(),
-                self.to_left_gate.weight.to(pair.dtype)[sl].T.contiguous(),
-                self.to_right.weight.to(pair.dtype)[sl].T.contiguous(),
-                self.to_right_gate.weight.to(pair.dtype)[sl].T.contiguous(),
-                out_layout=_resolve_trimul_out_layout(pair.device),
-                pair_mask=pair_scale,
-            )
-            if pair_scale is not None and not _dispatch.is_sm90(pair.device):
-                left, right = left * pair_scale, right * pair_scale
-            return left, right
-
-        left_out, right_out = _front(slice(0, h))          # outgoing half, [B,h,L,L]
-        left_in, right_in = _front(slice(h, 2 * h))        # incoming half, [B,h,L,L]
-        out_o = torch.einsum("bdik,bdjk->bdij", left_out, right_out)   # outgoing
-        out_i = torch.einsum("bdki,bdkj->bdij", left_in, right_in)     # incoming
-        tri = torch.cat([out_o, out_i], dim=1)             # [B, 2h, L, L]
-
-        tri_dbn = tri.permute(1, 0, 2, 3).reshape(2 * h, b, l1 * l2)
-        oo = layer_norm_transpose(
-            tri_dbn, self.ln_out.weight, self.ln_out.bias,
-            eps=self.ln_out.eps, layout="dbn->bnd")
-        out_normed = (oo[0] if isinstance(oo, tuple) else oo).view(b, l1, l2, 2 * h)
-
-        # shared back: sigmoid(x @ to_gate.T) * (out_normed @ to_out.T)  (gate K=d, out K=2h).
-        # Fuse the residual (== module input pair) into the gate store via gate_elem_infer — the
-        # proj GEMM stays cuBLAS, the sigmoid·mul·+residual is one triton pass.
-        proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.to(pair.dtype).T           # (M, d) cuBLAS
-        y = gate_elem_infer(
-            x.reshape(M, d), proj, self.to_gate.weight.to(pair.dtype).T,
-            residual=pair.reshape(M, d), seq_len=l1)
-        return y.view(b, l1, l2, d)
-
-    # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
-    # so Dynamo traces straight through this. It could never have BEEN an op itself -- see
-    # ``kernels._compile`` -- but it does not need to be.
-    def _forward_cute_free(
-        self, pair: torch.Tensor, mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """CUEQUIV-FREE sm100 (B200) bidirectional path — the current sm100 kernels.
-
-        Mirrors the single-direction ``TriangleMultiplication._forward_cute_free``
-        (triton LN_in -> tm1 ``bdll_sm100`` front -> cuBLAS einsum -> sm100
-        LayerNormLinear + triton gate_elem), applied to BOTH directions with a
-        SHARED back-half over the 2h concatenation. NO cuequiv / quack LN. B=1.
-
-        ``mask`` [B, L] (residue mask) is folded into LN_in as a per-row scale
-        (row_scale = mask_i & mask_j over the M=L*L rows) — free masking on the fast path.
-        """
-        from miniworld_engine.kernels.trimul_inproj.cute.bidirectional_sm100 import (
-            bidirectional_trimul_sm100,
-        )
-        from miniworld_engine.modules.triangle_multiplication.module import (
-            _load_cute_fns,
-        )
-
-        tm1_cute_forward, _flm, _lnt = _load_cute_fns()
-        out_layout = _resolve_trimul_out_layout(pair.device)
-        row_scale = None
-        if mask is not None:
-            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)        # [B, L, L]
-            row_scale = m.reshape(-1).to(pair.dtype)           # [M]
-        # The residual is fused into the back half's gate store, so this returns the
-        # residual form directly -- there is no `out + pair` left to do here.
-        return bidirectional_trimul_sm100(
-            pair,
-            self.to_left.weight.to(pair.dtype), self.to_left_gate.weight.to(pair.dtype),
-            self.to_right.weight.to(pair.dtype), self.to_right_gate.weight.to(pair.dtype),
-            self.to_gate.weight.to(pair.dtype), self.to_out.weight.to(pair.dtype),
-            self.ln_pair.weight, self.ln_pair.bias,
-            self.ln_out.weight, self.ln_out.bias,
-            self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
-            tm1_cute_forward, out_layout,
-            row_scale=row_scale,
         )

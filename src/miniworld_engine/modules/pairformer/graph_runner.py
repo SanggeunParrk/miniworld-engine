@@ -1,6 +1,6 @@
 """Bucketed CUDA-graph runner for variable-length Pairformer INFERENCE.
 
-Our sm100 cute kernels are fastest under CUDA-graph replay (graph capture amortizes
+Our fused kernels are fastest under CUDA-graph replay (graph capture amortizes
 the per-launch host cost). Training uses a fixed crop so one captured graph suffices,
 but inference sees variable sequence length L, and a single graph is tied to one shape.
 
@@ -14,14 +14,14 @@ padding** — with CUDA graphs instead of XLA executables:
     ``[:, :L]`` and padded on ``[:, L:]``, replay, and return ``out[:, :L, :L]``.
 
 Correctness of the pad relies on the pair-mask being folded into LayerNorm (row_scale)
-on the fast free path (see TriangleMultiplication / bidirectional ``_forward_cute_free``):
+on the fused paths (the Triton front's row_scale, the hand-CUDA pair mask):
 padded rows are zeroed, so padded residues never contribute to a valid position's
 trimul k-contraction or triangle-attention keys. Padded output positions are garbage
 and are sliced off.
 
 Buckets share a single CUDA-graph memory pool to cap peak memory. B=1, bf16, eval/no_grad.
-Requires the graph-capturability workarounds (transition b2b off on sm100, non-fused
-triangle-attention gate) — apply_workarounds() sets them.
+Requires the graph-capturability workaround (non-fused triangle-attention gate) —
+apply_workarounds() sets it.
 """
 
 from __future__ import annotations
@@ -33,21 +33,14 @@ import torch.nn as nn
 def apply_workarounds() -> None:
     """Make every sub-module CUDA-graph-capturable (same as the bench runner).
 
-    Both of these used to reach around the engine: one wrote an environment variable that another
-    module would later read, the other rebound ``gate_use_fused`` on the module object. They are
-    settings now, so a caller can see what capture changed -- and change it back.
+    This used to reach around the engine by rebinding ``gate_use_fused`` on the module object.
+    It is a setting now, so a caller can see what capture changed -- and change it back.
     """
-    import dataclasses
-
     from miniworld_engine import settings
 
     active = settings.current()
-    defaults = {f.name: f.default for f in dataclasses.fields(settings.Settings)}
     changes = {}
     # setdefault semantics: an explicit choice by the caller still wins.
-    if (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10
-            and active.transition_cuda_b2b == defaults["transition_cuda_b2b"]):
-        changes["transition_cuda_b2b"] = False
     if active.pin_gate_backend is None:
         changes["pin_gate_backend"] = "split"
     if changes:

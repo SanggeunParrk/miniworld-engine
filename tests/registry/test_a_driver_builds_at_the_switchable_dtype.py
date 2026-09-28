@@ -26,17 +26,15 @@ DRIVERS = ROOT / "src" / "miniworld_engine" / "kernels" / "drivers"
 #: `file:symbol` -> why this site names a fixed precision. An ACTIVATION here is a bug unless the
 #: reason says the kernel genuinely runs at one precision and the registry declares the same.
 ALLOWED = {
-    "trimul_inproj.py:torch.float32": "LayerNorm row statistics stay FP32 independently of the BF16 activation",
-    "hopper.py:torch.float32": "LayerNorm mean, rstd and row reduction statistics stay FP32 independently of activation precision",
+    "trimul_inproj.py:torch.float32":
+        "the pair mask handed to the H100 trimul forward is an fp32 row weight, not an activation",
     "adaln.py:FP32": "a LayerNorm statistic (mean/rstd) is fp32 whatever the activation is",
     "triangle_multiplication.py:torch.float32": "sigma is fp32 by definition, not an activation",
     "rope.py:torch.float32": "cos/sin are fp32 angle tensors (rotation precision), not activations",
-    "fused_ln_mask.py:norm_affine":
-        "the masked LN's gamma/beta, fp32 in production via `primitives._Fp32ParamsMixin` -- "
-        "`dev audit --replay` showed this op keying `bfloat16+float32` against a bf16-only cache",
     "layernorm_linear.py:norm_affine":
-        "same: `layernorm_linear_triton_fwd` is handed a `primitives.LayerNorm` parameter, so its "
-        "production key is `bfloat16+float32` and the bf16 driver recorded a bucket nothing asks for",
+        "the LN gamma/beta, fp32 in production via `primitives._Fp32ParamsMixin`: "
+        "`layernorm_linear_triton_fwd` is handed a `primitives.LayerNorm` parameter, so its "
+        "production key is `bfloat16+float32` and a bf16 driver would record a bucket nothing asks for",
     "trimul_inproj.py:norm_affine":
         "the LN_out affine (gamma/beta), which `primitives.LayerNorm`'s `_Fp32ParamsMixin` pins to "
         "fp32 through the trunk's bulk .to(bfloat16) -- so it is fp32 whatever the ACTIVATION is, "
