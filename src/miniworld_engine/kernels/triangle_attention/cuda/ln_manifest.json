@@ -15,7 +15,7 @@
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
     "ln_backward.py": "7b9a1610c238de2a88cc6ae3e0299f08404743d63b3f347ff6763a2cfc258089",
     "ln_residual.cu": "cabd03e537012a204018fde8962ee62d3115098cfb6b02343ce9b1dc8955220c",
-    "triattn_ln_warp_packed.so": "682fb35c2bd0b6b84ba529f09d6dd31a1c040872a370103b3e2a446c7016556b"
+    "triattn_ln_warp_packed.so": "c5a02ba01ae7861975bc8caff049ec8b846dd73a17602ade5d66e92cd40cc700"
   },
   "gate_artifact": "n64_staged",
   "below80_combined_job": 16576,

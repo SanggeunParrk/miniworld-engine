@@ -17,7 +17,7 @@
     "bias_fusion.cu": "401b3c654c2e0b2d34bb843966c92c05ce7d9eed7d76d46ab8f25045343ac8e2",
     "build_bias.py": "4f740ab6c0ac5e246ce2b27902a9d2e8110d384470a510ad442884a8a090b18c",
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
-    "triattn_bias_rs8_async_q4.so": "d5b5bbd86ef6d629b4c0a1a8f811f67203a7e09ffbefff1c546a2ab6d9271394"
+    "triattn_bias_rs8_async_q4.so": "db890da47ad381d5f42328208277397cf4405b26e80cb8206cc89ed89ba28674"
   },
   "dq_artifact": "rs_softmax_overlap",
   "below80_combined_job": 16576,
