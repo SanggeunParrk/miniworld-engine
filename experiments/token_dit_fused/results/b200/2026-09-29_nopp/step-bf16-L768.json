@@ -1,0 +1,33 @@
+{
+ "length": 768,
+ "samples": 5,
+ "blocks": 24,
+ "dtype": "bf16",
+ "device": "NVIDIA B200",
+ "step_us": {
+  "engine MINIWORLD": 8919.98062133789,
+  "fused v7 (v6 + per-shape GEMM choice)": 2512.4095916748047,
+  "fused v5 (cuBLAS expand + swiglu_rows)": 2619.468879699707,
+  "fused v4 (v1 core, pre-scaled)": 3221.196746826172,
+  "fused v3, logits not pre-scaled": 3336.4734649658203,
+  "fused v2, engine attention core": 3443.3982849121094,
+  "fused v1 (AdaLN in Triton GEMM)": 8834.873962402344,
+  "Anthropic composed": 5936.025619506836,
+  "Anthropic composed, hoisted": 4625.612640380859
+ },
+ "rel_rms": {
+  "engine MINIWORLD": 0.011087639257311821,
+  "fused v7 (v6 + per-shape GEMM choice)": 0.004415504634380341,
+  "fused v5 (cuBLAS expand + swiglu_rows)": 0.004647810943424702,
+  "fused v4 (v1 core, pre-scaled)": 0.004414080176502466,
+  "fused v3, logits not pre-scaled": 0.004412933252751827,
+  "fused v2, engine attention core": 0.0044151307083666325,
+  "fused v1 (AdaLN in Triton GEMM)": 0.004462525248527527,
+  "Anthropic composed": 0.004198499955236912,
+  "Anthropic composed, hoisted": 0.004198499955236912
+ },
+ "once_per_sample_us": {
+  "fused hoist (all blocks' pair bias)": 178.82239818572998,
+  "Anthropic hoist (24 x ln_proj.pair_bias)": 1314.3744468688965
+ }
+}

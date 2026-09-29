@@ -1,0 +1,87 @@
+# start Tue Sep 29 12:41:38 KST 2026  host DCTN-0831174147-1  gpu 6  torch 2.10.0+cu130
+## 12:41:40 sweep_fa4  gpu6 foreign=0  256.00 W, 645 MHz, 34
+fwd L384 A48 build/attn_fwd2_nopp.cubin                   69.2 us   (outputs vs attn_fwd2_nopp.cubin: rel 0.0e+00)
+fwd L384 A48 build/attn_fwd2_pp.cubin                     65.9 us   (outputs vs attn_fwd2_nopp.cubin: rel 0.0e+00)
+fwd L384 A48 build/attn_fwd2_pp_p1.cubin                  67.7 us   (outputs vs attn_fwd2_nopp.cubin: rel 3.9e-04)
+fwd L384 A48 build/attn_fwd2_pp_p2.cubin                  70.5 us   (outputs vs attn_fwd2_nopp.cubin: rel 5.4e-04)
+fwd L384 A48 build/attn_fwd2_pp_m8p3.cubin                68.3 us   (outputs vs attn_fwd2_nopp.cubin: rel 4.7e-04)
+fwd L384 A48 build/attn_fwd2_nopp.cubin                   69.9 us   (outputs vs attn_fwd2_nopp.cubin: rel 0.0e+00)
+dqb L384 A48 build/attn_dqb_nopp.cubin                    95.4 us   (outputs vs attn_dqb_nopp.cubin: rel 0.0e+00)
+dqb L384 A48 build/attn_dqb_pp.cubin                      93.4 us   (outputs vs attn_dqb_nopp.cubin: rel 1.5e-07)
+dqb L384 A48 build/attn_dqb_pp_p1.cubin                  100.3 us   (outputs vs attn_dqb_nopp.cubin: rel 4.3e-04)
+dqb L384 A48 build/attn_dqb_pp_p2.cubin                  105.7 us   (outputs vs attn_dqb_nopp.cubin: rel 6.0e-04)
+dqb L384 A48 build/attn_dqb_pp_m8p3.cubin                103.8 us   (outputs vs attn_dqb_nopp.cubin: rel 5.1e-04)
+dqb L384 A48 build/attn_dqb_nopp.cubin                    96.7 us   (outputs vs attn_dqb_nopp.cubin: rel 6.5e-08)
+dkv L384 A48 build/attn_dkv_nopp.cubin                   100.8 us   (outputs vs attn_dkv_nopp.cubin: rel 0.0e+00)
+dkv L384 A48 build/attn_dkv_pp.cubin                      99.7 us   (outputs vs attn_dkv_nopp.cubin: rel 5.8e-08)
+dkv L384 A48 build/attn_dkv_pp_p1.cubin                  102.1 us   (outputs vs attn_dkv_nopp.cubin: rel 4.2e-04)
+dkv L384 A48 build/attn_dkv_pp_p2.cubin                  106.7 us   (outputs vs attn_dkv_nopp.cubin: rel 5.8e-04)
+dkv L384 A48 build/attn_dkv_pp_m8p3.cubin                103.1 us   (outputs vs attn_dkv_nopp.cubin: rel 5.1e-04)
+dkv L384 A48 build/attn_dkv_nopp.cubin                   100.8 us   (outputs vs attn_dkv_nopp.cubin: rel 7.2e-08)
+fwd L768 A48 build/attn_fwd2_nopp.cubin                  234.1 us   (outputs vs attn_fwd2_nopp.cubin: rel 0.0e+00)
+fwd L768 A48 build/attn_fwd2_pp.cubin                    210.1 us   (outputs vs attn_fwd2_nopp.cubin: rel 0.0e+00)
+fwd L768 A48 build/attn_fwd2_pp_p1.cubin                 217.2 us   (outputs vs attn_fwd2_nopp.cubin: rel 3.9e-04)
+fwd L768 A48 build/attn_fwd2_pp_p2.cubin                 232.8 us   (outputs vs attn_fwd2_nopp.cubin: rel 5.6e-04)
+fwd L768 A48 build/attn_fwd2_pp_m8p3.cubin               221.5 us   (outputs vs attn_fwd2_nopp.cubin: rel 4.8e-04)
+fwd L768 A48 build/attn_fwd2_nopp.cubin                  234.6 us   (outputs vs attn_fwd2_nopp.cubin: rel 0.0e+00)
+dqb L768 A48 build/attn_dqb_nopp.cubin                   342.5 us   (outputs vs attn_dqb_nopp.cubin: rel 0.0e+00)
+dqb L768 A48 build/attn_dqb_pp.cubin                     332.0 us   (outputs vs attn_dqb_nopp.cubin: rel 1.6e-07)
+dqb L768 A48 build/attn_dqb_pp_p1.cubin                  353.6 us   (outputs vs attn_dqb_nopp.cubin: rel 4.2e-04)
+dqb L768 A48 build/attn_dqb_pp_p2.cubin                  375.1 us   (outputs vs attn_dqb_nopp.cubin: rel 6.0e-04)
+dqb L768 A48 build/attn_dqb_pp_m8p3.cubin                366.3 us   (outputs vs attn_dqb_nopp.cubin: rel 5.2e-04)
+dqb L768 A48 build/attn_dqb_nopp.cubin                   344.2 us   (outputs vs attn_dqb_nopp.cubin: rel 5.9e-08)
+dkv L768 A48 build/attn_dkv_nopp.cubin                   343.5 us   (outputs vs attn_dkv_nopp.cubin: rel 0.0e+00)
+dkv L768 A48 build/attn_dkv_pp.cubin                     337.4 us   (outputs vs attn_dkv_nopp.cubin: rel 5.4e-08)
+dkv L768 A48 build/attn_dkv_pp_p1.cubin                  348.2 us   (outputs vs attn_dkv_nopp.cubin: rel 4.2e-04)
+dkv L768 A48 build/attn_dkv_pp_p2.cubin                  366.3 us   (outputs vs attn_dkv_nopp.cubin: rel 5.9e-04)
+dkv L768 A48 build/attn_dkv_pp_m8p3.cubin                352.6 us   (outputs vs attn_dkv_nopp.cubin: rel 5.1e-04)
+dkv L768 A48 build/attn_dkv_nopp.cubin                   344.2 us   (outputs vs attn_dkv_nopp.cubin: rel 7.0e-08)
+## 12:42:07 core L384  gpu6 foreign=0  343.03 W, 1965 MHz, 31
+L384: O 1.56e-03  dq 3.02e-03  dk 2.95e-03  dv 2.87e-03  dbias 2.43e-03
+L384: inference    68.5 us   training   289.3 us   (glue  27.1, dkv incl. dQ zero  108.3, dqb   86.8)
+## 12:42:13 core L768  gpu6 foreign=0  351.54 W, 1965 MHz, 30
+L768: O 1.61e-03  dq 2.99e-03  dk 2.92e-03  dv 2.88e-03  dbias 2.42e-03
+L768: inference   234.0 us   training   987.6 us   (glue  50.5, dkv incl. dQ zero  381.0, dqb  342.6)
+## 12:42:17 step L384  gpu6 foreign=0  332.94 W, 1965 MHz, 31
+
+[token DiT] 24 blocks, S=5, L=384, bf16, one sampling step
+  engine MINIWORLD                       4432.8 us/step    184.7 us/block  rel_rms vs fp32 1.13e-02
+  fused v7 (v6 + per-shape GEMM choice)     1411.6 us/step     58.8 us/block  rel_rms vs fp32 4.42e-03
+    GEMM choices: {(384, 73728, 384, True): 'cublas', (384, 36864, 384, True): 'cublas', (1920, 3072, 768, True): 'cublas', (1920, 768, 768, False): 'cublas', (1920, 768, 1536, False): 'cublas'}
+  fused v5 (cuBLAS expand + swiglu_rows)     1464.6 us/step     61.0 us/block  rel_rms vs fp32 4.65e-03
+  fused v4 (v1 core, pre-scaled)         1653.7 us/step     68.9 us/block  rel_rms vs fp32 4.42e-03
+  fused v3, logits not pre-scaled        1693.8 us/step     70.6 us/block  rel_rms vs fp32 4.42e-03
+  fused v2, engine attention core        1691.7 us/step     70.5 us/block  rel_rms vs fp32 4.41e-03
+  fused v1 (AdaLN in Triton GEMM)        4835.4 us/step    201.5 us/block  rel_rms vs fp32 4.46e-03
+  Anthropic composed                     3065.9 us/step    127.7 us/block  rel_rms vs fp32 4.20e-03
+  Anthropic composed, hoisted            2680.6 us/step    111.7 us/block  rel_rms vs fp32 4.20e-03
+  once per sample: fused hoist (all blocks' pair bias)               51.9 us
+  once per sample: Anthropic hoist (24 x ln_proj.pair_bias)         391.1 us
+saved /NHNHOME/WORKSPACE/26mohw002_A/psk6950/scratch/tdit/0929_1241/step-bf16-L384.json
+## 12:43:58 step L768  gpu6 foreign=0  255.83 W, 1965 MHz, 31
+
+[token DiT] 24 blocks, S=5, L=768, bf16, one sampling step
+  engine MINIWORLD                       8920.0 us/step    371.7 us/block  rel_rms vs fp32 1.11e-02
+  fused v7 (v6 + per-shape GEMM choice)     2512.4 us/step    104.7 us/block  rel_rms vs fp32 4.42e-03
+    GEMM choices: {(768, 73728, 384, True): 'cublas', (768, 36864, 384, True): 'cublas', (3840, 3072, 768, True): 'cublas', (3840, 768, 768, False): 'cublas', (3840, 768, 1536, False): 'cublas'}
+  fused v5 (cuBLAS expand + swiglu_rows)     2619.5 us/step    109.1 us/block  rel_rms vs fp32 4.65e-03
+  fused v4 (v1 core, pre-scaled)         3221.2 us/step    134.2 us/block  rel_rms vs fp32 4.41e-03
+  fused v3, logits not pre-scaled        3336.5 us/step    139.0 us/block  rel_rms vs fp32 4.41e-03
+  fused v2, engine attention core        3443.4 us/step    143.5 us/block  rel_rms vs fp32 4.42e-03
+  fused v1 (AdaLN in Triton GEMM)        8834.9 us/step    368.1 us/block  rel_rms vs fp32 4.46e-03
+  Anthropic composed                     5936.0 us/step    247.3 us/block  rel_rms vs fp32 4.20e-03
+  Anthropic composed, hoisted            4625.6 us/step    192.7 us/block  rel_rms vs fp32 4.20e-03
+  once per sample: fused hoist (all blocks' pair bias)              178.8 us
+  once per sample: Anthropic hoist (24 x ln_proj.pair_bias)        1314.4 us
+saved /NHNHOME/WORKSPACE/26mohw002_A/psk6950/scratch/tdit/0929_1241/step-bf16-L768.json
+## 12:45:35 train L384  gpu6 foreign=0  256.21 W, 1965 MHz, 32
+[token DiT training] 4 block(s), per-block times, A=48, L=384, qk_norm, fp32 params
+  pytorch        forward    2692.5 us   forward+backward    7282.6 us   peak  9.32 GB   max grad rel vs pytorch 0.00e+00
+  engine-b200    forward    1675.0 us   forward+backward    4398.4 us   peak  8.06 GB   max grad rel vs pytorch 4.83e-03
+  tdit-b200      forward     527.0 us   forward+backward    1662.4 us   peak  8.65 GB   max grad rel vs pytorch 1.46e-02
+## 12:46:40 train L768  gpu6 foreign=0  255.99 W, 1965 MHz, 31
+[token DiT training] 4 block(s), per-block times, A=48, L=768, qk_norm, fp32 params
+  pytorch        forward    6891.8 us   forward+backward   17412.3 us   peak 25.24 GB   max grad rel vs pytorch 0.00e+00
+  engine-b200    forward    3397.8 us   forward+backward    8979.1 us   peak 17.22 GB   max grad rel vs pytorch 5.43e-03
+  tdit-b200      forward    1122.4 us   forward+backward    3669.4 us   peak 17.84 GB   max grad rel vs pytorch 1.00e-02
+# end Tue Sep 29 12:47:46 KST 2026
