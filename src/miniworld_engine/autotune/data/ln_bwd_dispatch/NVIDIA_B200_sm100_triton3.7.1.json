@@ -1,0 +1,16 @@
+{
+  "128|131072": {
+    "ms": {
+      "atomic": 0.050499,
+      "persistent": 0.069802
+    },
+    "path": "atomic"
+  },
+  "128|524288": {
+    "ms": {
+      "atomic": 0.155135,
+      "persistent": 0.18168
+    },
+    "path": "atomic"
+  }
+}
