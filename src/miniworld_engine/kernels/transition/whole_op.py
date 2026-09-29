@@ -36,8 +36,10 @@ def transition(
     Autograd-transparent: back-prop produces gradients for ``x`` and every weight.
 
     Dispatch is the one ``modules.Transition`` uses: the hand-CUDA sm_90 kernels
-    (``fused_sm90a`` at d=128, ``fused_wide_sm90a`` at d=64/256/384/512; n=4, bf16) where they
-    apply, else the shape-general Triton residual path. LayerNorm is folded into the kernel on
+    (``fused_sm90a`` at d=128, ``fused_wide_sm90a`` at d=64/256/384/512; n=4, bf16) and the sm_100
+    kernels (``fused_sm100a`` at d=128, ``fused_wide_sm100a`` at d=64/256/384/512; n=4, bf16) where they
+    apply, else the shape-general Triton
+    residual path. LayerNorm is folded into the kernel on
     every path, never a separate native ``F.layer_norm``.
     """
     from miniworld_engine import settings
@@ -57,6 +59,19 @@ def transition(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
         if fused_wide_sm90a.available(x, expand_a_weight, squeeze_weight):
             return fused_wide_sm90a.transition_wide_sm90a(
+                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+
+    if settings.current().engine_backend != "triton":
+        from miniworld_engine.kernels.transition.cuda import fused_sm100a
+
+        if fused_sm100a.available(x, expand_a_weight, squeeze_weight):
+            return fused_sm100a.transition_fused_sm100a(
+                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+
+        from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a
+
+        if fused_wide_sm100a.available(x, expand_a_weight, squeeze_weight):
+            return fused_wide_sm100a.transition_wide_sm100a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
 
     from miniworld_engine.kernels.transition.triton.residual import transition_residual

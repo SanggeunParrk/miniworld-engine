@@ -40,3 +40,28 @@ def test_compiled_availability_never_traces_extension_builder(monkeypatch, wide)
     x = torch.zeros(128, 256 if wide else 128)
     compiled = torch.compile(forward, backend="eager", fullgraph=True)
     torch.testing.assert_close(compiled(x), x + 1)
+
+
+@pytest.mark.parametrize("wide", [False, True])
+def test_sm100a_fake_and_compiled_availability_never_build(monkeypatch, wide):
+    """The same two guarantees for the B200 paths (``fused_sm100a`` at D128, ``fused_wide_sm100a`` at the other widths)."""
+    from miniworld_engine.kernels.transition.cuda import fused_sm100a, fused_wide_sm100a
+
+    backend, builder = (fused_wide_sm100a, "_load") if wide else (fused_sm100a, "_ext")
+    monkeypatch.setattr(backend, "supported", lambda *args: True)
+    monkeypatch.setattr(backend, "_BUILD_FAILED", set() if wide else False)
+
+    def forbidden(*args):
+        raise AssertionError("availability invoked the CUDA extension builder")
+
+    monkeypatch.setattr(backend, builder, forbidden)
+    with FakeTensorMode():
+        x = torch.empty(128, 256 if wide else 128)
+        assert backend.available(x, x, x)
+
+    def forward(x):
+        return x + (1 if backend.available(x, x, x) else 0)
+
+    x = torch.zeros(128, 256 if wide else 128)
+    compiled = torch.compile(forward, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(x), x + 1)

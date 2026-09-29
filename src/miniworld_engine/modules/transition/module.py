@@ -23,6 +23,15 @@ def _fused_sm90a_enabled() -> bool:
     return settings.current().transition_fused_sm90a and settings.current().engine_backend != "triton"
 
 
+def _fused_sm100a_enabled() -> bool:
+    """Whether to route the n=4 bf16 residual path on sm_100 (B200) through the hand-CUDA kernels: ``fused_sm100a`` at d=128
+    (module training step 2.5x / 2.3x the Triton residual path at L384 / L768) and ``fused_wide_sm100a`` at d=64/256/384/512.
+    Default on; MINIWORLD_TRANSITION_FUSED_SM100A=0 to A/B against Triton."""
+    from miniworld_engine import settings
+
+    return settings.current().engine_backend != "triton"
+
+
 def _fused_sm80_enabled() -> bool:
     """Whether to route the d=128/n=4 bf16 residual path on sm_80 through the fused hand-CUDA forward and two-kernel backward
     (training step ~1.44x the Triton residual path).  Default on; MINIWORLD_TRANSITION_FUSED_SM80=0 to A/B against Triton."""
@@ -111,7 +120,8 @@ class Transition(nn.Module):
 
         On sm_90 at the AF3 pair width (d=128, n=4, bf16, whole 128-row tiles) this runs the
         fused hand-CUDA kernels -- one launch each way instead of three and two. d = 64, 256, 384
-        and 512 (n = 4) have their own hand-CUDA builds (``fused_wide_sm90a``). Every other
+        and 512 (n = 4) have their own hand-CUDA builds (``fused_wide_sm90a``). sm_100 (B200) and
+        sm_80 (A100) have their own d=128/n=4 builds (``fused_sm100a``, ``fused_sm80``). Every other
         shape, dtype and architecture keeps the Triton path, which is shape-general. The gates are
         ``fused_sm90a.available`` / ``fused_wide_sm90a.available``; they are the kernels' own
         requirements, not a policy.
@@ -130,6 +140,19 @@ class Transition(nn.Module):
 
             if fused_wide_sm90a.available(x, wa, ws):
                 return fused_wide_sm90a.transition_wide_sm90a(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+
+        if _fused_sm100a_enabled():
+            from miniworld_engine.kernels.transition.cuda import fused_sm100a
+
+            if fused_sm100a.available(x, wa, ws):
+                return fused_sm100a.transition_fused_sm100a(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+
+            from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a
+
+            if fused_wide_sm100a.available(x, wa, ws):
+                return fused_wide_sm100a.transition_wide_sm100a(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
 
         if _fused_sm80_enabled():
