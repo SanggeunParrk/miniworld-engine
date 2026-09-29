@@ -197,6 +197,13 @@ class BenchConfig(BaseModel):
     #: MiniWorld runs/msa_bench_20260921; v1.1's bucket_msa_multiple used 2048. Not a yaml key
     #: (every target's yaml carries one key set), so override it with `+n_msa=2048`.
     n_msa: int = 1024
+    #: TriangleAttention heads and hidden width (d_hidden None = d_pair). The registered model shapes keep 32-channel heads
+    #: (Protenix-v2 256 = 8 x 32, OpenDDE 384 = 12 x 32, templates 64 = 2 x 32 / 4 x 32, AF3 template 64 = 4 x 16); the module's
+    #: default of 4 heads is AF3's c_z / 4 rule. Not yaml keys: override with `+tri_n_head=8 +tri_d_hidden=256`.
+    tri_n_head: int = 4
+    tri_d_hidden: int | None = None
+    #: TriangleAttention on B200: False sets `module._b200_cuda = False` (the Triton path, the baseline the CUDA path replaced).
+    tri_b200_cuda: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -1108,6 +1115,8 @@ def bench_module_triangle_attention(
                 [
                     cls(
                         conf.d_pair,
+                        conf.tri_n_head,
+                        d_hidden=conf.tri_d_hidden,
                         implementation=impl,
                         use_self_attention=True,
                         p_drop=conf.dropout,
@@ -1136,6 +1145,8 @@ def bench_module_triangle_attention(
                 nn.init.normal_(linear.weight, std=conf.d_pair**-0.5)
     model = model.to(device=DEVICE, dtype=dtype)
     model.train(not is_inference_mode(conf.mode))
+    for layer in model.layers:
+        layer._b200_cuda = conf.tri_b200_cuda
     if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
@@ -1162,6 +1173,18 @@ def bench_module_triangle_attention(
         ),
         ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
     }.get(spec.impl, spec.impl.value)
+    if spec.impl == ImplementationType.TRITON:
+        from miniworld_engine.integrations import triattn_b200
+        layer0 = getattr(model, "module", model).layers[0]
+        if triattn_b200.serves(layer0, pair, mask):
+            execution_path = ("integrations.triattn_b200 (sm_100a CUDA): tri_pack_params + tri_front -> triattn_fwd -> tri_tail; "
+                              "backward tri_gate_bwd -> triattn_bwd_kv + triattn_bwd_q -> tri_head_bwd -> tri_wgrad")
+        elif is_inference_mode(conf.mode):
+            with torch.no_grad():
+                wide = triattn_b200.serves_wide(layer0, pair, mask)
+            if wide:
+                execution_path = ("integrations.triattn_b200 wide (sm_100a CUDA + cuBLAS): tri_ln_rows -> projection GEMM -> "
+                                  "tri_bias_heads -> triattn_fwd -> tri_gate_mul -> out-projection addmm")
     accuracy: AccuracyFields = {}
     if anthropic:
         execution_path = (f"integrations.anthropic.module_triangle_attention[{anthropic_row}] -> upstream "

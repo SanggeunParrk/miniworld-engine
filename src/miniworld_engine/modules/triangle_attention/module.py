@@ -1,6 +1,8 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/triangle_updates.py
 """Triangle (gated self-)attention — model-level op connecting the fused
-triangle-attention kernel (and a cuequivariance baseline)."""
+triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a kernels
+(``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16- or
+32-channel heads, inference) serve the whole module."""
 
 import math
 from contextlib import contextmanager
@@ -13,6 +15,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import triattn_b200 as _b200
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
@@ -142,6 +145,8 @@ class TriangleAttention(nn.Module):
         self._fuse_dq_backward = True
         self._fuse_front_backward = True
         self._fuse_gate_backward = True
+        # B200 (sm_100a) whole-module CUDA path (integrations.triattn_b200); False keeps the Triton path there.
+        self._b200_cuda = True
 
     def _kernel_triangle_attention(
         self,
@@ -307,6 +312,12 @@ class TriangleAttention(nn.Module):
             _inference()
             if self.training and self.p_drop:
                 raise RuntimeError("Anthropic TriangleAttention requires eval() when dropout is enabled")
+        if _b200.serves(self, pair, mask):
+            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                return _b200.forward(self, pair, mask)
+        if _b200.serves_wide(self, pair, mask):
+            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                return _b200.forward_wide(self, pair, mask)
         if (
             getattr(self, "_fuse_front_backward", True)
             and getattr(self, "_fuse_projection_backward", True)

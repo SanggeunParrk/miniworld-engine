@@ -2,5 +2,73 @@
   "gate|128|128|131072": {
     "choice": "fused",
     "ms": {}
+  },
+  "gate|128|128|262144": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|128|128|524288": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|128|64|131072": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|128|64|262144": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|128|64|524288": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|256|256|131072": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|256|256|262144": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|256|256|524288": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|384|384|131072": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|384|384|262144": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|384|384|524288": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|512|512|131072": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|512|512|262144": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|512|512|524288": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|64|64|131072": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|64|64|262144": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|64|64|524288": {
+    "choice": "fused",
+    "ms": {}
   }
 }
