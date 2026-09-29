@@ -20,6 +20,22 @@ from miniworld_engine.kernels.conditioned_transition.triton import token_dit_ker
 from miniworld_engine.kernels.conditioned_transition.triton.token_dit_attn import attention_gated_in_place, attention_gated_in_place2, bias_descriptor
 
 
+def _row_kernels(device):
+    """The row passes between the GEMMs: CUDA on B200 (``kernels/conditioned_transition/cuda``), Triton elsewhere or
+    when the extension does not build. MINIWORLD_TOKEN_DIT_ROWS_CUDA=0 keeps Triton on B200 too."""
+    import os
+    if (device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0)
+            and os.environ.get("MINIWORLD_TOKEN_DIT_ROWS_CUDA", "1") != "0"):
+        try:
+            from miniworld_engine.kernels.conditioned_transition import cuda as cuda_rows
+            cuda_rows.available()
+            return cuda_rows
+        except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton rows
+            import warnings
+            warnings.warn(f"token DiT CUDA row kernels unavailable, keeping Triton: {exc!r}", RuntimeWarning, stacklevel=2)
+    return K
+
+
 def _t(w):
     return w.detach().t().contiguous()
 
@@ -62,6 +78,7 @@ class FusedTokenDiT:
         self.dp = a0.ln_pair.weight.shape[0]
         self.eps = 1e-5
         dev = a0.to_query.weight.device
+        self.K = _row_kernels(dev)
         f32 = lambda t: t.detach().float()
         w1, b1, w2, b2, pw = [], [], [], [], []
         self.per = []
@@ -84,11 +101,10 @@ class FusedTokenDiT:
                 wqkvg = wqkvg.detach().float().clone(); bqkvg = bqkvg.float().clone()
                 wqkvg[: self.d] *= qs
                 bqkvg[: self.d] *= qs
+            # (the v1 path's transposed copies -- wqkvg_t, wo_t, wa_t, wb_t, ws_t -- were read by nothing but two buffer
+            # shapes and cost five weight-sized copies on every pack; the research archive keeps v1)
             self.per.append(dict(
-                wqkvg_t=_t(wqkvg).to(dtype), bqkvg=bqkvg.to(dtype).contiguous(),
-                wo_t=_t(at.to_out.weight).to(dtype),
-                wa_t=_t(tr.expand_a.weight).to(dtype), wb_t=_t(tr.expand_b.weight).to(dtype),
-                ws_t=_t(tr.squeeze.weight).to(dtype),
+                bqkvg=bqkvg.to(dtype).contiguous(),
                 # v2 operands, nn.Linear layout [out, in] for torch.addmm(b, x, W.t())
                 wqkvg=wqkvg.detach().to(dtype).contiguous(), wo=at.to_out.weight.detach().to(dtype).contiguous(),
                 wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0).detach().to(dtype).contiguous(),
@@ -112,7 +128,10 @@ class FusedTokenDiT:
         padded keys get -inf here, once per sample, so the attention core never touches a mask."""
         L = pair.shape[1]
         out = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
-        K.pair_bias_all(pair.reshape(L * L, self.dp), self.pw_t, out, L, self.eps)
+        if getattr(self.K, "PAIR_BIAS_MASK", False):              # the CUDA rows fold the mask into the same pass
+            self.K.pair_bias_all(pair.reshape(L * L, self.dp), self.pw_t, out, L, self.eps, mask=mask)
+            return out
+        self.K.pair_bias_all(pair.reshape(L * L, self.dp), self.pw_t, out, L, self.eps)
         if mask is not None:
             out[:, :, ~mask.reshape(L)] = float("-inf")
         return out
@@ -121,12 +140,12 @@ class FusedTokenDiT:
         key = (S, L, dev, tag)
         if key not in self._buf:
             M = S * L
-            T = self.d // K.STAT_W
+            T = self.d // self.K.STAT_W
             self._buf[key] = dict(
                 x=torch.empty(M, self.d, device=dev, dtype=torch.float32),
                 mean=torch.empty(M, T, device=dev), m2=torch.empty(M, T, device=dev),
                 qkvg=torch.empty(4, M, self.d, device=dev, dtype=self.dtype),
-                h=torch.empty(M, self.per[0]["wa_t"].shape[1], device=dev, dtype=self.dtype),
+                h=torch.empty(M, self.per[0]["wab"].shape[0] // 2, device=dev, dtype=self.dtype),
                 # the attention core allocates and fills an all-true mask per call when handed None
                 keep=torch.ones(S, 1, L, device=dev, dtype=torch.bool),
                 lse=torch.empty(S, 1, self.h, L, device=dev, dtype=torch.float32),
@@ -135,7 +154,7 @@ class FusedTokenDiT:
                 qkvg2=torch.empty(M, 4 * self.d, device=dev, dtype=self.dtype),
                 a=torch.empty(M, self.d, device=dev, dtype=self.dtype),
                 y=torch.empty(M, self.d, device=dev, dtype=self.dtype),
-                ab=torch.empty(M, 2 * self.per[0]["wa_t"].shape[1], device=dev, dtype=self.dtype))
+                ab=torch.empty(M, self.per[0]["wab"].shape[0], device=dev, dtype=self.dtype))
         return self._buf[key]
 
     # ------------------------------------------------------------------ once per solver step
@@ -157,7 +176,9 @@ class FusedTokenDiT:
         streams = min(streams or self.streams, S)
         g1, g2 = self._cond(cond, L, D)
         if streams <= 1:
-            return self._run(single, g1, g2, bias, 0).view(S, 1, L, D).to(out_dtype or single.dtype)
+            # copy=True: the fp32 residual is this runner's buffer; returning it uncopied (fp32 out) let the next step on a
+            # reused runner overwrite an earlier result
+            return self._run(single, g1, g2, bias, 0).view(S, 1, L, D).to(out_dtype or single.dtype, copy=True)
         main = torch.cuda.current_stream()
         if len(self._streams) < streams:
             self._streams += [torch.cuda.Stream() for _ in range(streams - len(self._streams))]
@@ -183,13 +204,15 @@ class FusedTokenDiT:
         buf = self._buffers(S, L, single.device, tag)
         x, xa, qkvg, a, y, ab, h = (buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h"))
         x.copy_(single.reshape(M, D))
-        K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, L, self.eps)
+        self.K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, L, self.eps)
         # q, k, v, g as strided views of ONE [M, 4D] GEMM output; the core launcher honours strides
         q, k, v = (qkvg.view(S, 1, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(3))
         key = atom_key(L)
         q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(4))
         keep2 = buf["keep"].view(S, L)
-        if self.core == "gated2":
+        sm100 = self.core == "gated2" and self.prescale and self._sm100_core(single.device, L, D, H)
+        gsw = self._gemm_swiglu(single.device, xa)
+        if self.core == "gated2" and not sm100:
             assert self.prescale, "the v2 core expects pre-scaled logits"
             key_d = (bias.data_ptr(), tuple(bias.shape))
             if getattr(self, "_bdesc_key", None) != key_d:
@@ -197,7 +220,10 @@ class FusedTokenDiT:
             bdesc = self._bdesc
         for b, p in enumerate(self.per):
             self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
-            if self.core == "gated2":
+            if sm100:
+                sm100(qkvg, bias, b, S)                                   # sigmoid(g)*o over q, one sm_100a kernel
+                self._mm(qkvg[:, :D], p["wo"], y)
+            elif self.core == "gated2":
                 attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
                 self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated":
@@ -205,16 +231,63 @@ class FusedTokenDiT:
                 torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
             else:
                 attention_in_place(q, k, v, bias[b * H:(b + 1) * H].unsqueeze(0), buf["keep"], buf["lse"], key)
-                K.gate_rows(qkvg[:, :D], qkvg[:, 3 * D:], a)            # o sits where q was
+                self.K.gate_rows(qkvg[:, :D], qkvg[:, 3 * D:], a)            # o sits where q was
                 torch.mm(a, p["wo"].t(), out=y)
-            K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, self.eps)
-            torch.mm(xa, p["wab"].t(), out=ab)
-            K.swiglu_rows(ab, h)
+            self.K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, self.eps)
+            if gsw is not None:
+                gsw(xa, p["wab"], h)                                  # expand + SwiGLU, one sm_100a kernel
+            else:
+                torch.mm(xa, p["wab"].t(), out=ab)
+                self.K.swiglu_rows(ab, h)
             self._mm(h, p["ws"], y)
             last = b + 1 == self.nb
-            K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
+            self.K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
                                  None if last else g1[:, b + 1, 1], xa, L, self.eps)
         return x
+
+    @staticmethod
+    def _blackwell_bf16(device, dtype):
+        return dtype is torch.bfloat16 and device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0)
+
+    def _gemm_swiglu(self, device, xa):
+        """The sm_100a expand GEMM with the SwiGLU epilogue (``kernels/conditioned_transition/cuda/gemm_swiglu.py``) where
+        it fits and builds; cuBLAS + the SwiGLU row pass otherwise."""
+        if not self._blackwell_bf16(device, self.dtype) or torch.compiler.is_compiling():
+            return None
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        cache = self.__dict__.setdefault("_gemm_swiglu_ops", {})
+        key = (idx, xa.shape[0])                                      # the choice depends on M (gemm_swiglu.MIN_ROWS)
+        if key not in cache:
+            from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+            op = None
+            wab = self.per[0]["wab"]
+            if gemm_swiglu.supported(xa, wab):
+                try:
+                    op = gemm_swiglu.GemmSwiglu(idx, K=wab.shape[1], H=wab.shape[0] // 2)
+                except Exception as exc:  # noqa: BLE001 -- a failed build keeps cuBLAS + the row pass
+                    import warnings
+                    warnings.warn(f"sm100 SwiGLU GEMM unavailable, keeping cuBLAS: {exc!r}", RuntimeWarning, stacklevel=2)
+            cache[key] = op
+        return cache[key]
+
+    def _sm100_core(self, device, L, D, H):
+        """The sm_100a gated core (``augmented_attention/cuda/sm100``, attn_inf.cu) where it fits -- bf16, 16 x 48, L a
+        multiple of 128, B200 -- and builds; the Triton gated2 core otherwise. Same contract: pre-scaled logits in,
+        sigmoid(g) * o written over q."""
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        cores = self.__dict__.setdefault("_sm100_cores", {})
+        if idx not in cores:
+            from miniworld_engine.kernels.augmented_attention.cuda import sm100
+            core = None
+            if sm100.inference_core_supported(self.dtype, L, D, H, idx) and not torch.compiler.is_compiling():
+                try:
+                    core = sm100.GatedInferenceCore(idx)
+                except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
+                    import warnings
+                    warnings.warn(f"sm100 token DiT core unavailable, keeping the Triton core: {exc!r}", RuntimeWarning, stacklevel=2)
+            cores[idx] = core
+        core = cores[idx]
+        return core if core is not None and L % 128 == 0 else None
 
     def _mm(self, A, W, out, bias=None):
         """out = A @ W^T (+ bias), cuBLAS."""

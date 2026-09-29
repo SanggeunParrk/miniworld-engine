@@ -1,34 +1,37 @@
 # Token DiT on B200 (sm100)
 
-Kernel-level status of the token DiT (AF3 Alg. 23 block: AdaLN + AugmentedAttention with pair bias + conditioned
-SwiGLU transition; d_single 768, d_cond 384, d_pair 128, 16 heads x 48) on B200; the module-level summary is in
+Kernel-level status of the token DiT block (AF3 Alg. 23: AdaLN + AugmentedAttention with pair bias + conditioned SwiGLU
+transition; d_single 768, d_cond 384, d_pair 128, 16 heads x 48, transition n = 2) on B200; the module-level summary is in
 [b200.md](../b200.md). Columns are (Length, Dimension, dtype) from the shape registry (`token_single`, d_hidden 768).
 
-**Where the code is.** The B200 kernels are **not in this repo's dispatch yet**: they live on branch
-`b200/token-dit` (d0f14e7e, local worktree `~/practice/mw-engine-b200-dit`) under
-`experiments/token_dit_fused/` (step runner, training block, Triton row kernels) and `experiments/augattn_sm100/`
-(sm_100a attention cores, `build.sh` -> cubins). On the box they are at
-`/NHNHOME/WORKSPACE/26mohw002_A/psk6950/mw-dit`. In the tables, **CUDA†** = sm_100a hand CUDA from that branch,
-**Triton†** = Triton from that branch; what this repo's dispatch runs today is Triton for every shape (see b200.md).
-"미검증" = the kernel accepts the shape (L % 128 == 0) but it has not been run there. fp32 has no B200 path (the
-sm_100a cores are bf16 only).
-cache build: nothing on the branch uses this repo's persisted autotune cache (`miniworld-engine build`). ✓ where
-nothing needs one: the cores are cubins built by `build.sh`, the training row kernels have fixed configs. ✗ for the
-inference row kernels: `@triton.autotune`, re-tuned on the first call of every process. The GEMM choices are also
-timed on first call and kept only in-process: cuBLAS vs quack per (M, N, K) and the quack SwiGLU tile config in the
-inference step (`FusedTokenDiT._mm`, `GATED_CFGS`), the quack gated forward / backward configs in training
-(`tdit/qgemm.py` `_race`).
+On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, no quack -- on two paths that
+`modules/dit` dispatches to:
 
-Two paths, both bf16 GEMM operands with fp32 accumulation and an fp32 residual stream:
+- **Inference** (`integrations/token_dit.py` -> `kernels/conditioned_transition/triton/token_dit_runner.py`, the fused
+  step runner shared with H100): serves `DiTBlock` calls with no autograd, the engine's kernel backend (implementation
+  TRITON or MINIWORLD), one conditioning shared by the samples. On capability 10.0 the runner takes the CUDA row kernels
+  (`kernels/conditioned_transition/cuda/token_dit_rows.cu`), the sm_100a gated attention core
+  (`kernels/augmented_attention/cuda/sm100/attn_inf.cu`) in bf16, and from M = S L >= 3840 the expand GEMM with the
+  SwiGLU in its epilogue (`kernels/conditioned_transition/cuda/gemm_swiglu2_sm100.cu`); the other GEMMs are cuBLAS.
+  Inference only (the token DiT is not recycled), so the block's weight pack and its pair bias are made once and reused
+  while the weights / the pair tensor are unchanged (keyed on pointer and version), CUDA-graph replays included: a replay
+  reads the pack and pair bias it was captured with and the live single / cond.
+- **Training** (`integrations/token_dit_train.py`, new): serves `DiTBlock` calls under autograd, engine kernel backend
+  (implementation TRITON or MINIWORLD), bf16 (inputs, or `compute_dtype`), B == 1, even A, L % 128 == 0, key mask [B, L]
+  or none. One autograd Function per block whose forward and backward are each one opaque op (torch.compile keeps them
+  as nodes): cuBLAS GEMMs (bf16 operands, fp32 accumulation, fp32 weight gradients), the sm_100a attention forward /
+  backward (`attn_fwd2`, `attn_dqb`, `attn_dkv`), and 16 CUDA row kernels
+  (`kernels/conditioned_transition/cuda/token_dit_train_rows.cu`). The key mask folds into the pair bias as -inf.
+- The attention module alone (`AugmentedAttentionPairBias`, `compute_dtype=bf16`, no mask, even A) also takes the sm_100a
+  forward / backward (`settings.augmented_attention_bf16_sm100`).
 
-- **Inference**: one sampling step of 24 blocks, S = 5 samples. Every block's pair bias is computed once per sample
-  (one LayerNorm + one GEMM for all blocks, head-major), the AdaLN / gate conditioning once per step on L rows (shared by
-  the samples); per block: q|k|v|g GEMM, attention core, Wo GEMM, residual + gate + AdaLN row kernel, expand GEMM with
-  SwiGLU in its epilogue (quack), squeeze GEMM, residual + gate + next AdaLN row kernel.
-- **Training**: forward + backward of a block stack, A = 48 augments, qk-norm, fp32 parameters. Pair bias hoisted for
-  the whole stack (one LN + one GEMM forward, one backward); cond LayerNorm once per stack; conditioning as two GEMMs
-  (cond-LN weights folded); q|k|v|g one GEMM; SwiGLU forward / backward in quack sm100 GEMM epilogues; every
-  elementwise step one Triton row kernel; bf16 weight pack cached across steps.
+"미검증" = the kernels accept the shape but no test or measurement has run there. cache build ✓: nothing on these paths
+autotunes -- the CUDA row kernels have fixed launch shapes, the sm_100a kernels are cubins built on first use into
+`MINIWORLD_ENGINE_JIT_ROOT` (keyed by source and flags), the SwiGLU GEMM choice is a fixed row threshold. fp32 inference
+on B200 keeps the Triton gated core (the sm_100a cores are bf16 only).
+
+Switches (all default on): `MINIWORLD_TOKEN_DIT_ROWS_CUDA`, `MINIWORLD_AUGATTN_BF16_SM100`,
+`MINIWORLD_TOKEN_DIT_GEMM_SWIGLU` (`auto` = M >= 3840, `1` forces, `0` off), `MINIWORLD_TOKEN_DIT_TRAIN`.
 
 ## Inference
 
@@ -36,19 +39,27 @@ Two paths, both bf16 GEMM operands with fp32 accumulation and an fp32 residual s
 
 | (Length, Dimension, dtype) | (128, 768, bf16) | (256, 768, bf16) | (384, 768, bf16) | (512, 768, bf16) | (640, 768, bf16) | (768, 768, bf16) |
 |---|---|---|---|---|---|---|
-| implementation | CUDA† 미검증 | CUDA† 미검증 | CUDA† | CUDA† 미검증 | CUDA† 미검증 | CUDA† |
+| implementation | CUDA 미검증 | CUDA 미검증 | CUDA | CUDA 미검증 | CUDA 미검증 | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-### I2 · `resgate_adaln_rows` (x += sigmoid(gate) y in fp32, then the next AdaLN) · I3 `adaln_rows`
+### I2 · row kernels `adaln_rows`, `resgate_adaln_rows`, `swiglu_rows`, pair LayerNorm (+ one cuBLAS projection)
 
 | (Length, Dimension, dtype) | (128, 768, bf16) | (256, 768, bf16) | (384, 768, bf16) | (512, 768, bf16) | (640, 768, bf16) | (768, 768, bf16) |
 |---|---|---|---|---|---|---|
-| implementation | Triton† 미검증 | Triton† 미검증 | Triton† | Triton† 미검증 | Triton† 미검증 | Triton† |
+| implementation | CUDA 미검증 | CUDA | CUDA | CUDA 미검증 | CUDA 미검증 | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| cache build | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-GEMMs (cuBLAS; expand + SwiGLU through quack `gemm_act`) and the hoisted pair-bias GEMM are not kernel rows.
+### I3 · expand GEMM + SwiGLU `gemm_swiglu2_sm100` (M >= 3840; below it cuBLAS + `swiglu_rows`)
+
+| (Length, Dimension, dtype) | (128, 768, bf16) | (256, 768, bf16) | (384, 768, bf16) | (512, 768, bf16) | (640, 768, bf16) | (768, 768, bf16) |
+|---|---|---|---|---|---|---|
+| implementation | cuBLAS + CUDA | cuBLAS + CUDA | cuBLAS + CUDA | cuBLAS + CUDA | cuBLAS + CUDA | CUDA |
+| 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+(at S = 5; the choice follows M = S L, so L = 768 is the first registry length above the threshold.)
 
 ## Training
 
@@ -56,126 +67,95 @@ GEMMs (cuBLAS; expand + SwiGLU through quack `gemm_act`) and the hoisted pair-bi
 
 | (Length, Dimension, dtype) | (128, 768, bf16) | (256, 768, bf16) | (384, 768, bf16) | (512, 768, bf16) | (640, 768, bf16) | (768, 768, bf16) |
 |---|---|---|---|---|---|---|
-| implementation | CUDA† 미검증 | CUDA† 미검증 | CUDA† | CUDA† 미검증 | CUDA† 미검증 | CUDA† |
+| implementation | CUDA | CUDA | CUDA | CUDA 미검증 | CUDA 미검증 | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-### T4 · Triton row kernels (`tdit/train_kernels.py`, 17 kernels)
+### T4 · row kernels (`token_dit_train_rows.cu`, 16 kernels)
 
-Forward: `_cond_prep`, `_adaln_a`, `_qknorm`, `_gate_o`, `_res_adaln_b`, `_res_c`, `_ln_rows` (pair). Backward:
-`_res_c_bwd`, `_res_adaln_b_bwd`, `_gate_o_bwd` (also the core-backward prep dO, D), `_qknorm_bwd`, `_adaln_a_bwd`,
-`_cond_bwd`, `_unfold_lnw`, `_ln_rows_bwd` (pair); bias / qk-norm / gate gradient sums accumulate atomically inside
-them.
+Forward `cond_prep`, `adaln_a`, `qknorm`, `gate_o`, `res_adaln_b`, `res_c`, `pair_ln` (+ `swiglu_rows`); backward
+`res_c_bwd`, `swiglu_bwd`, `res_adaln_b_bwd`, `gate_o_bwd` (also the core backward's dO and D), `qknorm_bwd`,
+`adaln_a_bwd`, `cond_bwd`, `unfold_lnw`, `pair_ln_bwd`. Per-column gradient sums leave each block of rows as one row of a
+partial buffer, summed once on the host side.
 
 | (Length, Dimension, dtype) | (128, 768, bf16) | (256, 768, bf16) | (384, 768, bf16) | (512, 768, bf16) | (640, 768, bf16) | (768, 768, bf16) |
 |---|---|---|---|---|---|---|
-| implementation | Triton† 미검증 | Triton† 미검증 | Triton† | Triton† 미검증 | Triton† 미검증 | Triton† |
+| implementation | CUDA 미검증 | CUDA | CUDA | CUDA 미검증 | CUDA 미검증 | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## Measurements (2026-09-29)
 
-B200 (148 SMs, 1000 W power cap), torch 2.10.0+cu130 (the old uv venv of the box, not the v2.2.0 pixi env), GPU 6
-through `gpuq` with nothing else on the GPU (checked before every step). Per block, us, median.
-Reproduce on the box: `gpuq run -g 6 -- bash measure_b200.sh` in `experiments/token_dit_fused` of the branch; logs
-and step JSONs in its `results/b200/2026-09-29_{nopp,pp}/`.
+B200 (148 SMs, 1000 W power cap), the v2.2.0 pixi env (torch 2.13.0+cu129), GPU 6 through `gpuq` with nothing else on
+it. ms per block, median. Run-to-run spread on this card is +-3-5 % (power cap), so differences below that are not
+resolved.
 
-**Not the `benchmarks/runners/bench.py` protocol**: inference is CUDA-graph replay of the 24-block step (`bench.py`
-of the branch); training is eager with CUDA events over a 4-block stack (`train_block.py --stack 4`), no torch.compile
-baseline; PyTorch = the engine's `PYTORCH` implementation. No cuEquivariance column (it has no token DiT block).
+All rows from `benchmarks/runners/bench.py target=dit level=module` (one DiTBlock, bf16, key mask 12.5 % masked), in one
+run. "ours" is the bench's `miniworld` row (implementation TRITON: the engine's kernels). cuEquivariance has no DiT block
+(no column). × = ours vs the fastest other row.
 
-### Inference (S = 5, 24-block step, CUDA graph)
+### Training (A = 48, compiled; CUDA graph off / on)
 
-| (Length, Dimension, dtype) | PyTorch (engine `MINIWORLD`) | Anthropic parts, pair bias hoisted | ours | × | rel_rms vs fp32 (ours / engine) |
+| (Length, Dimension, dtype) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (384, 768, bf16) | 184.7 | 111.7 | **57.6** | 1.94 | 4.4e-3 / 1.1e-2 |
-| (768, 768, bf16) | 371.6 | 192.7 | **101.4** | 1.90 | 4.4e-3 / 1.1e-2 |
+| (384, 768, bf16) | 3.087 / 2.856 | — | no backward | **1.934 / 1.767** | 1.60 / 1.62 |
+| (768, 768, bf16) | 8.540 / 8.315 | — | no backward | **4.096 / 4.046** | 2.08 / 2.06 |
 
-Once per sample (all 24 blocks' pair bias): ours 51.8 / 179.0 us, Anthropic 24 x `ln_proj.pair_bias` 390.9 / 1314.6 us.
-Energy SOL (`sol_b200.py`): 21.8 / 45.8 us. For reference, the same schedule on H100: 82.3 / 170.5 us.
+Before this path (engine module path on B200): 2.502 / 2.289 and 6.036 / 5.806 ms. Accuracy
+(`tests/integrations/test_b200_token_dit_train_gpu.py`, against the fp32 PyTorch block): output and every input /
+parameter gradient within 1.09x of the engine module path's own error in the same bf16 regime (qk-norm on / off, key mask
+on / off); the compiled block matches eager.
 
-### Training (A = 48, qk-norm, fp32 params, fwd + bwd, 4-block stack)
+### Inference, one conditioning shared by the S = 5 samples (a sampling step; `+shared_cond=true`)
 
-| (Length, Dimension, dtype) | PyTorch fp32 (TF32) | engine bf16 + our core | ours | × | max grad rel vs PyTorch fp32 |
+Both fused rows compute a layer's pair bias once per pair (their samplers do, and so does ours) and the conditioning once
+per token. Anthropic runs `compile=false` (it has no compilable graph); PyTorch and ours are given compile=false /
+compiled, both with CUDA graphs.
+
+| (Length, Dimension, dtype) | PyTorch | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (384, 768, bf16) | 7281.9 | 4390.0 | **1623.0** | 2.70 | 8.7e-3 |
-| (768, 768, bf16) | 17389.7 | 9029.9 | **3562.7** | 2.53 | 1.0e-2 |
+| (384, 768, bf16) | 0.500 eager / 0.165 compiled | — | 0.123 | **0.090** | 1.36 |
+| (768, 768, bf16) | 1.570 eager / 0.373 compiled | — | 0.208 | **0.137** | 1.51 |
 
-Forward alone: ours 519.7 / 1048.2 us, PyTorch 2693.6 / 6890.2 us. Peak memory at L768: ours 17.3 GB, PyTorch 25.2 GB.
-Energy SOL: 697.1 / 1548.5 us (both paths at 38-45 % of it). The max grad error is the bf16-operand floor: many
-parameters sit at the same 8.6-8.7e-3 (L384) / 9.5-10e-3 (L768); the engine path is at 4.8-5.6e-3.
+Before (per-call weight pack and pair bias, Triton rows and core): 0.258 / 0.403 ms.
 
-### Attention core alone (`augattn_sm100/bench_train.py`, A = 48)
+### Inference, a different conditioning per sample (the bench default)
 
-| (Length, Dimension, dtype) | engine Triton | H100 sm_90a (other box, reference) | ours | × vs engine Triton |
-|---|---|---|---|---|
-| inference (384, 768, bf16) | 152.5 | 107 | **65.7** | 2.32 |
-| training (384, 768, bf16) | 706.0 | 558 | **283.5** | 2.49 |
-| inference (768, 768, bf16) | 517.4 | 334 | **210.0** | 2.46 |
-| training (768, 768, bf16) | 2895.1 | 1841 | **962.6** | 3.01 |
+The fused step does not serve per-sample conditioning; ours is the module composition (Triton kernels, bf16 attention
+core not requested) -- no B200 CUDA path yet.
 
-Engine Triton measured on this box on 2026-09-27 (augattn round v1). Training = forward + glue + dkv + dqb; split at L384 / L768: 65.7 / 210.0, 27.1 / 50.6, 107.1 / 385.0, 84.4 / 327.2 us.
-Errors against fp64: O 1.6e-3, dq 3.0e-3, dk 2.9e-3, dv 2.9e-3, dbias 2.4e-3.
+| (Length, Dimension, dtype) | PyTorch | cuEquivariance | Anthropic | ours | × |
+|---|---|---|---|---|---|
+| (384, 768, bf16) | 0.479 eager / 0.164 compiled | — | **0.145** | 0.188 / 0.170 | 0.85 |
+| (768, 768, bf16) | 1.539 eager / 0.369 compiled | — | **0.285** | 0.362 / 0.330 | 0.86 |
 
-## Where the time goes (training, L384, per block ~1570 us of kernel time)
+### Inference step inside the runner (24 blocks, S = 5, CUDA graph; probe, per block)
 
-| group | us | share | state |
-|---|---:|---:|---|
-| GEMMs (cuBLAS nvjet, quack gated fwd / bwd, split-K reduce) | ~738 | 47 % | 913 GFLOP at ~1.24 PFLOP/s: the power-capped cuBLAS ceiling (~1.30 PF) |
-| Triton row kernels | ~480 | 31 % | each at ~65-85 % of 7 TB/s |
-| attention cores | ~267 | 17 % | 30 % at L768 (1072 of ~3500 us); the largest gap to its own ceiling |
+| (Length, Dimension, dtype) | before (Triton rows + Triton core) | ours | × |
+|---|---|---|---|
+| (384, 768, bf16) | 62.9 us | **60.0 us** | 1.05 |
+| (768, 768, bf16) | 115.9 us | **101.8 us** | 1.14 |
 
-## Development record
+Per block at L768: attention core 33 us, cuBLAS GEMMs ~45 us, `gemm_swiglu2` 18.4 us (cuBLAS expand + row pass: 22.3),
+`resgate_adaln_rows` x2 20.5 us.
 
-Training block, per block, L384 fwd + bwd:
+## What was tried and not kept
 
-| round | commit (branch `b200/token-dit`) | us | change |
-|---|---|---:|---|
-| T1 | ded9b0b1 | 2598 | the fused block: two conditioning GEMMs, one q\|k\|v\|g GEMM, sm_100a core, row kernels |
-| T2 | 565da489 | 2068 | bias reductions inside the backward row kernels, weight-pack cache, TF32 pair-bias dots; 89 -> 45 launches |
-| T3 | e25ace6a | 1926 | SwiGLU in quack sm100 GEMM epilogues (forward and backward) |
-| T4 | dc8c4aa8 | 1664 (4-block stack) | pair bias hoisted for the stack, tuned row kernels |
-| PP | d5577279, 2b3665c6 | 1623 (4-block stack) | exponential ping-pong in the cores (below) |
-| — | d0f14e7e | within noise | `_unfold_lnw` 16 rows per program (was 3072 programs x 384 atomics onto 768 addresses: 22-26 -> < 11 us); cond LayerNorm once per stack (~13 / ~25 us at L384 / L768) |
-
-Inference core: `attn_inf` (95776774) = `attn_fwd2` adapted to the step (q|k|v|g column views, logits pre-scaled into
-exp2 units, odd S by a clamped partner sample, g by TMA, sigmoid(g) o written over q by TMA store): 16.1 -> 13.3 us
-(L384) and 41.8 -> 35.1 us (L768) against the Triton core, before PP.
-
-**Exponential ping-pong (PP).** The two softmax (forward) / dS (backward) warpgroups take turns on the exponentials
-through named barriers, so one's S load, bias, max and P store run under the other's MUFU phase (the forward had 25.5 %
-of warp samples stalled on ex2 while MUFU averaged 48 %). Sweep (`sweep_fa4.sh`, us):
-
-| kernel | L | PP = 0 | **PP** | PP + 1/4 poly exp | PP + 2/4 poly | PP + 3/8 poly |
-|---|---|---:|---:|---:|---:|---:|
-| attn_fwd2 | 384 | 69.2 | **65.9** | 67.7 | 70.5 | 68.3 |
-| attn_dqb | 384 | 95.4 | **93.4** | 100.3 | 105.7 | 103.8 |
-| attn_dkv | 384 | 100.8 | **99.7** | 102.1 | 106.7 | 103.1 |
-| attn_fwd2 | 768 | 234.1 | **210.1** | 217.2 | 232.8 | 221.5 |
-| attn_dqb | 768 | 342.5 | **332.0** | 353.6 | 375.1 | 366.3 |
-| attn_dkv | 768 | 343.5 | **337.4** | 348.2 | 366.3 | 352.6 |
-
-PP output is identical in the forward and within 2e-7 in the backward; polynomial exp2 shares lose everywhere (+4-6e-4
-error). End to end: inference 58.8 / 104.7 -> 57.6 / 101.4 us, training 1662 / 3669 -> 1623 / 3563 us. The PP = 0
-run also confirmed the T4 / inference numbers first taken while another job shared the GPUs (1664 / 3605 then).
-
-Measured and not taken:
-
-| change | result |
+| attempt | result |
 |---|---|
-| backward row kernels walking row chunks per program, atomics once at the end | slower (`_res_adaln_b_bwd` 83 -> 113 us): the atomics were not the cost, parallelism was |
-| cores read v in place from q\|k\|v\|g (strided TMA rows), no v copy | `_qknorm` -7 / -10 us per block, cores possibly 1-2 % slower at L768; not resolvable, reverted |
-| inference: double-buffered P, `attn_inf2` (keys split over the two warpgroups) | flat at S = 5: the core is bound by one item's latency |
+| row kernels with one warp per row | 2x slower than Triton (13 warps per SM at M = 1920: latency-bound); one block per row fixed it |
+| pair bias as one fused WMMA kernel (LayerNorm + projection) | 3.4-3.6x slower than LayerNorm + cuBLAS; dropped |
+| 1-CTA SwiGLU GEMM (`gemm_swiglu_sm100.cu`, kept for the record) | 540 TFLOPS: a 128 x 256 tile per SM is TMA-intake-bound; the 2-CTA kernel replaced it |
+| `gemm_swiglu2` at L384 (M = 1920) | 14.0 us vs 13.7 for cuBLAS + row pass: 96 items on 74 SM pairs leave most pairs idle in round 2 |
+| training column sums by atomicAdd per block | every block onto the same 768 addresses serialised in L2 (`qknorm_bwd` 736 us, `res_c_bwd` 105 us at L384); partial buffers instead |
 
-**Measurement noise on this card.** Under the 1000 W cap the same code's kernel-time total moves by +-4 % between
-runs seconds apart (L768 13983-15177 us; `attn_dkv` 1545-1725 us) and eager wall time by +-3-5 %: 1-3 % changes need
-per-kernel times normalised by an unchanged kernel of the same run, or energy per call.
+## Limits and next
 
-## Next
-
-- Wire the paths into this repo (kernels under `kernels/<family>/cuda/`, dispatch on capability 10.0, the
-  `benchmarks/runners/bench.py` protocol) — the branch predates v2.2.0's layout.
-- Attention forward writing sigmoid(g) o directly (as `attn_inf` does) to drop `_gate_o`, if D = rowsum(dO o) can be
-  taken from the gated output without losing accuracy.
-- The attention backward cores (30 % of the block at L768).
-- Key mask in the training path; QK-norm in the inference path.
+- A DiTBlock call sees one block, so the pair bias and the cond LayerNorm are recomputed per block; the research stack
+  runner (branch `b200/token-dit`) hoisted them for the whole stack (training 1.62 / 3.56 ms per block there, with Triton
+  and quack).
+- Training SwiGLU is cuBLAS + CUDA row kernels; `gemm_swiglu2`'s `-DSAVE_AB` variant (writes a, b) is the next step for the
+  forward.
+- Per-sample conditioning at inference has no B200 CUDA path (Anthropic 1.17x faster there): the training block's forward
+  without the saves would serve it.
+- Not done: QK-norm in the inference path.

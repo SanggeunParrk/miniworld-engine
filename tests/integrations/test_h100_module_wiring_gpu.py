@@ -153,11 +153,18 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
         new = m(x, c, p, mask)
         assert not torch.equal(old, new)
         # No stale pair-bias cache: a live changed pair must change the output.
-        assert not torch.equal(new, m(x, c, p * 0.7, mask))
+        # (not p * 0.7 alone: ln_pair is scale-invariant up to eps)
+        assert not torch.equal(new, m(x, c, p * 0.7 + 0.3 * torch.randn_like(p), mask))
+        # An in-place change of the pair bumps its version: the pair-bias cache misses.
+        before = m(x, c, p, mask)
+        p.add_(0.3 * torch.randn_like(p))
+        assert not torch.equal(before, m(x, c, p, mask))
+        # Inference-only contract (integrations/token_dit.py): a replay reads the weights' pack and the pair bias it was
+        # captured with, and the live single / cond.
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = m(x, c, p, mask)
-        p.mul_(.9)
+        x.mul_(.9)
         graph.replay()
         assert relative(captured, m(x, c, p, mask)) < 1e-5
 

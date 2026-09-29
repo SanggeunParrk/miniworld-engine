@@ -219,6 +219,10 @@ class Settings:
     #: (kernels/augmented_attention/cuda: fwd+bwd 2.5x the bf16 Triton core at L=768, A=48, peak memory -1.9 GB).
     #: Falls back on anything else. MINIWORLD_AUGATTN_BF16_SM90=0 also turns it off.
     augmented_attention_bf16_sm90: bool = True
+    #: The same routing on sm_100 (B200) through the tcgen05 forward and backward
+    #: (kernels/augmented_attention/cuda/sm100: fwd+bwd 3.0x the bf16 Triton core at L=768, A=48), when additionally
+    #: A is even and there is no key mask. Falls back on anything else. MINIWORLD_AUGATTN_BF16_SM100=0 also turns it off.
+    augmented_attention_bf16_sm100: bool = True
     #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
     #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.
     transition_gatebwd_wgmma: bool = True
