@@ -63,6 +63,18 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   and B1r / B7r for D128 bidirectional), dispatched by `integrations/trimul_b200.py`. LayerNorm-parameter gradients
   are fixed-order sums (bit-identical across runs). With a CUDA graph it is 1.3-3.1x the fastest of PyTorch compiled /
   cuEquivariance 0.12 in inference and 1.2-3.0x in training (`docs/gpus/b200/trimul/trimul.md`).
+- B200 (sm_100): hand-CUDA fused Transition for D128/n=4 bf16 (`kernels/transition/cuda/fused_sm100a.py`,
+  one forward kernel with 2-CTA tcgen05 products, one backward kernel + a partial reduction), dispatched
+  from `modules.Transition` and `ops.transition`; `MINIWORLD_TRANSITION_FUSED_SM100A=0` opts out. Module
+  training step 2.5x / 2.3x the Triton residual path at L384 / L768. The kernels are built into cubins
+  by the newest nvcc that knows sm_100a (13.1 on the B200 box; 12.9's ptxas is ~8 % slower on the
+  backward) and launched through the driver API. Page: `docs/gpus/b200/transition/transition.md`.
+- B200 (sm_100): hand-CUDA Transition for D64/256/384/512, n=4, bf16 (`kernels/transition/cuda/fused_wide_sm100a.py`:
+  D64 one fused forward + one fused backward; D256 fused forward, split backward; D384/512 LN -> expand+SwiGLU -> squeeze,
+  split backward from the saved a / b), same dispatch and opt-out as D128. Module L384 vs torch.compile: inference
+  1.3-3.6x, training 1.08-2.5x. The D128 kernels drop two cluster-scope releases per launch (D128 L128 inference
+  15.1 -> 13.5 us kernel time, bit-identical outputs). Kernel sources under `sm100/` are generated from the research
+  capsule (`experiments/transition_fused_sm100/export_engine.py`).
 - `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
   writes) from a JSON spec.
 - H100 single-direction TriMul training in CUDA at D64 (`h100_uni_d64_training`, the

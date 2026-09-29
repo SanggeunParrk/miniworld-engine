@@ -1,0 +1,701 @@
+{
+ "figures": {
+  "inference_d128": {
+   "title": "B200 · Transition (pair, n = 4) · inference · D128, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd2_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(8):  # 64 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b   # TMEM only",
+        "  acc += h @ W_s[:, j].T",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s",
+        "γ, β"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 0.4 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_d128": {
+   "title": "B200 · Transition (pair, n = 4) · training · D128, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (saves x_n, rstd, c1)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd2_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(8):",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b   # TMEM only",
+        "  acc += h @ W_s[:, j].T",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s",
+        "γ, β"
+       ],
+       "writes": [
+        "y",
+        "x_n",
+        "rstd, c1"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y, x_n",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "rstd, c1",
+       "shape": "[L·L] fp32"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 0.4 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "fused backward (weight role + input role)",
+       "impl": "CUDA · transition_bwd_sm100 (2-CTA)",
+       "code": [
+        "# weight role, one hidden slice s per CTA:",
+        "dh, a, b = dy @ W_s[:, s], x_n @ W_a[s].T, x_n @ W_b[s].T",
+        "h, dA, dB = swiglu_bwd(dh, a, b)",
+        "dW_s[:, s] += dy.T @ h",
+        "dW_a[s] += dA.T @ x_n;  dW_b[s] += dB.T @ x_n",
+        "# input role, one row tile per CTA:",
+        "d_xn = Σ_j dA_j @ W_a[j] + dB_j @ W_b[j]",
+        "dx = dy + layer_norm_bwd(d_xn, x, rstd, c1, γ)"
+       ],
+       "reads": [
+        "dy",
+        "x, x_n",
+        "rstd, c1",
+        "W_a, W_b, W_s, γ"
+       ],
+       "writes": [
+        "dx",
+        "partials"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "partial-sum reduction",
+       "impl": "CUDA · transition_bwd_reduce",
+       "code": [
+        "dW_a, dW_b, dW_s = partials.sum(0)",
+        "dγ, dβ = partials_ln.sum(0)"
+       ],
+       "reads": [
+        "partials"
+       ],
+       "writes": [
+        "dW_a, dW_b, dW_s",
+        "dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "dy, dx",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "partials",
+       "shape": "fp32, 7 MB"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "bf16 / fp32, 0.4 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "inference_d64": {
+   "title": "B200 · Transition (pair, n = 4) · inference · D64, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (nothing saved; weights resident in shared memory)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd_d64_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(4):  # 64 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b   # TMEM only",
+        "  acc += h @ W_s[:, j].T",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 0.1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_d64": {
+   "title": "B200 · Transition (pair, n = 4) · training · D64, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (saves x_n, rstd, c1)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd_d64_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(4):  # 64 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b   # TMEM only",
+        "  acc += h @ W_s[:, j].T",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "y",
+        "x_n",
+        "rstd, c1"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y, x_n",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "rstd, c1",
+       "shape": "[L·L] fp32"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 0.1 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "fused backward (weight role + input role)",
+       "impl": "CUDA · transition_bwd_d64_sm100 (2-CTA)",
+       "code": [
+        "# weight role: 4 hidden slices x 20 replicas",
+        "dh, a, b = dy @ W_s[:, s], x_n @ W_a[s].T, x_n @ W_b[s].T",
+        "h, dA, dB = swiglu_bwd(dh, a, b)",
+        "dW_s[:, s] += dy.T @ h;  dW_a|b[s] += dA|B.T @ x_n",
+        "# input role: all weights resident",
+        "dx = dy + layer_norm_bwd(dA @ W_a + dB @ W_b, ...)"
+       ],
+       "reads": [
+        "dy",
+        "x, x_n",
+        "rstd, c1",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "dx",
+        "partials"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "partial-sum reduction",
+       "impl": "CUDA · transition_bwd_d64_reduce",
+       "code": [
+        "dW_a, dW_b, dW_s = partials.sum(0)",
+        "dγ, dβ = partials_ln.sum(0)"
+       ],
+       "reads": [
+        "partials"
+       ],
+       "writes": [
+        "dW_*, dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "dy, dx",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "partials",
+       "shape": "fp32, 9 MB"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "bf16 / fp32, 0.1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "inference_d256": {
+   "title": "B200 · Transition (pair, n = 4) · inference · D256, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd_d256_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(16):  # 64 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b   # TMEM only",
+        "  acc += h @ W_s[:, j].T",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 1.6 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_d256": {
+   "title": "B200 · Transition (pair, n = 4) · training · D256, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (saves x_n, rstd, c1)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd_d256_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(16):  # 64 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b   # TMEM only",
+        "  acc += h @ W_s[:, j].T",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "y",
+        "x_n",
+        "rstd, c1"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y, x_n",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "rstd, c1",
+       "shape": "[L·L] fp32"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 1.6 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "gate (recomputes a, b)",
+       "impl": "CUDA · transition_gate_w_sm100 (2-CTA)",
+       "code": [
+        "dh = dy @ W_s",
+        "a, b = x_n @ W_a.T, x_n @ W_b.T   # fp32, TMEM",
+        "h, dA, dB = swiglu_bwd(dh, a, b)"
+       ],
+       "reads": [
+        "dy, x_n",
+        "W_a, W_b, W_s"
+       ],
+       "writes": [
+        "h",
+        "dA | dB"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "dW GEMMs (fp32 out)",
+       "impl": "cuBLAS · torch.mm(out_dtype=fp32)",
+       "code": [
+        "dW_s = dy.T @ h",
+        "[dW_a; dW_b] = [dA | dB].T @ x_n"
+       ],
+       "reads": [
+        "dy, h, dA|dB, x_n"
+       ],
+       "writes": [
+        "dW_*"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "d_xn GEMM",
+       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA, EPI_PLAIN)",
+       "code": [
+        "d_xn = [dA | dB] @ [W_a; W_b]"
+       ],
+       "reads": [
+        "dA|dB",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "d_xn"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "LayerNorm backward + residual",
+       "impl": "CUDA · transition_lnbwd_w (+ reduce)",
+       "code": [
+        "dx = dy + layer_norm_bwd(d_xn, x, rstd, c1, γ)",
+        "dγ, dβ = partials.sum(0)"
+       ],
+       "reads": [
+        "d_xn, x, dy",
+        "rstd, c1, γ"
+       ],
+       "writes": [
+        "dx",
+        "dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "dy, dx, d_xn",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "h, dA | dB",
+       "shape": "[L,L,4D], [L,L,8D] bf16"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "fp32"
+      }
+     ]
+    }
+   ]
+  },
+  "inference_d384": {
+   "title": "B200 · Transition (pair, n = 4) · inference · D384 / D512, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (x_n and h pass through HBM; nothing saved)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LayerNorm",
+       "impl": "CUDA · transition_ln_w",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)"
+       ],
+       "reads": [
+        "x",
+        "γ, β"
+       ],
+       "writes": [
+        "x_n"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "expand + SwiGLU",
+       "impl": "CUDA · transition_swiglu_w_sm100 (2-CTA; item schedule ≤ 1152 tiles)",
+       "code": [
+        "a, b = x_n @ W_a.T, x_n @ W_b.T",
+        "h = F.silu(a) * b"
+       ],
+       "reads": [
+        "x_n",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "h"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "squeeze + residual",
+       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA)",
+       "code": [
+        "y = x + h @ W_s.T"
+       ],
+       "reads": [
+        "h, x",
+        "W_s"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y, x_n",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "h",
+       "shape": "[L,L,4D] bf16"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 3.5 / 6.3 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_d384": {
+   "title": "B200 · Transition (pair, n = 4) · training · D384 / D512, bf16, whole 128-row tiles",
+   "panels": [
+    {
+     "label": "forward (saves x_n, rstd, c1, h, a, b)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LayerNorm",
+       "impl": "CUDA · transition_ln_w",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)"
+       ],
+       "reads": [
+        "x",
+        "γ, β"
+       ],
+       "writes": [
+        "x_n",
+        "rstd, c1"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "expand + SwiGLU",
+       "impl": "CUDA · transition_swiglu_w_sm100 (2-CTA; item schedule ≤ 1152 tiles)",
+       "code": [
+        "a, b = x_n @ W_a.T, x_n @ W_b.T",
+        "h = F.silu(a) * b"
+       ],
+       "reads": [
+        "x_n",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "h",
+        "a, b"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "squeeze + residual",
+       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA)",
+       "code": [
+        "y = x + h @ W_s.T"
+       ],
+       "reads": [
+        "h, x",
+        "W_s"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y, x_n",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "h, a, b",
+       "shape": "[L,L,4D] bf16"
+      },
+      {
+       "name": "rstd, c1",
+       "shape": "[L·L] fp32"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "gate (dh GEMM + SwiGLU bwd from saved a, b)",
+       "impl": "CUDA · transition_gate_ab_sm100 (2-CTA)",
+       "code": [
+        "dh = dy @ W_s",
+        "dA, dB = swiglu_bwd(dh, a, b)"
+       ],
+       "reads": [
+        "dy, a, b",
+        "W_s"
+       ],
+       "writes": [
+        "dA | dB"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "dW GEMMs (fp32 out)",
+       "impl": "cuBLAS · torch.mm(out_dtype=fp32)",
+       "code": [
+        "dW_s = dy.T @ h",
+        "[dW_a; dW_b] = [dA | dB].T @ x_n"
+       ],
+       "reads": [
+        "dy, h, dA|dB, x_n"
+       ],
+       "writes": [
+        "dW_*"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "d_xn GEMM",
+       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA, EPI_PLAIN)",
+       "code": [
+        "d_xn = [dA | dB] @ [W_a; W_b]"
+       ],
+       "reads": [
+        "dA|dB",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "d_xn"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "LayerNorm backward + residual",
+       "impl": "CUDA · transition_lnbwd_w (+ reduce)",
+       "code": [
+        "dx = dy + layer_norm_bwd(d_xn, x, rstd, c1, γ)",
+        "dγ, dβ = partials.sum(0)"
+       ],
+       "reads": [
+        "d_xn, x, dy",
+        "rstd, c1, γ"
+       ],
+       "writes": [
+        "dx",
+        "dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "dy, dx, d_xn",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "h, a, b, dA | dB",
+       "shape": "[L,L,4D] / [L,L,8D] bf16"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "fp32"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
