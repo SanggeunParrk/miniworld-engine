@@ -148,8 +148,9 @@ class Transition(nn.Module):
         )
 
     def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Norm affine params are fp32-pinned; cast them to the activation dtype for the
-        # reference LN so the downstream bf16 expand/squeeze get a matching activation.
+        # Norm affine params are fp32-pinned and the projections bf16-pinned; cast both to the
+        # activation dtype. This is the path `guard_dtype` sends every non-bf16 input to, so
+        # applying the bf16 Linear modules directly would fail on exactly the dtypes it serves.
         x = F.layer_norm(
             x,
             (self.d_hidden,),
@@ -157,7 +158,7 @@ class Transition(nn.Module):
             self.ln_in.bias.to(x.dtype),
             self.ln_in.eps,
         )
-        a = self.expand_a(x)
-        b = self.expand_b(x)
+        a = F.linear(x, self.expand_a.weight.to(x.dtype))
+        b = F.linear(x, self.expand_b.weight.to(x.dtype))
         x = swish_gate(a, b)
-        return self.squeeze(x)
+        return F.linear(x, self.squeeze.weight.to(x.dtype))

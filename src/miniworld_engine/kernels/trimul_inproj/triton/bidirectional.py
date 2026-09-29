@@ -312,6 +312,16 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
     # Reuse the training contraction launcher: both cuBLAS calls write directly
     # into disjoint slices of the final buffer, with no intermediate cat copy.
     tri = packed_forward(lf, rf, h)                            # (H, L, L)
+    if x_n.dtype != torch.bfloat16:
+        # `_back_kernel` is registered BF16 only: it rounds the LN'd tile to bf16 for the proj
+        # dot, which does not compile against an fp32 Wp. Other dtypes take the same split
+        # LN+GEMM / gate pair `_BidirBackHalfTriton` uses for them; the identity drop scale
+        # keeps its output that of the inference path.
+        proj, _, _, _ = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps,
+                                    shape_key=both_key(M))
+        y, _ = gate_elem_train(x_n.reshape(M, D), proj, Wgt, residual,
+                               ones_dropscale(L, D, x_n), seq_len=L)
+        return y.view(B, L, L, D)
     # ONE pass: LN_out(H) + proj GEMM (H -> D) + gate GEMM (D -> D) + residual. This used to be
     # `_te_forward` (LN+GEMM) followed by a separate gate pass (since removed), because
     # `trimul_back_triton` gated over the same axis it normalised and so refused H != D. It takes
