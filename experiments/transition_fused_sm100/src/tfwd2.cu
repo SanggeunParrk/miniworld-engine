@@ -79,13 +79,27 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     }
     mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
     fence_barrier_init();
+#ifndef OLD_SYNC
+    if (n_local > 0) {                                         // tile 0's x now, not after the cluster sync (its barrier is local)
+      fence_proxy_async();
+      mbar_expect_tx(&B.x_full[0], TILE);
+#pragma unroll
+      for (int cb = 0; cb < 2; ++cb)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) tma_load_2d(su + O_X + cb * 16384 + h * 8192, &mx, &B.x_full[0], cb * 64, tile_of(0) * ROWS + h * 64);
+    }
+#endif
     prefetch_map(&mx); prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mws); prefetch_map(&mout); prefetch_map(&mxn);
   }
   if (tid < 128) { reinterpret_cast<float*>(sm + O_GB)[tid] = gamma[tid]; reinterpret_cast<float*>(sm + O_GB)[128 + tid] = beta[tid]; }
   if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
   tc_fence_before();
   __syncthreads();
+#ifdef OLD_SYNC
   cluster_sync();
+#else
+  cluster_sync_relaxed();                                      // the barriers were published by fence_barrier_init
+#endif
   tc_fence_after();
   const uint32_t tmem = B.tmem;
 
@@ -93,7 +107,11 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------ x producer (own tiles)
     if (lane == 0) {
+#ifdef OLD_SYNC
       for (int i = 0; i < n_local; ++i) {
+#else
+      for (int i = 1; i < n_local; ++i) {                     // tile 0 was issued at setup
+#endif
         const int b = i & 1, row = tile_of(i) * ROWS;
         if (i >= 2) mbar_wait(&B.x_empty[b], ((i >> 1) - 1) & 1);
         mbar_expect_tx(&B.x_full[b], TILE);
@@ -292,7 +310,11 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
       fence_proxy_async();
       named_bar_sync(1, 128);
       if (t2 == 0) {
+#ifdef OLD_SYNC
         mbar_arrive_remote(&B.xn_full[b], 0);
+#else
+        mbar_arrive_remote_cta(&B.xn_full[b], 0);
+#endif
         if (save && real) {
           const int row0 = tile_of(i) * ROWS;
 #pragma unroll
@@ -358,6 +380,10 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
   }
   tc_fence_before();
   __syncthreads();
+#ifdef OLD_SYNC
   cluster_sync();
+#else
+  cluster_sync_relaxed();
+#endif
   if (warp == 2) { tc_fence_after(); tmem_dealloc2(tmem, 512); }
 }

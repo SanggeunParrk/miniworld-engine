@@ -150,6 +150,10 @@ DEVI void tma_load_2d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0,
 // in every CTA of `mask`
 DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
 DEVI void cluster_sync() { asm volatile("barrier.cluster.arrive.aligned; barrier.cluster.wait.aligned;" ::: "memory"); }
+// no memory ordering on the arrive (~0.5 us cheaper than cluster_sync): at setup, after fence.mbarrier_init.release.cluster has
+// published the barriers (CUTLASS's fence_barrier_init + cluster_arrive_relaxed); at teardown, where the pair's TMEM traffic is already
+// ordered by the MMA commits and the tcgen05 fences
+DEVI void cluster_sync_relaxed() { asm volatile("barrier.cluster.arrive.relaxed.aligned; barrier.cluster.wait.aligned;" ::: "memory"); }
 DEVI void tma_load_2d_mc(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, uint16_t mask) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
                :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask) : "memory");
@@ -271,6 +275,14 @@ DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
   asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(smem_u32(bar)), "r"(rank));
   asm volatile("mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];" :: "r"(r) : "memory");
 }
+// release at CTA scope (CUTLASS's ClusterBarrier::arrive(cta_id)): for shared-memory operands this CTA's threads wrote (then
+// fence.proxy.async) and the pair's MMA reads. The cluster-scope release costs ~0.5 us on sm_100a (measured, rounds/s1.md) -- on the
+// critical path of a short launch
+DEVI void mbar_arrive_remote_cta(uint64_t* bar, uint32_t rank) {
+  uint32_t r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(smem_u32(bar)), "r"(rank));
+  asm volatile("mbarrier.arrive.release.cta.shared::cluster.b64 _, [%0];" :: "r"(r) : "memory");
+}
 // relaxed variant: for signals whose data ordering is already carried by tcgen05.fence::before_thread_sync (TMEM reads/writes done)
 DEVI void mbar_arrive_remote_relaxed(uint64_t* bar, uint32_t rank) {
   uint32_t r;
@@ -282,6 +294,12 @@ DEVI void mbar_wait_cl(uint64_t* b, uint32_t parity) {      // acquire at cluste
   mbar_wait(b, parity); return;
 #endif
   uint32_t ok = 0;
+#ifdef WAIT_CL_TEST                                            // spin on test_wait (never suspends) instead of try_wait
+  while (!ok)
+    asm volatile("{ .reg .pred p; mbarrier.test_wait.parity.acquire.cluster.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
+                 : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");
+  return;
+#endif
   while (!ok)
     asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
                  : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");

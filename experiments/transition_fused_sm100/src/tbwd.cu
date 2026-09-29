@@ -97,7 +97,14 @@ DEVI float gate_da(float g, float b, float s, float l) { return (g * b) * (s + l
 DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, uint32_t& hp, uint32_t& dap, uint32_t& dbp) {
   const uint32_t gp = pack_bf16(__uint_as_float(dh0), __uint_as_float(dh1));
   const f2 G = mk2(bf16lo(gp), bf16hi(gp)), A = mk2u(a0, a1), Bv = mk2u(b0, b1);
+#ifndef SIG_PAIR
   const f2 S = mk2(sigmoid_kit(__uint_as_float(a0)), sigmoid_kit(__uint_as_float(a1)));
+#else
+  // SIG_PAIR (v23, not adopted): the kit sigmoid's multiply and add paired — bit-identical, same SASS count (pair MOVs), no gain
+  const f2 E = mul2(A, mk2(-1.4426950408889634f, -1.4426950408889634f));
+  const f2 D1 = add2(mk2(ex2f(lo2(E)), ex2f(hi2(E))), mk2(1.f, 1.f));
+  const f2 S = mk2(rcpf(lo2(D1)), rcpf(hi2(D1)));
+#endif
   const f2 L = mul2(A, S);
   const f2 H = mul2(L, Bv), DB = mul2(G, L);
   const f2 U = fma2(L, fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);
@@ -126,7 +133,11 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
   __syncthreads();
-  cluster_sync();                                          // every CTA's barriers exist before any multicast or remote arrive
+#ifdef OLD_SYNC
+  cluster_sync();
+#else
+  cluster_sync_relaxed();                                          // every CTA's barriers exist before any multicast or remote arrive
+#endif
   tc_fence_after();
   const uint32_t tmem = B.tmem;
 
@@ -345,8 +356,13 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
 #pragma unroll
     for (int cc = 0; cc < 6; ++cc) {
       uint32_t v[32];
-      tmem_ld32(trow + (cc < 4 ? T_DWAB + cc * 32 : T_DWS + (cc - 4) * 32), v);
-      tmem_wait_ld();
+      if (n_local > 0) {
+        tmem_ld32(trow + (cc < 4 ? T_DWAB + cc * 32 : T_DWS + (cc - 4) * 32), v);
+        tmem_wait_ld();
+      } else {                                             // fewer tiles than replicas: this CTA accumulated nothing, its partial is 0
+#pragma unroll
+        for (int k = 0; k < 32; ++k) v[k] = 0u;
+      }
       float* dst = cc < 4 ? pab + cc * 32 : ps + (cc - 4) * 32;
 #pragma unroll
       for (int k = 0; k < 8; ++k) *reinterpret_cast<uint4*>(dst + 4 * k) = make_uint4(v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]);
@@ -354,11 +370,18 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
   }
   tc_fence_before();
   __syncthreads();
-  cluster_sync();                                          // no CTA leaves while a peer may still multicast into it
+#ifdef OLD_SYNC
+  cluster_sync();
+#else
+  cluster_sync_relaxed();                                          // no CTA leaves while a peer may still multicast into it
+#endif
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
 
 // warp reduce-scatter: lane l returns the sum over the warp of v[l]
+#ifdef ABL_RS
+DEVI float reduce_scatter32(float (&v)[32], int lane) { return v[0] + v[31]; }   // ablation: no reduce-scatter (dgamma / dbeta wrong)
+#else
 DEVI float reduce_scatter32(float (&v)[32], int lane) {
 #pragma unroll
   for (int off = 16; off; off >>= 1) {
@@ -374,6 +397,7 @@ DEVI float reduce_scatter32(float (&v)[32], int lane) {
   }
   return v[0];
 }
+#endif
 
 // ================================================================================================ DX role
 DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int lane) {
@@ -402,7 +426,11 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
   __syncthreads();
-  cluster_sync();                                          // every CTA's barriers exist before any multicast or remote arrive
+#ifdef OLD_SYNC
+  cluster_sync();
+#else
+  cluster_sync_relaxed();                                          // every CTA's barriers exist before any multicast or remote arrive
+#endif
   tc_fence_after();
   const uint32_t tmem = B.tmem;
 
@@ -783,7 +811,11 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
   }
   tc_fence_before();
   __syncthreads();
-  cluster_sync();                                          // no CTA leaves while a peer may still multicast into it
+#ifdef OLD_SYNC
+  cluster_sync();
+#else
+  cluster_sync_relaxed();                                          // no CTA leaves while a peer may still multicast into it
+#endif
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
 

@@ -1,0 +1,533 @@
+{
+ "device": "NVIDIA B200",
+ "rows": [
+  {
+   "D": 384,
+   "L": 128,
+   "ours_us": 57.4,
+   "swiglu_sched": "item",
+   "compile_us": 91.3,
+   "anthropic_best": "pf",
+   "anthropic_us": 497.9,
+   "err_anthropic": 0.00328,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_384x1536 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c384_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     497.9,
+     0.00328
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c384_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:no_launch_pin:10.0|bf16|c384|h1536|res1 ("
+    ],
+    "v1": [
+     532.8,
+     0.00297
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00224,
+   "err_compile": 0.00315,
+   "err_eager": 0.00328,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.59,
+   "x_anthropic": 8.67
+  },
+  {
+   "D": 384,
+   "L": 256,
+   "ours_us": 201.2,
+   "swiglu_sched": "item",
+   "compile_us": 361.6,
+   "anthropic_best": "pf",
+   "anthropic_us": 1988.7,
+   "err_anthropic": 0.00329,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_384x1536 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c384_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     1988.7,
+     0.00329
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c384_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:no_launch_pin:10.0|bf16|c384|h1536|res1 ("
+    ],
+    "v1": [
+     2142.6,
+     0.00299
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00226,
+   "err_compile": 0.00316,
+   "err_eager": 0.00329,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.8,
+   "x_anthropic": 9.88
+  },
+  {
+   "D": 384,
+   "L": 384,
+   "ours_us": 461.9,
+   "swiglu_sched": "item",
+   "compile_us": 826.7,
+   "anthropic_best": "pf",
+   "anthropic_us": 4444.5,
+   "err_anthropic": 0.00328,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_384x1536 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c384_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     4444.5,
+     0.00328
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c384_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:no_launch_pin:10.0|bf16|c384|h1536|res1 ("
+    ],
+    "v1": [
+     4795.0,
+     0.00299
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00225,
+   "err_compile": 0.00315,
+   "err_eager": 0.00328,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.79,
+   "x_anthropic": 9.62
+  },
+  {
+   "D": 384,
+   "L": 512,
+   "ours_us": 976.4,
+   "swiglu_sched": "item",
+   "compile_us": 1432.0,
+   "anthropic_best": "pf",
+   "anthropic_us": 7873.1,
+   "err_anthropic": 0.00326,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_384x1536 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c384_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     7873.1,
+     0.00326
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c384_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:no_launch_pin:10.0|bf16|c384|h1536|res1 ("
+    ],
+    "v1": [
+     8480.0,
+     0.00298
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00225,
+   "err_compile": 0.00313,
+   "err_eager": 0.00326,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.47,
+   "x_anthropic": 8.06
+  },
+  {
+   "D": 384,
+   "L": 640,
+   "ours_us": 1390.1,
+   "swiglu_sched": "item",
+   "compile_us": 2270.3,
+   "anthropic_best": "pf",
+   "anthropic_us": 12280.3,
+   "err_anthropic": 0.00327,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_384x1536 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c384_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     12280.3,
+     0.00327
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c384_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:no_launch_pin:10.0|bf16|c384|h1536|res1 ("
+    ],
+    "v1": [
+     13219.6,
+     0.00299
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00225,
+   "err_compile": 0.00313,
+   "err_eager": 0.00327,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.63,
+   "x_anthropic": 8.83
+  },
+  {
+   "D": 384,
+   "L": 768,
+   "ours_us": 2001.6,
+   "swiglu_sched": "tile",
+   "compile_us": 3138.8,
+   "anthropic_best": "pf",
+   "anthropic_us": 17665.2,
+   "err_anthropic": 0.00329,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_384x1536 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c384_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     17665.2,
+     0.00329
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c384_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:no_launch_pin:10.0|bf16|c384|h1536|res1 ("
+    ],
+    "v1": [
+     19024.2,
+     0.003
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00226,
+   "err_compile": 0.00316,
+   "err_eager": 0.00329,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.57,
+   "x_anthropic": 8.83
+  },
+  {
+   "D": 512,
+   "L": 128,
+   "ours_us": 84.8,
+   "swiglu_sched": "item",
+   "compile_us": 125.0,
+   "anthropic_best": null,
+   "anthropic_us": null,
+   "err_anthropic": null,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_512x2048 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c512_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     null,
+     "Refusal('pf:c512_outside_64/128/256/384 (row=pf, fallback=to"
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c512_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:c512_outside_64/128/256/384 (row=af3_fuse"
+    ],
+    "v1": [
+     null,
+     "Refusal('v1:c512_outside_64/128/256/384 (row=v1, fallback=to"
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00224,
+   "err_compile": 0.00313,
+   "err_eager": 0.00326,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.47,
+   "x_anthropic": null
+  },
+  {
+   "D": 512,
+   "L": 256,
+   "ours_us": 322.4,
+   "swiglu_sched": "item",
+   "compile_us": 506.8,
+   "anthropic_best": null,
+   "anthropic_us": null,
+   "err_anthropic": null,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_512x2048 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c512_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     null,
+     "Refusal('pf:c512_outside_64/128/256/384 (row=pf, fallback=to"
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c512_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:c512_outside_64/128/256/384 (row=af3_fuse"
+    ],
+    "v1": [
+     null,
+     "Refusal('v1:c512_outside_64/128/256/384 (row=v1, fallback=to"
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00226,
+   "err_compile": 0.00313,
+   "err_eager": 0.00327,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.57,
+   "x_anthropic": null
+  },
+  {
+   "D": 512,
+   "L": 384,
+   "ours_us": 811.8,
+   "swiglu_sched": "item",
+   "compile_us": 1148.1,
+   "anthropic_best": null,
+   "anthropic_us": null,
+   "err_anthropic": null,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_512x2048 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c512_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     null,
+     "Refusal('pf:c512_outside_64/128/256/384 (row=pf, fallback=to"
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c512_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:c512_outside_64/128/256/384 (row=af3_fuse"
+    ],
+    "v1": [
+     null,
+     "Refusal('v1:c512_outside_64/128/256/384 (row=v1, fallback=to"
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00225,
+   "err_compile": 0.00313,
+   "err_eager": 0.00326,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.41,
+   "x_anthropic": null
+  },
+  {
+   "D": 512,
+   "L": 512,
+   "ours_us": 1483.1,
+   "swiglu_sched": "item",
+   "compile_us": 2181.2,
+   "anthropic_best": null,
+   "anthropic_us": null,
+   "err_anthropic": null,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_512x2048 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c512_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     null,
+     "Refusal('pf:c512_outside_64/128/256/384 (row=pf, fallback=to"
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c512_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:c512_outside_64/128/256/384 (row=af3_fuse"
+    ],
+    "v1": [
+     null,
+     "Refusal('v1:c512_outside_64/128/256/384 (row=v1, fallback=to"
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00225,
+   "err_compile": 0.00311,
+   "err_eager": 0.00325,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.47,
+   "x_anthropic": null
+  },
+  {
+   "D": 512,
+   "L": 640,
+   "ours_us": 2263.9,
+   "swiglu_sched": "item",
+   "compile_us": 3425.1,
+   "anthropic_best": null,
+   "anthropic_us": null,
+   "err_anthropic": null,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_512x2048 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c512_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     null,
+     "Refusal('pf:c512_outside_64/128/256/384 (row=pf, fallback=to"
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c512_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:c512_outside_64/128/256/384 (row=af3_fuse"
+    ],
+    "v1": [
+     null,
+     "Refusal('v1:c512_outside_64/128/256/384 (row=v1, fallback=to"
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00225,
+   "err_compile": 0.00313,
+   "err_eager": 0.00326,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.51,
+   "x_anthropic": null
+  },
+  {
+   "D": 512,
+   "L": 768,
+   "ours_us": 3289.9,
+   "swiglu_sched": "tile",
+   "compile_us": 4976.6,
+   "anthropic_best": null,
+   "anthropic_us": null,
+   "err_anthropic": null,
+   "anthropic_rows": {
+    "v2": [
+     null,
+     "Refusal('v2:no_measured_launch_on_cc_10.0_for_512x2048 (row="
+    ],
+    "esm_t16": [
+     null,
+     "Refusal('esm_t16:c512_not_256 (row=esm_t16, fallback=engine_"
+    ],
+    "pf": [
+     null,
+     "Refusal('pf:c512_outside_64/128/256/384 (row=pf, fallback=to"
+    ],
+    "lnl": [
+     null,
+     "Refusal('lnl:c512_outside_64/128/256 (row=lnl, fallback=torc"
+    ],
+    "af3_fused": [
+     null,
+     "Refusal('af3_fused:c512_outside_64/128/256/384 (row=af3_fuse"
+    ],
+    "v1": [
+     null,
+     "Refusal('v1:c512_outside_64/128/256/384 (row=v1, fallback=to"
+    ]
+   },
+   "eager_us": null,
+   "err_ours": 0.00225,
+   "err_compile": 0.00314,
+   "err_eager": 0.00327,
+   "repro": true,
+   "finite": true,
+   "x_compile": 1.51,
+   "x_anthropic": null
+  }
+ ]
+}
