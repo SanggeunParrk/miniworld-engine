@@ -111,7 +111,7 @@ def front(d, pg=False, method=0, bufs=None):
             n * 128,
             128,
             0,
-            0,
+            int(d["mask"].ndim == 1),   # token mask [n]: K1 forms m[i] & m[j]
         ]
     )
     p = base

@@ -67,6 +67,7 @@ void mw_independent_input_ln(__grid_constant__ const Params p){
   __syncthreads();
  }
  aggregate_ln<D,NT>(gg,bb,reinterpret_cast<float*>(sm),p.dg,p.db);
+#ifndef INPUT_NO_REDUCE   // MiniWorld: the single-direction path reduces its weight gradients with GEMMs
 
  for(int i=blockIdx.x*NT+tid;i<4*D*D;i+=gridDim.x*NT){
   int which=i/(D*D),j=(i%(D*D))*2;float a=0,b=0;
@@ -74,4 +75,5 @@ void mw_independent_input_ln(__grid_constant__ const Params p){
   for(int s=0;s<8;++s){float2 v=*reinterpret_cast<const float2*>(p.part+size_t(s)*11*D*D+(3+2*which)*D*D+j);a+=v.x;b+=v.y;}
   *reinterpret_cast<uint32_t*>(p.dw[which]+j)=pack_bf16(a,b);
  }
+#endif
 }

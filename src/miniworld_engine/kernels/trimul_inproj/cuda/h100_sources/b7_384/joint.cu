@@ -16,6 +16,19 @@ constexpr int THREADS=256,SMEM=114688;
 constexpr int SOURCES=16,CONSUMERS=B7_CONSUMERS,GROUP=SOURCES+CONSUMERS,RINGS=B7_RING_DEPTH;
 #define allsync() named_bar_sync(1+threadIdx.x/128,128)
 struct Params{CUtensorMap xn,wp,dl,dr,dg,wgate,x,res,dx,wt[4],ringstore;const __nv_bfloat16* mask;const float *gamma,*beta;__nv_bfloat16 *dxptr,*dw;float *dgam,*dbeta,*partw,*partln;unsigned int* counts;int M,tiles;uint8_t *ring,*xring;unsigned* flags;};
+
+#ifndef B7_TOKEN_MASK
+#define B7_TOKEN_MASK 0
+#endif
+// bf16x2 mask factor of pair row t = i N + j: the [N, N] bf16 pair mask, or (B7_TOKEN_MASK) m[i] & m[j] from a bool / uint8 token mask [N]
+TMN_DEVI uint32_t b7_mask_bits(const Params& p,int t){
+#if B7_TOKEN_MASK
+ const unsigned char* tk=reinterpret_cast<const unsigned char*>(p.mask);
+ return (tk[t/B7_N]&tk[t%B7_N])?0x3F803F80u:0u;
+#else
+ return uint32_t(__bfloat16_as_ushort(p.mask[t]))*0x10001u;
+#endif
+}
 #include "single_wg.inc"
 TMN_DEVI void store2d(const CUtensorMap* map,const void* src,int c,int r){asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0,{%2,%3}],[%1];"::"l"(map),"r"(smem_u32(src)),"r"(c),"r"(r):"memory");}
 TMN_DEVI void multicast_xn(void* dst,const CUtensorMap* map,uint64_t* bar,int c,int row){asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0],[%1,{%3,%4}],[%2],%5;"::"r"(smem_u32(dst)),"l"(map),"r"(smem_u32(bar)),"r"(c),"r"(row),"h"(uint16_t((1<<B7_HW_CLUSTER)-1)):"memory");}
@@ -107,12 +120,12 @@ TMN_DEVI void source_compute(const Params& p,uint8_t* sm,uint64_t* bar){
   
   uint8_t* s0=sm+slot*20480;uint8_t* s1=sm+((slot+1)%4)*20480;uint8_t* sg0=sm+98304;uint8_t* sg1=sm+106496;
   mbar_wait(bar+slot,(round/4)&1);uint32_t xn[8][4];load_frag_bf16<8,8192>(xn,smem_u32(s0),w*16,lane);
-  int ra=w*16+lane/4;uint32_t ma=uint32_t(__bfloat16_as_ushort(p.mask[tile*64+ra]))*0x10001u,mb=uint32_t(__bfloat16_as_ushort(p.mask[tile*64+ra+8]))*0x10001u;
+  int ra=w*16+lane/4;uint32_t ma=b7_mask_bits(p,tile*64+ra),mb=b7_mask_bits(p,tile*64+ra+8);
   float a0[32]={},a1[32]={};pair_gp(a0,xn,desc);wgmma_wait<0>();fence_regs(a0);
   if(second){mbar_wait(bar+slot+1,(round/4)&1);load_frag_bf16<8,8192>(xn,smem_u32(s1),w*16,lane);pair_gp(a1,xn,desc);}
   if(round>0)mbar_wait(bar+20,((round/2)-1)&1);
   pair_glu(a0,s0,sg0,ma,mb);
-  if(second){wgmma_wait<0>();fence_regs(a1);ma=uint32_t(__bfloat16_as_ushort(p.mask[(tile+groups)*64+ra]))*0x10001u;mb=uint32_t(__bfloat16_as_ushort(p.mask[(tile+groups)*64+ra+8]))*0x10001u;pair_glu(a1,s1,sg1,ma,mb);}
+  if(second){wgmma_wait<0>();fence_regs(a1);ma=b7_mask_bits(p,(tile+groups)*64+ra);mb=b7_mask_bits(p,(tile+groups)*64+ra+8);pair_glu(a1,s1,sg1,ma,mb);}
   fence_proxy_async();allsync();
   // Both consumers use the same derivatives. Publish while local dW executes.
   if(tid==0)mbar_arrive(bar+19);

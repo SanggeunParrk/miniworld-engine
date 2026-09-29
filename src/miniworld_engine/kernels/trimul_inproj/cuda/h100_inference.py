@@ -52,11 +52,12 @@ def _inference_fake(x, weights, mask, direction, eps):
 def inference(
     x: torch.Tensor,
     weights: list[torch.Tensor],
-    mask: torch.Tensor,
+    mask: torch.Tensor | None,
     direction: int,
     eps: float,
 ) -> torch.Tensor:
-    """Run packaged K1, contractions, and K3 with a GPU/shape-specific schedule."""
+    """Run packaged K1, contractions, and K3 with a GPU/shape-specific schedule. mask: None, a bool token mask [N] (K1
+    forms m[i] & m[j] itself) or a pair mask [N, N]."""
     config = _select_config(x, weights, mask, direction, eps)
     return _run_inference(x, weights, mask, direction, eps, config)
 
@@ -113,7 +114,7 @@ def _run_inference(x, weights, mask, direction, eps, config):
         cache = {}
         kk.k1(
             z,
-            mask.reshape(n, n).float(),
+            mask if mask is None or mask.ndim == 1 else mask.reshape(n, n).float(),
             w,
             ab,
             N=n,
@@ -124,6 +125,7 @@ def _run_inference(x, weights, mask, direction, eps, config):
             lnm=2,
             eps=eps,
             cache=cache,
+            token_mask=mask is not None and mask.ndim == 1,
         )
         left, right = ab[:ch], ab[ch:]
         if direction == 0:

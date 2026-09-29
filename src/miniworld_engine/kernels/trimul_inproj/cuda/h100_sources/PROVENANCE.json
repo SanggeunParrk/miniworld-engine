@@ -1,7 +1,8 @@
 {
   "h100_sources/upstream/csrc/tmn_kernels.cuh": {
     "source": "experiments/trimul_training_v2/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh",
-    "sha256": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6"
+    "sha256": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+    "modified": "2026-09-29 MiniWorld: K1 token-mask mode (K1Params.pad1 = 1); sha256 is of the imported original"
   },
   "h100_sources/upstream/csrc/tmn_ptx.cuh": {
     "source": "experiments/trimul_training_v2/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_ptx.cuh",

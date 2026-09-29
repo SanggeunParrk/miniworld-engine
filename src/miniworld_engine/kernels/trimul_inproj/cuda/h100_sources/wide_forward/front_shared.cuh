@@ -5,8 +5,8 @@ namespace tmn { namespace sm90 {
 TMN_DEVI void mw_shared_mma(float (&v)[32],uint64_t a,uint64_t b,int ac){
  asm volatile("{.reg .pred p;setp.ne.b32 p,%34,0;wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31},%32,%33,p,1,1,0,0;}" : "+f"(v[0]),"+f"(v[1]),"+f"(v[2]),"+f"(v[3]),"+f"(v[4]),"+f"(v[5]),"+f"(v[6]),"+f"(v[7]),"+f"(v[8]),"+f"(v[9]),"+f"(v[10]),"+f"(v[11]),"+f"(v[12]),"+f"(v[13]),"+f"(v[14]),"+f"(v[15]),"+f"(v[16]),"+f"(v[17]),"+f"(v[18]),"+f"(v[19]),"+f"(v[20]),"+f"(v[21]),"+f"(v[22]),"+f"(v[23]),"+f"(v[24]),"+f"(v[25]),"+f"(v[26]),"+f"(v[27]),"+f"(v[28]),"+f"(v[29]),"+f"(v[30]),"+f"(v[31]) : "l"(a),"l"(b),"r"(ac));
 }
-template <class G, bool HAS_MASK, int LNM, bool SAVE, bool EMITX = false, int MT = 0>
-TMN_DEVI void mw_k1_shared(const K1Params& p) {
+template <class G, bool HAS_MASK, int LNM, bool SAVE, bool EMITX = false, int MT = 0, class P = K1Params>
+TMN_DEVI void mw_k1_shared(const P& p) {
   constexpr int CZ = G::CZ, KS = G::KS, NSLOT = G::NSLOT, SPB = G::SPB, NBLK = G::NBLK, SKCH = G::SKCH, SLOT_BYTES = G::SLOT_BYTES, BI = G::BI, BJ = G::BJ;
   static_assert(!(G::ZF32 && LNM == 2), "the reference-order LayerNorm is defined on bf16 inputs");
   extern __shared__ __align__(1024) uint8_t smem[];
@@ -37,7 +37,7 @@ TMN_DEVI void mw_k1_shared(const K1Params& p) {
     for (int s = 0; s < NSLOT; ++s) { mbar_init(barW_full + s, 1); mbar_init(barW_empty + s, 4 * G::NCWG); }
     if (K1OFF > 0) mbar_init(barGo, 1);
     fence_barrier_init();
-    tma_prefetch_desc(&p.tm_z); tma_prefetch_desc(&p.tm_w);
+    tma_prefetch_desc(&p.tm_z); k1_prefetch_weights(p);
     if (TMN_K1_BULK_STORE) tma_prefetch_desc(&p.tm_ab);
   }
   __syncthreads();
@@ -64,8 +64,7 @@ TMN_DEVI void mw_k1_shared(const K1Params& p) {
         if (u > 0) mbar_wait(barW_empty + s, (u - 1) & 1);
         mbar_arrive_expect_tx(barW_full + s, SLOT_BYTES);
         const int hb = w_iter % per_tile, b = hb / SPB, h = hb % SPB;
-#pragma unroll
-        for (int kk = 0; kk < SKCH; ++kk) tma_load_2d(sW + s * SLOT_BYTES + kk * 8192, &p.tm_w, barW_full + s, (h * SKCH + kk) * 64, 64 * b);
+        k1_load_weight_slot<G>(p, sW + s * SLOT_BYTES, barW_full + s, h, b);
       }
     }
     __syncwarp();
@@ -111,21 +110,7 @@ TMN_DEVI void mw_k1_shared(const K1Params& p) {
     const int iA = i0 + rowA / BJ, jA = j0 + rowA % BJ, iB = i0 + rowB / BJ, jB = j0 + rowB % BJ;
     const bool vA = (iA < p.N) && (jA < p.N), vB = (iB < p.N) && (jB < p.N);
     float mA = vA ? 1.f : 0.f, mB = vB ? 1.f : 0.f;
-    if (HAS_MASK) {
-      const size_t oA = (size_t)iA * p.ms_i + (size_t)jA * p.ms_j, oB = (size_t)iB * p.ms_i + (size_t)jB * p.ms_j;
-      if constexpr (MT == 1) {              // bf16 mask (TMN_MASK_TEMPLATE, name field m2): no per-call fp32 cast pass
-        const __nv_bfloat16* mk = reinterpret_cast<const __nv_bfloat16*>(p.mask);
-        if (vA) mA = __bfloat162float(__ldg(mk + oA));
-        if (vB) mB = __bfloat162float(__ldg(mk + oB));
-      } else if constexpr (MT == 2) {       // bool / uint8 mask (m3)
-        const unsigned char* mk = reinterpret_cast<const unsigned char*>(p.mask);
-        if (vA) mA = (float)__ldg(mk + oA);
-        if (vB) mB = (float)__ldg(mk + oB);
-      } else {                              // fp32 mask: the original contract
-        if (vA) mA = __ldg(p.mask + oA);
-        if (vB) mB = __ldg(p.mask + oB);
-      }
-    }
+    if (HAS_MASK) k1_mask_rows<MT>(p, vA, iA, jA, vB, iB, jB, mA, mB);
     const int rho_g = 64 * cw + 8 * st_g;                                  // first token of this lane's store granule
     const int is_ = i0 + rho_g / BJ, js_ = j0 + rho_g % BJ;
     const bool st_ok = (is_ < p.Np) && (js_ < p.Np);

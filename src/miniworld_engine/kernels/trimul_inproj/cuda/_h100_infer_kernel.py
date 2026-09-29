@@ -695,19 +695,24 @@ class Kernels:
         cache,
         stream=None,
         grid_limit=0,
+        token_mask=False,
     ):
         """z [N, N, cz] contiguous (bf16 or fp32); mask None or fp32 [N, N] contiguous; w = packed weights (ops.pack_weights); ab = planes
         [2 ch, Np, Np] bf16 (fully written incl. zero pads).  transpose=True reads z (and mask) with the token axes swapped: the planes then hold
         the transposed a/b (incoming direction contracts with the same NT GEMM as outgoing).  xz (fp32 z only): a bf16 [N, N, cz] buffer that receives
-        bf16(LN_in(z)) in z's own layout (the _x1 kernels) for a mode-p K3."""
+        bf16(LN_in(z)) in z's own layout (the _x1 kernels) for a mode-p K3.  token_mask=True: mask is a bool / uint8 TOKEN mask [N] and K1
+        applies m[i] & m[j] itself (K1Params.pad1 = 1), so no [N, N] pair mask is built."""
         zf32 = z.dtype == torch.float32
         esz = 4 if zf32 else 2
         bi, bj, nslot, skch = (
             cfg or TILE_TABLE[(self.arch, cz, ch, "f" if zf32 else "b")]["k1"]
         )
-        if mask is not None and mask.dtype not in MASK_CODE:
+        if token_mask:
+            if mask is None or mask.ndim != 1 or mask.dtype not in (torch.bool, torch.uint8) or not mask.is_contiguous():
+                raise ValueError("token_mask needs a contiguous bool / uint8 [N] mask")
+        elif mask is not None and mask.dtype not in MASK_CODE:
             mask = mask.to(torch.float32)
-        mcode = 0 if mask is None else MASK_CODE[mask.dtype]
+        mcode = 0 if mask is None else 1 if token_mask else MASK_CODE[mask.dtype]
         if mcode > 1 and k1_name(
             cz,
             ch,
@@ -739,7 +744,7 @@ class Kernels:
         # w["wq"] = (W_l, W_lg, W_r, W_rg), row-major bf16 [ch, cz]: K1 reads them in place (K1ParamsQ.tm_wq, pad0 = 1) and no
         # packed w1 exists; otherwise w["w1"] is the host-packed [4 ch, cz] block-interleaved matrix.
         wmode = self._k1_weight_mode(w, cz, ch)   # 0 packed w1 | 1 in place (row-major)
-        plan_key = ("tmn.k1", name, N, Np, transpose, float(eps), wmode)
+        plan_key = ("tmn.k1", name, N, Np, transpose, float(eps), wmode, bool(token_mask))
         ent = cache.get(
             plan_key
         )  # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps, weight mode);
@@ -774,7 +779,7 @@ class Kernels:
                     int(ms_i * cz),
                     int(ms_j * cz),
                     int(wmode),
-                    0,
+                    int(bool(token_mask)),
                     *tm_wq,
                 ]
             )

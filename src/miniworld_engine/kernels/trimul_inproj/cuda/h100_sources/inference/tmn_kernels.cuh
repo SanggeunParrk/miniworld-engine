@@ -533,6 +533,62 @@ TMN_DEVI void pdl_trigger() {
 // per-CTA timeline probes (TMN_CTA_TS): slot 0 start, 1 first tile ready (consumer), 2 last tile start, 3 end (clock64); 4 start, 5 end (globaltimer); 6 n_iter
 TMN_DEVI unsigned long long tmn_globaltimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
 #define TMN_TS(buf, slot, val) do { if (TMN_CTA_TS && (buf)) reinterpret_cast<unsigned long long*>(buf)[blockIdx.x * 8 + (slot)] = (val); } while (0)
+// K1 weight ring slot: weight block b, k-slot h = SKCH 8 KB k-chunks of [32 gate | 32 proj] rows x 64 k. Host-packed tm_w, or
+// (K1ParamsQ, pad0 != 0) the four row-major weights read in place: block b = rows [32 b, 32 b + 32) of cat(left, right).
+template <class G, class P>
+TMN_DEVI void k1_load_weight_slot(const P& p, uint8_t* slot, uint64_t* bar, int h, int b) {
+  bool in_place = false;
+  if constexpr (k1_has_wq<P>::value) in_place = p.pad0 != 0;
+  if (in_place) {
+    if constexpr (k1_has_wq<P>::value) {
+      const int side = 32 * b >= G::CH, row = 32 * b - side * G::CH;
+#pragma unroll
+      for (int kk = 0; kk < G::SKCH; ++kk) {
+        uint8_t* dst = slot + kk * 8192;
+        const int k0 = (h * G::SKCH + kk) * 64;
+        tma_load_2d(dst, &p.tm_wq[2 * side + 1], bar, k0, row);
+        tma_load_2d(dst + 4096, &p.tm_wq[2 * side], bar, k0, row);
+      }
+    }
+  } else {
+#pragma unroll
+    for (int kk = 0; kk < G::SKCH; ++kk) tma_load_2d(slot + kk * 8192, &p.tm_w, bar, (h * G::SKCH + kk) * 64, 64 * b);
+  }
+}
+template <class P>
+TMN_DEVI void k1_prefetch_weights(const P& p) {
+  bool in_place = false;
+  if constexpr (k1_has_wq<P>::value) {
+    in_place = p.pad0 != 0;
+    if (in_place) for (int q = 0; q < 4; ++q) tma_prefetch_desc(&p.tm_wq[q]);
+  }
+  if (!in_place) tma_prefetch_desc(&p.tm_w);
+}
+// Mask factors of rows A and B. pad1 = 1: p.mask is a bool / uint8 TOKEN mask [N] and the factor is m[i] & m[j], so no [N, N] pair
+// mask is built per call (the product is symmetric: the transposed direction reads it unchanged). Otherwise element (i, j) at
+// mask[i ms_i + j ms_j] of element type MT (0 fp32 | 1 bf16 | 2 uint8/bool).
+template <int MT>
+TMN_DEVI void k1_mask_rows(const K1Params& p, bool vA, int iA, int jA, bool vB, int iB, int jB, float& mA, float& mB) {
+  if (p.pad1 == 1) {
+    const unsigned char* tk = reinterpret_cast<const unsigned char*>(p.mask);
+    if (vA) mA = (float)(__ldg(tk + iA) & __ldg(tk + jA));
+    if (vB) mB = (float)(__ldg(tk + iB) & __ldg(tk + jB));
+    return;
+  }
+  const size_t oA = (size_t)iA * p.ms_i + (size_t)jA * p.ms_j, oB = (size_t)iB * p.ms_i + (size_t)jB * p.ms_j;
+  if constexpr (MT == 1) {              // bf16 mask (TMN_MASK_TEMPLATE, name field m2): no per-call fp32 cast pass
+    const __nv_bfloat16* mk = reinterpret_cast<const __nv_bfloat16*>(p.mask);
+    if (vA) mA = __bfloat162float(__ldg(mk + oA));
+    if (vB) mB = __bfloat162float(__ldg(mk + oB));
+  } else if constexpr (MT == 2) {       // bool / uint8 mask (m3)
+    const unsigned char* mk = reinterpret_cast<const unsigned char*>(p.mask);
+    if (vA) mA = (float)__ldg(mk + oA);
+    if (vB) mB = (float)__ldg(mk + oB);
+  } else {                              // fp32 mask: the original contract
+    if (vA) mA = __ldg(p.mask + oA);
+    if (vB) mB = __ldg(p.mask + oB);
+  }
+}
 template <class G, bool HAS_MASK, int LNM, bool SAVE, bool EMITX = false, int MT = 0, class P = K1Params>
 TMN_DEVI void k1_body(const P& p) {
   constexpr int CZ = G::CZ, KS = G::KS, NSLOT = G::NSLOT, SPB = G::SPB, NBLK = G::NBLK, SKCH = G::SKCH, SLOT_BYTES = G::SLOT_BYTES, BI = G::BI, BJ = G::BJ;
@@ -565,13 +621,7 @@ TMN_DEVI void k1_body(const P& p) {
     for (int s = 0; s < NSLOT; ++s) { mbar_init(barW_full + s, 1); mbar_init(barW_empty + s, 4 * G::NCWG); }
     if (K1OFF > 0) mbar_init(barGo, 1);
     fence_barrier_init();
-    tma_prefetch_desc(&p.tm_z);
-    bool wq = false;
-    if constexpr (k1_has_wq<P>::value) {
-      wq = p.pad0 != 0;
-      if (wq) for (int q = 0; q < 4; ++q) tma_prefetch_desc(&p.tm_wq[q]);
-    }
-    if (!wq) tma_prefetch_desc(&p.tm_w);
+    tma_prefetch_desc(&p.tm_z); k1_prefetch_weights(p);
     if (TMN_K1_BULK_STORE) tma_prefetch_desc(&p.tm_ab);
   }
   __syncthreads();
@@ -598,23 +648,7 @@ TMN_DEVI void k1_body(const P& p) {
         if (u > 0) mbar_wait(barW_empty + s, (u - 1) & 1);
         mbar_arrive_expect_tx(barW_full + s, SLOT_BYTES);
         const int hb = w_iter % per_tile, b = hb / SPB, h = hb % SPB;
-        bool in_place = false;
-        if constexpr (k1_has_wq<P>::value) in_place = p.pad0 != 0;
-        if (in_place) {
-          if constexpr (k1_has_wq<P>::value) {
-            const int side = 32 * b >= G::CH, row = 32 * b - side * G::CH;   // block b = rows [32 b, 32 b + 32) of cat(left, right)
-#pragma unroll
-            for (int kk = 0; kk < SKCH; ++kk) {
-              uint8_t* dst = sW + s * SLOT_BYTES + kk * 8192;
-              const int k0 = (h * SKCH + kk) * 64;
-              tma_load_2d(dst, &p.tm_wq[2 * side + 1], barW_full + s, k0, row);
-              tma_load_2d(dst + 4096, &p.tm_wq[2 * side], barW_full + s, k0, row);
-            }
-          }
-        } else {
-#pragma unroll
-          for (int kk = 0; kk < SKCH; ++kk) tma_load_2d(sW + s * SLOT_BYTES + kk * 8192, &p.tm_w, barW_full + s, (h * SKCH + kk) * 64, 64 * b);
-        }
+        k1_load_weight_slot<G>(p, sW + s * SLOT_BYTES, barW_full + s, h, b);
       }
     }
     __syncwarp();
@@ -660,21 +694,7 @@ TMN_DEVI void k1_body(const P& p) {
     const int iA = i0 + rowA / BJ, jA = j0 + rowA % BJ, iB = i0 + rowB / BJ, jB = j0 + rowB % BJ;
     const bool vA = (iA < p.N) && (jA < p.N), vB = (iB < p.N) && (jB < p.N);
     float mA = vA ? 1.f : 0.f, mB = vB ? 1.f : 0.f;
-    if (HAS_MASK) {
-      const size_t oA = (size_t)iA * p.ms_i + (size_t)jA * p.ms_j, oB = (size_t)iB * p.ms_i + (size_t)jB * p.ms_j;
-      if constexpr (MT == 1) {              // bf16 mask (TMN_MASK_TEMPLATE, name field m2): no per-call fp32 cast pass
-        const __nv_bfloat16* mk = reinterpret_cast<const __nv_bfloat16*>(p.mask);
-        if (vA) mA = __bfloat162float(__ldg(mk + oA));
-        if (vB) mB = __bfloat162float(__ldg(mk + oB));
-      } else if constexpr (MT == 2) {       // bool / uint8 mask (m3)
-        const unsigned char* mk = reinterpret_cast<const unsigned char*>(p.mask);
-        if (vA) mA = (float)__ldg(mk + oA);
-        if (vB) mB = (float)__ldg(mk + oB);
-      } else {                              // fp32 mask: the original contract
-        if (vA) mA = __ldg(p.mask + oA);
-        if (vB) mB = __ldg(p.mask + oB);
-      }
-    }
+    if (HAS_MASK) k1_mask_rows<MT>(p, vA, iA, jA, vB, iB, jB, mA, mB);
     const int rho_g = 64 * cw + 8 * st_g;                                  // first token of this lane's store granule
     const int is_ = i0 + rho_g / BJ, js_ = j0 + rho_g % BJ;
     const bool st_ok = (is_ < p.Np) && (js_ < p.Np);

@@ -8,7 +8,11 @@
 using namespace tmn;using namespace tmn::sm90;using bf=__nv_bfloat16;
 constexpr int H=2*WIDTH,NT=128,ROWS=LN_ROWS,SB=ROWS*H*2;
 struct Params {CUtensorMap tri,dt,dnmap;const bf* dn;const float *mu,*rs,*gamma;float *dg,*db;int M;};
+#ifdef LN_STATS_OFFSET   // MiniWorld: set by the single-direction build (H = WIDTH * 2 of that build)
+constexpr int STATS=LN_STATS_OFFSET;
+#else
 constexpr int STATS=101504;
+#endif
 TMN_DEVI void load_stats(const Params& p,uint8_t* dst,uint64_t* bar,int row){
  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1],%2,[%3];"::"r"(smem_u32(dst)),"l"(p.mu+row),"n"(ROWS*4),"r"(smem_u32(bar)):"memory");
  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1],%2,[%3];"::"r"(smem_u32(dst+ROWS*4)),"l"(p.rs+row),"n"(ROWS*4),"r"(smem_u32(bar)):"memory");

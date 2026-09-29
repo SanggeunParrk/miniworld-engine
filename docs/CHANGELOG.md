@@ -20,11 +20,22 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - `docs/gpus/` is one folder per GPU (`<gpu>/<gpu>.md` module-level completion tables,
   `<gpu>/<module>/<module>.md` kernel-level tables and flow figures); `h100-dispatch.md` is now
   `h100/dispatch.md`. Page format: `docs/gpus/README.md`, `docs/gpus/template.md`.
+- H100 TriMul K1 (inference, the bidirectional wide front and the D128 training front) and B7
+  read the token mask [L] and form m[i] & m[j] themselves: no [L, L] pair mask is built per call
+  (inference; bidirectional D128 training). The bidirectional wide inference front reads the
+  projection weights in place (no pack). Outputs and gradients bitwise-identical.
 
 ### Added
 
 - `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
   writes) from a JSON spec.
+- H100 single-direction TriMul training in CUDA at D64 (`h100_uni_d64_training`, the
+  bidirectional D64 kernels at hidden 64) and D256/384 (`h100_uni_wide_training`, the wide
+  sources compiled for hidden D), L384/768. Measured on an H100 80GB HBM3 against the Triton path
+  (CUDA graph, fwd+bwd, 2026-09-29):
+  about 2x at D64, 1.27-1.33x at D256, 1.31-1.36x at D384; accuracy against an FP32 reference
+  matches the Triton path. Tests: `test_trimul_uni_d64_training_gpu.py`,
+  `test_trimul_uni_wide_training_gpu.py`.
 
 ## [2.2.0] - 2026-09-28
 

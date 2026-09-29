@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// tmn_kernels.cuh — triangle-multiplication prologue (K1) and epilogue (K3) kernels, one family parameterised over
+// tmn_kernels.cuh (MiniWorld change: K1 token-mask mode, K1Params.pad1 = 1) — triangle-multiplication prologue (K1) and epilogue (K3) kernels, one family parameterised over
 //   C_Z (pair channels) x C_H (hidden channels) in {64,128,256,384}^2, z dtype (bf16 | fp32-resident z under bf16 compute), tile shape,
 //   weight-ring depth, LayerNorm summation mode, mask on/off, dormant save-intermediates.
 // Derived from trimul_tx 1.2 (trimul_tx.cu: c_z = c_hidden = 256, bf16); the structure is kept and every width-specific constant became a
@@ -544,8 +544,14 @@ TMN_DEVI void k1_body(const K1Params& p) {
     const bool vA = (iA < p.N) && (jA < p.N), vB = (iB < p.N) && (jB < p.N);
     float mA = vA ? 1.f : 0.f, mB = vB ? 1.f : 0.f;
     if (HAS_MASK) {
-      if (vA) mA = __ldg(p.mask + (size_t)iA * p.ms_i + (size_t)jA * p.ms_j);
-      if (vB) mB = __ldg(p.mask + (size_t)iB * p.ms_i + (size_t)jB * p.ms_j);
+      if (p.pad1 == 1) {            // MiniWorld: token mask [N] (bool / uint8), factor m[i] & m[j]; no [N, N] pair mask per call
+        const unsigned char* tk = reinterpret_cast<const unsigned char*>(p.mask);
+        if (vA) mA = (float)(__ldg(tk + iA) & __ldg(tk + jA));
+        if (vB) mB = (float)(__ldg(tk + iB) & __ldg(tk + jB));
+      } else {
+        if (vA) mA = __ldg(p.mask + (size_t)iA * p.ms_i + (size_t)jA * p.ms_j);
+        if (vB) mB = __ldg(p.mask + (size_t)iB * p.ms_i + (size_t)jB * p.ms_j);
+      }
     }
     const int rho_g = 64 * cw + 8 * st_g;                                  // first token of this lane's store granule
     const int is_ = i0 + rho_g / BJ, js_ = j0 + rho_g % BJ;

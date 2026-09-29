@@ -74,21 +74,22 @@ def _headers():
 
 
 @T.device_cache
-def _compile(kind, D, cfg, normalize=True, stats=False):
+def _compile(kind, D, cfg, normalize=True, stats=False, has_mask=True):
     if kind == "k1":
         bi, bj, slots, sk, mb = cfg[:5]
         shared = len(cfg) > 5 and cfg[5]
         stream = int(shared == 2)
         include = "front_shared.cuh" if shared else "tmn_kernels.cuh"
         function = "mw_k1_shared" if shared else "k1_body"
-        # <HAS_MASK, LNM (1: in-kernel input LN, 0: pre-normalised), SAVE (LN statistics), EMITX (x_n), bf16 mask>
+        # <HAS_MASK, LNM (1: in-kernel input LN, 0: pre-normalised), SAVE (LN statistics), EMITX (x_n), bf16 mask, K1ParamsQ
+        # (the four projection weights read in place when pad0 = 1; the token mask when pad1 = 1)>
         body = (
             f'#include "{include}"\n'
             f"using C=tmn::K1Cfg<{D},{2 * D},false,{bi},{bj},{slots},{sk},{1 if stream else -1}>;\n"
             'extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB) '
-            "void mw_wide_front(__grid_constant__ const tmn::K1Params p){"
-            f"tmn::sm90::{function}<C,true,{int(normalize)},{str(stats).lower()},"
-            f"{str(normalize and not stats).lower()},1>(p);}}")
+            "void mw_wide_front(__grid_constant__ const tmn::K1ParamsQ p){"
+            f"tmn::sm90::{function}<C,{str(has_mask).lower()},{int(normalize)},{str(stats).lower()},"
+            f"{str(normalize and not stats).lower()},1,tmn::K1ParamsQ>(p);}}")
         smem = _k1_smem(D, cfg)
         name = "mw_wide_front"
         flags = [f"-DMW_MINB={mb}", f"-DMW_K1_STREAM={stream}"]
@@ -166,10 +167,19 @@ def _run(x, weights, mask):
     bn, stages = sel["k3s"]
     launch = T._launch_module()
 
-    # K1: input LN (in-kernel, or separately at D512) + packed gated projections -> ab. The gate
-    # operand handed to K3 is x plus the LN statistics (gfold) or the normalised rows x_n.
-    w = x.new_empty((8 * D, D))
-    T.pack_into(w, wl, wlg, wr, wrg)
+    # K1: input LN (in-kernel, or separately at D512) + gated projections -> ab. The four projection
+    # weights are read in place when row-major (no packed copy); the pair mask is formed from the
+    # token mask inside K1. The gate operand handed to K3 is x plus the LN statistics (gfold) or x_n.
+    quad = (wl, wlg, wr, wrg)
+    in_place = all(t.stride() == (D, 1) for t in quad)
+    if in_place:
+        w_map = launch.TensorMap(b"\0" * 128)
+        wq_maps = [_map(t, [64, 32], [D, 2 * D], [D * 2]) for t in quad]
+    else:
+        w = x.new_empty((8 * D, D))
+        T.pack_into(w, wl, wlg, wr, wrg)
+        w_map = _map(w, [64, 64], [D, 8 * D], [D * 2])
+        wq_maps = [launch.TensorMap(b"\0" * 128)] * 4
     ab = x.new_empty((4 * D, N, N))
     xs = torch.empty((M, 2), device=x.device, dtype=torch.float32) if gfold else None
     xn = torch.empty_like(x) if not (gfold and normalize) else None
@@ -178,16 +188,17 @@ def _run(x, weights, mask):
             _normalize_stats_into(xn, xs, x, gi, bi)
         else:
             T.normalize_into(xn, x, gi, bi)
-    k1, smem1 = _compile("k1", D, cfg, normalize, gfold and normalize)
+    k1, smem1 = _compile("k1", D, cfg, normalize, gfold and normalize, mask is not None)
     a, b, _, _, mb = cfg[:5]
     tj = (N + b - 1) // b
     tiles = ((N + a - 1) // a) * tj
     p1 = launch.Struct([
         _map(x if normalize else xn, [64, b, a], [D, N, N], [D * 2, N * D * 2]),
-        _map(w, [64, 64], [D, 8 * D], [D * 2]),
+        w_map,
         _map(ab, [64, 1, 32], [N, N, 4 * D], [N * 2, N * N * 2]),
         mask, gi, bi, ab, xs if normalize else None, xn if normalize else None,
-        N, N, tj, tiles, 1, N, 1, 1e-5, N * D, D, 0, 0])
+        N, N, tj, tiles, 1, N, 1, 1e-5, N * D, D, int(in_place), int(mask is not None),
+        *wq_maps])
     k1.launch((min(tiles, _sms(x.device) * mb), 1, 1), (128 * (a * b // 64 + 1), 1, 1), [p1], smem1)
 
     # Outgoing and incoming contractions into tri = [out | in].
@@ -221,8 +232,8 @@ def _wide_inference_fake(x, weights, mask):
 
 
 @opaque(fake=_wide_inference_fake, name="trimul_h100_infer_wide")
-def wide_inference(x: torch.Tensor, weights: list[torch.Tensor], mask: torch.Tensor) -> torch.Tensor:
-    """y = x + bidirectional TriMul(x); weights as in ``h100_inference.inference``, mask [N, N]."""
+def wide_inference(x: torch.Tensor, weights: list[torch.Tensor], mask: torch.Tensor | None) -> torch.Tensor:
+    """y = x + bidirectional TriMul(x); weights as in ``h100_inference.inference``; mask None or a bool token mask [N]."""
     with T.native_context(x.device):
         return _run(x.contiguous(), [w.contiguous() for w in weights],
-                    mask.to(torch.bfloat16).contiguous())
+                    None if mask is None else mask.to(torch.bool).contiguous())

@@ -304,11 +304,11 @@ def trimul_output_f567_train():
 
 
 def trimul_fwd_sm90_cuda():
-    from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import inference
     from miniworld_engine.autotune.fused_config import trimul_candidates
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import inference
     length, width = driver_length(384), driver_width(128)
     x = torch.randn(1, length, length, width, device="cuda", dtype=BF16)
-    mask = torch.ones(1, length, length, device="cuda", dtype=torch.float32)
+    mask = torch.ones(length, device="cuda", dtype=torch.bool)   # the token mask the module passes (K1 forms m[i] & m[j])
     for hidden in (width, 2 * width):
         if not trimul_candidates(width, hidden, length, 0):
             continue

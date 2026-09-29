@@ -1242,7 +1242,13 @@ TMN_DEVI void k3_body(const K3Params& p) {
 }  // namespace sm90
 }  // namespace tmn
 
-using Base=tmn::K1Cfg<384,768,false,2,64,2,6,-1>;
+#ifndef FRONT_CZ   // MiniWorld: the single-direction path compiles this front at (C_Z, C_H) = (D, D)
+#define FRONT_CZ 384
+#define FRONT_CH 768
+#define FRONT_SLOTS 2
+#define FRONT_SK 6
+#endif
+using Base=tmn::K1Cfg<FRONT_CZ,FRONT_CH,false,2,64,FRONT_SLOTS,FRONT_SK,-1>;
 struct C:Base{static constexpr int SMEM_STAGE=NCWG*12288;static constexpr int SMEM=Base::SMEM+NCWG*4096;};
 extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB)
 void mw_wide_front_pre_overlap(__grid_constant__ const tmn::K1Params p){tmn::sm90::k1_body<C,true,1,false,true,1>(p);}

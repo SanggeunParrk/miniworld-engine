@@ -35,6 +35,8 @@ def kernel_plan(n, clusters, mode):
         "-DB7_CONSUMERS=" + str(cfg_values.consumers),
         "-DB7_REUSE_DP=" + str(cfg_values.reuse_dp),
         "-DB7_WT_MN=" + str(bool(mode & 64) * 1),
+        "-DB7_TOKEN_MASK=" + str(bool(mode & 128) * 1),
+        "-DB7_N=" + str(n),
         "-std=c++17",
         "-O3",
         "-arch=sm_90a",
@@ -78,6 +80,8 @@ class Plan:
         R = T.SOURCES / ("b7_384" if d["n"] == 384 else "b7_768")
         self.d = d
         self.xn = xn
+        if d["mask"].ndim == 1:   # token mask [n]: B7 forms m[i] & m[j] itself
+            mode |= 128
         if front_row_major(d["leaves"]):
             mode |= 64
         self.mode = mode
@@ -96,7 +100,7 @@ class Plan:
             (self.clusters * self.consumers, 256), device=x.device
         )
         self.counts = torch.zeros(2, device=x.device, dtype=torch.int32)
-        self.mask = d["mask"].bfloat16().reshape(-1)
+        self.mask = d["mask"] if mode & 128 else d["mask"].bfloat16().reshape(-1)
         self.ring = torch.empty(
             (self.clusters, self.rings, 131072), device=x.device, dtype=torch.uint8
         )

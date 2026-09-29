@@ -9,6 +9,9 @@ from miniworld_engine.modules.exceptions import ImplementationType
 
 #: Widths with a packaged bidirectional CUDA training path (D64, D128 and the wide port).
 TRAINING_WIDTHS = (64, 128, 256, 384, 512)
+#: Widths with a single-direction CUDA training path (D64: port of the bidirectional D64 kernels; D128: B1/B7;
+#: D256/384: the wide sources at hidden D).$
+SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384)
 
 
 def serves(module, pair: torch.Tensor) -> bool:
@@ -71,8 +74,16 @@ def update(
     )
 
     n, d = pair.shape[1], pair.shape[-1]
+    # Bidirectional D128 takes the token mask [n]: its front K1 and B7 form m[i] & m[j] themselves.
+    # The other paths read a bf16 pair mask in forward and backward, so it is built once here.
+    token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2)
     if mask is None:
-        pair_mask = torch.ones((n, n), device=pair.device, dtype=torch.bfloat16)
+        pair_mask = (torch.ones(n, device=pair.device, dtype=torch.bool) if token_path
+                     else torch.ones((n, n), device=pair.device, dtype=torch.bfloat16))
+    elif token_path:
+        pair_mask = mask.reshape(n)
+        if pair_mask.dtype != torch.bool:
+            pair_mask = pair_mask != 0
     else:
         pair_mask = (
             (mask.unsqueeze(-1) & mask.unsqueeze(-2)) if mask.ndim == 2 else mask
@@ -97,6 +108,17 @@ def update(
         )
     elif bidirectional:
         apply = bidirectional_trimul
+    elif d in (64, 256, 384):
+        if d == 64:
+            from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_d64_training import (
+                single_trimul,
+            )
+        else:
+            from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import (
+                single_trimul,
+            )
+        def apply(*args):
+            return single_trimul(module.outgoing, *args)
     else:
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_single import (
             single_trimul,
@@ -154,11 +176,10 @@ def update_inference(module, pair, mask, *, bidirectional):
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import inference
 
     n = pair.shape[1]
-    pm = (
-        pair.new_ones((n, n))
-        if mask is None
-        else (mask.unsqueeze(-1) & mask.unsqueeze(-2)).float().contiguous()
-    )
+    # K1 forms the pair mask m[i] & m[j] from the token mask itself: no [n, n] tensor per call.
+    token = None if mask is None else mask.reshape(n)
+    if token is not None and token.dtype != torch.bool:
+        token = token != 0
     weights = (
         module.to_left.weight,
         module.to_left_gate.weight,
@@ -180,15 +201,20 @@ def update_inference(module, pair, mask, *, bidirectional):
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import (
             wide_inference,
         )
-        return wide_inference(pair, weights, pm)
+        return wide_inference(pair, weights, token)
     if not bidirectional and _uni_wide_inference_ok(module, pair):
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_inference import (
             uni_wide_inference,
         )
 
+        pm = (
+            pair.new_ones((n, n))
+            if mask is None
+            else (mask.unsqueeze(-1) & mask.unsqueeze(-2)).float().contiguous()
+        )
         return uni_wide_inference(pair, weights, pm, module.outgoing)
     direction = 0 if bidirectional else 1 if module.outgoing else 2
-    return inference(pair, weights, pm, direction, module.ln_pair.eps)
+    return inference(pair, weights, token, direction, module.ln_pair.eps)
 
 
 def _wide_inference_ok(module, pair: torch.Tensor) -> bool:
@@ -205,7 +231,7 @@ def _wide_inference_ok(module, pair: torch.Tensor) -> bool:
 
 def serves_single(module, pair: torch.Tensor) -> bool:
     """Qualified single-direction native training contract; inference is separate."""
-    return pair.shape[-1] == 128 and serves(module, pair)
+    return pair.shape[-1] in SINGLE_TRAINING_WIDTHS and serves(module, pair)
 
 
 def _uni_wide_inference_ok(module, pair: torch.Tensor) -> bool:

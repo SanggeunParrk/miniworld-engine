@@ -36,7 +36,8 @@ def _data(leaves, mask, ds, *, packed=None, for_backward=False):
         n=n,
         x=x,
         leaves=leaves,
-        mask=mask.reshape(n, n) if for_backward else mask.reshape(n, n).float(),
+        # A token mask [n] goes to K1 and B7 as is (they form m[i] & m[j]); a pair mask keeps the old contract.
+        mask=mask if mask.ndim == 1 else mask.reshape(n, n) if for_backward else mask.reshape(n, n).float(),
         ds=ds.reshape(n, 128),
         wt=_backward_transposes(leaves) if for_backward else [],
         wp=wp,
