@@ -56,7 +56,7 @@ def test_gate_rejects_what_the_tiles_cannot_take():
 
 
 @needs_blackwell
-@pytest.mark.parametrize("A,L,bias_scale,head_major", [
+@pytest.mark.parametrize(("A", "L", "bias_scale", "head_major"), [
     (48, 384, 1.0, False),     # the token DiT's training shape
     (2, 768, 1.0, True),       # one sample pair, head-major bias (as the DiT hoists it)
     (6, 256, 4.0, False),      # wide logits
@@ -68,7 +68,7 @@ def test_matches_fp64_at_the_bf16_input_floor(A, L, bias_scale, head_major):
     q, k, v, bias = _inputs(A, L, seed=A * 1000 + L, bias_scale=bias_scale)
     do = torch.randn(A, 1, L, 16, 48, device="cuda")
     truth = _truth(q, k, v, bias, do)
-    r = lambda t: t.bfloat16().float()  # noqa: E731
+    r = lambda t: t.bfloat16().float()
     floor = _truth(r(q), r(k), r(v), r(bias), r(do))
 
     leaves = [t.clone().requires_grad_() for t in (q, k, v)]
@@ -78,9 +78,10 @@ def test_matches_fp64_at_the_bf16_input_floor(A, L, bias_scale, head_major):
     o.backward(do)
     db = b.grad.permute(1, 2, 3, 0) if head_major else b.grad
     got = (o.detach(), leaves[0].grad, leaves[1].grad, leaves[2].grad, db)
-    for name, x, t, f in zip(("O", "dq", "dk", "dv", "dbias"), got, truth, floor):
+    for name, x, t, f in zip(("O", "dq", "dk", "dv", "dbias"), got, truth, floor, strict=False):
         e, ef = _rel(x, t), _rel(f, t)
-        assert math.isfinite(e) and e < 1.3 * ef + 1e-4, f"{name}: {e:.2e} against a floor of {ef:.2e}"
+        assert math.isfinite(e), f"{name}: not finite"
+        assert e < 1.3 * ef + 1e-4, f"{name}: {e:.2e} against a floor of {ef:.2e}"
 
 
 @needs_blackwell
@@ -144,6 +145,6 @@ def test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error():
         tri = run(eng, compute_dtype=torch.bfloat16)
     finally:
         settings.configure(augmented_attention_bf16_sm100=prev.augmented_attention_bf16_sm100)
-    for name, a, b, t in zip(("out", "dsingle", "dcond", "dpair"), got, tri, truth):
+    for name, a, b, t in zip(("out", "dsingle", "dcond", "dpair"), got, tri, truth, strict=False):
         es, et = _rel(a, t), _rel(b, t)
         assert es < 1.5 * et + 1e-4, f"{name}: sm100 {es:.2e} vs triton bf16 {et:.2e}"

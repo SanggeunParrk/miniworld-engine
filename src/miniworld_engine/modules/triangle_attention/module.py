@@ -166,7 +166,10 @@ class TriangleAttention(nn.Module):
         if backend == KernelBackend.TRITON:
             if (getattr(self, "_fuse_bias_backward", True) and torch.is_grad_enabled()
                     and not self.use_qk_norm):
-                from miniworld_engine.kernels.triangle_attention.cuda.bias_backward import can_use, attention
+                from miniworld_engine.kernels.triangle_attention.cuda.bias_backward import (
+                    attention,
+                    can_use,
+                )
                 if can_use(query, key, value, bias):
                     return attention(query, key, value, bias, native_dq=getattr(self, "_fuse_dq_backward", True))
             return kernels.triton_triangle_attention_pair_bias(
@@ -306,7 +309,9 @@ class TriangleAttention(nn.Module):
         not a flag on this module."""
         if self._backend == KernelBackend.ANTHROPIC:
             if self.anthropic_row.startswith("block:"):
-                from miniworld_engine.integrations.anthropic import module_triangle_attention
+                from miniworld_engine.integrations.anthropic import (
+                    module_triangle_attention,
+                )
                 return module_triangle_attention(self, pair, mask)
             from miniworld_engine.integrations.anthropic import _inference
             _inference()
@@ -375,7 +380,10 @@ class TriangleAttention(nn.Module):
                 and backend == KernelBackend.TRITON and self.use_self_attention
                 and not self.use_qk_norm and self.n_head == 4
             ):
-                from miniworld_engine.kernels.triangle_attention.cuda import can_use, projections
+                from miniworld_engine.kernels.triangle_attention.cuda import (
+                    can_use,
+                    projections,
+                )
                 weights = (self.to_query.weight, self.to_key.weight, self.to_value.weight,
                            self.to_gate.weight, self.to_bias.weight)
                 fused_projection = can_use(pair, weights)

@@ -87,27 +87,27 @@ def _pack(P, qk, dev):
     hit = _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
-    g = lambda n: P[n]  # noqa: E731
+    g = lambda n: P[n]
     w1, w2 = _f32(g("attention.ada_ln_in.ln_cond.weight")), _f32(g("transition.ada_ln_in.ln_cond.weight"))
     Wraw = torch.cat([_f32(g("attention.ada_ln_in.to_scale.weight")), _f32(g("attention.ada_ln_in.to_bias.weight")),
                       _f32(g("transition.ada_ln_in.to_scale.weight")), _f32(g("transition.ada_ln_in.to_bias.weight"))])
     wp, Wb = _f32(g("attention.ln_pair.weight")), _f32(g("attention.to_bias.weight"))
     Wf = Wb * wp
-    W = dict(
-        w1=w1, w2=w2, Wraw=Wraw, Wn=torch.cat([Wraw[:2 * D] * w1, Wraw[2 * D:] * w2]).to(BF),   # cond-LN weights folded
-        Wg=torch.cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]).detach().to(BF),
-        bs1=_f32(g("attention.ada_ln_in.to_scale.bias")), bs2=_f32(g("transition.ada_ln_in.to_scale.bias")),
-        bg1=_f32(g("attention.to_scale.bias")), bg2=_f32(g("transition.to_scale.bias")),
-        Wqkvg=torch.cat([g("attention.to_query.weight"), g("attention.to_key.weight"), g("attention.to_value.weight"),
+    W = {
+        "w1": w1, "w2": w2, "Wraw": Wraw, "Wn": torch.cat([Wraw[:2 * D] * w1, Wraw[2 * D:] * w2]).to(BF),   # cond-LN weights folded
+        "Wg": torch.cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]).detach().to(BF),
+        "bs1": _f32(g("attention.ada_ln_in.to_scale.bias")), "bs2": _f32(g("transition.ada_ln_in.to_scale.bias")),
+        "bg1": _f32(g("attention.to_scale.bias")), "bg2": _f32(g("transition.to_scale.bias")),
+        "Wqkvg": torch.cat([g("attention.to_query.weight"), g("attention.to_key.weight"), g("attention.to_value.weight"),
                          g("attention.to_gate.weight")]).detach().to(BF),
-        bqkvg=torch.cat([g("attention.to_query.bias").detach().float(), torch.zeros(3 * D, device=dev)]).to(BF),
-        nq=_f32(g("attention.norm_query.weight")) if qk else torch.ones(DH, device=dev),
-        nk=_f32(g("attention.norm_key.weight")) if qk else torch.ones(DH, device=dev),
-        wp=wp, Wb=Wb, Wf=Wf, Wf_bf=Wf.to(BF),
-        Wo=g("attention.to_out.weight").detach().to(BF).contiguous(),
-        Wab=torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).detach().to(BF),
-        Wsq=g("transition.squeeze.weight").detach().to(BF).contiguous(),
-    )
+        "bqkvg": torch.cat([g("attention.to_query.bias").detach().float(), torch.zeros(3 * D, device=dev)]).to(BF),
+        "nq": _f32(g("attention.norm_query.weight")) if qk else torch.ones(DH, device=dev),
+        "nk": _f32(g("attention.norm_key.weight")) if qk else torch.ones(DH, device=dev),
+        "wp": wp, "Wb": Wb, "Wf": Wf, "Wf_bf": Wf.to(BF),
+        "Wo": g("attention.to_out.weight").detach().to(BF).contiguous(),
+        "Wab": torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).detach().to(BF),
+        "Wsq": g("transition.squeeze.weight").detach().to(BF).contiguous(),
+    }
     _PACKS[slot] = (key, W)
     return W
 
@@ -141,7 +141,7 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     T = ext()
     names = _names_for(qk)
-    P = dict(zip(names, params))
+    P = dict(zip(names, params, strict=False))
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
     x = single.reshape(M, D).to(torch.float32, copy=True)                    # the fp32 residual (never aliases the input)
@@ -150,7 +150,7 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     cst = torch.empty(M, 2, device=dev)
     T.cond_prep(c2, chat, cbf, cst, EPS)
     W = _pack(P, qk, dev)
-    Wn, Wraw, Wg, w1, w2 = W["Wn"], W["Wraw"], W["Wg"], W["w1"], W["w2"]
+    Wn, Wg = W["Wn"], W["Wg"]
     G = torch.mm(chat, Wn.t())                                                  # [M, 4D] s1 | sh1 | s2 | sh2
     Gg = torch.mm(cbf, Wg.t())                                                  # [M, 2D] gate1 | gate2
     bs1, bs2, bg1, bg2 = W["bs1"], W["bs2"], W["bg1"], W["bg2"]
@@ -165,8 +165,7 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     p2 = pair.reshape(R, DP)
     ph = torch.empty(R, DP, device=dev, dtype=BF); pst = torch.empty(R, 2, device=dev)
     T.pair_ln(p2, ph, pst, EPS)
-    wp, Wb, Wf = W["wp"], W["Wb"], W["Wf"]                                     # Wf = Wb diag(wp): ln_pair weight folded
-    bias = torch.mm(W["Wf_bf"], ph.t()).view(H, L, L)                           # head-major, natural units
+    bias = torch.mm(W["Wf_bf"], ph.t()).view(H, L, L)                           # head-major, natural units; Wf = Wb diag(wp)
     if mask is not None:
         bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
     O, LSE = sm100.forward(qn, kn, vc, bias, A, L)
@@ -201,7 +200,7 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     T = ext()
     (x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, bias, O, LSE, og, y, x1, x1st, xt, ab, z, ph, pst) = saved
     names = _names_for(qk)
-    W = _pack(dict(zip(names, params)), qk, single.device)
+    W = _pack(dict(zip(names, params, strict=False)), qk, single.device)
     Wn, Wraw, Wg, Wqkvg, Wo, Wab, Wsq, Wf = W["Wn"], W["Wraw"], W["Wg"], W["Wqkvg"], W["Wo"], W["Wab"], W["Wsq"], W["Wf"]
     nq, nk, bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (W[k] for k in ("nq", "nk", "bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb"))
     A, _, L, _ = single.shape
@@ -269,19 +268,19 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     # custom-op outputs may not alias each other: the gradients above are views of a few shared buffers, so each leaves as
     # its own copy (in the parameter's dtype)
     return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP),
-            *(grads[n].to(p.dtype, copy=True).reshape(p.shape) for n, p in zip(names, params))]
+            *(grads[n].to(p.dtype, copy=True).reshape(p.shape) for n, p in zip(names, params, strict=False))]
 
 
 class _Block(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, single, cond, pair, mask, qk, eq, ek, *params):  # noqa: D102
+    def forward(ctx, single, cond, pair, mask, qk, eq, ek, *params):
         out, *saved = _fwd(single, cond, pair, mask, list(params), qk, eq, ek)
         ctx.save_for_backward(single, cond, pair, *params, *saved)
         ctx.meta = (mask, qk, eq, ek, len(params))
         return out
 
     @staticmethod
-    def backward(ctx, dout):  # noqa: D102
+    def backward(ctx, dout):
         mask, qk, eq, ek, npar = ctx.meta
         vals = ctx.saved_tensors
         single, cond, pair = vals[:3]

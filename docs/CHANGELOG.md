@@ -75,6 +75,15 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   1.3-3.6x, training 1.08-2.5x. The D128 kernels drop two cluster-scope releases per launch (D128 L128 inference
   15.1 -> 13.5 us kernel time, bit-identical outputs). Kernel sources under `sm100/` are generated from the research
   capsule (`experiments/transition_fused_sm100/export_engine.py`).
+- B200 (sm_100a) hand-CUDA TriangleAttention, the whole module (`integrations/triattn_b200.py`,
+  `kernels/triangle_attention/cuda/b200_triattn.py`, `b200_sources/`): d_pair 128 / 4 heads fused for inference and
+  training (L a multiple of 128), d_pair 64-512 inference. `module._b200_cuda = False` keeps the Triton path.
+  Page: `docs/gpus/b200/triattn/triattn.md`.
+- B200 (sm_100a) OuterProductMean / PWA training: `integrations/opm_train.py` and `pwa_train.py` accept compute
+  capability (10, 0) with the H100 kernels' signatures on tcgen05 / TMEM (`integrations/csrc/sm100/`).
+- B200 (sm_100a) token DiT, inference and training with hand CUDA + cuBLAS only (`integrations/token_dit.py`,
+  new `integrations/token_dit_train.py`, `kernels/augmented_attention/cuda/sm100/`,
+  `kernels/conditioned_transition/cuda/`). Page: `docs/gpus/b200/token_dit/token_dit.md`.
 - `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
   writes) from a JSON spec.
 - H100 single-direction TriMul training in CUDA at D64 (`h100_uni_d64_training`, the

@@ -142,7 +142,9 @@ class AugmentedAttentionPairBias(nn.Module):
                 return cuda_sm90.augmented_attention_bf16_sm90(query, key, value, bias, mask)
         if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.TRITON
                 and _bf16_sm100_enabled()):
-            from miniworld_engine.kernels.augmented_attention.cuda import sm100 as cuda_sm100
+            from miniworld_engine.kernels.augmented_attention.cuda import (
+                sm100 as cuda_sm100,
+            )
 
             if cuda_sm100.available(query, bias, mask):
                 return cuda_sm100.augmented_attention_bf16_sm100(query, key, value, bias)

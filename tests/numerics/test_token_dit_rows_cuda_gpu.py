@@ -13,7 +13,9 @@ def _rel(a, b):
 
 def _mods():
     from miniworld_engine.kernels.conditioned_transition import cuda as C
-    from miniworld_engine.kernels.conditioned_transition.triton import token_dit_kernels as T
+    from miniworld_engine.kernels.conditioned_transition.triton import (
+        token_dit_kernels as T,
+    )
     return C, T
 
 
@@ -89,7 +91,9 @@ def test_runner_takes_the_cuda_rows_on_b200():
     from types import SimpleNamespace
 
     from miniworld_engine.kernels.conditioned_transition import cuda as C
-    from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import _row_kernels
+    from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
+        _row_kernels,
+    )
 
     assert _row_kernels(torch.device("cuda")) is C
     del SimpleNamespace
