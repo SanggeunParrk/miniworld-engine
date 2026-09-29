@@ -61,8 +61,11 @@ def refusal(msa: torch.Tensor, pair: torch.Tensor, d_msa: int, d_pair: int, n_he
             return f"the kernels are bf16, got {msa.dtype} / {pair.dtype}"
         if not msa.is_cuda:
             return "the input is not on a CUDA device"
-        if torch.cuda.get_device_capability(msa.device) != (9, 0):
-            return "the kernels are built for sm_90a"
+        cap = torch.cuda.get_device_capability(msa.device)
+        if cap not in ((9, 0), (10, 0)):
+            return "the kernels are built for sm_90a and sm_100a"
+        if cap == (10, 0) and torch.is_grad_enabled() and not _SM100_TRAIN:
+            return "the sm_100a backward kernels are not built yet"
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         n, s = msa.shape[2], msa.shape[1]
@@ -101,6 +104,28 @@ def _build(name: str, src_name: str):
     _EXT[name] = load(name=name, sources=[str(src)], build_directory=str(build),
                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math"], extra_cflags=["-O3"])
     return _EXT[name]
+
+
+_SM100_TRAIN = True        # the sm_100a backward kernels (csrc/sm100/pwa_sm100.cu) serve grad-enabled calls
+
+
+def _k100():
+    """B200: `csrc/sm100/pwa_sm100.cu` (ln_vg and the forward on tcgen05 / TMEM) and the H100 `pair3.cu` as it is
+    (mma.sync + ldmatrix + cp.async, all valid on sm_100a), built for sm_100a."""
+    if "sm100" not in _EXT:
+        from miniworld_engine.kernels._nvcc import load_extension as load
+        root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+        csrc = Path(__file__).with_name("csrc")
+        flags = ["-O3", "-gencode=arch=compute_100a,code=sm_100a", "--use_fast_math"]
+        k = {}
+        for name, src, inc in (("miniworld_pwa_sm100", csrc / "sm100" / "pwa_sm100.cu", [str(csrc / "sm100")]),
+                               ("miniworld_pwa_pair3_sm100", csrc / "pair3.cu", [])):
+            build = root / name
+            build.mkdir(parents=True, exist_ok=True)
+            k[name] = load(name=name, sources=[str(src)], build_directory=str(build), extra_include_paths=inc,
+                           extra_cuda_cflags=flags, extra_cflags=["-O3"])
+        _EXT["sm100"] = {"pwa": k["miniworld_pwa_sm100"], "pair3": k["miniworld_pwa_pair3_sm100"]}
+    return _EXT["sm100"]
 
 
 def _k():
@@ -263,23 +288,33 @@ class _PwaMath(torch.autograd.Function):
     @staticmethod
     @torch.autocast("cuda", enabled=False)
     def forward(ctx, msa, pair, pm, lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo, eps_m, eps_z, p_drop):
-        k = _k()
         m = msa[0].contiguous(); z = pair[0].contiguous()
         N = m.shape[1]
         bf = torch.bfloat16
         wv16 = wv.detach().to(bf).contiguous(); wg16 = wg.detach().to(bf).contiguous(); wo16 = wo.detach().to(bf).contiguous()
-        if k["pair3"] is not None and N % 16 == 0 and N <= 1024:
+        sm100 = torch.cuda.get_device_capability(m.device) == (10, 0)
+        k = _k100() if sm100 else _k()
+        if sm100:                                                                   # pm: the [N] bool key mask (pair_weighted_averaging)
+            w16 = k["pwa"].pair_fwd(z, pm, lnz_w.detach().contiguous(), lnz_b.detach().contiguous(), eps_z, wb.detach().contiguous())
+        elif k["pair3"] is not None and N % 16 == 0 and N <= 1024:
             w16 = k["pair3"].pair_fwd3(z, pm, lnz_w.detach().float().contiguous(), lnz_b.detach().float().contiguous(), eps_z, wb.detach())
         else:
             w16 = pair_fwd(z, pm, lnz_w.detach().float().contiguous(), lnz_b.detach().float().contiguous(), eps_z, wb.detach(), H, BJ=64)
-        v, y = k["lnvg"].ln_vg(m, lnm_w.detach().float().contiguous(), lnm_b.detach().float().contiguous(), wv16, eps_m, 2, 3, 1)
+        if sm100:
+            v, y = k["pwa"].ln_vg(m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), wv16, eps_m)
+        else:
+            v, y = k["lnvg"].ln_vg(m, lnm_w.detach().float().contiguous(), lnm_b.detach().float().contiguous(), wv16, eps_m, 2, 3, 1)
         # the module's drop_msa (Dropout(broadcast_dim=1)): one keep-mask per (token, channel) shared over the MSA rows,
         # x * mask / (1 - p); applied to the bf16 update inside the kernel's residual epilogue
         dmask, dscale = None, 1.0
         if p_drop > 0:
             dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
-        out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)           # residual fused; o kept for the backward
+        if sm100:
+            out, o = k["pwa"].pwa_fwd2(w16, v, m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), eps_m, wg16, wo16, True,
+                                       dmask, dscale)   # split: contraction, then gate / out (y recomputed; ln_vg's y kept for the backward)
+        else:
+            out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)       # residual fused; o kept for the backward
         ctx.save_for_backward(m, z, w16, v, y, o, lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo, *((dmask,) if dmask is not None else ()))
         ctx.eps = (eps_m, eps_z); ctx.dscale = dscale
         return out[None]
@@ -287,7 +322,7 @@ class _PwaMath(torch.autograd.Function):
     @staticmethod
     @torch.autocast("cuda", enabled=False)
     def backward(ctx, dres):
-        k = _k()
+        k = None if torch.cuda.get_device_capability(dres.device) == (10, 0) else _k()
         saved = ctx.saved_tensors
         m, z, w16, v, y, o, lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo = saved[:14]
         dmask = saved[14] if len(saved) > 14 else None
@@ -297,6 +332,19 @@ class _PwaMath(torch.autograd.Function):
         dres0 = dres[0].contiguous()
         # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
         wv16 = wv.to(bf).contiguous(); wg16 = wg.to(bf).contiguous(); wo16 = wo.to(bf).contiguous()
+        if torch.cuda.get_device_capability(m.device) == (10, 0):
+            k = _k100()["pwa"]
+            # the parameter gradients come out of the kernels in the parameters' dtype (.to below is then a no-op): no cast launches
+            wot, wgvT = k.pwa_wprep(wg16, wv16, wo16)                              # Wo^T, [Wg; Wv]^T: one launch
+            # glue2: dgp never leaves the chip -- its consumers (dWg = dgp^T y, dyg = dgp Wg) run inside; dv_bwd adds dv Wv to dyg
+            d_o, dyg, dWo, dWg = k.pwa_glue2(o, y, dres0, wg16, wot, dmask, ctx.dscale, int(wo.dtype == bf))
+            dv = k.pwa_plain(w16, d_o)                                               # head-major [H, N, S*C]
+            dw = torch.bmm(d_o, v.transpose(1, 2))                                   # [H][N][N] bf16 (PyTorch's dw is bf16 too), K = S*C
+            dm, dWv, dlw, dlb = k.dv_bwd(dv, dyg, y, m, dres0, wgvT, lnm_w.detach().contiguous(), eps_m, int(wv.dtype == bf), int(lnm_w.dtype == bf))
+            dz, dWb, dzw, dzb = k.pair_bwd(z, w16, dw, lnz_w.detach().contiguous(), lnz_b.detach().contiguous(), eps_z, wb.detach().contiguous(),
+                                           int(wb.dtype == bf), int(lnz_w.dtype == bf))
+            return (dm[None], dz[None], None, dlw.to(lnm_w.dtype), dlb.to(lnm_b.dtype), dWv.to(wv.dtype), dWg.to(wg.dtype),
+                    dzw.to(lnz_w.dtype), dzb.to(lnz_b.dtype), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
         dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)               # dgp | dv: one [S,N,512] buffer
         if k["glue3"] is not None:                                                  # dWo partials fused: go never touches memory
             d_o, _, dWo = k["glue3"].pwa_glue3(o, y, dres0, wg16, wo16.t().contiguous(), dgv, 2, 1, dmask, ctx.dscale)
@@ -320,11 +368,22 @@ class _PwaMath(torch.autograd.Function):
 @torch.autocast("cuda", enabled=False)
 def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """msa + PWA(msa, pair, key mask) for a grad-free call: the same three forward kernels, o not kept, no dropout."""
-    k = _k(); bf = torch.bfloat16
+    bf = torch.bfloat16
     m = msa[0].contiguous(); z = pair[0].contiguous(); n = m.shape[1]
+    eps_m = float(getattr(module.ln_msa, "eps", 1e-5)); eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
+    if torch.cuda.get_device_capability(m.device) == (10, 0):
+        k = _k100()
+        km = torch.ones(n, dtype=torch.bool, device=m.device) if mask is None else mask[0].to(torch.bool).contiguous()
+        w16 = k["pwa"].pair_fwd(z, km, module.ln_pair.weight.detach().contiguous(), module.ln_pair.bias.detach().contiguous(), eps_z,
+                                module.to_bias.weight.detach().contiguous())
+        lnw, lnb = module.ln_msa.weight.detach().contiguous(), module.ln_msa.bias.detach().contiguous()
+        v, _ = k["pwa"].ln_vg(m, lnw, lnb, module.to_value.weight.detach().to(bf).contiguous(), eps_m, False)   # y is recomputed downstream
+        out, _ = k["pwa"].pwa_fwd2(w16, v, m, lnw, lnb, eps_m, module.to_gate.weight.detach().to(bf).contiguous(),
+                                   module.to_out.weight.detach().to(bf).contiguous(), False, None, 1.0)
+        return out[None]
     pm = torch.ones(n, n, dtype=bf, device=m.device) if mask is None else mask[0].to(bf)[None, :].expand(n, n).contiguous()
     lnz_w = module.ln_pair.weight.detach().float().contiguous(); lnz_b = module.ln_pair.bias.detach().float().contiguous()
-    eps_m = float(getattr(module.ln_msa, "eps", 1e-5)); eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
+    k = _k()
     if k["pair3"] is not None and n % 16 == 0 and n <= 1024:
         w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, lnz_b, eps_z, module.to_bias.weight.detach())
     else:
@@ -342,7 +401,9 @@ def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
 def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask): the residual is INCLUDED (the forward kernel adds it)."""
     n = msa.shape[2]
-    if mask is None:
+    if torch.cuda.get_device_capability(msa.device) == (10, 0):                  # sm_100a: the [N] key mask itself
+        pm = torch.ones(n, dtype=torch.bool, device=msa.device) if mask is None else mask[0].to(torch.bool).contiguous()
+    elif mask is None:
         pm = torch.ones(n, n, dtype=torch.bfloat16, device=msa.device)
     else:
         pm = mask[0].to(torch.bfloat16)[None, :].expand(n, n).contiguous()          # the module masks the key axis j
