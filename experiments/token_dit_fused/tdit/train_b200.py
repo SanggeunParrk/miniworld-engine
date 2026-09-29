@@ -94,8 +94,12 @@ class _Block(torch.autograd.Function):
         W = _weights_cached(P, names)
         R = 8
         gr = T.grid(M, R)
-        chat = torch.empty(M, 384, device=dev, dtype=bf); cbf = torch.empty_like(chat); cst = torch.empty(M, 2, device=dev)
-        T._cond_prep[gr](c, chat, cbf, cst, M, N=384, BN=512, ROWS=R, eps=EPS_LN)
+        cp = getattr(store, "cprep", None)                                # every block of the stack reads the same cond:
+        if cp is None or cp[0] != (c.data_ptr(), c._version):              # its LayerNorm and bf16 copy are made once
+            chat = torch.empty(M, 384, device=dev, dtype=bf); cbf = torch.empty_like(chat); cst = torch.empty(M, 2, device=dev)
+            T._cond_prep[gr](c, chat, cbf, cst, M, N=384, BN=512, ROWS=R, eps=EPS_LN)
+            store.cprep = cp = ((c.data_ptr(), c._version), chat, cbf, cst)
+        chat, cbf, cst = cp[1:]
         G = torch.mm(chat, W["Wn"].t())                                   # [M, 3072] s1 | sh1 | s2 | sh2 (bf16)
         Gg = torch.mm(cbf, W["Wg"].t())                                   # [M, 1536] gate1 | gate2
         xa = torch.empty(M, D, device=dev, dtype=bf); xst = torch.empty(M, 2, device=dev)
@@ -176,7 +180,7 @@ class _Block(torch.autograd.Function):
         store.dbias[bix].copy_(DB)                                         # the hoisted pair bias backward runs once for all blocks
         bsum = pbias                                                      # bg2, bs2, bg1, bs1
         dWu = torch.empty_like(dWn); dw12 = torch.zeros(2, 384, device=dev)
-        T._unfold_lnw[(4 * D,)](dWn, P["Ws1"], P["Wb1"], P["Ws2"], P["Wb2"], P["w1"], P["w2"], dWu, dw12, K=384, BK=512)
+        T._unfold_lnw[(4 * D // 16,)](dWn, P["Ws1"], P["Wb1"], P["Ws2"], P["Wb2"], P["w1"], P["w2"], dWu, dw12, K=384, BK=512, RB=16)
         dWs1, dWb1, dWs2, dWb2 = dWu.split(D)
         grads = dict(
             Ws1=dWs1, Wb1=dWb1, Ws2=dWs2, Wb2=dWb2, w1=dw12[0], w2=dw12[1],

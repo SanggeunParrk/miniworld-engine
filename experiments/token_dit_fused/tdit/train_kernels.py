@@ -365,21 +365,23 @@ def colsum(x, rows=64):
 
 
 @triton.jit
-def _unfold_lnw(DWN, WS1, WB1, WS2, WB2, W1, W2, DW, DW12, K: tl.constexpr, BK: tl.constexpr):
+def _unfold_lnw(DWN, WS1, WB1, WS2, WB2, W1, W2, DW, DW12, K: tl.constexpr, BK: tl.constexpr, RB: tl.constexpr):
     """The cond-LN weights are folded into the conditioning GEMM (Wn = W diag(w)). Per output row i of Wn (4 x 768 rows):
-    dW[i] = dWn[i] w, and dw += dWn[i] * W[i] (column sums over each group of 768 rows -> DW12 [2, K] via atomics)."""
-    i = tl.program_id(0)                                         # 0 .. 3071
+    dW[i] = dWn[i] w, and dw += dWn[i] * W[i] (column sums over each group of 768 rows -> DW12 [2, K]). A program takes RB
+    rows of one group and adds their column sum once (one atomic per row onto 2 x K addresses serialised)."""
+    i = tl.program_id(0) * RB + tl.arange(0, RB)                 # rows of Wn, RB | 768 so one group per program
     k = tl.arange(0, BK)
     km = k < K
-    grp = i // 768
+    grp = (tl.program_id(0) * RB) // 768
     row = i % 768
-    lw = tl.where(grp < 2, tl.load(W1 + k, mask=km, other=0.0), tl.load(W2 + k, mask=km, other=0.0))
-    d = tl.load(DWN + i * K + k, mask=km, other=0.0)
-    w = tl.where(grp == 0, tl.load(WS1 + row * K + k, mask=km, other=0.0),
-                 tl.where(grp == 1, tl.load(WB1 + row * K + k, mask=km, other=0.0),
-                          tl.where(grp == 2, tl.load(WS2 + row * K + k, mask=km, other=0.0), tl.load(WB2 + row * K + k, mask=km, other=0.0))))
-    tl.store(DW + i * K + k, d * lw, mask=km)
-    tl.atomic_add(DW12 + (grp // 2) * K + k, d * w, mask=km, sem="relaxed")
+    lw = tl.load(W1 + k, mask=km & (grp < 2), other=0.0) + tl.load(W2 + k, mask=km & (grp >= 2), other=0.0)
+    m2 = km[None, :]
+    d = tl.load(DWN + i[:, None] * K + k[None, :], mask=m2, other=0.0)
+    off = row[:, None] * K + k[None, :]
+    w = (tl.load(WS1 + off, mask=m2 & (grp == 0), other=0.0) + tl.load(WB1 + off, mask=m2 & (grp == 1), other=0.0)
+         + tl.load(WS2 + off, mask=m2 & (grp == 2), other=0.0) + tl.load(WB2 + off, mask=m2 & (grp == 3), other=0.0))
+    tl.store(DW + i[:, None] * K + k[None, :], d * lw[None, :], mask=m2)
+    tl.atomic_add(DW12 + (grp // 2) * K + k, tl.sum(d * w, 0), mask=km, sem="relaxed")
 
 
 @triton.jit
