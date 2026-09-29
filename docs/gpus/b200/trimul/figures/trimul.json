@@ -1,0 +1,855 @@
+{
+ "figures": {
+  "inference_small": {
+   "title": "B200 · TriMul · inference · D64 / D128, bf16, every L = 16k (one direction: P = 2D, H = D; bidirectional: P = 4D, H = 2D)",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "weight prep",
+       "impl": "CUDA · k1w_prep",
+       "code": [
+        "w_p' = W_p[:, perm]   # k3g's TMEM K order",
+        "W_* = W_*.contiguous()  # only if strided"
+       ],
+       "reads": [
+        "W_l, W_lg, W_r, W_rg, W_p"
+       ],
+       "writes": [
+        "w_p' (, W_* copies)"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "input LN + gated proj",
+       "impl": "CUDA · k1w",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "m = mask[:, None] & mask[None, :]",
+        "a = sigmoid(x_n @ W_lg.T) * (x_n @ W_l.T) * m",
+        "b = sigmoid(x_n @ W_rg.T) * (x_n @ W_r.T) * m",
+        "# channel-major planes [P, L, L]"
+       ],
+       "reads": [
+        "x",
+        "W_l, W_lg, W_r, W_rg",
+        "mask [L]",
+        "γ, β"
+       ],
+       "writes": [
+        "a, b (planes)"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "contractions",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "# one direction (outgoing):",
+        "t = einsum(\"bikd,bjkd->bijd\", a, b)",
+        "# bidirectional: outgoing on the first",
+        "# half of the planes, incoming on the",
+        "# second, t = cat(t_out, t_in)"
+       ],
+       "reads": [
+        "a, b"
+       ],
+       "writes": [
+        "t"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "output LN + proj + gate",
+       "impl": "CUDA · k3g",
+       "code": [
+        "o = F.layer_norm(t, (H,), γ_o, β_o) @ W_p.T",
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "g = torch.sigmoid(x_n @ W_g.T)",
+        "y = x + ds * (g * o)"
+       ],
+       "reads": [
+        "t",
+        "x",
+        "w_p', W_g, γ, β, γ_o, β_o",
+        "ds (dropout only)"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, D128 bidirectional)",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,D] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "mask",
+       "shape": "[L] bool",
+       "size": "< 1 KB"
+      },
+      {
+       "name": "W_*, w_p', γ, β",
+       "shape": "bf16 / fp32",
+       "size": "< 1 MB"
+      },
+      {
+       "name": "a, b",
+       "shape": "[P,L,L] bf16",
+       "size": "604 MB"
+      },
+      {
+       "name": "t",
+       "shape": "[H,L,L] bf16",
+       "size": "302 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "inference_wide": {
+   "title": "B200 · TriMul · inference · D256 / D384 / D512, bf16, every L = 16k (both LayerNorms folded into the output GEMMs)",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "F0",
+       "name": "input LN stats",
+       "impl": "CUDA · k1w_stats",
+       "code": [
+        "μ, σ = x.mean(-1), x.var(-1).add(ε).rsqrt()"
+       ],
+       "reads": [
+        "x"
+       ],
+       "writes": [
+        "μ, σ"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "input LN + gated proj",
+       "impl": "CUDA · k1w",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "m = mask[:, None] & mask[None, :]",
+        "a = sigmoid(x_n @ W_lg.T) * (x_n @ W_l.T) * m",
+        "b = sigmoid(x_n @ W_rg.T) * (x_n @ W_r.T) * m",
+        "# channel-major planes [P, L, L]"
+       ],
+       "reads": [
+        "x",
+        "μ, σ",
+        "W_l, W_lg, W_r, W_rg",
+        "mask [L]",
+        "γ, β"
+       ],
+       "writes": [
+        "a, b (planes)"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "contractions",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "# one direction (outgoing):",
+        "t = einsum(\"bikd,bjkd->bijd\", a, b)",
+        "# bidirectional: outgoing on the first",
+        "# half of the planes, incoming on the",
+        "# second, t = cat(t_out, t_in)"
+       ],
+       "reads": [
+        "a, b"
+       ],
+       "writes": [
+        "t"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "output LN stats",
+       "impl": "CUDA · wide_ln_stats",
+       "code": [
+        "μ_o, σ_o over the H channels of t"
+       ],
+       "reads": [
+        "t"
+       ],
+       "writes": [
+        "μ_o, σ_o"
+       ]
+      },
+      {
+       "id": "F4",
+       "name": "LN-affine fold",
+       "impl": "CUDA · wide_fold_prep",
+       "code": [
+        "W_p' = bf16(W_p * γ_o); s_p = W_p'.sum(1); e_p = W_p @ β_o",
+        "W_g' = bf16(W_g * γ); s_g = W_g'.sum(1); e_g = W_g @ β"
+       ],
+       "reads": [
+        "W_p, W_g, γ_o, β_o, γ, β"
+       ],
+       "writes": [
+        "W_p', W_g', s, e"
+       ]
+      },
+      {
+       "id": "F5",
+       "name": "output GEMMs + gate",
+       "impl": "CUDA · k3w",
+       "code": [
+        "o = σ_o * (t.T @ W_p'.T - μ_o * s_p) + e_p",
+        "g = σ * (x @ W_g'.T - μ * s_g) + e_g",
+        "y = x + ds * (sigmoid(g) * o)"
+       ],
+       "reads": [
+        "t (as stored)",
+        "x",
+        "W_p', W_g', s, e",
+        "μ, σ, μ_o, σ_o",
+        "ds (dropout only)"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, D512 bidirectional)",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,D] bf16",
+       "size": "604 MB each"
+      },
+      {
+       "name": "μ, σ, μ_o, σ_o",
+       "shape": "4 × [L,L] fp32",
+       "size": "9.4 MB"
+      },
+      {
+       "name": "W_*, W_p', W_g', s, e",
+       "shape": "bf16 / fp32",
+       "size": "< 4 MB"
+      },
+      {
+       "name": "a, b",
+       "shape": "[P,L,L] bf16",
+       "size": "2.4 GB"
+      },
+      {
+       "name": "t",
+       "shape": "[H,L,L] bf16",
+       "size": "1.2 GB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_small": {
+   "title": "B200 · TriMul · training · D64 (either direction), D128 (one direction), bf16, every L = 128k",
+   "panels": [
+    {
+     "label": "forward (saves a, b, t, x_n, LN_out stats)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "weight prep",
+       "impl": "CUDA · k1w_prep",
+       "code": [
+        "w_p' = W_p[:, perm]   # k3g's TMEM K order",
+        "W_* = W_*.contiguous()  # only if strided"
+       ],
+       "reads": [
+        "W_l, W_lg, W_r, W_rg, W_p"
+       ],
+       "writes": [
+        "w_p' (, W_* copies)"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "input LN + gated proj",
+       "impl": "CUDA · k1w",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "m = mask[:, None] & mask[None, :]",
+        "a = sigmoid(x_n @ W_lg.T) * (x_n @ W_l.T) * m",
+        "b = sigmoid(x_n @ W_rg.T) * (x_n @ W_r.T) * m",
+        "# channel-major planes [P, L, L]"
+       ],
+       "reads": [
+        "x",
+        "W_l, W_lg, W_r, W_rg",
+        "mask [L]",
+        "γ, β"
+       ],
+       "writes": [
+        "a, b (planes)"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "contractions",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "# one direction (outgoing):",
+        "t = einsum(\"bikd,bjkd->bijd\", a, b)",
+        "# bidirectional: outgoing on the first",
+        "# half of the planes, incoming on the",
+        "# second, t = cat(t_out, t_in)"
+       ],
+       "reads": [
+        "a, b"
+       ],
+       "writes": [
+        "t"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "output LN + proj + gate (saves)",
+       "impl": "CUDA · k3g (save)",
+       "code": [
+        "o = F.layer_norm(t, (H,), γ_o, β_o) @ W_p.T",
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "g = torch.sigmoid(x_n @ W_g.T)",
+        "y = x + ds * (g * o)"
+       ],
+       "reads": [
+        "t",
+        "x",
+        "w_p', W_g, γ, β, γ_o, β_o",
+        "ds"
+       ],
+       "writes": [
+        "y",
+        "x_n",
+        "μ_o, σ_o"
+       ]
+      }
+     ],
+     "hbm_title": "HBM, forward (sizes at L = 768, D128 one direction)",
+     "hbm": [
+      {
+       "name": "x",
+       "shape": "[L,L,D] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "mask, ds",
+       "shape": "[L] bool, [L,D] bf16",
+       "size": "< 1 MB"
+      },
+      {
+       "name": "W_*, w_p', γ, β",
+       "shape": "bf16 / fp32",
+       "size": "< 1 MB"
+      },
+      {
+       "name": "a, b  (saved)",
+       "shape": "[P,L,L] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "t  (saved)",
+       "shape": "[H,L,L] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "x_n  (saved)",
+       "shape": "[L,L,D] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "μ_o, σ_o  (saved)",
+       "shape": "2 × [L,L] fp32",
+       "size": "4.7 MB"
+      },
+      {
+       "name": "y",
+       "shape": "[L,L,D] bf16",
+       "size": "151 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "output-side backward",
+       "impl": "CUDA · b1s (D64) / b1g (D128)",
+       "code": [
+        "(dt, dx_ng, dW_p, dW_g,",
+        " dγ_o, dβ_o) = torch.autograd.grad(",
+        "    y, (t, x_n, W_p, W_g, γ_o, β_o), dy)"
+       ],
+       "reads": [
+        "dy",
+        "t",
+        "x_n",
+        "ds",
+        "μ_o, σ_o",
+        "W_p, W_g, γ_o, β_o"
+       ],
+       "writes": [
+        "dt",
+        "dx_ng",
+        "dW_p, dW_g, dγ_o, dβ_o"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "contraction grads",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "da, db = torch.autograd.grad(",
+        "    t, (a, b), dt)"
+       ],
+       "reads": [
+        "dt",
+        "a, b"
+       ],
+       "writes": [
+        "da, db"
+       ]
+      },
+      {
+       "id": "P2",
+       "name": "weight pack",
+       "impl": "PyTorch · pack_w1",
+       "code": [
+        "w_1 = stack((W_lg, W_l), (W_rg, W_r))",
+        "  # 64-row (gate, proj) chunks"
+       ],
+       "reads": [
+        "W_l, W_lg, W_r, W_rg"
+       ],
+       "writes": [
+        "w_1"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "input-side backward",
+       "impl": "CUDA · b7m (D64) / b7g (D128)",
+       "code": [
+        "(dx, dw_1, dγ, dβ) = torch.autograd.grad(",
+        "    (a, b, x_n), (x, w_1, γ, β),",
+        "    (da, db, dx_ng))",
+        "dx = dx + dy"
+       ],
+       "reads": [
+        "da, db",
+        "dx_ng",
+        "dy",
+        "x, x_n",
+        "w_1, W_g, mask"
+       ],
+       "writes": [
+        "dx",
+        "dw_1",
+        "dγ, dβ"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "weight-grad unpack",
+       "impl": "PyTorch",
+       "code": [
+        "dW_l, dW_lg, dW_r, dW_rg =",
+        "    unpack(dw_1)   # inverse of P2"
+       ],
+       "reads": [
+        "dw_1"
+       ],
+       "writes": [
+        "dW_l, dW_lg, dW_r, dW_rg"
+       ]
+      }
+     ],
+     "hbm_title": "HBM, backward (sizes at L = 768, D128 one direction)",
+     "hbm": [
+      {
+       "name": "dy, x, x_n",
+       "shape": "[L,L,D] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "a, b  (saved)",
+       "shape": "[P,L,L] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "t  (saved)",
+       "shape": "[H,L,L] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "μ_o, σ_o, mask, ds, W_*",
+       "shape": "fp32 / bf16",
+       "size": "< 6 MB"
+      },
+      {
+       "name": "dt",
+       "shape": "[H,L,L] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "dx_ng",
+       "shape": "[L,L,D] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "da, db",
+       "shape": "[P,L,L] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "dx",
+       "shape": "[L,L,D] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "fp32 / bf16",
+       "size": "< 1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_wide": {
+   "title": "B200 · TriMul · training · D256 / D384 / D512, bf16, every L = 16k",
+   "panels": [
+    {
+     "label": "forward (saves a, b, t, μ, σ, μ_o, σ_o, o, g)",
+     "kernels": [
+      {
+       "id": "F0",
+       "name": "input LN stats",
+       "impl": "CUDA · k1w_stats",
+       "code": [
+        "μ, σ = x.mean(-1), x.var(-1).add(ε).rsqrt()"
+       ],
+       "reads": [
+        "x"
+       ],
+       "writes": [
+        "μ, σ"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "input LN + gated proj",
+       "impl": "CUDA · k1w",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "m = mask[:, None] & mask[None, :]",
+        "a = sigmoid(x_n @ W_lg.T) * (x_n @ W_l.T) * m",
+        "b = sigmoid(x_n @ W_rg.T) * (x_n @ W_r.T) * m",
+        "# channel-major planes [P, L, L]"
+       ],
+       "reads": [
+        "x",
+        "μ, σ",
+        "W_l, W_lg, W_r, W_rg",
+        "mask [L]",
+        "γ, β"
+       ],
+       "writes": [
+        "a, b (planes)"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "contractions",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "# one direction (outgoing):",
+        "t = einsum(\"bikd,bjkd->bijd\", a, b)",
+        "# bidirectional: outgoing on the first",
+        "# half of the planes, incoming on the",
+        "# second, t = cat(t_out, t_in)"
+       ],
+       "reads": [
+        "a, b"
+       ],
+       "writes": [
+        "t"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "output LN stats",
+       "impl": "CUDA · wide_ln_stats",
+       "code": [
+        "μ_o, σ_o over the H channels of t"
+       ],
+       "reads": [
+        "t"
+       ],
+       "writes": [
+        "μ_o, σ_o"
+       ]
+      },
+      {
+       "id": "F4",
+       "name": "LN-affine fold",
+       "impl": "CUDA · wide_fold_prep",
+       "code": [
+        "W_p' = bf16(W_p * γ_o); s_p = W_p'.sum(1); e_p = W_p @ β_o",
+        "W_g' = bf16(W_g * γ); s_g = W_g'.sum(1); e_g = W_g @ β"
+       ],
+       "reads": [
+        "W_p, W_g, γ_o, β_o, γ, β"
+       ],
+       "writes": [
+        "W_p', W_g', s, e"
+       ]
+      },
+      {
+       "id": "F5",
+       "name": "output GEMMs + gate (saves)",
+       "impl": "CUDA · k3w (save)",
+       "code": [
+        "o = σ_o * (t.T @ W_p'.T - μ_o * s_p) + e_p",
+        "g = σ * (x @ W_g'.T - μ * s_g) + e_g",
+        "y = x + ds * (sigmoid(g) * o)"
+       ],
+       "reads": [
+        "t (as stored)",
+        "x",
+        "W_p', W_g', s, e",
+        "μ, σ, μ_o, σ_o",
+        "ds (dropout only)"
+       ],
+       "writes": [
+        "y",
+        "o, g"
+       ]
+      }
+     ],
+     "hbm_title": "HBM, forward (sizes at L = 768, D512 one direction)",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,D] bf16",
+       "size": "604 MB each"
+      },
+      {
+       "name": "a, b  (saved)",
+       "shape": "[P,L,L] bf16",
+       "size": "1.2 GB"
+      },
+      {
+       "name": "t  (saved)",
+       "shape": "[H,L,L] bf16",
+       "size": "604 MB"
+      },
+      {
+       "name": "o, g  (saved)",
+       "shape": "2 × [L,L,D] bf16",
+       "size": "1.2 GB"
+      },
+      {
+       "name": "μ, σ, μ_o, σ_o  (saved)",
+       "shape": "4 × [L,L] fp32",
+       "size": "9.4 MB"
+      },
+      {
+       "name": "W_*, W_p', W_g', s, e",
+       "shape": "bf16 / fp32",
+       "size": "< 4 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "gate backward",
+       "impl": "CUDA · wide_gate_bwd",
+       "code": [
+        "dp = dy * ds * sigmoid(g); dg = dp * o * (1 - sigmoid(g))",
+        "dpr = dp * σ_o; S1 = dp·s_p; S2 = dp·(o - e_p)"
+       ],
+       "reads": [
+        "dy",
+        "o, g",
+        "ds",
+        "s, e",
+        "μ_o, σ_o"
+       ],
+       "writes": [
+        "dpr",
+        "dx_ng (= dg)",
+        "S1, S2"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "output-projection grads",
+       "impl": "cuBLAS · mm",
+       "code": [
+        "do^T = W_p.T @ dpr.T   # channel-major",
+        "dW_p = γ_o (dpr.T @ t.T - r1) + β_o r0"
+       ],
+       "reads": [
+        "dpr",
+        "t"
+       ],
+       "writes": [
+        "do^T",
+        "dW_p"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "output-LN backward",
+       "impl": "CUDA · wide_lnout_bwd",
+       "code": [
+        "dt = γ_o do - σ_o (S1 + x̂ S2) / H"
+       ],
+       "reads": [
+        "do^T",
+        "t",
+        "μ_o, σ_o, S1, S2, γ_o"
+       ],
+       "writes": [
+        "dt",
+        "dγ_o, dβ_o"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "contraction grads",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "da, db = torch.autograd.grad(",
+        "    t, (a, b), dt)"
+       ],
+       "reads": [
+        "dt",
+        "a, b"
+       ],
+       "writes": [
+        "da, db"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "front backward",
+       "impl": "CUDA · k1wb",
+       "code": [
+        "recompute gate / proj pre-activations",
+        "dpre = (d gate, d proj) from da, db",
+        "  # token-major, w_1 row order"
+       ],
+       "reads": [
+        "x, μ, σ, γ, β",
+        "W_l, W_lg, W_r, W_rg",
+        "mask",
+        "da, db"
+       ],
+       "writes": [
+        "dpre"
+       ]
+      },
+      {
+       "id": "B6",
+       "name": "input LN apply",
+       "impl": "CUDA · wide_ln_apply",
+       "code": [
+        "x_n = (x - μ) σ γ + β"
+       ],
+       "reads": [
+        "x, μ, σ, γ, β"
+       ],
+       "writes": [
+        "x_n"
+       ]
+      },
+      {
+       "id": "B7",
+       "name": "input-projection grads",
+       "impl": "cuBLAS · mm",
+       "code": [
+        "[dw_1; dW_g] = [dpre | dg].T @ x_n",
+        "dx_n = [dpre | dg] @ [w_1; W_g]"
+       ],
+       "reads": [
+        "dpre, dg",
+        "x_n",
+        "W_*"
+       ],
+       "writes": [
+        "dw_1, dW_g",
+        "dx_n"
+       ]
+      },
+      {
+       "id": "B8",
+       "name": "input-LN backward",
+       "impl": "CUDA · wide_lnin_bwd",
+       "code": [
+        "dx = dy + LN_backward(dx_n, x, μ, σ, γ)"
+       ],
+       "reads": [
+        "dx_n",
+        "x, dy",
+        "μ, σ, γ"
+       ],
+       "writes": [
+        "dx",
+        "dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM, backward (sizes at L = 768, D512 one direction)",
+     "hbm": [
+      {
+       "name": "dy, x, dx",
+       "shape": "[L,L,D] bf16",
+       "size": "604 MB each"
+      },
+      {
+       "name": "dpr, dg, x_n, dx_n",
+       "shape": "[L,L,D] bf16",
+       "size": "604 MB each"
+      },
+      {
+       "name": "do^T, dt",
+       "shape": "[H,L,L] bf16",
+       "size": "604 MB each"
+      },
+      {
+       "name": "a, b, da, db",
+       "shape": "[P,L,L] bf16",
+       "size": "1.2 GB each"
+      },
+      {
+       "name": "dpre",
+       "shape": "[L,L,2P] bf16",
+       "size": "2.4 GB"
+      },
+      {
+       "name": "S1, S2, stats",
+       "shape": "fp32",
+       "size": "< 12 MB"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

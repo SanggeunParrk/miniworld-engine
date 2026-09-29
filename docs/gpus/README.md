@@ -6,7 +6,7 @@ The maintainer makes that call; the pages record it.
 | GPU | arch | cluster / partition | page | summary |
 |---|---|---|---|---|
 | H100 80GB HBM3 | sm90 | cssb, `h100` partition | [h100/h100.md](h100/h100.md) · [module dispatch](h100/dispatch.md) | hand CUDA for TriMul, Transition (n=4), TriAttn training, OPM/PWA, token DiT; Triton elsewhere |
-| B200 | sm100 | cssb (same cluster as H100/A100) | [b200/b200.md](b200/b200.md) | Triton only in this repo (CUDA work is happening elsewhere) |
+| B200 | sm100 | lab-external server, no scheduler (see page) | [b200/b200.md](b200/b200.md) | hand CUDA for TriMul (both modules, D64-D512, inference and training); Triton elsewhere |
 | A100 80GB PCIe | sm80 | cssb (same cluster as H100/B200) | [a100/a100.md](a100/a100.md) | Triton only |
 | RTX A6000 / A5000 | sm86 | `cssb-master`, `gpu` partition | [ampere-workstation/ampere-workstation.md](ampere-workstation/ampere-workstation.md) | Triton only (no completion table) |
 
@@ -44,5 +44,5 @@ timing only (`benchmarks/cautions.md`). Shapes come from the model shape registr
 (`src/miniworld_engine/kernels/registry/registry_module.csv`). Full template:
 [template.md](template.md).
 
-H100 uses this format. The A100 and B200 pages still carry the previous op-per-row table
+H100 and B200 (TriMul) use this format. The A100 page and the rest of the B200 page still carry the previous op-per-row table
 (its **judgement** column is the maintainer's) until they are converted.

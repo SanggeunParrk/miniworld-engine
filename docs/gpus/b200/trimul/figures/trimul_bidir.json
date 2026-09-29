@@ -1,0 +1,282 @@
+{
+ "figures": {
+  "training_d128": {
+   "title": "B200 · TriMul bidirectional · training · D128, bf16, every L = 128k",
+   "panels": [
+    {
+     "label": "forward (saves l_*, r_*, t, x_n, LN_out stats, w_1)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "weight pack",
+       "impl": "PyTorch · pack_w1 / pack_wp",
+       "code": [
+        "l = torch.stack((W_lg, W_l), 1)",
+        "r = torch.stack((W_rg, W_r), 1)",
+        "w_1 = torch.cat((l, r))   # 64-row chunks",
+        "w_p = W_p[:, perm]"
+       ],
+       "reads": [
+        "W_l, W_lg, W_r, W_rg, W_p"
+       ],
+       "writes": [
+        "w_1, w_p"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "input LN + gated proj",
+       "impl": "CUDA · b200_bidir K1",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "l = torch.sigmoid(x_n @ W_lg.T)",
+        "l = l * (x_n @ W_l.T) * m",
+        "r = torch.sigmoid(x_n @ W_rg.T)",
+        "r = r * (x_n @ W_r.T) * m",
+        "l_out, l_in = l.chunk(2, -1)",
+        "r_out, r_in = r.chunk(2, -1)"
+       ],
+       "reads": [
+        "x",
+        "w_1",
+        "mask",
+        "γ, β"
+       ],
+       "writes": [
+        "l_out, l_in",
+        "r_out, r_in"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "contractions ×2",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "t_out = torch.einsum(",
+        "  \"bikd,bjkd->bijd\", l_out, r_out)",
+        "t_in = torch.einsum(",
+        "  \"bkid,bkjd->bijd\", l_in, r_in)",
+        "t = torch.cat((t_out, t_in), -1)"
+       ],
+       "reads": [
+        "l_out, l_in",
+        "r_out, r_in"
+       ],
+       "writes": [
+        "t"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "output LN + proj + gate",
+       "impl": "CUDA · b200_bidir K3",
+       "code": [
+        "o = F.layer_norm(t, (2h,), γ_o, β_o)",
+        "o = o @ W_p.T",
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "g = torch.sigmoid(x_n @ W_g.T)",
+        "y = x + ds * (g * o)"
+       ],
+       "reads": [
+        "t",
+        "x",
+        "w_p, W_g, γ, β, γ_o, β_o",
+        "ds"
+       ],
+       "writes": [
+        "y",
+        "x_n",
+        "μ_o, σ_o"
+       ]
+      }
+     ],
+     "hbm_title": "HBM, forward (sizes at L = 768)",
+     "hbm": [
+      {
+       "name": "x",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "mask, ds",
+       "shape": "[L,L] fp32, [L,128] bf16",
+       "size": "2.6 MB"
+      },
+      {
+       "name": "W_*, γ, β, w_1, w_p",
+       "shape": "bf16 / fp32",
+       "size": "< 1 MB"
+      },
+      {
+       "name": "l_out, l_in, r_out, r_in  (saved)",
+       "shape": "4 × [128,L,L] bf16",
+       "size": "604 MB"
+      },
+      {
+       "name": "t  (saved)",
+       "shape": "[256,L,L] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "x_n  (saved)",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "μ_o, σ_o  (saved)",
+       "shape": "2 × [L,L] fp32",
+       "size": "4.7 MB"
+      },
+      {
+       "name": "y",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "output-side backward",
+       "impl": "CUDA · b200_bidir B1r",
+       "code": [
+        "(dt, dx_ng, dW_p, dW_g,",
+        " dγ_o, dβ_o) = torch.autograd.grad(",
+        "    y, (t, x_n, W_p, W_g,",
+        "        γ_o, β_o), dy)"
+       ],
+       "reads": [
+        "dy",
+        "t",
+        "x_n",
+        "ds",
+        "μ_o, σ_o",
+        "W_p, W_g, γ_o, β_o"
+       ],
+       "writes": [
+        "dt",
+        "dx_ng",
+        "dW_p, dW_g, dγ_o, dβ_o"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "contraction grads ×4",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "dl, dr = torch.autograd.grad(",
+        "    t, (l, r), dt)"
+       ],
+       "reads": [
+        "dt",
+        "l_out, l_in",
+        "r_out, r_in"
+       ],
+       "writes": [
+        "dl, dr"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "input-side backward",
+       "impl": "CUDA · b200_bidir B7r",
+       "code": [
+        "(dx, dw_1, dγ, dβ) = torch.autograd.grad(",
+        "    (l, r, x_n), (x, w_1, γ, β),",
+        "    (dl, dr, dx_ng))",
+        "dx = dx + dy"
+       ],
+       "reads": [
+        "dl, dr",
+        "dx_ng",
+        "dy",
+        "x, x_n",
+        "w_1, W_g, mask"
+       ],
+       "writes": [
+        "dx",
+        "dw_1",
+        "dγ, dβ"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "weight-grad unpack",
+       "impl": "PyTorch",
+       "code": [
+        "dW_lg, dW_l, dW_rg, dW_r =",
+        "    unpack(dw_1)   # inverse of P1"
+       ],
+       "reads": [
+        "dw_1"
+       ],
+       "writes": [
+        "dW_l, dW_lg, dW_r, dW_rg"
+       ]
+      }
+     ],
+     "hbm_title": "HBM, backward (sizes at L = 768)",
+     "hbm": [
+      {
+       "name": "dy",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "l_out, l_in, r_out, r_in  (saved)",
+       "shape": "4 × [128,L,L] bf16",
+       "size": "604 MB"
+      },
+      {
+       "name": "t  (saved)",
+       "shape": "[256,L,L] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "x_n  (saved), x",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "μ_o, σ_o  (saved)",
+       "shape": "2 × [L,L] fp32",
+       "size": "4.7 MB"
+      },
+      {
+       "name": "W_*, w_1, mask, ds",
+       "shape": "bf16 / fp32",
+       "size": "< 3 MB"
+      },
+      {
+       "name": "dt",
+       "shape": "[256,L,L] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "dx_ng",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "dl, dr",
+       "shape": "[512,L,L] bf16",
+       "size": "604 MB"
+      },
+      {
+       "name": "dx",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "fp32 / bf16",
+       "size": "< 1 MB"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
