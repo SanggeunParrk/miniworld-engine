@@ -29,6 +29,13 @@ def _bf16_sm90_enabled() -> bool:
     return settings.current().augmented_attention_bf16_sm90 and settings.current().engine_backend != "triton"
 
 
+def _bf16_sm100_enabled() -> bool:
+    """Whether a bf16 attention core on sm_100 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm100)."""
+    from miniworld_engine import settings
+
+    return settings.current().augmented_attention_bf16_sm100 and settings.current().engine_backend != "triton"
+
+
 class AugmentedAttentionPairBias(nn.Module):
     """Augmented attention with pair bias and adaptive conditioning.
 
@@ -133,6 +140,12 @@ class AugmentedAttentionPairBias(nn.Module):
             if cuda_sm90.available(query, bias):
                 # Takes the fp32 (or bf16) tensors as they are: the bf16 cast happens in the kernels' one prep pass.
                 return cuda_sm90.augmented_attention_bf16_sm90(query, key, value, bias, mask)
+        if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.TRITON
+                and _bf16_sm100_enabled()):
+            from miniworld_engine.kernels.augmented_attention.cuda import sm100 as cuda_sm100
+
+            if cuda_sm100.available(query, bias, mask):
+                return cuda_sm100.augmented_attention_bf16_sm100(query, key, value, bias)
         if compute_dtype is not None:
             query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
 
