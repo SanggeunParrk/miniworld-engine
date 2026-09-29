@@ -84,20 +84,22 @@ def _run_inference(x, weights, mask, direction, eps, config):
         kk = _kernels()
         from miniworld_engine.autotune.fused_config import unpack_trimul
         cfg = unpack_trimul(config)
-        # Live packing is captured in CUDA graphs; there is no stale parameter snapshot.
-        w1 = (
-            torch.stack(
+        # K1 reads row-major weights in place (no pack kernel, nothing snapshotted); any other layout is packed live, which a
+        # CUDA graph captures like every other launch. (A transposed-B K1 for the column-major D128 bidirectional storage was
+        # bitwise-correct but 11 % slower at L768 and 2x at L128, 2026-09-29, so that storage keeps the pack.)
+        quad = (wl, wlg, wr, wrg)
+        if all(t.dtype == torch.bfloat16 and t.stride() == (cz, 1) for t in quad):
+            wmap = {"wq": quad}
+        else:
+            wmap = {"w1": torch.stack(
                 (
                     torch.cat((wlg, wrg)).reshape(-1, 32, cz),
                     torch.cat((wl, wr)).reshape(-1, 32, cz),
                 ),
                 1,
-            )
-            .reshape(4 * ch, cz)
-            .contiguous()
-        )
+            ).reshape(4 * ch, cz).contiguous()}
         w = {
-            "w1": w1,
+            **wmap,
             "ln_in_w": gi,
             "ln_in_b": bi,
             "ln_out_w": go,

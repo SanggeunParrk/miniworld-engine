@@ -13,6 +13,15 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as WIDE
 
 
+def _backward_transposes(leaves):
+    """W^T of (W_l, W_lg, W_r, W_rg, W_g) for B1/B7. Row-major front weights are read in place by B7 (no copies; None);
+    the column-major storage makes these transposes views."""
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_b7 import front_row_major
+
+    front = [None] * 4 if front_row_major(leaves) else [w.t().contiguous() for w in leaves[1:5]]
+    return front + [leaves[5].t().contiguous()]
+
+
 def _data(leaves, mask, ds, *, packed=None, for_backward=False):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     n = x.shape[1]
@@ -29,8 +38,7 @@ def _data(leaves, mask, ds, *, packed=None, for_backward=False):
         leaves=leaves,
         mask=mask.reshape(n, n) if for_backward else mask.reshape(n, n).float(),
         ds=ds.reshape(n, 128),
-        wt=[w.t().contiguous() for w in (wl, wlg, wr, wrg, wg)]
-        if for_backward else [],
+        wt=_backward_transposes(leaves) if for_backward else [],
         wp=wp,
         gi=gi,
         bi=bi,

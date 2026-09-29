@@ -88,6 +88,15 @@ struct K1Params {
   int xs_i, xs_j, pad0, pad1;   // xz element strides of the tile's slow (i) and fast (j) token axes
 };
 
+// K1 that can read the four projection weights in place: with pad0 != 0 the producer fills each 64-row weight block from
+// tm_wq = {W_l, W_lg, W_r, W_rg} (each 2D [C_Z (k)][C_H (n)] bf16, box [64][32], SW128) instead of the host-packed tm_w.
+// A block's 32 gate rows land in its first 4 KB of every 8 KB k chunk and its 32 projection rows in the second (the pack's layout).
+struct K1ParamsQ : K1Params {
+  CUtensorMap tm_wq[4];
+};
+template <class P> struct k1_has_wq { static constexpr bool value = false; };
+template <> struct k1_has_wq<K1ParamsQ> { static constexpr bool value = true; };
+
 struct K3Params {
   CUtensorMap tm_z;      // 3D z [C_Z][N (j)][N (i)] (z dtype), box [128/esz][BJ][BI], SW128: the gate operand tile
   CUtensorMap tm_x;      // 3D X planes [Np (j)][Np (i)][C_H (ch)] bf16, box [64][1][64], SW128
@@ -524,8 +533,8 @@ TMN_DEVI void pdl_trigger() {
 // per-CTA timeline probes (TMN_CTA_TS): slot 0 start, 1 first tile ready (consumer), 2 last tile start, 3 end (clock64); 4 start, 5 end (globaltimer); 6 n_iter
 TMN_DEVI unsigned long long tmn_globaltimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
 #define TMN_TS(buf, slot, val) do { if (TMN_CTA_TS && (buf)) reinterpret_cast<unsigned long long*>(buf)[blockIdx.x * 8 + (slot)] = (val); } while (0)
-template <class G, bool HAS_MASK, int LNM, bool SAVE, bool EMITX = false, int MT = 0>
-TMN_DEVI void k1_body(const K1Params& p) {
+template <class G, bool HAS_MASK, int LNM, bool SAVE, bool EMITX = false, int MT = 0, class P = K1Params>
+TMN_DEVI void k1_body(const P& p) {
   constexpr int CZ = G::CZ, KS = G::KS, NSLOT = G::NSLOT, SPB = G::SPB, NBLK = G::NBLK, SKCH = G::SKCH, SLOT_BYTES = G::SLOT_BYTES, BI = G::BI, BJ = G::BJ;
   static_assert(!(G::ZF32 && LNM == 2), "the reference-order LayerNorm is defined on bf16 inputs");
   extern __shared__ __align__(1024) uint8_t smem[];
@@ -556,7 +565,13 @@ TMN_DEVI void k1_body(const K1Params& p) {
     for (int s = 0; s < NSLOT; ++s) { mbar_init(barW_full + s, 1); mbar_init(barW_empty + s, 4 * G::NCWG); }
     if (K1OFF > 0) mbar_init(barGo, 1);
     fence_barrier_init();
-    tma_prefetch_desc(&p.tm_z); tma_prefetch_desc(&p.tm_w);
+    tma_prefetch_desc(&p.tm_z);
+    bool wq = false;
+    if constexpr (k1_has_wq<P>::value) {
+      wq = p.pad0 != 0;
+      if (wq) for (int q = 0; q < 4; ++q) tma_prefetch_desc(&p.tm_wq[q]);
+    }
+    if (!wq) tma_prefetch_desc(&p.tm_w);
     if (TMN_K1_BULK_STORE) tma_prefetch_desc(&p.tm_ab);
   }
   __syncthreads();
@@ -583,8 +598,23 @@ TMN_DEVI void k1_body(const K1Params& p) {
         if (u > 0) mbar_wait(barW_empty + s, (u - 1) & 1);
         mbar_arrive_expect_tx(barW_full + s, SLOT_BYTES);
         const int hb = w_iter % per_tile, b = hb / SPB, h = hb % SPB;
+        bool in_place = false;
+        if constexpr (k1_has_wq<P>::value) in_place = p.pad0 != 0;
+        if (in_place) {
+          if constexpr (k1_has_wq<P>::value) {
+            const int side = 32 * b >= G::CH, row = 32 * b - side * G::CH;   // block b = rows [32 b, 32 b + 32) of cat(left, right)
 #pragma unroll
-        for (int kk = 0; kk < SKCH; ++kk) tma_load_2d(sW + s * SLOT_BYTES + kk * 8192, &p.tm_w, barW_full + s, (h * SKCH + kk) * 64, 64 * b);
+            for (int kk = 0; kk < SKCH; ++kk) {
+              uint8_t* dst = sW + s * SLOT_BYTES + kk * 8192;
+              const int k0 = (h * SKCH + kk) * 64;
+              tma_load_2d(dst, &p.tm_wq[2 * side + 1], barW_full + s, k0, row);
+              tma_load_2d(dst + 4096, &p.tm_wq[2 * side], barW_full + s, k0, row);
+            }
+          }
+        } else {
+#pragma unroll
+          for (int kk = 0; kk < SKCH; ++kk) tma_load_2d(sW + s * SLOT_BYTES + kk * 8192, &p.tm_w, barW_full + s, (h * SKCH + kk) * 64, 64 * b);
+        }
       }
     }
     __syncwarp();

@@ -20,14 +20,14 @@
 #define TMN_K1_MT(M) ((M) == 2 ? 1 : (M) == 3 ? 2 : 0)   // name field m: 0 no mask | 1 fp32 | 2 bf16 | 3 uint8/bool (TMN_MASK_TEMPLATE instantiations)
 #define TMN_K1(CZ, CH, ZF, ZC, BI, BJ, NS, SK, M, L, V)                                                                              \
   extern "C" __global__ void TMN_K1_LB(BI, BJ)                                                                                   \
-  tmn_k1_z##CZ##_h##CH##_##ZC##_t##BI##x##BJ##_s##NS##k##SK##_m##M##_l##L##_v##V(const __grid_constant__ tmn::K1Params p) {     \
-    tmn::sm90::k1_body<tmn::K1Cfg<CZ, CH, ZF, BI, BJ, NS, SK>, (M) != 0, TMN_K1_LNM_OF(L), (V) != 0, false, TMN_K1_MT(M)>(p);                  \
+  tmn_k1_z##CZ##_h##CH##_##ZC##_t##BI##x##BJ##_s##NS##k##SK##_m##M##_l##L##_v##V(const __grid_constant__ tmn::K1ParamsQ p) {     \
+    tmn::sm90::k1_body<tmn::K1Cfg<CZ, CH, ZF, BI, BJ, NS, SK>, (M) != 0, TMN_K1_LNM_OF(L), (V) != 0, false, TMN_K1_MT(M), tmn::K1ParamsQ>(p);                  \
   }
 // fp32 z, also emitting bf16(LN_in(z)) rows for a pre-normalised K3 (name field x1)
 #define TMN_K1X(CZ, CH, BI, BJ, NS, SK, M)                                                                                           \
   extern "C" __global__ void TMN_K1_LB(BI, BJ)                                                                                   \
-  tmn_k1_z##CZ##_h##CH##_f_t##BI##x##BJ##_s##NS##k##SK##_m##M##_l1_v0_x1(const __grid_constant__ tmn::K1Params p) {            \
-    tmn::sm90::k1_body<tmn::K1Cfg<CZ, CH, true, BI, BJ, NS, SK>, (M) != 0, 1, false, true>(p);                                    \
+  tmn_k1_z##CZ##_h##CH##_f_t##BI##x##BJ##_s##NS##k##SK##_m##M##_l1_v0_x1(const __grid_constant__ tmn::K1ParamsQ p) {           \
+    tmn::sm90::k1_body<tmn::K1Cfg<CZ, CH, true, BI, BJ, NS, SK>, (M) != 0, 1, false, true, 0, tmn::K1ParamsQ>(p);                                    \
   }
 #define TMN_MODE_b 0
 #define TMN_MODE_f 1
@@ -231,4 +231,5 @@ extern "C" __global__ void tmn_info(int* out) {
   if (threadIdx.x != 0) return;
   out[0] = (int)sizeof(tmn::K1Params); out[1] = (int)offsetof(tmn::K1Params, tm_w); out[2] = (int)offsetof(tmn::K1Params, mask); out[3] = (int)offsetof(tmn::K1Params, N); out[4] = (int)offsetof(tmn::K1Params, eps);
   out[5] = (int)sizeof(tmn::K3Params); out[6] = (int)offsetof(tmn::K3Params, zres); out[7] = (int)offsetof(tmn::K3Params, gamma_in); out[8] = (int)offsetof(tmn::K3Params, N); out[9] = (int)offsetof(tmn::K3Params, eps);
+  out[10] = (int)sizeof(tmn::K1ParamsQ); out[11] = (int)offsetof(tmn::K1ParamsQ, tm_wq);
 }

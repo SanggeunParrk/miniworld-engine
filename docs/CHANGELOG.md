@@ -6,6 +6,26 @@ here. Format loosely follows
 
 The public surface is enforced by `tests/compile/test_public_api.py`.
 
+## [Unreleased]
+
+### Changed
+
+- H100 TriMul inference K1 reads row-major `W_l, W_lg, W_r, W_rg` in place (`K1ParamsQ`, four
+  TMA maps) instead of a per-call packed `w1`: no weight-pack kernels on bidirectional D64 and
+  single-direction D64–384; output bitwise-identical. The column-major D128 bidirectional storage
+  keeps the pack (a transposed-B K1 was slower and was not kept).
+- H100 D128 training B7 (`B7_WT_MN`, mode bit 64) reads row-major front weights as MN-major
+  tiles, so no transposed copies are made when the weights arrive row-major; the default
+  column-major storage is unchanged.
+- `docs/gpus/` is one folder per GPU (`<gpu>/<gpu>.md` module-level completion tables,
+  `<gpu>/<module>/<module>.md` kernel-level tables and flow figures); `h100-dispatch.md` is now
+  `h100/dispatch.md`. Page format: `docs/gpus/README.md`, `docs/gpus/template.md`.
+
+### Added
+
+- `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
+  writes) from a JSON spec.
+
 ## [2.2.0] - 2026-09-28
 
 Two tiers per op: hand-written CUDA where it exists, a Triton fallback everywhere else, plus the
@@ -75,7 +95,7 @@ GPU qualification of this release is pending.
   replay on H100 (was 0.69-0.75x). Its retained activations are larger than the old port's
   (D512/L768 11.3 GiB) and equal to or below the Triton path's. cuBLASLt algorithms frozen under 12.8.4 are matched by configuration against the
   running cuBLASLt (`lt_selection.json`), falling back to the first heuristic with a warning.
-  See docs/gpus/h100-dispatch.md.
+  See docs/gpus/h100/dispatch.md.
 - `trimul_h100_training_widths` defaults to `(128, 256, 384, 512)`; D64 bidirectional training
   runs on Triton (its CUDA port measured 0.61x of Triton in graph replay).
 - The H100 training opaque ops are renamed (`trimul_h100_train_{fwd,bwd}_wide_port`,
@@ -133,7 +153,7 @@ GPU qualification of this release is pending.
   residuals and `torch.compile` boundaries.
 - Make explicit backend comparison policy consistent for Transition.
 - Ship selected CUDA sources/includes and write compilation products only to
-  the user cache. [Dispatch contracts](gpus/h100-dispatch.md).
+  the user cache. [Dispatch contracts](gpus/h100/dispatch.md).
 
 ## [2.0.0] - 2026-09-23
 

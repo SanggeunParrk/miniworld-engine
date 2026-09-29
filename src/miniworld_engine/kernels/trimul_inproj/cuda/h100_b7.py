@@ -34,6 +34,7 @@ def kernel_plan(n, clusters, mode):
         "-DB7_PREFETCH=" + str(mode & 3),
         "-DB7_CONSUMERS=" + str(cfg_values.consumers),
         "-DB7_REUSE_DP=" + str(cfg_values.reuse_dp),
+        "-DB7_WT_MN=" + str(bool(mode & 64) * 1),
         "-std=c++17",
         "-O3",
         "-arch=sm_90a",
@@ -66,11 +67,20 @@ def kernel_plan(n, clusters, mode):
     return cfg_values
 
 
+def front_row_major(leaves):
+    """The four front weights (W_l, W_lg, W_r, W_rg) row-major [256, 128]: B7 then reads them in place as MN-major tiles
+    (mode bit 64) and no transposed copies are made; the column-major storage keeps reading W^T views as K-major tiles."""
+    return all(w.stride() == (w.shape[1], 1) for w in leaves[1:5])
+
+
 class Plan:
     def __init__(self, d, dy, dl, dr, dg, xn, clusters=10, mode=52):
         R = T.SOURCES / ("b7_384" if d["n"] == 384 else "b7_768")
         self.d = d
         self.xn = xn
+        if front_row_major(d["leaves"]):
+            mode |= 64
+        self.mode = mode
         static = kernel_plan(d["n"], clusters, mode)
         self.hwcluster, self.multicast, self.rings = static.hwcluster, static.multicast, static.rings
         self.clusters, self.consumers = static.clusters, static.consumers
@@ -111,6 +121,7 @@ class Plan:
         )
         row = lambda t: tm(t, [64, 64], [128, m], [256])
         wg = d["wt"][4]
+        lv = d["leaves"]
         self.params = L.Struct.fixed("h100_b7:1",
             [
                 row(self.xn),
@@ -122,10 +133,11 @@ class Plan:
                 row(d["x"]),
                 row(dy),
                 row(self.dx),
-                *[
-                    tm(w, [64, 128], [256, 128], [512])
-                    for w in (d["wt"][1], d["wt"][0], d["wt"][3], d["wt"][2])
-                ],
+                *(
+                    [tm(w, [64, 64], [128, 256], [256]) for w in (lv[2], lv[1], lv[4], lv[3])]
+                    if self.mode & 64 else
+                    [tm(w, [64, 128], [256, 128], [512]) for w in (d["wt"][1], d["wt"][0], d["wt"][3], d["wt"][2])]
+                ),
                 L.tensor_map(
                     self.ring.view(torch.bfloat16),
                     [256, 8, 2],

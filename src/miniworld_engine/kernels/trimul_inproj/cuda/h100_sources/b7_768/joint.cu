@@ -123,7 +123,13 @@ TMN_DEVI void source_compute(const Params& p,uint8_t* sm,uint64_t* bar){
  }
  store_pair_dw(p,dw,cid+groups,rank,sm);
 }
-TMN_DEVI void input128(float (&d)[64],uint64_t a,uint64_t b,int acc){asm volatile("{ .reg .pred p;setp.ne.b32 p, %66, 0;wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63},%64,%65,p,1,1,1,0; }":"+f"(d[0]),"+f"(d[1]),"+f"(d[2]),"+f"(d[3]),"+f"(d[4]),"+f"(d[5]),"+f"(d[6]),"+f"(d[7]),"+f"(d[8]),"+f"(d[9]),"+f"(d[10]),"+f"(d[11]),"+f"(d[12]),"+f"(d[13]),"+f"(d[14]),"+f"(d[15]),"+f"(d[16]),"+f"(d[17]),"+f"(d[18]),"+f"(d[19]),"+f"(d[20]),"+f"(d[21]),"+f"(d[22]),"+f"(d[23]),"+f"(d[24]),"+f"(d[25]),"+f"(d[26]),"+f"(d[27]),"+f"(d[28]),"+f"(d[29]),"+f"(d[30]),"+f"(d[31]),"+f"(d[32]),"+f"(d[33]),"+f"(d[34]),"+f"(d[35]),"+f"(d[36]),"+f"(d[37]),"+f"(d[38]),"+f"(d[39]),"+f"(d[40]),"+f"(d[41]),"+f"(d[42]),"+f"(d[43]),"+f"(d[44]),"+f"(d[45]),"+f"(d[46]),"+f"(d[47]),"+f"(d[48]),"+f"(d[49]),"+f"(d[50]),"+f"(d[51]),"+f"(d[52]),"+f"(d[53]),"+f"(d[54]),"+f"(d[55]),"+f"(d[56]),"+f"(d[57]),"+f"(d[58]),"+f"(d[59]),"+f"(d[60]),"+f"(d[61]),"+f"(d[62]),"+f"(d[63]):"l"(a),"l"(b),"r"(acc));}
+#ifndef B7_WT_MN
+#define B7_WT_MN 0
+#endif
+#define B7_STR_(x) #x
+#define B7_STR(x) B7_STR_(x)
+// dX GEMM: A = dL/dR tiles (MN-major), B = the four front weights: W^T tiles (K-major, B7_WT_MN 0) or row-major W tiles (MN-major, 1)
+TMN_DEVI void input128(float (&d)[64],uint64_t a,uint64_t b,int acc){asm volatile("{ .reg .pred p;setp.ne.b32 p, %66, 0;wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63},%64,%65,p,1,1,1," B7_STR(B7_WT_MN) "; }":"+f"(d[0]),"+f"(d[1]),"+f"(d[2]),"+f"(d[3]),"+f"(d[4]),"+f"(d[5]),"+f"(d[6]),"+f"(d[7]),"+f"(d[8]),"+f"(d[9]),"+f"(d[10]),"+f"(d[11]),"+f"(d[12]),"+f"(d[13]),"+f"(d[14]),"+f"(d[15]),"+f"(d[16]),"+f"(d[17]),"+f"(d[18]),"+f"(d[19]),"+f"(d[20]),"+f"(d[21]),"+f"(d[22]),"+f"(d[23]),"+f"(d[24]),"+f"(d[25]),"+f"(d[26]),"+f"(d[27]),"+f"(d[28]),"+f"(d[29]),"+f"(d[30]),"+f"(d[31]),"+f"(d[32]),"+f"(d[33]),"+f"(d[34]),"+f"(d[35]),"+f"(d[36]),"+f"(d[37]),"+f"(d[38]),"+f"(d[39]),"+f"(d[40]),"+f"(d[41]),"+f"(d[42]),"+f"(d[43]),"+f"(d[44]),"+f"(d[45]),"+f"(d[46]),"+f"(d[47]),"+f"(d[48]),"+f"(d[49]),"+f"(d[50]),"+f"(d[51]),"+f"(d[52]),"+f"(d[53]),"+f"(d[54]),"+f"(d[55]),"+f"(d[56]),"+f"(d[57]),"+f"(d[58]),"+f"(d[59]),"+f"(d[60]),"+f"(d[61]),"+f"(d[62]),"+f"(d[63]):"l"(a),"l"(b),"r"(acc));}
 TMN_DEVI void consumer_producer(const Params& p,uint8_t* sm,uint64_t* bar){
  int rank=blockIdx.x%GROUP-SOURCES,cid=blockIdx.x/GROUP,groups=gridDim.x/GROUP,round=0;
  if(threadIdx.x>=64)return;
@@ -149,7 +155,13 @@ TMN_DEVI void consumer_producer(const Params& p,uint8_t* sm,uint64_t* bar){
   for(int batch=0;batch<8;++batch){int ws=batch%2;
    if(batch>=2)mbar_wait(bar+6+ws,((batch/2)-1)&1);
    mbar_arrive_expect_tx(bar+2+ws,32768);
+#if B7_WT_MN
+   // row-major W [ch][cz]: stage = 64 k (ch) rows as two [64 k][64 n] MN-major tiles (n = cz 0..63 | 64..127)
+   for(int sub=0;sub<2;++sub){int stage=batch*2+sub;uint8_t* dst=sm+32768+ws*32768+sub*16384;
+    tma_load_2d(dst,p.wt+stage/4,bar+2+ws,0,(stage%4)*64);tma_load_2d(dst+8192,p.wt+stage/4,bar+2+ws,64,(stage%4)*64);}
+#else
    for(int sub=0;sub<2;++sub){int stage=batch*2+sub;tma_load_2d(sm+32768+ws*32768+sub*16384,p.wt+stage/4,bar+2+ws,(stage%4)*64,0);}
+#endif
   }
   for(int ws=0;ws<2;++ws)mbar_wait(bar+6+ws,1);
   mbar_arrive_expect_tx(bar+12,65536);
@@ -181,7 +193,11 @@ TMN_DEVI void consumer_compute(const Params& p,uint8_t* sm,uint64_t* bar,const f
    mbar_wait(bar+24+slot,(batch/2)&1);mbar_wait(bar+2+ws,(batch/2)&1);
    for(int sub=0;sub<2;++sub){int stage=batch*2+sub;uint8_t* ds=sm+slot*16384+sub*8192;
     static_for<4>([&](auto kk){constexpr int k=decltype(kk)::value;
+#if B7_WT_MN
+     input128(acc,smem_desc(smem_u32(ds+k*2048),16,1024,1),smem_desc(smem_u32(sm+32768+ws*32768+sub*16384+k*2048),8192,1024,1),stage>0||k>0);
+#else
      input128(acc,smem_desc(smem_u32(ds+k*2048),16,1024,1),smem_desc(smem_u32(sm+32768+ws*32768+sub*16384+k*32),16,1024,1),stage>0||k>0);
+#endif
     });
    }
    wgmma_commit();wgmma_wait<0>();fence_regs(acc);allsync();

@@ -525,10 +525,10 @@ def unit_name(arch, cz, ch):
 
 
 K1_PARAMS_SIZE, K3_PARAMS_SIZE = (
-    512,
+    1024,
     768,
-)  # sizeof(K1Params), sizeof(K3Params) incl. the plane-store / output-store tensor maps (tmn_info reports the device-side layout)
-# K1Params: 2 maps (256) + 6 pointers (48) + 7 int + eps (32) + 4 int (16) = 352 -> 384 with the 64-byte struct alignment
+)  # sizeof(K1ParamsQ), sizeof(K3Params) incl. the plane-store / output-store tensor maps (tmn_info reports the device-side layout)
+# K1ParamsQ: K1Params (3 maps + 6 pointers + 12 scalars -> 512 with the 64-byte alignment) + 4 in-place weight maps (512)
 
 
 class Kernels:
@@ -649,6 +649,32 @@ class Kernels:
         return tm
 
     # ---------------------------------------------------------------- K1
+    @staticmethod
+    def _k1_weight_mode(w, cz, ch):
+        """0: packed w1; 1: the four weights row-major [ch, cz], read in place."""
+        if "wq" not in w:
+            return 0
+        quad = w["wq"]
+        if any(t.dtype != torch.bfloat16 or tuple(t.shape) != (ch, cz) for t in quad):
+            raise ValueError("in-place K1 weights must be bf16 [ch, cz]")
+        if any(t.stride() != (cz, 1) for t in quad):
+            raise ValueError("in-place K1 weights must be row-major")
+        return 1
+
+    def _k1_weight_maps(self, cache, w, cz, ch, zero_tm):
+        """(tm_w, tm_wq[4]): the packed-w1 map, or the four in-place maps {W_l, W_lg, W_r, W_rg} (box [64 k][32 n], 128-B swizzle)."""
+        if self._k1_weight_mode(w, cz, ch) == 0:
+            tm_w = self.tmap(cache, ("w1", cz, ch), w["w1"], [64, 64], [cz, 4 * ch], [cz * 2], "128B", "256B")
+            return tm_w, [zero_tm] * 4
+        maps = [self.tmap(cache, ("wq", q, cz, ch), t, [64, 32], [cz, ch], [cz * 2], "128B", "256B")
+                for q, t in enumerate(w["wq"])]
+        return zero_tm, maps
+
+    @staticmethod
+    def _k1_weight_sig(w):
+        ws = tuple(t.data_ptr() for t in w["wq"]) if "wq" in w else (w["w1"].data_ptr(),)
+        return ws + (w["ln_in_w"].data_ptr(), w["ln_in_b"].data_ptr())
+
     def k1(
         self,
         z,
@@ -710,9 +736,13 @@ class Kernels:
             stats is not None,
             xz is not None,
         )
+        # w["wq"] = (W_l, W_lg, W_r, W_rg), row-major bf16 [ch, cz]: K1 reads them in place (K1ParamsQ.tm_wq, pad0 = 1) and no
+        # packed w1 exists; otherwise w["w1"] is the host-packed [4 ch, cz] block-interleaved matrix.
+        wmode = self._k1_weight_mode(w, cz, ch)   # 0 packed w1 | 1 in place (row-major)
+        plan_key = ("tmn.k1", name, N, Np, transpose, float(eps), wmode)
         ent = cache.get(
-            ("tmn.k1", name, N, Np, transpose, float(eps))
-        )  # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps);
+            plan_key
+        )  # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps, weight mode);
         # pointers / maps / the weight set are re-patched per call below
         if ent is None:
             smem = k1_smem(cz, ch, zf32, bi, bj, nslot, skch)
@@ -720,17 +750,8 @@ class Kernels:
             tiles_i, tiles_j = -(-Np // bi), -(-Np // bj)
             num_tiles = tiles_i * tiles_j
             ms_i, ms_j = (1, N) if transpose else (N, 1)
-            tm_w = self.tmap(
-                cache,
-                ("w1", cz, ch),
-                w["w1"],
-                [64, 64],
-                [cz, 4 * ch],
-                [cz * 2],
-                "128B",
-                "256B",
-            )
             zero_tm = L.TensorMap(b"\0" * 128)
+            tm_w, tm_wq = self._k1_weight_maps(cache, w, cz, ch, zero_tm)
             st = L.Struct(
                 [
                     zero_tm,
@@ -752,8 +773,9 @@ class Kernels:
                     float(eps),
                     int(ms_i * cz),
                     int(ms_j * cz),
+                    int(wmode),
                     0,
-                    0,
+                    *tm_wq,
                 ]
             )
             pack = L.ArgPack([st])
@@ -767,11 +789,7 @@ class Kernels:
                 1,
                 1,
             )
-            wsig = (
-                w["w1"].data_ptr(),
-                w["ln_in_w"].data_ptr(),
-                w["ln_in_b"].data_ptr(),
-            )
+            wsig = self._k1_weight_sig(w)
             ent = [
                 pack,
                 k,
@@ -785,25 +803,19 @@ class Kernels:
                 wsig,
                 (nthr, 1, 1),
             ]  # + last-patched (z map, mask ptr, ab ptr, stats ptr, xz ptr, weight signature), block
-            cache[("tmn.k1", name, N, Np, transpose, float(eps))] = ent
+            cache[plan_key] = ent
         pack, k, grid, smem, block = ent[0], ent[1], ent[2], ent[3], ent[10]
-        wsig = (w["w1"].data_ptr(), w["ln_in_w"].data_ptr(), w["ln_in_b"].data_ptr())
+        wsig = self._k1_weight_sig(w)
         if (
             ent[9] != wsig
         ):  # another weight set through the same cache (one cache serving every layer): re-point the weight
-            tm_w = self.tmap(
-                cache,
-                ("w1", cz, ch),
-                w["w1"],
-                [64, 64],
-                [cz, 4 * ch],
-                [cz * 2],
-                "128B",
-                "256B",
-            )  # stream and the LN_in affine
+            # stream(s) and the LN_in affine
+            tm_w, tm_wq = self._k1_weight_maps(cache, w, cz, ch, L.TensorMap(b"\0" * 128))
             pack.set_tensor_map(0, tm_w, field=1)
-            pack.set_ptr(0, wsig[1], field=4)
-            pack.set_ptr(0, wsig[2], field=5)
+            for q, tm in enumerate(tm_wq):
+                pack.set_tensor_map(0, tm, field=21 + q)
+            pack.set_ptr(0, w["ln_in_w"].data_ptr(), field=4)
+            pack.set_ptr(0, w["ln_in_b"].data_ptr(), field=5)
             ent[9] = wsig
         s_fast, s_slow = cz * esz, N * cz * esz
         if transpose:
