@@ -252,6 +252,27 @@ class Settings:
     #: Override the trimul implementation choice. Formerly MINIWORLD_TRIMUL_IMPL.
     trimul_impl: str | None = None
 
+    # ---- SWA atom DiT fused block (kernels/swa_dit) ----------------------------------------- #
+    # Moved from team-gm (commit 14f2c73), whose environment switches these replace one for one, with the same
+    # defaults. `engine_backend="triton"` turns every *_cuda stage off as well.
+    #: Let `modules.swa_dit.SWADiTBlock` (implementation other than pytorch) run the fused block when
+    #: `kernels.swa_dit.interface.refusal` accepts the call (bf16 or fp32, d_atom 128 / 4 heads, window 128, SwiGLU hidden 256);
+    #: off keeps the per-op path. Formerly team-gm's opt-in MINIWORLD_SWA_FUSED on SWAAtomTransformer.
+    swa_dit_fused: bool = True
+    #: Serve the qkvg forward (RMSNorm + adaLN + Q/K/V/gate projections + q/k-norm + RoPE) with the hand-CUDA sm_90a
+    #: wgmma kernel on sm_90; off (or any other card, or a failed build) takes the Triton kernel. Formerly SWA_QKVG_FWD.
+    swa_dit_qkvg_fwd_cuda: bool = True
+    #: Same for the out-projection + gated residual + SwiGLU FFN forward. Formerly SWA_FFN_FWD.
+    swa_dit_ffn_fwd_cuda: bool = True
+    #: Same for the FFN backward (used with `swa_dit_ffn_dw="mat"` only). Formerly SWA_FFN_BWD.
+    swa_dit_ffn_bwd_cuda: bool = True
+    #: FFN weight gradients: "mat" materialises [da | db] and h and takes dW from cuBLAS; "fused" recomputes them in
+    #: the `_swa_ffn_dw_kernel` Triton kernel (correct, slower in Triton: 255 registers). Formerly SWA_FFN_DW.
+    swa_dit_ffn_dw: Literal["mat", "fused"] = "mat"
+    #: dtype of dq1, the gradient handed from the FFN half of the backward to the attention half, on the Triton FFN
+    #: backward (the hand-CUDA one writes bf16). Formerly SWA_DQ1.
+    swa_dit_dq1: Literal["bf16", "fp32"] = "bf16"
+
     # ---- diagnostics ----------------------------------------------------------------------- #
     #: jaxtyped+beartype decoration on annotated functions. Off by default: it is a per-call cost.
     #: Formerly SHOULD_TYPECHECK.

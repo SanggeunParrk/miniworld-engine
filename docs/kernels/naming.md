@@ -22,6 +22,9 @@
     triangle_attention   Triangle Attention
     qk_norm_rope         Fused Q/K RMSNorm and rotary preprocessing
     swa_gate_out         SWA sigmoid gate multiplication with output projection
+    swa_dit              Fused ESMFold2 SWA atom DiT block (kernels/swa_dit): RMSNorm+adaLN -> QKVG 투영 +
+                         q/k RMSNorm + RoPE (`inproj`), 슬라이딩 윈도 어텐션 (`softmax`, `dq`, `dkdv`),
+                         sigmoid 게이트 + out-proj + 게이트 residual (`output`), SwiGLU FFN (`swiglu`)
     rope                 Rotary position embedding (3D-RoPE for the SWA atom block)
     augmented_attention  Augmented (atom) Attention
     bias_only_attention  Bias-only Attention

@@ -1,0 +1,5 @@
+axis,values
+BM,64 128
+BN,32 64
+num_warps,4 8
+num_stages,1 2 3

@@ -27,6 +27,35 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- SWA atom DiT fused block moved from team-gm 14f2c73 ("research(swa): preserve opt-in fused atom
+  transformer work"; copied from team-gm 4fafa83, `swa_fused_triton.py` + `swa_cuda/`) into the new
+  kernel family `kernels/swa_dit`: the ESMFold2 `SWAAtomBlock` (RMSNorm + adaLN-Zero, QKVG
+  projections + q/k RMSNorm + 3D RoPE, window-128 attention with `seqused` masking, sigmoid gate +
+  out-projection, SwiGLU FFN) as 9 autotuned Triton kernels (3 forward, 6 backward) and 3 hand-CUDA
+  sm_90a bf16-wgmma stages (qkvg forward, out-projection + FFN forward, FFN backward), bf16,
+  d_atom 128 / 4 heads / SwiGLU hidden 256. Kernel bodies and CUDA sources are unchanged; the
+  autotune key is `atom_key(S, ...)` instead of team-gm's log2(rows), `configs/default` holds exactly
+  the configs team-gm's decorators enumerated, the CUDA stages JIT-build under
+  `MINIWORLD_ENGINE_JIT_ROOT` and fall back to Triton, and team-gm's `SWA_*` environment switches are
+  `settings.swa_dit_*` (same defaults). Public: `kernels.swa_dit_block`,
+  `kernels.swa_dit_hoist_modulation` (and `kernels.swa_dit.interface.refusal`). `SWADiTBlock`
+  (implementation other than pytorch) now runs the fused block where `refusal` accepts the call
+  (`settings.swa_dit_fused=False` keeps the per-op path), and `SWADiTBlock.forward_hoisted` takes the
+  augment-invariant conditioning [B, S, d_cond] to compute the modulation once per batch element.
+  Registry: 12 rows (`swa_dit_*`), drivers, checks, fp32 reference. Tests:
+  `test_swa_dit_fused_gpu.py`, `test_swa_dit_fused_dispatch.py`.
+- `swa_dit` keys every Triton launch on the augment count as well: `atom_key(S, A=N // B, C[, NHID])`,
+  A = 1 included (MiniWorld's input feature embedder calls with num_aug=1, diffusion with 48 in
+  training and 5 samples at evaluation); the drivers tune A = 1 / 48 (and 5 for the inference
+  forward). The bf16 qkvg backward's config sets gained SP = 1 tiles for A = 1.
+- fp32 fused SWA atom DiT block: `swa_dit_block` dispatches on the activation dtype; all-fp32 calls
+  (MiniWorld v1.3's fp32 atom transformer) run 5 new Triton kernels (`swa_dit_*_fp32_triton`,
+  `triton/forward_fp32.py`, `backward_fp32.py`; Triton only) around the shared bf16-operand window
+  attention, as the per-op path's FlashAttention-4 does. Residual stream, norms, modulation, RoPE,
+  gates and SwiGLU are fp32; projections tf32 and the FFN GEMMs tf32x3 (measured: Triton's tf32
+  truncates, and only the FFN's truncation showed). Accuracy against the fp32 reference matches the
+  per-op fp32 path; fwd+bwd of 3 blocks at N=1, S=4096 (H100, CUDA graph) 0.87 ms against 1.83 ms.
+  `refusal` accepts all-bf16 or all-fp32 and refuses mixed dtypes.
 - `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
   writes) from a JSON spec.
 - H100 single-direction TriMul training in CUDA at D64 (`h100_uni_d64_training`, the

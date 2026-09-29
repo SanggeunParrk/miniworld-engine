@@ -60,7 +60,9 @@ where = ["src"]
 # directory of a package that IS found -- so a kernel family's optimization log shipped in the
 # wheel (20 files) until this excluded it. The log is a record of how a kernel got here; a
 # consumer installs the kernel, not its history.
-exclude = ["*.notes", "*.notes.*", "*.autotune.plans", "*.autotune.plans.*"]
+# `swa_dit.cuda.gen` holds the generator script of the `wgmma_bf16.inc` the CUDA sources include: the
+# .inc ships (package data of the parent package, `**/*.inc`), the build-time script does not.
+exclude = ["*.notes", "*.notes.*", "*.autotune.plans", "*.autotune.plans.*", "*.swa_dit.cuda.gen"]
 
 [tool.setuptools.package-data]
 # Ship the non-.py assets the RUNTIME needs in a non-editable (pip / wheel) install. Editable
@@ -236,6 +238,8 @@ ban-relative-imports = "all"
 # as the originals are not held to this repo's standards.
 "src/miniworld_engine/kernels/**/triton/*.py" = ["ALL"]
 "src/miniworld_engine/kernels/**/cuda/*.py" = ["ALL"]
+# The vendored generator of swa_dit's wgmma_bf16.inc (team-gm 14f2c73), kept verbatim beside its output.
+"src/miniworld_engine/kernels/**/cuda/gen/*.py" = ["ALL"]
 # dtv1 is the vendored perf/trimul fused kernel kept as a baseline.
 "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
 "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1_bidir.py" = [

@@ -35,6 +35,8 @@ _CONTRACT = frozenset(
         "fused_gate_out",
         "sigmoid_gate_fused",
         "layernorm_kernel",
+        "swa_dit_block",
+        "swa_dit_hoist_modulation",
         "triton_augmented_attention_pair_bias",
         "triton_bias_only_attention",
         "triton_layernorm",

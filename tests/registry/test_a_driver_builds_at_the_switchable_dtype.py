@@ -31,6 +31,9 @@ ALLOWED = {
     "adaln.py:FP32": "a LayerNorm statistic (mean/rstd) is fp32 whatever the activation is",
     "triangle_multiplication.py:torch.float32": "sigma is fp32 by definition, not an activation",
     "rope.py:torch.float32": "cos/sin are fp32 angle tensors (rotation precision), not activations",
+    "swa_dit.py:torch.float32":
+        "cos/sin are fp32 angle tensors (rotation precision), not activations; the fused SWA block's "
+        "CUDA and Triton kernels read them as fp32 [B*S, 16] whatever the activation dtype is",
     "layernorm_linear.py:norm_affine":
         "the LN gamma/beta, fp32 in production via `primitives._Fp32ParamsMixin`: "
         "`layernorm_linear_triton_fwd` is handed a `primitives.LayerNorm` parameter, so its "

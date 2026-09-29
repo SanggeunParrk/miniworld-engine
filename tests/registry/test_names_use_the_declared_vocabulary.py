@@ -37,7 +37,7 @@ SPEC = ROOT / "docs/kernels/naming.md"
 FUNCS = ("outer_product_mean", "pair_weighted_averaging",
          "mpnn_relative_position", "mpnn_node_message", "mpnn_edge_tail",
          "mpnn_edge_dropout", "mpnn_edge_mlp", "mpnn_message",
-         "qk_norm_rope", "swa_gate_out", "rope", "layernorm_linear", "cond_transition", "trimul_outproj", "triangle_attention",
+         "qk_norm_rope", "swa_gate_out", "swa_dit", "rope", "layernorm_linear", "cond_transition", "trimul_outproj", "triangle_attention",
          "augmented_attention", "bias_only_attention", "gated_projection", "layernorm",
          # before "rmsnorm": the longer, more specific prefix, as layernorm_linear is
          "rmsnorm_adamod", "rmsnorm",

@@ -1,0 +1,6 @@
+axis,values
+SP,1 2 4 8 16
+AT,1 2 8 16 32
+NH,64 128
+num_warps,4 8
+num_stages,1 2

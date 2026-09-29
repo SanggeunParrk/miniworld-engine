@@ -110,9 +110,13 @@ def _cases():
         valid[:, -7:] = False
         attention_params = build_attention_params(
             angles.cos(), angles.sin(), valid, num_aug=augmentation)
-        yield (SWADiTBlock(128, 128, 4, implementation=OURS),
-               (_t(augmentation, length, 128), _t(augmentation, length, 128),
-                attention_params), training)
+        # The default half window (64) takes the fused block (kernels/swa_dit: swa_dit_block_fwd / _bwd); a half
+        # window the fused block does not serve keeps the per-op path, whose ops (qk_norm_rope, the flash window,
+        # swa_gate_out) this capture has to keep seeing.
+        for half_window in (64, 32):
+            yield (SWADiTBlock(128, 128, 4, half_window=half_window, implementation=OURS),
+                   (_t(augmentation, length, 128), _t(augmentation, length, 128),
+                    attention_params), training)
         angles = torch.randn(augmentation, 128, 16, device=DEV)
         yield _RMSRoPE(), (_t(augmentation, 128, 4, 32), angles.cos(), angles.sin()), training
 
@@ -153,7 +157,8 @@ def captured():
 def test_capture_saw_ops(captured):
     """Guard the guard: a capture that silently records nothing would make every check vacuous."""
     required = {"qk_norm_rope_fwd", "qk_norm_rope_bwd", "swa_gate_out_fwd",
-                "swa_atom_attention_flash_window", "rmsnorm_fwd", "rmsnorm_bwd", "rope_3d"}
+                "swa_atom_attention_flash_window", "rmsnorm_fwd", "rmsnorm_bwd", "rope_3d",
+                "swa_dit_block_fwd", "swa_dit_block_bwd"}
     if torch.cuda.get_device_capability(0) == (8, 6):
         required |= {"adaln_inference_fused", "adaln_gemm_gate", "adaln_cond_affine",
                      "adaln_dgrad_condln", "conditioned_transition_inference",
