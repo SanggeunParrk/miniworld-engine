@@ -10,7 +10,7 @@ if which == "sm100":
 else:
     SF._qkvg_fwd_cuda_ok = SF._ffn_fwd_cuda_ok = SF._ffn_bwd_cuda_ok = (lambda *x: False)
 A = 5 if mode == "inference" else 48
-q, cb, cos, sin, su, w = make(A, 8 * L)
+q, cb, cos, sin, su, w = make(A, 8 * L if L < 1000 else L)
 W = ("wqkv", "wg", "wo", "wu", "wd")
 train = mode == "training"
 if train:
