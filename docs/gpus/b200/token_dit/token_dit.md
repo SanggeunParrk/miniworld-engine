@@ -11,7 +11,13 @@ SwiGLU transition; d_single 768, d_cond 384, d_pair 128, 16 heads x 48) on B200;
 `/NHNHOME/WORKSPACE/26mohw002_A/psk6950/mw-dit`. In the tables, **CUDA†** = sm_100a hand CUDA from that branch,
 **Triton†** = Triton from that branch; what this repo's dispatch runs today is Triton for every shape (see b200.md).
 "미검증" = the kernel accepts the shape (L % 128 == 0) but it has not been run there. fp32 has no B200 path (the
-sm_100a cores are bf16 only). cache build ✓: cubins are built by `build.sh`, the row kernels have fixed configs.
+sm_100a cores are bf16 only).
+cache build: nothing on the branch uses this repo's persisted autotune cache (`miniworld-engine build`). ✓ where
+nothing needs one: the cores are cubins built by `build.sh`, the training row kernels have fixed configs. ✗ for the
+inference row kernels: `@triton.autotune`, re-tuned on the first call of every process. The GEMM choices are also
+timed on first call and kept only in-process: cuBLAS vs quack per (M, N, K) and the quack SwiGLU tile config in the
+inference step (`FusedTokenDiT._mm`, `GATED_CFGS`), the quack gated forward / backward configs in training
+(`tdit/qgemm.py` `_race`).
 
 Two paths, both bf16 GEMM operands with fp32 accumulation and an fp32 residual stream:
 
@@ -40,7 +46,7 @@ Two paths, both bf16 GEMM operands with fp32 accumulation and an fp32 residual s
 |---|---|---|---|---|---|---|
 | implementation | Triton† 미검증 | Triton† 미검증 | Triton† | Triton† 미검증 | Triton† 미검증 | Triton† |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| cache build | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 GEMMs (cuBLAS; expand + SwiGLU through quack `gemm_act`) and the hoisted pair-bias GEMM are not kernel rows.
 
