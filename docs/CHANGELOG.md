@@ -56,6 +56,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   truncates, and only the FFN's truncation showed). Accuracy against the fp32 reference matches the
   per-op fp32 path; fwd+bwd of 3 blocks at N=1, S=4096 (H100, CUDA graph) 0.87 ms against 1.83 ms.
   `refusal` accepts all-bf16 or all-fp32 and refuses mixed dtypes.
+- B200 (sm_100a) hand-CUDA TriMul for both modules (bidirectional and one direction), D64 / D128 / D256 / D384 /
+  D512, inference and training (`kernels/trimul_inproj/cuda/b200_{infer,train,bidir}.py`, `b200_sources/`: k1w front ->
+  cuBLAS contractions -> k3g (D <= 128) or k3w (D >= 256, LayerNorms folded into the output GEMMs); training backward
+  b1s / b1g -> contraction grads -> b7m / b7g at D64 / D128 one direction, a cuBLAS + memory-kernel composite at D >= 256,
+  and B1r / B7r for D128 bidirectional), dispatched by `integrations/trimul_b200.py`. LayerNorm-parameter gradients
+  are fixed-order sums (bit-identical across runs). With a CUDA graph it is 1.3-3.1x the fastest of PyTorch compiled /
+  cuEquivariance 0.12 in inference and 1.2-3.0x in training (`docs/gpus/b200/trimul/trimul.md`).
 - `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
   writes) from a JSON spec.
 - H100 single-direction TriMul training in CUDA at D64 (`h100_uni_d64_training`, the

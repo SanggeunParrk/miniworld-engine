@@ -1,0 +1,114 @@
+"""B200 (sm_100a) TriMul inference for every width D = 64 / 128 / 256 / 384 / 512, bidirectional or one direction, bf16, B=1.
+
+Front (every D): ``k1w`` -- input LN + gated projections + mask -> channel-major planes (tcgen05; D <= 128 computes the LN
+statistics in-kernel, D >= 256 takes them from ``k1w_stats``). Contractions: cuBLAS. Output:
+  D <= 128  ``k3g`` -- output LN + output projection + gate + residual in one kernel (the D128 K3 generalised over (D, H)).
+  D >= 256  ``k3w`` -- both output GEMMs on the raw operands (t as stored, channel-major; x) with the two LayerNorms folded into
+            the weights (``wide_fold_prep``) and undone per token in the epilogue from ``wide_ln_stats`` / ``k1w_stats``;
+            gate, dropout and residual in the same epilogue. Nothing between the contraction and y touches HBM but t.
+Sources: ``b200_sources/{k1w,k3g,k3w,wide_aux}.cu``. Every call owns its buffers.
+"""
+
+import functools
+from pathlib import Path
+
+import torch
+
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+_SRC = Path(__file__).with_name("b200_sources")
+WIDTHS = (64, 128, 256, 384, 512)
+EPS = 1e-5
+
+
+@functools.lru_cache(maxsize=1)
+def _ext():
+    ensure_cuda_home()
+    return load_extension(
+        name="trimul_b200_v4",
+        sources=[str(_SRC / f) for f in ("k1w.cu", "k3g.cu", "k3w.cu", "wide_aux.cu", "k1wb.cu", "wide_bwd.cu", "b1s.cu", "b7m.cu", "b1g.cu", "b7g.cu",
+                                         "bind_b200.cpp")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a"), "--expt-relaxed-constexpr",
+                           "-DNDEBUG", f"-I{_SRC}"],
+        extra_cflags=["-std=c++17", f"-I{_SRC}"], verbose=False)
+
+
+def supports(width: int, length: int, dropout: bool = False) -> bool:
+    """k1w / k3g / k3w tile 128 tokens and ln_stats 256, so L is a multiple of 16; a dropout scale on the fused D <= 128 output
+    goes through k3g's training epilogue, which groups tiles by column (L a multiple of 128)."""
+    if width not in WIDTHS or length <= 0 or length % 16:
+        return False
+    return not (dropout and width <= 128 and length % 128)
+
+
+def _front(E, wl, wlg, wr, wrg, wp=None, wpp=None):
+    """k1w reads the four front matrices in place when their columns are contiguous; otherwise (the D128 bidirectional module
+    stores them column-major) ``k1w_prep`` writes row-major copies, in the same launch as k3g's ``wpp`` when that is asked for."""
+    ws = (wl, wlg, wr, wrg)
+    wc = None if all(w.stride(1) == 1 and w.stride(0) % 8 == 0 for w in ws) else wl.new_empty((4, *wl.shape))
+    if wc is not None or wp is not None:
+        E.k1w_prep(wl, wlg, wr, wrg, wc, wp, wpp)
+    return ws if wc is None else tuple(wc.unbind(0))
+
+
+def _contract(planes, d, direction):
+    n = planes.shape[1]
+    t = planes.new_empty(((2 if direction == 0 else 1) * d, n, n))
+    if direction == 0:
+        torch.bmm(planes[:d], planes[2 * d:3 * d].transpose(1, 2), out=t[:d])
+        torch.bmm(planes[d:2 * d].transpose(1, 2), planes[3 * d:], out=t[d:])
+    elif direction == 1:
+        torch.bmm(planes[:d], planes[d:].transpose(1, 2), out=t)
+    else:
+        torch.bmm(planes[:d].transpose(1, 2), planes[d:], out=t)
+    return t
+
+
+def _inference_fake(leaves, mask, ds, direction):
+    """y only."""
+    return torch.empty_like(leaves[0])
+
+
+@opaque(fake=_inference_fake, name="trimul_b200_inference")
+def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int) -> torch.Tensor:
+    """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]; the front four may be strided), gi, bi, go, bo (fp32);
+    mask [L] bool token mask or None (k1w forms the pair mask); ds [L, D] bf16 row-dropout scale or None;
+    direction 0 = bidirectional, 1 = outgoing, 2 = incoming."""
+    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
+    n, d = x.shape[1], x.shape[-1]
+    m = n * n
+    E = _ext()
+    with torch.cuda.device(x.device):
+        x2 = x.reshape(m, d)
+        p = (4 if direction == 0 else 2) * d
+        planes = x.new_empty((p, n, n))
+        y = torch.empty_like(x)
+        if d <= 128:
+            wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
+            front = _front(E, wl, wlg, wr, wrg, wp, wpp)
+            E.k1w_forward(x2, *front, mask, None, None, gi, bi, planes, 0, EPS)
+            t = _contract(planes, d, direction)
+            del planes
+            if ds is None:
+                E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 0, None, None, None, None, 0)
+            else:   # the inference K3 has no dropout: the saving epilogue into throwaway buffers
+                mo = x.new_empty((m,), dtype=torch.float32)
+                E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 1, ds, torch.empty_like(x2), mo,
+                              torch.empty_like(mo), 0)
+            return y
+        mean = x.new_empty((m,), dtype=torch.float32)
+        rstd = torch.empty_like(mean)
+        E.k1w_stats(x2, mean, rstd, EPS)
+        E.k1w_forward(x2, *_front(E, wl, wlg, wr, wrg), mask, mean, rstd, gi, bi, planes, 0, EPS)
+        t = _contract(planes, d, direction)
+        del planes
+        mo = torch.empty_like(mean)
+        ro = torch.empty_like(mean)
+        E.wide_ln_stats(t, mo, ro, EPS)
+        wpq = torch.empty_like(wp)
+        wgq = torch.empty_like(wg)
+        vec = x.new_empty((4, d), dtype=torch.float32)
+        E.wide_fold_prep(wp, go, bo, wg, gi, bi, wpq, wgq, vec)
+        E.k3w_forward(x2, t.view(t.shape[0], m), wpq, wgq, vec, mo, ro, mean, rstd, ds, y.view(m, d), n, 0, None, None)
+    return y

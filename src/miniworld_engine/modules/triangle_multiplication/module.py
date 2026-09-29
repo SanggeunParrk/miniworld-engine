@@ -12,6 +12,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
+from miniworld_engine.integrations import trimul_b200 as _b200
 from miniworld_engine.integrations import trimul_h100 as _h100
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
@@ -159,6 +160,11 @@ class TriangleMultiplication(nn.Module):
                     out = out * _ds
                 return out + _pair_in
 
+            # Hand-CUDA B200 inference (integrations.trimul_b200 states its contract).
+            if _b200.serves_inference(self, pair, bidirectional=False, dropscale=_ds):
+                return _b200.update_inference(self, pair, mask, _ds, bidirectional=False)
+            if _b200.serves_train(self, pair, bidirectional=False):
+                return _b200.update_train(self, pair, mask, _ds, bidirectional=False)
             # Hand-CUDA H100 kernels first (integrations.trimul_h100 states their contract).
             if _h100.serves_inference(self, pair, bidirectional=False, dropscale=_ds):
                 return _h100.update_inference(self, pair, mask, bidirectional=False)
