@@ -1,0 +1,233 @@
+{
+  "128|1024": {
+    "ms": {
+      "atomic": 79.498238,
+      "persistent": 22.647808
+    },
+    "path": "persistent"
+  },
+  "128|1048576": {
+    "ms": {
+      "atomic": 1.121657,
+      "persistent": 1.146179
+    },
+    "path": "atomic"
+  },
+  "128|131072": {
+    "ms": {
+      "atomic": 0.169509,
+      "persistent": 0.176449
+    },
+    "path": "atomic"
+  },
+  "128|16384": {
+    "ms": {
+      "atomic": 156.101639,
+      "persistent": 37.496834
+    },
+    "path": "persistent"
+  },
+  "128|2048": {
+    "ms": {
+      "atomic": 0.014592,
+      "persistent": 0.021595
+    },
+    "path": "atomic"
+  },
+  "128|262144": {
+    "ms": {
+      "atomic": 0.291182,
+      "persistent": 0.299882
+    },
+    "path": "atomic"
+  },
+  "128|4096": {
+    "ms": {
+      "atomic": 0.016794,
+      "persistent": 0.022761
+    },
+    "path": "atomic"
+  },
+  "128|524288": {
+    "ms": {
+      "atomic": 0.637987,
+      "persistent": 0.650522
+    },
+    "path": "atomic"
+  },
+  "128|65536": {
+    "ms": {
+      "atomic": 0.082927,
+      "persistent": 0.087618
+    },
+    "path": "atomic"
+  },
+  "256|1048576": {
+    "ms": {
+      "atomic": 2.315823,
+      "persistent": 2.228503
+    },
+    "path": "persistent"
+  },
+  "256|131072": {
+    "ms": {
+      "atomic": 0.527104,
+      "persistent": 0.771742
+    },
+    "path": "atomic"
+  },
+  "256|16384": {
+    "ms": {
+      "atomic": 81.25235,
+      "persistent": 22.322176
+    },
+    "path": "persistent"
+  },
+  "256|262144": {
+    "ms": {
+      "atomic": 0.586547,
+      "persistent": 0.570778
+    },
+    "path": "persistent"
+  },
+  "256|524288": {
+    "ms": {
+      "atomic": 2.062507,
+      "persistent": 3.29344
+    },
+    "path": "atomic"
+  },
+  "256|65536": {
+    "ms": {
+      "atomic": 0.163249,
+      "persistent": 0.156938
+    },
+    "path": "persistent"
+  },
+  "384|1048576": {
+    "ms": {
+      "atomic": 4.273835,
+      "persistent": 5.75744
+    },
+    "path": "atomic"
+  },
+  "384|131072": {
+    "ms": {
+      "atomic": 0.60375,
+      "persistent": 0.836895
+    },
+    "path": "atomic"
+  },
+  "384|256": {
+    "ms": {
+      "atomic": 79.135742,
+      "persistent": 21.512192
+    },
+    "path": "persistent"
+  },
+  "384|262144": {
+    "ms": {
+      "atomic": 1.388845,
+      "persistent": 2.92864
+    },
+    "path": "atomic"
+  },
+  "384|512": {
+    "ms": {
+      "atomic": 141.109253,
+      "persistent": 21.689344
+    },
+    "path": "persistent"
+  },
+  "384|524288": {
+    "ms": {
+      "atomic": 3.094016,
+      "persistent": 6.916864
+    },
+    "path": "atomic"
+  },
+  "384|65536": {
+    "ms": {
+      "atomic": 0.358175,
+      "persistent": 0.702391
+    },
+    "path": "atomic"
+  },
+  "512|131072": {
+    "ms": {
+      "atomic": 1.045894,
+      "persistent": 3.124992
+    },
+    "path": "atomic"
+  },
+  "512|16384": {
+    "ms": {
+      "atomic": 77.593597,
+      "persistent": 20.059135
+    },
+    "path": "persistent"
+  },
+  "512|262144": {
+    "ms": {
+      "atomic": 1.848793,
+      "persistent": 5.706342
+    },
+    "path": "atomic"
+  },
+  "512|524288": {
+    "ms": {
+      "atomic": 4.126379,
+      "persistent": 13.56032
+    },
+    "path": "atomic"
+  },
+  "512|65536": {
+    "ms": {
+      "atomic": 0.47434,
+      "persistent": 1.31596
+    },
+    "path": "atomic"
+  },
+  "64|1024": {
+    "ms": {
+      "atomic": 133.346298,
+      "persistent": 21.21216
+    },
+    "path": "persistent"
+  },
+  "64|2048": {
+    "ms": {
+      "atomic": 0.012429,
+      "persistent": 0.017626
+    },
+    "path": "atomic"
+  },
+  "64|4096": {
+    "ms": {
+      "atomic": 0.012979,
+      "persistent": 0.016243
+    },
+    "path": "atomic"
+  },
+  "768|128": {
+    "ms": {
+      "atomic": 75.883522,
+      "persistent": 36.124672
+    },
+    "path": "persistent"
+  },
+  "768|256": {
+    "ms": {
+      "atomic": 79.157249,
+      "persistent": 34.030594
+    },
+    "path": "persistent"
+  },
+  "768|512": {
+    "ms": {
+      "atomic": 73.555969,
+      "persistent": 20.227072
+    },
+    "path": "persistent"
+  }
+}

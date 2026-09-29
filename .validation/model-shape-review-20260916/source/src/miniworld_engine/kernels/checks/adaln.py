@@ -1,0 +1,236 @@
+"""Reference checks for the ``adaln`` family.
+
+adaLN and its ``conditioned_transition`` tail were one module (``checks_adaln.py``). The rules
+these references follow -- same shapes as the driver, fp32 autograd rather than a hand-derived
+formula, saved activations consumed as-is while saved statistics are recomputed -- are written
+out in ``checks/conditioned_transition.py``. The helpers both families use are in
+``checks/__init__.py``.
+"""
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+from miniworld_engine.kernels.checks import _fixed, _no_tf32
+from miniworld_engine.kernels.drivers import _rand
+from miniworld_engine.kernels.drivers.adaln import _EPS, _adaln_args
+from miniworld_engine.kernels.drivers.conditioned_transition import (
+    _D,
+    _DC,
+    _M,
+    _SHAPE_KEY,
+)
+
+
+def _ln(x: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
+    """LayerNorm, no affine, biased variance -- computed in fp32 as the kernels do in-register."""
+    return F.layer_norm(x.float(), (x.shape[-1],), eps=eps)
+
+
+def _ln_stats(xf: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(x_hat, rstd) for that same LayerNorm; ``xf`` already fp32. rstd is the saved-stat form."""
+    return (F.layer_norm(xf, (xf.shape[-1],), eps=_EPS),
+            torch.rsqrt(xf.var(dim=-1, correction=0) + _EPS))
+
+
+def _true_stats(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(mean, rstd) fp32 (M,) -- what a forward would have SAVED for this exact input.
+
+    The drivers hand these two buffers to the backward kernels as ``ones``; see the module
+    docstring for why a checker cannot.
+    """
+    tf = t.float()
+    return tf.mean(dim=-1), torch.rsqrt(tf.var(dim=-1, correction=0) + _EPS)
+
+
+# ── adaLN ─────────────────────────────────────────────────────────────────────────────────────
+
+
+def _adaln_ref(x, cond, lnw, ws, sb, wb):
+    """(y, x_hat, cond_norm, gate, rstd_x, rstd_c) in fp32 -- the whole adaLN forward.
+
+    Written from ``modules/adaptive_layernorm/module.py``'s PYTORCH branch: two affine-free
+    LayerNorms (the cond one weighted by lnw), a biased Linear to scale, an unbiased one to bias,
+    and a sigmoid gate. Both GEMMs run with TF32 off.
+    """
+    x_hat, rstd_x = _ln_stats(x.detach().float())
+    cond_norm, rstd_c = _ln_stats(cond.detach().float())
+    cond_aff = cond_norm * lnw.detach().float()
+    with _no_tf32():
+        scale = torch.addmm(sb.detach().float(), cond_aff, ws.detach().float().t())
+        bias = cond_aff @ wb.detach().float().t()
+    gate = torch.sigmoid(scale)
+    return gate * x_hat + bias, x_hat, cond_norm, gate, rstd_x, rstd_c
+
+
+def _gate_bwd_saved(gate, x_norm, dy):
+    """(dscale, dxn) by fp32 autograd through y = sigmoid(scale)*x_norm, at the SAVED gate.
+
+    ``scale`` is pinned at ``logit(gate)`` so ``sigmoid(scale)`` reproduces the saved gate the
+    kernel actually read; autograd then supplies the sigmoid derivative and the product rule.
+    """
+    s = torch.logit(gate.float()).detach().requires_grad_(True)
+    xn = x_norm.float().detach().requires_grad_(True)
+    (torch.sigmoid(s) * xn).backward(dy.float())
+    return s.grad, xn.grad
+
+
+def layernorm_fwd_strided():
+    """ln_strided._ln_kernel (HAS_W=True) via inference._cond_affine: aff = LN(cond) * lnw.
+
+    ``ln_cond`` of the module: affine-free biased-variance LayerNorm times a weight, no bias. The
+    reduce axis is _DC, which ragged mode moves to a different partial tail than _D.
+    """
+    from miniworld_engine.kernels.adaln.triton.inference import _cond_affine
+
+    _fixed()
+    cond, lnw = _rand(_M, _DC), _rand(_DC)
+    aff = _cond_affine(cond, lnw, _EPS, shape_key=_SHAPE_KEY)
+    return aff, _ln(cond) * lnw.float()
+
+
+def adaln_fwd():
+    """inference._adaln_fused_kernel: the whole adaLN forward in one kernel, y only."""
+    from miniworld_engine.kernels.adaln.triton.inference import adaln_inference_fused
+
+    _fixed()
+    # OUTER entry point: it reshapes x/cond itself and takes the key from the PRE-flatten
+    # shape, so it needs the (1, M, D) activation the driver passes (``length_of`` refuses a
+    # 2-D (M, D), where shape[-2] is M and not L). y comes back at that same shape; the
+    # reference runs on x[0]/cond[0] -- views of the very rows the kernel read, no copy and
+    # no second draw -- and y[0] is the whole of y at B=1.
+    x, cond, lnw, ws, sb, wb = _adaln_args(batched=True)
+    y = adaln_inference_fused(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
+    return y[0], _adaln_ref(x[0], cond[0], lnw, ws, sb, wb)[0]
+
+
+def adaln_epilogue_saveact():
+    """training._epilogue_train_kernel: y, mean_x, rstd_x and gate, with HAS_SB=True.
+
+    sb is the raw (M, 2N) [scale|bias] the outside GEMM produced and ``scale_bias`` (N,) is folded
+    into the SCALE half in the epilogue (kernel: ``scale = SB[:, :N] + ScaleBias``,
+    ``bias = SB[:, N:]``). All four buffers are outputs the training forward saves, so all four are
+    compared; the statistics are the kernel's own, not consumed, so they are recomputed here.
+    """
+    from miniworld_engine.kernels.adaln.triton.training import _epilogue_train
+
+    _fixed()
+    x, sb, scale_b = _rand(_M, _D), _rand(_M, 2 * _D), _rand(_D)
+    y, mean, rstd, gate = _epilogue_train(x, sb, _EPS, scale_b, shape_key=_SHAPE_KEY)
+    x_hat, e_rstd = _ln_stats(x.float())
+    e_gate = torch.sigmoid(sb[:, :_D].float() + scale_b.float())
+    return {"Y": (y, e_gate * x_hat + sb[:, _D:].float()), "Mean": (mean, x.float().mean(dim=-1)),
+            "Rstd": (rstd, e_rstd), "Gate": (gate, e_gate)}
+
+
+def adaln_bwd_pre_dx():
+    """training._bwd_x_kernel: D=(2N,M) [dscale;dy] stacked, and dx = LN-bwd(dy*gate) fused.
+
+    mean_x/rstd_x are the TRUE statistics of the x passed (the driver fills them with 1.0) and gate
+    is sigmoid(randn); see the module docstring. dx is an LN backward, so the reference
+    differentiates through F.layer_norm -- freezing the statistics would drop the two centering
+    terms. dscale comes from the same autograd tape, and dy is copied straight into D's upper half.
+    """
+    from miniworld_engine.kernels.adaln.triton.training import _bwd_x
+
+    _fixed()
+    dy, x = _rand(_M, _D), _rand(_M, _D)
+    gate = torch.sigmoid(_rand(_M, _D).float()).to(dy.dtype)
+    mean_x, rstd_x = _true_stats(x)
+    d_stack, dx = _bwd_x(dy, x, mean_x, rstd_x, gate, shape_key=_SHAPE_KEY)
+    xr = x.float().detach().requires_grad_(True)
+    s = torch.logit(gate.float()).detach().requires_grad_(True)
+    (torch.sigmoid(s) * F.layer_norm(xr, (_D,), eps=_EPS)).backward(dy.float())
+    assert s.grad is not None
+    assert xr.grad is not None
+    return {"D": (d_stack, torch.cat([s.grad, dy.float()], dim=1).t()), "DX": (dx, xr.grad)}
+
+
+def adaln_bwd_dx_dlnw():
+    """training._dgrad_condln_kernel: dcond_aff = D^T@w_cat in-kernel, then the cond LN backward.
+
+    mean_c/rstd_c are the true statistics of the cond passed (the driver fills them with 1.0).
+    D and w_cat stay the driver's randn -- the kernel only contracts them, so their values carry no
+    assumption. The GEMM is applied outside autograd (TF32 off) and its result is the vector-Jacobian
+    seed for ``LN(cond)*lnw``, which gives dcond and dlnw from one tape; dlnw lands via fp32
+    atomics, so its add order can differ run to run.
+    """
+    from miniworld_engine.kernels.adaln.triton.training import _dgrad_condln
+
+    _fixed()
+    d_stack, w_cat = _rand(2 * _D, _M), _rand(2 * _D, _DC)
+    cond, lnw = _rand(_M, _DC), _rand(_DC)
+    mean_c, rstd_c = _true_stats(cond)
+    dcond, dlnw = _dgrad_condln(d_stack, w_cat, cond, mean_c, rstd_c, lnw, shape_key=_SHAPE_KEY)
+    with _no_tf32():
+        dcond_aff = d_stack.float().t() @ w_cat.float()
+    cr = cond.float().detach().requires_grad_(True)
+    lw = lnw.float().detach().requires_grad_(True)
+    (F.layer_norm(cr, (_DC,), eps=_EPS) * lw).backward(dcond_aff)
+    return {"DCond": (dcond, cr.grad), "DLnW": (dlnw, lw.grad)}
+
+
+def adaln_fwd_gate():
+    """training._adaln_fwd_gate_kernel: y and gate from (cond_n, Ws.T, Wb.T, x, rstd, c1).
+
+    The reference builds scale/bias in fp32 from the same pre-normalised cond and the true x
+    stats, so a transposed weight or a mis-masked tail moves the gate or the offset rather than
+    cancelling. Both y and gate are checked. ``_no_tf32`` so the reference GEMMs keep the bits.
+    """
+    from miniworld_engine.kernels.adaln.triton.training import _adaln_fwd_gate
+
+    _fixed()
+    cond_n, x = _rand(_M, _DC), _rand(_M, _D)
+    sw_t, bw_t, scale_b = _rand(_DC, _D), _rand(_DC, _D), _rand(_D)
+    xf = x.float()
+    mean = xf.mean(dim=-1)
+    rstd = torch.rsqrt(xf.var(dim=-1, unbiased=False) + _EPS)
+    y, gate = _adaln_fwd_gate(cond_n, sw_t, scale_b, bw_t, x, rstd, mean * rstd,
+                              shape_key=_SHAPE_KEY)
+    with _no_tf32():
+        scale = cond_n.float() @ sw_t.float() + scale_b.float()
+        bias = cond_n.float() @ bw_t.float()
+    e_gate = torch.sigmoid(scale)
+    return {"Y": (y, e_gate * _ln(x) + bias), "Gate": (gate, e_gate)}
+
+
+def adaln_gemm_gate():
+    """inference._adaln_gemm_gate_kernel: the adaLN forward minus LN(cond), in one kernel.
+
+    ``rstd``/``c1`` are the TRUE statistics of the x passed, not the driver's 1.0 filler, so the
+    reference is the same normalisation the kernel applies (``x*rstd - c1``, with c1 = mean*rstd).
+    The two projections are compared through one output because they meet there: a transposed
+    weight or a mis-masked K tail moves the gate or the offset and cannot cancel.
+    ``_no_tf32`` because the reference GEMMs must not drop mantissa bits the kernel keeps.
+    """
+    from miniworld_engine.kernels.adaln.triton.inference import _adaln_gemm_gate
+
+    _fixed()
+    cond_n, x = _rand(_M, _DC), _rand(_M, _D)
+    sw_t, bw_t, scale_b = _rand(_DC, _D), _rand(_DC, _D), _rand(_D)
+    xf = x.float()
+    mean = xf.mean(dim=-1)
+    rstd = torch.rsqrt(xf.var(dim=-1, unbiased=False) + _EPS)
+    y = _adaln_gemm_gate(cond_n, sw_t, scale_b, bw_t, x, rstd, mean * rstd,
+                         shape_key=_SHAPE_KEY)
+    with _no_tf32():
+        scale = cond_n.float() @ sw_t.float() + scale_b.float()
+        bias = cond_n.float() @ bw_t.float()
+    return y, torch.sigmoid(scale) * _ln(x) + bias
+
+
+def adaln_epilogue():
+    """inference._adaln_epilogue_kernel: y = sigmoid(SB[:, :N]) * LN(x) + SB[:, N:].
+
+    SB is the (M, 2N) [scale|bias] the outside GEMM produced, so scale already carries to_scale's
+    bias and the epilogue applies no weights of its own.
+    """
+    from miniworld_engine.kernels.adaln.triton.inference import _adaln_epilogue
+
+    _fixed()
+    x, sb = _rand(_M, _D), _rand(_M, 2 * _D)
+    y = _adaln_epilogue(x, sb, _EPS, shape_key=_SHAPE_KEY)
+    scale, bias = sb[:, :_D].float(), sb[:, _D:].float()
+    return y, torch.sigmoid(scale) * _ln(x) + bias
+
+

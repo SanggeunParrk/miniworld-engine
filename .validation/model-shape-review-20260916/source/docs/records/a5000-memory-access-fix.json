@@ -1,0 +1,765 @@
+{
+  "updated": "2026-09-12T01:55:56.044467+00:00",
+  "baseline_commit": "fb6777417c0a34e383e0984978fec89169c18e28",
+  "gpu": "NVIDIA RTX A5000 (sm86)",
+  "node": "gpu02",
+  "jobs": {
+    "original_build": 1678627,
+    "module_replays": 1680191,
+    "resume": 1680274,
+    "previous_resume": 1680229,
+    "followup": 1680273
+  },
+  "confirmed_fault": {
+    "op": "layernorm_linear_fwd_triton",
+    "K": 128,
+    "N": 520,
+    "dtype": "bfloat16",
+    "BLOCK_K": 128,
+    "BLOCK_M1": 64,
+    "BLOCK_N": 128,
+    "num_warps": 1,
+    "num_stages": 1,
+    "sanitizer": "invalid shared-memory write",
+    "sanitizer_errors": 34
+  },
+  "cpu_validation": {
+    "builder_and_autotune": {
+      "passed": 1257,
+      "skipped": 1
+    },
+    "focused_regression": {
+      "passed": 83
+    },
+    "ruff": "pass",
+    "ty": "pass"
+  },
+  "module_replays": [
+    {
+      "name": "lnl-module-384",
+      "status": "passed",
+      "fatal_cuda_recorded": false,
+      "log": ".scratch/a5000-memory-debug/lnl-module-384.out"
+    },
+    {
+      "name": "lnl-module-512",
+      "status": "passed",
+      "fatal_cuda_recorded": false,
+      "log": ".scratch/a5000-memory-debug/lnl-module-512.out"
+    },
+    {
+      "name": "lnl-module-640",
+      "status": "passed",
+      "fatal_cuda_recorded": false,
+      "log": ".scratch/a5000-memory-debug/lnl-module-640.out"
+    },
+    {
+      "name": "replay-0",
+      "status": "passed",
+      "fatal_cuda_recorded": false,
+      "log": ".scratch/a5000-memory-debug/replay-0.out"
+    },
+    {
+      "name": "replay-1",
+      "status": "passed",
+      "fatal_cuda_recorded": false,
+      "log": ".scratch/a5000-memory-debug/replay-1.out"
+    },
+    {
+      "name": "replay-2",
+      "status": "passed",
+      "fatal_cuda_recorded": false,
+      "log": ".scratch/a5000-memory-debug/replay-2.out"
+    },
+    {
+      "name": "replay-3",
+      "status": "passed",
+      "fatal_cuda_recorded": false,
+      "log": ".scratch/a5000-memory-debug/replay-3.out"
+    }
+  ],
+  "remaining_original_faults": "Four original Xid 31 faults are not reproduced; root cause unconfirmed.",
+  "oom_policy": "Capacity failures accepted; not counted as illegal-memory-access bugs.",
+  "lnl_neighbor_checks": [
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 256,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 1,
+      "stages": 2,
+      "status": "pass",
+      "errors": [
+        0.0016676360974088311
+      ],
+      "shared": 53248
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 256,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 2,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.0016676360974088311
+      ],
+      "shared": 49152
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 256,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 4,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.0016676360974088311
+      ],
+      "shared": 49152
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 147456,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 1,
+      "stages": 2,
+      "status": "pass",
+      "errors": [
+        0.0016342930030077696
+      ],
+      "shared": 53248
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 147456,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 2,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.0016342930030077696
+      ],
+      "shared": 49152
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 147456,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 4,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.0016342930030077696
+      ],
+      "shared": 49152
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 262144,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 1,
+      "stages": 2,
+      "status": "pass",
+      "errors": [
+        0.001651270780712366
+      ],
+      "shared": 53248
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 262144,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 2,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.001651270780712366
+      ],
+      "shared": 49152
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 262144,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 4,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.001651270780712366
+      ],
+      "shared": 49152
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 409600,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 1,
+      "stages": 2,
+      "status": "pass",
+      "errors": [
+        0.001664186711423099
+      ],
+      "shared": 53248
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 409600,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 2,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.001664186711423099
+      ],
+      "shared": 49152
+    },
+    {
+      "index": 0,
+      "family": "lnl",
+      "M": 409600,
+      "kwargs": {
+        "BLOCK_K": 128,
+        "BLOCK_M1": 64,
+        "BLOCK_N": 128
+      },
+      "warps": 4,
+      "stages": 1,
+      "status": "pass",
+      "errors": [
+        0.001664186711423099
+      ],
+      "shared": 49152
+    }
+  ],
+  "completion_smoke": {
+    "unit_complete": true,
+    "shutdown_error": false
+  },
+  "recovery-merge": {
+    "source_shards": 345,
+    "written_buckets": 1107,
+    "written_ops": [
+      "adaln_bwd_dx_dlnw_triton",
+      "adaln_bwd_pre_dx_triton",
+      "adaln_epilogue_saveact_triton",
+      "adaln_epilogue_triton",
+      "adaln_fwd_gate_triton",
+      "adaln_fwd_triton",
+      "adaln_gemm_gate_triton",
+      "augmented_attention_bwd_pre_triton",
+      "augmented_attention_bwd_reduce_triton",
+      "augmented_attention_bwd_split_triton",
+      "augmented_attention_fwd_triton",
+      "cond_transition_bwd_gemm_swiglu_triton",
+      "cond_transition_bwd_swiglu_flat_triton",
+      "cond_transition_expand_swiglu_triton",
+      "cond_transition_fwd_b2b_saveact_triton",
+      "cond_transition_fwd_b2b_triton",
+      "cond_transition_squeeze_gate_triton",
+      "cond_transition_swiglu_triton",
+      "gated_projection_bwd_dx_triton",
+      "gated_projection_bwd_gate_dropres_triton",
+      "gated_projection_bwd_gate_flat_triton",
+      "gated_projection_bwd_gate_triton",
+      "gated_projection_gate_dropres_triton",
+      "gated_projection_gate_flat_triton",
+      "gated_projection_gate_gemm_triton",
+      "gated_projection_gate_triton",
+      "layernorm_bwd_atomic_strided_triton",
+      "layernorm_bwd_atomic_triton",
+      "layernorm_bwd_split_mmajor_triton",
+      "layernorm_bwd_split_triton",
+      "layernorm_fwd_saveact_strided_triton",
+      "layernorm_fwd_saveact_triton",
+      "layernorm_fwd_strided_triton",
+      "layernorm_linear_bwd_fp32_triton",
+      "layernorm_linear_fwd_fp32_triton",
+      "layernorm_linear_fwd_triton",
+      "layernorm_stats_triton",
+      "qk_norm_rope_bwd_triton",
+      "qk_norm_rope_fwd_triton",
+      "swa_gate_out_fwd_triton",
+      "transition_bwd_swiglu_recompute_triton",
+      "transition_expand_swiglu_triton",
+      "triangle_attention_bwd_dkdv_triton",
+      "triangle_attention_bwd_dq_triton",
+      "triangle_attention_bwd_pre_triton",
+      "triangle_attention_fwd_triton",
+      "trimul_bwd_gate_packed_triton",
+      "trimul_bwd_gate_recompute_triton",
+      "trimul_gemm_gate_mmajor_triton",
+      "trimul_gemm_gate_triton",
+      "trimul_outproj_bwd_gate_recompute_triton",
+      "trimul_outproj_gemm_gate_triton",
+      "trimul_outproj_layernorm_gemm_gate_triton"
+    ],
+    "skipped": []
+  },
+  "recovery-coverage": {
+    "arch": "sm86",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "want": 1008,
+    "have": 1058,
+    "missing": [
+      [
+        "adaln_gemm_gate_triton",
+        "bfloat16+float32|shape_key=43986909135407"
+      ],
+      [
+        "adaln_gemm_gate_triton",
+        "bfloat16+float32|shape_key=52783002157615"
+      ],
+      [
+        "augmented_attention_bwd_reduce_triton",
+        "float32|shape_key=4096"
+      ],
+      [
+        "augmented_attention_bwd_reduce_triton",
+        "float32|shape_key=8192"
+      ],
+      [
+        "augmented_attention_bwd_split_triton",
+        "bfloat16+float32|shape_key=281475043953114"
+      ],
+      [
+        "augmented_attention_bwd_split_triton",
+        "bfloat16+float32|shape_key=562950020663770"
+      ],
+      [
+        "augmented_attention_bwd_split_triton",
+        "float32|shape_key=281475043953114"
+      ],
+      [
+        "augmented_attention_bwd_split_triton",
+        "float32|shape_key=562950020663770"
+      ],
+      [
+        "gated_projection_bwd_dx_triton",
+        "bfloat16|shape_key=26390427077431"
+      ],
+      [
+        "gated_projection_bwd_dx_triton",
+        "bfloat16|shape_key=35186520099639"
+      ],
+      [
+        "gated_projection_bwd_dx_triton",
+        "bfloat16|shape_key=43982613121847"
+      ],
+      [
+        "gated_projection_bwd_dx_triton",
+        "bfloat16|shape_key=52778706668343"
+      ],
+      [
+        "gated_projection_gate_gemm_triton",
+        "bfloat16|shape_key=26390427077431"
+      ],
+      [
+        "gated_projection_gate_gemm_triton",
+        "bfloat16|shape_key=35186520099639"
+      ],
+      [
+        "gated_projection_gate_gemm_triton",
+        "bfloat16|shape_key=43982613121847"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=1099513201434"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=1099513725722"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=2473902736154"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=2473903260442"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=4398048084762"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=4398048609050"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=6871949247258"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=6871949771546"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=9895606223642"
+      ],
+      [
+        "layernorm_bwd_split_triton",
+        "bfloat16+float32|shape_key=9895606747930"
+      ]
+    ],
+    "extra": [
+      [
+        "gated_projection_bwd_gate_dropres_triton",
+        "bfloat16|FROM_PREACT=0,N=128,shape_key=128"
+      ],
+      [
+        "gated_projection_bwd_gate_dropres_triton",
+        "bfloat16|FROM_PREACT=0,N=128,shape_key=256"
+      ],
+      [
+        "gated_projection_bwd_gate_dropres_triton",
+        "bfloat16|FROM_PREACT=0,N=128,shape_key=384"
+      ],
+      [
+        "gated_projection_bwd_gate_dropres_triton",
+        "bfloat16|FROM_PREACT=0,N=128,shape_key=512"
+      ],
+      [
+        "gated_projection_bwd_gate_flat_triton",
+        "bfloat16|shape_key=1024"
+      ],
+      [
+        "gated_projection_bwd_gate_flat_triton",
+        "bfloat16|shape_key=2048"
+      ],
+      [
+        "gated_projection_bwd_gate_flat_triton",
+        "bfloat16|shape_key=256"
+      ],
+      [
+        "gated_projection_bwd_gate_flat_triton",
+        "bfloat16|shape_key=512"
+      ],
+      [
+        "gated_projection_bwd_gate_recompute_flat_triton",
+        "bfloat16+float32|shape_key=128"
+      ],
+      [
+        "gated_projection_bwd_gate_recompute_flat_triton",
+        "bfloat16+float32|shape_key=256"
+      ],
+      [
+        "gated_projection_bwd_gate_recompute_flat_triton",
+        "bfloat16+float32|shape_key=384"
+      ],
+      [
+        "gated_projection_bwd_gate_recompute_flat_triton",
+        "bfloat16+float32|shape_key=512"
+      ],
+      [
+        "gated_projection_gate_flat_triton",
+        "bfloat16|shape_key=1024"
+      ],
+      [
+        "gated_projection_gate_flat_triton",
+        "bfloat16|shape_key=2048"
+      ],
+      [
+        "gated_projection_gate_flat_triton",
+        "bfloat16|shape_key=256"
+      ],
+      [
+        "gated_projection_gate_flat_triton",
+        "bfloat16|shape_key=512"
+      ],
+      [
+        "gated_projection_gate_inplace_flat_triton",
+        "bfloat16|shape_key=128"
+      ],
+      [
+        "gated_projection_gate_inplace_flat_triton",
+        "bfloat16|shape_key=256"
+      ],
+      [
+        "gated_projection_gate_inplace_flat_triton",
+        "bfloat16|shape_key=384"
+      ],
+      [
+        "gated_projection_gate_inplace_flat_triton",
+        "bfloat16|shape_key=512"
+      ],
+      [
+        "gated_projection_gate_packed_flat_triton",
+        "bfloat16|shape_key=128"
+      ],
+      [
+        "gated_projection_gate_packed_flat_triton",
+        "bfloat16|shape_key=256"
+      ],
+      [
+        "gated_projection_gate_packed_flat_triton",
+        "bfloat16|shape_key=384"
+      ],
+      [
+        "gated_projection_gate_packed_flat_triton",
+        "bfloat16|shape_key=512"
+      ],
+      [
+        "gated_projection_gate_res_triton",
+        "bfloat16|N=128,shape_key=128"
+      ],
+      [
+        "gated_projection_gate_res_triton",
+        "bfloat16|N=128,shape_key=256"
+      ],
+      [
+        "gated_projection_gate_res_triton",
+        "bfloat16|N=128,shape_key=384"
+      ],
+      [
+        "gated_projection_gate_res_triton",
+        "bfloat16|N=128,shape_key=512"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=137439479701"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=17180395413"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=2149582741"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=34360264597"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=4297066389"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=6444550037"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=68720002965"
+      ],
+      [
+        "layernorm_stats_triton",
+        "bfloat16+float32|shape_key=8592033685"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=1099512154005"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=1099512678293"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=1099513726869"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=137439479701"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=17180395413"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=2149058453"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=2149582741"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=2150631317"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=2473901688725"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=2473902213013"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=2473903261589"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=274878433173"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=274878957461"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=274880006037"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=34360264597"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=4296542101"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=4297066389"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=4298114965"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=4398047037333"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=4398047561621"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=4398048610197"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=6444025749"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=6444550037"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=6445598613"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=68720002965"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=8591509397"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=8592033685"
+      ],
+      [
+        "layernorm_stats_triton",
+        "float32|shape_key=8593082261"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=1024"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=147456"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=16384"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=2048"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=256"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=262144"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=4096"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=512"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=65536"
+      ],
+      [
+        "transition_bwd_epilogue_triton",
+        "bfloat16|shape_key=8192"
+      ],
+      [
+        "transition_fold_triton",
+        "bfloat16+float32|K=128,N=512"
+      ]
+    ],
+    "usable": 983,
+    "invalid": {}
+  }
+}

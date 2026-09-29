@@ -1,0 +1,327 @@
+"""Constexprs that are invisible to the autotune cache.
+
+A `tl.constexpr` that is neither a tuned tile axis (supplied by the op's config CSV) nor in
+`key=[...]` cannot be distinguished by the cache: two differently-compiled programs share one
+entry, so the config tuned for one code path is served to the other. Triton still specializes per
+constexpr value, so nothing fails -- the cache just cannot tell them apart.
+
+Resolution is by the registry's (file, symbol) PAIR, never by the bare symbol. An earlier
+throwaway version of this check keyed a `name -> constexprs` dict and unioned across files, which
+silently merged the two different kernels both called `_gate_mul_kernel`
+(`tm1/cute/launch.py` takes `BLOCK_E`; `trimul_inproj/triton/gate_elem.py` takes
+`N, BLOCK_M1, BLOCK_K, SAVE_GATE, ADD_RESIDUAL, USE_DROPOUT` -- ADD_RESIDUAL has since been
+removed from that kernel). Each then appeared to be missing
+the other's parameters, producing two entirely fabricated findings and a third false conclusion --
+that two "sibling" kernels disagreed about keying USE_DROPOUT, when one of them does not have it.
+The same name-collision mistake, in the same repo, that `launch_bind.py` documents.
+
+Reported, not decided: whether a visible constexpr BELONGS in the key is a judgement call. A
+numeric tolerance (`eps`) never does; a value fully determined by another key entry does not
+either. This tool finds candidates.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import csv
+import functools
+import pathlib
+from pathlib import Path
+
+from miniworld_engine.autotune.configs import config_set
+
+SRC = Path(__file__).resolve().parents[2]
+REG = SRC / "miniworld_engine/kernels/registry.csv"
+ALLOWED = Path(__file__).parent / "key_gaps_allowed.csv"
+#: padding helpers derived from a keyed dim, never independent
+IGNORE = {"HEAD_DIM_PAD", "N_PAD"}
+
+
+def _kernel_ast(path: Path, symbol: str) -> ast.FunctionDef | None:
+    try:
+        tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError):
+        return None
+    want = symbol.split(".")[-1]
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and fn.name == want:
+            return fn
+    return None
+
+
+def _constexprs(fn: ast.FunctionDef) -> set[str]:
+    a = fn.args
+    return {p.arg for p in a.posonlyargs + a.args + a.kwonlyargs
+            if p.annotation and "constexpr" in ast.unparse(p.annotation)}
+
+
+def _key_list(fn: ast.FunctionDef) -> list[str] | None:
+    for dec in fn.decorator_list:
+        if not isinstance(dec, ast.Call):
+            continue
+        if getattr(dec.func, "attr", getattr(dec.func, "id", "")) != "autotune":
+            continue
+        for kw in dec.keywords:
+            if kw.arg == "key" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                return [e.value for e in kw.value.elts
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+    return None
+
+
+def allowed() -> dict[tuple[str, str], str]:
+    """(op, param) a human has judged NOT to belong in the key, with the reason.
+
+    Without this the tool always reports the same ~19 findings and a NEW gap hides among them.
+    Judging is not automatable -- `eps` is a tolerance, `D == K` is a launch-site identity, a
+    stride equals a product of two keyed dims -- so the judgement is recorded rather than
+    re-derived, and the file is the reviewable artefact.
+    """
+    if not ALLOWED.is_file():
+        return {}
+    return {(r["op"], r["param"]): r["reason"] for r in csv.DictReader(ALLOWED.open())}
+
+
+def _axes_of(expr) -> set[str]:
+    """The shape axes a ``shape_key=`` expression folds in.
+
+    A launcher that can be handed a key from its caller writes a conditional --
+    ``both_key(M, K=K) if shape_key is None else pack(shape_key, K=K)`` -- so the two branches are
+    INTERSECTED: an axis counts only if BOTH paths fold it. A launcher that folds K on one path and
+    not the other writes two different keys for one shape, which is the thing this check exists to
+    catch, not to wave through.
+    """
+    if isinstance(expr, ast.Call):
+        # The keyword NAME is the kernel's axis; what it is bound to has to be the same expression
+        # the launch passes for that axis, or the fold is a decoration. `token_key(L, K=something)`
+        # beside `..., K=K_real, ...` would silence a real gap on the kernel's K. Recorded here
+        # rather than checked, because the binding is only visible at the launch node -- see
+        # `_folded_into_shape_key`, which is where the launch's own kwargs are in scope.
+        return {k.arg for k in expr.keywords if k.arg}
+    if isinstance(expr, ast.IfExp):
+        return _axes_of(expr.body) & _axes_of(expr.orelse)
+    return set()
+
+
+@functools.cache
+def _shape_key_pos(src_file: str, symbol: str) -> int:
+    """Index of ``shape_key`` in the kernel's parameter list, or -1.
+
+    Half of `transition/triton/fused.py`'s launches pass it POSITIONALLY
+    (``M, ND, K, _shape_key(shape_key, M), eps``). Reading only the ``shape_key=`` keyword makes
+    those sites invisible to the intersection, which is the same hole aliased imports were: a site
+    that does not fold is never noticed, and it writes a key the other launchers never read.
+    """
+    for base in (SRC, SRC / "miniworld_engine"):
+        path = base / src_file
+        if path.is_file():
+            fn = _kernel_ast(path, symbol)
+            if fn is None:
+                continue
+            names = [a.arg for a in fn.args.args]
+            return names.index("shape_key") if "shape_key" in names else -1
+    return -1
+
+
+@functools.lru_cache(maxsize=1)
+def _folded_into_shape_key() -> dict[tuple[str, str, str], set[str]]:
+    """(launching file, symbol, defining file) -> the axes THAT FILE's launches fold.
+
+    Per launching file, not per kernel: intersecting across the files that launch one kernel is
+    :func:`_folds_for`'s job, and it needs the defining file to know which of the four kernels
+    named ``_attn_fwd`` this row is about.
+
+    ``shape_key.pack`` lets a launcher put a kernel's width axes INTO the shape key
+    (``atom_key(L, H=H, HEAD_DIM=D)``) instead of listing them beside it in ``key=[...]``. They are
+    then still keyed -- more finely, since the axis names are folded in too -- but this audit,
+    which reads only the ``key=[...]`` list, would report them as invisible.
+
+    So read the launches. For each ``<symbol>[grid](...)`` call, take the keywords of the
+    ``shape_key=`` expression, and INTERSECT across every launch of that symbol: an axis only
+    counts as folded if EVERY launcher folds it. One site that forgets it makes the whole kernel
+    report the gap, which is the answer that matches what the cache does -- that site writes a key
+    the others never read.
+    """
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        # `from ...persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit` launches the
+        # SAME kernel under another name. Without this the aliased site is invisible: it is not
+        # intersected, so a site that forgets to fold an axis reports nothing and quietly writes a
+        # key the other launchers never read -- the exact failure this check exists to prevent.
+        alias, origin = {}, {}
+        here = path.relative_to(SRC).parent
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.ImportFrom):
+                continue
+            base = here
+            for _ in range(max(0, n.level - 1)):
+                base = base.parent
+            mod = (n.module or "").replace(".", "/")
+            src_file = f"{base.as_posix()}/{mod}.py" if n.level else f"{mod}.py".replace(
+                "miniworld_engine/", "")
+            for a in n.names:
+                if a.asname:
+                    alias[a.asname] = a.name
+                origin[a.asname or a.name] = src_file
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            # `<symbol>[grid](...)`: a Subscript whose value is the kernel name
+            if not (isinstance(f, ast.Subscript) and isinstance(f.value, ast.Name)):
+                continue
+            local = f.value.id
+            sk = next((k.value for k in node.keywords if k.arg == "shape_key"), None)
+            if sk is None:
+                src_file = origin.get(local, str(path.relative_to(SRC)))
+                i = _shape_key_pos(src_file, alias.get(local, local))
+                sk = node.args[i] if 0 <= i < len(node.args) else None
+            # A bare Name means the key was built elsewhere and handed down. Follow the assignment
+            # it came from, and if the name is a PARAMETER of the launching function -- rope passes
+            # `shape_key` down two frames and through an `@opaque` boundary -- fall back to the
+            # single key-building call in the module, which is what those launchers have.
+            if isinstance(sk, ast.Name):
+                sk = (_resolve_key_name(tree, sk.id)
+                      or _sole_key_call(tree)
+                      or sk)
+            folded = _axes_of(sk)
+            # Drop any axis whose folded value disagrees with what the launch passes for the
+            # same-named kernel argument. Without this a launcher can name an axis in the shape key
+            # and hand the kernel a different one, and the audit reads it as covered.
+            passed = {k.arg: ast.dump(k.value) for k in node.keywords if k.arg}
+            if isinstance(sk, ast.Call):
+                bound = {k.arg: ast.dump(k.value) for k in sk.keywords if k.arg}
+                folded -= {a for a in folded
+                           if a in passed and a in bound and passed[a] != bound[a]}
+            key = (str(path.relative_to(SRC)), alias.get(local, local),
+                   origin.get(local, str(path.relative_to(SRC))))
+            prev = out.get(key)
+            out[key] = folded if prev is None else (prev & folded)
+    return out
+
+
+def _sole_key_call(tree):
+    """The module's single `*_key(...)` call, when it has exactly one.
+
+    Used only when the launch passes a `shape_key` PARAMETER, so the assignment is in a caller
+    rather than the launching function -- `rope/triton/main.py` builds the key in
+    `_RoPE3D.forward` and threads it through `_rope`. With one such call in the file there is no
+    ambiguity about which key the launch carries.
+
+    With SEVERAL there is, and this returns None so the audit keeps the conservative "folds
+    nothing" answer rather than guessing. That is not hypothetical: `rmsnorm/triton/main.py` holds
+    `both_key(rows, N=n)` for the plain norm and `both_key(rows, N=n, K=c2.shape[1])` for adamod,
+    and picking either one would attribute an axis to a kernel that does not fold it -- which
+    unpacks a bucket that was never packed and reports a hole where the cache is complete. A
+    missing fold costs a false MISSING; a wrong fold costs a false COVERED, and only the second
+    hides a real gap.
+    """
+    calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = getattr(node.func, "id", getattr(node.func, "attr", ""))
+            if fn in ("pack", "atom_key", "both_key", "token_key") and node.keywords:
+                calls.append(node)
+    if len(calls) != 1:
+        return None
+    return calls[0]
+
+
+def _resolve_key_name(tree, name: str):
+    """The `*_key(...)`/`pack(...)` call a local `shape_key` variable was assigned from.
+
+    A launcher does not always fold inline. `rope/triton/main.py` builds the key several frames up
+    -- `key = atom_key(n * s, D=d)` -- and passes it down through an `@opaque` boundary, so the
+    launch site reads `shape_key=shape_key`, a bare Name with no keywords. Reading only the launch
+    then reports the kernel as folding NOTHING, `unpack_base` becomes the identity, and the
+    coverage audit compares a packed key of order 1e10 against a declared bucket of 128 -- every
+    bucket of that op reported missing, on every card, forever.
+
+    So when the launch passes a name, look for what that name was assigned in the same module.
+    Deliberately a same-file lookup and no further: chasing across modules would need real dataflow,
+    and the four kernels this affects all build their key in the file that launches them.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        v = node.value
+        if isinstance(v, ast.Call):
+            fn = getattr(v.func, "id", getattr(v.func, "attr", ""))
+            if fn in ("pack", "atom_key", "both_key", "token_key"):
+                return v
+    return None
+
+
+def _folds_for(kernel_file: str, symbol: str) -> set[str]:
+    """The axes EVERY launch of this kernel folds into ``shape_key``.
+
+    A launch site counts for this kernel when the launching file either IS the kernel's file, or
+    IMPORTS that symbol from it. Resolving by symbol alone unions the four different kernels named
+    ``_attn_fwd`` and the two named ``_gate_mul_kernel`` -- the mistake this module's audit
+    docstring already records for a ``name -> constexprs`` dict. Resolving by DIRECTORY is not
+    enough either: ``layernorm_linear/triton/mmajor_bwd.py`` launches ``layernorm``'s
+    ``_ln_bwd_persistent``, so a directory rule drops the one site most likely to be forgotten.
+    """
+    def _norm(path: str) -> str:
+        # registry rows, scanned paths and resolved imports disagree about the prefix
+        # (`miniworld_engine/kernels/...` vs `kernels/...`). Compare from `kernels/` on.
+        parts = pathlib.PurePosixPath(path).parts
+        return "/".join(parts[parts.index("kernels"):]) if "kernels" in parts else path
+
+    want = _norm(kernel_file)
+    sets = [v for (f, sym, src), v in _folded_into_shape_key().items()
+            if sym == symbol and want in (_norm(src), _norm(f))]
+    return set.intersection(*sets) if sets else set()
+
+
+def audit(config_dir: Path) -> tuple[list, int]:
+    rows = list(csv.DictReader(REG.open()))
+    findings, checked = [], 0
+    for r in rows:
+        if r["backend"] != "triton":
+            continue
+        fn = _kernel_ast(SRC / r["file"], r["symbol"])
+        if fn is None:
+            continue
+        keys = _key_list(fn)
+        if keys is None:
+            continue
+        spec = config_dir / f"{r['kernel']}.csv"
+        axes: set[str] = set()
+        if spec.is_file():
+            head = list(csv.DictReader(spec.open(newline="")))
+            if head and set(head[0]) >= {"axis", "values"}:
+                axes = {h["axis"] for h in head}          # grid-spec form
+            elif head:
+                axes = set(head[0])                        # materialised form
+        checked += 1
+        ok = allowed()
+        folded = _folds_for(r["file"], r["symbol"])
+        gap = sorted(p for p in _constexprs(fn) - set(keys) - axes - folded - IGNORE
+                     if (r["kernel"], p) not in ok)
+        if gap:
+            findings.append((r["file"], r["kernel"], sorted(keys), gap))
+    return findings, checked
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config-dir", default=str(config_set("accuracy")))
+    args = ap.parse_args()
+    findings, checked = audit(Path(args.config_dir))
+    print(f"triton kernels checked: {checked}   "
+          f"judged-and-recorded exclusions: {len(allowed())}   "
+          f"UNEXPLAINED invisible constexpr: {len(findings)}")
+    for f, op, keys, gap in findings:
+        print(f"\n{f}\n    {op}\n      key={keys}\n      not-in-key={gap}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

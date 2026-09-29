@@ -1,0 +1,852 @@
+{
+  "created_utc": "2026-09-11T06:38:49.347807+00:00",
+  "reason": "Retired runtime-invalid A5000 caches; no timings relabelled or rebuilt.",
+  "a6000_stale_at_archive": [],
+  "files": [
+    {
+      "original_path": "src/miniworld_engine/autotune/data/adaln_bwd_dx_dlnw_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/adaln_bwd_dx_dlnw_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 157515,
+      "sha256": "c99ca529a98905077f80b241afbfbed8a61b70c09cb6d428ed21a4038af1e4f3",
+      "status": {
+        "op": "adaln_bwd_dx_dlnw_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/adaln_bwd_pre_dx_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/adaln_bwd_pre_dx_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 78222,
+      "sha256": "17590a1468701776da72709b6e481672759f4739c5a2db837b95a18a79d961e6",
+      "status": {
+        "op": "adaln_bwd_pre_dx_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/adaln_epilogue_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/adaln_epilogue_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 80147,
+      "sha256": "53ab699c70a450eef031ae487b48744caeb3523b7ccc3ebf6a73ba70c9abe964",
+      "status": {
+        "op": "adaln_epilogue_saveact_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/adaln_epilogue_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/adaln_epilogue_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 79935,
+      "sha256": "18a994d3f2013170b56c5b560d26c4a31d57f92a06c71aeb74a7250f7cff3fb7",
+      "status": {
+        "op": "adaln_epilogue_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/adaln_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/adaln_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 157408,
+      "sha256": "d1d09a0b609e447530fe6f9f0ddfd9d637c1ff48d88ecf3ef558833ea005285d",
+      "status": {
+        "op": "adaln_fwd_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/adaln_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/adaln_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 118648,
+      "sha256": "f456dfe8f3fe60d4dc91d1311727310d483df6f1c1c10e30bb34b6b7cf2bd6ce",
+      "status": {
+        "op": "adaln_gemm_gate_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/augmented_attention_bwd_atomic_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/augmented_attention_bwd_atomic_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 53748,
+      "sha256": "43ea985ca4dc35b1a528dda860adf407a6abe471a9a121248cc5f963e37e7732",
+      "status": {
+        "op": "augmented_attention_bwd_atomic_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "bucket key scheme changed (cache.KEY_SCHEME)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/augmented_attention_bwd_pre_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/augmented_attention_bwd_pre_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 15288,
+      "sha256": "84a9e21b51146014bf6955925ff7d7f9e8900fdb4e5ae77bb7bf7cf32ce84fe1",
+      "status": {
+        "op": "augmented_attention_bwd_pre_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "bucket key scheme changed (cache.KEY_SCHEME)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/augmented_attention_bwd_reduce_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/augmented_attention_bwd_reduce_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 14651,
+      "sha256": "15163e3942091c770ba629e4a01ce29d0c08e6a12922e19a6a62b61604d06b6e",
+      "status": {
+        "op": "augmented_attention_bwd_reduce_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "bucket key scheme changed (cache.KEY_SCHEME)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/augmented_attention_bwd_split_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/augmented_attention_bwd_split_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 53927,
+      "sha256": "42dd8e4ba9b373dff17a46ef24e6f854da63cfe2c46a1d0a46ba0a36685b0645",
+      "status": {
+        "op": "augmented_attention_bwd_split_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "bucket key scheme changed (cache.KEY_SCHEME)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/augmented_attention_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/augmented_attention_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 54101,
+      "sha256": "20fab14315299d7c044eff37a38391d255e644977a409818aa78ef1b6d04be87",
+      "status": {
+        "op": "augmented_attention_fwd_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "bucket key scheme changed (cache.KEY_SCHEME)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/bias_only_attention_bwd_pre_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/bias_only_attention_bwd_pre_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 14792,
+      "sha256": "8f4649a3d3a6754da95c1fdf8ccb6c1ad2d8862d33ae7c5f5c50dd0f19d4c738",
+      "status": {
+        "op": "bias_only_attention_bwd_pre_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/bias_only_attention_bwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/bias_only_attention_bwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 51943,
+      "sha256": "ee6a89fb5610ed3b2dab5b9e5169892ddaf2c4b7d6b2b78cc934c0845324b1bc",
+      "status": {
+        "op": "bias_only_attention_bwd_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/bias_only_attention_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/bias_only_attention_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 51977,
+      "sha256": "6cb387ffdc7e5f3d8545e3c6ca418bb475d5d2fde9cd760680e9600b5cf5fe25",
+      "status": {
+        "op": "bias_only_attention_fwd_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_bwd_swiglu_flat_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_bwd_swiglu_flat_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 12860,
+      "sha256": "beabe22343aa18fc7c86ac8a7a5271a617a16c06dd6c117abe20c4c9b61d3faa",
+      "status": {
+        "op": "cond_transition_bwd_swiglu_flat_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_expand_swiglu_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_expand_swiglu_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 189814,
+      "sha256": "8a69348d40f99b4d9ed4f05b1c73f5897061f09a3a6e356cfb48d22cecd79450",
+      "status": {
+        "op": "cond_transition_expand_swiglu_saveact_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_expand_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_expand_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 189601,
+      "sha256": "093defed90efa2331b05ed52a19075b138cb3506514d4503499856fbd5b33120",
+      "status": {
+        "op": "cond_transition_expand_swiglu_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_fwd_b2b_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_fwd_b2b_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 735910,
+      "sha256": "0cfef9d0bde28ee92178ab63bcc5a82e9ffddb9ee967604152d62d4bf11a9d71",
+      "status": {
+        "op": "cond_transition_fwd_b2b_saveact_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_fwd_b2b_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_fwd_b2b_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 568681,
+      "sha256": "320f640a8bb6769c99dd1eaa5e2d7fb0af3b5226495457d1f0abcbe3f57c83f5",
+      "status": {
+        "op": "cond_transition_fwd_b2b_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_squeeze_gate_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_squeeze_gate_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 740871,
+      "sha256": "b3694c8891d1839caf5c3595052f9b5bbdb9621e6263646aeddcdb1825c983f8",
+      "status": {
+        "op": "cond_transition_squeeze_gate_saveact_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_squeeze_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_squeeze_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 738884,
+      "sha256": "1c1656b4a7936a70d06f84ab13ae91e77c99c06863a2c475a9dad822ab399282",
+      "status": {
+        "op": "cond_transition_squeeze_gate_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/cond_transition_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/cond_transition_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 12851,
+      "sha256": "ababf2c9a2483ea21312f60f1a602957197bd7480faab7e159875471251c386a",
+      "status": {
+        "op": "cond_transition_swiglu_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/gated_projection_bwd_dx_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/gated_projection_bwd_dx_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 190582,
+      "sha256": "141f478f8b0bdf0cf09242e5e760658dd204d03f2735d9f466e8b09884306823",
+      "status": {
+        "op": "gated_projection_bwd_dx_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/gated_projection_bwd_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/gated_projection_bwd_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 46835,
+      "sha256": "2c6fb6902184ab3243bb72673cdc2e5f05e6b7ea599a9a88195f7af98ab27423",
+      "status": {
+        "op": "gated_projection_bwd_gate_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/gated_projection_gate_gemm_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/gated_projection_gate_gemm_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 189979,
+      "sha256": "50451618cbe93ed7dd3dfdda337c6c19625f8b5061465f3dda6c51907d223526",
+      "status": {
+        "op": "gated_projection_gate_gemm_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/gated_projection_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/gated_projection_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 46045,
+      "sha256": "fc5fa227d11c69a42497adad4832bed8d1a99d6507425cf278d315c52ff7338d",
+      "status": {
+        "op": "gated_projection_gate_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_bwd_atomic_strided_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_bwd_atomic_strided_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 18962,
+      "sha256": "92314ef1833aea18d239ee105a5d91de9887f8e1fa5c99006b84d118bda9b8e1",
+      "status": {
+        "op": "layernorm_bwd_atomic_strided_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_bwd_atomic_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_bwd_atomic_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 86836,
+      "sha256": "5d9322719a15845806ce25cc42f6521844db129ffdf017d8b088604eec39608d",
+      "status": {
+        "op": "layernorm_bwd_atomic_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_bwd_foldstats_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_bwd_foldstats_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 83966,
+      "sha256": "236854d119b7b8f996655316a890b0cfdaacc222d540b56f4b9cbabbaaf7f921",
+      "status": {
+        "op": "layernorm_bwd_foldstats_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_bwd_split_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_bwd_split_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 86367,
+      "sha256": "50f237cc9932e79746f34b7f012687963fa18167e145bc4a1ee94e3ddb36139d",
+      "status": {
+        "op": "layernorm_bwd_split_mmajor_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_bwd_split_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_bwd_split_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 84918,
+      "sha256": "64c515fd9ed174d73d692a473d47ebfbdbfd52cd41e927b3c10049ee4b107736",
+      "status": {
+        "op": "layernorm_bwd_split_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 84934,
+      "sha256": "6ec68af08af8ae15d912701b4548ef16858e49337c8048373a8ae391725037c6",
+      "status": {
+        "op": "layernorm_fwd_mmajor_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_recompute_foldstats_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_recompute_foldstats_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 46275,
+      "sha256": "84469d5381375aba161226315d89128285d97e95ea6c27e62e3eb5673598d413",
+      "status": {
+        "op": "layernorm_fwd_recompute_foldstats_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_recompute_noaffine_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_recompute_noaffine_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 46279,
+      "sha256": "acab934560f7fc11660dfff88a827a056f9495daec7412f335c13c45cb305c9e",
+      "status": {
+        "op": "layernorm_fwd_recompute_noaffine_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 46270,
+      "sha256": "5263b37c4b346598b57027f39deed7afad6111c72b5b9ea9f6154faa5d649b76",
+      "status": {
+        "op": "layernorm_fwd_recompute_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_rowscale_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_rowscale_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 81510,
+      "sha256": "284044445c585f5f2070e880c7f58115afcdf14f79f8407b87edd4fefe1b4b79",
+      "status": {
+        "op": "layernorm_fwd_rowscale_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_saveact_strided_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_saveact_strided_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 84916,
+      "sha256": "1e7c7ef35ee05f17efedd676c6508a264840dc8b3965bac847a57ff89846800b",
+      "status": {
+        "op": "layernorm_fwd_saveact_strided_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 83942,
+      "sha256": "6eb39d5ed617bd7abc586fd56a916826dcb3dd37a504ded85f5f295d1402c982",
+      "status": {
+        "op": "layernorm_fwd_saveact_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_fwd_strided_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_fwd_strided_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 26987,
+      "sha256": "13fd36b8d8fb5e95b66f9af57fe11f8afa324cf92a96981c1892f229b661f4b5",
+      "status": {
+        "op": "layernorm_fwd_strided_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "build_rev declared 2 (registry.csv)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_linear_bwd_fp32_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_linear_bwd_fp32_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 155240,
+      "sha256": "793fb7a367773bedc9b69724e3b9c2de8f43af0cddacc4824c1b72c8dc07ab62",
+      "status": {
+        "op": "layernorm_linear_bwd_fp32_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_linear_fwd_fp32_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_linear_fwd_fp32_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 155241,
+      "sha256": "42a275fa8e2b0e130768c6ec7bd96e3c4a9dc0b969e2c2a09244501ff2585f5a",
+      "status": {
+        "op": "layernorm_linear_fwd_fp32_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/layernorm_linear_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/layernorm_linear_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 193631,
+      "sha256": "cd0993d85ac72168e44cb123c947a41f9515c6b6204356a49ba8d4359826d9e6",
+      "status": {
+        "op": "layernorm_linear_fwd_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/transition_bwd_swiglu_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/transition_bwd_swiglu_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 195688,
+      "sha256": "d352d45d45ab4e86be95dd6c7d7e4a253f0a8e51dd10af74e4f120c74bbad0e5",
+      "status": {
+        "op": "transition_bwd_swiglu_recompute_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/transition_bwd_transpose_packed_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/transition_bwd_transpose_packed_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 47556,
+      "sha256": "e364429613e448a3306bfec02b8595284960448d9491b83ab07aca2c0609e8a3",
+      "status": {
+        "op": "transition_bwd_transpose_packed_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/transition_expand_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/transition_expand_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 193981,
+      "sha256": "ab06572110da68b71b6be56cb85c399dad7c5e06878a14a3071aa060c4de9289",
+      "status": {
+        "op": "transition_expand_swiglu_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/transition_fwd_b2b_ktiled_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/transition_fwd_b2b_ktiled_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 160312,
+      "sha256": "f36695f60655620f9e113b022b62652b50efbf5148392750dbfaccf17c6cdef6",
+      "status": {
+        "op": "transition_fwd_b2b_ktiled_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/transition_fwd_b2b_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/transition_fwd_b2b_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 160780,
+      "sha256": "b04b669473b1cc77678cd1e8c9cb15eded8940a16814601a6a4e51a31810302b",
+      "status": {
+        "op": "transition_fwd_b2b_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/transition_layernorm_expand_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/transition_layernorm_expand_swiglu_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 160532,
+      "sha256": "b28294e39bb14d74402f918c103ad93a82af2b5e815f19b281b70ae954e96383",
+      "status": {
+        "op": "transition_layernorm_expand_swiglu_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/triangle_attention_bwd_atomic_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/triangle_attention_bwd_atomic_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 52697,
+      "sha256": "68a951e7d1d58a96e02046c9f9029629feb40bdf60a64878e61489440b1a72ce",
+      "status": {
+        "op": "triangle_attention_bwd_atomic_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/triangle_attention_bwd_dkdv_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/triangle_attention_bwd_dkdv_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 52682,
+      "sha256": "883cba4fa9fb30d4df3e20bc1b967909db503506f0a19c8430381dc29e206955",
+      "status": {
+        "op": "triangle_attention_bwd_dkdv_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/triangle_attention_bwd_dq_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/triangle_attention_bwd_dq_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 52680,
+      "sha256": "3dff13388cae403d932c88114da51f1ffcff2ef140bfa00fa821ee21ae062629",
+      "status": {
+        "op": "triangle_attention_bwd_dq_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/triangle_attention_bwd_pre_contig_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/triangle_attention_bwd_pre_contig_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 14796,
+      "sha256": "c3c170122ba37a09db7454efd96b46079c3aaac95b14dc9076a26da73623f7e5",
+      "status": {
+        "op": "triangle_attention_bwd_pre_contig_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/triangle_attention_bwd_pre_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/triangle_attention_bwd_pre_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 14798,
+      "sha256": "41d374f6b5af1a26c4d8d7aa43fa07da668e76c1202b5bd896bc87196f1f15ef",
+      "status": {
+        "op": "triangle_attention_bwd_pre_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/triangle_attention_fwd_contig_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/triangle_attention_fwd_contig_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 52728,
+      "sha256": "6e3491a3da65b977fe2a4ccf475bd4b32a6ba6eeb663437bab08278d68048e9b",
+      "status": {
+        "op": "triangle_attention_fwd_contig_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/triangle_attention_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/triangle_attention_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 52709,
+      "sha256": "6fee5445f4b7aadac3d7b7340d67c1ab6897820a2ac5f11f8497ac4861bb78ec",
+      "status": {
+        "op": "triangle_attention_fwd_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_bwd_gate_packed_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_bwd_gate_packed_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 12930,
+      "sha256": "48143164aa5f2b29041fc3cef8e6667f76cdb35d3b2e3099fd65286279219186",
+      "status": {
+        "op": "trimul_bwd_gate_packed_recompute_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_bwd_gate_packed_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_bwd_gate_packed_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 12926,
+      "sha256": "d93c95e08f986c5fc0812a464de5b181185c768816de9e458e6780ea595b4cb8",
+      "status": {
+        "op": "trimul_bwd_gate_packed_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_bwd_gate_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_bwd_gate_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 190524,
+      "sha256": "96ff5aaf414ef7f32ef711b35e565def8a9369871da495b06a7df0ed047c9634",
+      "status": {
+        "op": "trimul_bwd_gate_recompute_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_gemm_gate_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_gemm_gate_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 153154,
+      "sha256": "6d9b27fdada418d9381e0d623d3f76bed4720070c26e99b5e09ded223b13c5d8",
+      "status": {
+        "op": "trimul_gemm_gate_mmajor_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_gemm_gate_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_gemm_gate_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 190928,
+      "sha256": "0c659699f6ba8afbf4aa36ad62729ffb1e0002ceeac4c78953a3d2eaf728c3f8",
+      "status": {
+        "op": "trimul_gemm_gate_saveact_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 190515,
+      "sha256": "0cf9f2cdcb433dd3f0d978023dbbca580c03031f26ec12d2e4f3d5212202c238",
+      "status": {
+        "op": "trimul_gemm_gate_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_outproj_bwd_gate_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_outproj_bwd_gate_recompute_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 189915,
+      "sha256": "c15c752da1ed60031923b1b2bfbb69af932f8bc60a0d8471e643e18cb5ddcb71",
+      "status": {
+        "op": "trimul_outproj_bwd_gate_recompute_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_outproj_gemm_gate_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_outproj_gemm_gate_saveact_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 190496,
+      "sha256": "4e612954479fc5dbfe7e9b749908632723471b7fc49d8ce6ab325b2d5f098aec",
+      "status": {
+        "op": "trimul_outproj_gemm_gate_saveact_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_outproj_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_outproj_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 190110,
+      "sha256": "16a1bd2ff1d25e08e30f7b7b672cf7539b81e00682fce932be05b10e22ada04c",
+      "status": {
+        "op": "trimul_outproj_gemm_gate_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    },
+    {
+      "original_path": "src/miniworld_engine/autotune/data/trimul_outproj_layernorm_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "archive_path": "docs/records/archive/stale-a5000-cache/trimul_outproj_layernorm_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+      "bytes": 190532,
+      "sha256": "33b6ba351b80990098c55ea9abf9656c6a497f13308c282029df8a0e79de969e",
+      "status": {
+        "op": "trimul_outproj_layernorm_gemm_gate_triton",
+        "gpu": "NVIDIA RTX A5000 (sm86)",
+        "verdict": "STALE",
+        "reason": "kernel source/key changed (op_identity)",
+        "env_matches": true
+      }
+    }
+  ]
+}

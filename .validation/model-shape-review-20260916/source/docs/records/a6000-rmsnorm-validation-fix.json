@@ -1,0 +1,957 @@
+{
+  "status": "ok",
+  "records": [
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.11112000048160553,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.0033022803254425526,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.0033022803254425526,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.0033022803254425526,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.0033022803254425526,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.0033022803254425526,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.11112000048160553,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.11112000048160553,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.003302177647128701,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.003302177647128701,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.003302177647128701,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.003302177647128701,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0033783784601837397,
+      "new_relative_max": 0.003302177647128701,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995104797032895,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.11112000048160553,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.11161600053310394,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0034722222480922937,
+      "new_relative_max": 0.0033323264215141535,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994978462102007,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0022321429569274187,
+      "new_relative_max": 0.002235311083495617,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995124953272522,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0022321429569274187,
+      "new_relative_max": 0.002235311083495617,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995124953272522,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16435199975967407,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0022321429569274187,
+      "new_relative_max": 0.002235311083495617,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995124953272522,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0022321429569274187,
+      "new_relative_max": 0.002235311083495617,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995124953272522,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0022321429569274187,
+      "new_relative_max": 0.002235311083495617,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9995124953272522,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0020920501556247473,
+      "new_relative_max": 0.0020910371094942093,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994530813575376,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0020920501556247473,
+      "new_relative_max": 0.0020910371094942093,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994530813575376,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16435199975967407,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0020920501556247473,
+      "new_relative_max": 0.0020910371094942093,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994530813575376,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0020920501556247473,
+      "new_relative_max": 0.0020910371094942093,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994530813575376,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "contiguous",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0020920501556247473,
+      "new_relative_max": 0.0020910371094942093,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994530813575376,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0023255813866853714,
+      "new_relative_max": 0.002329701092094183,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994684669807391,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0023255813866853714,
+      "new_relative_max": 0.002329701092094183,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994684669807391,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16435199975967407,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0023255813866853714,
+      "new_relative_max": 0.002329701092094183,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994684669807391,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0023255813866853714,
+      "new_relative_max": 0.002329701092094183,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994684669807391,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 0,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0023255813866853714,
+      "new_relative_max": 0.002329701092094183,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994684669807391,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0044247787445783615,
+      "new_relative_max": 0.0022086026147007942,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994743542870331,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0044247787445783615,
+      "new_relative_max": 0.0022086026147007942,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994743542870331,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.16435199975967407,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0044247787445783615,
+      "new_relative_max": 0.0022086026147007942,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994743542870331,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0044247787445783615,
+      "new_relative_max": 0.0022086026147007942,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994743542870331,
+      "finite": true,
+      "auxiliary_ok": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "layout": "mmajor",
+      "seed": 1,
+      "candidate": {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.16486400365829468,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      "band": 0.004,
+      "old_relative_max": 0.0044247787445783615,
+      "new_relative_max": 0.0022086026147007942,
+      "fp64_envelope_violations": 0,
+      "fp64_max_envelope_ratio": 0.9994743542870331,
+      "finite": true,
+      "auxiliary_ok": true
+    }
+  ],
+  "source_hash": "e26b6b50c6b7aaa3c0cf08afda2b6361d9abc408a84831a891d259f6fd700298",
+  "cache_unchanged": true,
+  "registry_unchanged": true,
+  "registry_sha256": "c0754f485d9ee48440d32ece24b8871a7c982fbb8ad1dacbfab0e9f04a38aad8",
+  "cache_snapshot": {
+    "tiles": {
+      "adaln_bwd_dx_dlnw_triton/NVIDIA RTX A6000 (sm86).json": "545d5daf108ef336607a760c742503f53ba587dae31dec03ecebebf26c7a10b3",
+      "adaln_bwd_pre_dx_triton/NVIDIA RTX A6000 (sm86).json": "e61eda8852dde438a07dca6bc7bc7f0ec52a7c292fd1ef0a9a11961dff6bcd8a",
+      "adaln_epilogue_saveact_triton/NVIDIA RTX A6000 (sm86).json": "8436a92b64e2499e17b382192e4de1c1f23f33f669b8bdc465a638e7ac86b87a",
+      "adaln_epilogue_triton/NVIDIA RTX A6000 (sm86).json": "51d4363c79bed2cd06fbb001d645b7b94cb0c1d7f3cc0e6f6be7be74984a3cf9",
+      "adaln_fwd_gate_triton/NVIDIA RTX A6000 (sm86).json": "eefe527a5f0d698bded17ecfd5ff59ff0deea9bfd55e25554c25a00c4561f143",
+      "adaln_fwd_triton/NVIDIA RTX A6000 (sm86).json": "1b23093959249670f4be0089e58ee9a8ab97a9e54d34bb6db6292d17c67439ed",
+      "adaln_gemm_gate_triton/NVIDIA RTX A6000 (sm86).json": "6a4a97afb4db4ca65493ff1a6ec69ef6a60cdad79ee0eec2a51aa0fabc649922",
+      "augmented_attention_bwd_atomic_triton/NVIDIA RTX A6000 (sm86).json": "dc6606b22f7539d0bb295bda076a699a95e31ca7634d978eb0f7e387199217d9",
+      "augmented_attention_bwd_pre_triton/NVIDIA RTX A6000 (sm86).json": "58eb869d2430a9270f872010d6def3281f5f06f718c477e24f0630be2c32d714",
+      "augmented_attention_bwd_reduce_triton/NVIDIA RTX A6000 (sm86).json": "e8bac6126fef39cff3faebe694dd7a8f669a61459b76a23b4e5876408a341993",
+      "augmented_attention_bwd_split_triton/NVIDIA RTX A6000 (sm86).json": "d09b721cf15d2e26d664b7aa3be3211ef4ee875e9172d30f6cdfd5bc554e749e",
+      "augmented_attention_fwd_triton/NVIDIA RTX A6000 (sm86).json": "bd830f35a5e14667eeca19a4566f8dbca88ba5ecb6c232e6e9e6a6cf720158f0",
+      "cond_transition_bwd_gemm_swiglu_triton/NVIDIA RTX A6000 (sm86).json": "21e3ed2839ca45225e2bd53a5d7730ad4763c18dd2de2099400b4b8872b9198b",
+      "cond_transition_bwd_swiglu_flat_triton/NVIDIA RTX A6000 (sm86).json": "fc701970e11333133ee1162ee2a5310d7f78c8fcb82075cec9a4a1882c3566c5",
+      "cond_transition_expand_swiglu_saveact_triton/NVIDIA RTX A6000 (sm86).json": "5cb2ff2ebc9f20e7323c17a10519ebffc246c7053a6c728d4c2c7f5ed2081702",
+      "cond_transition_expand_swiglu_triton/NVIDIA RTX A6000 (sm86).json": "3caa32abd4ac08134ff7965591b1e69d5d39872e970dbb76cc4fa98abdf4ad5a",
+      "cond_transition_fwd_b2b_saveact_triton/NVIDIA RTX A6000 (sm86).json": "71a8c810e3c4b7b64117a61280e35c5f473e8efd7aa6cfd3e97e51f793b1b1f6",
+      "cond_transition_fwd_b2b_triton/NVIDIA RTX A6000 (sm86).json": "caae7bb9f2847afbb64364779554d0b828f8a4e1d10de55b9f89522132b62de3",
+      "cond_transition_squeeze_gate_saveact_triton/NVIDIA RTX A6000 (sm86).json": "62d41f361a5b79a01491b44e73472781f91dd428dbd1aed18a496d58883b04fa",
+      "cond_transition_squeeze_gate_triton/NVIDIA RTX A6000 (sm86).json": "aec712766246017d26657602429a3e0efba48c9dc88aa881fef741741bfaaa3c",
+      "cond_transition_swiglu_triton/NVIDIA RTX A6000 (sm86).json": "0a3861184b0bb94d93d8b7b22fca967cf8c497988d806fc439ea92fe49bce9cb",
+      "gated_projection_bwd_dx_triton/NVIDIA RTX A6000 (sm86).json": "e50757179fbf7cec312fff895782b38bfaebee1aa712cc6b78a62d7dd9600516",
+      "gated_projection_bwd_gate_dropres_triton/NVIDIA RTX A6000 (sm86).json": "6bb60a4e86ceae5fb7921b5dd871c856a1ce9c40a30de9fef201f1dc56251547",
+      "gated_projection_bwd_gate_flat_triton/NVIDIA RTX A6000 (sm86).json": "c8ca94a56c3f7decc9ee06e59837cf8797beb0d44706d41ed4a957828681f963",
+      "gated_projection_bwd_gate_recompute_flat_triton/NVIDIA RTX A6000 (sm86).json": "a8cf2e8abd389e5546fe5a812ffab37261599a781902fbdc19dd6533bf8dba0a",
+      "gated_projection_bwd_gate_triton/NVIDIA RTX A6000 (sm86).json": "30a43eeb5a7814ab10e8aa4596d65d0a1e8111f43e99e0f631df9ad74d52db47",
+      "gated_projection_gate_dropres_triton/NVIDIA RTX A6000 (sm86).json": "1309204589fd8c5254fdf654104d77426b4727452c5569ebd9af6ae5333637b1",
+      "gated_projection_gate_flat_triton/NVIDIA RTX A6000 (sm86).json": "e162dc3e387a05de5e15c158570e73a875ae3e5ababb6642b094f6cd41f6b29c",
+      "gated_projection_gate_gemm_triton/NVIDIA RTX A6000 (sm86).json": "1054b3f21ca0c5cfe5f35fd07470f513adb77522ba76d5784cc86094566a3b47",
+      "gated_projection_gate_inplace_flat_triton/NVIDIA RTX A6000 (sm86).json": "54107eb975ae1ae078fbf27b725aedf7cf2f0f7a111dcf0409a316615ccc1094",
+      "gated_projection_gate_packed_flat_triton/NVIDIA RTX A6000 (sm86).json": "e1256f99ed1e1b76ea8aa9089d94f68383e89c74ca6d7a0269f6c3bb386dded2",
+      "gated_projection_gate_res_triton/NVIDIA RTX A6000 (sm86).json": "2d2aac2c04d91c16bbe427d2f882ea780f62d6a6030205555d15eab7c3d00ea3",
+      "gated_projection_gate_triton/NVIDIA RTX A6000 (sm86).json": "d03ccac72d512d530c6c8de115c11c17a3e500a5c5e76985428376451ce73ac0",
+      "layernorm_bwd_atomic_strided_triton/NVIDIA RTX A6000 (sm86).json": "d60c1310f65bdf104060b410290505c065f47900aa80a51d0e9d14b7c316f580",
+      "layernorm_bwd_atomic_triton/NVIDIA RTX A6000 (sm86).json": "af0a9c1335521686789e3600c5f9750ee1b42c9a8eaa3e7c5335c1019d20cbb4",
+      "layernorm_bwd_foldstats_triton/NVIDIA RTX A6000 (sm86).json": "787aaa8ff4b634c0affeb6548eb66691f902fab06083d37dd51dea3e37b68e32",
+      "layernorm_bwd_split_mmajor_triton/NVIDIA RTX A6000 (sm86).json": "f5a7f48a9cf9e0afe844d00b0bac11c4c709ee860968a06c7e400b0d555161e1",
+      "layernorm_bwd_split_triton/NVIDIA RTX A6000 (sm86).json": "f2a5da399ac7dec09307353ceaa50a3aca00d0a6b4ee84e474c43cee01b23481",
+      "layernorm_fwd_mmajor_triton/NVIDIA RTX A6000 (sm86).json": "e1c226e92aa7cc7f2a6397d8e339effd1cf8acac0adfcc25b3451f6080bba84d",
+      "layernorm_fwd_recompute_foldstats_triton/NVIDIA RTX A6000 (sm86).json": "261e1220ee7cfea87e23b7d908bc99fc7a2ef22bbd9758130c53378be04d0164",
+      "layernorm_fwd_recompute_noaffine_triton/NVIDIA RTX A6000 (sm86).json": "90c59497a72f95b4e0386eecdd39d416754d62d2e8bc625ec57f4ab34e131e5e",
+      "layernorm_fwd_recompute_triton/NVIDIA RTX A6000 (sm86).json": "604dc14474c154c0599b2a530d30ba57cebf565c3aff1bc6aec45d56a934d244",
+      "layernorm_fwd_rowscale_triton/NVIDIA RTX A6000 (sm86).json": "8b937aaa9b533a1244af7f39ba3d08578a0c1f6be0b8f85bb57bf17546ad62d2",
+      "layernorm_fwd_saveact_strided_triton/NVIDIA RTX A6000 (sm86).json": "b702cfd2568d6e709ec5f9d45a204b3f6b33d940e94afdc0b1251ed003a315b7",
+      "layernorm_fwd_saveact_triton/NVIDIA RTX A6000 (sm86).json": "f9001916e35629cec120e1d8b64dcfe8c18f61d3ccb35da22bddc3d4e81c45d3",
+      "layernorm_fwd_strided_triton/NVIDIA RTX A6000 (sm86).json": "5fec38ded5ab8a48201709a5b439fa8e5dea75a8dc63067986e70a90118b727b",
+      "layernorm_linear_bwd_fp32_triton/NVIDIA RTX A6000 (sm86).json": "d90537f0be91e324dc71473d638829943b5843a4294247b8bd45cb5f88f2e45f",
+      "layernorm_linear_fwd_fp32_triton/NVIDIA RTX A6000 (sm86).json": "30c2b099cae85c974652ede203463463aa52cda05288782bc2f3624d4fe938e7",
+      "layernorm_linear_fwd_triton/NVIDIA RTX A6000 (sm86).json": "47104457e553505592d545b00020e4c26fd55bf536f4e26b333ce1645796cf4b",
+      "layernorm_stats_triton/NVIDIA RTX A6000 (sm86).json": "c3c9922dd2c0302a0c45f5b49092924588966cfb55f9aaab022ee3891b766b0d",
+      "rmsnorm_adamod_bwd_triton/NVIDIA RTX A6000 (sm86).json": "aff9b2c762c318b3a70fd7f6779fb9d2635ac56956f8b623d836d7c0a197c912",
+      "rmsnorm_adamod_fwd_triton/NVIDIA RTX A6000 (sm86).json": "d0333de0a712dae705fafa97f06aab736006c3ffac38fcb1ae5cf3fccd3cee63",
+      "rmsnorm_bwd_triton/NVIDIA RTX A6000 (sm86).json": "150f9dce44f5a7958ae1ee12e7ac31bbc91ed903daf1000e2e3b98e14dc58338",
+      "rmsnorm_fwd_triton/NVIDIA RTX A6000 (sm86).json": "031f8589daca09cc8935df168450dd24c1d8d8fe475fbb76d5ae62ee462ec6f8",
+      "rope_fwd_triton/NVIDIA RTX A6000 (sm86).json": "f372a15a1a8a7fc17f5e2b676d7b3305cfb78f63646409ce072c59b0d5ce330a",
+      "transition_bwd_epilogue_triton/NVIDIA RTX A6000 (sm86).json": "0acc858f23a08e5d442443dc35b29355ff5987949bb4f8d0cb5485349bb3e486",
+      "transition_bwd_swiglu_recompute_triton/NVIDIA RTX A6000 (sm86).json": "ecbd20aefde20f963d741a6c3916a6a8ed5730d4b5982fcafd7631e3a41cf9cc",
+      "transition_bwd_transpose_packed_triton/NVIDIA RTX A6000 (sm86).json": "9244ebeafcd3a251f428ee25c11d5e40a748346a5b86f0fa4e06a2c2d28b91b5",
+      "transition_expand_swiglu_triton/NVIDIA RTX A6000 (sm86).json": "3557318a635989deb64a7bf7e50e4985556d7b44fc4b3317191dbf2fda2830f2",
+      "transition_fold_triton/NVIDIA RTX A6000 (sm86).json": "9584feb7c9d844818bcbd9a45ecca807340e76f8e70525a0760a624f1d84764d",
+      "transition_fwd_b2b_ktiled_triton/NVIDIA RTX A6000 (sm86).json": "169f5bf7822979cb515f696a4942608fcf2a6cfb7474ee0b42cb3a31440a255d",
+      "transition_fwd_b2b_triton/NVIDIA RTX A6000 (sm86).json": "9410c618b5df3c80452d694b905952b2352aba81949d44997b87337200228324",
+      "transition_layernorm_expand_swiglu_triton/NVIDIA RTX A6000 (sm86).json": "e19d3ed4ec402ceb78f06f088c85ec6afa7a4b6d037e8e87438ca039d8ebbc77",
+      "triangle_attention_bwd_atomic_triton/NVIDIA RTX A6000 (sm86).json": "dfd7594108c093b43bb911b48bbf7426bea0571cb8f3f5c461aa8171431a3f57",
+      "triangle_attention_bwd_dkdv_triton/NVIDIA RTX A6000 (sm86).json": "4ea336b6b96e65a5303c4178c95ba08a53eb1d80428f56059f5eb82814337588",
+      "triangle_attention_bwd_dq_triton/NVIDIA RTX A6000 (sm86).json": "9845bf040c53f98df42bebc3b5c1c3cfc3d5bb16b6f2c0d43aef8fac868d51a5",
+      "triangle_attention_bwd_pre_contig_triton/NVIDIA RTX A6000 (sm86).json": "1df9c4dee05b6b23174888ebba08714dbb362d6a609bf972007978430653b9f3",
+      "triangle_attention_bwd_pre_triton/NVIDIA RTX A6000 (sm86).json": "ef0832f89aef1fe4f629f98ec052912d7ed60aa0a09878a61e97f3d23a489d45",
+      "triangle_attention_fwd_contig_triton/NVIDIA RTX A6000 (sm86).json": "90d9fde3d7921e7f0a15a5757eaa89e081e326ab3bb3885b4e3f2ebc606200e4",
+      "triangle_attention_fwd_triton/NVIDIA RTX A6000 (sm86).json": "6f2e7de3a3db26131b0772d03213528e3456fbf851774b65fd7b356f788e9317",
+      "trimul_bwd_gate_packed_recompute_triton/NVIDIA RTX A6000 (sm86).json": "b9f44f7542763d4958e9ddc6a5d9059af32ee98e380a23ebd4c75ae048fda4e5",
+      "trimul_bwd_gate_packed_triton/NVIDIA RTX A6000 (sm86).json": "64939511b582cd5462c3fe10c67026963cbd544e52096e7f3cc80e9aea71930e",
+      "trimul_bwd_gate_recompute_triton/NVIDIA RTX A6000 (sm86).json": "1f6e5d100acb1ad09a06d6097b878f45ee14313606bd98133d1c0cc4c51d2bfd",
+      "trimul_gemm_gate_mmajor_triton/NVIDIA RTX A6000 (sm86).json": "5746c797c867da4c3df93bbea000c39f310e8f1d10f3ba2986b5773047e8eb0d",
+      "trimul_gemm_gate_saveact_triton/NVIDIA RTX A6000 (sm86).json": "05ef78c3ff7e02e606b49ea01e397f416bf208ca4613ac49a3525b4c3913fbd9",
+      "trimul_gemm_gate_triton/NVIDIA RTX A6000 (sm86).json": "c346ecddfd4ac402ddb34a838a4a9cbc58776ff40a3a17e3bf74ee365d36e371",
+      "trimul_outproj_bwd_gate_recompute_triton/NVIDIA RTX A6000 (sm86).json": "1788d4f118ca46f99b98d3273fb4a09b9cff00c32c09b2848c2eee39c68d62ca",
+      "trimul_outproj_gemm_gate_saveact_triton/NVIDIA RTX A6000 (sm86).json": "da2bebd0fe4ec1528730b4d733f1289689484883d511c84e81d84d913251471e",
+      "trimul_outproj_gemm_gate_triton/NVIDIA RTX A6000 (sm86).json": "458e7ee50d1c56788fa14edbcc14e515f943cd084af5d8021513a23d3a454a31",
+      "trimul_outproj_layernorm_gemm_gate_triton/NVIDIA RTX A6000 (sm86).json": "af718b65417b6fb41ba53171ffda44efbabd124a380b5dba81be9e209db383cd"
+    },
+    "dispatch": {
+      "bias_only_dispatch/NVIDIA_RTX_A6000_sm86_triton3.6.0.json": "9742a103acfa87fdf75900b8fe0c7db3b4043ad06fc723e9809b5da50a40ae4f",
+      "ln_bwd_dispatch/NVIDIA_RTX_A6000_sm86_triton3.6.0.json": "028edda22cc649d922be53eefb2ff9748c70d0eaf4555a24455fea2858930568"
+    }
+  },
+  "gpu_uuid": "40e6429b-fc40-3f79-7b81-ffc1a1bd6482",
+  "job": "1672723",
+  "shape": [
+    589824,
+    32
+  ],
+  "eps": 1.1920928955078125e-07,
+  "policy": "unchanged registry bands against unrounded FP32 reference; independent FP64 half-BF16-ULP envelope",
+  "registry_change": {
+    "kernel": "rmsnorm_fwd_triton",
+    "before": "bf16=3.2e-3|fp32=8.0e-7",
+    "after": "bf16=4.0e-3|fp32=8.0e-7"
+  },
+  "tests": {
+    "cpu_passed": 23,
+    "cpu_skipped": 1,
+    "gpu_passed": 16,
+    "large_candidate_input_checks": 40
+  },
+  "note": "registry_unchanged refers to the GPU audit interval, after the explicit forward BF16 band correction recorded here."
+}

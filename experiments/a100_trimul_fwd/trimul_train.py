@@ -21,6 +21,7 @@ _B1G_ENV = os.environ.get("A100_B1G", "128")
 _B1G = {"all": (128, 256), "none": ()}[_B1G_ENV] if _B1G_ENV in ("all", "none") else tuple(int(c) for c in _B1G_ENV.split(","))
 _OVERLAP = os.environ.get("A100_OVERLAP", "1") == "1"      # weight-gradient GEMMs on a side stream under the contraction backward
 _SIDE = {}
+DEBUG = None                                              # a dict: backward keeps dW (and B7src's dgp) there for dw_acc.py
 
 
 def _side_stream(dev):
@@ -30,6 +31,14 @@ def _side_stream(dev):
 
 
 _B7J_RINGS = int(os.environ.get("A100_B7J_RINGS", "8"))
+
+
+def knobs(pk, L, dev):
+    """This shape's training knobs: env / module defaults, then the selection table (trimul_a100.selected)."""
+    ch = pk["ch"]
+    d = dict(b7j=_B7J, c=_B7J_C[ch], rings=_B7J_RINGS, b1g=ch in _B1G, overlap=_OVERLAP, contract=None)
+    d.update(TA.selected(pk["bidir"], L, "train", dev))
+    return d
 PARAMS = ("ln_pair.weight", "ln_pair.bias", "to_left_gate.weight", "to_left.weight", "to_right_gate.weight", "to_right.weight",
           "ln_out.weight", "ln_out.bias", "to_gate.weight", "to_out.weight")
 
@@ -102,14 +111,15 @@ class TriMulA100(torch.autograd.Function):
         zf = z.reshape(T, C).contiguous()
         ab = torch.empty(2 * ch, T, device=z.device, dtype=torch.bfloat16)
         x = torch.empty(ch, L, L, device=z.device, dtype=torch.bfloat16)
-        mk = mask.reshape(L).to(torch.uint8).contiguous() if mask is not None else torch.empty(0, dtype=torch.uint8, device=z.device)
+        mk = TA.mask_u8(mask, L, z.device)
         none = torch.empty(0, device=z.device)
         zst = torch.empty(T, 2, device=z.device, dtype=torch.float32) if TA.ZST else none
         if TA.ZST:
             ext.k1z(zf, mk, pk["w1"], pk["g_in"], pk["b_in"], ab, L, pk["eps_in"], zst)
         else:
             ext.k1(zf, mk, pk["w1"], pk["g_in"], pk["b_in"], ab, L, pk["eps_in"], 0, none)
-        TA.contract(ab[:ch].view(ch, L, L), ab[ch:].view(ch, L, L), x, pk, ext)
+        kn = knobs(pk, L, z.device)
+        TA.contract(ab[:ch].view(ch, L, L), ab[ch:].view(ch, L, L), x, pk, ext, kn["contract"])
         out = torch.empty_like(zf)
         dsv = ds.reshape(L, C).contiguous() if ds is not None else none.to(torch.bfloat16)
         # training K3 also saves the LayerNorm statistics (mu_o, r_o, mu_i, r_i) and x_n for the backward (the sm_90 forward's saved tensors)
@@ -118,20 +128,20 @@ class TriMulA100(torch.autograd.Function):
         ext.k3_train(x.view(ch, T), zf, pk["wo"], pk["wg"], pk["so"], pk["bo"], pk["sg"], pk["bg"], out, pk["eps_out"], dsv, L, stats, xn,
                      pk["g_in"], pk["b_in"], zst)
         ctx.save_for_backward(zf, ab, x, dsv, mk, stats, xn)
-        ctx.ext, ctx.pk, ctx.L, ctx.m = ext, pk, L, m
+        ctx.ext, ctx.pk, ctx.L, ctx.m, ctx.kn = ext, pk, L, m, kn
         return out.view(B, L, L, C)
 
     @staticmethod
     def backward(ctx, dy):
         zf, ab, x, dsv, mk, stats, xn = ctx.saved_tensors
-        ext, pk, L, m = ctx.ext, ctx.pk, ctx.L, ctx.m
+        ext, pk, L, m, kn = ctx.ext, ctx.pk, ctx.L, ctx.m, ctx.kn
         ch, T, C = pk["ch"], L * L, 128
         dev = zf.device
         dyf = dy.reshape(T, C).contiguous().to(torch.bfloat16)
         # ---- B1
         dX = torch.empty(ch, L, L, device=dev, dtype=torch.bfloat16)
         ao = torch.empty(T, C, device=dev, dtype=torch.bfloat16)
-        joint = _B7J and T % 128 == 0
+        joint = bool(kn["b7j"]) and T % 128 == 0
         if joint:                                   # d_g alone; dg / dp of the planes live only in the joint kernel's L2 ring
             ldd = C
             dgp = torch.empty(T, C, device=dev, dtype=torch.bfloat16)
@@ -140,7 +150,7 @@ class TriMulA100(torch.autograd.Function):
             ldd = 4 * ch + C
             dgp = torch.empty(T, ldd, device=dev, dtype=torch.bfloat16)    # [dg | dp of the planes (K1 order) | d_g of the output gate]
             dgv = dgp[:, 4 * ch:]
-        if ch in _B1G:
+        if kn["b1g"]:
             nb = ext.b1g_grid(T)
             red = torch.empty(nb, 2, C, device=dev, dtype=torch.float32)
             gpart = torch.empty(nb, C, ch, device=dev, dtype=torch.float32)
@@ -167,7 +177,7 @@ class TriMulA100(torch.autograd.Function):
 
         # the weight-gradient GEMMs are DRAM-bound, the contraction backward is tensor-bound: run them side by side
         main = torch.cuda.current_stream()
-        if _OVERLAP:
+        if kn["overlap"]:
             side = _side_stream(dev)
             side.wait_stream(main)
             for t in (red, gpart, ao, x, dgv, xn):
@@ -191,14 +201,14 @@ class TriMulA100(torch.autograd.Function):
         dz = torch.empty_like(zf)
         if joint:
             # ---- B7 joint: sources (dg / dp + dW per weight block) -> L2 ring -> consumers (dx_n GEMM + LN_in backward + residual)
-            S, Cc = nstep, _B7J_C[ch]
+            S, Cc, R = nstep, int(kn["c"]), int(kn["rings"])
             Gn = ext.b7j_capacity() // (S + Cc)
-            ring = torch.empty(Gn * _B7J_RINGS * 128 * 64 * S, device=dev, dtype=torch.bfloat16)
-            flags = torch.zeros(Gn * _B7J_RINGS * (S + 1), device=dev, dtype=torch.int32)
-            dwp = torch.empty(Gn, 4 * ch, C, device=dev, dtype=torch.float32)
+            ring = torch.empty(Gn * R * 128 * 64 * S, device=dev, dtype=torch.bfloat16)
+            flags = torch.zeros(Gn * R * (S + 1), device=dev, dtype=torch.int32)
+            dwp = torch.empty(Gn * ext.b7j_dwseg(), 4 * ch, C, device=dev, dtype=torch.float32)
             part = torch.empty(Gn * Cc, 2, C, device=dev, dtype=torch.float32)
             ext.b7j(xn, pk["w1"], dab.view(2 * ch, T), mk, pk["wdx"], dgv, zf, dyf, stats, pk["g_in"], ring,
-                    flags[:Gn * _B7J_RINGS * S], flags[Gn * _B7J_RINGS * S:], dz, dwp, part, L, Cc, Gn, _B7J_RINGS)
+                    flags[:Gn * R * S], flags[Gn * R * S:], dz, dwp, part, L, Cc, Gn, R)
         else:
             # ---- B7src: dg / dp (columns 0 .. 4CH) + input-weight gradient partials
             splits = max(1, TA.num_sms(dev) // (nstep // 2))                  # one wave of pair CTAs (one per SM)
@@ -208,7 +218,9 @@ class TriMulA100(torch.autograd.Function):
             part = torch.empty(min((T + 127) // 128, 2 * TA.num_sms(dev)), 2, C, device=dev, dtype=torch.float32)
             ext.b8(dgp, ldd, pk["wdx"], zf, dyf, stats, pk["g_in"], dz, part)
         dw_rows = dwp.sum(0)                                                  # [4CH, 128] in K1 row order
-        if _OVERLAP:
+        if DEBUG is not None:
+            DEBUG.update(dw_rows=dw_rows, xn=xn, dgp=None if joint else dgp[:, :4 * ch])
+        if kn["overlap"]:
             main.wait_stream(side)
             for t in (d_wo, d_gout, d_bout, d_wog):
                 t.record_stream(main)
@@ -226,3 +238,10 @@ class TriMulA100(torch.autograd.Function):
 def forward_train(ext, m, z, mask, ds):
     params = [dict(m.named_parameters())[n] for n in PARAMS]
     return TriMulA100.apply(z, mask, ds, ext, m, *params)
+
+
+def forward_train_auto(m, z, mask, ds):
+    """forward_train() with the shape's selected build (its compile flags)."""
+    bidir = m.__class__.__name__.startswith("Bidirectional")
+    ext = TA.build(extra=tuple(TA.selected_extra(bidir, z.shape[1], "train", z.device).split()))
+    return forward_train(ext, m, z, mask, ds)

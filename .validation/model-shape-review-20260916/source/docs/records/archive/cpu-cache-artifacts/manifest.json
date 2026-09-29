@@ -1,0 +1,47 @@
+[
+  {
+    "original": "src/miniworld_engine/autotune/data/adaln_epilogue_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/adaln_epilogue_triton.json",
+    "sha256": "b2138e789620dfa20ef29efaeea6e38eb7d6badc85ee4fcf9b123158757dff34"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/cond_transition_bwd_gemm_swiglu_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/cond_transition_bwd_gemm_swiglu_triton.json",
+    "sha256": "060fadba53f17e0b5f735b33fc30ea412db1f2dc869c3f2c3748de7f7b877633"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/cond_transition_fwd_b2b_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/cond_transition_fwd_b2b_triton.json",
+    "sha256": "9191912e472ab6cc502b47bac51a104dea1cb0d3c1638e684ee5f214a39b888f"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/gated_projection_bwd_gate_dropres_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/gated_projection_bwd_gate_dropres_triton.json",
+    "sha256": "46b46b667bf1e6b6518667479bdc5158fe977e464901f99861aa7544062cf268"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/gated_projection_gate_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/gated_projection_gate_triton.json",
+    "sha256": "d89ee4de080562099ce8b1f4e6f767f1bdc44c5dfacd40d70d0b016062f1d496"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/layernorm_bwd_atomic_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/layernorm_bwd_atomic_triton.json",
+    "sha256": "b0f21288b51423c15c7abb3b07f5ef17881ffbb77f30e21a1023d110a9283ff9"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/layernorm_bwd_foldstats_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/layernorm_bwd_foldstats_triton.json",
+    "sha256": "23b7c8bf8ada25bf9ab57057afc9bc77758a4ccc00ddf24c92d91753bf1b745f"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/layernorm_bwd_split_mmajor_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/layernorm_bwd_split_mmajor_triton.json",
+    "sha256": "325b31f1f44da2918c5d40168d22291645d1d468cbe19b652e8aca2aba2a1ec9"
+  },
+  {
+    "original": "src/miniworld_engine/autotune/data/trimul_outproj_layernorm_gemm_gate_triton/cpu.json",
+    "archive": "docs/records/archive/cpu-cache-artifacts/trimul_outproj_layernorm_gemm_gate_triton.json",
+    "sha256": "61fe874abe94c396942b93be1938eb1dfa566212eaafc12be524c48b50cebe16"
+  }
+]

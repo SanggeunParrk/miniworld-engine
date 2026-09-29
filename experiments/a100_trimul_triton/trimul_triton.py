@@ -432,7 +432,10 @@ def _forward(pk, z, mask, ds, train):
     assert B == 1 and D == pk["D"]
     T, ch, NP, dev = L * L, pk["ch"], pk["NP"], z.device
     zf = z.reshape(T, D).contiguous()
-    mk = mask.reshape(L).to(torch.uint8).contiguous() if mask is not None else zf
+    mk = zf
+    if mask is not None:                         # a bool mask is read as uint8 in place (no cast kernel); the kernels test != 0
+        mk = mask.reshape(L)
+        mk = mk.view(torch.uint8) if mk.dtype == torch.bool and mk.is_contiguous() else (mk != 0).to(torch.uint8)
     ab = torch.empty(NP, T, device=dev, dtype=torch.bfloat16)
     zst = torch.empty(T, 2, device=dev, dtype=torch.float32)
     _k1[lambda a: (triton.cdiv(T, a["BM"]),)](zf, mk, pk["w1i"], pk["gin"], pk["bin"], ab, zst, T, L, pk["eps_in"], D=D, NP=NP,

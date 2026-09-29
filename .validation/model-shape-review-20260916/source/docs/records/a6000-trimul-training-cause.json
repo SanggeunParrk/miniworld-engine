@@ -1,0 +1,2072 @@
+{
+  "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+  "cache_unchanged": true,
+  "history": [
+    {
+      "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_seq_len.csv",
+      "sha256": "c1074fccb43121b46cfd269e458fedb7c622ef5c62e652ab4908b179dcf2cb47",
+      "rows": [
+        {
+          "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_seq_len",
+          "target_kind": "module",
+          "target": "triangle_multiplication",
+          "device": "NVIDIA RTX A6000",
+          "torch_version": "2.10.0+cu128",
+          "cuda_version": "12.8",
+          "metric": "time",
+          "unit": "ms",
+          "mode": "training",
+          "compiled": "True",
+          "cudagraph": "disabled",
+          "precision": "bf16-mixed",
+          "allow_tf32": "True",
+          "sweep_axis": "seq_len",
+          "implementation": "cuequivariance",
+          "implementation_type": "cuequivariance",
+          "ln_implementation": "",
+          "input_dtype": "float32",
+          "parameter_dtype": "float32",
+          "execution_path": "cuequivariance",
+          "reference": "pytorch",
+          "output_max_abs": "0.0008693039417266846",
+          "output_rel_frob": "2.4074743123492226e-05",
+          "output_cosine": "1.0",
+          "grad_max_abs": "0.0010058879852294922",
+          "grad_rel_frob": "6.392753130057827e-05",
+          "grad_cosine": "1.0",
+          "n_layers": "1",
+          "n_augment": "32",
+          "mask_prob": "0.0",
+          "seq_len": "384",
+          "tokens": "147456",
+          "batch_size": "1",
+          "d_pair": "128",
+          "d_single": "384",
+          "d_single_token": "768",
+          "d_single_atom": "128",
+          "d_pair_atom": "16",
+          "status": "ok",
+          "error": "",
+          "value": "9.134079933166504"
+        },
+        {
+          "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_seq_len",
+          "target_kind": "module",
+          "target": "triangle_multiplication",
+          "device": "NVIDIA RTX A6000",
+          "torch_version": "2.10.0+cu128",
+          "cuda_version": "12.8",
+          "metric": "time",
+          "unit": "ms",
+          "mode": "training",
+          "compiled": "True",
+          "cudagraph": "disabled",
+          "precision": "bf16-mixed",
+          "allow_tf32": "True",
+          "sweep_axis": "seq_len",
+          "implementation": "miniworld",
+          "implementation_type": "miniworld",
+          "ln_implementation": "",
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "float32",
+          "execution_path": "miniworld.v6_training_merged",
+          "reference": "pytorch",
+          "output_max_abs": "0.03407573699951172",
+          "output_rel_frob": "0.003118508728221059",
+          "output_cosine": "0.9999952912330627",
+          "grad_max_abs": "0.04651498794555664",
+          "grad_rel_frob": "0.004533738363534212",
+          "grad_cosine": "0.9999896883964539",
+          "n_layers": "1",
+          "n_augment": "32",
+          "mask_prob": "0.0",
+          "seq_len": "384",
+          "tokens": "147456",
+          "batch_size": "1",
+          "d_pair": "128",
+          "d_single": "384",
+          "d_single_token": "768",
+          "d_single_atom": "128",
+          "d_pair_atom": "16",
+          "status": "ok",
+          "error": "",
+          "value": "4.814336061477661"
+        },
+        {
+          "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_seq_len",
+          "target_kind": "module",
+          "target": "triangle_multiplication",
+          "device": "NVIDIA RTX A6000",
+          "torch_version": "2.10.0+cu128",
+          "cuda_version": "12.8",
+          "metric": "time",
+          "unit": "ms",
+          "mode": "training",
+          "compiled": "True",
+          "cudagraph": "disabled",
+          "precision": "bf16-mixed",
+          "allow_tf32": "True",
+          "sweep_axis": "seq_len",
+          "implementation": "miniworld",
+          "implementation_type": "miniworld",
+          "ln_implementation": "",
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "float32",
+          "execution_path": "miniworld.v6_training_merged",
+          "reference": "pytorch",
+          "output_max_abs": "0.03407573699951172",
+          "output_rel_frob": "0.003118508728221059",
+          "output_cosine": "0.9999952912330627",
+          "grad_max_abs": "0.04651498794555664",
+          "grad_rel_frob": "0.004533738363534212",
+          "grad_cosine": "0.9999896883964539",
+          "n_layers": "1",
+          "n_augment": "32",
+          "mask_prob": "0.0",
+          "seq_len": "384",
+          "tokens": "147456",
+          "batch_size": "1",
+          "d_pair": "128",
+          "d_single": "384",
+          "d_single_token": "768",
+          "d_single_atom": "128",
+          "d_pair_atom": "16",
+          "status": "ok",
+          "error": "",
+          "value": "4.824063777923584"
+        }
+      ]
+    },
+    {
+      "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep.csv",
+      "sha256": "ccc0208b9413ba81a9995746c1d2372c0d8aa65d9e310077cdfdfab01693a514",
+      "rows": [
+        {
+          "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep",
+          "target_kind": "module",
+          "target": "triangle_multiplication",
+          "device": "NVIDIA RTX A6000",
+          "torch_version": "2.10.0+cu128",
+          "cuda_version": "12.8",
+          "metric": "time",
+          "unit": "ms",
+          "mode": "training",
+          "compiled": "True",
+          "cudagraph": "manual",
+          "precision": "bf16-mixed",
+          "allow_tf32": "True",
+          "sweep_axis": "seq_len",
+          "implementation": "cuequivariance",
+          "implementation_type": "cuequivariance",
+          "ln_implementation": "",
+          "input_dtype": "float32",
+          "parameter_dtype": "float32",
+          "execution_path": "cuequivariance",
+          "reference": "pytorch",
+          "output_max_abs": "0.0008692741394042969",
+          "output_rel_frob": "5.0816790462704375e-05",
+          "output_cosine": "0.9999998807907104",
+          "grad_max_abs": "0.0010059475898742676",
+          "grad_rel_frob": "9.871661313809454e-05",
+          "grad_cosine": "1.0",
+          "n_layers": "1",
+          "n_augment": "32",
+          "mask_prob": "0.0",
+          "seq_len": "384",
+          "tokens": "147456",
+          "batch_size": "1",
+          "d_pair": "128",
+          "d_single": "384",
+          "d_single_token": "768",
+          "d_single_atom": "128",
+          "d_pair_atom": "16",
+          "status": "ok",
+          "error": "",
+          "value": "9.2456955909729"
+        },
+        {
+          "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep",
+          "target_kind": "module",
+          "target": "triangle_multiplication",
+          "device": "NVIDIA RTX A6000",
+          "torch_version": "2.10.0+cu128",
+          "cuda_version": "12.8",
+          "metric": "time",
+          "unit": "ms",
+          "mode": "training",
+          "compiled": "True",
+          "cudagraph": "manual",
+          "precision": "bf16-mixed",
+          "allow_tf32": "True",
+          "sweep_axis": "seq_len",
+          "implementation": "miniworld",
+          "implementation_type": "miniworld",
+          "ln_implementation": "",
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "miniworld.v6_training_merged",
+          "reference": "pytorch",
+          "output_max_abs": "0.03128314018249512",
+          "output_rel_frob": "0.005813051480799913",
+          "output_cosine": "0.9999831318855286",
+          "grad_max_abs": "0.035547733306884766",
+          "grad_rel_frob": "0.006424787454307079",
+          "grad_cosine": "0.9999793767929077",
+          "n_layers": "1",
+          "n_augment": "32",
+          "mask_prob": "0.0",
+          "seq_len": "384",
+          "tokens": "147456",
+          "batch_size": "1",
+          "d_pair": "128",
+          "d_single": "384",
+          "d_single_token": "768",
+          "d_single_atom": "128",
+          "d_pair_atom": "16",
+          "status": "ok",
+          "error": "",
+          "value": "4.563967943191528"
+        }
+      ]
+    }
+  ],
+  "mask_ab": {
+    "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+    "job": "1672658",
+    "gpu_uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+    "runtime_patch": "all-valid mask versus mask=None; see mw_trimul_mask_cli.py",
+    "wrapper_hash": "394d2d55cba45d38d6a5208f97aeec990860e74a618cfa33f7760ab4fd0defcb",
+    "runs": [
+      {
+        "repeat": 0,
+        "omit_mask": false,
+        "command": [
+          "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/python",
+          "-u",
+          "/home/psk6950/practice/team-gm/mw_trimul_mask_cli.py",
+          "level=module",
+          "target=triangle_multiplication",
+          "mode=training",
+          "metric=time",
+          "implementations=[miniworld,cuequivariance]",
+          "compile=true",
+          "cudagraph=disabled",
+          "n_augment=auto",
+          "precision=bf16-mixed",
+          "allow_tf32=false",
+          "n_layers=1",
+          "trimul_direction=outgoing",
+          "mask_prob=0",
+          "d_pair=128",
+          "min_seq_len=384",
+          "max_seq_len=384",
+          "sweep_axis=seq_len",
+          "name_suffix=DIAGNOSTIC_mask_none0_1672658_r0",
+          "hydra.run.dir=/tmp/psk6950-directions-mask-ab-1672658/mask-False-0"
+        ],
+        "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e5c28637-src-6df41ce4-run-0620346d6b8b_DIAGNOSTIC_mask_none0_1672658_r0.csv",
+        "csv_hash": "dc9d622222293cc80237a43aa344b22a1ce127fc6956a78b57486ab069bc9b00",
+        "rows": [
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e5c28637-src-6df41ce4-run-0620346d6b8b_DIAGNOSTIC_mask_none0_1672658_r0",
+            "measurement_schema": "2",
+            "run_id": "0620346d6b8b476d8ed420dec94a34d6",
+            "config_hash": "e5c28637faf308adf1b03d35d861690eaea6ed90f3f9533c90e41b53fe3b1370",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "miniworld",
+            "implementation_type": "miniworld",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.0030957916751503944",
+            "output_cosine": "0.9999950528144836",
+            "grad_max_abs": "0.0467219352722168",
+            "grad_rel_frob": "0.0045047421008348465",
+            "grad_cosine": "0.999989926815033",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.7861762046813965"
+          },
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e5c28637-src-6df41ce4-run-0620346d6b8b_DIAGNOSTIC_mask_none0_1672658_r0",
+            "measurement_schema": "2",
+            "run_id": "0620346d6b8b476d8ed420dec94a34d6",
+            "config_hash": "e5c28637faf308adf1b03d35d861690eaea6ed90f3f9533c90e41b53fe3b1370",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "cuequivariance",
+            "implementation_type": "cuequivariance",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.003143779467791319",
+            "output_cosine": "0.9999951720237732",
+            "grad_max_abs": "0.046874046325683594",
+            "grad_rel_frob": "0.0044614518992602825",
+            "grad_cosine": "0.9999900460243225",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.627968072891235"
+          }
+        ]
+      },
+      {
+        "repeat": 0,
+        "omit_mask": true,
+        "command": [
+          "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/python",
+          "-u",
+          "/home/psk6950/practice/team-gm/mw_trimul_mask_cli.py",
+          "level=module",
+          "target=triangle_multiplication",
+          "mode=training",
+          "metric=time",
+          "implementations=[miniworld,cuequivariance]",
+          "compile=true",
+          "cudagraph=disabled",
+          "n_augment=auto",
+          "precision=bf16-mixed",
+          "allow_tf32=false",
+          "n_layers=1",
+          "trimul_direction=outgoing",
+          "mask_prob=0",
+          "d_pair=128",
+          "min_seq_len=384",
+          "max_seq_len=384",
+          "sweep_axis=seq_len",
+          "name_suffix=DIAGNOSTIC_mask_none1_1672658_r0",
+          "hydra.run.dir=/tmp/psk6950-directions-mask-ab-1672658/mask-True-0"
+        ],
+        "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-2c56272e-src-6df41ce4-run-7e9d907bd82b_DIAGNOSTIC_mask_none1_1672658_r0.csv",
+        "csv_hash": "383572afd10b80e106ec6cfef2eee83b4f9659a86db2106ad7c5667f07be282b",
+        "rows": [
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-2c56272e-src-6df41ce4-run-7e9d907bd82b_DIAGNOSTIC_mask_none1_1672658_r0",
+            "measurement_schema": "2",
+            "run_id": "7e9d907bd82b425db329fa6fc799710e",
+            "config_hash": "2c56272e281e94b64386c2f6f4b41a2b3ca329c88f5d8b717ead26e6708a0e96",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "miniworld",
+            "implementation_type": "miniworld",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.0030957916751503944",
+            "output_cosine": "0.9999950528144836",
+            "grad_max_abs": "0.0467219352722168",
+            "grad_rel_frob": "0.0045047421008348465",
+            "grad_cosine": "0.999989926815033",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.3878397941589355"
+          },
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-2c56272e-src-6df41ce4-run-7e9d907bd82b_DIAGNOSTIC_mask_none1_1672658_r0",
+            "measurement_schema": "2",
+            "run_id": "7e9d907bd82b425db329fa6fc799710e",
+            "config_hash": "2c56272e281e94b64386c2f6f4b41a2b3ca329c88f5d8b717ead26e6708a0e96",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "cuequivariance",
+            "implementation_type": "cuequivariance",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.003143779467791319",
+            "output_cosine": "0.9999951720237732",
+            "grad_max_abs": "0.046874046325683594",
+            "grad_rel_frob": "0.0044614518992602825",
+            "grad_cosine": "0.9999900460243225",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.553728103637695"
+          }
+        ]
+      },
+      {
+        "repeat": 1,
+        "omit_mask": true,
+        "command": [
+          "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/python",
+          "-u",
+          "/home/psk6950/practice/team-gm/mw_trimul_mask_cli.py",
+          "level=module",
+          "target=triangle_multiplication",
+          "mode=training",
+          "metric=time",
+          "implementations=[cuequivariance,miniworld]",
+          "compile=true",
+          "cudagraph=disabled",
+          "n_augment=auto",
+          "precision=bf16-mixed",
+          "allow_tf32=false",
+          "n_layers=1",
+          "trimul_direction=outgoing",
+          "mask_prob=0",
+          "d_pair=128",
+          "min_seq_len=384",
+          "max_seq_len=384",
+          "sweep_axis=seq_len",
+          "name_suffix=DIAGNOSTIC_mask_none1_1672658_r1",
+          "hydra.run.dir=/tmp/psk6950-directions-mask-ab-1672658/mask-True-1"
+        ],
+        "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-6cb40dc2-src-6df41ce4-run-107d4a2c14c8_DIAGNOSTIC_mask_none1_1672658_r1.csv",
+        "csv_hash": "c3463ed8465705184463ed1e2e8050ea1e938a4559795629364462c7e321fe2b",
+        "rows": [
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-6cb40dc2-src-6df41ce4-run-107d4a2c14c8_DIAGNOSTIC_mask_none1_1672658_r1",
+            "measurement_schema": "2",
+            "run_id": "107d4a2c14c84e4f9da3f73b832bf763",
+            "config_hash": "6cb40dc2ee164aaec6744dabe375dd6961ce868dc6496e8f1295ab8c494a5ae7",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "cuequivariance",
+            "implementation_type": "cuequivariance",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.003143779467791319",
+            "output_cosine": "0.9999951720237732",
+            "grad_max_abs": "0.046874046325683594",
+            "grad_rel_frob": "0.0044614518992602825",
+            "grad_cosine": "0.9999900460243225",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.552703857421875"
+          },
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-6cb40dc2-src-6df41ce4-run-107d4a2c14c8_DIAGNOSTIC_mask_none1_1672658_r1",
+            "measurement_schema": "2",
+            "run_id": "107d4a2c14c84e4f9da3f73b832bf763",
+            "config_hash": "6cb40dc2ee164aaec6744dabe375dd6961ce868dc6496e8f1295ab8c494a5ae7",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "miniworld",
+            "implementation_type": "miniworld",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.0030957916751503944",
+            "output_cosine": "0.9999950528144836",
+            "grad_max_abs": "0.0467219352722168",
+            "grad_rel_frob": "0.0045047421008348465",
+            "grad_cosine": "0.999989926815033",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.474880218505859"
+          }
+        ]
+      },
+      {
+        "repeat": 1,
+        "omit_mask": false,
+        "command": [
+          "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/python",
+          "-u",
+          "/home/psk6950/practice/team-gm/mw_trimul_mask_cli.py",
+          "level=module",
+          "target=triangle_multiplication",
+          "mode=training",
+          "metric=time",
+          "implementations=[cuequivariance,miniworld]",
+          "compile=true",
+          "cudagraph=disabled",
+          "n_augment=auto",
+          "precision=bf16-mixed",
+          "allow_tf32=false",
+          "n_layers=1",
+          "trimul_direction=outgoing",
+          "mask_prob=0",
+          "d_pair=128",
+          "min_seq_len=384",
+          "max_seq_len=384",
+          "sweep_axis=seq_len",
+          "name_suffix=DIAGNOSTIC_mask_none0_1672658_r1",
+          "hydra.run.dir=/tmp/psk6950-directions-mask-ab-1672658/mask-False-1"
+        ],
+        "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-44648042-src-6df41ce4-run-d1f042578aea_DIAGNOSTIC_mask_none0_1672658_r1.csv",
+        "csv_hash": "55fa73702a855ad9d3dd27d9acb04a2787b90b0da27fbad79d6a055a693fef0c",
+        "rows": [
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-44648042-src-6df41ce4-run-d1f042578aea_DIAGNOSTIC_mask_none0_1672658_r1",
+            "measurement_schema": "2",
+            "run_id": "d1f042578aea42259c59303b24e39051",
+            "config_hash": "44648042ee83b3678b565a1fe0bfc00c5545c1cd1de4d19c9ff910c8eb325a53",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "cuequivariance",
+            "implementation_type": "cuequivariance",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.003143779467791319",
+            "output_cosine": "0.9999951720237732",
+            "grad_max_abs": "0.046874046325683594",
+            "grad_rel_frob": "0.0044614518992602825",
+            "grad_cosine": "0.9999900460243225",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.612095832824707"
+          },
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-44648042-src-6df41ce4-run-d1f042578aea_DIAGNOSTIC_mask_none0_1672658_r1",
+            "measurement_schema": "2",
+            "run_id": "d1f042578aea42259c59303b24e39051",
+            "config_hash": "44648042ee83b3678b565a1fe0bfc00c5545c1cd1de4d19c9ff910c8eb325a53",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "miniworld",
+            "implementation_type": "miniworld",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.0030957916751503944",
+            "output_cosine": "0.9999950528144836",
+            "grad_max_abs": "0.0467219352722168",
+            "grad_rel_frob": "0.0045047421008348465",
+            "grad_cosine": "0.999989926815033",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.85478401184082"
+          }
+        ]
+      },
+      {
+        "repeat": 2,
+        "omit_mask": false,
+        "command": [
+          "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/python",
+          "-u",
+          "/home/psk6950/practice/team-gm/mw_trimul_mask_cli.py",
+          "level=module",
+          "target=triangle_multiplication",
+          "mode=training",
+          "metric=time",
+          "implementations=[miniworld,cuequivariance]",
+          "compile=true",
+          "cudagraph=disabled",
+          "n_augment=auto",
+          "precision=bf16-mixed",
+          "allow_tf32=false",
+          "n_layers=1",
+          "trimul_direction=outgoing",
+          "mask_prob=0",
+          "d_pair=128",
+          "min_seq_len=384",
+          "max_seq_len=384",
+          "sweep_axis=seq_len",
+          "name_suffix=DIAGNOSTIC_mask_none0_1672658_r2",
+          "hydra.run.dir=/tmp/psk6950-directions-mask-ab-1672658/mask-False-2"
+        ],
+        "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-3949492d-src-6df41ce4-run-f8b8fced825e_DIAGNOSTIC_mask_none0_1672658_r2.csv",
+        "csv_hash": "0adfc3bb4fb4ae706551d00e458cd30d997872cc6db5f286e16cb47c12ea96f9",
+        "rows": [
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-3949492d-src-6df41ce4-run-f8b8fced825e_DIAGNOSTIC_mask_none0_1672658_r2",
+            "measurement_schema": "2",
+            "run_id": "f8b8fced825e451eb373f1a25a903bd4",
+            "config_hash": "3949492d5ae8bf3f62ef66b21253b59fd52715aecc9d2c3e1fecedb945e0f85d",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "miniworld",
+            "implementation_type": "miniworld",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.0030957916751503944",
+            "output_cosine": "0.9999950528144836",
+            "grad_max_abs": "0.0467219352722168",
+            "grad_rel_frob": "0.0045047421008348465",
+            "grad_cosine": "0.999989926815033",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.798463821411133"
+          },
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-3949492d-src-6df41ce4-run-f8b8fced825e_DIAGNOSTIC_mask_none0_1672658_r2",
+            "measurement_schema": "2",
+            "run_id": "f8b8fced825e451eb373f1a25a903bd4",
+            "config_hash": "3949492d5ae8bf3f62ef66b21253b59fd52715aecc9d2c3e1fecedb945e0f85d",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "cuequivariance",
+            "implementation_type": "cuequivariance",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.003143779467791319",
+            "output_cosine": "0.9999951720237732",
+            "grad_max_abs": "0.046874046325683594",
+            "grad_rel_frob": "0.0044614518992602825",
+            "grad_cosine": "0.9999900460243225",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.652031898498535"
+          }
+        ]
+      },
+      {
+        "repeat": 2,
+        "omit_mask": true,
+        "command": [
+          "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/python",
+          "-u",
+          "/home/psk6950/practice/team-gm/mw_trimul_mask_cli.py",
+          "level=module",
+          "target=triangle_multiplication",
+          "mode=training",
+          "metric=time",
+          "implementations=[miniworld,cuequivariance]",
+          "compile=true",
+          "cudagraph=disabled",
+          "n_augment=auto",
+          "precision=bf16-mixed",
+          "allow_tf32=false",
+          "n_layers=1",
+          "trimul_direction=outgoing",
+          "mask_prob=0",
+          "d_pair=128",
+          "min_seq_len=384",
+          "max_seq_len=384",
+          "sweep_axis=seq_len",
+          "name_suffix=DIAGNOSTIC_mask_none1_1672658_r2",
+          "hydra.run.dir=/tmp/psk6950-directions-mask-ab-1672658/mask-True-2"
+        ],
+        "csv": "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-f90a06ab-src-6df41ce4-run-83bd6aec1bc8_DIAGNOSTIC_mask_none1_1672658_r2.csv",
+        "csv_hash": "a70ab6964118f5a096665a473e3caea9db82f9b4de36214d30b4e0da59c4ae3b",
+        "rows": [
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-f90a06ab-src-6df41ce4-run-83bd6aec1bc8_DIAGNOSTIC_mask_none1_1672658_r2",
+            "measurement_schema": "2",
+            "run_id": "83bd6aec1bc84bfc9d42fe509c1e17d5",
+            "config_hash": "f90a06abad4ffebc8cf2f8052f26c47b1a02e4987889a45b00d91d632e466e5a",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "miniworld",
+            "implementation_type": "miniworld",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.0030957916751503944",
+            "output_cosine": "0.9999950528144836",
+            "grad_max_abs": "0.0467219352722168",
+            "grad_rel_frob": "0.0045047421008348465",
+            "grad_cosine": "0.999989926815033",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.382751941680908"
+          },
+          {
+            "run_name": "triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-f90a06ab-src-6df41ce4-run-83bd6aec1bc8_DIAGNOSTIC_mask_none1_1672658_r2",
+            "measurement_schema": "2",
+            "run_id": "83bd6aec1bc84bfc9d42fe509c1e17d5",
+            "config_hash": "f90a06abad4ffebc8cf2f8052f26c47b1a02e4987889a45b00d91d632e466e5a",
+            "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+            "target_kind": "module",
+            "target": "triangle_multiplication",
+            "device": "NVIDIA RTX A6000",
+            "torch_version": "2.10.0+cu128",
+            "cuda_version": "12.8",
+            "metric": "time",
+            "unit": "ms",
+            "mode": "training",
+            "compiled": "True",
+            "compile_requested": "True",
+            "cudagraph": "disabled",
+            "cudagraph_requested": "disabled",
+            "compile_scope": "module_forward:partial_allowed",
+            "compiled_graphs": "1",
+            "measurement_scope": "forward_backward",
+            "mode_requested": "training",
+            "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 384]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 384, 384, 128]}}",
+            "execution_validation": "{\"finite_tensors\": 12}",
+            "compile_wrap": "custom_op",
+            "precision": "bf16-mixed",
+            "allow_tf32": "False",
+            "sweep_axis": "seq_len",
+            "implementation": "cuequivariance",
+            "implementation_type": "cuequivariance",
+            "ln_implementation": "",
+            "input_dtype": "bfloat16",
+            "parameter_dtype": "bfloat16+float32",
+            "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+            "reference": "pytorch",
+            "output_max_abs": "0.033677101135253906",
+            "output_rel_frob": "0.003143779467791319",
+            "output_cosine": "0.9999951720237732",
+            "grad_max_abs": "0.046874046325683594",
+            "grad_rel_frob": "0.0044614518992602825",
+            "grad_cosine": "0.9999900460243225",
+            "n_layers": "1",
+            "n_layers_requested": "1",
+            "trimul_direction": "outgoing",
+            "n_augment": "48",
+            "mask_prob": "0.0",
+            "seq_len": "384",
+            "tokens": "",
+            "batch_size": "",
+            "d_pair": "128",
+            "d_single": "384",
+            "d_single_token": "768",
+            "d_single_atom": "128",
+            "d_pair_atom": "16",
+            "status": "ok",
+            "error": "",
+            "value": "4.585472106933594"
+          }
+        ]
+      }
+    ],
+    "finished": true,
+    "cache_unchanged": true
+  },
+  "profiles": {
+    "mw_out": {
+      "name": "mw_out",
+      "target": "triangle_multiplication",
+      "direction": "outgoing",
+      "depth": 1,
+      "implementation": "miniworld",
+      "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+      "profiled_steps": 5,
+      "gpu": [
+        {
+          "name": "_bidir_front_kernel",
+          "ms_per_step": 0.5476115999999999,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "_dconcat_kernel",
+          "ms_per_step": 0.5263957999999999,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x256_ldg8_f2f_stages_32x1_nt",
+          "ms_per_step": 0.36359820000000015,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_64x3_nn",
+          "ms_per_step": 0.28774500000000064,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "_gate_mul_train_kernel",
+          "ms_per_step": 0.26323959999999974,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "_gate_elem_bwd_ew_kernel",
+          "ms_per_step": 0.26050639999999986,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "ms_per_step": 0.22631159999999956,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_64x128_ldg8_f2f_stages_32x6_nt",
+          "ms_per_step": 0.2225092000000001,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "triton_poi_fused__to_copy_bitwise_and_mul_unsqueeze_view_2",
+          "ms_per_step": 0.21270520000000004,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "triton_poi_fused__to_copy_bitwise_and_mul_trimul_front_bwd_dconcat_unsqueeze_view_0",
+          "ms_per_step": 0.21163620000000014,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_tn",
+          "ms_per_step": 0.17952699999999974,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_nn",
+          "ms_per_step": 0.17783139999999986,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "_ln_bwd_kernel",
+          "ms_per_step": 0.17452239999999983,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nt",
+          "ms_per_step": 0.16841679999999926,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "layer_norm_bwd_dx_fused",
+          "ms_per_step": 0.16613820000000035,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_add_view_6",
+          "ms_per_step": 0.15849660000000074,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tt",
+          "ms_per_step": 0.11736360000000022,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "_ln_mat_kernel",
+          "ms_per_step": 0.11561660000000056,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "layer_norm_fwd_fused",
+          "ms_per_step": 0.1148612000000001,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms_per_step": 0.11266640000000015,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "Memcpy DtoD (Device -> Device)",
+          "ms_per_step": 0.1068996000000001,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "ms_per_step": 0.012051600000000325,
+          "calls_per_step": 5.0
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms_per_step": 0.00844819999999936,
+          "calls_per_step": 3.0
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "ms_per_step": 0.0045959999999997305,
+          "calls_per_step": 4.0
+        },
+        {
+          "name": "triton_poi_fused_cat_clone_t_1",
+          "ms_per_step": 0.0022720000000006624,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_cat_clone_stack_t_view_1",
+          "ms_per_step": 0.002176000000000431,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_clone_t_trimul_gate_elem_fwd_train_view_3",
+          "ms_per_step": 0.0020161999999994806,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_clone_slice_t_2",
+          "ms_per_step": 0.001932600000000821,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_clone_slice_t_3",
+          "ms_per_step": 0.001804599999999664,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_ones_0",
+          "ms_per_step": 0.0015041999999993547,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_clone_slice_t_5",
+          "ms_per_step": 0.001446399999999812,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_clone_slice_t_4",
+          "ms_per_step": 0.001446200000000681,
+          "calls_per_step": 1.0
+        }
+      ],
+      "operators": [
+        {
+          "name": "miniworld_engine::layernorm_fwd",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              128
+            ],
+            [
+              128
+            ],
+            [],
+            [],
+            [],
+            []
+          ],
+          "device_ms": 0.11486120000000011,
+          "self_device_ms": 0.11486120000000011,
+          "count": 1.0
+        },
+        {
+          "name": "aten::bmm",
+          "shapes": [
+            [
+              128,
+              384,
+              384
+            ],
+            [
+              128,
+              384,
+              384
+            ],
+            [
+              128,
+              384,
+              384
+            ]
+          ],
+          "device_ms": 0.5257751999999989,
+          "self_device_ms": 0.5257751999999989,
+          "count": 3.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_materialize",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              128
+            ],
+            [
+              128
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.11561660000000056,
+          "self_device_ms": 0.11561660000000056,
+          "count": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              128,
+              128
+            ],
+            [
+              147456,
+              128
+            ]
+          ],
+          "device_ms": 0.22631159999999953,
+          "self_device_ms": 0.22631159999999953,
+          "count": 2.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              128,
+              128
+            ]
+          ],
+          "device_ms": 0.11266640000000017,
+          "self_device_ms": 0.11266640000000017,
+          "count": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              128,
+              147456
+            ],
+            [
+              147456,
+              128
+            ],
+            [
+              128,
+              128
+            ]
+          ],
+          "device_ms": 0.22805179999999953,
+          "self_device_ms": 0.22805179999999953,
+          "count": 2.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              128,
+              128
+            ],
+            [
+              128,
+              147456
+            ],
+            [
+              128,
+              147456
+            ]
+          ],
+          "device_ms": 0.11736360000000023,
+          "self_device_ms": 0.11736360000000023,
+          "count": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_bwd_mmajor",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              147456,
+              128
+            ],
+            [
+              128
+            ],
+            [
+              147456
+            ],
+            [
+              147456
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.17697399999999944,
+          "self_device_ms": 0.17452239999999983,
+          "count": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              512,
+              147456
+            ],
+            [
+              147456,
+              128
+            ],
+            [
+              512,
+              128
+            ]
+          ],
+          "device_ms": 0.2906506000000005,
+          "self_device_ms": 0.2906506000000005,
+          "count": 1.0
+        },
+        {
+          "name": "aten::addmm",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              147456,
+              512
+            ],
+            [
+              512,
+              128
+            ],
+            [],
+            [],
+            [
+              147456,
+              128
+            ]
+          ],
+          "device_ms": 0.4704978000000003,
+          "self_device_ms": 0.4704978000000003,
+          "count": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_bwd",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              147456,
+              128
+            ],
+            [
+              128
+            ],
+            [
+              147456
+            ],
+            [
+              147456
+            ],
+            [],
+            [],
+            [],
+            []
+          ],
+          "device_ms": 0.16828260000000045,
+          "self_device_ms": 0.16613820000000032,
+          "count": 1.0
+        },
+        {
+          "name": "aten::copy_",
+          "shapes": [
+            [
+              128,
+              128
+            ],
+            [
+              128,
+              128
+            ],
+            []
+          ],
+          "device_ms": 0.012051600000000325,
+          "self_device_ms": 0.012051600000000325,
+          "count": 5.0
+        }
+      ],
+      "gpu_uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+      "job": "1672662",
+      "compiled_graphs": 1,
+      "profile_gpu_sum_ms": 4.754292600000001,
+      "cache_unchanged": true,
+      "note": "Profile only: do not subtract these instrumented GPU sums from native unprofiled timing."
+    },
+    "cueq_out": {
+      "name": "cueq_out",
+      "target": "triangle_multiplication",
+      "direction": "outgoing",
+      "depth": 1,
+      "implementation": "cuequivariance",
+      "source_hash": "6df41ce4c744c85f51927609d783209c66950f22d2e8af1624b48191ec808b22",
+      "profiled_steps": 5,
+      "gpu": [
+        {
+          "name": "fused_sigmoid_gated_dual_gemm_backward_pregemm_kernel",
+          "ms_per_step": 0.7657436000000001,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms_per_step": 0.5775508000000009,
+          "calls_per_step": 4.0
+        },
+        {
+          "name": "layer_norm_transpose_backward_kernel",
+          "ms_per_step": 0.5074129999999992,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "fused_sigmoid_gated_dual_gemm_forward_kernel",
+          "ms_per_step": 0.44290779999999974,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "layer_norm_transpose_forward_kernel",
+          "ms_per_step": 0.3815569999999996,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "ampere_s16816gemm_bf16_128x64_ldg8_stages_64x3_nt",
+          "ms_per_step": 0.3197068000000001,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "triton_poi_fused_cat_fused_gated_dual_gemm_backward_permute_squeeze_view_2",
+          "ms_per_step": 0.3028106000000007,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_64x128_ldg8_f2f_stages_32x6_nt",
+          "ms_per_step": 0.2205706000000003,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "triton_poi_fused_add_layer_norm_transpose_bwd_view_3",
+          "ms_per_step": 0.2061635999999997,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_nn",
+          "ms_per_step": 0.1850054000000003,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_tn",
+          "ms_per_step": 0.18398760000000025,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nt",
+          "ms_per_step": 0.16783439999999983,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_add_view_2",
+          "ms_per_step": 0.15836219999999968,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_add_view_4",
+          "ms_per_step": 0.15700540000000038,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_red_fused_sum_view_0",
+          "ms_per_step": 0.01509120000000021,
+          "calls_per_step": 4.0
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)",
+          "ms_per_step": 0.007731000000000494,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms_per_step": 0.006790400000000408,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "triton_per_fused_sum_view_1",
+          "ms_per_step": 0.006522000000000389,
+          "calls_per_step": 4.0
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms_per_step": 0.005862399999998797,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "triton_poi_fused_cat_1",
+          "ms_per_step": 0.0035329999999995374,
+          "calls_per_step": 2.0
+        },
+        {
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+          "ms_per_step": 0.0034756000000003037,
+          "calls_per_step": 1.0
+        },
+        {
+          "name": "triton_poi_fused_bitwise_and_unsqueeze_0",
+          "ms_per_step": 0.001843000000000029,
+          "calls_per_step": 0.8
+        }
+      ],
+      "operators": [
+        {
+          "name": "aten::bmm",
+          "shapes": [
+            [
+              128,
+              384,
+              384
+            ],
+            [
+              128,
+              384,
+              384
+            ],
+            [
+              128,
+              384,
+              384
+            ]
+          ],
+          "device_ms": 0.5368274000000003,
+          "self_device_ms": 0.5368274000000003,
+          "count": 3.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              128,
+              147456
+            ],
+            [
+              147456,
+              128
+            ],
+            [
+              128,
+              128
+            ]
+          ],
+          "device_ms": 0.22643299999999908,
+          "self_device_ms": 0.22643299999999908,
+          "count": 2.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              147456,
+              128
+            ],
+            [
+              128,
+              128
+            ],
+            [
+              147456,
+              128
+            ]
+          ],
+          "device_ms": 0.22995899999999986,
+          "self_device_ms": 0.22995899999999986,
+          "count": 2.0
+        },
+        {
+          "name": "aten::copy_",
+          "shapes": [
+            [
+              147456
+            ],
+            [
+              147456
+            ],
+            []
+          ],
+          "device_ms": 0.003475600000000304,
+          "self_device_ms": 0.003475600000000304,
+          "count": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              256,
+              147456
+            ],
+            [
+              147456,
+              128
+            ],
+            [
+              256,
+              128
+            ]
+          ],
+          "device_ms": 0.3264972000000005,
+          "self_device_ms": 0.3264972000000005,
+          "count": 2.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              147456,
+              256
+            ],
+            [
+              256,
+              128
+            ],
+            [
+              147456,
+              128
+            ]
+          ],
+          "device_ms": 0.34759180000000106,
+          "self_device_ms": 0.34759180000000106,
+          "count": 2.0
+        }
+      ],
+      "gpu_uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+      "job": "1672662",
+      "compiled_graphs": 1,
+      "profile_gpu_sum_ms": 4.627467400000001,
+      "cache_unchanged": true,
+      "note": "Profile only: do not subtract these instrumented GPU sums from native unprofiled timing."
+    }
+  },
+  "phases": {
+    "mw_out": {
+      "CompiledFunction": {
+        "total_ms": 1.6666573999999998,
+        "kernels": [
+          [
+            "_bidir_front_kernel",
+            0.5476116
+          ],
+          [
+            "_gate_mul_train_kernel",
+            0.26323959999999996
+          ],
+          [
+            "triton_poi_fused__to_copy_bitwise_and_mul_unsqueeze_view_2",
+            0.21270519999999998
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_tn",
+            0.179527
+          ],
+          [
+            "_ln_mat_kernel",
+            0.1156166
+          ],
+          [
+            "layer_norm_fwd_fused",
+            0.1148612
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            0.1147334
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+            0.1126664
+          ],
+          [
+            "triton_poi_fused_cat_clone_stack_t_view_1",
+            0.002176
+          ],
+          [
+            "triton_poi_fused_clone_t_trimul_gate_elem_fwd_train_view_3",
+            0.0020162
+          ],
+          [
+            "triton_poi_fused_ones_0",
+            0.0015042
+          ]
+        ]
+      },
+      "CompiledFunctionBackward": {
+        "total_ms": 3.0755836,
+        "kernels": [
+          [
+            "_dconcat_kernel",
+            0.5263958
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x256_ldg8_f2f_stages_32x1_nt",
+            0.3635982
+          ],
+          [
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_64x3_nn",
+            0.287745
+          ],
+          [
+            "_gate_elem_bwd_ew_kernel",
+            0.26050639999999997
+          ],
+          [
+            "ampere_bf16_s16816gemm_bf16_64x128_ldg8_f2f_stages_32x6_nt",
+            0.22250920000000002
+          ],
+          [
+            "triton_poi_fused__to_copy_bitwise_and_mul_trimul_front_bwd_dconcat_unsqueeze_view_0",
+            0.2116362
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_nn",
+            0.17783140000000003
+          ],
+          [
+            "_ln_bwd_kernel",
+            0.1745224
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nt",
+            0.16841679999999998
+          ],
+          [
+            "layer_norm_bwd_dx_fused",
+            0.1661382
+          ],
+          [
+            "triton_poi_fused_add_view_6",
+            0.1584966
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tt",
+            0.11736360000000001
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            0.1115782
+          ],
+          [
+            "Memcpy DtoD (Device -> Device)",
+            0.1068996
+          ],
+          [
+            "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+            0.008448200000000001
+          ],
+          [
+            "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+            0.004595999999999999
+          ],
+          [
+            "triton_poi_fused_cat_clone_t_1",
+            0.002272
+          ],
+          [
+            "triton_poi_fused_clone_slice_t_2",
+            0.0019326
+          ],
+          [
+            "triton_poi_fused_clone_slice_t_3",
+            0.0018046
+          ],
+          [
+            "triton_poi_fused_clone_slice_t_5",
+            0.0014463999999999998
+          ],
+          [
+            "triton_poi_fused_clone_slice_t_4",
+            0.0014462000000000001
+          ]
+        ]
+      },
+      "unattributed": {
+        "total_ms": 0.0120516,
+        "kernels": [
+          [
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            0.0120516
+          ]
+        ]
+      }
+    },
+    "cueq_out": {
+      "CompiledFunction": {
+        "total_ms": 1.1721906,
+        "kernels": [
+          [
+            "fused_sigmoid_gated_dual_gemm_forward_kernel",
+            0.4429078
+          ],
+          [
+            "layer_norm_transpose_forward_kernel",
+            0.381557
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_tn",
+            0.1839876
+          ],
+          [
+            "triton_poi_fused_add_view_2",
+            0.1583622
+          ],
+          [
+            "triton_poi_fused_cat_1",
+            0.0035330000000000005
+          ],
+          [
+            "triton_poi_fused_bitwise_and_unsqueeze_0",
+            0.0018429999999999998
+          ]
+        ]
+      },
+      "CompiledFunctionBackward": {
+        "total_ms": 3.4552768,
+        "kernels": [
+          [
+            "fused_sigmoid_gated_dual_gemm_backward_pregemm_kernel",
+            0.7657436
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+            0.5775507999999999
+          ],
+          [
+            "layer_norm_transpose_backward_kernel",
+            0.507413
+          ],
+          [
+            "ampere_s16816gemm_bf16_128x64_ldg8_stages_64x3_nt",
+            0.3197068
+          ],
+          [
+            "triton_poi_fused_cat_fused_gated_dual_gemm_backward_permute_squeeze_view_2",
+            0.3028106
+          ],
+          [
+            "ampere_bf16_s16816gemm_bf16_64x128_ldg8_f2f_stages_32x6_nt",
+            0.22057060000000003
+          ],
+          [
+            "triton_poi_fused_add_layer_norm_transpose_bwd_view_3",
+            0.2061636
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_nn",
+            0.18500540000000001
+          ],
+          [
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nt",
+            0.1678344
+          ],
+          [
+            "triton_poi_fused_add_view_4",
+            0.15700540000000002
+          ],
+          [
+            "triton_red_fused_sum_view_0",
+            0.0150912
+          ],
+          [
+            "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)",
+            0.007730999999999999
+          ],
+          [
+            "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, float const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, float const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+            0.006790399999999999
+          ],
+          [
+            "triton_per_fused_sum_view_1",
+            0.006522000000000002
+          ],
+          [
+            "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+            0.0058624
+          ],
+          [
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            0.0034756
+          ]
+        ]
+      }
+    }
+  },
+  "caveat": "Diagnostic all-valid mask versus None is mathematically equivalent. The production mask=.125 remains necessary. Native timer unchanged; runtime mask override explicitly recorded. No kernel change or tuning was performed."
+}

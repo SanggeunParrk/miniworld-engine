@@ -19,6 +19,9 @@
 // and one warp's 64 tokens of a channel are a single 128 B segment.
 #pragma once
 #include "sm80_common.cuh"
+#ifndef K1_FRAGLN
+#define K1_FRAGLN 0                              // 1: LayerNorm on the A fragments in registers (the sm_90 "class 1" LN) instead of the in-place smem pass
+#endif
 #ifndef K1_PROF
 #define K1_PROF 0
 #endif
@@ -89,10 +92,14 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) k1_kernel(const K1Params p) 
   const int total = n_iter * NSTEP;
   // LayerNorm affine in the pass's lane order: float4 slot k * 8 + lc holds (k < 4: gamma, else beta) of channels
   // (k & 2 ? 64 : 0) + 8 lc + 4 (k & 1) ..: eight lanes read eight consecutive 16 B
-  for (int i = tid; i < 64; i += NT) {
-    const int k = i >> 3, l = i & 7, c0 = ((k & 2) ? 64 : 0) + 8 * l + 4 * (k & 1);
-    const float* src = (k & 4) ? p.beta : p.gamma;
-    reinterpret_cast<float4*>(sG)[i] = make_float4(src[c0], src[c0 + 1], src[c0 + 2], src[c0 + 3]);
+  if (K1_FRAGLN) {                               // plain [gamma | beta]
+    for (int i = tid; i < 2 * CZ; i += NT) sG[i] = i < CZ ? p.gamma[i] : p.beta[i - CZ];
+  } else {
+    for (int i = tid; i < 64; i += NT) {
+      const int k = i >> 3, l = i & 7, c0 = ((k & 2) ? 64 : 0) + 8 * l + 4 * (k & 1);
+      const float* src = (k & 4) ? p.beta : p.gamma;
+      reinterpret_cast<float4*>(sG)[i] = make_float4(src[c0], src[c0 + 1], src[c0 + 2], src[c0 + 3]);
+    }
   }
   if (tid == 0) {
     for (int s = 0; s < NST; ++s) mbar_init(barW + 8 * s, NT);
@@ -107,7 +114,8 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) k1_kernel(const K1Params p) 
     const __nv_bfloat16* src = w_src + (size_t)blk * 64 * CZ;
     const uint32_t dst = w_dst + s * G::SLOT;
 #pragma unroll
-    for (int i = 0; i < 1024 / NT; ++i) cp_async16(dst + i * NT * 16, src + i * NT * 8);
+    for (int i = 0; i < (1024 + NT - 1) / NT; ++i)
+      if (1024 % NT == 0 || tid + i * NT < 1024) cp_async16(dst + i * NT * 16, src + i * NT * 8);
     cp_async_mbar_arrive(barW + 8 * s);
   };
   auto load_z = [&](int tile) {                 // BM tokens x 256 B, BM / 8 granules per thread, zero-filled past T
@@ -181,9 +189,11 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) k1_kernel(const K1Params p) 
   if (n_iter > 0) {                              // first tile: normalised up front; every later tile under the previous tile's steps
     mask_table(blockIdx.x, 0);
     bar_sync(1, NT);
-    mbar_wait(barZ, 0);
+    if (!K1_FRAGLN) {
+      mbar_wait(barZ, 0);
 #pragma unroll 1
-    for (int r0 = 0; r0 < G::LN_ROWS; r0 += 4) ln_pass(r0, 0, p.tok0 + (int)blockIdx.x * BM);
+      for (int r0 = 0; r0 < G::LN_ROWS; r0 += 4) ln_pass(r0, 0, p.tok0 + (int)blockIdx.x * BM);
+    }
   }
 
   int u = 0, slot = 0;
@@ -200,6 +210,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) k1_kernel(const K1Params p) 
     // ---- A fragments: 64 rows x 128 channels (4 m16 tiles x 8 k16 steps)
     constexpr int MT = G::MT, WR = G::WROWS;
     uint32_t fa[MT][8][4];
+    if (K1_FRAGLN) mbar_wait(barZ, it & 1);     // the raw z tile
 #pragma unroll
     for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
@@ -210,6 +221,53 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) k1_kernel(const K1Params p) 
     // ---- bf16-half masks of the packed words this lane stores: tokens (g8 & ~1) + {0, 1} of each (mt, h)
     bar_sync(1, NT);                             // every warp has its fragments and mask: the tile buffers take the next tile
     if (has_next) { load_z(tile + (int)gridDim.x); mask_table(tile + (int)gridDim.x, (it + 1) & 1); }   // read by the spread LN (after step barriers)
+    if (K1_FRAGLN) {
+      // fragment LayerNorm: words 0 / 2 of fa[mt][ks] hold token 2 g8, words 1 / 3 token 2 g8 + 1 (tile rows WR mg + 16 mt + 2 g8 + {0, 1}),
+      // channels 16 ks + 2 q + {0, 1} (words 0 / 1) and + 8 (words 2 / 3): 32 channels per lane, the quad holds the row's 128
+      const int mbuf = it & 1;
+#pragma unroll
+      for (int mt = 0; mt < MT; ++mt) {
+        float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks) {
+          s0 += bf16lo(fa[mt][ks][0]) + bf16hi(fa[mt][ks][0]) + bf16lo(fa[mt][ks][2]) + bf16hi(fa[mt][ks][2]);
+          s1 += bf16lo(fa[mt][ks][1]) + bf16hi(fa[mt][ks][1]) + bf16lo(fa[mt][ks][3]) + bf16hi(fa[mt][ks][3]);
+        }
+        s0 += __shfl_xor_sync(0xffffffffu, s0, 1); s0 += __shfl_xor_sync(0xffffffffu, s0, 2);
+        s1 += __shfl_xor_sync(0xffffffffu, s1, 1); s1 += __shfl_xor_sync(0xffffffffu, s1, 2);
+        const float m0 = s0 * (1.f / CZ), m1 = s1 * (1.f / CZ);
+        float q0 = 0.f, q1 = 0.f;
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks)
+#pragma unroll
+          for (int w = 0; w < 4; w += 2) {
+            const float a0 = bf16lo(fa[mt][ks][w]) - m0, a1 = bf16hi(fa[mt][ks][w]) - m0;
+            const float b0 = bf16lo(fa[mt][ks][w + 1]) - m1, b1 = bf16hi(fa[mt][ks][w + 1]) - m1;
+            q0 = fmaf(a0, a0, fmaf(a1, a1, q0)); q1 = fmaf(b0, b0, fmaf(b1, b1, q1));
+          }
+        q0 += __shfl_xor_sync(0xffffffffu, q0, 1); q0 += __shfl_xor_sync(0xffffffffu, q0, 2);
+        q1 += __shfl_xor_sync(0xffffffffu, q1, 1); q1 += __shfl_xor_sync(0xffffffffu, q1, 2);
+        const float r0 = rsqrtf(q0 * (1.f / CZ) + p.eps), r1 = rsqrtf(q1 * (1.f / CZ) + p.eps);
+        const int row0 = WR * mg + 16 * mt + 2 * g8;
+        if (p.zst != nullptr && nw == 0 && q == 0) {
+          if (t0 + row0 < p.T) *reinterpret_cast<float2*>(p.zst + (size_t)(t0 + row0) * 2) = make_float2(m0, r0);
+          if (t0 + row0 + 1 < p.T) *reinterpret_cast<float2*>(p.zst + (size_t)(t0 + row0 + 1) * 2) = make_float2(m1, r1);
+        }
+        const bool k0 = sMask[mbuf * BM + row0] != 0, k1 = sMask[mbuf * BM + row0 + 1] != 0;
+#pragma unroll
+        for (int ks = 0; ks < 8; ++ks)
+#pragma unroll
+          for (int h = 0; h < 2; ++h) {                 // h: channels 16 ks + 8 h + 2 q + {0, 1}
+            const float2 gg = *reinterpret_cast<const float2*>(sG + 16 * ks + 8 * h + 2 * q);
+            const float2 bb = *reinterpret_cast<const float2*>(sG + CZ + 16 * ks + 8 * h + 2 * q);
+            const uint32_t wa = fa[mt][ks][2 * h], wb = fa[mt][ks][2 * h + 1];
+            const uint32_t na = pack_bf16(fmaf((bf16lo(wa) - m0) * r0, gg.x, bb.x), fmaf((bf16hi(wa) - m0) * r0, gg.y, bb.y));
+            const uint32_t nb = pack_bf16(fmaf((bf16lo(wb) - m1) * r1, gg.x, bb.x), fmaf((bf16hi(wb) - m1) * r1, gg.y, bb.y));
+            fa[mt][ks][2 * h] = k0 ? na : 0u;
+            fa[mt][ks][2 * h + 1] = k1 ? nb : 0u;
+          }
+      }
+    }
     __nv_bfloat16* gout = p.ab + (size_t)(16 * nw) * p.T + t0 + WR * mg;
     // ---- weight blocks, software-pipelined inside the warp: a step's two channel groups alternate with the other group's epilogue,
     //      [MMA(s, g0) | EPI(s - 1, g1)] [MMA(s, g1) | EPI(s, g0)], interleaved k-step by k-step so the HMMA stream and the epilogue's
@@ -290,7 +348,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) k1_kernel(const K1Params p) 
       K1P(2);
       epi_store(1, step);
       K1P(5);
-      if (has_next && step >= G::LN_S0) {       // the next tile's z (issued at this tile's start) -> LayerNorm, spread over the second half
+      if (!K1_FRAGLN && has_next && step >= G::LN_S0) {       // the next tile's z (issued at this tile's start) -> LayerNorm, spread over the second half
         if (step == G::LN_S0) mbar_wait(barZ, (it + 1) & 1);
 #pragma unroll
         for (int k = 0; k < G::LN_PER_STEP; ++k) {

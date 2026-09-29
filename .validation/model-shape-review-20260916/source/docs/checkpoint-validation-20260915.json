@@ -1,0 +1,124 @@
+{
+  "date": "2026-09-15",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "registry_rows_before": 53,
+  "registry_rows_after": 141,
+  "census_job": 43944,
+  "scope": "Module wiring, numerical/compile/graph checks and first-length fake-tensor launch tracing; not a complete cache build or end-to-end model qualification.",
+  "final_job": 44200,
+  "derive": {
+    "rows": 88,
+    "entries": 244,
+    "errors": []
+  },
+  "derive_units": 907,
+  "core_gpu_tests": {
+    "passed": 31,
+    "jobs": {
+      "43951_1": 5,
+      "43954_1": 26
+    }
+  },
+  "projection_measurements": [
+    {
+      "width": 267,
+      "out": 128,
+      "compute": "None",
+      "fused_ms": 0.24632320404052735,
+      "split_ms": 0.04365312099456787,
+      "speedup": 0.17721887454576005
+    },
+    {
+      "width": 256,
+      "out": 128,
+      "compute": "torch.float32",
+      "fused_ms": 0.19508224487304687,
+      "split_ms": 0.10477567672729492,
+      "speedup": 0.5370846372794177
+    },
+    {
+      "width": 512,
+      "out": 256,
+      "compute": "torch.float32",
+      "fused_ms": 0.7592550659179688,
+      "split_ms": 0.3159449577331543,
+      "speedup": 0.41612492549017716
+    },
+    {
+      "width": 384,
+      "out": 128,
+      "compute": "torch.float32",
+      "fused_ms": 0.11232255935668946,
+      "split_ms": 0.05449728012084961,
+      "speedup": 0.48518552669182907
+    },
+    {
+      "width": 128,
+      "out": 3,
+      "compute": "torch.float32",
+      "fused_ms": 0.015912959575653075,
+      "split_ms": 0.017797119617462158,
+      "speedup": 1.1184041241889322
+    }
+  ],
+  "measurement_setup": {
+    "compile": "torch.compile(fullgraph=True), both candidates",
+    "cuda_graph": true,
+    "dtype": "native BF16 parameters; FP32 norm; no autocast",
+    "reference": "existing MiniWorld LayerNorm plus native linear",
+    "timing": "100 CUDA graph replays averaged with CUDA events after warmup",
+    "pair_L": 128,
+    "single_rows": 4096,
+    "cache": "existing tuned entries or heuristic subset; no complete autotune"
+  },
+  "tests": {
+    "engine-tests.xml": [
+      {
+        "name": "pytest",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "tests": "719",
+        "time": "34.279",
+        "timestamp": "2026-09-15T13:18:43.386505+09:00",
+        "hostname": "gpu04"
+      }
+    ],
+    "final-registry-tests.xml": [
+      {
+        "name": "pytest",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "tests": "719",
+        "time": "22.282",
+        "timestamp": "2026-09-15T13:43:45.099052+09:00",
+        "hostname": "gpu04"
+      }
+    ],
+    "final-projection-tests.xml": [
+      {
+        "name": "pytest",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "tests": "6",
+        "time": "32.839",
+        "timestamp": "2026-09-15T13:44:09.014605+09:00",
+        "hostname": "gpu04"
+      }
+    ],
+    "fusion-tests-isolated.xml": [
+      {
+        "name": "pytest",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "tests": "26",
+        "time": "449.906",
+        "timestamp": "2026-09-15T13:19:02.759937+09:00",
+        "hostname": "gpu04"
+      }
+    ]
+  }
+}

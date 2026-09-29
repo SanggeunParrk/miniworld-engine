@@ -1,0 +1,91 @@
+kernel,backend,family,file,status,detail,dtype
+#provenance,1.0.0,6216c667e490,clean,2026-09-01,v1.0.0-205-g6216c667,
+adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel DCond=2.30e-03 DLnW=1.82e-03 (band 1e-02 declared),bf16
+adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel D=8.13e-04 DX=3.13e-03 (band 1e-02 declared),bf16
+adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=2.92e-03 Mean=1.61e-08 Rstd=1.51e-07 Gate=1.96e-03 (band 1e-02 declared),bf16
+adaln_epilogue_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/inference.py,ok,rel out=3.03e-03 (band 1e-02 declared),bf16
+adaln_fwd_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/inference.py,ok,rel out=3.32e-03 (band 1e-02 declared),bf16
+layernorm_fwd_strided_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/ln_strided.py,ok,rel out=2.35e-03 (band 9e-03 declared),bf16
+augmented_attention_bwd_atomic_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py,ok,rel dq=4.04e-03 dk=3.25e-03 dv=4.70e-03 dbias=2.58e-03 (band 2e-02 declared),bf16
+augmented_attention_bwd_pre_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,ok,rel out=8.02e-08 (band 4e-07 declared),bf16
+augmented_attention_bwd_split_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,ok,rel dq=4.04e-03 dk=3.25e-03 dv=4.70e-03 dbias=2.58e-03 (band 2e-02 declared),bf16
+augmented_attention_fwd_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,ok,rel out=2.17e-03 m=9.38e-08 (band 9e-03 declared),bf16
+bias_only_attention_bwd_pre_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/main.py,ok,rel out=6.27e-08 (band 3e-07 declared),bf16
+bias_only_attention_bwd_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/main.py,ok,rel dv=9.97e-03 dbias=8.75e-03 (band 5e-02 declared),bf16
+bias_only_attention_fwd_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/main.py,ok,rel out=1.08e-02 m=8.44e-04 (band 4e-02 declared),bf16
+gated_projection_bwd_dx_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/gate_out.py,ok,rel d_out_r=2.56e-03 d_gate=1.86e-03 gated=1.99e-03 (band 1e-02 declared),bf16
+gated_projection_gate_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/gate_out.py,ok,rel out=3.07e-03 (band 1e-02 declared),bf16
+cond_transition_bwd_swiglu_flat_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/training.py,ok,rel out=2.00e-03 (band 8e-03 declared),bf16
+cond_transition_expand_swiglu_saveact_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py,ok,rel H=2.84e-03 AB=2.35e-03 (band 1e-02 declared),bf16
+cond_transition_expand_swiglu_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/composed.py,ok,rel out=2.84e-03 (band 1e-02 declared),bf16
+cond_transition_fwd_b2b_saveact_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/training.py,ok,rel Y=3.13e-03 AB=2.35e-03 H=2.84e-03 Out=3.03e-03 Scale=2.53e-03 (band 3e-03 declared),bf16
+cond_transition_fwd_b2b_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/inference.py,ok,rel out=3.13e-03 (band 1e-02 declared),bf16
+cond_transition_squeeze_gate_saveact_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py,ok,rel Y=2.03e-03 Out=3.44e-03 Scale=2.53e-03 (band 1e-02 declared),bf16
+cond_transition_squeeze_gate_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/composed.py,ok,rel out=2.03e-03 (band 8e-03 declared),bf16
+cond_transition_swiglu_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/training.py,ok,rel out=3.13e-03 (band 1e-02 declared),bf16
+layernorm_fwd_rowscale_triton,triton,fused_ln_mask,miniworld_engine/kernels/fused_ln_mask/cute/fused_ln_mask.py,ok,rel out=1.00e-03 (band 3e-03 declared),bf16
+gated_projection_bwd_gate_flat_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel dg=2.74e-03 do=2.22e-03 (band 1e-02 declared),bf16
+gated_projection_bwd_gate_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel dgate=2.74e-03 drep=2.22e-03 (band 1e-02 declared),bf16
+gated_projection_gate_flat_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.01e-03 (band 8e-03 declared),bf16
+gated_projection_gate_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.01e-03 (band 8e-03 declared),bf16
+layernorm_bwd_split_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dx=1.91e-03 dw=2.00e-03 db=2.13e-03 (band 1e-02 declared),bf16
+layernorm_bwd_reduce_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dw=2.00e-03 db=2.13e-03 (band 9e-03 declared),bf16
+layernorm_fwd_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel y=2.00e-03 mean=3.88e-08 rstd=8.69e-08 (band 1e-02 declared),bf16
+layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel dx=1.91e-03 dw=2.00e-03 db=2.13e-03 (band 1e-02 declared),bf16
+layernorm_bwd_split_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/persistent.py,ok,rel dx=1.91e-03 dw=2.00e-03 db=2.13e-03 (band 1e-02 declared),bf16
+layernorm_fwd_mmajor_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/transpose.py,ok,rel out=2.03e-03 (band 1e-02 declared),bf16
+layernorm_fwd_saveact_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel out=2.00e-03 (band 1e-02 declared),bf16
+layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,skipped,"needs sm90, this card is sm80",bf16
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.83e-03 dgamma=8.54e-07 dbeta=2.17e-07 (band 1e-02 declared),bf16
+layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=2.83e-03 dgamma=5.69e-07 dbeta=8.66e-08 (band 1e-02 declared),bf16
+layernorm_fwd_recompute_noaffine_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=3.26e-03 (band 1e-02 declared),bf16
+layernorm_fwd_recompute_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=2.00e-03 (band 1e-02 declared),bf16
+layernorm_fwd_saveact_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel x_normed=2.03e-03 mean=2.22e-08 rstd=1.78e-07 (band 1e-02 declared),bf16
+layernorm_linear_bwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel dx=3.12e-03 dln_weight=2.44e-03 dproj_weight=1.62e-03 (band 1e-02 declared),bf16
+layernorm_linear_fwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel out=2.13e-03 mean=1.94e-08 rstd=1.74e-07 (band 9e-03 declared),bf16
+layernorm_linear_fwd_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/fused.py,ok,rel out=2.92e-03 (band 2e-02 declared),bf16
+layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=1.30e-07 c1=1.55e-07 (band 6e-07 declared),bf16
+trimul_gemm_gate_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/sm100_gate_gemm_collective.py,skipped,"needs sm100, this card is sm80",bf16
+trimul_gemm_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/_blackwell_dense_gemm.py,skipped,"needs sm100, this card is sm80",bf16
+gated_projection_gate_inplace_flat_triton,triton,tm1,miniworld_engine/kernels/tm1/cute/launch.py,ok,rel out=2.06e-03 (band 1e-02 declared),bf16
+gated_projection_gate_packed_flat_triton,triton,tm1,miniworld_engine/kernels/tm1/cute/launch.py,ok,rel out=2.12e-03 (band 9e-03 declared),bf16
+trimul_bwd_gate_recompute_triton,triton,tm1,miniworld_engine/kernels/tm1/triton/main.py,ok,rel dLA=2.54e-03 dLB=2.07e-03 dRA=2.84e-03 dRB=2.07e-03 (band 1e-02 declared),bf16
+trimul_gemm_gate_triton,triton,tm1,miniworld_engine/kernels/tm1/triton/main.py,ok,rel left=3.19e-03 right=1.84e-03 (band 8e-03 declared),bf16
+trimul_outproj_gemm_gate_sm90_cute,cute,tm2,miniworld_engine/kernels/tm2/cute/tm2_cute_kernel.py,skipped,"needs sm90, this card is sm80",bf16
+trimul_outproj_bwd_gate_recompute_triton,triton,tm2,miniworld_engine/kernels/tm2/triton/main.py,ok,rel dA=2.81e-03 dB=2.24e-03 (band 1e-02 declared),bf16
+trimul_outproj_gemm_gate_triton,triton,tm2,miniworld_engine/kernels/tm2/triton/main.py,ok,rel out=1.87e-03 (band 8e-03 declared),bf16
+transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=3.83e-03 (band 1e-02 declared),bf16
+transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=3.83e-03 (band 2e-02 declared),bf16
+transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel dx=4.02e-03 dwa=3.93e-03 dwb=4.21e-03 dws=3.62e-03 (band 2e-02 declared),bf16
+transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,skipped,"needs sm100, this card is sm80",bf16
+layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.61e-03 dgamma=2.02e-07 dbeta=8.46e-08 (band 9e-03 declared),bf16
+layernorm_fwd_recompute_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/cute/fused.py,ok,rel xn=2.73e-03 vs_layer_norm=2.73e-03 (band 9e-03 declared),bf16
+transition_bwd_epilogue_triton,triton,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,ok,rel dA=2.33e-03 dB=2.56e-03 (band 1e-02 declared),bf16
+transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel h=2.18e-03 dAB=2.16e-03 xn=6.87e-04 (band 1e-02 declared),bf16
+transition_bwd_transpose_packed_triton,triton,transition,miniworld_engine/kernels/transition/cute/backward_gatebwd.py,ok,rel contiguous=0.00e+00 strided_view=0.00e+00 (band 1e-04 declared),bf16
+transition_expand_swiglu_triton,triton,transition,miniworld_engine/kernels/transition/triton/main.py,ok,rel out=2.81e-03 (band 1e-02 declared),bf16
+transition_fold_triton,triton,transition,miniworld_engine/kernels/transition/triton/fold.py,ok,rel B=0.00e+00 S=5.14e-08 B2=9.01e-08 (band 5e-07 declared),bf16
+transition_fwd_b2b_ktiled_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel out=2.83e-03 (band 9e-03 declared),bf16
+transition_fwd_b2b_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel out=2.69e-03 (band 1e-02 declared),bf16
+transition_layernorm_expand_swiglu_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel out=2.18e-03 (band 1e-02 declared),bf16
+triangle_attention_bwd_atomic_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/atomic.py,ok,rel dq=6.85e-03 dk=7.76e-03 dv=3.28e-03 dbias=3.99e-03 (band 5e-02),bf16
+triangle_attention_bwd_dkdv_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/main.py,ok,rel dk=2.94e-03 dv=3.79e-03 dbias=3.52e-03 (band 2e-02 declared),bf16
+triangle_attention_bwd_dq_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/main.py,ok,rel dq=4.89e-03 (band 2e-02 declared),bf16
+triangle_attention_bwd_pre_contig_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/atomic.py,ok,rel out=5.83e-03 (band 3e-02 declared),bf16
+triangle_attention_bwd_pre_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/main.py,ok,rel out=7.45e-08 (band 5e-07 declared),bf16
+triangle_attention_fwd_contig_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/atomic.py,ok,rel out=2.54e-03 m=1.73e-07 (band 1e-02 declared),bf16
+triangle_attention_fwd_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/main.py,ok,rel out=2.54e-03 m=1.73e-07 (band 1e-02 declared),bf16
+gated_projection_bwd_gate_recompute_flat_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel d_gate=2.88e-03 d_proj=3.36e-03 (band 1e-02 declared),bf16
+trimul_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel ab=1.95e-03 sig_m=1.94e-06 (band 1e-02 declared),bf16
+trimul_outproj_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel ab=2.06e-03 sig=2.15e-06 (band 9e-03 declared),bf16
+trimul_gemm_gate_packed_sm100_cute,cute,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_fused_gemm_sm100.py,skipped,"needs sm100, this card is sm80",bf16
+gated_projection_bwd_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel d_proj=3.32e-03 d_glogit=2.39e-03 d_proj_drop=2.17e-03 d_glogit_drop=1.79e-03 d_proj_preact=3.57e-03 d_glogit_preact=2.40e-03 (band 1e-02 declared),bf16
+gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel y=2.76e-03 gate=2.73e-03 y_dropres=2.94e-03 (band 1e-02 declared),bf16
+trimul_bwd_gate_packed_recompute_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=2.08e-03 d_pL=2.95e-03 d_gRlog=2.78e-03 d_pR=2.21e-03 (band 9e-03 declared),bf16
+trimul_bwd_gate_packed_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=3.04e-03 d_pL=2.03e-03 d_gRlog=2.88e-03 d_pR=2.10e-03 (band 1e-02 declared),bf16
+trimul_gemm_gate_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/bidirectional.py,ok,rel left=3.30e-03 right=1.85e-03 preact_left=2.64e-03 preact_right=2.73e-03 (band 1e-02 declared),bf16
+trimul_outproj_layernorm_gemm_gate_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back.py,ok,rel y=2.65e-03 y_residual=2.20e-03 (band 1e-02 declared),bf16
+rmsnorm_fwd_triton,triton,rmsnorm,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel y_aff=5.92e-04 y_plain=0.00e+00 ymod_aff=5.87e-04 ymod_plain=9.92e-04 (band 3e-03 declared),bf16
+rmsnorm_bwd_triton,triton,rmsnorm,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel dx_aff=1.02e-03 dweight_aff=0.00e+00 dx_plain=1.30e-03 dxmod_aff=4.60e-04 dscale_aff=3.03e-04 dshift_aff=0.00e+00 dweightmod_aff=0.00e+00 dxmod_plain=2.07e-03 dscale_plain=5.53e-04 dshift_plain=0.00e+00 (band 8e-03 declared),bf16
+rmsnorm_adamod_fwd_triton,triton,rmsnorm_adamod,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel y_plain=2.92e-03 y_aff=2.08e-03 (band 5e-03 declared),bf16
+rmsnorm_adamod_bwd_triton,triton,rmsnorm_adamod,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel dq_plain=2.46e-03 dc_plain=5.00e-03 dWsc_plain=4.17e-03 dWsh_plain=3.62e-03 dq_aff=2.92e-03 dc_aff=4.74e-03 dWsc_aff=4.55e-03 dWsh_aff=3.62e-03 dweight_aff=0.00e+00 (band 1e-02 declared),bf16

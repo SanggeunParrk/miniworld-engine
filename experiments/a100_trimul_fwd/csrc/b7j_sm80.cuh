@@ -14,6 +14,9 @@
 #include "contract_sm80.cuh"
 
 
+#ifndef B7J_DWSEG
+#define B7J_DWSEG 1                              // dW accumulated in this many consecutive token segments per source (partials summed on the host)
+#endif
 #ifndef B7J_PROF
 #define B7J_PROF 0                               // cycle counters: [0] source total, [1] source slot waits, [2] consumer total, [3] consumer flag waits
 #endif
@@ -36,7 +39,7 @@ struct B7JParams {
   unsigned* prod;              // [G][RINGS][S]   sequence + 1 of the tile a source published into the slot
   unsigned* cons;              // [G][RINGS]      times the slot was consumed
   __nv_bfloat16* dz;           // [T][128]
-  float* dwpart;               // [G][S][64][128]
+  float* dwpart;               // [G][B7J_DWSEG][S][64][128]
   float* lnpart;               // [G * C][2][128]
   int T, L, num_tiles, S, C, G, RINGS, K4;
 };
@@ -81,12 +84,30 @@ DEVI void b7j_source(const B7JParams& p, uint8_t* smem, int g, int b) {
   for (int i = 0; i < 8; ++i) { const int c = tid + 128 * i; cp_async16(sW_u + c * 16, p.w1 + (size_t)b * 64 * CZ + c * 8); }
   cp_async_commit();
   float dwa[2][8][4];
+  auto zero_dw = [&]() {
 #pragma unroll
-  for (int mt = 0; mt < 2; ++mt)
+    for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
-    for (int n = 0; n < 8; ++n)
+      for (int n = 0; n < 8; ++n)
 #pragma unroll
-      for (int e = 0; e < 4; ++e) dwa[mt][n][e] = 0.f;
+        for (int e = 0; e < 4; ++e) dwa[mt][n][e] = 0.f;
+  };
+  zero_dw();
+  // dW^T of this block over segment sg of the walk -> dwpart[g][sg][b]
+  auto store_dw = [&](int sg) {
+    float* dst = p.dwpart + (((size_t)g * B7J_DWSEG + sg) * p.S + b) * 64 * CZ;
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+      for (int n = 0; n < 8; ++n)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          const int c = 32 * warp + 16 * mt + g8 + 8 * h, rw = 8 * n + 2 * q;
+          dst[(size_t)rw * CZ + c] = dwa[mt][n][2 * h];
+          dst[(size_t)(rw + 1) * CZ + c] = dwa[mt][n][2 * h + 1];
+        }
+  };
+  const int seg_len = n_iter > 0 ? (n_iter + B7J_DWSEG - 1) / B7J_DWSEG : 1;
   const int oc0 = 32 * b;
   const int r0 = tid >> 4, gq = tid & 15;
   const uint32_t zdst = sZ_u + r0 * 256 + ((gq ^ (r0 & 7)) << 4), adst = sA_u + r0 * 256 + ((gq ^ (r0 & 7)) << 4);
@@ -199,21 +220,18 @@ DEVI void b7j_source(const B7JParams& p, uint8_t* smem, int g, int b) {
         for (int mt = 0; mt < 2; ++mt) { mma16816(dwa[mt][2 * np], a[mt], bb[0], bb[1]); mma16816(dwa[mt][2 * np + 1], a[mt], bb[2], bb[3]); }
       }
     }
+    if (B7J_DWSEG > 1 && (it + 1) % seg_len == 0 && it + 1 < n_iter) { store_dw(it / seg_len); zero_dw(); }
     __syncthreads();                             // x_n / dgp tiles free; every thread's ring stores issued
     if (tid == 0) { __threadfence(); st_release(p.prod + (g * p.RINGS + slot) * p.S + b, (unsigned)(it + 1)); }
     if (has_next) { load_z(tn); cp_async_commit(); }
   }
-  float* dst = p.dwpart + ((size_t)g * p.S + b) * 64 * CZ;
-#pragma unroll
-  for (int mt = 0; mt < 2; ++mt)
-#pragma unroll
-    for (int n = 0; n < 8; ++n)
-#pragma unroll
-      for (int h = 0; h < 2; ++h) {
-        const int c = 32 * warp + 16 * mt + g8 + 8 * h, rw = 8 * n + 2 * q;
-        dst[(size_t)rw * CZ + c] = dwa[mt][n][2 * h];
-        dst[(size_t)(rw + 1) * CZ + c] = dwa[mt][n][2 * h + 1];
-      }
+  // the last (possibly partial) segment, then zeros for the segments a short walk never reached
+  const int seg_done = n_iter > 0 ? (n_iter - 1) / seg_len : 0;
+  store_dw(seg_done);
+  if (B7J_DWSEG > 1) {
+    zero_dw();
+    for (int sg2 = seg_done + 1; sg2 < B7J_DWSEG; ++sg2) store_dw(sg2);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------- consumer

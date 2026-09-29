@@ -1,0 +1,5422 @@
+{
+  "arch": "sm86",
+  "scope": "first registered length per row, default and forced-atomic training; fake launches, no GPU timing",
+  "units": 323,
+  "hits": [
+    {
+      "unit": {
+        "module": "msa_pair_weighted_averaging",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "n_head",
+            8
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "msa_pair_weighted_averaging[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=128;n_head=8 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "msa_pair_weighted_averaging",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "n_head",
+            8
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "msa_pair_weighted_averaging[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=128;n_head=8 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "msa_pair_weighted_averaging",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            64
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "n_head",
+            8
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "msa_pair_weighted_averaging[miniworld/bfloat16] stream=msa_token d_msa=64;d_pair=128;n_head=8 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "msa_pair_weighted_averaging",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            64
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "n_head",
+            8
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "msa_pair_weighted_averaging[miniworld/bfloat16] stream=msa_token d_msa=64;d_pair=128;n_head=8 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=128;d_hidden=32 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=128;d_hidden=32 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            64
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=64;d_pair=128;d_hidden=32 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            64
+          ],
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=64;d_pair=128;d_hidden=32 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "pairformer_block",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden_tri_multi",
+            128
+          ],
+          [
+            "d_hidden_tri_attention",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "pairformer_block[miniworld/bfloat16] stream=token_pair d_pair=128;d_hidden_tri_multi=128;d_hidden_tri_attention=32 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "pairformer_block",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden_tri_multi",
+            128
+          ],
+          [
+            "d_hidden_tri_attention",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "pairformer_block[miniworld/bfloat16] stream=token_pair d_pair=128;d_hidden_tri_multi=128;d_hidden_tri_attention=32 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "pairformer_block",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden_tri_multi",
+            256
+          ],
+          [
+            "d_hidden_tri_attention",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "pairformer_block[miniworld/bfloat16] stream=token_pair d_pair=256;d_hidden_tri_multi=256;d_hidden_tri_attention=32 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "pairformer_block",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden_tri_multi",
+            256
+          ],
+          [
+            "d_hidden_tri_attention",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "pairformer_block[miniworld/bfloat16] stream=token_pair d_pair=256;d_hidden_tri_multi=256;d_hidden_tri_attention=32 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=128 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=128 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=128 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=128 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=256 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=256 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=256 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=256 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=384 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=384 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=384 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_single d_hidden=384 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=384 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=384 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            768
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_single d_hidden=768 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            768
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=768 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            768
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=768 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=128 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=128 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[triton/bfloat16] stream=token_pair d_pair=128 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[triton/bfloat16] stream=token_pair d_pair=128 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=256 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=256 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[triton/bfloat16] stream=token_pair d_pair=256 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[triton/bfloat16] stream=token_pair d_pair=256 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=512 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[triton/bfloat16] stream=token_pair d_pair=512 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_attention_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_attention_bidirectional[triton/bfloat16] stream=token_pair d_pair=512 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=128;d_hidden=128 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=128;d_hidden=128 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=128;d_hidden=128 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=128;d_hidden=128 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=256;d_hidden=256 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=256;d_hidden=256 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=256;d_hidden=256 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=256;d_hidden=256 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ],
+          [
+            "d_hidden",
+            512
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=512;d_hidden=512 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ],
+          [
+            "d_hidden",
+            512
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=512;d_hidden=512 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ],
+          [
+            "d_hidden",
+            512
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=512;d_hidden=512 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ],
+          [
+            "d_hidden",
+            512
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=512;d_hidden=512 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=128;d_hidden=128 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            128
+          ],
+          [
+            "d_hidden",
+            128
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=128;d_hidden=128 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=256;d_hidden=256 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            256
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=256;d_hidden=256 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ],
+          [
+            "d_hidden",
+            512
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=512;d_hidden=512 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            512
+          ],
+          [
+            "d_hidden",
+            512
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=512;d_hidden=512 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            64
+          ],
+          [
+            "d_hidden",
+            64
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=64;d_hidden=64 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            64
+          ],
+          [
+            "d_hidden",
+            64
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=64;d_hidden=64 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            64
+          ],
+          [
+            "d_hidden",
+            64
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=64;d_hidden=64 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            64
+          ],
+          [
+            "d_hidden",
+            64
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=64;d_hidden=64 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=384;d_hidden=384 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[miniworld/bfloat16] stream=token_pair d_pair=384;d_hidden=384 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=384;d_hidden=384 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication[triton/bfloat16] stream=token_pair d_pair=384;d_hidden=384 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            64
+          ],
+          [
+            "d_hidden",
+            64
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=64;d_hidden=64 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            64
+          ],
+          [
+            "d_hidden",
+            64
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=64;d_hidden=64 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=384;d_hidden=384 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "triangle_multiplication_bidirectional",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            384
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "triangle_multiplication_bidirectional[miniworld/bfloat16] stream=token_pair d_pair=384;d_hidden=384 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=64;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=64;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=64;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=64;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=128;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=128;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=128;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=128;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=256;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=256;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=256;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            256
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=256;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_pair d_hidden=384;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=384;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_pair d_hidden=384;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_single d_hidden=384;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=384;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            384
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=384;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            768
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=token_single d_hidden=768;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            768
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=768;n=2 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            768
+          ],
+          [
+            "n",
+            2
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=token_single d_hidden=768;n=2 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=msa_token d_hidden=64;n=4 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=msa_token d_hidden=64;n=4 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=msa_token d_hidden=64;n=4 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            64
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=msa_token d_hidden=64;n=4 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=msa_token d_hidden=128;n=4 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[miniworld/bfloat16] stream=msa_token d_hidden=128;n=4 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=msa_token d_hidden=128;n=4 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "transition",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_hidden",
+            128
+          ],
+          [
+            "n",
+            4
+          ]
+        ],
+        "impl": "triton",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "transition[triton/bfloat16] stream=msa_token d_hidden=128;n=4 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=256;d_hidden=32 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=256;d_hidden=32 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "msa_pair_weighted_averaging",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "n_head",
+            8
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "msa_pair_weighted_averaging[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=256;n_head=8 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "msa_pair_weighted_averaging",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            256
+          ],
+          [
+            "n_head",
+            8
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "msa_pair_weighted_averaging[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=256;n_head=8 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        },
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=384;d_hidden=32 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "outer_product_mean",
+        "stream": "msa_token",
+        "length": 128,
+        "dims": [
+          [
+            "d_msa",
+            128
+          ],
+          [
+            "d_pair",
+            384
+          ],
+          [
+            "d_hidden",
+            32
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "outer_product_mean[miniworld/bfloat16] stream=msa_token d_msa=128;d_pair=384;d_hidden=32 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 1024,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            16
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=16;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 16,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            16
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=16;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 16,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            64
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=64;has_bias=1 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            64
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=64;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=128;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=128;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=128;has_bias=1 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=128;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            256
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=256;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            256
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=256;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            256
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=256;has_bias=1 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            256
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=256;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            267
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=267;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 267,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            267
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=267;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 267,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            384
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=384;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            384
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=384;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            384
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=384;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            451
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=451;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 451,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            512
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=512;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            768
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=768;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            768
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=768;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            768
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=768;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            831
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=831;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 831,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            831
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=831;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 831,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            2560
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=2560;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 2560,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            16
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=16;has_bias=1 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 16,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            16
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=16;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 16,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            64
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=64;has_bias=1 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            64
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=64;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 64,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=128;has_bias=1 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=128;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            256
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=256;has_bias=1 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            256
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=256;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 256,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            384
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=384;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 384,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "atom_single",
+        "length": 1024,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 48
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=atom_single d_norm=128;has_bias=0 L=1024 A=48 train",
+      "launches": [
+        {
+          "M": 49152,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "atom_single",
+        "length": 1024,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 48
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=atom_single d_norm=128;has_bias=0 L=1024 A=48 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 49152,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "atom_single",
+        "length": 1024,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 48
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=atom_single d_norm=128;has_bias=1 L=1024 A=48 train",
+      "launches": [
+        {
+          "M": 49152,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "atom_single",
+        "length": 1024,
+        "dims": [
+          [
+            "d_norm",
+            128
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 48
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=atom_single d_norm=128;has_bias=1 L=1024 A=48 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 49152,
+          "N": 128,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            833
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=833;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 833,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            833
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=833;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 833,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            512
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=512;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 128,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            512
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=512;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 128,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            267
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=267;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 267,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            267
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=267;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 267,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            512
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=512;has_bias=0 L=128 A=1 train",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            512
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=512;has_bias=0 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_pair",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            512
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 1
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_pair d_norm=512;has_bias=1 L=128 A=1 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 16384,
+          "N": 512,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            768
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": null,
+        "augmentation": 48
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=768;has_bias=0 L=128 A=48 train",
+      "launches": [
+        {
+          "M": 6144,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            768
+          ],
+          [
+            "has_bias",
+            0
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 48
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=768;has_bias=0 L=128 A=48 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 6144,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    },
+    {
+      "unit": {
+        "module": "layernorm_native",
+        "stream": "token_single",
+        "length": 128,
+        "dims": [
+          [
+            "d_norm",
+            768
+          ],
+          [
+            "has_bias",
+            1
+          ]
+        ],
+        "impl": "miniworld",
+        "dtype": "bfloat16",
+        "compute": "",
+        "mode": "train",
+        "option": [
+          "ln_bwd_path",
+          "atomic"
+        ],
+        "augmentation": 48
+      },
+      "label": "layernorm_native[miniworld/bfloat16] stream=token_single d_norm=768;has_bias=1 L=128 A=48 train ln_bwd_path=atomic",
+      "launches": [
+        {
+          "M": 6144,
+          "N": 768,
+          "rowscale": false,
+          "dtype": "bfloat16+float32"
+        }
+      ],
+      "error": null
+    }
+  ],
+  "errors": []
+}

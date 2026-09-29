@@ -1,0 +1,10 @@
+> H100 (Hopper, compute capability 9.0).
+>
+> Nothing is subtracted here, and the empty rule list is the POINT of the file: cute and cuda are
+> the architecture-specific backends this whole directory exists to gate, and sm_90 is the arch
+> they were written for -- on an H100 cute is the fastest trimul path there is. A card with no
+> file gets the same treatment (build everything), so this file exists to say the fleet was
+> considered rather than to change behaviour.
+>
+> Columns: case,impl,dtype,build,reason
+case,impl,dtype,build,reason

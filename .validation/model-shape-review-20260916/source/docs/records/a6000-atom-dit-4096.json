@@ -1,0 +1,691 @@
+{
+  "status": "complete",
+  "job": 1678318,
+  "atom_length": 4096,
+  "equivalent_token_length": 512,
+  "reports": {
+    "inference_pytorch": {
+      "target": "dit_atom",
+      "mode": "inference",
+      "implementation": "pytorch",
+      "gpu": "bc3980f1-1475-227c-c59a-6577004dbe97",
+      "gpu_name": "NVIDIA RTX A6000",
+      "source_identity": "e781eaea096290deaaaa5e02adc19b653e4f7b2b842e344f6fbf9f2ecb90d7a5",
+      "source_hash": "97bed90c6b1a98ad249fa97e23b33bde7552bd8b41db29c9f0a857517e535862",
+      "lookups": [],
+      "layers": [
+        {
+          "type": "DiTBlock",
+          "attention": "AugmentedAttentionPairBias",
+          "transition": "ConditionedTransition"
+        }
+      ],
+      "input_shapes": [
+        [
+          5,
+          1,
+          4096,
+          128
+        ],
+        [
+          5,
+          1,
+          4096,
+          128
+        ],
+        [
+          1,
+          4096,
+          4096,
+          16
+        ]
+      ],
+      "input_requires_grad": [
+        false,
+        false,
+        false
+      ],
+      "samples": [
+        {
+          "value": 9.80838394165039,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "manual",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+        },
+        {
+          "value": 9.752575874328613,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "manual",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+        },
+        {
+          "value": 9.796607971191406,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "manual",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+        }
+      ],
+      "median_ms": 9.796607971191406,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 5,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "dit_atom",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "inference",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "manual",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "cache_unchanged": true
+    },
+    "inference_miniworld": {
+      "target": "dit_atom",
+      "mode": "inference",
+      "implementation": "miniworld",
+      "gpu": "bc3980f1-1475-227c-c59a-6577004dbe97",
+      "gpu_name": "NVIDIA RTX A6000",
+      "source_identity": "e781eaea096290deaaaa5e02adc19b653e4f7b2b842e344f6fbf9f2ecb90d7a5",
+      "source_hash": "97bed90c6b1a98ad249fa97e23b33bde7552bd8b41db29c9f0a857517e535862",
+      "lookups": [
+        {
+          "op": "augmented_attention_fwd_triton",
+          "key": "bfloat16+float32|shape_key=281475043953114",
+          "retained": 5
+        },
+        {
+          "op": "adaln_fwd_triton",
+          "key": "bfloat16|shape_key=281477124719151",
+          "retained": 5
+        },
+        {
+          "op": "cond_transition_fwd_b2b_triton",
+          "key": "bfloat16|shape_key=1152930302848402281",
+          "retained": 5
+        }
+      ],
+      "layers": [
+        {
+          "type": "DiTBlock",
+          "attention": "AugmentedAttentionPairBias",
+          "transition": "ConditionedTransition"
+        }
+      ],
+      "input_shapes": [
+        [
+          5,
+          1,
+          4096,
+          128
+        ],
+        [
+          5,
+          1,
+          4096,
+          128
+        ],
+        [
+          1,
+          4096,
+          4096,
+          16
+        ]
+      ],
+      "input_requires_grad": [
+        false,
+        false,
+        false
+      ],
+      "samples": [
+        {
+          "value": 4.947968006134033,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.dit.DiTBlock",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "manual",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+        },
+        {
+          "value": 4.965888023376465,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.dit.DiTBlock",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "manual",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+        },
+        {
+          "value": 4.9791998863220215,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.dit.DiTBlock",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "manual",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [5, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+        }
+      ],
+      "median_ms": 4.965888023376465,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 5,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "dit_atom",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "inference",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "manual",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "cache_unchanged": true
+    },
+    "training_pytorch": {
+      "target": "dit_atom",
+      "mode": "training",
+      "implementation": "pytorch",
+      "gpu": "bc3980f1-1475-227c-c59a-6577004dbe97",
+      "gpu_name": "NVIDIA RTX A6000",
+      "source_identity": "e781eaea096290deaaaa5e02adc19b653e4f7b2b842e344f6fbf9f2ecb90d7a5",
+      "source_hash": "97bed90c6b1a98ad249fa97e23b33bde7552bd8b41db29c9f0a857517e535862",
+      "lookups": [],
+      "layers": [
+        {
+          "type": "DiTBlock",
+          "attention": "AugmentedAttentionPairBias",
+          "transition": "ConditionedTransition"
+        }
+      ],
+      "input_shapes": [
+        [
+          48,
+          1,
+          4096,
+          128
+        ],
+        [
+          48,
+          1,
+          4096,
+          128
+        ],
+        [
+          1,
+          4096,
+          4096,
+          16
+        ]
+      ],
+      "input_requires_grad": [
+        true,
+        true,
+        true
+      ],
+      "samples": [
+        {
+          "value": 170.787841796875,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 27}"
+        },
+        {
+          "value": 171.22508239746094,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 27}"
+        },
+        {
+          "value": 171.45242309570312,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 27}"
+        }
+      ],
+      "median_ms": 171.22508239746094,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "dit_atom",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "cache_unchanged": true
+    },
+    "training_miniworld": {
+      "target": "dit_atom",
+      "mode": "training",
+      "implementation": "miniworld",
+      "gpu": "bc3980f1-1475-227c-c59a-6577004dbe97",
+      "gpu_name": "NVIDIA RTX A6000",
+      "source_identity": "e781eaea096290deaaaa5e02adc19b653e4f7b2b842e344f6fbf9f2ecb90d7a5",
+      "source_hash": "97bed90c6b1a98ad249fa97e23b33bde7552bd8b41db29c9f0a857517e535862",
+      "lookups": [
+        {
+          "op": "augmented_attention_fwd_triton",
+          "key": "bfloat16+float32|shape_key=281475043953114",
+          "retained": 5
+        },
+        {
+          "op": "layernorm_fwd_saveact_strided_triton",
+          "key": "bfloat16+float32|shape_key=2473901687578",
+          "retained": 5
+        },
+        {
+          "op": "adaln_epilogue_saveact_triton",
+          "key": "bfloat16+float32|HAS_SB=1,shape_key=68720001818",
+          "retained": 5
+        },
+        {
+          "op": "cond_transition_fwd_b2b_saveact_triton",
+          "key": "bfloat16|shape_key=1152930302848402281",
+          "retained": 5
+        },
+        {
+          "op": "gated_projection_bwd_gate_flat_triton",
+          "key": "bfloat16|shape_key=147456",
+          "retained": 5
+        },
+        {
+          "op": "cond_transition_bwd_gemm_swiglu_triton",
+          "key": "bfloat16|shape_key=281477125245168",
+          "retained": 5
+        },
+        {
+          "op": "adaln_bwd_pre_dx_triton",
+          "key": "bfloat16+float32|shape_key=68720001818",
+          "retained": 5
+        },
+        {
+          "op": "adaln_bwd_dx_dlnw_triton",
+          "key": "bfloat16+float32|shape_key=281479272203082",
+          "retained": 5
+        },
+        {
+          "op": "augmented_attention_bwd_pre_triton",
+          "key": "bfloat16+float32|shape_key=281475043953114",
+          "retained": 5
+        },
+        {
+          "op": "augmented_attention_bwd_split_triton",
+          "key": "bfloat16+float32|shape_key=281475043953114",
+          "retained": 5
+        },
+        {
+          "op": "augmented_attention_bwd_reduce_triton",
+          "key": "float32|shape_key=4096",
+          "retained": 5
+        }
+      ],
+      "layers": [
+        {
+          "type": "DiTBlock",
+          "attention": "AugmentedAttentionPairBias",
+          "transition": "ConditionedTransition"
+        }
+      ],
+      "input_shapes": [
+        [
+          48,
+          1,
+          4096,
+          128
+        ],
+        [
+          48,
+          1,
+          4096,
+          128
+        ],
+        [
+          1,
+          4096,
+          4096,
+          16
+        ]
+      ],
+      "input_requires_grad": [
+        true,
+        true,
+        true
+      ],
+      "samples": [
+        {
+          "value": 134.32730102539062,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.dit.DiTBlock",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 27}"
+        },
+        {
+          "value": 134.47576904296875,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.dit.DiTBlock",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 27}"
+        },
+        {
+          "value": 134.45631408691406,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16+float32",
+          "execution_path": "modules.dit.DiTBlock",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 4096]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 4096, 4096, 16]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 4096, 128]}}",
+          "execution_validation": "{\"finite_tensors\": 27}"
+        }
+      ],
+      "median_ms": 134.45631408691406,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "dit_atom",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "cache_unchanged": true
+    }
+  },
+  "comparisons": [
+    {
+      "mode": "inference",
+      "pytorch_ms": 9.796607971191406,
+      "miniworld_ms": 4.965888023376465,
+      "speedup": 1.9727806839531556,
+      "reduction_percent": 49.310128179268744
+    },
+    {
+      "mode": "training",
+      "pytorch_ms": 171.22508239746094,
+      "miniworld_ms": 134.45631408691406,
+      "speedup": 1.2734625633629904,
+      "reduction_percent": 21.47393816123059
+    }
+  ],
+  "tests": "147 module setup/compile/gradient contract tests passed",
+  "runner": "/home/psk6950/practice/miniworld-engine/.scratch/a6000-2026-09/mw-atom-dit/run.py",
+  "runner_sha256": "0a319bea9fc962bd9cc66e75f67183ebac38a3372d287ebe478b0ca6b61d57b4"
+}

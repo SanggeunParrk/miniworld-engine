@@ -1,0 +1,482 @@
+{
+  "policy": "All eight pre-audit config grids restored exactly at the candidate level. No new tile/warp/stage reduction based on sampled GPU winners. Keep actual dimension tuples, truthful inventory, and existing kernel prune behavior.",
+  "kernels": [
+    {
+      "kernel": "transition_fwd_b2b_triton",
+      "before": 27944,
+      "after": 27944,
+      "retained_ranked_configs": 31,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 80,
+        "NVIDIA RTX A6000 (sm86)": 80
+      },
+      "before_sha256": "3f8481ca360a3070b0a8de832b40a59f0b85b2fdca15de8c8a6843095458d5fd",
+      "after_sha256": "3f8481ca360a3070b0a8de832b40a59f0b85b2fdca15de8c8a6843095458d5fd",
+      "original_grid_csv": "axis,values\nBLOCK_K_D,16 32 64 128 256\nBLOCK_N,16 32 64 128 256\nBLOCK_K_ND,16 32 64 128 256\nBLOCK_M1,16 32 64 128\nGROUP_M,1 4\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5 6 8\n",
+      "withdrawn_heuristic_count": 396,
+      "withdrawn_heuristic_sha256": "b2f26ebb8f754f6ae3cfec2990f1f9ca13de8c8416b2542ddc44b51b1eb3736a"
+    },
+    {
+      "kernel": "cond_transition_bwd_gemm_swiglu_triton",
+      "before": 2880,
+      "after": 2880,
+      "retained_ranked_configs": 114,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 190,
+        "NVIDIA RTX A6000 (sm86)": 140,
+        "NVIDIA RTX A5000 (sm86)": 70
+      },
+      "before_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "after_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 620,
+      "withdrawn_heuristic_sha256": "bd681dd96b0116379ddc73259a5b9061fc8dc57490fc9a64eaa96b7f0ddbc4a3"
+    },
+    {
+      "kernel": "adaln_gemm_gate_triton",
+      "before": 2880,
+      "after": 2880,
+      "retained_ranked_configs": 82,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 190,
+        "NVIDIA RTX A6000 (sm86)": 150,
+        "NVIDIA RTX A5000 (sm86)": 60
+      },
+      "before_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "after_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 589,
+      "withdrawn_heuristic_sha256": "8b9cf38f97bd65465aa4c0fda961d440a3f9ce685cf753f5a6888806ab1ec4b7"
+    },
+    {
+      "kernel": "cond_transition_fwd_b2b_saveact_triton",
+      "before": 2160,
+      "after": 2160,
+      "retained_ranked_configs": 34,
+      "historical_outside_original_grid": 13,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 27,
+        "NVIDIA RTX A6000 (sm86)": 90,
+        "NVIDIA RTX A5000 (sm86)": 40
+      },
+      "before_sha256": "ab37b632d9d7c6bbb8b26f613e6e4376782bb78b4c23e9e61d085fb1bcf549bd",
+      "after_sha256": "ab37b632d9d7c6bbb8b26f613e6e4376782bb78b4c23e9e61d085fb1bcf549bd",
+      "original_grid_csv": "axis,values\nBLOCK_K_D,16 32 64\nBLOCK_K_ND,16 32 64\nBLOCK_M1,32 64 128\nBLOCK_N,32 64 128 256\nGROUP_M,1 4\nnum_warps,2 4\nnum_stages,1 2 3 4 5\n",
+      "withdrawn_heuristic_count": 454,
+      "withdrawn_heuristic_sha256": "cf9588163d6833928900ab09fe8798f16f6e13f18355dce71ee4863818330ce2"
+    },
+    {
+      "kernel": "adaln_fwd_gate_triton",
+      "before": 2160,
+      "after": 2160,
+      "retained_ranked_configs": 61,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 190,
+        "NVIDIA RTX A6000 (sm86)": 150,
+        "NVIDIA RTX A5000 (sm86)": 90
+      },
+      "before_sha256": "82cae2f65df0e76689648ce2a19769f4b49d1e788cfec4295be1fb1dc495b651",
+      "after_sha256": "82cae2f65df0e76689648ce2a19769f4b49d1e788cfec4295be1fb1dc495b651",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 391,
+      "withdrawn_heuristic_sha256": "29fa821f3ea3c8ddadb47db641b6359ba8bdcd801219c58c9b42b8109c7399e9"
+    },
+    {
+      "kernel": "rmsnorm_adamod_bwd_triton",
+      "before": 1980,
+      "after": 1980,
+      "retained_ranked_configs": 82,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 280,
+        "NVIDIA RTX A6000 (sm86)": 302,
+        "NVIDIA RTX A5000 (sm86)": 284
+      },
+      "before_sha256": "b9f746a29432f1e9da86371d40095d256a0ce76275e0dc1e787c098cd40fa780",
+      "after_sha256": "b9f746a29432f1e9da86371d40095d256a0ce76275e0dc1e787c098cd40fa780",
+      "original_grid_csv": "axis,values\nBLOCK_N,16 32 64 128 256\nBLOCK_K,16 32 64 128 256\nBLOCK_M1,16 32 64 128\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5\n",
+      "withdrawn_heuristic_count": 357,
+      "withdrawn_heuristic_sha256": "cb785458ca373d3dd9dc2fbfe1fe0c4ed1eb2790def6725f0fd7caddb85896e7"
+    },
+    {
+      "kernel": "rmsnorm_adamod_fwd_triton",
+      "before": 1584,
+      "after": 1584,
+      "retained_ranked_configs": 65,
+      "historical_outside_original_grid": 32,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 283,
+        "NVIDIA RTX A6000 (sm86)": 299,
+        "NVIDIA RTX A5000 (sm86)": 290
+      },
+      "before_sha256": "5dede67f97020a187429b84eb281fb503a3ac7db2a385d5a5dc170d0b790229e",
+      "after_sha256": "5dede67f97020a187429b84eb281fb503a3ac7db2a385d5a5dc170d0b790229e",
+      "original_grid_csv": "axis,values\nBLOCK_N,16 32 64 128 256\nBLOCK_K,16 32 64 128 256\nBLOCK_M1,16 32 64 128\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 334,
+      "withdrawn_heuristic_sha256": "907ec5fd8c7e8359a3afe57e5d55bb1962fb5e16b808b4364196003625be0ae1"
+    },
+    {
+      "kernel": "layernorm_linear_fwd_triton",
+      "before": 1440,
+      "after": 1440,
+      "retained_ranked_configs": 124,
+      "historical_outside_original_grid": 6,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 274,
+        "NVIDIA RTX A6000 (sm86)": 210,
+        "NVIDIA RTX A5000 (sm86)": 60
+      },
+      "before_sha256": "feec6b304ca90f17a73225928182930de3c82bdbcc322cc533facdfce2fa8d90",
+      "after_sha256": "feec6b304ca90f17a73225928182930de3c82bdbcc322cc533facdfce2fa8d90",
+      "original_grid_csv": "axis,values\nBLOCK_K,16 32 64 128 256 512\nBLOCK_M1,32 64 128\nBLOCK_N,32 64 128 256\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5\n",
+      "withdrawn_heuristic_count": 299,
+      "withdrawn_heuristic_sha256": "69f57a6f67f993a6c31fd3568fadfc4f5759a13bfffe1b9e39b83a79c9cf3f38"
+    }
+  ],
+  "a6000_membership_audit": {
+    "scope": "Membership in restored grids, including flat entries and workload measurements; not GPU timing or runtime cache validity.",
+    "kernels": [
+      {
+        "op": "transition_fwd_b2b_triton",
+        "configs": 27944,
+        "groups": {
+          "entries": {
+            "buckets": 16,
+            "top1_kept": 16,
+            "topk_total": 80,
+            "topk_kept": 80,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "cond_transition_bwd_gemm_swiglu_triton",
+        "configs": 2880,
+        "groups": {
+          "entries": {
+            "buckets": 28,
+            "top1_kept": 28,
+            "topk_total": 140,
+            "topk_kept": 140,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "adaln_gemm_gate_triton",
+        "configs": 2880,
+        "groups": {
+          "entries": {
+            "buckets": 30,
+            "top1_kept": 30,
+            "topk_total": 150,
+            "topk_kept": 150,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "cond_transition_fwd_b2b_saveact_triton",
+        "configs": 2160,
+        "groups": {
+          "entries": {
+            "buckets": 18,
+            "top1_kept": 18,
+            "topk_total": 90,
+            "topk_kept": 90,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "adaln_fwd_gate_triton",
+        "configs": 2160,
+        "groups": {
+          "entries": {
+            "buckets": 30,
+            "top1_kept": 30,
+            "topk_total": 150,
+            "topk_kept": 150,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 6,
+            "top1_kept": 6,
+            "topk_total": 30,
+            "topk_kept": 30,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "rmsnorm_adamod_bwd_triton",
+        "configs": 1980,
+        "groups": {
+          "entries": {
+            "buckets": 54,
+            "top1_kept": 54,
+            "topk_total": 302,
+            "topk_kept": 302,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 62,
+            "top1_kept": 62,
+            "topk_total": 310,
+            "topk_kept": 310,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "rmsnorm_adamod_fwd_triton",
+        "configs": 1584,
+        "groups": {
+          "entries": {
+            "buckets": 54,
+            "top1_kept": 54,
+            "topk_total": 299,
+            "topk_kept": 299,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 62,
+            "top1_kept": 62,
+            "topk_total": 306,
+            "topk_kept": 306,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "layernorm_linear_fwd_triton",
+        "configs": 1440,
+        "groups": {
+          "entries": {
+            "buckets": 44,
+            "top1_kept": 44,
+            "topk_total": 210,
+            "topk_kept": 210,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "layernorm_bwd_atomic_triton",
+        "configs": 1440,
+        "groups": {
+          "entries": {
+            "buckets": 80,
+            "top1_kept": 80,
+            "topk_total": 400,
+            "topk_kept": 400,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      }
+    ]
+  },
+  "validation": {
+    "status": "passed",
+    "host": "cssb3 Slurm CPU compute allocation",
+    "job": 46552,
+    "tests_passed": 127,
+    "warnings": 9,
+    "seconds": 29.18,
+    "gpu_benchmark": false
+  },
+  "atomic_layernorm_shape_audit": {
+    "job": 46555,
+    "node": "cssb3 gpu07 (allocated A100; fake dispatch target sm86)",
+    "scope": "first registered length per row, default and forced-atomic training; fake launches, no GPU timing",
+    "module_units": 323,
+    "units_calling_atomic": 155,
+    "errors": [],
+    "observed_shapes": [
+      {
+        "stream": "atom_single",
+        "rows_M": 49152,
+        "dtype": "bfloat16+float32",
+        "widths": [
+          128
+        ]
+      },
+      {
+        "stream": "msa_token",
+        "rows_M": 1024,
+        "dtype": "bfloat16+float32",
+        "widths": [
+          64,
+          128
+        ]
+      },
+      {
+        "stream": "token_pair",
+        "rows_M": 16384,
+        "dtype": "bfloat16+float32",
+        "widths": [
+          16,
+          64,
+          128,
+          256,
+          267,
+          384,
+          512
+        ]
+      },
+      {
+        "stream": "token_single",
+        "rows_M": 128,
+        "dtype": "bfloat16+float32",
+        "widths": [
+          16,
+          64,
+          128,
+          256,
+          267,
+          384,
+          451,
+          512,
+          768,
+          831,
+          833,
+          2560
+        ]
+      },
+      {
+        "stream": "token_single",
+        "rows_M": 6144,
+        "dtype": "bfloat16+float32",
+        "widths": [
+          768
+        ]
+      }
+    ],
+    "limits": [
+      "Only first registered length per module row and default/forced-atomic train paths were traced.",
+      "No device kernel compilation, numerical validation or timing.",
+      "Not a complete derive plan or cross-GPU proof; fallback probe work list is unchanged."
+    ],
+    "source_sha256": {
+      "src/miniworld_engine/kernels/registry_module.csv": "5cfa4d1da445f594704240e06f3b7c1e5cbb761a3857cef8093d05b29165e452",
+      "src/miniworld_engine/autotune/checkpoint_cases.py": "f411049ebb6ce0326d4242141776441484e76fea991195858b832e884d22115b",
+      "src/miniworld_engine/autotune/builder.py": "b667a127656a0a64aa697ff04932c9d22ae85d46fba72aaf13dbbd22e902d742"
+    }
+  },
+  "model_pair_768_audit": {
+    "basis": "Current local model configs and conditioning/LayerNorm source, cross-checked against 2026-09-15 actual-constructor census. Not a new full-model execution.",
+    "coverage_contract": "Union of selected model/checkpoint/config runtime kernel workloads after dispatch, including operation-specific dimensions, mode, activation and affine precision, layout, augmentation and GPU policy; driver ladders are not the denominator.",
+    "models": [
+      {
+        "model": "AF3 default",
+        "trunk_pair": 128,
+        "conditioning_pair_norm": 267,
+        "pair_norm_768_found": false
+      },
+      {
+        "model": "Protenix base default v1.0.0",
+        "trunk_pair": 128,
+        "conditioning_pair_norm": 256,
+        "pair_norm_768_found": false
+      },
+      {
+        "model": "Protenix-v2",
+        "trunk_pair": 256,
+        "conditioning_pair_norm": 512,
+        "pair_norm_768_found": false
+      },
+      {
+        "model": "OpenDDE default",
+        "trunk_pair": 384,
+        "diffusion_pair": 128,
+        "conditioning_pair_norm": 256,
+        "pair_norm_768_found": false
+      },
+      {
+        "model": "ESMFold2 installed checkpoint/default configuration",
+        "trunk_pair": 256,
+        "conditioning_pair_norm": 512,
+        "pair_norm_768_found": false
+      },
+      {
+        "model": "MiniWorld team-gm debug/small/medium/large presets",
+        "trunk_pair": 128,
+        "atom_pair": 16,
+        "token_dit_single": 768,
+        "pair_norm_768_found": false
+      }
+    ],
+    "counterexample": "Shared DiffusionConditioning(c_z=384, c_z_pair_diffusion=None) sets diffusion pair to 384 and creates LayerNorm(2*384=768); OpenDDE default explicitly sets diffusion pair to 128 instead.",
+    "decision": "Do not claim universal absence or remove generic support; declare the supported config set before deleting a required build case.",
+    "source_sha256": {
+      "/home/psk6950/practice/FoldForge/src/foldforge/models/architectures/af3.py": "2d222964e3a1b64a2b14a3bd1f6e7a47f852d85de9ebfb716ec89468071aab2f",
+      "/home/psk6950/practice/FoldForge/src/foldforge/modules/dense/diffusion_head.py": "b2b70b9c38d52865f5c6d22cc3e00336ff9f5852a334b598aa3de15da1c6660d",
+      "/home/psk6950/practice/FoldForge/src/foldforge/models/config/protenix/configs/configs_base.py": "7f18bd1a66b4579cd37b728cd3e3e8956d17d717524e89a7757d957c77a62ac6",
+      "/home/psk6950/practice/FoldForge/src/foldforge/models/config/protenix/configs/configs_model_type.py": "38173d9123d8bc0939ceea78359a400fca0c230b7385fd10291b686182dee43b",
+      "/home/psk6950/practice/FoldForge/src/foldforge/models/config/opendde/config/model_base.py": "a06693216b0364c7089b915a3c71f0cc265e3cfbe18eb562fbfa9b1e1b1f225a",
+      "/home/psk6950/practice/FoldForge/src/foldforge/models/config/esmfold2.py": "5a6cddd17185aa00008bad8270f7952d87d94d53ad200d05ce755abbb2c4351d",
+      "/home/psk6950/practice/FoldForge/src/foldforge/modules/sequence/diffusion.py": "fa00ffb89a7fba7fc2295fa8783dbce8da12d2725de545bc8982560bc94bdb22",
+      "/home/psk6950/practice/team-gm/src/team_gm/modules/checkpoints/denoiser.py": "321c511a09bbc6ce4aaa3fbe039abd2b4dd0fa3ffa540c6b8f314984a4702c8a",
+      "/home/psk6950/practice/team-gm/config/krystal/model/debug.yaml": "d6e8ae621cc06a9374f8a6e3d5c3b450c2b38a09550520b2f33385e8b504c0d0",
+      "/home/psk6950/practice/team-gm/config/krystal/model/small.yaml": "5d3e1385d7cb000fd6cca05f33f5f9b650df90da67abf1744bd8913ba98b5548",
+      "/home/psk6950/practice/team-gm/config/krystal/model/medium.yaml": "b9af61b791b612e001e0e7300d8c51a0894fe8bf90a5f414a0f83976f761c69d",
+      "/home/psk6950/practice/team-gm/config/krystal/model/large.yaml": "f29e68bc7d5a0bd93d53cbeb26855b13bab8f7eb952c3ffbc7008169e1f00001",
+      "/home/psk6950/practice/miniworld-engine/docs/checkpoint-shapes-20260915.json": "e2f50d7a76423eb41dd41b78b7a0d98be68fd332e4c5ce19b8f945b83b3cec08"
+    }
+  }
+}

@@ -1,0 +1,2720 @@
+{
+  "status": "complete",
+  "source_hash": "4fa017e5636bb2a393ebb1dfc3a7231de48bfe1644c76b35bb767d375bf2e8b3",
+  "added_keys": 4,
+  "preexisting_entries_preserved": true,
+  "runtime_cache_misses": 0,
+  "covered_inspected_keys": 24,
+  "validation": [
+    {
+      "op": "layernorm_fwd_saveact_strided_triton",
+      "key": "bfloat16+float32|shape_key=274879480602",
+      "shape": [
+        18432,
+        384
+      ],
+      "candidates": [
+        {
+          "kwargs": {
+            "BLOCK_K": 256,
+            "BLOCK_M1": 1
+          },
+          "num_warps": 2,
+          "num_stages": 1,
+          "ms": 0.04403200000524521
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 256,
+            "BLOCK_M1": 1
+          },
+          "num_warps": 2,
+          "num_stages": 2,
+          "ms": 0.04403200000524521
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 256,
+            "BLOCK_M1": 1
+          },
+          "num_warps": 2,
+          "num_stages": 3,
+          "ms": 0.04403200000524521
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 256,
+            "BLOCK_M1": 1
+          },
+          "num_warps": 2,
+          "num_stages": 4,
+          "ms": 0.04403200000524521
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 256,
+            "BLOCK_M1": 1
+          },
+          "num_warps": 2,
+          "num_stages": 5,
+          "ms": 0.04403200000524521
+        }
+      ],
+      "checks": 20,
+      "max_relative": 0.002586298333144437,
+      "max_relative_frobenius": 0.0016674271319061518,
+      "policy": "registry_relative_max_against_fp32_formula",
+      "qualification": null,
+      "op_identity": "d5409f8e326f",
+      "validated_sha256": "471626e250f7d89118934f70b7d9a0b4db6d248c21d08a739d1ae0aa5c0cc84e"
+    },
+    {
+      "op": "layernorm_bwd_atomic_strided_triton",
+      "key": "bfloat16+float32|shape_key=274879480602",
+      "shape": [
+        18432,
+        384
+      ],
+      "candidates": [
+        {
+          "kwargs": {
+            "BLOCK_M1": 16
+          },
+          "num_warps": 4,
+          "num_stages": 1,
+          "ms": 0.08806400001049042
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 16
+          },
+          "num_warps": 4,
+          "num_stages": 3,
+          "ms": 0.08806400001049042
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 16
+          },
+          "num_warps": 4,
+          "num_stages": 5,
+          "ms": 0.08806400001049042
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 16
+          },
+          "num_warps": 4,
+          "num_stages": 2,
+          "ms": 0.08908800035715103
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 16
+          },
+          "num_warps": 4,
+          "num_stages": 4,
+          "ms": 0.08908800035715103
+        }
+      ],
+      "checks": 20,
+      "max_relative": 0.002784046189278573,
+      "max_relative_frobenius": 0.00165979762095958,
+      "policy": "registry_relative_max_against_fp32_formula",
+      "qualification": null,
+      "op_identity": "6c95892c5f2e",
+      "validated_sha256": "2a6ba9b330a035da08d1d0f04e59bb273c22cfa1eaf2f95c552a0d3c93025fc0"
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "key": "bfloat16+float32|HAS_WEIGHT=0,shape_key=9895604781850",
+      "shape": [
+        589824,
+        32
+      ],
+      "candidates": [
+        {
+          "kwargs": {
+            "BLOCK_K": 32,
+            "BLOCK_M1": 128
+          },
+          "num_warps": 8,
+          "num_stages": 3,
+          "ms": 0.11112000048160553
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 16,
+            "BLOCK_M1": 8
+          },
+          "num_warps": 4,
+          "num_stages": 1,
+          "ms": 0.11161600053310394
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 16,
+            "BLOCK_M1": 8
+          },
+          "num_warps": 4,
+          "num_stages": 2,
+          "ms": 0.11161600053310394
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 16,
+            "BLOCK_M1": 8
+          },
+          "num_warps": 4,
+          "num_stages": 3,
+          "ms": 0.11161600053310394
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 16,
+            "BLOCK_M1": 8
+          },
+          "num_warps": 4,
+          "num_stages": 5,
+          "ms": 0.11161600053310394
+        }
+      ],
+      "checks": 20,
+      "max_relative": 0.0034722222480922937,
+      "max_relative_frobenius": 1.4071496480028145e-05,
+      "policy": "fp64_bf16_rounding_envelope",
+      "qualification": "Registry max-relative band is exceeded for some BF16 boundary values. Accepted against independent FP64 formula: half BF16 spacing plus 2e-6 arithmetic scale. Backward scale uses the sum of absolute dot-product terms to account for cancellation. No kernel source or registry tolerance changed.",
+      "op_identity": "406bd61d2a82",
+      "validated_sha256": "96643ac052144b9ad6fea36757834aa5630a8a7a43a0137ed9bf4e460a314d73"
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "key": "bfloat16+float32|HAS_WEIGHT=0,shape_key=9895604781850",
+      "shape": [
+        589824,
+        32
+      ],
+      "candidates": [
+        {
+          "kwargs": {
+            "BLOCK_K": 128,
+            "BLOCK_M1": 4
+          },
+          "num_warps": 1,
+          "num_stages": 2,
+          "ms": 0.16383999586105347
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 128,
+            "BLOCK_M1": 4
+          },
+          "num_warps": 1,
+          "num_stages": 4,
+          "ms": 0.16383999586105347
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 128,
+            "BLOCK_M1": 4
+          },
+          "num_warps": 1,
+          "num_stages": 1,
+          "ms": 0.16435199975967407
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 32,
+            "BLOCK_M1": 128
+          },
+          "num_warps": 4,
+          "num_stages": 1,
+          "ms": 0.16486400365829468
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 32,
+            "BLOCK_M1": 128
+          },
+          "num_warps": 4,
+          "num_stages": 2,
+          "ms": 0.16486400365829468
+        }
+      ],
+      "checks": 20,
+      "max_relative": 0.0044247787445783615,
+      "max_relative_frobenius": 1.4027131328475662e-05,
+      "policy": "fp64_bf16_rounding_envelope",
+      "qualification": "Registry max-relative band is exceeded for some BF16 boundary values. Accepted against independent FP64 formula: half BF16 spacing plus 2e-6 arithmetic scale. Backward scale uses the sum of absolute dot-product terms to account for cancellation. No kernel source or registry tolerance changed.",
+      "op_identity": "0459776d3cd5",
+      "validated_sha256": "b1eb497f92e231a0e115836113a7da28fcf6604c0e89c096a63f8851c61a0912"
+    }
+  ],
+  "benchmark": {
+    "status": "ok",
+    "attempts_complete": true,
+    "all_cells_measured": true,
+    "source_hash": "4fa017e5636bb2a393ebb1dfc3a7231de48bfe1644c76b35bb767d375bf2e8b3",
+    "cache_unchanged": true,
+    "accepted_rows": 138,
+    "groups": [
+      {
+        "target": "adaptive_layernorm",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.06656000018119812,
+        "min_ms": 0.06451199948787689,
+        "max_ms": 0.06656000018119812,
+        "times_ms": [
+          0.06656000018119812,
+          0.06451199948787689,
+          0.06656000018119812
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-ed7e75e3-src-4fa017e5-run-e102b933142e_L384_1672474_0_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-7036fae7-src-4fa017e5-run-f6286341e4fb_L384_1672474_0_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-19a54873-src-4fa017e5-run-4de761d878f3_L384_1672474_0_r3.csv"
+        ]
+      },
+      {
+        "target": "adaptive_layernorm",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.05222399905323982,
+        "min_ms": 0.05222399905323982,
+        "max_ms": 0.05222399905323982,
+        "times_ms": [
+          0.05222399905323982,
+          0.05222399905323982,
+          0.05222399905323982
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-ed7e75e3-src-4fa017e5-run-e102b933142e_L384_1672474_0_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-7036fae7-src-4fa017e5-run-f6286341e4fb_L384_1672474_0_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-19a54873-src-4fa017e5-run-4de761d878f3_L384_1672474_0_r3.csv"
+        ]
+      },
+      {
+        "target": "adaptive_layernorm",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 1.233407974243164,
+        "min_ms": 1.2124160528182983,
+        "max_ms": 1.2349439859390259,
+        "times_ms": [
+          1.233407974243164,
+          1.2124160528182983,
+          1.2349439859390259
+        ],
+        "gpu_uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-0a5ece23-src-4fa017e5-run-3a3607f62c8e_L384_1672523_1_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-89168403-src-4fa017e5-run-cef3aebdc18d_L384_1672523_1_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-eaff5f5e-src-4fa017e5-run-f183e50378bb_L384_1672523_1_r3.csv"
+        ]
+      },
+      {
+        "target": "adaptive_layernorm",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 1.6097279787063599,
+        "min_ms": 1.6087039709091187,
+        "max_ms": 1.6240639686584473,
+        "times_ms": [
+          1.6240639686584473,
+          1.6097279787063599,
+          1.6087039709091187
+        ],
+        "gpu_uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-0a5ece23-src-4fa017e5-run-3a3607f62c8e_L384_1672523_1_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-89168403-src-4fa017e5-run-cef3aebdc18d_L384_1672523_1_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/adaptive_layernorm/artifacts/NVIDIA RTX A6000/adaptive_layernorm_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-eaff5f5e-src-4fa017e5-run-f183e50378bb_L384_1672523_1_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 5.77945613861084,
+        "min_ms": 5.776895999908447,
+        "max_ms": 5.780992031097412,
+        "times_ms": [
+          5.780992031097412,
+          5.776895999908447,
+          5.77945613861084
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-a5103358-src-4fa017e5-run-53b31ca30610_augmentation_1672345_2_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-37b04c5a-src-4fa017e5-run-ebf5fac8829a_augmentation_1672345_2_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-72d009ff-src-4fa017e5-run-1ba5740a0477_augmentation_1672345_2_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication",
+        "mode": "inference",
+        "implementation": "cuequivariance",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 1.3783040046691895,
+        "min_ms": 1.3772799968719482,
+        "max_ms": 1.3793280124664307,
+        "times_ms": [
+          1.3783040046691895,
+          1.3772799968719482,
+          1.3793280124664307
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-a5103358-src-4fa017e5-run-53b31ca30610_augmentation_1672345_2_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-37b04c5a-src-4fa017e5-run-ebf5fac8829a_augmentation_1672345_2_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-72d009ff-src-4fa017e5-run-1ba5740a0477_augmentation_1672345_2_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 1.2072960138320923,
+        "min_ms": 1.1776000261306763,
+        "max_ms": 1.222656011581421,
+        "times_ms": [
+          1.222656011581421,
+          1.1776000261306763,
+          1.2072960138320923
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-a5103358-src-4fa017e5-run-53b31ca30610_augmentation_1672345_2_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-37b04c5a-src-4fa017e5-run-ebf5fac8829a_augmentation_1672345_2_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-72d009ff-src-4fa017e5-run-1ba5740a0477_augmentation_1672345_2_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 14.118911743164062,
+        "min_ms": 14.10969591140747,
+        "max_ms": 14.13375997543335,
+        "times_ms": [
+          14.118911743164062,
+          14.13375997543335,
+          14.10969591140747
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-3a6c3587-src-4fa017e5-run-4feae3161542_augmentation_1672345_3_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-ce7e8efe-src-4fa017e5-run-08c3615bf89e_augmentation_1672345_3_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-6101d487-src-4fa017e5-run-c717f9b088a4_augmentation_1672345_3_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication",
+        "mode": "training",
+        "implementation": "cuequivariance",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 4.596224069595337,
+        "min_ms": 4.595200061798096,
+        "max_ms": 4.6141438484191895,
+        "times_ms": [
+          4.596224069595337,
+          4.595200061798096,
+          4.6141438484191895
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-3a6c3587-src-4fa017e5-run-4feae3161542_augmentation_1672345_3_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-ce7e8efe-src-4fa017e5-run-08c3615bf89e_augmentation_1672345_3_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-6101d487-src-4fa017e5-run-c717f9b088a4_augmentation_1672345_3_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 4.834303855895996,
+        "min_ms": 4.830207824707031,
+        "max_ms": 4.841472148895264,
+        "times_ms": [
+          4.834303855895996,
+          4.830207824707031,
+          4.841472148895264
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-3a6c3587-src-4fa017e5-run-4feae3161542_augmentation_1672345_3_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-ce7e8efe-src-4fa017e5-run-08c3615bf89e_augmentation_1672345_3_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication/artifacts/NVIDIA RTX A6000/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-6101d487-src-4fa017e5-run-c717f9b088a4_augmentation_1672345_3_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication_bidirectional",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 9.674752235412598,
+        "min_ms": 9.670656204223633,
+        "max_ms": 9.684991836547852,
+        "times_ms": [
+          9.674752235412598,
+          9.670656204223633,
+          9.684991836547852
+        ],
+        "gpu_uuid": "8216929f-6220-d20a-9a8d-d6e677a15987",
+        "input_shapes": {
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-180a8d02-src-4fa017e5-run-4805151e1737_L384_1672474_4_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-652f011c-src-4fa017e5-run-f1b64ab0b192_L384_1672474_4_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-62dd58d9-src-4fa017e5-run-5109dd0bf32f_L384_1672474_4_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication_bidirectional",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 2.0654079914093018,
+        "min_ms": 2.0643839836120605,
+        "max_ms": 2.0776960849761963,
+        "times_ms": [
+          2.0643839836120605,
+          2.0776960849761963,
+          2.0654079914093018
+        ],
+        "gpu_uuid": "8216929f-6220-d20a-9a8d-d6e677a15987",
+        "input_shapes": {
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-180a8d02-src-4fa017e5-run-4805151e1737_L384_1672474_4_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-652f011c-src-4fa017e5-run-f1b64ab0b192_L384_1672474_4_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-62dd58d9-src-4fa017e5-run-5109dd0bf32f_L384_1672474_4_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication_bidirectional",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 31.941631317138672,
+        "min_ms": 31.933439254760742,
+        "max_ms": 31.94879913330078,
+        "times_ms": [
+          31.941631317138672,
+          31.933439254760742,
+          31.94879913330078
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-0bb76923-src-4fa017e5-run-05577b346407_L384_1672474_5_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-cacd5f41-src-4fa017e5-run-0137fc2a079a_L384_1672474_5_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-fbce6179-src-4fa017e5-run-43b262461d5c_L384_1672474_5_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_multiplication_bidirectional",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 9.80787181854248,
+        "min_ms": 9.788415908813477,
+        "max_ms": 9.893888473510742,
+        "times_ms": [
+          9.80787181854248,
+          9.788415908813477,
+          9.893888473510742
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-0bb76923-src-4fa017e5-run-05577b346407_L384_1672474_5_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-cacd5f41-src-4fa017e5-run-0137fc2a079a_L384_1672474_5_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_multiplication_bidirectional/artifacts/NVIDIA RTX A6000/triangle_multiplication_bidirectional_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-fbce6179-src-4fa017e5-run-43b262461d5c_L384_1672474_5_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_attention",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 4.984831809997559,
+        "min_ms": 4.984831809997559,
+        "max_ms": 5.015552043914795,
+        "times_ms": [
+          4.984831809997559,
+          4.984831809997559,
+          5.015552043914795
+        ],
+        "gpu_uuid": "84bdd46d-8646-1bb5-372c-3abcd40db369",
+        "input_shapes": {
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-e04cefc8-src-4fa017e5-run-bd9523a71516_augmentation_1672345_6_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-f34f040a-src-4fa017e5-run-0a4def6577b3_augmentation_1672345_6_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-9eea8c32-src-4fa017e5-run-bbad487a8aac_augmentation_1672345_6_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_attention",
+        "mode": "inference",
+        "implementation": "cuequivariance",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 2.0439040660858154,
+        "min_ms": 2.0413440465927124,
+        "max_ms": 2.0531198978424072,
+        "times_ms": [
+          2.0439040660858154,
+          2.0413440465927124,
+          2.0531198978424072
+        ],
+        "gpu_uuid": "84bdd46d-8646-1bb5-372c-3abcd40db369",
+        "input_shapes": {
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-e04cefc8-src-4fa017e5-run-bd9523a71516_augmentation_1672345_6_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-f34f040a-src-4fa017e5-run-0a4def6577b3_augmentation_1672345_6_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-9eea8c32-src-4fa017e5-run-bbad487a8aac_augmentation_1672345_6_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_attention",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 1.5124479532241821,
+        "min_ms": 1.5124479532241821,
+        "max_ms": 1.5196160078048706,
+        "times_ms": [
+          1.5124479532241821,
+          1.5124479532241821,
+          1.5196160078048706
+        ],
+        "gpu_uuid": "84bdd46d-8646-1bb5-372c-3abcd40db369",
+        "input_shapes": {
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-e04cefc8-src-4fa017e5-run-bd9523a71516_augmentation_1672345_6_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-f34f040a-src-4fa017e5-run-0a4def6577b3_augmentation_1672345_6_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-9eea8c32-src-4fa017e5-run-bbad487a8aac_augmentation_1672345_6_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_attention",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 13.550592422485352,
+        "min_ms": 13.532159805297852,
+        "max_ms": 13.552639961242676,
+        "times_ms": [
+          13.532159805297852,
+          13.552639961242676,
+          13.550592422485352
+        ],
+        "gpu_uuid": "bc3980f1-1475-227c-c59a-6577004dbe97",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-30ff2f3a-src-4fa017e5-run-9ac6bd225612_augmentation_1672345_7_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-9ef5abda-src-4fa017e5-run-3e565564eb40_augmentation_1672345_7_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-9af494d6-src-4fa017e5-run-8a45c7108734_augmentation_1672345_7_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_attention",
+        "mode": "training",
+        "implementation": "cuequivariance",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 8.064000129699707,
+        "min_ms": 8.048640251159668,
+        "max_ms": 8.092672348022461,
+        "times_ms": [
+          8.048640251159668,
+          8.064000129699707,
+          8.092672348022461
+        ],
+        "gpu_uuid": "bc3980f1-1475-227c-c59a-6577004dbe97",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-30ff2f3a-src-4fa017e5-run-9ac6bd225612_augmentation_1672345_7_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-9ef5abda-src-4fa017e5-run-3e565564eb40_augmentation_1672345_7_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-9af494d6-src-4fa017e5-run-8a45c7108734_augmentation_1672345_7_r3.csv"
+        ]
+      },
+      {
+        "target": "triangle_attention",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 6.248447895050049,
+        "min_ms": 6.247424125671387,
+        "max_ms": 6.255616188049316,
+        "times_ms": [
+          6.255616188049316,
+          6.247424125671387,
+          6.248447895050049
+        ],
+        "gpu_uuid": "bc3980f1-1475-227c-c59a-6577004dbe97",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": true,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-30ff2f3a-src-4fa017e5-run-9ac6bd225612_augmentation_1672345_7_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-9ef5abda-src-4fa017e5-run-3e565564eb40_augmentation_1672345_7_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/triangle_attention/artifacts/NVIDIA RTX A6000/triangle_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-9af494d6-src-4fa017e5-run-8a45c7108734_augmentation_1672345_7_r3.csv"
+        ]
+      },
+      {
+        "target": "transition",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 1.7940479516983032,
+        "min_ms": 1.7884160280227661,
+        "max_ms": 1.7960959672927856,
+        "times_ms": [
+          1.7960959672927856,
+          1.7940479516983032,
+          1.7884160280227661
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0fc5dee0-src-4fa017e5-run-7158f5ab216c_L384_1672474_8_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-9f5fb9f2-src-4fa017e5-run-f149cd9cea5f_L384_1672474_8_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-24a85009-src-4fa017e5-run-278cdb27979e_L384_1672474_8_r3.csv"
+        ]
+      },
+      {
+        "target": "transition",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.954367995262146,
+        "min_ms": 0.9512959718704224,
+        "max_ms": 0.9553920030593872,
+        "times_ms": [
+          0.9512959718704224,
+          0.9553920030593872,
+          0.954367995262146
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0fc5dee0-src-4fa017e5-run-7158f5ab216c_L384_1672474_8_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-9f5fb9f2-src-4fa017e5-run-f149cd9cea5f_L384_1672474_8_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-24a85009-src-4fa017e5-run-278cdb27979e_L384_1672474_8_r3.csv"
+        ]
+      },
+      {
+        "target": "transition",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 4.8363518714904785,
+        "min_ms": 4.834815979003906,
+        "max_ms": 4.839424133300781,
+        "times_ms": [
+          4.839424133300781,
+          4.8363518714904785,
+          4.834815979003906
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.x": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-a22b96ea-src-4fa017e5-run-389b1a264ecb_L384_1672474_9_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e93e377b-src-4fa017e5-run-5d3ec1dc3c0d_L384_1672474_9_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-a3d1a72a-src-4fa017e5-run-90868a1cf1ae_L384_1672474_9_r3.csv"
+        ]
+      },
+      {
+        "target": "transition",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 3.762176036834717,
+        "min_ms": 3.7585920095443726,
+        "max_ms": 3.7703680992126465,
+        "times_ms": [
+          3.762176036834717,
+          3.7585920095443726,
+          3.7703680992126465
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.x": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-a22b96ea-src-4fa017e5-run-389b1a264ecb_L384_1672474_9_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e93e377b-src-4fa017e5-run-5d3ec1dc3c0d_L384_1672474_9_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/transition/artifacts/NVIDIA RTX A6000/transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-a3d1a72a-src-4fa017e5-run-90868a1cf1ae_L384_1672474_9_r3.csv"
+        ]
+      },
+      {
+        "target": "conditioned_transition",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.32051199674606323,
+        "min_ms": 0.3123199939727783,
+        "max_ms": 0.3317759931087494,
+        "times_ms": [
+          0.32051199674606323,
+          0.3123199939727783,
+          0.3317759931087494
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-debc1d1b-src-4fa017e5-run-3de88cab3e9e_L384_1672474_10_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-5bb0ade8-src-4fa017e5-run-a2da1dd1cc87_L384_1672474_10_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-8c0bc4a2-src-4fa017e5-run-af5b98ea216e_L384_1672474_10_r3.csv"
+        ]
+      },
+      {
+        "target": "conditioned_transition",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.21401600539684296,
+        "min_ms": 0.21299199759960175,
+        "max_ms": 0.21401600539684296,
+        "times_ms": [
+          0.21401600539684296,
+          0.21401600539684296,
+          0.21299199759960175
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-debc1d1b-src-4fa017e5-run-3de88cab3e9e_L384_1672474_10_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-5bb0ade8-src-4fa017e5-run-a2da1dd1cc87_L384_1672474_10_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-8c0bc4a2-src-4fa017e5-run-af5b98ea216e_L384_1672474_10_r3.csv"
+        ]
+      },
+      {
+        "target": "conditioned_transition",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 6.023168087005615,
+        "min_ms": 5.952511787414551,
+        "max_ms": 6.0293121337890625,
+        "times_ms": [
+          5.952511787414551,
+          6.0293121337890625,
+          6.023168087005615
+        ],
+        "gpu_uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-329bfeba-src-4fa017e5-run-12613d2f53d8_L384_1672523_11_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-bd0bf01e-src-4fa017e5-run-e85b019e0107_L384_1672523_11_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-52bd39c6-src-4fa017e5-run-96cdc23cf9a4_L384_1672523_11_r3.csv"
+        ]
+      },
+      {
+        "target": "conditioned_transition",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 6.201344013214111,
+        "min_ms": 6.138879776000977,
+        "max_ms": 6.201344013214111,
+        "times_ms": [
+          6.138879776000977,
+          6.201344013214111,
+          6.201344013214111
+        ],
+        "gpu_uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-329bfeba-src-4fa017e5-run-12613d2f53d8_L384_1672523_11_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-bd0bf01e-src-4fa017e5-run-e85b019e0107_L384_1672523_11_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/conditioned_transition/artifacts/NVIDIA RTX A6000/conditioned_transition_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-52bd39c6-src-4fa017e5-run-96cdc23cf9a4_L384_1672523_11_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_token",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.7761920094490051,
+        "min_ms": 0.7761920094490051,
+        "max_ms": 0.7772160172462463,
+        "times_ms": [
+          0.7772160172462463,
+          0.7761920094490051,
+          0.7761920094490051
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-6ba14f3e-src-4fa017e5-run-85860c28d477_L384_1672474_12_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-4e650a7e-src-4fa017e5-run-6945bc9bb283_L384_1672474_12_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-72e18cde-src-4fa017e5-run-01634ec57ccb_L384_1672474_12_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_token",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.5611519813537598,
+        "min_ms": 0.5539839863777161,
+        "max_ms": 0.5683199763298035,
+        "times_ms": [
+          0.5683199763298035,
+          0.5539839863777161,
+          0.5611519813537598
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-6ba14f3e-src-4fa017e5-run-85860c28d477_L384_1672474_12_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-4e650a7e-src-4fa017e5-run-6945bc9bb283_L384_1672474_12_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-72e18cde-src-4fa017e5-run-01634ec57ccb_L384_1672474_12_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_token",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 11.994112014770508,
+        "min_ms": 11.969535827636719,
+        "max_ms": 12.012543678283691,
+        "times_ms": [
+          11.994112014770508,
+          12.012543678283691,
+          11.969535827636719
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "dy_single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "inference_step.cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-b7ef3b50-src-4fa017e5-run-fee4dc592ca7_L384_1672474_13_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-10c45401-src-4fa017e5-run-ccf572d0f7db_L384_1672474_13_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-5c47f1c2-src-4fa017e5-run-bd768918b338_L384_1672474_13_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_token",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 11.597824096679688,
+        "min_ms": 11.564544200897217,
+        "max_ms": 11.605504035949707,
+        "times_ms": [
+          11.597824096679688,
+          11.564544200897217,
+          11.605504035949707
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "dy_single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "inference_step.cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "inference_step.single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-b7ef3b50-src-4fa017e5-run-fee4dc592ca7_L384_1672474_13_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-10c45401-src-4fa017e5-run-ccf572d0f7db_L384_1672474_13_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_token/artifacts/NVIDIA RTX A6000/augmented_attention_token_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-5c47f1c2-src-4fa017e5-run-bd768918b338_L384_1672474_13_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_atom",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 5.3882880210876465,
+        "min_ms": 5.384191989898682,
+        "max_ms": 5.399551868438721,
+        "times_ms": [
+          5.384191989898682,
+          5.399551868438721,
+          5.3882880210876465
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              3072,
+              128
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              3072
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              3072,
+              3072,
+              16
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-8bdce13a-src-4fa017e5-run-72c4ccd40b7e_L384_1672474_14_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-611d3ea0-src-4fa017e5-run-99de556a6ae8_L384_1672474_14_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-375703c6-src-4fa017e5-run-3729d329a9d6_L384_1672474_14_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_atom",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 2.6265599727630615,
+        "min_ms": 2.623487949371338,
+        "max_ms": 2.6275839805603027,
+        "times_ms": [
+          2.6275839805603027,
+          2.623487949371338,
+          2.6265599727630615
+        ],
+        "gpu_uuid": "ecfb7c52-fbb1-de4f-fc55-270af8e02983",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              3072,
+              128
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              3072
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              3072,
+              3072,
+              16
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-8bdce13a-src-4fa017e5-run-72c4ccd40b7e_L384_1672474_14_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-611d3ea0-src-4fa017e5-run-99de556a6ae8_L384_1672474_14_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-375703c6-src-4fa017e5-run-3729d329a9d6_L384_1672474_14_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_atom",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 92.71910095214844,
+        "min_ms": 92.35250854492188,
+        "max_ms": 93.1256332397461,
+        "times_ms": [
+          92.35250854492188,
+          93.1256332397461,
+          92.71910095214844
+        ],
+        "gpu_uuid": "8216929f-6220-d20a-9a8d-d6e677a15987",
+        "input_shapes": {
+          "dy_single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              3072,
+              128
+            ]
+          },
+          "inference_step.cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              3072,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              3072
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              3072,
+              3072,
+              16
+            ]
+          },
+          "inference_step.single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e0bec658-src-4fa017e5-run-a2d953dda954_L384_1672474_15_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-83529627-src-4fa017e5-run-d2e1cd235232_L384_1672474_15_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-1fd3ae16-src-4fa017e5-run-d1f358611e63_L384_1672474_15_r3.csv"
+        ]
+      },
+      {
+        "target": "augmented_attention_atom",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 72.84326171875,
+        "min_ms": 72.67635345458984,
+        "max_ms": 73.09209442138672,
+        "times_ms": [
+          72.84326171875,
+          73.09209442138672,
+          72.67635345458984
+        ],
+        "gpu_uuid": "8216929f-6220-d20a-9a8d-d6e677a15987",
+        "input_shapes": {
+          "dy_single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              3072,
+              128
+            ]
+          },
+          "inference_step.cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              3072,
+              128
+            ]
+          },
+          "inference_step.mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              3072
+            ]
+          },
+          "inference_step.pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              3072,
+              3072,
+              16
+            ]
+          },
+          "inference_step.single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e0bec658-src-4fa017e5-run-a2d953dda954_L384_1672474_15_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-83529627-src-4fa017e5-run-d2e1cd235232_L384_1672474_15_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/augmented_attention_atom/artifacts/NVIDIA RTX A6000/augmented_attention_atom_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-1fd3ae16-src-4fa017e5-run-d1f358611e63_L384_1672474_15_r3.csv"
+        ]
+      },
+      {
+        "target": "swa_atom_attention",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.46694400906562805,
+        "min_ms": 0.46694400906562805,
+        "max_ms": 0.46694400906562805,
+        "times_ms": [
+          0.46694400906562805,
+          0.46694400906562805,
+          0.46694400906562805
+        ],
+        "gpu_uuid": "13b61e95-69d6-f2ca-fe4c-e4593d53b746",
+        "input_shapes": {
+          "ap[0]": {
+            "dtype": "float32",
+            "shape": [
+              5,
+              3072,
+              16
+            ]
+          },
+          "ap[1]": {
+            "dtype": "float32",
+            "shape": [
+              5,
+              3072,
+              16
+            ]
+          },
+          "ap[2]": {
+            "dtype": "int32",
+            "shape": [
+              5
+            ]
+          },
+          "ap[3]": {
+            "dtype": "int32",
+            "shape": [
+              6
+            ]
+          },
+          "ap[5]": {
+            "dtype": "bool",
+            "shape": [
+              5,
+              3072
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_atom_attention/artifacts/NVIDIA RTX A6000/swa_atom_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0e4390aa-src-4fa017e5-run-425715bb67c8_L384_1672474_16_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_atom_attention/artifacts/NVIDIA RTX A6000/swa_atom_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-a88b21b8-src-4fa017e5-run-12cf8e05b9fd_L384_1672474_16_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_atom_attention/artifacts/NVIDIA RTX A6000/swa_atom_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-6342f87a-src-4fa017e5-run-acac9195940b_L384_1672474_16_r3.csv"
+        ]
+      },
+      {
+        "target": "swa_atom_attention",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 10.077183723449707,
+        "min_ms": 10.067968368530273,
+        "max_ms": 10.093567848205566,
+        "times_ms": [
+          10.067968368530273,
+          10.093567848205566,
+          10.077183723449707
+        ],
+        "gpu_uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+        "input_shapes": {
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          },
+          "inference_step.ap[0]": {
+            "dtype": "float32",
+            "shape": [
+              48,
+              3072,
+              16
+            ]
+          },
+          "inference_step.ap[1]": {
+            "dtype": "float32",
+            "shape": [
+              48,
+              3072,
+              16
+            ]
+          },
+          "inference_step.ap[2]": {
+            "dtype": "int32",
+            "shape": [
+              48
+            ]
+          },
+          "inference_step.ap[3]": {
+            "dtype": "int32",
+            "shape": [
+              49
+            ]
+          },
+          "inference_step.ap[5]": {
+            "dtype": "bool",
+            "shape": [
+              48,
+              3072
+            ]
+          },
+          "inference_step.x": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_atom_attention/artifacts/NVIDIA RTX A6000/swa_atom_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-e26ab843-src-4fa017e5-run-176ae99aa69f_L384_1672523_17_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_atom_attention/artifacts/NVIDIA RTX A6000/swa_atom_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-5dd7b543-src-4fa017e5-run-d8799cde19c7_L384_1672523_17_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_atom_attention/artifacts/NVIDIA RTX A6000/swa_atom_attention_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-5fc344c6-src-4fa017e5-run-16ca2d240171_L384_1672523_17_r3.csv"
+        ]
+      },
+      {
+        "target": "dit",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 1.0383360385894775,
+        "min_ms": 1.0342400074005127,
+        "max_ms": 1.0577919483184814,
+        "times_ms": [
+          1.0342400074005127,
+          1.0383360385894775,
+          1.0577919483184814
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-b1be0ef6-src-4fa017e5-run-4f4f6f21225b_L384_1672474_18_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-e68cb5c5-src-4fa017e5-run-cee0f264e286_L384_1672474_18_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-e97c99b6-src-4fa017e5-run-9678524b76de_L384_1672474_18_r3.csv"
+        ]
+      },
+      {
+        "target": "dit",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.7475200295448303,
+        "min_ms": 0.7454720139503479,
+        "max_ms": 0.7505919933319092,
+        "times_ms": [
+          0.7454720139503479,
+          0.7505919933319092,
+          0.7475200295448303
+        ],
+        "gpu_uuid": "20dbc787-efdc-b977-e3f0-c30466924996",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              384
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-b1be0ef6-src-4fa017e5-run-4f4f6f21225b_L384_1672474_18_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-e68cb5c5-src-4fa017e5-run-cee0f264e286_L384_1672474_18_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-e97c99b6-src-4fa017e5-run-9678524b76de_L384_1672474_18_r3.csv"
+        ]
+      },
+      {
+        "target": "dit",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 18.074623107910156,
+        "min_ms": 18.062335968017578,
+        "max_ms": 18.108415603637695,
+        "times_ms": [
+          18.108415603637695,
+          18.074623107910156,
+          18.062335968017578
+        ],
+        "gpu_uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-96ff0986-src-4fa017e5-run-31911eb5f3a9_L384_1672523_19_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-532e7e3a-src-4fa017e5-run-ae02313892d0_L384_1672523_19_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-aa1598e0-src-4fa017e5-run-47f122037689_L384_1672523_19_r3.csv"
+        ]
+      },
+      {
+        "target": "dit",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 17.911808013916016,
+        "min_ms": 17.86777687072754,
+        "max_ms": 17.963008880615234,
+        "times_ms": [
+          17.963008880615234,
+          17.86777687072754,
+          17.911808013916016
+        ],
+        "gpu_uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+        "input_shapes": {
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              384
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          },
+          "mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              384
+            ]
+          },
+          "pair": {
+            "dtype": "bfloat16",
+            "shape": [
+              1,
+              384,
+              384,
+              128
+            ]
+          },
+          "single": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              1,
+              384,
+              768
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-96ff0986-src-4fa017e5-run-31911eb5f3a9_L384_1672523_19_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-532e7e3a-src-4fa017e5-run-ae02313892d0_L384_1672523_19_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/dit/artifacts/NVIDIA RTX A6000/dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-aa1598e0-src-4fa017e5-run-47f122037689_L384_1672523_19_r3.csv"
+        ]
+      },
+      {
+        "target": "swa_dit",
+        "mode": "inference",
+        "implementation": "pytorch",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.6635519862174988,
+        "min_ms": 0.6615039706230164,
+        "max_ms": 0.66457599401474,
+        "times_ms": [
+          0.6615039706230164,
+          0.66457599401474,
+          0.6635519862174988
+        ],
+        "gpu_uuid": "8216929f-6220-d20a-9a8d-d6e677a15987",
+        "input_shapes": {
+          "ap[0]": {
+            "dtype": "float32",
+            "shape": [
+              5,
+              3072,
+              16
+            ]
+          },
+          "ap[1]": {
+            "dtype": "float32",
+            "shape": [
+              5,
+              3072,
+              16
+            ]
+          },
+          "ap[2]": {
+            "dtype": "int32",
+            "shape": [
+              5
+            ]
+          },
+          "ap[3]": {
+            "dtype": "int32",
+            "shape": [
+              6
+            ]
+          },
+          "ap[5]": {
+            "dtype": "bool",
+            "shape": [
+              5,
+              3072
+            ]
+          },
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              3072,
+              128
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-92f11eb7-src-4fa017e5-run-21229fbe7cee_L384_1672474_20_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-ac1c8b14-src-4fa017e5-run-e3d00a8bfdf1_L384_1672474_20_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-5ad6ece9-src-4fa017e5-run-f698e831b97c_L384_1672474_20_r3.csv"
+        ]
+      },
+      {
+        "target": "swa_dit",
+        "mode": "inference",
+        "implementation": "miniworld",
+        "augment": 5,
+        "length": 384,
+        "median_ms": 0.5734400153160095,
+        "min_ms": 0.5734400153160095,
+        "max_ms": 0.5744640231132507,
+        "times_ms": [
+          0.5734400153160095,
+          0.5744640231132507,
+          0.5734400153160095
+        ],
+        "gpu_uuid": "8216929f-6220-d20a-9a8d-d6e677a15987",
+        "input_shapes": {
+          "ap[0]": {
+            "dtype": "float32",
+            "shape": [
+              5,
+              3072,
+              16
+            ]
+          },
+          "ap[1]": {
+            "dtype": "float32",
+            "shape": [
+              5,
+              3072,
+              16
+            ]
+          },
+          "ap[2]": {
+            "dtype": "int32",
+            "shape": [
+              5
+            ]
+          },
+          "ap[3]": {
+            "dtype": "int32",
+            "shape": [
+              6
+            ]
+          },
+          "ap[5]": {
+            "dtype": "bool",
+            "shape": [
+              5,
+              3072
+            ]
+          },
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              3072,
+              128
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              5,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-92f11eb7-src-4fa017e5-run-21229fbe7cee_L384_1672474_20_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-ac1c8b14-src-4fa017e5-run-e3d00a8bfdf1_L384_1672474_20_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-5ad6ece9-src-4fa017e5-run-f698e831b97c_L384_1672474_20_r3.csv"
+        ]
+      },
+      {
+        "target": "swa_dit",
+        "mode": "training",
+        "implementation": "pytorch",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 17.068031311035156,
+        "min_ms": 17.046527862548828,
+        "max_ms": 17.070079803466797,
+        "times_ms": [
+          17.046527862548828,
+          17.070079803466797,
+          17.068031311035156
+        ],
+        "gpu_uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+        "input_shapes": {
+          "ap[0]": {
+            "dtype": "float32",
+            "shape": [
+              48,
+              3072,
+              16
+            ]
+          },
+          "ap[1]": {
+            "dtype": "float32",
+            "shape": [
+              48,
+              3072,
+              16
+            ]
+          },
+          "ap[2]": {
+            "dtype": "int32",
+            "shape": [
+              48
+            ]
+          },
+          "ap[3]": {
+            "dtype": "int32",
+            "shape": [
+              49
+            ]
+          },
+          "ap[5]": {
+            "dtype": "bool",
+            "shape": [
+              48,
+              3072
+            ]
+          },
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-8766f73a-src-4fa017e5-run-38428d22aa89_L384_1672523_21_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-0c43f518-src-4fa017e5-run-3fb25a11166c_L384_1672523_21_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-d5dc7427-src-4fa017e5-run-215d0c0e2770_L384_1672523_21_r3.csv"
+        ]
+      },
+      {
+        "target": "swa_dit",
+        "mode": "training",
+        "implementation": "miniworld",
+        "augment": 48,
+        "length": 384,
+        "median_ms": 16.500736236572266,
+        "min_ms": 16.497663497924805,
+        "max_ms": 16.520191192626953,
+        "times_ms": [
+          16.497663497924805,
+          16.520191192626953,
+          16.500736236572266
+        ],
+        "gpu_uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+        "input_shapes": {
+          "ap[0]": {
+            "dtype": "float32",
+            "shape": [
+              48,
+              3072,
+              16
+            ]
+          },
+          "ap[1]": {
+            "dtype": "float32",
+            "shape": [
+              48,
+              3072,
+              16
+            ]
+          },
+          "ap[2]": {
+            "dtype": "int32",
+            "shape": [
+              48
+            ]
+          },
+          "ap[3]": {
+            "dtype": "int32",
+            "shape": [
+              49
+            ]
+          },
+          "ap[5]": {
+            "dtype": "bool",
+            "shape": [
+              48,
+              3072
+            ]
+          },
+          "cond": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          },
+          "dy": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          },
+          "x": {
+            "dtype": "bfloat16",
+            "shape": [
+              48,
+              3072,
+              128
+            ]
+          }
+        },
+        "reused": false,
+        "csv_paths": [
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-8766f73a-src-4fa017e5-run-38428d22aa89_L384_1672523_21_r1.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-0c43f518-src-4fa017e5-run-3fb25a11166c_L384_1672523_21_r2.csv",
+          "/home/psk6950/practice/miniworld-engine/benchmarks/modules/swa_dit/artifacts/NVIDIA RTX A6000/swa_dit_n_layers=1_training_time_bf16-mixed_compile_wrap-custom_op_seq_len_cfg-d5dc7427-src-4fa017e5-run-215d0c0e2770_L384_1672523_21_r3.csv"
+        ]
+      }
+    ],
+    "blocked": [],
+    "unfinished": [],
+    "cache_revision": {
+      "reason": "Four validated L384/A48 keys added; all preexisting entries preserved.",
+      "evidence": "/home/psk6950/practice/team-gm/mw-l384-missing-build/merge-result.json",
+      "previous_manifest": "/home/psk6950/practice/team-gm/mw-l384-modules/pre-missing4-merge/manifest.json",
+      "repeated_tasks": [
+        1,
+        11,
+        17,
+        19,
+        21
+      ]
+    },
+    "note": "Four missing L384/A48 cache keys were built and validated before the retried tasks. No kernel source or preexisting cache entries changed. Cache misses abort setup before fallback search. TriangleMultiplication/TriangleAttention reuse verified native L384 results; other targets newly measured."
+  }
+}

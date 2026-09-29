@@ -1,0 +1,8 @@
+> A100 (Ampere, compute capability 8.0).
+>
+> This file SUBTRACTS -- see sm_86.csv for why it is a deny-list rather than an allow-list.
+>
+> Columns: case,impl,dtype,build,reason
+case,impl,dtype,build,reason
+*,cute,*,no,"quack/CuTe GEMM is WGMMA/TMA-only; below sm_90 it raises 'Gemm Sm80 is not implemented yet' -- the error names sm_80 directly."
+*,cuda,*,no,"the hand-CUDA extensions are compiled -gencode arch=compute_90,code=sm_90a and will not build here."

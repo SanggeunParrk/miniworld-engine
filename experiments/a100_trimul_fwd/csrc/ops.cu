@@ -251,7 +251,7 @@ int b7j_per_sm() {
   return per_sm;
 }
 // B7 joint (cooperative): sources S = w1 blocks, C consumers per group, G groups; ring [G*RINGS*128*K4] bf16, prod [G*RINGS*S] / cons [G*RINGS]
-// int32 zeroed; dwpart [G, S*64, 128], lnpart [G*C, 2, 128] fp32
+// int32 zeroed; dwpart [G * B7J_DWSEG, S*64, 128], lnpart [G*C, 2, 128] fp32
 void b7j(torch::Tensor xn, torch::Tensor w1, torch::Tensor dab, torch::Tensor mask, torch::Tensor wdx, torch::Tensor dg, torch::Tensor z,
          torch::Tensor dy, torch::Tensor stats, torch::Tensor gamma, torch::Tensor ring, torch::Tensor prod, torch::Tensor cons, torch::Tensor dz,
          torch::Tensor dwpart, torch::Tensor lnpart, int64_t L, int64_t C, int64_t G, int64_t RINGS) {
@@ -268,7 +268,7 @@ void b7j(torch::Tensor xn, torch::Tensor w1, torch::Tensor dab, torch::Tensor ma
   p.RINGS = (int)RINGS; p.K4 = 64 * p.S;
   TORCH_CHECK(p.T % 128 == 0 && p.S <= 32 && wdx.size(0) == p.K4 + 128, "B7J: T % 128, S <= 32, wdx rows");
   TORCH_CHECK(ring.numel() >= (int64_t)p.G * p.RINGS * 128 * p.K4 && prod.numel() >= p.G * p.RINGS * p.S && cons.numel() >= p.G * p.RINGS, "B7J buffers");
-  TORCH_CHECK(dwpart.numel() == (int64_t)p.G * p.S * 64 * 128 && lnpart.numel() == (int64_t)p.G * p.C * 256, "B7J partials");
+  TORCH_CHECK(dwpart.numel() == (int64_t)p.G * B7J_DWSEG * p.S * 64 * 128 && lnpart.numel() == (int64_t)p.G * p.C * 256, "B7J partials");
   const int per_sm = b7j_per_sm();
   TORCH_CHECK(p.G >= 1, "B7J: no group fits");
   const int grid = p.G * (p.S + p.C);
@@ -308,6 +308,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("b1g", &b1g);
   m.def("b1g_grid", [](int64_t T) { return b1g_grid((int)T); });
   m.def("b7j", &b7j);
+  m.def("b7j_dwseg", []() { return (int64_t)B7J_DWSEG; });
   m.def("b7j_prof", []() {
     unsigned long long h[4];
     C10_CUDA_CHECK(cudaMemcpyFromSymbol(h, a100::b7j_prof, sizeof(h)));

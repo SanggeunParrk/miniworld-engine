@@ -1,0 +1,1579 @@
+{
+  "pytorch": {
+    "label": "pytorch",
+    "gpu_name": "NVIDIA RTX A6000",
+    "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+    "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+    "lookups": [],
+    "profile": [
+      {
+        "name": "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<32, 128, 128, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<32, 128, 128, 4, cutlass::bfloat16_t> >, false, false, true, false, false, true, false, false>(flash::Flash_fwd_params)",
+        "us_per_replay": 67.38556666666666,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "us_per_replay": 63.77176666666678,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1}>(int, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1})",
+        "us_per_replay": 43.118899999999975,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+        "us_per_replay": 42.42360000000004,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "memcpy128",
+        "us_per_replay": 32.58779999999985,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "triton_per_fused__fused_rms_norm__to_copy__unsafe_view_add_cat_mul_neg_permute_repeat_split_swa_atom_attention_flash_window_unbind_unsqueeze_view_0",
+        "us_per_replay": 26.126966666666693,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "us_per_replay": 24.98999999999989,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+        "us_per_replay": 21.730200000000192,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+        "us_per_replay": 14.7063333333335,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "triton_poi_fused__unsafe_view_mul_sigmoid_view_1",
+        "us_per_replay": 14.377599999999937,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 3.520066666666556,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4>)",
+        "us_per_replay": 3.419766666666775,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<long, std::plus<long> >::Policy900, long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int, long, false>(long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, int, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 2.6784333333333508,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 2.6462999999999655,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<int, std::plus<int> >::Policy900, int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int, int, false>(int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, int, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 2.015933333333291,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
+        "us_per_replay": 1.585066666666527,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul> >(int, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul>)",
+        "us_per_replay": 1.5797000000000325,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1})",
+        "us_per_replay": 1.5648000000000437,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
+        "us_per_replay": 1.3855999999999995,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 1, 128, 1, 16>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us_per_replay": 1.2788999999999604,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)",
+        "us_per_replay": 1.1199999999999664,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+        "us_per_replay": 1.030366666666752,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<long, true> >(at_cuda_detail::cub::ScanTileState<long, true>, int)",
+        "us_per_replay": 0.9974000000000922,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<int, true> >(at_cuda_detail::cub::ScanTileState<int, true>, int)",
+        "us_per_replay": 0.9908999999999655,
+        "calls": 0.9999999999999999
+      }
+    ],
+    "native_samples": [
+      {
+        "value": 0.37273600697517395,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 1,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.36694398522377014,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 1,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.3668479919433594,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 1,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      }
+    ],
+    "configuration": {
+      "d_single": 384,
+      "d_pair": 128,
+      "d_single_token": 768,
+      "d_single_atom": 128,
+      "d_pair_atom": 16,
+      "n_layers": 1,
+      "trimul_direction": "outgoing",
+      "n_augment": 5,
+      "mask_prob": 0.125,
+      "min_seq_len": 64,
+      "max_seq_len": 384,
+      "seq_len_step": 64,
+      "min_d_pair": 64,
+      "max_d_pair": 256,
+      "d_pair_step": 64,
+      "d_pair_values": null,
+      "sweep_axis": "seq_len",
+      "sweep_seq_len": 512,
+      "autotune_shard": "",
+      "config_dir": "",
+      "pin_gate_backend": "",
+      "dropout": 0.0,
+      "compile_jobs": 0,
+      "pin_infer_concat": null,
+      "pin_transition_cuda_b2b": null,
+      "target": "swa_atom_attention",
+      "level": "module",
+      "implementations": [
+        "pytorch",
+        "triton"
+      ],
+      "mode": "inference",
+      "metric": "time",
+      "compile": true,
+      "cudagraph": "manual",
+      "allow_tf32": false,
+      "precision": "bf16-mixed",
+      "layernorm_weight_precision": null,
+      "allow_eager": false,
+      "name_suffix": ""
+    },
+    "tile_cache_unchanged": true,
+    "rope_required": [
+      [
+        "bfloat16",
+        "shape_key=137439087108"
+      ],
+      [
+        "bfloat16",
+        "shape_key=68719610372"
+      ]
+    ],
+    "rope_missing": [],
+    "rope_invalid": {},
+    "median_ms": 0.36694398522377014
+  },
+  "miniworld": {
+    "label": "miniworld",
+    "gpu_name": "NVIDIA RTX A6000",
+    "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+    "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+    "lookups": [
+      {
+        "op": "rmsnorm_fwd_triton",
+        "key": "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878038810",
+        "kept": 5
+      },
+      {
+        "op": "rope_fwd_triton",
+        "key": "bfloat16+float32|shape_key=137439087108",
+        "kept": 5
+      },
+      {
+        "op": "gated_projection_gate_flat_triton",
+        "key": "bfloat16|shape_key=8192",
+        "kept": 5
+      }
+    ],
+    "profile": [
+      {
+        "name": "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<32, 128, 128, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<32, 128, 128, 4, cutlass::bfloat16_t> >, false, false, true, false, false, true, false, false>(flash::Flash_fwd_params)",
+        "us_per_replay": 64.9057333333333,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "us_per_replay": 61.83276666666687,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1}>(int, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1})",
+        "us_per_replay": 40.91873333333335,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+        "us_per_replay": 40.269833333333224,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "memcpy128",
+        "us_per_replay": 33.50619999999991,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "rope_3d_kernel",
+        "us_per_replay": 32.346733333333255,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "us_per_replay": 23.952000000000123,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+        "us_per_replay": 22.11096666666692,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "triton_poi_fused_clone_0",
+        "us_per_replay": 22.035166666666843,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "rmsnorm_fwd_kernel",
+        "us_per_replay": 17.448666666666657,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+        "us_per_replay": 14.275166666666646,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "_sigmul_fwd",
+        "us_per_replay": 13.809166666666746,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 3.366600000000167,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4>)",
+        "us_per_replay": 3.2320666666665696,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<long, std::plus<long> >::Policy900, long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int, long, false>(long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, int, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 2.5320999999999456,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 2.4980666666666353,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<int, std::plus<int> >::Policy900, int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int, int, false>(int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, int, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 1.8996666666667203,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul> >(int, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul>)",
+        "us_per_replay": 1.5061333333335438,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
+        "us_per_replay": 1.4912000000000258,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1})",
+        "us_per_replay": 1.4814999999999594,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
+        "us_per_replay": 1.3034333333333277,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 1, 128, 1, 16>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us_per_replay": 1.224566666666662,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)",
+        "us_per_replay": 1.0667333333333917,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+        "us_per_replay": 0.977033333333422,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<long, true> >(at_cuda_detail::cub::ScanTileState<long, true>, int)",
+        "us_per_replay": 0.9482666666666474,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<int, true> >(at_cuda_detail::cub::ScanTileState<int, true>, int)",
+        "us_per_replay": 0.9439999999999149,
+        "calls": 0.9999999999999999
+      }
+    ],
+    "native_samples": [
+      {
+        "value": 0.4055039882659912,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 7,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.4094719886779785,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 7,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.4092160016298294,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 7,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      }
+    ],
+    "configuration": {
+      "d_single": 384,
+      "d_pair": 128,
+      "d_single_token": 768,
+      "d_single_atom": 128,
+      "d_pair_atom": 16,
+      "n_layers": 1,
+      "trimul_direction": "outgoing",
+      "n_augment": 5,
+      "mask_prob": 0.125,
+      "min_seq_len": 64,
+      "max_seq_len": 384,
+      "seq_len_step": 64,
+      "min_d_pair": 64,
+      "max_d_pair": 256,
+      "d_pair_step": 64,
+      "d_pair_values": null,
+      "sweep_axis": "seq_len",
+      "sweep_seq_len": 512,
+      "autotune_shard": "",
+      "config_dir": "",
+      "pin_gate_backend": "",
+      "dropout": 0.0,
+      "compile_jobs": 0,
+      "pin_infer_concat": null,
+      "pin_transition_cuda_b2b": null,
+      "target": "swa_atom_attention",
+      "level": "module",
+      "implementations": [
+        "pytorch",
+        "triton"
+      ],
+      "mode": "inference",
+      "metric": "time",
+      "compile": true,
+      "cudagraph": "manual",
+      "allow_tf32": false,
+      "precision": "bf16-mixed",
+      "layernorm_weight_precision": null,
+      "allow_eager": false,
+      "name_suffix": ""
+    },
+    "tile_cache_unchanged": true,
+    "rope_required": [
+      [
+        "bfloat16",
+        "shape_key=137439087108"
+      ],
+      [
+        "bfloat16",
+        "shape_key=68719610372"
+      ]
+    ],
+    "rope_missing": [],
+    "rope_invalid": {},
+    "median_ms": 0.4092160016298294
+  },
+  "rms_torch": {
+    "label": "rms_torch",
+    "gpu_name": "NVIDIA RTX A6000",
+    "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+    "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+    "lookups": [
+      {
+        "op": "rope_fwd_triton",
+        "key": "bfloat16+float32|shape_key=137439087108",
+        "kept": 5
+      },
+      {
+        "op": "gated_projection_gate_flat_triton",
+        "key": "bfloat16|shape_key=8192",
+        "kept": 5
+      }
+    ],
+    "profile": [
+      {
+        "name": "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<32, 128, 128, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<32, 128, 128, 4, cutlass::bfloat16_t> >, false, false, true, false, false, true, false, false>(flash::Flash_fwd_params)",
+        "us_per_replay": 64.64633333333326,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "us_per_replay": 61.83160000000017,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+        "us_per_replay": 41.39860000000001,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1}>(int, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1})",
+        "us_per_replay": 41.26189999999998,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "memcpy128",
+        "us_per_replay": 33.681299999999986,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "rope_3d_kernel",
+        "us_per_replay": 33.02093333333321,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "us_per_replay": 24.139733333333364,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+        "us_per_replay": 22.108966666666603,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+        "us_per_replay": 14.580199999999985,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "_sigmul_fwd",
+        "us_per_replay": 13.867666666666555,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "triton_per_fused__fused_rms_norm__to_copy__unsafe_view_permute_unbind_view_1",
+        "us_per_replay": 11.667200000000031,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "triton_per_fused__fused_rms_norm__to_copy__unsafe_view_permute_unbind_view_0",
+        "us_per_replay": 9.605333333333244,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 3.38876666666681,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4>)",
+        "us_per_replay": 3.227833333333366,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<long, std::plus<long> >::Policy900, long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int, long, false>(long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, int, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 2.5535666666668093,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 2.504533333333475,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<int, std::plus<int> >::Policy900, int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int, int, false>(int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, int, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 1.947633333333337,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
+        "us_per_replay": 1.508366666666696,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul> >(int, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul>)",
+        "us_per_replay": 1.5029666666666415,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1})",
+        "us_per_replay": 1.5008999999998949,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
+        "us_per_replay": 1.3076333333333041,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 1, 128, 1, 16>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us_per_replay": 1.2383999999999404,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)",
+        "us_per_replay": 1.0730666666667426,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+        "us_per_replay": 0.9950999999998811,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<int, true> >(at_cuda_detail::cub::ScanTileState<int, true>, int)",
+        "us_per_replay": 0.9482999999999496,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<long, true> >(at_cuda_detail::cub::ScanTileState<long, true>, int)",
+        "us_per_replay": 0.9471666666666886,
+        "calls": 0.9999999999999999
+      }
+    ],
+    "native_samples": [
+      {
+        "value": 0.3911679983139038,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 4,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.39292800426483154,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 4,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.3932639956474304,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 4,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      }
+    ],
+    "configuration": {
+      "d_single": 384,
+      "d_pair": 128,
+      "d_single_token": 768,
+      "d_single_atom": 128,
+      "d_pair_atom": 16,
+      "n_layers": 1,
+      "trimul_direction": "outgoing",
+      "n_augment": 5,
+      "mask_prob": 0.125,
+      "min_seq_len": 64,
+      "max_seq_len": 384,
+      "seq_len_step": 64,
+      "min_d_pair": 64,
+      "max_d_pair": 256,
+      "d_pair_step": 64,
+      "d_pair_values": null,
+      "sweep_axis": "seq_len",
+      "sweep_seq_len": 512,
+      "autotune_shard": "",
+      "config_dir": "",
+      "pin_gate_backend": "",
+      "dropout": 0.0,
+      "compile_jobs": 0,
+      "pin_infer_concat": null,
+      "pin_transition_cuda_b2b": null,
+      "target": "swa_atom_attention",
+      "level": "module",
+      "implementations": [
+        "pytorch",
+        "triton"
+      ],
+      "mode": "inference",
+      "metric": "time",
+      "compile": true,
+      "cudagraph": "manual",
+      "allow_tf32": false,
+      "precision": "bf16-mixed",
+      "layernorm_weight_precision": null,
+      "allow_eager": false,
+      "name_suffix": ""
+    },
+    "tile_cache_unchanged": true,
+    "rope_required": [
+      [
+        "bfloat16",
+        "shape_key=137439087108"
+      ],
+      [
+        "bfloat16",
+        "shape_key=68719610372"
+      ]
+    ],
+    "rope_missing": [],
+    "rope_invalid": {},
+    "median_ms": 0.39292800426483154
+  },
+  "rope_torch": {
+    "label": "rope_torch",
+    "gpu_name": "NVIDIA RTX A6000",
+    "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+    "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+    "lookups": [
+      {
+        "op": "rmsnorm_fwd_triton",
+        "key": "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878038810",
+        "kept": 5
+      },
+      {
+        "op": "gated_projection_gate_flat_triton",
+        "key": "bfloat16|shape_key=8192",
+        "kept": 5
+      }
+    ],
+    "profile": [
+      {
+        "name": "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<32, 128, 128, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<32, 128, 128, 4, cutlass::bfloat16_t> >, false, false, true, false, false, true, false, false>(flash::Flash_fwd_params)",
+        "us_per_replay": 66.26896666666683,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "us_per_replay": 63.07009999999997,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1}>(int, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1})",
+        "us_per_replay": 42.32773333333375,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+        "us_per_replay": 40.1151666666666,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "memcpy128",
+        "us_per_replay": 32.62410000000001,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "triton_poi_fused__to_copy_add_cat_mul_neg_repeat_split_swa_atom_attention_flash_window_unsqueeze_0",
+        "us_per_replay": 25.911566666666523,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "us_per_replay": 24.24953333333336,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "triton_poi_fused_clone_0",
+        "us_per_replay": 21.97986666666706,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+        "us_per_replay": 21.531966666666452,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "rmsnorm_fwd_kernel",
+        "us_per_replay": 17.031600000000044,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+        "us_per_replay": 14.330633333333298,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "_sigmul_fwd",
+        "us_per_replay": 12.59406666666677,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 3.394033333333299,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4>)",
+        "us_per_replay": 3.2426666666667203,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<long, std::plus<long> >::Policy900, long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int, long, false>(long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, int, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 2.5355000000000087,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 2.5045666666667317,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<int, std::plus<int> >::Policy900, int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int, int, false>(int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, int, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 1.9040666666666317,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul> >(int, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul>)",
+        "us_per_replay": 1.4955333333332719,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1})",
+        "us_per_replay": 1.4868999999999304,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
+        "us_per_replay": 1.4709666666665793,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
+        "us_per_replay": 1.3097999999999954,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 1, 128, 1, 16>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us_per_replay": 1.218166666666639,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)",
+        "us_per_replay": 1.0688666666666977,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+        "us_per_replay": 0.9749000000001165,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<long, true> >(at_cuda_detail::cub::ScanTileState<long, true>, int)",
+        "us_per_replay": 0.9514666666667385,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<int, true> >(at_cuda_detail::cub::ScanTileState<int, true>, int)",
+        "us_per_replay": 0.9397999999999914,
+        "calls": 0.9999999999999999
+      }
+    ],
+    "native_samples": [
+      {
+        "value": 0.40038400888442993,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 5,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.4036799967288971,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 5,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.40329599380493164,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 5,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      }
+    ],
+    "configuration": {
+      "d_single": 384,
+      "d_pair": 128,
+      "d_single_token": 768,
+      "d_single_atom": 128,
+      "d_pair_atom": 16,
+      "n_layers": 1,
+      "trimul_direction": "outgoing",
+      "n_augment": 5,
+      "mask_prob": 0.125,
+      "min_seq_len": 64,
+      "max_seq_len": 384,
+      "seq_len_step": 64,
+      "min_d_pair": 64,
+      "max_d_pair": 256,
+      "d_pair_step": 64,
+      "d_pair_values": null,
+      "sweep_axis": "seq_len",
+      "sweep_seq_len": 512,
+      "autotune_shard": "",
+      "config_dir": "",
+      "pin_gate_backend": "",
+      "dropout": 0.0,
+      "compile_jobs": 0,
+      "pin_infer_concat": null,
+      "pin_transition_cuda_b2b": null,
+      "target": "swa_atom_attention",
+      "level": "module",
+      "implementations": [
+        "pytorch",
+        "triton"
+      ],
+      "mode": "inference",
+      "metric": "time",
+      "compile": true,
+      "cudagraph": "manual",
+      "allow_tf32": false,
+      "precision": "bf16-mixed",
+      "layernorm_weight_precision": null,
+      "allow_eager": false,
+      "name_suffix": ""
+    },
+    "tile_cache_unchanged": true,
+    "rope_required": [
+      [
+        "bfloat16",
+        "shape_key=137439087108"
+      ],
+      [
+        "bfloat16",
+        "shape_key=68719610372"
+      ]
+    ],
+    "rope_missing": [],
+    "rope_invalid": {},
+    "median_ms": 0.40329599380493164
+  },
+  "gate_torch": {
+    "label": "gate_torch",
+    "gpu_name": "NVIDIA RTX A6000",
+    "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+    "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+    "lookups": [
+      {
+        "op": "rmsnorm_fwd_triton",
+        "key": "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878038810",
+        "kept": 5
+      },
+      {
+        "op": "rope_fwd_triton",
+        "key": "bfloat16+float32|shape_key=137439087108",
+        "kept": 5
+      }
+    ],
+    "profile": [
+      {
+        "name": "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<32, 128, 128, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<32, 128, 128, 4, cutlass::bfloat16_t> >, false, false, true, false, false, true, false, false>(flash::Flash_fwd_params)",
+        "us_per_replay": 64.49079999999978,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "us_per_replay": 61.89763333333354,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1}>(int, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1})",
+        "us_per_replay": 41.064266666666796,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+        "us_per_replay": 40.11416666666671,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "memcpy128",
+        "us_per_replay": 33.87746666666639,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "rope_3d_kernel",
+        "us_per_replay": 32.20916666666694,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "us_per_replay": 24.038500000000163,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "triton_poi_fused_clone_0",
+        "us_per_replay": 22.037299999999895,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+        "us_per_replay": 21.03233333333371,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "rmsnorm_fwd_kernel",
+        "us_per_replay": 17.272666666666336,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "triton_poi_fused__unsafe_view_mul_sigmoid_view_0",
+        "us_per_replay": 14.58779999999994,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+        "us_per_replay": 14.254900000000038,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 3.4559333333332756,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4>)",
+        "us_per_replay": 3.222333333333467,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<long, std::plus<long> >::Policy900, long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int, long, false>(long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, int, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 2.522566666666633,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 2.5032999999999435,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<int, std::plus<int> >::Policy900, int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int, int, false>(int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, int, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 1.9210666666666922,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul> >(int, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul>)",
+        "us_per_replay": 1.5285333333333557,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
+        "us_per_replay": 1.4880666666667668,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1})",
+        "us_per_replay": 1.4849000000000914,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
+        "us_per_replay": 1.3119333333332786,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 1, 128, 1, 16>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us_per_replay": 1.2341666666666014,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)",
+        "us_per_replay": 1.0687333333331703,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+        "us_per_replay": 0.9900333333332738,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<int, true> >(at_cuda_detail::cub::ScanTileState<int, true>, int)",
+        "us_per_replay": 0.9417666666665586,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<long, true> >(at_cuda_detail::cub::ScanTileState<long, true>, int)",
+        "us_per_replay": 0.9376333333334441,
+        "calls": 0.9999999999999999
+      }
+    ],
+    "native_samples": [
+      {
+        "value": 0.4065279960632324,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 7,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.40904000401496887,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 7,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.4089280068874359,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 7,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      }
+    ],
+    "configuration": {
+      "d_single": 384,
+      "d_pair": 128,
+      "d_single_token": 768,
+      "d_single_atom": 128,
+      "d_pair_atom": 16,
+      "n_layers": 1,
+      "trimul_direction": "outgoing",
+      "n_augment": 5,
+      "mask_prob": 0.125,
+      "min_seq_len": 64,
+      "max_seq_len": 384,
+      "seq_len_step": 64,
+      "min_d_pair": 64,
+      "max_d_pair": 256,
+      "d_pair_step": 64,
+      "d_pair_values": null,
+      "sweep_axis": "seq_len",
+      "sweep_seq_len": 512,
+      "autotune_shard": "",
+      "config_dir": "",
+      "pin_gate_backend": "",
+      "dropout": 0.0,
+      "compile_jobs": 0,
+      "pin_infer_concat": null,
+      "pin_transition_cuda_b2b": null,
+      "target": "swa_atom_attention",
+      "level": "module",
+      "implementations": [
+        "pytorch",
+        "triton"
+      ],
+      "mode": "inference",
+      "metric": "time",
+      "compile": true,
+      "cudagraph": "manual",
+      "allow_tf32": false,
+      "precision": "bf16-mixed",
+      "layernorm_weight_precision": null,
+      "allow_eager": false,
+      "name_suffix": ""
+    },
+    "tile_cache_unchanged": true,
+    "rope_required": [
+      [
+        "bfloat16",
+        "shape_key=137439087108"
+      ],
+      [
+        "bfloat16",
+        "shape_key=68719610372"
+      ]
+    ],
+    "rope_missing": [],
+    "rope_invalid": {},
+    "median_ms": 0.4089280068874359
+  },
+  "rms_rope_torch": {
+    "label": "rms_rope_torch",
+    "gpu_name": "NVIDIA RTX A6000",
+    "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+    "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+    "lookups": [
+      {
+        "op": "gated_projection_gate_flat_triton",
+        "key": "bfloat16|shape_key=8192",
+        "kept": 5
+      }
+    ],
+    "profile": [
+      {
+        "name": "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<32, 128, 128, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<32, 128, 128, 4, cutlass::bfloat16_t> >, false, false, true, false, false, true, false, false>(flash::Flash_fwd_params)",
+        "us_per_replay": 65.3739666666667,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{lambda(bool, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "us_per_replay": 63.577900000000355,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1}>(int, at::native::_cuda_scatter_gather_internal_kernel<true, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1})",
+        "us_per_replay": 41.94456666666651,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+        "us_per_replay": 40.46086666666658,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "memcpy128",
+        "us_per_replay": 32.669866666666465,
+        "calls": 2.999999999999999
+      },
+      {
+        "name": "triton_per_fused__fused_rms_norm__to_copy__unsafe_view_add_cat_mul_neg_permute_repeat_split_swa_atom_attention_flash_window_unbind_unsqueeze_view_0",
+        "us_per_replay": 25.993533333333474,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "us_per_replay": 25.075300000000098,
+        "calls": 2.0000000000000027
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+        "us_per_replay": 21.628833333333034,
+        "calls": 3.9999999999999956
+      },
+      {
+        "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+        "us_per_replay": 14.11623333333332,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "_sigmul_fwd",
+        "us_per_replay": 13.81546666666665,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#3}::operator()() const::{lambda(int)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 3.3974666666666957,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::sum_functor<int, int, int>::operator()(at::TensorIterator&)::{lambda(int, int)#1}>, unsigned int, int, 4, 4>)",
+        "us_per_replay": 3.2299666666666567,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<long, std::plus<long> >::Policy900, long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int, long, false>(long const*, long*, at_cuda_detail::cub::ScanTileState<long, true>, int, std::plus<long>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 2.5471666666667176,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "us_per_replay": 2.51420000000011,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanKernel<at_cuda_detail::cub::DeviceScanPolicy<int, std::plus<int> >::Policy900, int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int, int, false>(int const*, int*, at_cuda_detail::cub::ScanTileState<int, true>, int, std::plus<int>, at_cuda_detail::cub::NullType, unsigned int)",
+        "us_per_replay": 1.949899999999897,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul> >(int, at::native::(anonymous namespace)::where_kernel_impl(at::TensorIterator&)::{lambda()#1}::operator()() const::{lambda()#8}::operator()() const::{lambda(bool, long, long)#1}, std::array<char*, 4ul>)",
+        "us_per_replay": 1.51136666666686,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<long> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<long> const&)::{lambda(int)#1})",
+        "us_per_replay": 1.5061333333332712,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
+        "us_per_replay": 1.5039333333333766,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
+        "us_per_replay": 1.3131666666666961,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 1, 128, 1, 16>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "us_per_replay": 1.2385333333333994,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)",
+        "us_per_replay": 1.079466666666591,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+        "us_per_replay": 0.9952999999999067,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<long, true> >(at_cuda_detail::cub::ScanTileState<long, true>, int)",
+        "us_per_replay": 0.9524999999999185,
+        "calls": 0.9999999999999999
+      },
+      {
+        "name": "void at_cuda_detail::cub::DeviceScanInitKernel<at_cuda_detail::cub::ScanTileState<int, true> >(at_cuda_detail::cub::ScanTileState<int, true>, int)",
+        "us_per_replay": 0.9355000000001384,
+        "calls": 0.9999999999999999
+      }
+    ],
+    "native_samples": [
+      {
+        "value": 0.3635199964046478,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 1,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.36604800820350647,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 1,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      },
+      {
+        "value": 0.366239994764328,
+        "input_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "execution_path": "modules.swa_atom_attention.SWA3DRoPEAttention[fa2]",
+        "reference": "",
+        "output_max_abs": null,
+        "output_rel_frob": null,
+        "output_cosine": null,
+        "grad_max_abs": null,
+        "grad_rel_frob": null,
+        "grad_cosine": null,
+        "compiled": true,
+        "cudagraph": "manual",
+        "compile_scope": "module_forward:partial_allowed",
+        "compiled_graphs": 1,
+        "measurement_scope": "forward",
+        "input_shapes": "{\"ap[0]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[1]\": {\"dtype\": \"float32\", \"shape\": [5, 3072, 16]}, \"ap[2]\": {\"dtype\": \"int32\", \"shape\": [5]}, \"ap[3]\": {\"dtype\": \"int32\", \"shape\": [6]}, \"ap[5]\": {\"dtype\": \"bool\", \"shape\": [5, 3072]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [5, 3072, 128]}}",
+        "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}"
+      }
+    ],
+    "configuration": {
+      "d_single": 384,
+      "d_pair": 128,
+      "d_single_token": 768,
+      "d_single_atom": 128,
+      "d_pair_atom": 16,
+      "n_layers": 1,
+      "trimul_direction": "outgoing",
+      "n_augment": 5,
+      "mask_prob": 0.125,
+      "min_seq_len": 64,
+      "max_seq_len": 384,
+      "seq_len_step": 64,
+      "min_d_pair": 64,
+      "max_d_pair": 256,
+      "d_pair_step": 64,
+      "d_pair_values": null,
+      "sweep_axis": "seq_len",
+      "sweep_seq_len": 512,
+      "autotune_shard": "",
+      "config_dir": "",
+      "pin_gate_backend": "",
+      "dropout": 0.0,
+      "compile_jobs": 0,
+      "pin_infer_concat": null,
+      "pin_transition_cuda_b2b": null,
+      "target": "swa_atom_attention",
+      "level": "module",
+      "implementations": [
+        "pytorch",
+        "triton"
+      ],
+      "mode": "inference",
+      "metric": "time",
+      "compile": true,
+      "cudagraph": "manual",
+      "allow_tf32": false,
+      "precision": "bf16-mixed",
+      "layernorm_weight_precision": null,
+      "allow_eager": false,
+      "name_suffix": ""
+    },
+    "tile_cache_unchanged": true,
+    "rope_required": [
+      [
+        "bfloat16",
+        "shape_key=137439087108"
+      ],
+      [
+        "bfloat16",
+        "shape_key=68719610372"
+      ]
+    ],
+    "rope_missing": [],
+    "rope_invalid": {},
+    "median_ms": 0.36604800820350647
+  }
+}

@@ -36,6 +36,32 @@ def build(verbose=False, extra=()):
 
 ZST = os.environ.get("TRIMUL_ZST", "1") == "1"
 
+# ---- exact-shape selection (the native TriMul's K1 x K3 table, here over this path's knobs): select_a100.py measures the candidates of a
+# shape, keeps the ones whose outputs match the default's, and records the fastest in records/select.json under
+# "<gpu>|<variant>|L<L>|<infer|train>".  A shape without an entry runs the defaults (env / compiled).
+SELECT_PATH = Path(os.environ.get("A100_SELECT", HERE / "records/select.json"))
+_SELECT = None
+CFG = {}                                         # explicit knobs (a tuner's candidate): take precedence over the table
+
+
+def selection_key(bidir, L, mode, dev=None):
+    return f"{torch.cuda.get_device_name(dev)}|{'bidir' if bidir else 'single'}|L{L}|{mode}"
+
+
+def selected(bidir, L, mode, dev=None):
+    """Knobs of this shape: the table's entry (if any) overridden by CFG."""
+    global _SELECT
+    if _SELECT is None:
+        import json
+        _SELECT = json.loads(SELECT_PATH.read_text()) if SELECT_PATH.exists() and os.environ.get("A100_SELECT_OFF") != "1" else {}
+    return {**_SELECT.get(selection_key(bidir, L, mode, dev), {}).get("knobs", {}), **CFG}
+
+
+def selected_extra(bidir, L, mode, dev=None):
+    """Compile flags of the shape's selected build ("" = the default build)."""
+    selected(bidir, L, mode, dev)
+    return _SELECT.get(selection_key(bidir, L, mode, dev), {}).get("extra", "")
+
 
 def num_sms(dev):
     return torch.cuda.get_device_properties(dev).multi_processor_count
@@ -70,9 +96,10 @@ def pack(m):
                 eps_in=float(m.ln_pair.eps), eps_out=float(m.ln_out.eps))
 
 
-def contract(a, b, x, pk, ext=None):
+def contract(a, b, x, pk, ext=None, mode=None):
     ch = pk["ch"]
-    mode = os.environ.get("TRIMUL_CONTRACT", "auto")    # auto: the custom kernel where it measured ahead (bidirectional, L <= 512: one launch)
+    if mode is None:                                   # auto: the custom kernel where it measured ahead (bidirectional, L <= 512: one launch)
+        mode = os.environ.get("TRIMUL_CONTRACT", "auto")
     use = mode == "custom" or (mode == "auto" and pk["bidir"] and a.shape[1] <= 512)
     if ext is not None and use and a.shape[1] % 128 == 0:
         h = ch // 2 if pk["bidir"] else (ch if pk["outgoing"] else 0)      # channels [0, h) outgoing (NT), the rest incoming (TN)
@@ -86,6 +113,21 @@ def contract(a, b, x, pk, ext=None):
         torch.bmm(a, b.transpose(1, 2), out=x)
     else:
         torch.bmm(a.transpose(1, 2), b, out=x)
+
+
+_MASK_CAST = os.environ.get("A100_MASK_CAST") == "1"      # A/B only: the former per-call bool -> uint8 cast kernel
+
+
+def mask_u8(mask, L, dev):
+    """The [L] token mask as the kernels' uint8: a bool mask is reinterpreted in place (no cast kernel), other dtypes compare against 0."""
+    if mask is None:
+        return torch.empty(0, dtype=torch.uint8, device=dev)
+    m = mask.reshape(L)
+    if _MASK_CAST:
+        return m.to(torch.uint8)
+    if m.dtype == torch.bool and m.is_contiguous():
+        return m.view(torch.uint8)
+    return (m != 0).to(torch.uint8)
 
 
 def forward(ext, z, mask, pk, bufs=None):
@@ -104,18 +146,24 @@ def forward(ext, z, mask, pk, bufs=None):
                     x=torch.empty(ch, L, L, device=z.device, dtype=torch.bfloat16),
                     zst=torch.empty(T, 2, device=z.device, dtype=torch.float32))
     ab, x = bufs["ab"], bufs["x"]
-    m = mask.reshape(L).to(torch.uint8) if mask is not None else torch.empty(0, dtype=torch.uint8, device=z.device)
+    m = mask_u8(mask, L, z.device)
     if ZST:                                      # K1 saves the LN_in statistics; K3 skips its z statistics and their exchange
         ext.k1z(zf, m, pk["w1"], pk["g_in"], pk["b_in"], ab, L, pk["eps_in"], bufs["zst"])
     else:
         ext.k1(zf, m, pk["w1"], pk["g_in"], pk["b_in"], ab, L, pk["eps_in"], 0, _NOPROF)
-    contract(ab[:ch].view(ch, L, L), ab[ch:].view(ch, L, L), x, pk, ext)
+    contract(ab[:ch].view(ch, L, L), ab[ch:].view(ch, L, L), x, pk, ext, selected(pk["bidir"], L, "infer", z.device).get("contract"))
     out = torch.empty_like(zf)
     if ZST:
         ext.k3z(x.view(ch, T), zf, pk["wo"], pk["wg"], pk["so"], pk["bo"], pk["sg"], pk["bg"], out, pk["eps_out"], bufs["zst"])
     else:
         ext.k3(x.view(ch, T), zf, pk["wo"], pk["wg"], pk["so"], pk["bo"], pk["sg"], pk["bg"], out, pk["eps_out"], 0, _NOPROF, _NOPROF, L)
     return out.view(1, L, L, C)
+
+
+def forward_auto(z, mask, pk, bufs=None):
+    """forward() with the shape's selected build (its compile flags)."""
+    L = z.shape[1]
+    return forward(build(extra=tuple(selected_extra(pk["bidir"], L, "infer", z.device).split())), z, mask, pk, bufs)
 
 
 def sol_us(L, ch, bw=1.602e12, tc=240e12):

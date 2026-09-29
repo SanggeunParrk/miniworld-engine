@@ -1,0 +1,337 @@
+{
+  "policy": "All eight pre-audit config grids restored exactly at the candidate level. No new tile/warp/stage reduction based on sampled GPU winners. Keep actual dimension tuples, truthful inventory, and existing kernel prune behavior.",
+  "kernels": [
+    {
+      "kernel": "transition_fwd_b2b_triton",
+      "before": 27944,
+      "after": 27944,
+      "retained_ranked_configs": 31,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 80,
+        "NVIDIA RTX A6000 (sm86)": 80
+      },
+      "before_sha256": "3f8481ca360a3070b0a8de832b40a59f0b85b2fdca15de8c8a6843095458d5fd",
+      "after_sha256": "3f8481ca360a3070b0a8de832b40a59f0b85b2fdca15de8c8a6843095458d5fd",
+      "original_grid_csv": "axis,values\nBLOCK_K_D,16 32 64 128 256\nBLOCK_N,16 32 64 128 256\nBLOCK_K_ND,16 32 64 128 256\nBLOCK_M1,16 32 64 128\nGROUP_M,1 4\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5 6 8\n",
+      "withdrawn_heuristic_count": 396,
+      "withdrawn_heuristic_sha256": "b2f26ebb8f754f6ae3cfec2990f1f9ca13de8c8416b2542ddc44b51b1eb3736a"
+    },
+    {
+      "kernel": "cond_transition_bwd_gemm_swiglu_triton",
+      "before": 2880,
+      "after": 2880,
+      "retained_ranked_configs": 114,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 190,
+        "NVIDIA RTX A6000 (sm86)": 140,
+        "NVIDIA RTX A5000 (sm86)": 70
+      },
+      "before_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "after_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 620,
+      "withdrawn_heuristic_sha256": "bd681dd96b0116379ddc73259a5b9061fc8dc57490fc9a64eaa96b7f0ddbc4a3"
+    },
+    {
+      "kernel": "adaln_gemm_gate_triton",
+      "before": 2880,
+      "after": 2880,
+      "retained_ranked_configs": 82,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 190,
+        "NVIDIA RTX A6000 (sm86)": 150,
+        "NVIDIA RTX A5000 (sm86)": 60
+      },
+      "before_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "after_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 589,
+      "withdrawn_heuristic_sha256": "8b9cf38f97bd65465aa4c0fda961d440a3f9ce685cf753f5a6888806ab1ec4b7"
+    },
+    {
+      "kernel": "cond_transition_fwd_b2b_saveact_triton",
+      "before": 2160,
+      "after": 2160,
+      "retained_ranked_configs": 34,
+      "historical_outside_original_grid": 13,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 27,
+        "NVIDIA RTX A6000 (sm86)": 90,
+        "NVIDIA RTX A5000 (sm86)": 40
+      },
+      "before_sha256": "ab37b632d9d7c6bbb8b26f613e6e4376782bb78b4c23e9e61d085fb1bcf549bd",
+      "after_sha256": "ab37b632d9d7c6bbb8b26f613e6e4376782bb78b4c23e9e61d085fb1bcf549bd",
+      "original_grid_csv": "axis,values\nBLOCK_K_D,16 32 64\nBLOCK_K_ND,16 32 64\nBLOCK_M1,32 64 128\nBLOCK_N,32 64 128 256\nGROUP_M,1 4\nnum_warps,2 4\nnum_stages,1 2 3 4 5\n",
+      "withdrawn_heuristic_count": 454,
+      "withdrawn_heuristic_sha256": "cf9588163d6833928900ab09fe8798f16f6e13f18355dce71ee4863818330ce2"
+    },
+    {
+      "kernel": "adaln_fwd_gate_triton",
+      "before": 2160,
+      "after": 2160,
+      "retained_ranked_configs": 61,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 190,
+        "NVIDIA RTX A6000 (sm86)": 150,
+        "NVIDIA RTX A5000 (sm86)": 90
+      },
+      "before_sha256": "82cae2f65df0e76689648ce2a19769f4b49d1e788cfec4295be1fb1dc495b651",
+      "after_sha256": "82cae2f65df0e76689648ce2a19769f4b49d1e788cfec4295be1fb1dc495b651",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 391,
+      "withdrawn_heuristic_sha256": "29fa821f3ea3c8ddadb47db641b6359ba8bdcd801219c58c9b42b8109c7399e9"
+    },
+    {
+      "kernel": "rmsnorm_adamod_bwd_triton",
+      "before": 1980,
+      "after": 1980,
+      "retained_ranked_configs": 82,
+      "historical_outside_original_grid": 0,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 280,
+        "NVIDIA RTX A6000 (sm86)": 302,
+        "NVIDIA RTX A5000 (sm86)": 284
+      },
+      "before_sha256": "b9f746a29432f1e9da86371d40095d256a0ce76275e0dc1e787c098cd40fa780",
+      "after_sha256": "b9f746a29432f1e9da86371d40095d256a0ce76275e0dc1e787c098cd40fa780",
+      "original_grid_csv": "axis,values\nBLOCK_N,16 32 64 128 256\nBLOCK_K,16 32 64 128 256\nBLOCK_M1,16 32 64 128\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5\n",
+      "withdrawn_heuristic_count": 357,
+      "withdrawn_heuristic_sha256": "cb785458ca373d3dd9dc2fbfe1fe0c4ed1eb2790def6725f0fd7caddb85896e7"
+    },
+    {
+      "kernel": "rmsnorm_adamod_fwd_triton",
+      "before": 1584,
+      "after": 1584,
+      "retained_ranked_configs": 65,
+      "historical_outside_original_grid": 32,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 283,
+        "NVIDIA RTX A6000 (sm86)": 299,
+        "NVIDIA RTX A5000 (sm86)": 290
+      },
+      "before_sha256": "5dede67f97020a187429b84eb281fb503a3ac7db2a385d5a5dc170d0b790229e",
+      "after_sha256": "5dede67f97020a187429b84eb281fb503a3ac7db2a385d5a5dc170d0b790229e",
+      "original_grid_csv": "axis,values\nBLOCK_N,16 32 64 128 256\nBLOCK_K,16 32 64 128 256\nBLOCK_M1,16 32 64 128\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4\n",
+      "withdrawn_heuristic_count": 334,
+      "withdrawn_heuristic_sha256": "907ec5fd8c7e8359a3afe57e5d55bb1962fb5e16b808b4364196003625be0ae1"
+    },
+    {
+      "kernel": "layernorm_linear_fwd_triton",
+      "before": 1440,
+      "after": 1440,
+      "retained_ranked_configs": 124,
+      "historical_outside_original_grid": 6,
+      "cards": {
+        "NVIDIA A100 80GB PCIe (sm80)": 274,
+        "NVIDIA RTX A6000 (sm86)": 210,
+        "NVIDIA RTX A5000 (sm86)": 60
+      },
+      "before_sha256": "feec6b304ca90f17a73225928182930de3c82bdbcc322cc533facdfce2fa8d90",
+      "after_sha256": "feec6b304ca90f17a73225928182930de3c82bdbcc322cc533facdfce2fa8d90",
+      "original_grid_csv": "axis,values\nBLOCK_K,16 32 64 128 256 512\nBLOCK_M1,32 64 128\nBLOCK_N,32 64 128 256\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5\n",
+      "withdrawn_heuristic_count": 299,
+      "withdrawn_heuristic_sha256": "69f57a6f67f993a6c31fd3568fadfc4f5759a13bfffe1b9e39b83a79c9cf3f38"
+    }
+  ],
+  "a6000_membership_audit": {
+    "scope": "Historical membership check of the withdrawn narrowing; all those configs also remain in the restored original grids. This checks membership only, not current runtime validity or cross-GPU optimality.",
+    "kernels": [
+      {
+        "op": "transition_fwd_b2b_triton",
+        "configs": 396,
+        "groups": {
+          "entries": {
+            "buckets": 16,
+            "top1_kept": 16,
+            "topk_total": 80,
+            "topk_kept": 80,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "cond_transition_bwd_gemm_swiglu_triton",
+        "configs": 620,
+        "groups": {
+          "entries": {
+            "buckets": 28,
+            "top1_kept": 28,
+            "topk_total": 140,
+            "topk_kept": 140,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "adaln_gemm_gate_triton",
+        "configs": 589,
+        "groups": {
+          "entries": {
+            "buckets": 30,
+            "top1_kept": 30,
+            "topk_total": 150,
+            "topk_kept": 150,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "cond_transition_fwd_b2b_saveact_triton",
+        "configs": 454,
+        "groups": {
+          "entries": {
+            "buckets": 18,
+            "top1_kept": 18,
+            "topk_total": 90,
+            "topk_kept": 90,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "adaln_fwd_gate_triton",
+        "configs": 391,
+        "groups": {
+          "entries": {
+            "buckets": 30,
+            "top1_kept": 30,
+            "topk_total": 150,
+            "topk_kept": 150,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 6,
+            "top1_kept": 6,
+            "topk_total": 30,
+            "topk_kept": 30,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "rmsnorm_adamod_bwd_triton",
+        "configs": 357,
+        "groups": {
+          "entries": {
+            "buckets": 54,
+            "top1_kept": 54,
+            "topk_total": 302,
+            "topk_kept": 302,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 62,
+            "top1_kept": 62,
+            "topk_total": 310,
+            "topk_kept": 310,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "rmsnorm_adamod_fwd_triton",
+        "configs": 334,
+        "groups": {
+          "entries": {
+            "buckets": 54,
+            "top1_kept": 54,
+            "topk_total": 299,
+            "topk_kept": 299,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 62,
+            "top1_kept": 62,
+            "topk_total": 306,
+            "topk_kept": 306,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "layernorm_linear_fwd_triton",
+        "configs": 299,
+        "groups": {
+          "entries": {
+            "buckets": 44,
+            "top1_kept": 44,
+            "topk_total": 210,
+            "topk_kept": 210,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      },
+      {
+        "op": "layernorm_bwd_atomic_triton",
+        "configs": 1440,
+        "groups": {
+          "entries": {
+            "buckets": 80,
+            "top1_kept": 80,
+            "topk_total": 400,
+            "topk_kept": 400,
+            "removed_by_this_change": 0
+          },
+          "measurements": {
+            "buckets": 0,
+            "top1_kept": 0,
+            "topk_total": 0,
+            "topk_kept": 0,
+            "removed_by_this_change": 0
+          }
+        },
+        "missing": []
+      }
+    ]
+  },
+  "validation": {
+    "status": "pending rollback regression tests"
+  }
+}

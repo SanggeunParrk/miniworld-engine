@@ -1,0 +1,444 @@
+[project]
+name = "miniworld-engine"
+version = "1.0.0"
+requires-python = ">=3.10"
+description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  # Lean runtime core. This is the PUBLIC CONTRACT surface a parent (team-gm)
+  # inherits when it consumes miniworld-engine as a submodule / dependency:
+  # only what `miniworld_engine.kernels.*` needs to import and run its Triton
+  # entry points. Bench harness, comparison baselines, and the CuTeDSL backend
+  # are optional extras below so the parent never drags them in.
+  "torch>=2.8",
+  # From code, not from a test: `autotune/cache.py` prefers
+  # `triton.backends.nvidia.compiler.get_ptxas_version`, which exists from 3.3, and falls
+  # back below it. Nothing has been RUN on anything older than the triton in docs/supported.md.
+  # einops / jaxtyping / numpy stay unbounded on purpose -- see that page: a guessed floor
+  # reads like evidence, and there is none for them.
+  "triton>=3.3",
+  "einops",
+  "jaxtyping",
+  "numpy",
+  "scipy",  # module parameter initialization uses scipy.stats.truncnorm
+]
+
+[project.optional-dependencies]
+# CuTeDSL / quack backends (the .cute kernel paths). cutlass ships as the
+# `nvidia-cutlass-dsl` wheel — no git submodule needed (see CONTRIBUTING.md).
+# Pinned to the quack 0.5.0 / cutlass-dsl 4.5.2 set so the cute kernels coexist with
+# FlashAttention-4 (which requires quack-kernels>=0.5.0). The cute launch path was
+# migrated to cutlass-dsl 4.5.2's TVM-FFI convention; the quack-import shim
+# (kernels/_quack_compat.py) additionally keeps quack 0.3.11 importable, but the
+# supported/tested runtime is this set. Do NOT bump quack to 0.6.x: it drags torch
+# 2.10 -> 2.13 and breaks the cu130 stack.
+cute = ["nvidia-cutlass-dsl==4.5.2", "quack-kernels==0.5.0"]
+# Comparison baselines only (CUEQUIVARIANCE impl path + reference helpers).
+# NOT required to use the miniworld kernels.
+baselines = ["cuequivariance-torch>=0.9,<0.10"]
+# Benchmark harness (benchmarks/runners/bench.py, team-gm hydra style) + plots.
+bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
+# Dev: tests, lint, static typing. `ty`, not pyright -- pyright cannot parse jaxtyping shape
+# strings (`Float[Tensor, "N S 3"]`) and reported 144 parse errors and no real findings, so
+# `[tool.pyright]` now turns it off outright and `pixi run types` / CI run ty.
+dev = ["pytest", "ruff", "ty"]
+# FlashAttention-4 (Blackwell/sm_100) — EXTERNAL CuTeDSL JIT wheel, used only as a
+# benchmark comparison backend (miniworld-engine ships no flash kernel of its own).
+# Opt-in so it never enters the default/parent solve; it is a prerelease wheel, so
+# install with: uv pip install --prerelease=allow "flash-attn-4[cu13]"
+flash = ["flash-attn-4"]
+# FlashAttention-2, for sm_80/sm_86/sm_89 (A100, L40S, 4090). FA4 is sm_90+ only, so on an
+# Ampere card the `flash` extra above installs something that cannot run and
+# `swa_atom_attention` falls back to a dense band mask -- which wants a 24 GiB [N, S, S]
+# tensor at A=48, S=8192 and simply OOMs. This extra is what makes that block work there.
+# No prebuilt wheel matches every torch/CUDA pair, so it compiles on install (~40 min):
+#   pip install --no-build-isolation "miniworld-engine[flash2]"
+# The two are mutually exclusive in practice but not in the metadata: the module picks
+# whichever the CARD can use (see modules/swa_atom_attention/module.py::_flash_backend),
+# so installing both is harmless.
+flash2 = ["flash-attn>=2.8,<3"]
+
+[build-system]
+requires = ["setuptools>=77"]  # >=77 for PEP 639 (SPDX `license` string + `license-files`)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+# `notes` has no __init__.py, but the recursive `**/*` package-data globs below reach into any
+# directory of a package that IS found -- so a kernel family's optimization log shipped in the
+# wheel (20 files) until this excluded it. The log is a record of how a kernel got here; a
+# consumer installs the kernel, not its history.
+exclude = ["*.notes", "*.notes.*", "*.autotune.plans", "*.autotune.plans.*"]
+
+[tool.setuptools.package-data]
+# Ship the non-.py assets the RUNTIME needs in a non-editable (pip / wheel) install. Editable
+# installs read straight from src/ so they don't need this, but a wheel would otherwise contain
+# only .py and silently drop:
+#   - autotune/data/**/*.json  -> the shipped per-GPU autotune caches (else every op re-tunes
+#                                 live on first call in the consumer)
+#   - **/*.cu / *.cuh / *.cpp / *.h -> CUDA / CUTLASS kernel sources JIT-compiled at runtime by
+#                                 the hand-CUDA backends (transition b2b, adaln, gate-bwd wgmma);
+#                                 without them those backends fail to build in a pip install.
+#   - build/*.csv              -> the per-GPU kernel-cache build matrix, read by the cache builder
+#                                 (miniworld_engine.build.matrix) to decide which units a card may
+#                                 build; without it the builder raises on a missing matrix.
+#   - autotune/configs/grid/*.csv -> the DEFAULT autotune search space. Without it a wheel has no
+#                                 config set at all and every triton kernel dies at its first
+#                                 launch with `dynamic_func() missing N positional arguments`;
+#                                 see autotune/configs/README.md.
+#   - py.typed                 -> the PEP 561 marker. Without it a consumer's type checker
+#                                 sees `Any` for every symbol in this package, so the `ty`
+#                                 gate protects only this repo. The file must be BOTH
+#                                 present and listed here; either alone ships nothing.
+miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h",
+                    "**/*.csv"]
+# ...but not the optimization logs. `exclude` above drops `notes` as a package; these
+# `exclude-package-data` entries drop the assets the globs above would otherwise sweep in
+# from a parent package's tree. tests/layout/test_notes_stay_out_of_the_wheel.py checks the result.
+
+[tool.setuptools.exclude-package-data]
+miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebuilt in user cache
+                    "kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
+                    # The A/B config sets. `grid` is the default and ships; accuracy/blk*/
+                    # warp*/mixed* exist to compare tilings during a sweep and a consumer
+                    # never selects one, so 819 CSVs stay out of the wheel.
+                    "autotune/configs/accuracy/*", "autotune/configs/blk*/*",
+                    "autotune/configs/warp*/*", "autotune/configs/mixed*/*"]
+
+# ----------------------------------------------------------------------------
+# ruff — practical repo policy.
+#
+# This repo keeps faithful ports, benchmark probes, and module wrappers side by
+# side. `select = ["ALL"]` turns docstring, annotation, naming, print, and
+# complexity rules into noise for that shape of code. Keep ruff focused on rules
+# that catch real breakage across src/tests/benchmarks.
+# ----------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+# Every test in tests/ is CPU-only today and the whole suite runs in ~76 s, so CI runs all of
+# it. A test that genuinely needs a device must be marked `gpu` -- `pixi run test` excludes
+# that marker, `pixi run test-gpu` selects it. Registering the marker here is what makes an
+# unmarked typo an error instead of a silently-skipped test.
+testpaths = ["tests"]
+markers = [
+  "gpu: needs a CUDA device (excluded from the CPU suite CI runs)",
+]
+# An unregistered marker is a typo that silently disables a test; refuse it.
+addopts = "--strict-markers"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+# src layout: without this, ruff resolves first-party imports against the repo root, so its
+# relative-import fix rewrote `from .module import X` to `from src.miniworld_engine...` -- a
+# package path that only exists when the repo root is on sys.path, which it never is.
+src = ["src"]
+exclude = [
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
+  # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
+  # them; excluding only artifacts meant a working tree with local profiler captures reported
+  # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
+  # A kernel's optimization log: the write-up per round and the scratch .py a version was
+  # measured with. Records, not maintained code -- they are not imported, not run, and not
+  # shipped (no __init__.py, enforced by tests/layout/test_kernel_layout.py). Excluded for what they
+  # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
+  "src/miniworld_engine/kernels/*/notes",
+  "benchmarks/**/artifacts",
+  "benchmarks/**/profiles",
+  "benchmarks/**/plots",
+]
+
+[tool.ruff.lint]
+# The rule set is a decision, and it is written down here because the source already argued with
+# the old one: `select = ["E", "F", "W"]` while the code carried ~700 `# noqa:` comments naming
+# PLC0415, BLE001, ANN001, SLF001, S603, ARG005 and two dozen more. None of those rules were on,
+# so none of those comments suppressed anything, and nothing could tell you that. Either the rules
+# are on or the comments go: 264 of them were converted back to plain comments (their REASONS are
+# the part worth keeping -- ruff's own RUF100 fix deletes the whole comment), and the rest now
+# name a rule this set selects. What remains under `= ["ALL"]` below is upstream's, left alone.
+#
+# What is ON: correctness and modernity (F, E, W, B, UP, FURB, PIE, RET, SIM, C4, PERF), one
+# import style (I, TID, ICN, FA), one string style (Q, ISC), the pytest and logging idioms
+# (PT, LOG, G), and RUF -- including RUF100, so a `# noqa` for a rule this set does not select is
+# itself an error rather than decoration.
+select = [
+  "E", "F", "W",        # pycodestyle + pyflakes
+  "I",                  # import sorting
+  "UP",                 # pyupgrade
+  "B",                  # bugbear
+  "C4", "PIE", "RET", "SIM", "PERF", "FURB",   # comprehensions / simplification / speed
+  "TID", "ICN", "FA",   # absolute imports, conventional aliases, `from __future__`
+  "Q", "ISC",           # quote + implicit-concat style
+  "PT",                 # pytest idioms
+  "LOG", "G",           # logging
+  "SLOT", "INT", "FLY", "NPY", "DTZ", "EXE", "YTT", "ASYNC",
+  "RUF",
+]
+# What is OFF, and why -- each of these was measured against this codebase, not assumed:
+#   ANN   1,500+ findings. The kernel and bench code is deliberately unannotated at the boundary
+#         where triton hands back `Unknown`; `ty` is this repo's type gate and it gates.
+#   D     docstrings here are prose that explains a decision, not numpydoc sections. D205/D401
+#         would rewrite 200 of them into worse English.
+#   N     709 findings, nearly all math notation: `WL`, `Wp`, `D`, `L`, `Q`, `K`, `V`, `M`. The
+#         papers and the kernels use these names; renaming them makes the code harder to check
+#         against the algorithm.
+#   S     347 of them are `assert` in tests, which is what pytest is. The subprocess rules
+#         (S603/S607) fire on the build's own GPU-worker fan-out, which is the point of it.
+#   PL    512 PLC0415 alone: lazy imports here are load-bearing (importing a kernel module has
+#         side effects on autotuner registration and costs minutes of triton compilation), so the
+#         rule is wrong for this codebase rather than unmet by it. PLR's arity and magic-value
+#         thresholds are taste.
+#   SLF   the autotune harness reaches into triton's private autotuner state on purpose; that is
+#         what capturing a config grid is.
+#   ARG   unused arguments are the bench harness's uniform signature
+#         `(conf, seq_len, implementation, fabric)`, which every target must accept.
+#   T20   367 `print`s: this is a CLI and a benchmark runner. Printing is the output.
+#   INP   `tests/` and `benchmarks/` are script trees, deliberately not packages.
+#   TC    moving imports into `if TYPE_CHECKING` breaks jaxtyping, which resolves its annotations
+#         at runtime through `@typecheck`.
+ignore = [
+  "E501",    # line length: the formatter's 88 is a target, not a hard wrap for tables and prose
+  "E701",
+  "E702",
+  "E402",    # module-level import position: the bench/tool scripts bootstrap sys.path first
+  "E731",    # lambda assignment: the kernel benches are full of one-line kernel adapters
+  "E741",    # `l`, `L`, `I` are dimensions here
+  "F722",    # Incompatible with jaxtyping
+  "COM812",  # Conflicts with ruff formatter
+  # Korean is a first-class language in docs/ and in the comments that cite them; every one of
+  # these is a full-width character in prose, not a homoglyph smuggled into an identifier.
+  "RUF002",
+  "RUF003",
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+# One import style, absolute, everywhere. The default ("parents") would leave `from .sibling
+# import x` alone, and that is the form that broke today: `modules/attention_pair_bias.py` read
+# `from .ops import sigmoid_gate`, and the moment the flat module became `attention_pair_bias/
+# module.py` the same line resolved somewhere else. An absolute import means the same thing from
+# any file, which is what makes a move mechanical.
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+# The multiplication sign is the page's own column label ("units x grid" reads worse and the
+# test has to match the rendered string byte for byte), so RUF001 is off for the generator and the
+# test that checks its output.
+"src/miniworld_engine/viz/sweep_page.py" = ["RUF001"]
+"tests/layout/test_the_sweep_page_matches_the_repo.py" = ["RUF001"]
+# `PT` is flake8-pytest-style: it is about how tests are written, and it has no business in
+# library code. Selected globally it fires PT018 on ordinary `assert a and b` in `src/` and
+# `benchmarks/`, which is a pytest-report-readability rule applied where there is no report.
+"src/**/*.py" = ["PT"]
+"benchmarks/**/*.py" = [
+  "E402",   # the bench/tool scripts bootstrap sys.path before importing the package
+  "PT",
+]
+"src/miniworld_engine/tools/**/*.py" = ["PT"]
+# team-gm's kernel relaxation (math-notation names, no annotations) for the
+# connecting/reference code that lives under kernels/ (interface.py, reference.py).
+"src/miniworld_engine/kernels/**/*.py" = []
+# Vendored kernel *bodies* are faithful copies (triton main/perf/miniworld,
+# CuTeDSL, CUDA) from team-gm branches + FlashAttentionBias — not linted, exactly
+# as the originals are not held to this repo's standards.
+"src/miniworld_engine/kernels/**/triton/*.py" = ["ALL"]
+"src/miniworld_engine/kernels/**/cute/*.py" = ["ALL"]
+"src/miniworld_engine/kernels/**/cuda/*.py" = ["ALL"]
+# dtv1 is the vendored perf/trimul fused kernel kept as a baseline.
+"src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
+"src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1_bidir.py" = [
+  "ALL",
+]
+"src/miniworld_engine/_typecheck.py" = []
+
+[tool.ruff.format]
+docstring-code-format = false
+
+# ----------------------------------------------------------------------------
+# ty is the static typing gate: `pixi run types`, and a CI step with no `|| true`.
+# It runs clean, so a new finding fails the build.
+#
+# `[tool.pyright]` below is not a second gate. It exists only to keep an editor's
+# bundled Pylance quiet, because pyright cannot parse jaxtyping shape strings.
+# ----------------------------------------------------------------------------
+
+[tool.pyright]
+include = ["src", "tests", "benchmarks"]
+exclude = [
+  ".pixi",
+  "**/.pixi",
+  "**/__pycache__",
+  "cute-env",
+  "**/cute/**",
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
+  # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
+  # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
+  # A kernel's optimization log: the write-up per round and the scratch .py a version was
+  # measured with. Records, not maintained code -- they are not imported, not run, and not
+  # shipped (no __init__.py, enforced by tests/layout/test_kernel_layout.py). Excluded for what they
+  # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
+  "src/miniworld_engine/kernels/*/notes",
+  "benchmarks/**/artifacts",
+  "benchmarks/**/profiles",
+  "benchmarks/**/plots",
+]
+pythonVersion = "3.10"
+# ty is the static-typing gate (see `[tool.ty]` below and the `types` task). This block
+# exists only to keep an editor's bundled pyright/Pylance quiet: it cannot parse jaxtyping
+# string shapes (`Float[Tensor, "N S 3"]`), so every annotated signature became a parse
+# error. Off means off -- no individual rule is re-enabled here, or the suppression
+# comments in the source would have to name two checkers.
+typeCheckingMode = "off"
+
+[tool.ty.src]
+include = ["src", "tests", "benchmarks"]
+exclude = [
+  ".pixi",
+  "**/.pixi",
+  "**/__pycache__",
+  "cute-env",
+  "**/cute/**",
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
+  # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
+  # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
+  # A kernel's optimization log: the write-up per round and the scratch .py a version was
+  # measured with. Records, not maintained code -- they are not imported, not run, and not
+  # shipped (no __init__.py, enforced by tests/layout/test_kernel_layout.py). Excluded for what they
+  # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
+  "src/miniworld_engine/kernels/*/notes",
+  "benchmarks/**/artifacts",
+  "benchmarks/**/profiles",
+  "benchmarks/**/plots",
+  # Vendored kernel bodies -- the same set ruff excludes with `= ["ALL"]`: faithful copies from
+  # team-gm branches and FlashAttentionBias, "not linted, exactly as the originals are not held
+  # to this repo's standards". Holding them to a type checker but not a linter was an
+  # inconsistency, not a decision.
+  "src/miniworld_engine/kernels/**/triton/**",
+  "src/miniworld_engine/kernels/**/cute/**",
+  "src/miniworld_engine/kernels/**/cuda/**",
+]
+
+[tool.ty.rules]
+# torch's stubs type `autograd.Function.backward` as variadic (`*grad_outputs: Any`) and
+# `nn.Module.forward` as `Callable[..., Any]`. Every concrete override in this repo is therefore
+# an "invalid override" -- 16 of them, all correctly written, 15 with @staticmethod exactly as
+# torch requires. The rule cannot distinguish a real signature break from the torch idiom here,
+# so it reports only noise; left on, it is 16 findings standing between this check and gating.
+# Revisit if torch ships tighter stubs.
+invalid-method-override = "ignore"
+
+[tool.ty.environment]
+python-version = "3.10"
+# Import roots a `sys.path.insert` creates at call time, which no checker can follow.
+#
+# `benchmarks/runners` holds `bench_policy`, imported by tests/layout/test_bench_precision_policy
+# after inserting the directory on `sys.path` -- runners are scripts a bench invokes by path, not
+# a package, so there is nothing to import them AS. Naming the directory here resolves those
+# imports for real instead of suppressing them; it stays out of `[tool.ty.src].include`, so its
+# own contents are not checked.
+#
+# This line and half its comment were lost when `tools/kernel-audit` (the original entry) moved
+# into `src/miniworld_engine/build`, leaving a sentence that stops mid-clause and one unresolved
+# import that made `ty check` non-empty -- which is what a gate documented as "runs clean, so a
+# new finding fails the build" cannot afford: a standing finding hides the next real one.
+extra-paths = ["benchmarks/runners", "tests", "tests/layout"]
+
+# ----------------------------------------------------------------------------
+# pixi — single unified environment for the whole repo (triton + Transformer
+# Engine cu12 + CuTeDSL/quack + cuequivariance + benching). Replaces the old
+# per-backend cute-env/ and te-env/ folders. The materialized `.pixi/` is
+# gitignored. See docs/benchmarks.md and docs/kernels/.
+#
+# Cluster notes (CSSB H100, driver 575 = CUDA 12.9-max):
+#   - MUST be cu12, never cu13 (transformer_engine_cu12 + core-cu12 extra).
+#   - Build needs no GPU (srun without --gres); compute nodes are offline so
+#     resolve/download runs on the login node wrapped in `timeout`.
+#   - Runtime needs this env's libstdc++: export LD_LIBRARY_PATH=$CONDA_PREFIX/lib
+# ----------------------------------------------------------------------------
+[tool.pixi.workspace]
+channels = ["conda-forge", "nvidia"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+pip = "*"
+# CUDA toolchain to compile transformer_engine_torch from source (cu12.8).
+cuda-toolkit = "12.8.*"
+cudnn = "*"
+nccl = "*"
+cuda-nvtx-dev = "12.8.*"
+ninja = "*"
+cmake = "*"
+setuptools = "*"
+wheel = "*"
+pybind11 = "*"
+
+[tool.pixi.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu128"]
+no-build-isolation = ["transformer-engine-torch"]
+
+# The dev environment installs the package WITH ALL EXTRAS so the full bench +
+# baseline + cute + dev stack is present here, even though the published
+# `[project.dependencies]` core stays lean for downstream consumers (team-gm).
+# `[project.dependencies]` (torch, triton, einops, jaxtyping, numpy) plus every
+# extra (cute/baselines/bench/dev) are pulled via the editable install below.
+[tool.pixi.pypi-dependencies]
+miniworld-engine = { path = ".", editable = true, extras = ["cute", "baselines", "bench", "dev"] }
+# Transformer Engine (cu12) is dev-only and needs the special no-build-isolation
+# handling above, so it stays an explicit pixi dep rather than a package extra.
+transformer-engine = { version = "*", extras = ["pytorch", "core-cu12"] }
+transformer-engine-cu12 = "*"
+# cu12 ops backend for the cuequivariance baseline (pairs with the [baselines] extra).
+cuequivariance-ops-torch-cu12 = "*"
+
+[tool.pixi.activation.env]
+PYTHONNOUSERSITE = "1"
+CUDA_HOME = "$CONDA_PREFIX"
+
+# transformer-engine-torch's sdist metadata wrongly declares a dep on the cu13
+# core (the real build uses cu12), so the lock pins BOTH cu12 and cu13 and the
+# cu13 lib overwrites cu12 in transformer_engine/wheel_lib/. The cluster's 575
+# driver can't run cu13. `fix-te-cu12` reinstalls the cu12 core last so it wins.
+# RUN IT AFTER EVERY `pixi install`.
+[tool.pixi.tasks]
+fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==2.16.0"
+# FlashAttention, picked from the CARD rather than from the reader: FA4 is sm90+, FA2 is
+# sm80+, and the wrong one installs fine and then never loads. Needs a visible GPU (or
+# `--arch sm80`), and FA2 compiles from source, so it is a task and not a dependency.
+flash = "miniworld-engine dev install-flash"
+smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
+smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
+smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
+ruff-check = "ruff check src tests benchmarks"
+ruff-format = "ruff format src tests benchmarks"
+# benchmarks too: `[tool.ty.src].include` has always listed it, but the command checked
+# src+tests only, so 53 findings in the bench harness were invisible -- among them a
+# `BenchResult(status=...)` that raised TypeError on the path it was guarding.
+types = "ty check src tests benchmarks"
+
+# The whole suite is CPU-only and runs in ~76 s; naming a subset here is what let 13 of
+# 16 test files run nowhere automatic.
+#
+# `python -m pytest`, not the `pytest` launcher: the launcher is a script with an absolute
+# shebang baked in at install time, so renaming the checkout (miniworld-kernels ->
+# miniworld-engine) left it pointing at a python that no longer exists and every
+# `pixi run test` died with "No such file or directory". `python -m` resolves at run time.
+test = "python -m pytest tests/ -m 'not gpu' -q"
+test-gpu = "python -m pytest tests/ -m gpu -q"
+# Mirrors the CI job, in its order: lint, then the type gate, then the suite.
+ci = "ruff check src tests benchmarks && ty check src tests benchmarks && python -m pytest tests/ -m 'not gpu' -q"
+
+[project.scripts]
+miniworld-engine = "miniworld_engine.cli:main"
