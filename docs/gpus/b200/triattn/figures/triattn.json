@@ -1,0 +1,465 @@
+{
+ "figures": {
+  "inference": {
+   "title": "B200 · TriangleAttention (starting node) · inference · D128, 4 heads × 32, bf16, every L = 128k",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "parameter pack",
+       "impl": "CUDA · tri_pack_params",
+       "code": [
+        "w_4 = torch.cat((W_q, W_k, W_v, W_g)).bfloat16()",
+        "w_o = W_o.bfloat16()",
+        "prm = torch.cat((γ, β, W_b)).float()"
+       ],
+       "reads": [
+        "W_q, W_k, W_v, W_g, W_o",
+        "γ, β, W_b"
+       ],
+       "writes": [
+        "w_4, w_o, prm"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "LN + q|k|v|g + bias",
+       "impl": "CUDA · tri_front",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "q, k, v, g = (x_n @ W.T for W in w_4)",
+        "b = (x_n @ W_b.T).permute(0, 3, 1, 2)",
+        "b = b.masked_fill(~mask[:, None, None], -inf)"
+       ],
+       "reads": [
+        "x",
+        "w_4, prm",
+        "mask"
+       ],
+       "writes": [
+        "q, k, v, g",
+        "b"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "attention",
+       "impl": "CUDA · triattn_fwd",
+       "code": [
+        "s = q[h] @ k[h].T / sqrt(32) + b[h]",
+        "o[h] = torch.softmax(s, -1) @ v[h]",
+        "# per pair row i, head h"
+       ],
+       "reads": [
+        "q, k, v",
+        "b"
+       ],
+       "writes": [
+        "o"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "gate + out proj + residual",
+       "impl": "CUDA · tri_tail",
+       "code": [
+        "u = torch.sigmoid(g) * o",
+        "y = x + (u @ W_o.T)"
+       ],
+       "reads": [
+        "g, o",
+        "x",
+        "w_o"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768)",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "q, k, v, g, o",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "b",
+       "shape": "[4,L,L] bf16",
+       "size": "4.7 MB"
+      },
+      {
+       "name": "mask, W_*, w_4, w_o, prm",
+       "shape": "bf16 / fp32",
+       "size": "< 1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training": {
+   "title": "B200 · TriangleAttention (starting node) · training · D128, 4 heads × 32, bf16, broadcast dropout, every L = 128k",
+   "panels": [
+    {
+     "label": "forward (saves x, q, k, v, g, b, o, lse, w_4, w_o, prm, ds)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "parameter pack",
+       "impl": "CUDA · tri_pack_params",
+       "code": [
+        "w_4 = torch.cat((W_q, W_k, W_v, W_g)).bfloat16()",
+        "w_o = W_o.bfloat16()",
+        "prm = torch.cat((γ, β, W_b)).float()"
+       ],
+       "reads": [
+        "W_q, W_k, W_v, W_g, W_o",
+        "γ, β, W_b"
+       ],
+       "writes": [
+        "w_4, w_o, prm"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "LN + q|k|v|g + bias",
+       "impl": "CUDA · tri_front",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "q, k, v, g = (x_n @ W.T for W in w_4)",
+        "b = (x_n @ W_b.T).permute(0, 3, 1, 2)",
+        "b = b.masked_fill(~mask[:, None, None], -inf)"
+       ],
+       "reads": [
+        "x",
+        "w_4, prm",
+        "mask"
+       ],
+       "writes": [
+        "q, k, v, g",
+        "b"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "attention + LSE",
+       "impl": "CUDA · triattn_fwd",
+       "code": [
+        "s = q[h] @ k[h].T / sqrt(32) + b[h]",
+        "lse[h] = torch.logsumexp(s, -1)",
+        "o[h] = torch.exp(s - lse[h]) @ v[h]"
+       ],
+       "reads": [
+        "q, k, v",
+        "b"
+       ],
+       "writes": [
+        "o",
+        "lse"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "gate + out proj + dropout + residual",
+       "impl": "CUDA · tri_tail",
+       "code": [
+        "u = torch.sigmoid(g) * o",
+        "y = x + ds * (u @ W_o.T)",
+        "# ds: [B,1,L,D] broadcast dropout scale"
+       ],
+       "reads": [
+        "g, o",
+        "x",
+        "w_o, ds"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768)",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "q, k, v, g, o  (saved)",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "b  (saved)",
+       "shape": "[4,L,L] bf16",
+       "size": "4.7 MB"
+      },
+      {
+       "name": "lse  (saved)",
+       "shape": "[L,4,L] fp32",
+       "size": "9.4 MB"
+      },
+      {
+       "name": "mask, ds, W_*, w_4, w_o, prm",
+       "shape": "bf16 / fp32",
+       "size": "< 1 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "gate backward",
+       "impl": "CUDA · tri_gate_bwd",
+       "code": [
+        "du = (ds * dy) @ W_o",
+        "s_g = torch.sigmoid(g)",
+        "do, dg = du * s_g, du * o * s_g * (1 - s_g)",
+        "Δ = (do * o).sum per head; dW_o = (ds*dy).T @ (s_g*o)",
+        "dx = dy   # residual seed"
+       ],
+       "reads": [
+        "dy",
+        "g, o",
+        "w_o, ds"
+       ],
+       "writes": [
+        "do, dg",
+        "Δ",
+        "dx",
+        "dW_o (fp32)"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "bias transpose",
+       "impl": "CUDA · triattn_biasT",
+       "code": [
+        "b_T = (b * log2(e)).transpose(-1, -2).float()"
+       ],
+       "reads": [
+        "b"
+       ],
+       "writes": [
+        "b_T"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "attention backward, key side",
+       "impl": "CUDA · triattn_bwd_kv",
+       "code": [
+        "p = torch.exp(s - lse)   # recomputed",
+        "dp = do @ v.T;  ds_ = p * (dp - Δ)",
+        "dv = p.T @ do;  dk = ds_.T @ q / sqrt(32)"
+       ],
+       "reads": [
+        "q, k, v, do",
+        "b_T",
+        "lse, Δ"
+       ],
+       "writes": [
+        "dk, dv"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "attention backward, query side",
+       "impl": "CUDA · triattn_bwd_q",
+       "code": [
+        "p = torch.exp(s - lse)   # recomputed",
+        "ds_ = p * (do @ v.T - Δ)",
+        "dq = ds_ @ k / sqrt(32)",
+        "db = ds_.sum(pair rows)"
+       ],
+       "reads": [
+        "q, k, v, do",
+        "b",
+        "lse, Δ"
+       ],
+       "writes": [
+        "dq",
+        "db (fp32)"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "projection dgrad + LN backward",
+       "impl": "CUDA · tri_head_bwd",
+       "code": [
+        "dx_n = cat(dq, dk, dv, dg) @ w_4 + db @ W_b",
+        "dx += F.layer_norm backward(dx_n)"
+       ],
+       "reads": [
+        "dq, dk, dv, dg",
+        "db",
+        "x",
+        "w_4, prm",
+        "dx"
+       ],
+       "writes": [
+        "dx"
+       ]
+      },
+      {
+       "id": "B6",
+       "name": "weight / LN-parameter grads",
+       "impl": "CUDA · tri_wgrad + tri_param_finish",
+       "code": [
+        "M[t] = xhat.T @ d[t]   (t = q, k, v, g)",
+        "dW[t] = γ * M[t] + outer(β, d[t].sum(0));  dγ, dβ, dW_b",
+        "dW_o = dW_o.to(W_o.dtype)"
+       ],
+       "reads": [
+        "dq, dk, dv, dg",
+        "db",
+        "x",
+        "w_4, prm",
+        "dW_o (fp32)"
+       ],
+       "writes": [
+        "dW_q, dW_k, dW_v, dW_g",
+        "dγ, dβ, dW_b, dW_o"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768)",
+     "hbm": [
+      {
+       "name": "dy, dx",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "x, q, k, v, g, o  (saved)",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "do, dg, dq, dk, dv",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB each"
+      },
+      {
+       "name": "b (saved), b_T",
+       "shape": "[4,L,L] bf16 / fp32",
+       "size": "4.7 / 9.4 MB"
+      },
+      {
+       "name": "lse (saved), Δ",
+       "shape": "[L,4,L] fp32",
+       "size": "9.4 MB each"
+      },
+      {
+       "name": "db",
+       "shape": "[4,L,L] fp32",
+       "size": "9.4 MB"
+      },
+      {
+       "name": "W_*, dW_*, dγ, dβ, ds",
+       "shape": "fp32 / bf16",
+       "size": "< 1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "inference_wide": {
+   "title": "B200 · TriangleAttention (starting node) · inference · d_pair C = 64 .. 512, heads × 32 (16-channel heads zero-padded), bf16, every L = 128k",
+   "panels": [
+    {
+     "label": "forward (nothing saved); HD_p = heads × 32",
+     "kernels": [
+      {
+       "id": "W1",
+       "name": "LN + q|k|v|g + bias",
+       "impl": "CUDA · tri_wfront",
+       "code": [
+        "x_n = F.layer_norm(x, (C,), γ, β)   # in shared memory",
+        "q, k, v, g = (x_n @ W.T for W in W_qkvg)",
+        "b = (x_n @ W_b.T).permute(0, 3, 1, 2)",
+        "b = b.masked_fill(~mask[:, None, None], -inf)",
+        "# W streamed in [up to 256 rows][64] chunks"
+       ],
+       "reads": [
+        "x",
+        "W_qkvgb (bf16, packed)",
+        "γ, β, mask"
+       ],
+       "writes": [
+        "q, k, v, g",
+        "b"
+       ]
+      },
+      {
+       "id": "W2",
+       "name": "attention",
+       "impl": "CUDA · triattn_fwd",
+       "code": [
+        "s = q[h] @ k[h].T / sqrt(d_head) + b[h]",
+        "o[h] = torch.softmax(s, -1) @ v[h]"
+       ],
+       "reads": [
+        "q, k, v",
+        "b"
+       ],
+       "writes": [
+        "o"
+       ]
+      },
+      {
+       "id": "W3",
+       "name": "gate + out proj + residual",
+       "impl": "CUDA · tri_wtail",
+       "code": [
+        "u = torch.sigmoid(g) * o   # in shared memory",
+        "y = x + u @ W_o.T",
+        "# W_o streamed in [C][64] chunks"
+       ],
+       "reads": [
+        "g, o",
+        "x",
+        "W_o (bf16, packed)"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, C = HD = 256)",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,C] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "q, k, v, g, o",
+       "shape": "[L,L,HD_p] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "b",
+       "shape": "[heads,L,L] bf16",
+       "size": "9.4 MB"
+      },
+      {
+       "name": "W_qkvgb, W_o, γ, β, mask",
+       "shape": "bf16 / fp32",
+       "size": "< 3 MB"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
