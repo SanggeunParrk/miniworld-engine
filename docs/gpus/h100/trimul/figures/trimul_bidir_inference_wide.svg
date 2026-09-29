@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1814" height="511" viewBox="0 0 1814 511">
+<defs>
+<marker id="head-1f2328" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#1f2328"/></marker>
+<marker id="head-b3261e" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#b3261e"/></marker>
+<marker id="head-1a5fb4" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#1a5fb4"/></marker>
+</defs>
+<rect width="1814" height="511" fill="#ffffff"/>
+<text x="30.0" y="28.0" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="bold" fill="#1f2328" text-anchor="start">H100 · TriMul bidirectional · inference · D256 / D384 / D512, bf16, L384 / L768</text>
+<text x="1784.0" y="24.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#b3261e" text-anchor="end">red: written to HBM</text>
+<text x="1784.0" y="38.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a5fb4" text-anchor="end">blue, dashed: read from HBM</text>
+<text x="30.0" y="60.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#57606a" text-anchor="start">forward (nothing saved)</text>
+<rect x="30" y="70" width="254" height="169" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M36,70 h242 a6,6 0 0 1 6,6 v40 h-254 v-40 a6,6 0 0 1 6,-6 z" fill="#fde8cf"/>
+<line x1="30" y1="116" x2="284" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="40.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">P1 · weight pack</text>
+<text x="40.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">Triton · _pack</text>
+<text x="40.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">g = torch.cat((W_lg, W_rg))</text>
+<text x="40.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">v = torch.cat((W_l, W_r))</text>
+<text x="40.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">w_1 = torch.stack((g, v), 1)</text>
+<line x1="284.0" y1="93.0" x2="327.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="60.5" y1="351.0" x2="60.5" y2="241.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="66.5" y="257.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W_l, W_lg, W_r, W_rg</text>
+<line x1="253.5" y1="239.0" x2="253.5" y2="349.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="247.5" y="270.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">w_1</text>
+<rect x="330" y="70" width="254" height="169" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M336,70 h242 a6,6 0 0 1 6,6 v40 h-254 v-40 a6,6 0 0 1 6,-6 z" fill="#eceef1"/>
+<line x1="330" y1="116" x2="584" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="340.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">P2 · input LN (D512 only)</text>
+<text x="340.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">PyTorch · torch.compile</text>
+<text x="340.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">x_n = F.layer_norm(x, (D,), γ, β)</text>
+<line x1="584.0" y1="93.0" x2="627.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="360.5" y1="351.0" x2="360.5" y2="241.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="366.5" y="257.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">x</text>
+<text x="366.5" y="270.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">γ, β</text>
+<line x1="553.5" y1="239.0" x2="553.5" y2="349.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="547.5" y="283.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">x_n, μ, σ</text>
+<rect x="630" y="70" width="254" height="169" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M636,70 h242 a6,6 0 0 1 6,6 v40 h-254 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="630" y1="116" x2="884" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="640.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">F1 · input LN + gated proj</text>
+<text x="640.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · mw_wide_front</text>
+<text x="640.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">x_n = F.layer_norm(x, (D,), γ, β)</text>
+<text x="640.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">l = torch.sigmoid(x_n @ W_lg.T)</text>
+<text x="640.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">l = l * (x_n @ W_l.T) * m</text>
+<text x="640.0" y="181.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">r = torch.sigmoid(x_n @ W_rg.T)</text>
+<text x="640.0" y="196.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">r = r * (x_n @ W_r.T) * m</text>
+<text x="640.0" y="211.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">l_out, l_in = l.chunk(2, -1)</text>
+<text x="640.0" y="226.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">r_out, r_in = r.chunk(2, -1)</text>
+<line x1="884.0" y1="93.0" x2="927.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="660.5" y1="351.0" x2="660.5" y2="241.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="666.5" y="257.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">x (or x_n)</text>
+<text x="666.5" y="270.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">w_1</text>
+<text x="666.5" y="283.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">mask</text>
+<line x1="853.5" y1="239.0" x2="853.5" y2="349.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="847.5" y="296.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">l_out, l_in</text>
+<text x="847.5" y="309.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">r_out, r_in</text>
+<text x="847.5" y="322.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">μ, σ</text>
+<rect x="930" y="70" width="254" height="169" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M936,70 h242 a6,6 0 0 1 6,6 v40 h-254 v-40 a6,6 0 0 1 6,-6 z" fill="#dbe7fb"/>
+<line x1="930" y1="116" x2="1184" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="940.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">F2 · contractions ×2</text>
+<text x="940.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">cuBLAS · bmm</text>
+<text x="940.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">t_out = torch.einsum(</text>
+<text x="940.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">  "bikd,bjkd-&gt;bijd", l_out, r_out)</text>
+<text x="940.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">t_in = torch.einsum(</text>
+<text x="940.0" y="181.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">  "bkid,bkjd-&gt;bijd", l_in, r_in)</text>
+<text x="940.0" y="196.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">t = torch.cat((t_out, t_in), -1)</text>
+<line x1="1184.0" y1="93.0" x2="1227.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="960.5" y1="351.0" x2="960.5" y2="241.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="966.5" y="257.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">l_out, l_in</text>
+<text x="966.5" y="270.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">r_out, r_in</text>
+<line x1="1153.5" y1="239.0" x2="1153.5" y2="349.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="1147.5" y="283.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">t</text>
+<rect x="1230" y="70" width="254" height="169" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1236,70 h242 a6,6 0 0 1 6,6 v40 h-254 v-40 a6,6 0 0 1 6,-6 z" fill="#fde8cf"/>
+<line x1="1230" y1="116" x2="1484" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="1240.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">F3 · LN-affine fold</text>
+<text x="1240.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">Triton · _fold</text>
+<text x="1240.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">W_pf = W_p * γ_o</text>
+<text x="1240.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">u_p = W_pf.sum(1)</text>
+<text x="1240.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">v_p = W_p @ β_o</text>
+<text x="1240.0" y="181.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">W_gf = W_g * γ</text>
+<text x="1240.0" y="196.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">u_g = W_gf.sum(1)</text>
+<text x="1240.0" y="211.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">v_g = W_g @ β</text>
+<line x1="1484.0" y1="93.0" x2="1527.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="1260.5" y1="351.0" x2="1260.5" y2="241.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="1266.5" y="257.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W_p, W_g</text>
+<text x="1266.5" y="270.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">γ_o, β_o, γ, β</text>
+<line x1="1453.5" y1="239.0" x2="1453.5" y2="349.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="1447.5" y="283.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">W_pf, W_gf, u, v</text>
+<rect x="1530" y="70" width="254" height="169" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1536,70 h242 a6,6 0 0 1 6,6 v40 h-254 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="1530" y1="116" x2="1784" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="1540.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">F4 · output LN + proj + gate</text>
+<text x="1540.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · mw_wide_output_stream</text>
+<text x="1540.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">o = F.layer_norm(t, (2h,), γ_o, β_o)</text>
+<text x="1540.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">o = o @ W_p.T</text>
+<text x="1540.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">x_n = F.layer_norm(x, (D,), γ, β)</text>
+<text x="1540.0" y="181.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">g = torch.sigmoid(x_n @ W_g.T)</text>
+<text x="1540.0" y="196.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">y = x + g * o</text>
+<line x1="1560.5" y1="351.0" x2="1560.5" y2="241.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="1566.5" y="257.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">t</text>
+<text x="1566.5" y="270.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">x</text>
+<text x="1566.5" y="283.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">μ, σ</text>
+<text x="1566.5" y="296.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W_pf, W_gf, u, v</text>
+<line x1="1753.5" y1="239.0" x2="1753.5" y2="349.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="1747.5" y="309.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">y</text>
+<rect x="30" y="351" width="1754" height="136" rx="8" fill="#f6f8fa" stroke="#1f2328" stroke-width="1.4"/>
+<text x="42.0" y="373.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">HBM</text>
+<rect x="42" y="383" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="50.0" y="399.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">x, y</text>
+<text x="50.0" y="415.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L,D] bf16</text>
+<rect x="302" y="383" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="310.0" y="399.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">x_n (D512 only)</text>
+<text x="310.0" y="415.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L,D] bf16</text>
+<rect x="562" y="383" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="570.0" y="399.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">μ, σ</text>
+<text x="570.0" y="415.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L·L,2] fp32</text>
+<rect x="822" y="383" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="830.0" y="399.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">mask</text>
+<text x="830.0" y="415.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L] bf16</text>
+<rect x="1082" y="383" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="1090.0" y="399.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">W_*, w_1, W_pf, W_gf, u, v</text>
+<text x="1090.0" y="415.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">bf16 / fp32</text>
+<rect x="1342" y="383" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="1350.0" y="399.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">l_out, l_in, r_out, r_in</text>
+<text x="1350.0" y="415.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">4 × [h,L,L] bf16</text>
+<rect x="42" y="431" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="50.0" y="447.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">t</text>
+<text x="50.0" y="463.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[2h,L,L] bf16</text>
+</svg>

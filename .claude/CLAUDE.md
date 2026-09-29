@@ -11,7 +11,7 @@ Docs index: `docs/README.md`.
 1. **Never run real work on a login node.** No `python`, `pytest`, `ruff`, `pixi install`,
    `import torch`, builds, benchmarks or recursive scans outside this repo. Even a one-line
    import check goes through Slurm. Only trivial shell ops (`ls`, `cat`, `git`, editing files)
-   run locally. How to reach a compute node on each GPU cluster: `docs/gpus/<gpu>.md`.
+   run locally. How to reach a compute node on each GPU cluster: `docs/gpus/<gpu>/<gpu>.md` (index: `docs/gpus/README.md`).
 2. **Always pass `--mem`** to `srun`/`sbatch`; without it the job requests the node's full RAM.
 3. **Never `git checkout`/`git restore` a file that has uncommitted work.** Stash, or revert by
    hand. Built-but-uncommitted kernels have been lost this way.
@@ -36,8 +36,9 @@ torch 2.13 + cu129, triton 3.7, Transformer Engine, cuequivariance 0.12, FlashAt
 - Benchmarks: only `benchmarks/runners/bench.py` + `benchmarks/modules/<module>/configs/bench.yaml`.
   One-off probes stay outside the checkout (e.g. `~/miniworld-engine-scratch/`). Timings are CUDA-graph or compiled —
   never eager for final numbers.
-- Per-GPU completion status (which op is finished for which shapes): `docs/gpus/<gpu>.md` (section "Completion status").
-  The **judgement** column is filled by the maintainer, not by an agent.
+- Per-GPU completion status (which op is finished for which shapes): `docs/gpus/<gpu>/<gpu>.md` (module level;
+  per-module kernel tables and figures in `docs/gpus/<gpu>/<module>/`; format: `docs/gpus/README.md`).
+  The **성능 확인** row is filled by the maintainer, not by an agent.
 - Dated measurements and audits: `docs/records/`, never edited after the fact.
 - Local scratch lives outside the checkout. Removed research lives in git (see
   README "Research history").

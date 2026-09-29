@@ -1,0 +1,259 @@
+{
+  "figures": {
+    "inference_k1k3": {
+      "title": "H100 · TriMul bidirectional · inference · D64 / D128, bf16, every L (h = D per direction)",
+      "panels": [
+        {"label": "forward (nothing saved)",
+         "kernels": [
+          {"id": "P1", "name": "weight pack", "impl": "PyTorch",
+           "code": ["g = torch.cat((W_lg, W_rg))", "v = torch.cat((W_l, W_r))", "w_1 = torch.stack((g, v), 1)"],
+           "reads": ["W_l, W_lg, W_r, W_rg"], "writes": ["w_1"]},
+          {"id": "F1", "name": "input LN + gated proj", "impl": "CUDA · h100_inference K1",
+           "code": ["x_n = F.layer_norm(x, (D,), γ, β)", "l = torch.sigmoid(x_n @ W_lg.T)", "l = l * (x_n @ W_l.T) * m", "r = torch.sigmoid(x_n @ W_rg.T)", "r = r * (x_n @ W_r.T) * m", "l_out, l_in = l.chunk(2, -1)", "r_out, r_in = r.chunk(2, -1)"],
+           "reads": ["x", "w_1", "mask", "γ, β"], "writes": ["l_out, l_in", "r_out, r_in"]},
+          {"id": "F2", "name": "contractions ×2", "impl": "cuBLAS · bmm",
+           "code": ["t_out = torch.einsum(", "  \"bikd,bjkd->bijd\", l_out, r_out)", "t_in = torch.einsum(", "  \"bkid,bkjd->bijd\", l_in, r_in)", "t = torch.cat((t_out, t_in), -1)"],
+           "reads": ["l_out, l_in", "r_out, r_in"], "writes": ["t"]},
+          {"id": "F3", "name": "output LN + proj + gate", "impl": "CUDA · h100_inference K3",
+           "code": ["o = F.layer_norm(t, (2h,), γ_o, β_o)", "o = o @ W_p.T", "x_n = F.layer_norm(x, (D,), γ, β)", "g = torch.sigmoid(x_n @ W_g.T)", "y = x + g * o"],
+           "reads": ["t", "x", "W_p, W_g, γ, β"], "writes": ["y"]}
+         ],
+         "hbm_title": "HBM",
+         "hbm": [
+          {"name": "x, y", "shape": "[L,L,D] bf16"},
+          {"name": "mask", "shape": "[L,L] fp32"},
+          {"name": "W_*, w_1, γ, β", "shape": "bf16 / fp32, < 3 MB"},
+          {"name": "l_out, l_in, r_out, r_in", "shape": "4 × [h,L,L] bf16"},
+          {"name": "t", "shape": "[2h,L,L] bf16"}
+         ]}
+      ]
+    },
+    "inference_wide": {
+      "title": "H100 · TriMul bidirectional · inference · D256 / D384 / D512, bf16, L384 / L768",
+      "panels": [
+        {"label": "forward (nothing saved)",
+         "kernels": [
+          {"id": "P1", "name": "weight pack", "impl": "Triton · _pack",
+           "code": ["g = torch.cat((W_lg, W_rg))", "v = torch.cat((W_l, W_r))", "w_1 = torch.stack((g, v), 1)"],
+           "reads": ["W_l, W_lg, W_r, W_rg"], "writes": ["w_1"]},
+          {"id": "P2", "name": "input LN (D512 only)", "impl": "PyTorch · torch.compile",
+           "code": ["x_n = F.layer_norm(x, (D,), γ, β)"],
+           "reads": ["x", "γ, β"], "writes": ["x_n, μ, σ"]},
+          {"id": "F1", "name": "input LN + gated proj", "impl": "CUDA · mw_wide_front",
+           "code": ["x_n = F.layer_norm(x, (D,), γ, β)", "l = torch.sigmoid(x_n @ W_lg.T)", "l = l * (x_n @ W_l.T) * m", "r = torch.sigmoid(x_n @ W_rg.T)", "r = r * (x_n @ W_r.T) * m", "l_out, l_in = l.chunk(2, -1)", "r_out, r_in = r.chunk(2, -1)"],
+           "reads": ["x (or x_n)", "w_1", "mask"], "writes": ["l_out, l_in", "r_out, r_in", "μ, σ"]},
+          {"id": "F2", "name": "contractions ×2", "impl": "cuBLAS · bmm",
+           "code": ["t_out = torch.einsum(", "  \"bikd,bjkd->bijd\", l_out, r_out)", "t_in = torch.einsum(", "  \"bkid,bkjd->bijd\", l_in, r_in)", "t = torch.cat((t_out, t_in), -1)"],
+           "reads": ["l_out, l_in", "r_out, r_in"], "writes": ["t"]},
+          {"id": "F3", "name": "LN-affine fold", "impl": "Triton · _fold",
+           "code": ["W_pf = W_p * γ_o", "u_p = W_pf.sum(1)", "v_p = W_p @ β_o", "W_gf = W_g * γ", "u_g = W_gf.sum(1)", "v_g = W_g @ β"],
+           "reads": ["W_p, W_g", "γ_o, β_o, γ, β"], "writes": ["W_pf, W_gf, u, v"]},
+          {"id": "F4", "name": "output LN + proj + gate", "impl": "CUDA · mw_wide_output_stream",
+           "code": ["o = F.layer_norm(t, (2h,), γ_o, β_o)", "o = o @ W_p.T", "x_n = F.layer_norm(x, (D,), γ, β)", "g = torch.sigmoid(x_n @ W_g.T)", "y = x + g * o"],
+           "reads": ["t", "x", "μ, σ", "W_pf, W_gf, u, v"], "writes": ["y"]}
+         ],
+         "hbm_title": "HBM",
+         "hbm": [
+          {"name": "x, y", "shape": "[L,L,D] bf16"},
+          {"name": "x_n (D512 only)", "shape": "[L,L,D] bf16"},
+          {"name": "μ, σ", "shape": "[L·L,2] fp32"},
+          {"name": "mask", "shape": "[L,L] bf16"},
+          {"name": "W_*, w_1, W_pf, W_gf, u, v", "shape": "bf16 / fp32"},
+          {"name": "l_out, l_in, r_out, r_in", "shape": "4 × [h,L,L] bf16"},
+          {"name": "t", "shape": "[2h,L,L] bf16"}
+         ]}
+      ]
+    },
+    "training_d64": {
+      "title": "H100 · TriMul bidirectional · training · D64, bf16, L384 / L768",
+      "panels": [
+        {"label": "forward (saves l_*, r_*, t, LN stats, w_1)",
+         "kernels": [
+          {"id": "P1", "name": "weight pack", "impl": "Triton · _pack",
+           "code": ["g = torch.cat((W_lg, W_rg))", "v = torch.cat((W_l, W_r))", "w_1 = torch.stack((g, v), 1)"],
+           "reads": ["W_l, W_lg, W_r, W_rg"], "writes": ["w_1"]},
+          {"id": "F1", "name": "input LN + gated proj", "impl": "CUDA · h100_inference K1",
+           "code": ["x_n = F.layer_norm(x, (D,), γ, β)", "l = torch.sigmoid(x_n @ W_lg.T)", "l = l * (x_n @ W_l.T) * m", "r = torch.sigmoid(x_n @ W_rg.T)", "r = r * (x_n @ W_r.T) * m", "l_out, l_in = l.chunk(2, -1)", "r_out, r_in = r.chunk(2, -1)"],
+           "reads": ["x", "w_1", "mask"], "writes": ["l_out, l_in", "r_out, r_in"]},
+          {"id": "F2", "name": "contractions ×2", "impl": "cuBLAS · bmm",
+           "code": ["t_out = torch.einsum(", "  \"bikd,bjkd->bijd\", l_out, r_out)", "t_in = torch.einsum(", "  \"bkid,bkjd->bijd\", l_in, r_in)", "t = torch.cat((t_out, t_in), -1)"],
+           "reads": ["l_out, l_in", "r_out, r_in"], "writes": ["t"]},
+          {"id": "F3", "name": "output LN + proj + gate", "impl": "CUDA · save_k3_d64",
+           "code": ["o = F.layer_norm(t, (2h,), γ_o, β_o)", "o = o @ W_p.T", "x_n = F.layer_norm(x, (D,), γ, β)", "g = torch.sigmoid(x_n @ W_g.T)", "y = x + ds * (g * o)"],
+           "reads": ["t", "x", "W_p, W_g, γ, β", "ds"], "writes": ["y", "μ, σ, μ_o, σ_o"]}
+         ],
+         "hbm_title": "HBM, forward",
+         "hbm": [
+          {"name": "x, y", "shape": "[L,L,64] bf16"},
+          {"name": "mask, ds", "shape": "[L,L] fp32, [L,64] bf16"},
+          {"name": "W_*, w_1, γ, β", "shape": "< 1 MB"},
+          {"name": "l_out, l_in, r_out, r_in  (saved)", "shape": "4 × [64,L,L] bf16"},
+          {"name": "t  (saved)", "shape": "[128,L,L] bf16"},
+          {"name": "μ, σ, μ_o, σ_o  (saved)", "shape": "4 × [L,L] fp32"}
+         ]},
+        {"label": "backward",
+         "kernels": [
+          {"id": "B1", "name": "output-side backward", "impl": "CUDA · d64_b1w",
+           "code": ["(dt, dx_ng, dW_p, dW_g,", " dγ_o, dβ_o) = torch.autograd.grad(", "    y, (t, x_n, W_p, W_g,", "        γ_o, β_o), dy)"],
+           "reads": ["dy", "t", "x", "stats", "W_p, W_g, γ_o, β_o"], "writes": ["dt", "dx_ng", "partials_1"]},
+          {"id": "B2", "name": "contraction grads ×4", "impl": "cuBLAS · bmm",
+           "code": ["dl, dr = torch.autograd.grad(", "    t, (l, r), dt)"],
+           "reads": ["dt", "l_out, l_in", "r_out, r_in"], "writes": ["dl, dr"]},
+          {"id": "B3", "name": "input-side backward", "impl": "CUDA · d64_b2w",
+           "code": ["(dx, dW_l, dW_lg, dW_r, dW_rg,", " dγ, dβ) = torch.autograd.grad(", "    (l, r, x_n), (x, W_l, W_lg,", "    W_r, W_rg, γ, β),", "    (dl, dr, dx_ng))", "dx = dx + dy"],
+           "reads": ["dl, dr", "dx_ng", "dy", "x", "stats", "w_1, mask"], "writes": ["dx", "partials_2"]},
+          {"id": "B4", "name": "weight-grad reduce", "impl": "CUDA · d64_finw",
+           "code": ["dW = partials.sum(0)"],
+           "reads": ["partials_1, partials_2"], "writes": ["dW_*, dγ, dβ, dγ_o, dβ_o"]}
+         ],
+         "hbm_title": "HBM, backward",
+         "hbm": [
+          {"name": "dy, dx", "shape": "[L,L,64] bf16"},
+          {"name": "l_out, l_in, r_out, r_in  (saved)", "shape": "4 × [64,L,L] bf16"},
+          {"name": "t  (saved), dt", "shape": "[128,L,L] bf16"},
+          {"name": "dx_ng", "shape": "[L,L,64] bf16"},
+          {"name": "dl, dr", "shape": "[256,L,L] bf16"},
+          {"name": "partials_1, partials_2", "shape": "[g,12544], [g,32896] fp32"},
+          {"name": "dW_*, dγ, dβ", "shape": "fp32 / bf16"}
+         ]}
+      ]
+    },
+    "training_d128": {
+      "title": "H100 · TriMul bidirectional · training · D128, bf16, L384 / L768",
+      "panels": [
+        {"label": "forward (saves l_*, r_*, t, x_n, LN_out stats, w_1)",
+         "kernels": [
+          {"id": "P1", "name": "weight pack", "impl": "Triton · _pack",
+           "code": ["g = torch.cat((W_lg, W_rg))", "v = torch.cat((W_l, W_r))", "w_1 = torch.stack((g, v), 1)"],
+           "reads": ["W_l, W_lg, W_r, W_rg"], "writes": ["w_1"]},
+          {"id": "F1", "name": "input LN + gated proj", "impl": "CUDA · h100_output.front",
+           "code": ["x_n = F.layer_norm(x, (D,), γ, β)", "l = torch.sigmoid(x_n @ W_lg.T)", "l = l * (x_n @ W_l.T) * m", "r = torch.sigmoid(x_n @ W_rg.T)", "r = r * (x_n @ W_r.T) * m", "l_out, l_in = l.chunk(2, -1)", "r_out, r_in = r.chunk(2, -1)"],
+           "reads": ["x", "w_1", "mask"], "writes": ["l_out, l_in", "r_out, r_in"]},
+          {"id": "F2", "name": "contractions ×2", "impl": "cuBLAS · bmm",
+           "code": ["t_out = torch.einsum(", "  \"bikd,bjkd->bijd\", l_out, r_out)", "t_in = torch.einsum(", "  \"bkid,bkjd->bijd\", l_in, r_in)", "t = torch.cat((t_out, t_in), -1)"],
+           "reads": ["l_out, l_in", "r_out, r_in"], "writes": ["t"]},
+          {"id": "F3", "name": "output LN + proj + gate", "impl": "CUDA · h100_output.output",
+           "code": ["o = F.layer_norm(t, (2h,), γ_o, β_o)", "o = o @ W_p.T", "x_n = F.layer_norm(x, (D,), γ, β)", "g = torch.sigmoid(x_n @ W_g.T)", "y = x + ds * (g * o)"],
+           "reads": ["t", "x", "W_p, W_g, γ, β", "ds"], "writes": ["y", "x_n", "μ_o, σ_o"]}
+         ],
+         "hbm_title": "HBM, forward (sizes at L = 768)",
+         "hbm": [
+          {"name": "x", "shape": "[L,L,128] bf16", "size": "151 MB"},
+          {"name": "mask, ds", "shape": "[L,L] fp32, [L,128] bf16", "size": "2.6 MB"},
+          {"name": "W_*, γ, β, w_1", "shape": "bf16 / fp32", "size": "< 1 MB"},
+          {"name": "l_out, l_in, r_out, r_in  (saved)", "shape": "4 × [128,L,L] bf16", "size": "604 MB"},
+          {"name": "t  (saved)", "shape": "[256,L,L] bf16", "size": "302 MB"},
+          {"name": "x_n  (saved)", "shape": "[L,L,128] bf16", "size": "151 MB"},
+          {"name": "μ_o, σ_o  (saved)", "shape": "2 × [L,L] fp32", "size": "4.7 MB"},
+          {"name": "y", "shape": "[L,L,128] bf16", "size": "151 MB"}
+         ]},
+        {"label": "backward",
+         "kernels": [
+          {"id": "B0", "name": "weight transposes", "impl": "PyTorch",
+           "code": ["W_t = [W.t().contiguous()", "       for W in (W_l, W_lg, W_r,", "                 W_rg, W_g)]"],
+           "reads": ["W_*"], "writes": ["W_t"]},
+          {"id": "B1", "name": "output-side backward", "impl": "CUDA · h100_b1",
+           "code": ["(dt, dx_ng, dW_p, dW_g,", " dγ_o, dβ_o) = torch.autograd.grad(", "    y, (t, x_n, W_p, W_g,", "        γ_o, β_o), dy)"],
+           "reads": ["dy", "t", "x_n", "μ_o, σ_o", "W_p, W_g, γ_o, β_o"], "writes": ["dt", "dx_ng", "dW_p, dW_g, dγ_o, dβ_o"]},
+          {"id": "B2", "name": "contraction grads ×4", "impl": "cuBLAS · bmm",
+           "code": ["dl, dr = torch.autograd.grad(", "    t, (l, r), dt)"],
+           "reads": ["dt", "l_out, l_in", "r_out, r_in"], "writes": ["dl, dr"]},
+          {"id": "B3", "name": "input-side backward", "impl": "CUDA · h100_b7",
+           "code": ["(dx, dW_l, dW_lg, dW_r, dW_rg,", " dγ, dβ) = torch.autograd.grad(", "    (l, r, x_n), (x, W_l, W_lg,", "    W_r, W_rg, γ, β),", "    (dl, dr, dx_ng))", "dx = dx + dy"],
+           "reads": ["dl, dr", "dx_ng", "dy", "x, x_n", "w_1, W_t, mask"], "writes": ["dx", "dW_l, dW_lg, dW_r, dW_rg", "dγ, dβ"]},
+          {"id": "B4", "name": "dW_g layout", "impl": "PyTorch",
+           "code": ["dW_g = dW_g.t().contiguous()"],
+           "reads": ["dW_g"], "writes": ["dW_g"]}
+         ],
+         "hbm_title": "HBM, backward (sizes at L = 768)",
+         "hbm": [
+          {"name": "dy", "shape": "[L,L,128] bf16", "size": "151 MB"},
+          {"name": "l_out, l_in, r_out, r_in  (saved)", "shape": "4 × [128,L,L] bf16", "size": "604 MB"},
+          {"name": "t  (saved)", "shape": "[256,L,L] bf16", "size": "302 MB"},
+          {"name": "x_n  (saved), x", "shape": "[L,L,128] bf16", "size": "151 MB each"},
+          {"name": "μ_o, σ_o  (saved)", "shape": "2 × [L,L] fp32", "size": "4.7 MB"},
+          {"name": "W_*, W_t, w_1, mask", "shape": "bf16 / fp32", "size": "< 3 MB"},
+          {"name": "dt", "shape": "[256,L,L] bf16", "size": "302 MB"},
+          {"name": "dx_ng", "shape": "[L,L,128] bf16", "size": "151 MB"},
+          {"name": "dl, dr", "shape": "[512,L,L] bf16", "size": "604 MB"},
+          {"name": "dx", "shape": "[L,L,128] bf16", "size": "151 MB"},
+          {"name": "dW_*, dγ, dβ", "shape": "fp32 / bf16", "size": "< 1 MB"}
+         ]}
+      ]
+    },
+    "training_wide": {
+      "title": "H100 · TriMul bidirectional · training · D256 / D384 / D512, bf16, L384 / L768",
+      "panels": [
+        {"label": "forward (saves l_*, r_*, t, x_n, o, proj, gate, LN_out stats)",
+         "kernels": [
+          {"id": "P1", "name": "weight pack", "impl": "Triton · _pack",
+           "code": ["g = torch.cat((W_lg, W_rg))", "v = torch.cat((W_l, W_r))", "w_1 = torch.stack((g, v), 1)"],
+           "reads": ["W_l, W_lg, W_r, W_rg"], "writes": ["w_1"]},
+          {"id": "F1", "name": "input LN + gated proj", "impl": "CUDA · mw_*_front",
+           "code": ["x_n = F.layer_norm(x, (D,), γ, β)", "pre = x_n @ w_1.T", "l = torch.sigmoid(x_n @ W_lg.T)", "l = l * (x_n @ W_l.T) * m", "r = torch.sigmoid(x_n @ W_rg.T)", "r = r * (x_n @ W_r.T) * m"],
+           "reads": ["x (D512: x_n)", "w_1", "mask"], "writes": ["l_*, r_*", "x_n", "pre (D384/512)"]},
+          {"id": "F2", "name": "contractions ×2", "impl": "cuBLAS · bmm / cuBLASLt",
+           "code": ["t_out = torch.einsum(", "  \"bikd,bjkd->bijd\", l_out, r_out)", "t_in = torch.einsum(", "  \"bkid,bkjd->bijd\", l_in, r_in)", "t = torch.cat((t_out, t_in), -1)"],
+           "reads": ["l_*, r_*"], "writes": ["t"]},
+          {"id": "F3", "name": "output LN", "impl": "CUDA · mw_wide_*_norm",
+           "code": ["o = F.layer_norm(t, (2h,), γ_o, β_o)"],
+           "reads": ["t", "γ_o, β_o"], "writes": ["o", "μ_o, σ_o"]},
+          {"id": "F4", "name": "proj + gate GEMMs", "impl": "cuBLASLt",
+           "code": ["proj = o @ W_p.T", "gate = x_n @ W_g.T"],
+           "reads": ["o", "x_n", "W_p, W_g"], "writes": ["proj, gate"]},
+          {"id": "F5", "name": "gate + residual", "impl": "CUDA · mw_wide_dense_output_epi",
+           "code": ["y = x + ds * torch.sigmoid(gate)", "      * proj"],
+           "reads": ["proj, gate", "x", "ds"], "writes": ["y"]}
+         ],
+         "hbm_title": "HBM, forward",
+         "hbm": [
+          {"name": "x, y", "shape": "[L,L,D] bf16"},
+          {"name": "x_n  (saved)", "shape": "[L,L,D] bf16"},
+          {"name": "pre  (saved, D384/512)", "shape": "[8D,L·L] bf16"},
+          {"name": "l_*, r_*  (saved)", "shape": "4 × [D,L,L] bf16"},
+          {"name": "t  (saved)", "shape": "[2D,L,L] bf16"},
+          {"name": "o  (saved)", "shape": "[L·L,2D] bf16"},
+          {"name": "proj, gate  (saved)", "shape": "2 × [L·L,D] bf16"},
+          {"name": "μ_o, σ_o  (saved)", "shape": "2 × [L·L] fp32"},
+          {"name": "mask, ds, W_*, w_1", "shape": "bf16 / fp32"}
+         ]},
+        {"label": "backward (D512 first repairs o / proj rows: CUDA mw_wide_*delta*)",
+         "kernels": [
+          {"id": "B1", "name": "gate backward", "impl": "CUDA · mw_*_gate",
+           "code": ["dproj, dgate = torch.autograd.grad(", "    y, (proj, gate), dy)"],
+           "reads": ["dy", "proj, gate", "ds"], "writes": ["dproj", "dgate"]},
+          {"id": "B2", "name": "dn GEMM", "impl": "cuBLASLt",
+           "code": ["do = dproj @ W_p"],
+           "reads": ["dproj", "W_p"], "writes": ["do"]},
+          {"id": "B3", "name": "output-LN backward", "impl": "CUDA · mw_*_output_ln",
+           "code": ["dt, dγ_o, dβ_o = torch.autograd.grad(", "    o, (t, γ_o, β_o), do)"],
+           "reads": ["do", "t", "μ_o, σ_o", "γ_o"], "writes": ["dt", "dγ_o, dβ_o"]},
+          {"id": "B4", "name": "contraction grads", "impl": "CUDA / cuBLASLt (by shape)",
+           "code": ["dl, dr = torch.autograd.grad(", "    t, (l, r), dt)", "dpre = torch.autograd.grad(", "    (l, r), pre, (dl, dr))"],
+           "reads": ["dt", "l_*, r_*", "pre / x_n, w_1", "mask"], "writes": ["dpre", "partials"]},
+          {"id": "B5", "name": "weight GEMMs", "impl": "cuBLAS / cuBLASLt",
+           "code": ["dW_p = dproj.T @ o", "dW_g = dgate.T @ x_n", "dW_1 = dpre @ x_n"],
+           "reads": ["dproj, dgate, dpre", "o, x_n"], "writes": ["dW_p, dW_g", "partials"]},
+          {"id": "B6", "name": "dx_n GEMM", "impl": "cuBLASLt",
+           "code": ["W_c = torch.cat((W_g, W_l, W_lg,", "                 W_r, W_rg))", "dx_n = torch.cat((dgate, dpre),", "    1) @ W_c"],
+           "reads": ["dgate, dpre", "W_*"], "writes": ["dx_n"]},
+          {"id": "B7", "name": "input-LN backward + reduce", "impl": "CUDA · mw_*_input_*",
+           "code": ["dx, dγ, dβ = torch.autograd.grad(", "    x_n, (x, γ, β), dx_n)", "dx = dx + dy", "dW = partials.sum(0)"],
+           "reads": ["dx_n", "x", "dy", "γ", "partials"], "writes": ["dx", "dW_*, dγ, dβ"]}
+         ],
+         "hbm_title": "HBM, backward",
+         "hbm": [
+          {"name": "dy, dx", "shape": "[L,L,D] bf16"},
+          {"name": "dproj, dgate", "shape": "[L·L,D] bf16"},
+          {"name": "do", "shape": "[L·L,2D] bf16"},
+          {"name": "dt", "shape": "[2D,L,L] bf16"},
+          {"name": "dpre", "shape": "4 × [2D,L·L] bf16"},
+          {"name": "dx_n", "shape": "[L·L,D] bf16"},
+          {"name": "partials", "shape": "fp32"},
+          {"name": "saved forward tensors", "shape": "see forward"},
+          {"name": "dW_*, dγ, dβ", "shape": "fp32 / bf16"}
+         ]}
+      ]
+    }
+  }
+}
