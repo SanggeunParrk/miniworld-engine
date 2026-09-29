@@ -12,4 +12,4 @@ latency), `bench_base.py` (baselines), `test_fwd.py`, `test_bwd.py`, `trace_*.py
 Older / rejected: `src/attn_fwd.cu` (v1), `src/attn_dkv4.cu`. Probes: `src/n48_test.cu`, `src/mufu_bench.cu`, `src/mma_lat.cu`.
 Build: `./build.sh attn_fwd2 && ./build.sh attn_dqb && ./build.sh attn_dkv` on the B200 box. Rounds in `rounds/`.
 State (2026-09-29, round v3, PP on): inference 65.7 / 210.0 us, training 283.5 / 962.6 us at L384 / L768; used by
-`../token_dit_fused` for its B200 inference step and training block (`../token_dit_fused/B200.md`).
+`../token_dit_fused` for its B200 inference step and training block (`docs/gpus/b200/token_dit/token_dit.md`, branch `docs/b200-token-dit`).

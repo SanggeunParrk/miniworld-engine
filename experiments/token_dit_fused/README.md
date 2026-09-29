@@ -1,7 +1,7 @@
 # Fused token DiT, inference
 
-> B200 (sm_100a): the inference step with an sm_100a core and a fused TRAINING block are in `B200.md` -- 57.6 / 101.4 us
-> per inference block and 1623 / 3563 us per training block (fwd+bwd, A = 48) at L384 / L768. This file is the H100 story.
+> B200 (sm_100a): the inference step with an sm_100a core and the fused TRAINING block are documented in
+> `docs/gpus/b200/token_dit/token_dit.md` (branch `docs/b200-token-dit`). This file is the H100 story.
 
 One sampling step of the token DiT -- 24 x `modules.dit.DiTBlock` (AF3 Alg. 23: d 768, cond 384, pair 128, 16 heads x 48,
 transition n = 2), S = 5 samples, bf16 -- rebuilt around what is invariant across samples and steps. Forward only,

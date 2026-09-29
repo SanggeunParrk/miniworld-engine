@@ -1,5 +1,5 @@
 #!/bin/bash
-# measure_b200.sh -- the B200 numbers of B200.md: build the four sm_100a cores, then core / inference step / training block
+# measure_b200.sh -- the B200 numbers of docs/gpus/b200/token_dit/token_dit.md: build the four sm_100a cores, then core / inference step / training block
 # for L = 384 and 768, one process each; stops if anything else is on the GPU. Run under: gpuq run -g 6 -n tdit -- bash measure_b200.sh
 set -u
 W=/NHNHOME/WORKSPACE/26mohw002_A/psk6950
