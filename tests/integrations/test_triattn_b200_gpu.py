@@ -304,10 +304,77 @@ def test_wide_repacks_after_a_weight_update():
     check_wide(ours, ref16, ref32, x, None)
 
 
-def test_wide_not_served_for_training_or_other_head_dims():
-    m = make_wide(ImplementationType.MINIWORLD, 256, 256, 8)
-    x = torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
-    assert not triattn_b200.serves_wide(m.train(), x)                   # grad enabled: training is not served yet
+def test_wide_not_served_for_other_head_dims():
     four = make_wide(ImplementationType.MINIWORLD, 256, 256, 4)         # 64-channel heads
+    x = torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         assert not triattn_b200.serves_wide(four.eval(), x)
+    assert triattn_b200.serves_wide(make_wide(ImplementationType.MINIWORLD, 256, 256, 8).train(), x)   # training is served
+
+
+def wide_grads(cfg, starting, length, p_drop, seed=1234):
+    """(output, [dx, dparams...]) of ours / bf16 PyTorch / fp32 PyTorch on one draw of x, mask, dy and the dropout."""
+    ours, ref16, ref32 = trio_wide(cfg, starting)
+    for m in (ours, ref16, ref32):
+        m.p_drop = p_drop
+    x = torch.randn(1, length, length, cfg[0], device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, length, device="cuda") > 0.2
+    dy = torch.randn(1, length, length, cfg[0], device="cuda") * 0.1
+    assert triattn_b200.serves_wide(ours.train(), x, mask)
+    torch.manual_seed(seed)
+    xo = x.clone().requires_grad_()
+    y = ours.train()(xo, mask)
+    y.backward(dy.to(y.dtype))
+    got = {"ours": (y, [xo.grad, *(p.grad for p in ours.parameters())])}
+    scale = None
+    if p_drop:
+        torch.manual_seed(seed)
+        scale = ours._make_drop_scale(x, p_drop)                  # the same draw, same shape and dtype
+    for name, m, xin in (("ref16", ref16, x), ("ref32", ref32, x.float())):
+        xi = xin.clone().requires_grad_()
+        att = m.train()._attention(xi, mask)
+        yr = xi + (att * scale.to(xin.dtype) if scale is not None else att)
+        yr.backward(dy.to(yr.dtype))
+        got[name] = (yr, [xi.grad, *(p.grad for p in m.parameters())])
+    return x, got, ["x", *(n for n, _ in ours.named_parameters())]
+
+
+def check_wide_grads(x, got, names):
+    e = relative(got["ours"][0].float() - x.float(), got["ref32"][0] - x.float())
+    e16 = relative(got["ref16"][0].float() - x.float(), got["ref32"][0] - x.float())
+    assert e <= 1.25 * e16 + 1e-3, (e, e16)
+    for i, n in enumerate(names):
+        err = relative(got["ours"][1][i], got["ref32"][1][i])
+        err16 = relative(got["ref16"][1][i], got["ref32"][1][i])
+        assert err <= 1.25 * err16 + 2e-3, (n, err, err16)
+
+
+@pytest.mark.parametrize("length", [128, 256])
+@pytest.mark.parametrize("cfg", WIDE, ids=WIDE_IDS)
+def test_wide_training(cfg, length):
+    """Output and every gradient against fp32 autograd, yardstick = the bf16 PyTorch module."""
+    check_wide_grads(*wide_grads(cfg, True, length, 0.0))
+
+
+@pytest.mark.parametrize("starting", [True, False], ids=["starting", "ending"])
+@pytest.mark.parametrize("cfg", [WIDE[0], WIDE[3]], ids=[WIDE_IDS[0], WIDE_IDS[3]])
+def test_wide_training_dropout(cfg, starting):
+    check_wide_grads(*wide_grads(cfg, starting, 256, 0.25))
+
+
+def test_wide_fp32_master_parameters():
+    """fp32 parameters with a bf16 activation: gradients come back in fp32 and match the bf16-parameter run."""
+    m16 = make_wide(ImplementationType.MINIWORLD, 256, 256, 8)
+    m32 = make_wide(ImplementationType.MINIWORLD, 256, 256, 8, dtype=torch.float32)
+    m32.load_state_dict({k: v.float() for k, v in m16.state_dict().items()})
+    x = torch.randn(1, 256, 256, 256, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn_like(x)
+    out = []
+    for m in (m16, m32):
+        xi = x.clone().requires_grad_()
+        m.train()(xi).backward(dy)
+        out.append([xi.grad, *(p.grad for p in m.parameters())])
+    for p in m32.parameters():
+        assert p.grad.dtype == torch.float32
+    for a, b in zip(*out, strict=True):
+        assert relative(a, b) < 1e-2

@@ -2,7 +2,7 @@
 """Triangle (gated self-)attention — model-level op connecting the fused
 triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a kernels
 (``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16- or
-32-channel heads, inference) serve the whole module."""
+32-channel heads, inference and training) serve the whole module."""
 
 import math
 from contextlib import contextmanager

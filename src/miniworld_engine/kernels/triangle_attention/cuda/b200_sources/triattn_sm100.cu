@@ -1090,7 +1090,8 @@ torch::Tensor triattn_delta_rows(torch::Tensor dout, torch::Tensor out) {
 }
 
 std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor dout,
-                                       torch::Tensor lse, torch::Tensor delta, double scale, torch::Tensor db_ws) {
+                                       torch::Tensor lse, torch::Tensor delta, double scale, torch::Tensor db_ws,
+                                       torch::Tensor dq_out, torch::Tensor dk_out, torch::Tensor dv_out) {
   TORCH_CHECK(q.is_cuda() && q.scalar_type() == torch::kBFloat16 && q.dim() == 5 && q.size(4) == D, "q: [B, N, S, H, 32] bf16");
   for (const auto* t : {&q, &k, &v, &dout}) TORCH_CHECK(t->is_contiguous() && t->sizes() == q.sizes() && t->scalar_type() == torch::kBFloat16, "q, k, v, dout: contiguous, same shape");
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
@@ -1098,7 +1099,14 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
   TORCH_CHECK(bias.numel() == B * H * S * S, "bias: [B, H, S, S]");
   for (const auto* t : {&lse, &delta}) TORCH_CHECK(t->scalar_type() == torch::kFloat32 && t->is_contiguous() && t->numel() == B * N * H * S, "lse / delta: fp32 [B, N, H, S]");
   auto b16 = bias.scalar_type() == torch::kBFloat16 ? bias.contiguous() : bias.to(torch::kBFloat16).contiguous();
-  auto dq = torch::empty_like(q), dk = torch::empty_like(q), dv = torch::empty_like(q);
+  // dq_out / dk_out / dv_out: optional [rows, H*32] views (dense rows at a 16-byte-multiple stride, e.g. column slices of one
+  // gradient buffer) the kernels store into; empty -> fresh [B, N, S, H, 32] tensors
+  const bool given = dq_out.defined() && dq_out.numel() > 0;
+  auto dq = given ? dq_out : torch::empty_like(q), dk = given ? dk_out : torch::empty_like(q), dv = given ? dv_out : torch::empty_like(q);
+  if (given)
+    for (const auto* t : {&dq, &dk, &dv})
+      TORCH_CHECK(t->scalar_type() == torch::kBFloat16 && t->dim() == 2 && t->size(0) == B * N * S && t->size(1) == H * D && t->stride(1) == 1 &&
+                  t->stride(0) % 8 == 0, "dq / dk / dv outputs: [rows, H*32] bf16, dense rows at a 16-byte-multiple stride");
   // db_ws: an already-zeroed fp32 buffer of B*H*S*S (the caller zeroes all its gradient accumulators with one memset)
   auto db = (db_ws.defined() && db_ws.numel() == B * H * S * S) ? db_ws.view({B, H, S, S}) : torch::zeros({B, H, S, S}, q.options().dtype(torch::kFloat32));
   CUtensorMap dbm = make_map<2>(db.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {32, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
@@ -1107,7 +1115,9 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
   auto m2 = [&](const torch::Tensor& t, uint32_t box, const char* what) { return make_map<2>(t.data_ptr(), {cols, rows}, {cols}, {D, box}, CU_TENSOR_MAP_SWIZZLE_64B, what); };
   CUtensorMap q32 = m2(q, KB_QW, "q"), d32 = m2(dout, KB_QW, "dout"), k128 = m2(k, 128, "k"), v128 = m2(v, 128, "v");   // (q32: box KB_QW rows)
   CUtensorMap q128 = m2(q, 128, "q"), d128 = m2(dout, 128, "dout"), k64 = m2(k, 64, "k"), v64 = m2(v, 64, "v");
-  CUtensorMap dkm = m2(dk, 128, "dk"), dvm = m2(dv, 128, "dv"), dqm = m2(dq, 128, "dq");
+  auto mo = [&](const torch::Tensor& t, const char* what) {
+    return make_map<2>(t.data_ptr(), {cols, rows}, {(uint64_t)(given ? t.stride(0) : (long)cols)}, {D, 128}, CU_TENSOR_MAP_SWIZZLE_64B, what); };
+  CUtensorMap dkm = mo(dk, "dk"), dvm = mo(dv, "dv"), dqm = mo(dq, "dq");
   auto bT = torch::empty({B, H, S, S}, q.options().dtype(torch::kFloat32));
   CUtensorMap bkv = make_map<2>(bT.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {32, BN}, CU_TENSOR_MAP_SWIZZLE_128B, "bias^T",
                                 CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
@@ -1143,5 +1153,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("triattn_delta", &triattn_delta_rows, "rowsum(dout o out) fp32 [B, N, H, S]");
   m.def("triattn_bwd", &triattn_bwd, "sm100 triangle-attention backward: (dq, dk, dv [B, N, S, H, 32] bf16, dbias fp32 [B, H, S, S])",
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("dout"), py::arg("lse"), py::arg("delta"), py::arg("scale"),
-        py::arg("db_ws") = torch::Tensor());
+        py::arg("db_ws"), py::arg("dq_out"), py::arg("dk_out"), py::arg("dv_out"));
 }
