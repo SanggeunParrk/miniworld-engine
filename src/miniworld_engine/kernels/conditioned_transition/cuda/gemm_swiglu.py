@@ -38,23 +38,25 @@ def supported(x: torch.Tensor, w_ab: torch.Tensor) -> bool:
 
 
 class GemmSwiglu:
-    """``gemm_swiglu2_sm100.cu``: 2-CTA clusters, persistent over (tile pair, 128-unit chunk) items, h only. W is taken
-    as ``[Wa; Wb]`` ([2H, K], gate rows first) -- the leader CTA streams the Wa half, its peer the Wb half. Bound launches
-    are cached per (buffer, weight, output): the TMA descriptors carry the pointers."""
+    """``gemm_swiglu2_sm100.cu``: 2-CTA clusters, persistent over (tile pair, 128-unit chunk) items, h only -- or, with
+    ``save_ab`` (the training forward), h and the bf16 pre-activation [a | b] for the backward. W is taken as ``[Wa; Wb]``
+    ([2H, K], gate rows first) -- the leader CTA streams the Wa half, its peer the Wb half. Bound launches are cached per
+    (buffer, weight, output): the TMA descriptors carry the pointers."""
 
-    SMEM = 5 * 32768 + 32768 + 512
-
-    def __init__(self, device_index: int, K: int = 768, H: int = 1536):
+    def __init__(self, device_index: int, K: int = 768, H: int = 1536, save_ab: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
         assert K % 64 == 0 and H % K == 0 and H % 128 == 0
         self._tm = sm100._tm
-        self.K, self.H = K, H
+        self.K, self.H, self.save_ab = K, H, save_ab
+        # ring stages x 32 KB, the h staging (32 KB), with save_ab the a | b staging (64 KB, one ring stage fewer), barriers
+        self.SMEM = (4 * 32768 + 32768 + 65536 + 512) if save_ab else (5 * 32768 + 32768 + 512)
+        defs = (f"DIM={K}", f"HMUL={H // K}", "ITEM_SCHED", *(("SAVE_AB",) if save_ab else ()))
         self.k = sm100._sm100_kernel("gemm_swiglu2_sm100", "gemm_swiglu2_sm100", device_index, src_dir=_dir,
-                               defs=(f"DIM={K}", f"HMUL={H // K}", "ITEM_SCHED"), cluster=2, smem=self.SMEM)
+                               defs=defs, cluster=2, smem=self.SMEM)
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs: dict = {}
 
-    def _bind(self, x, w_ab, out):
+    def _bind(self, x, w_ab, out, ab=None):
         M, K = x.shape
         H = self.H
         assert K == self.K and w_ab.shape == (2 * H, K) and out.shape == (M, H)
@@ -62,19 +64,26 @@ class GemmSwiglu:
         wa, wb = w_ab[:H], w_ab[H:]
         maps = (self._tm(x, [K, M], K * 2, [64, 64]), self._tm(wa, [K, H], K * 2, [64, 128]),
                 self._tm(wb, [K, H], K * 2, [64, 128]), self._tm(out, [H, M], H * 2, [64, 64]))
+        if self.save_ab:
+            assert ab is not None and ab.shape == (M, 2 * H) and ab.is_contiguous()
+            maps = (*maps, self._tm(ab[:, :H], [H, M], 2 * H * 2, [64, 64]), self._tm(ab[:, H:], [H, M], 2 * H * 2, [64, 64]), 1)
         tiles = (M + 127) // 128
         grid = (self.nsm & ~1, 1, 1)             # ITEM_SCHED: (tile pair, chunk) items dealt over every pair of SMs
 
         def run():
             self.k(grid, (512, 1, 1), *maps, int(tiles))
-        run.keep = (maps, x, w_ab, out)
+        run.keep = (maps, x, w_ab, out, ab)
         return run
 
-    def __call__(self, x, w_ab, out):
+    def __call__(self, x, w_ab, out, ab=None):
+        """out = silu(a) * b; with save_ab also ab = [a | b] ([M, 2H] bf16)."""
+        if self.save_ab:                 # training: fresh (saved) buffers every call; a cached binding would pin them
+            self._bind(x, w_ab, out, ab)()
+            return out
         key = (x.data_ptr(), w_ab.data_ptr(), out.data_ptr(), tuple(x.shape))
         run = self.runs.get(key)
         if run is None:
-            run = self.runs[key] = self._bind(x, w_ab, out)
+            run = self.runs[key] = self._bind(x, w_ab, out, ab)
         run()
         return out
 

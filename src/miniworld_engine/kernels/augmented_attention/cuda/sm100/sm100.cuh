@@ -158,6 +158,15 @@ DEVI void tma_load_2d_mc(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int 
 DEVI void tma_store_2d(const CUtensorMap* m, uint32_t src, int c0, int c1) {
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%2, %3}], [%1];" :: "l"(m), "r"(src), "r"(c0), "r"(c1) : "memory");
 }
+// 3-D tiles (coordinates innermost-first): a per-sample row dimension makes TMA zero-fill loads and clip stores past its end
+DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
+  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
+               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
+}
+DEVI void tma_store_3d(const CUtensorMap* m, uint32_t src, int c0, int c1, int c2) {
+  asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group [%0, {%2, %3, %4}], [%1];"
+               :: "l"(m), "r"(src), "r"(c0), "r"(c1), "r"(c2) : "memory");
+}
 DEVI void tma_store_commit() { asm volatile("cp.async.bulk.commit_group;" ::: "memory"); }
 DEVI void tma_store_wait_read0() { asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory"); }
 DEVI void tma_store_wait0() { asm volatile("cp.async.bulk.wait_group 0;" ::: "memory"); }
@@ -313,6 +322,27 @@ DEVI uint64_t desc_sw64(uint32_t saddr) {
 }
 // 64-byte swizzle of a [rows][64 B] tile (512-B aligned): 16-byte chunk q of row r lives at chunk q ^ ((r >> 1) & 3)
 DEVI uint32_t sw64(uint32_t r, uint32_t q) { return r * 64u + ((q ^ ((r >> 1) & 3u)) << 4); }
+// ------------------------------------------------------------------ kind::tf32 (fp32 operands, fp32 accumulation)
+// K-major operands use the usual layouts (desc_k128 / desc_sw64). An MN-major operand must sit in the 128-B swizzle with 32-B
+// atomicity (TMA CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B, UMMA layout type 1): 32-B chunk j of 128-B row r at chunk j ^ (r & 3), SBO =
+// 512 (4-row groups), LBO = the distance between 32-element MN atoms. In the plain 128-B swizzle an MN-major tf32 operand
+// multiplies to zeros (measured on B200), and a K-major one in the 32-B-atom layout faults.
+__host__ __device__ constexpr uint32_t idesc_tf32(int M, int N, int a_mn = 0, int b_mn = 0) {
+  return (1u << 4) | (2u << 7) | (2u << 10) | ((uint32_t)a_mn << 15) | ((uint32_t)b_mn << 16) | ((uint32_t)(N >> 3) << 17) |
+         ((uint32_t)(M >> 4) << 24);
+}
+DEVI uint64_t desc_mn32b(uint32_t saddr, uint32_t lbo) {
+  return (uint64_t)((saddr >> 4) & 0x3FFFu) | ((uint64_t)((lbo >> 4) & 0x3FFFu) << 16) | ((uint64_t)(512 >> 4) << 32) |
+         ((uint64_t)1 << 46) | ((uint64_t)1 << 61);
+}
+DEVI void umma_ss_tf32(uint32_t d_tmem, uint64_t a, uint64_t b, uint32_t idesc, uint32_t accumulate) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::tf32 [%0], %1, %2, %3, p; }"
+               :: "r"(d_tmem), "l"(a), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
+}
+DEVI void umma_ts_tf32(uint32_t d_tmem, uint32_t a_tmem, uint64_t b, uint32_t idesc, uint32_t accumulate) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::tf32 [%0], [%1], %2, %3, p; }"
+               :: "r"(d_tmem), "r"(a_tmem), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
+}
 DEVI void tmem_st8(uint32_t taddr, const uint32_t (&r)[8]) {
   asm volatile("tcgen05.st.sync.aligned.32x32b.x8.b32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};"
                :: "r"(taddr), "r"(r[0]), "r"(r[1]), "r"(r[2]), "r"(r[3]), "r"(r[4]), "r"(r[5]), "r"(r[6]), "r"(r[7]) : "memory");

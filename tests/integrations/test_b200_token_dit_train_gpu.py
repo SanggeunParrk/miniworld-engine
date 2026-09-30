@@ -1,6 +1,6 @@
-"""The fused token DiT TRAINING block on B200 (integrations/token_dit_train.py) against the fp32 PyTorch DiTBlock: output and
-every input / parameter gradient no worse than the engine's own module path in the same bf16 regime (the switch is off in
-the second run), and the path actually taken."""
+"""The fused token DiT TRAINING block on B200 (integrations/token_dit_train.py) against the fp32 PyTorch DiTBlock (IEEE, TF32
+off): output and every input / parameter gradient no worse than the engine's own module path in the same regime -- bf16, or
+fp32 (the fused path's TF32 kernels) -- (the switch is off in the second run), and the path actually taken."""
 
 import pytest
 import torch
@@ -41,7 +41,14 @@ def _randomize(m):
     return m
 
 
-def _run(m, single, cond, pair, mask, w):
+def _run(m, single, cond, pair, mask, w, tf32=None):
+    if tf32 is not None:
+        old = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+        try:
+            return _run(m, single, cond, pair, mask, w)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = old
     ins = [t.detach().clone().to(next(m.parameters()).dtype).requires_grad_() for t in (single, cond, pair)]
     out = m(*ins, mask)
     (out.float() * w).sum().backward()
@@ -51,15 +58,16 @@ def _run(m, single, cond, pair, mask, w):
     return res
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
-def test_train_block_matches_the_module_path(qk, masked, monkeypatch):
+def test_train_block_matches_the_module_path(dtype, qk, masked, monkeypatch):
     torch.manual_seed(7)
     A, L = 4, 256
     ref = _randomize(DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda())
     eng = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda()
     eng.load_state_dict(ref.state_dict())
-    eng = eng.to(torch.bfloat16)
+    eng = eng.to(dtype)
     g = torch.Generator(device="cuda").manual_seed(8)
     single = torch.randn(A, 1, L, 768, device="cuda", generator=g)
     cond = torch.randn(A, 1, L, 384, device="cuda", generator=g)
@@ -67,14 +75,17 @@ def test_train_block_matches_the_module_path(qk, masked, monkeypatch):
     mask = (torch.rand(1, L, device="cuda", generator=g) > 0.15) if masked else None
     w = torch.randn(A, 1, L, 768, device="cuda", generator=g)
 
-    truth = _run(ref, single, cond, pair, mask, w)
+    truth = _run(ref, single, cond, pair, mask, w, tf32=False)
     calls = []
     orig = token_dit_train._Block.apply
     monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a))
-    fused = _run(eng, single, cond, pair, mask, w)
-    assert calls, "the bf16 training call did not take the fused path"
+    # the same regime for both: fp32 is the TF32 recipe (the fused path forces TF32 on its GEMMs; the module path follows
+    # allow_tf32, so it is set for its run too)
+    tf32 = True if dtype is torch.float32 else None
+    fused = _run(eng, single, cond, pair, mask, w, tf32=tf32)
+    assert calls, f"the {dtype} training call did not take the fused path"
     monkeypatch.setenv("MINIWORLD_TOKEN_DIT_TRAIN", "0")
-    module = _run(eng, single, cond, pair, mask, w)
+    module = _run(eng, single, cond, pair, mask, w, tf32=tf32)
     assert set(fused) == set(truth), sorted(set(truth) ^ set(fused))
     worst = []
     for k in truth:

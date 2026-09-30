@@ -5,6 +5,9 @@
 // q | k | v | g are column views of the q|k|v|g GEMM output [S L, 3072] bf16. Logits arrive in exp2 units: sm_scale log2 e is
 // folded into Wq / bq and log2 e into the hoisted bias, so the kernel applies no scale. S may be odd: work items are sample pairs,
 // and the missing partner of the last pair recomputes the last sample (loads clamped) and does not store.
+// L is any multiple of 8 (the bias rows' 16-byte TMA stride): every map is 3-D (columns, row of the sample, sample | head), so
+// the last query tile's rows past L load as zeros and are clipped on the store, and the last key block's keys past L are
+// masked to -inf here (their k, v and bias load as zeros).
 // Per item the softmax warpgroup TMA-loads its g tile into its bf16 staging buffer; the epilogue gates o in place row by row and
 // one TMA store writes the tile over q. No LSE.
 // TMEM: S[w][b] at w * 128 + b * 64 (64 cols), P[w] at 256 + w * 32 (bf16, 32 cols), O[w] at 320 + w * 64 (48 cols).
@@ -79,7 +82,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int npair = (A + 1) >> 1, mt = L / QM, nb = L / BN;
+  const int npair = (A + 1) >> 1, mt = (L + QM - 1) / QM, nb = (L + BN - 1) / BN;
   const int items = npair * mt * 16;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int nblk = my_items * nb;                                          // this CTA's key blocks, all items
@@ -113,17 +116,17 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         const int qs = li % QR, qcol = head * DH;
         if (li >= QR) mbar_wait(&B.q_empty[qs], ((li / QR) - 1) & 1);
         mbar_expect_tx(&B.q_full[qs], 2 * QM * DH * 2);
-        for (int w = 0; w < 2; ++w) tma_load_2d(su + O_Q + qs * 2 * TQ + w * TQ, &mq, &B.q_full[qs], qcol, min(a0 + w, A - 1) * L + m0);
+        for (int w = 0; w < 2; ++w) tma_load_3d(su + O_Q + qs * 2 * TQ + w * TQ, &mq, &B.q_full[qs], qcol, m0, min(a0 + w, A - 1));
         for (int n = 0; n < nb; ++n, ++g) {
           const int s = g % ST;
           if (g >= ST) mbar_wait(&B.kv_empty[s], ((g / ST) - 1) & 1);
           const uint32_t st = su + O_ST + s * STB;
           mbar_expect_tx(&B.kv_full[s], 4 * BN * DH * 2 + TB);
           for (int w = 0; w < 2; ++w) {
-            tma_load_2d(st + w * TK, &mk, &B.kv_full[s], qcol, min(a0 + w, A - 1) * L + n * BN);
-            tma_load_2d(st + 2 * TK + w * TK, &mv, &B.kv_full[s], qcol, min(a0 + w, A - 1) * L + n * BN);
+            tma_load_3d(st + w * TK, &mk, &B.kv_full[s], qcol, n * BN, min(a0 + w, A - 1));
+            tma_load_3d(st + 2 * TK + w * TK, &mv, &B.kv_full[s], qcol, n * BN, min(a0 + w, A - 1));
           }
-          tma_load_2d(st + 4 * TK, &mb, &B.kv_full[s], n * BN, head * L + m0);
+          tma_load_3d(st + 4 * TK, &mb, &B.kv_full[s], n * BN, m0, head);
           TR(0, g);
         }
       }
@@ -183,7 +186,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           int a0, m0, head; item_of(li, a0, m0, head);
           tma_store_wait_read0();
           mbar_expect_tx(&B.g_full[w], QM * DH * 2);
-          tma_load_2d(xg, &mg, &B.g_full[w], head * DH, min(a0 + w, A - 1) * L + m0);
+          tma_load_3d(xg, &mg, &B.g_full[w], head * DH, m0, min(a0 + w, A - 1));
         }
       }
       mbar_wait(&B.kv_full[s], (G / ST) & 1);                              // the bias tile of this block
@@ -207,6 +210,10 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         }
       }
       if (G >= 1) { tc_fence_before(); }
+      if (const int kv = L - n * BN; kv < BN) {                            // the last block's keys past L (kv is a multiple of 8)
+#pragma unroll
+        for (int j = 0; j < BN / 2; ++j) if (2 * j >= kv) t[j] = mk2(-INFINITY, -INFINITY);
+      }
       float mxp[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};         // four independent chains
 #pragma unroll
       for (int j = 0; j < BN / 2; ++j) mxp[j & 3] = max3f(mxp[j & 3], lo2(t[j]), hi2(t[j]));
@@ -296,7 +303,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         fence_proxy_async();
         named_bar_sync(1 + w, 128);
         if (r == 0 && a0 + w < A) {
-          tma_store_2d(&mo, xg, head * DH, (a0 + w) * L + m0);
+          tma_store_3d(&mo, xg, head * DH, m0, a0 + w);
           tma_store_commit();
         }
       }

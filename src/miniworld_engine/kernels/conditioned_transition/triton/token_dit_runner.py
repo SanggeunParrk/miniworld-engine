@@ -13,11 +13,28 @@ What each call hoists, and why it may:
           sees the same one: it is computed for L token rows, not S * L, and for all 24 blocks in two GEMMs
           (LayerNorm(cond) statistics are shared too; each block's cond-LayerNorm weight is folded).
 """
+import contextlib
+
 import torch
 import torch.nn.functional as F
 
 from miniworld_engine.kernels.conditioned_transition.triton import token_dit_kernels as K
 from miniworld_engine.kernels.conditioned_transition.triton.token_dit_attn import attention_gated_in_place, attention_gated_in_place2, bias_descriptor
+
+
+@contextlib.contextmanager
+def _tf32(on: bool):
+    """cuBLAS on TF32 tensor cores for the fp32 path's GEMMs, whatever the caller's allow_tf32 (restored after): the fp32
+    path is the TF32 recipe -- its attention core is TF32 too -- and IEEE fp32 GEMMs ran the step 5-8x slower."""
+    if not on:
+        yield
+        return
+    old = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = old
 
 
 def _row_kernels(device):
@@ -63,14 +80,13 @@ def attention_in_place(q, k, v, bias, mask, m, key):
 class FusedTokenDiT:
     def __init__(self, blocks, dtype=torch.bfloat16, core="gated2", prescale=True, core_precision="tf32"):
         """``dtype`` is the activation / weight dtype of the whole path: bf16, or fp32 (MiniWorld's v1 diffusion recipe).
-        The residual stream is fp32 either way. fp32 GEMMs follow ``torch.backends.cuda.matmul.allow_tf32`` -- the caller's
-        policy, as for any torch matmul -- and ``core_precision`` sets the attention core's MMA precision for fp32."""
+        The residual stream is fp32 either way. fp32 GEMMs run on TF32 tensor cores (``_tf32``: the fp32 path is the TF32
+        recipe), and ``core_precision`` sets the Triton attention core's MMA precision for fp32."""
         self.core_precision = core_precision
         self.prescale = prescale     # fold sm_scale*log2(e) into Wq,bq and log2(e) into the pair-bias weights (gated core only)
         self.core = core            # "gated": tdit.attn (sample-fastest grid, gate epilogue); "engine": the engine kernel + gate pass
         blocks = list(blocks)
         a0 = blocks[0].attention
-        assert not a0.use_qk_norm, "QK-norm is not implemented on this path"
         self.nb = len(blocks)
         self.h = a0.n_head
         self.d = a0.to_query.weight.shape[0]
@@ -79,7 +95,19 @@ class FusedTokenDiT:
         self.eps = 1e-5
         dev = a0.to_query.weight.device
         self.K = _row_kernels(dev)
+        # QK-norm (RMSNorm of every 48-wide q / k head after the projection) runs as one in-place CUDA row pass; the
+        # sm_scale log2 e fold then moves from Wq / bq, which the norm would cancel, into the q norm's weight
+        self.qk = bool(a0.use_qk_norm)
+        if self.qk:
+            if not hasattr(self.K, "qknorm_rows"):
+                raise NotImplementedError("QK-norm on the fused token DiT step needs the CUDA row kernels (B200)")
+            eq, ek = getattr(a0, "qk_eps", None) or (a0.norm_query.effective_eps(dtype), a0.norm_key.effective_eps(dtype))
+            self.eq, self.ek = float(eq), float(ek)
         f32 = lambda t: t.detach().float()
+        # column blocks of the projection GEMM output. fp32 packs q | k | g | v: its sm_100a core (TF32) takes q | k | g and
+        # v^T from a second GEMM over the last quarter of the weight (see _run), with no copy of the pack
+        order = ("q", "k", "g", "v") if dtype is torch.float32 else ("q", "k", "v", "g")
+        self.col = {n: i for i, n in enumerate(order)}
         w1, b1, w2, b2, pw = [], [], [], [], []
         self.per = []
         for blk in blocks:
@@ -94,10 +122,11 @@ class FusedTokenDiT:
             w2 += [f32(at.to_scale.weight), f32(tr.to_scale.weight)]
             b2 += [f32(at.to_scale.bias), f32(tr.to_scale.bias)]
             pw.append(f32(at.to_bias.weight) * f32(at.ln_pair.weight))            # [H, dp], ln_pair weight folded
-            wqkvg = torch.cat([at.to_query.weight, at.to_key.weight, at.to_value.weight, at.to_gate.weight], 0)
-            bqkvg = torch.cat([at.to_query.bias.detach(), torch.zeros(3 * self.d, device=dev, dtype=at.to_query.bias.dtype)])
-            if prescale and core in ("gated", "gated2"):
-                qs = (self.d // self.h) ** -0.5 * 1.4426950408889634          # sm_scale * log2(e)
+            proj = dict(q=at.to_query.weight, k=at.to_key.weight, v=at.to_value.weight, g=at.to_gate.weight)
+            wqkvg = torch.cat([proj[n] for n in order], 0)
+            bqkvg = torch.cat([at.to_query.bias.detach(), torch.zeros(3 * self.d, device=dev, dtype=at.to_query.bias.dtype)])  # q first
+            qs = (self.d // self.h) ** -0.5 * 1.4426950408889634 if prescale and core in ("gated", "gated2") else 1.0
+            if qs != 1.0 and not self.qk:                                   # sm_scale * log2(e) into Wq, bq
                 wqkvg = wqkvg.detach().float().clone(); bqkvg = bqkvg.float().clone()
                 wqkvg[: self.d] *= qs
                 bqkvg[: self.d] *= qs
@@ -109,6 +138,8 @@ class FusedTokenDiT:
                 wqkvg=wqkvg.detach().to(dtype).contiguous(), wo=at.to_out.weight.detach().to(dtype).contiguous(),
                 wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0).detach().to(dtype).contiguous(),
                 ws=tr.squeeze.weight.detach().to(dtype).contiguous()))
+            if self.qk:                                                     # sm_scale * log2(e) into the q norm's weight
+                self.per[-1].update(nq=(f32(at.norm_query.weight) * qs).contiguous(), nk=f32(at.norm_key.weight).contiguous())
         self.w1 = torch.cat(w1, 0).to(dtype).contiguous()          # [nb*4*d, dc]
         self.b1 = torch.cat(b1, 0).to(dtype).contiguous()
         self.w2 = torch.cat(w2, 0).to(dtype).contiguous()          # [nb*2*d, dc]
@@ -126,6 +157,10 @@ class FusedTokenDiT:
     def hoist(self, pair, mask=None):
         """pair [1, L, L, dp] -> every block's bias, [nb*H, L, L] head-major. ``mask`` [L] bool marks the real tokens;
         padded keys get -inf here, once per sample, so the attention core never touches a mask."""
+        with _tf32(self.dtype is torch.float32):
+            return self._hoist(pair, mask)
+
+    def _hoist(self, pair, mask):
         L = pair.shape[1]
         out = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
         if getattr(self.K, "PAIR_BIAS_MASK", False):              # the CUDA rows fold the mask into the same pass
@@ -161,24 +196,40 @@ class FusedTokenDiT:
     def _cond(self, cond, L, D):
         """Raw logits: the v2 row kernels apply the sigmoid as they load, where it costs nothing (they are
         memory-bound); a separate in-place pass over the strided scale columns cost 5.3 us a block."""
-        c = cond[0, 0]                                                 # [L, dc]: shared by every sample at a step
-        cn = F.layer_norm(c.float(), (self.dc,), eps=self.eps).to(self.dtype)
-        g1 = torch.addmm(self.b1, cn, self.w1.t()).view(L, self.nb, 4, D)
-        g2 = torch.addmm(self.b2, c.to(self.dtype), self.w2.t()).view(L, self.nb, 2, D)
+        # A sampling step shares one conditioning across the samples (cond [1, ...] or expanded, stride 0): L rows. A
+        # conditioning per sample: S L rows. The row kernels read these tables at row % period with period = their row
+        # count (see _run), so both cases run the same kernels.
+        shared = cond.shape[0] == 1 or cond.stride(0) == 0
+        c = cond[0, 0] if shared else cond.reshape(-1, self.dc)       # [L or S L, dc]
+        rows = c.shape[0]
+        if hasattr(self.K, "layernorm_rows"):                         # one CUDA pass: any dtype in, the path's dtype out
+            cn = torch.empty(rows, self.dc, device=c.device, dtype=self.dtype)
+            self.K.layernorm_rows(c, cn, self.eps)
+        else:
+            cn = F.layer_norm(c.float(), (self.dc,), eps=self.eps).to(self.dtype)
+        g1 = torch.addmm(self.b1, cn, self.w1.t()).view(rows, self.nb, 4, D)
+        g2 = torch.addmm(self.b2, c.to(self.dtype), self.w2.t()).view(rows, self.nb, 2, D)
         return g1, g2
 
     def step(self, single, cond, bias, out_dtype=None, streams=None):
         """One solver step. ``streams`` > 1 splits the samples into that many groups, each on its own CUDA stream: the
         samples share only the conditioning and the pair bias, so one group's memory-bound passes can run under another
         group's GEMMs and attention."""
+        with _tf32(self.dtype is torch.float32):
+            return self._step(single, cond, bias, out_dtype or single.dtype, streams)
+
+    def _step(self, single, cond, bias, want, streams):
         S, B, L, D = single.shape
         assert B == 1
         streams = min(streams or self.streams, S)
         g1, g2 = self._cond(cond, L, D)
+        if g1.shape[0] != L:
+            streams = 1                                    # per-sample tables are not split across sample groups
         if streams <= 1:
-            # copy=True: the fp32 residual is this runner's buffer; returning it uncopied (fp32 out) let the next step on a
-            # reused runner overwrite an earlier result
-            return self._run(single, g1, g2, bias, 0).view(S, 1, L, D).to(out_dtype or single.dtype, copy=True)
+            out, fresh = self._run(single, g1, g2, bias, 0, want)
+            # copy=True otherwise: the fp32 residual is this runner's buffer; returning it uncopied (fp32 out) let the next
+            # step on a reused runner overwrite an earlier result
+            return out.view(S, 1, L, D) if fresh else out.view(S, 1, L, D).to(want, copy=True)
         main = torch.cuda.current_stream()
         if len(self._streams) < streams:
             self._streams += [torch.cuda.Stream() for _ in range(streams - len(self._streams))]
@@ -190,27 +241,39 @@ class FusedTokenDiT:
             st = self._streams[i]
             st.wait_event(ready)
             with torch.cuda.stream(st):
-                outs.append(self._run(single[cuts[i]:cuts[i + 1]], g1, g2, bias, i + 1))
+                outs.append(self._run(single[cuts[i]:cuts[i + 1]], g1, g2, bias, i + 1, want)[0])
             done = torch.cuda.Event()
             done.record(st)
             main.wait_event(done)
-        return torch.cat([o.view(-1, 1, L, D) for o in outs], 0).to(out_dtype or single.dtype)
+        return torch.cat([o.view(-1, 1, L, D) for o in outs], 0).to(want)
 
-    def _run(self, single, g1, g2, bias, tag):
-        """The blocks for one group of samples; returns the fp32 residual, [S*L, D]."""
+    def _run(self, single, g1, g2, bias, tag, want):
+        """The blocks for one group of samples: (output [S*L, D], fresh). With the CUDA rows the input is read and the
+        output written by the first / last row pass (a fresh ``want`` tensor); otherwise (the fp32 residual buffer, False)."""
         from miniworld_engine.autotune.shape_key import atom_key
         S, B, L, D = single.shape
         M, H = S * L, self.h
+        P = g1.shape[0]                                    # AdaLN / gate table period: L (shared cond) or S L (per sample)
         buf = self._buffers(S, L, single.device, tag)
         x, xa, qkvg, a, y, ab, h = (buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h"))
-        x.copy_(single.reshape(M, D))
-        self.K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, L, self.eps)
-        # q, k, v, g as strided views of ONE [M, 4D] GEMM output; the core launcher honours strides
-        q, k, v = (qkvg.view(S, 1, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(3))
+        fused_io = hasattr(self.K, "adaln_in_rows")
+        if fused_io:                                       # x = single (into fp32) and the first AdaLN, one pass
+            self.K.adaln_in_rows(single.reshape(M, D), x, g1[:, 0, 0], g1[:, 0, 1], xa, P, self.eps)
+        else:
+            x.copy_(single.reshape(M, D))
+            self.K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, P, self.eps)
+        # q, k, v, g as strided views of ONE [M, 4D] GEMM output (column blocks in self.col order); the core launcher
+        # honours strides
+        c = self.col
+        q, k, v = (qkvg.view(S, 1, L, 4 * D)[..., c[n] * D:(c[n] + 1) * D].unflatten(-1, (H, D // H)) for n in "qkv")
         key = atom_key(L)
-        q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., i * D:(i + 1) * D].unflatten(-1, (H, D // H)) for i in range(4))
-        keep2 = buf["keep"].view(S, L)
+        q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., c[n] * D:(c[n] + 1) * D].unflatten(-1, (H, D // H)) for n in "qkvg")
         sm100 = self.core == "gated2" and self.prescale and self._sm100_core(single.device, L, D, H)
+        tf32_core = sm100 and self.dtype is torch.float32
+        if tf32_core:
+            # the TF32 core's operands in the same storage: q | k | g [M, 3D] (o lands over q) and v^T [D, M]
+            qkg, vt = qkvg.view(-1)[:3 * M * D].view(M, 3 * D), qkvg.view(-1)[3 * M * D:].view(D, M)
+        keep2 = buf["keep"].view(S, L)
         gsw = self._gemm_swiglu(single.device, xa)
         if self.core == "gated2" and not sm100:
             assert self.prescale, "the v2 core expects pre-scaled logits"
@@ -219,8 +282,18 @@ class FusedTokenDiT:
                 self._bdesc, self._bdesc_key = bias_descriptor(bias), key_d
             bdesc = self._bdesc
         for b, p in enumerate(self.per):
-            self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
-            if sm100:
+            if not tf32_core:
+                self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
+                if self.qk:
+                    self.K.qknorm_rows(qkvg, p["nq"], p["nk"], self.eq, self.ek)
+            if tf32_core:
+                self._mm(xa, p["wqkvg"][:3 * D], qkg, p["bqkvg"][:3 * D])    # q | k | g
+                if self.qk:
+                    self.K.qknorm_rows(qkg, p["nq"], p["nk"], self.eq, self.ek)
+                torch.mm(p["wqkvg"][3 * D:], xa.t(), out=vt)                 # v^T (v has no bias)
+                sm100(qkg, bias, b, S, vt)                                # sigmoid(g)*o over q, one sm_100a kernel
+                self._mm(qkg[:, :D], p["wo"], y)
+            elif sm100:
                 sm100(qkvg, bias, b, S)                                   # sigmoid(g)*o over q, one sm_100a kernel
                 self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated2":
@@ -231,9 +304,9 @@ class FusedTokenDiT:
                 torch.mm(qkvg[:, :D], p["wo"].t(), out=y)
             else:
                 attention_in_place(q, k, v, bias[b * H:(b + 1) * H].unsqueeze(0), buf["keep"], buf["lse"], key)
-                self.K.gate_rows(qkvg[:, :D], qkvg[:, 3 * D:], a)            # o sits where q was
+                self.K.gate_rows(qkvg[:, :D], qkvg[:, c["g"] * D:(c["g"] + 1) * D], a)   # o sits where q was
                 torch.mm(a, p["wo"].t(), out=y)
-            self.K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, L, self.eps)
+            self.K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, P, self.eps)
             if gsw is not None:
                 gsw(xa, p["wab"], h)                                  # expand + SwiGLU, one sm_100a kernel
             else:
@@ -241,9 +314,13 @@ class FusedTokenDiT:
                 self.K.swiglu_rows(ab, h)
             self._mm(h, p["ws"], y)
             last = b + 1 == self.nb
+            if last and fused_io:                          # the last residual straight into the output
+                out = torch.empty(M, D, device=x.device, dtype=want)
+                self.K.resgate_out_rows(x, y, g2[:, b, 1], out, P)
+                return out, True
             self.K.resgate_adaln_rows(x, y, g2[:, b, 1], None if last else g1[:, b + 1, 0],
-                                 None if last else g1[:, b + 1, 1], xa, L, self.eps)
-        return x
+                                 None if last else g1[:, b + 1, 1], xa, P, self.eps)
+        return x, False
 
     @staticmethod
     def _blackwell_bf16(device, dtype):
@@ -271,9 +348,9 @@ class FusedTokenDiT:
         return cache[key]
 
     def _sm100_core(self, device, L, D, H):
-        """The sm_100a gated core (``augmented_attention/cuda/sm100``, attn_inf.cu) where it fits -- bf16, 16 x 48, L a
-        multiple of 128, B200 -- and builds; the Triton gated2 core otherwise. Same contract: pre-scaled logits in,
-        sigmoid(g) * o written over q."""
+        """The sm_100a gated core (``augmented_attention/cuda/sm100``: attn_inf.cu for bf16, attn_inf_tf32.cu for fp32 with
+        TF32 MMA) where it fits -- 16 x 48, L a multiple of 8, B200 -- and builds; the Triton gated2 core otherwise.
+        Same contract: pre-scaled logits in, sigmoid(g) * o written over q."""
         idx = device.index if device.index is not None else torch.cuda.current_device()
         cores = self.__dict__.setdefault("_sm100_cores", {})
         if idx not in cores:
@@ -281,13 +358,13 @@ class FusedTokenDiT:
             core = None
             if sm100.inference_core_supported(self.dtype, L, D, H, idx) and not torch.compiler.is_compiling():
                 try:
-                    core = sm100.GatedInferenceCore(idx)
+                    core = sm100.GatedInferenceCore(idx, self.dtype)
                 except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
                     import warnings
                     warnings.warn(f"sm100 token DiT core unavailable, keeping the Triton core: {exc!r}", RuntimeWarning, stacklevel=2)
             cores[idx] = core
         core = cores[idx]
-        return core if core is not None and L % 128 == 0 else None
+        return core if core is not None and L % 8 == 0 else None
 
     def _mm(self, A, W, out, bias=None):
         """out = A @ W^T (+ bias), cuBLAS."""
