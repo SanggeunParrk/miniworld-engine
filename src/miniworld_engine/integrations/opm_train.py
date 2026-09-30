@@ -295,6 +295,12 @@ class _SavedContext:
 
 def _forward_fake(args, eps, save_o):
     m=args[0];_,s,n,_=m.shape
+    if torch.cuda.get_device_capability(m.device)==(10,0):    # sm_100a keeps (nothing for the mask, its bits, A2, BT, stats [N, S, 2])
+        return [torch.empty((1,n,n,CZ),device=m.device,dtype=torch.bfloat16),torch.empty((0,),device=m.device,dtype=m.dtype),
+                torch.empty((n,s//32),device=m.device,dtype=torch.int32),
+                torch.empty((n*CH,s),device=m.device,dtype=torch.bfloat16),torch.empty((n*CH,s),device=m.device,dtype=torch.bfloat16),
+                torch.empty((n,s,2),device=m.device,dtype=torch.float32),
+                torch.empty((n*CH,n*CH) if save_o else (0,),device=m.device,dtype=torch.bfloat16)]
     return [torch.empty((1,n,n,CZ),device=m.device,dtype=torch.bfloat16),torch.empty((s,n),device=m.device,dtype=torch.bfloat16),torch.empty((n,n),device=m.device,dtype=torch.float32),
             torch.empty((n*CH,s),device=m.device,dtype=torch.bfloat16),torch.empty((n*CH,s),device=m.device,dtype=torch.bfloat16),torch.empty((s,n,2),device=m.device,dtype=torch.float32),
             torch.empty((n*CH,n*CH) if save_o else (0,),device=m.device,dtype=torch.bfloat16)]

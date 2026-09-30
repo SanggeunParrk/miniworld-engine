@@ -1,7 +1,8 @@
 """CUDA row kernels of the fused token DiT (``token_dit_rows.cu``): the passes between the GEMMs, one block per row.
 
 Same entry points and semantics as the Triton module ``kernels/conditioned_transition/triton/token_dit_kernels.py``
-(``adaln_rows``, ``resgate_adaln_rows``, ``gate_rows``, ``swiglu_rows``, ``pair_bias_all``), so the runner can take
+(``adaln_rows``, ``resgate_adaln_rows``, ``gate_rows``, ``swiglu_rows``, ``pair_bias_all``; ``qknorm_rows`` has no
+Triton twin: QK-norm on the fused step is B200-only), so the runner can take
 either. ``pair_bias_all`` is a CUDA LayerNorm of the pair rows and one cuBLAS GEMM that writes every block's bias
 head-major (a fused WMMA LayerNorm + projection kernel measured 3.4-3.6x slower on B200 and was dropped). Built on first use (``load_extension``), never at import.
 """
@@ -55,6 +56,28 @@ def gate_rows(o, g, out):
 def swiglu_rows(ab, out):
     """out = silu(a) * b for ab = [a | b]."""
     _ext().swiglu_rows_cuda(ab, out)
+
+
+def adaln_in_rows(xin, x, ms, mb, out, L, eps=1e-5):
+    """x = xin (the step's input rows, fp32 or bf16, into the fp32 residual [M, 768]) and out = LN(x) * sigmoid(ms) + mb,
+    one pass (adaln_rows after a copy, without the copy)."""
+    _ext().adaln_in_rows_cuda(xin, x, ms, mb, out, int(L), float(eps))
+
+
+def resgate_out_rows(x, y, gl, out, L):
+    """out = x + sigmoid(gl[row % L]) * y in out's dtype: the block's last residual, straight into the step's output."""
+    _ext().resgate_out_rows_cuda(x, y, gl, out, int(L))
+
+
+def layernorm_rows(z, out, eps=1e-5):
+    """out = LN(z) over 384 columns, no affine (the conditioning rows), z / out fp32 or bf16."""
+    _ext().layernorm_rows_cuda(z, out, float(eps))
+
+
+def qknorm_rows(qk, wq, wk, eq, ek):
+    """QK-norm in place: q = qk[:, 0:768], k = qk[:, 768:1536] of every row, RMSNorm per 48-wide head times wq / wk (fp32
+    [48], any logit scale folded in), eps eq / ek."""
+    _ext().qknorm_rows_cuda(qk, wq, wk, float(eq), float(ek))
 
 
 #: ``pair_bias_all`` applies the key mask itself (the runner then skips its own -inf fill).

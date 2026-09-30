@@ -61,7 +61,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
 
 
 def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    """The other widths (d_pair 64 .. 512, heads of 16 / 32 channels), inference only (no grad, no dropout)."""
+    """The other widths (d_pair 64 .. 512, heads of 16 / 32 channels), inference and training (with the module's dropout)."""
     if (
         getattr(module, "_backend", None) != KernelBackend.TRITON
         or not getattr(module, "_b200_cuda", True)
@@ -69,8 +69,6 @@ def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) ->
     ):
         return False
     if not module.use_self_attention or module.use_qk_norm:
-        return False
-    if torch.is_grad_enabled() or (module.training and module.p_drop > 0.0):
         return False
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4 or pair.shape[1] != pair.shape[2]:
         return False
@@ -87,10 +85,12 @@ def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) ->
 
 
 def forward_wide(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-    """pair + TriangleAttention(pair) on the wide inference path; the packed weights are cached until a parameter changes."""
+    """pair + TriangleAttention(pair) on the wide path (inference, or training with the module's dropout); the packed bf16
+    weights are cached until a parameter changes (data pointer or version: an optimizer step re-packs)."""
     from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import (
         pack_wide_weights,
         wide_inference,
+        wide_train,
     )
 
     weights = (module.to_query.weight, module.to_key.weight, module.to_value.weight, module.to_gate.weight,
@@ -98,13 +98,24 @@ def forward_wide(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch
     key = tuple((w.data_ptr(), w._version) for w in weights)
     cache = getattr(module, "_b200_wide_pack", None)
     if cache is None or cache[0] != key:
-        cache = (key, pack_wide_weights(*weights))
+        with torch.no_grad():
+            cache = (key, pack_wide_weights(*weights))
         module._b200_wide_pack = cache
     head_dim = module.to_query.weight.shape[0] // module.n_head
+    drop = None
+    if module.training and module.p_drop > 0.0:
+        # the module's own draw on the original layout: in the kernels' starting layout it indexes the row's last position
+        B, L = pair.shape[:2]
+        drop = module._make_drop_scale(pair, module.p_drop).reshape(B, L, pair.shape[-1])
     if not module.starting:
         pair = rearrange(pair, "B I J D -> B J I D")
-    out = wide_inference(pair.contiguous(), module.ln_pair.weight, module.ln_pair.bias, cache[1], module.n_head, head_dim,
-                         mask, module.ln_pair.eps)
+    grad = torch.is_grad_enabled() and (pair.requires_grad or any(w.requires_grad for w in weights))
+    if grad or drop is not None:
+        out = wide_train(pair.contiguous(), module.ln_pair.weight, module.ln_pair.bias, *weights, cache[1], module.n_head, head_dim,
+                         mask, module.ln_pair.eps, drop)
+    else:
+        out = wide_inference(pair.contiguous(), module.ln_pair.weight, module.ln_pair.bias, cache[1], module.n_head, head_dim,
+                             mask, module.ln_pair.eps)
     if not module.starting:
         out = rearrange(out, "B J I D -> B I J D").contiguous()
     return out

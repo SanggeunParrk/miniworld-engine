@@ -382,13 +382,12 @@
       {
        "id": "W1",
        "name": "LN + q|k|v|g + bias",
-       "impl": "CUDA · tri_wfront",
+       "impl": "CUDA · tri_wfront (2-CTA cluster)",
        "code": [
         "x_n = F.layer_norm(x, (C,), γ, β)   # in shared memory",
-        "q, k, v, g = (x_n @ W.T for W in W_qkvg)",
+        "q, k, v, g = (x_n @ W.T for W in W_qkvg)   # M = 256 per CTA pair",
         "b = (x_n @ W_b.T).permute(0, 3, 1, 2)",
-        "b = b.masked_fill(~mask[:, None, None], -inf)",
-        "# W streamed in [up to 256 rows][64] chunks"
+        "b = b.masked_fill(~mask[:, None, None], -inf)"
        ],
        "reads": [
         "x",
@@ -422,8 +421,7 @@
        "impl": "CUDA · tri_wtail",
        "code": [
         "u = torch.sigmoid(g) * o   # in shared memory",
-        "y = x + u @ W_o.T",
-        "# W_o streamed in [C][64] chunks"
+        "y = x @ I + u @ W_o.T   # x enters the accumulator as an MMA"
        ],
        "reads": [
         "g, o",
@@ -456,6 +454,313 @@
        "name": "W_qkvgb, W_o, γ, β, mask",
        "shape": "bf16 / fp32",
        "size": "< 3 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_wide": {
+   "title": "B200 · TriangleAttention (starting node) · training · d_pair C = 64 .. 512, heads × 32 (16-channel heads zero-padded), bf16, broadcast dropout, every L = 128k",
+   "panels": [
+    {
+     "label": "forward (saves x, q, k, v, g, b, o, lse, mean / rstd, ds); HD_p = heads × 32",
+     "kernels": [
+      {
+       "id": "W1",
+       "name": "LN + q|k|v|g + bias",
+       "impl": "CUDA · tri_wfront (2-CTA cluster)",
+       "code": [
+        "x_n = F.layer_norm(x, (C,), γ, β)   # in shared memory",
+        "q, k, v, g = (x_n @ W.T for W in W_qkvg)   # M = 256 per CTA pair",
+        "b = (x_n @ W_b.T).permute(0, 3, 1, 2)",
+        "b = b.masked_fill(~mask[:, None, None], -inf)",
+        "mean, rstd = LN statistics   # kept for the backward"
+       ],
+       "reads": [
+        "x",
+        "W_qkvgb (bf16, packed)",
+        "γ, β, mask"
+       ],
+       "writes": [
+        "q, k, v, g",
+        "b",
+        "mean, rstd"
+       ]
+      },
+      {
+       "id": "W2",
+       "name": "attention + LSE",
+       "impl": "CUDA · triattn_fwd",
+       "code": [
+        "s = q[h] @ k[h].T / sqrt(d_head) + b[h]",
+        "lse[h] = torch.logsumexp(s, -1)",
+        "o[h] = torch.exp(s - lse[h]) @ v[h]"
+       ],
+       "reads": [
+        "q, k, v",
+        "b"
+       ],
+       "writes": [
+        "o",
+        "lse"
+       ]
+      },
+      {
+       "id": "W3",
+       "name": "gate + out proj + dropout + residual",
+       "impl": "CUDA · tri_wtail",
+       "code": [
+        "u = torch.sigmoid(g) * o   # in shared memory",
+        "y = x + ds * (u @ W_o.T)",
+        "# ds: [B,1,L,C] broadcast dropout scale"
+       ],
+       "reads": [
+        "g, o",
+        "x",
+        "W_o (bf16, packed), ds"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, C = HD = 256)",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,C] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "q, k, v, g, o  (saved)",
+       "shape": "[L,L,HD_p] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "b  (saved)",
+       "shape": "[heads,L,L] bf16",
+       "size": "9.4 MB"
+      },
+      {
+       "name": "lse  (saved)",
+       "shape": "[L,heads,L] fp32",
+       "size": "19 MB"
+      },
+      {
+       "name": "mean, rstd  (saved)",
+       "shape": "[L,L,2] fp32",
+       "size": "4.7 MB"
+      },
+      {
+       "name": "W_qkvgb, W_o, γ, β, mask, ds",
+       "shape": "bf16 / fp32",
+       "size": "< 3 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward; D = [dq | dk | dv | dg | db], one buffer, each slice written by its producer",
+     "kernels": [
+      {
+       "id": "V1",
+       "name": "dropout scale",
+       "impl": "CUDA · tri_scale_rows (dropout only)",
+       "code": [
+        "dy_s = ds * dy"
+       ],
+       "reads": [
+        "dy",
+        "ds"
+       ],
+       "writes": [
+        "dy_s"
+       ]
+      },
+      {
+       "id": "V2",
+       "name": "gate backward",
+       "impl": "CUDA · tri_wgbwd",
+       "code": [
+        "du = dy_s @ W_o   # W_o^T streamed",
+        "s_g = torch.sigmoid(g);  u = s_g * o",
+        "do, dg = du * s_g, du * o * s_g * (1 - s_g)",
+        "Δ = (do * o).sum per head"
+       ],
+       "reads": [
+        "dy_s",
+        "g, o",
+        "W_o^T (bf16)"
+       ],
+       "writes": [
+        "do, u",
+        "D[dg]",
+        "Δ"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "bias transpose",
+       "impl": "CUDA · triattn_biasT",
+       "code": [
+        "b_T = (b * log2(e)).transpose(-1, -2).float()"
+       ],
+       "reads": [
+        "b"
+       ],
+       "writes": [
+        "b_T"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "attention backward, key side",
+       "impl": "CUDA · triattn_bwd_kv",
+       "code": [
+        "p = torch.exp(s - lse)   # recomputed",
+        "dp = do @ v.T;  ds_ = p * (dp - Δ)",
+        "dv = p.T @ do;  dk = ds_.T @ q * scale"
+       ],
+       "reads": [
+        "q, k, v, do",
+        "b_T",
+        "lse, Δ"
+       ],
+       "writes": [
+        "D[dk], D[dv]"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "attention backward, query side",
+       "impl": "CUDA · triattn_bwd_q",
+       "code": [
+        "p = torch.exp(s - lse)   # recomputed",
+        "ds_ = p * (do @ v.T - Δ)",
+        "dq = ds_ @ k * scale",
+        "db = ds_.sum(pair rows)"
+       ],
+       "reads": [
+        "q, k, v, do",
+        "b",
+        "lse, Δ"
+       ],
+       "writes": [
+        "D[dq]",
+        "db (fp32)"
+       ]
+      },
+      {
+       "id": "V3",
+       "name": "bias grad rows",
+       "impl": "CUDA · tri_db_rows",
+       "code": [
+        "D[db] = db.permute(0, 2, 3, 1)   # heads, then 0"
+       ],
+       "reads": [
+        "db (fp32)"
+       ],
+       "writes": [
+        "D[db]"
+       ]
+      },
+      {
+       "id": "V4",
+       "name": "projection dgrad + LN backward + residual",
+       "impl": "CUDA · tri_whbwd",
+       "code": [
+        "dx_n = D @ [W_qkvg; W_b]",
+        "dx = dy + F.layer_norm backward(dx_n)",
+        "xh1 = cat(xhat, 1)"
+       ],
+       "reads": [
+        "D",
+        "x, dy, mean / rstd",
+        "W^T (bf16), γ"
+       ],
+       "writes": [
+        "dx",
+        "xh1"
+       ]
+      },
+      {
+       "id": "V5",
+       "name": "weight-grad GEMMs",
+       "impl": "cuBLAS · torch.mm (fp32 out)",
+       "code": [
+        "G = D.T @ xh1   # K = L², one GEMM",
+        "dW_o = dy_s.T @ u"
+       ],
+       "reads": [
+        "D",
+        "xh1",
+        "dy_s, u"
+       ],
+       "writes": [
+        "G (fp32)",
+        "dW_o (fp32)"
+       ]
+      },
+      {
+       "id": "V6",
+       "name": "parameter grads",
+       "impl": "CUDA · tri_wfinish (+ _sum)",
+       "code": [
+        "dW = γ * G[:, :C] + outer(G[:, C], β)",
+        "dγ = (W * G[:, :C]).sum(0);  dβ = (W * G[:, C]).sum(0)",
+        "# padded channels dropped, dtype of the parameters"
+       ],
+       "reads": [
+        "G, W_qkvgb",
+        "γ, β",
+        "dW_o (fp32)"
+       ],
+       "writes": [
+        "dW_q, dW_k, dW_v, dW_g, dW_b",
+        "dγ, dβ, dW_o"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, C = HD = 256)",
+     "hbm": [
+      {
+       "name": "dy, dy_s, dx",
+       "shape": "[L,L,C] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "x, q, k, v, g, o  (saved)",
+       "shape": "[L,L,HD_p] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "do, u",
+       "shape": "[L,L,HD_p] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "D",
+       "shape": "[L,L,4·HD_p+64] bf16",
+       "size": "1.28 GB"
+      },
+      {
+       "name": "xh1",
+       "shape": "[L,L,C+64] bf16",
+       "size": "377 MB"
+      },
+      {
+       "name": "b (saved), b_T, db",
+       "shape": "[heads,L,L] bf16 / fp32 / fp32",
+       "size": "9.4 / 19 / 19 MB"
+      },
+      {
+       "name": "lse (saved), Δ",
+       "shape": "[L,heads,L] fp32",
+       "size": "19 MB each"
+      },
+      {
+       "name": "G, W_*, dW_*, dγ, dβ, ds",
+       "shape": "fp32 / bf16",
+       "size": "< 5 MB"
       }
      ]
     }

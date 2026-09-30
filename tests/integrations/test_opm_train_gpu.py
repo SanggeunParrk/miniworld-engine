@@ -1,4 +1,4 @@
-"""The fused OuterProductMean TRAINING path (integrations.opm_train) against this engine's own path. Needs an H100."""
+"""The fused OuterProductMean TRAINING path (integrations.opm_train) against this engine's own path. Needs an H100 or a B200."""
 import os
 
 import pytest
@@ -11,8 +11,8 @@ from miniworld_engine.modules.outer_product import OuterProductMean
 pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU"),
-    pytest.mark.skipif(torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
-                       reason="the kernels are built for sm_90a"),
+    pytest.mark.skipif(torch.cuda.is_available() and torch.cuda.get_device_capability() not in ((9, 0), (10, 0)),
+                       reason="the kernels are built for sm_90a and sm_100a"),
 ]
 
 D_MSA, D_PAIR, D_HID, L, S = 64, 128, 32, 384, 256

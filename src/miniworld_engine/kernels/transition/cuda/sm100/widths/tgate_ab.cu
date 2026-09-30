@@ -16,7 +16,10 @@ using namespace s100;
 #ifndef DIM
 #define DIM 512
 #endif
-constexpr int D_ = DIM, H_ = 4 * DIM, NB = 256, NBLK = H_ / NB, ROWS = 128, NKB = D_ / 64;
+#ifndef HID
+#define HID (4 * DIM)                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = DIM, H_ = HID, NB = 256, NBLK = H_ / NB, ROWS = 128, NKB = D_ / 64;
 #ifdef NO_H
 constexpr int NST = 3;                                         // no h staging: the forward's h is kept for the backward
 constexpr int EPW = 4;                                         // per epilogue warpgroup: 2 x (a/dA | b/dB)

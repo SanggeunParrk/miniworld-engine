@@ -17,7 +17,10 @@ using namespace s100;
 #ifndef DIM
 #define DIM 256
 #endif
-constexpr int D_ = DIM, H_ = 4 * DIM, HS = 64, NCH = H_ / HS, ROWS = 128, NKB = D_ / 64;
+#ifndef HID
+#define HID (4 * DIM)                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = DIM, H_ = HID, HS = 64, NCH = H_ / HS, ROWS = 128, NKB = D_ / 64;
 #ifndef NST_
 #define NST_ 4
 #endif

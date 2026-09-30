@@ -148,3 +148,41 @@ def test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error():
     for name, a, b, t in zip(("out", "dsingle", "dcond", "dpair"), got, tri, truth, strict=False):
         es, et = _rel(a, t), _rel(b, t)
         assert es < 1.5 * et + 1e-4, f"{name}: sm100 {es:.2e} vs triton bf16 {et:.2e}"
+
+
+@needs_blackwell
+@pytest.mark.parametrize(("dtype", "tol"), [(torch.bfloat16, 1.2e-2), (torch.float32, 2e-3)])
+@pytest.mark.parametrize(("S", "L"), [(5, 384), (2, 256), (3, 128), (3, 200), (2, 520), (5, 136)])
+def test_gated_inference_core_matches_fp64(dtype, tol, S, L):
+    """The step's gated core alone (bf16 attn_inf on q | k | v | g / fp32 TF32 attn_inf_tf32 on q | k | g and v^T) against
+    fp64: o = sigmoid(g) softmax_2(q k^T + bias) v written over q, logits in exp2 units; odd S exercises the clamped partner
+    sample, L not a multiple of 128 the zero-filled / clipped tile tails and the masked keys of the last block."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
+    g = torch.Generator(device="cuda").manual_seed(S * 100 + L)
+    M, D = S * L, 768
+    qkvg = torch.randn(M, 4 * D, device="cuda", generator=g)
+    qkvg[:, :D] *= 48 ** -0.5 * 1.4426950408889634              # the runner folds sm_scale log2 e into Wq
+    bias = torch.randn(2 * 16, L, L, device="cuda", generator=g) * 1.4426950408889634
+    ref_in = qkvg.to(dtype).double()
+    q, k, v, gt = (ref_in[:, i * D:(i + 1) * D].view(S, L, 16, 48) for i in range(4))
+    b = bias.to(dtype).double()[16:32]                           # block 1 of a two-block hoist
+    s = torch.einsum("slhd,sjhd->shlj", q, k) + b[None]
+    p = torch.softmax(s * math.log(2.0), -1)
+    want = (torch.einsum("shlj,sjhd->slhd", p, v) * torch.sigmoid(gt)).reshape(M, D)
+    core = sm100.GatedInferenceCore(torch.cuda.current_device(), dtype)
+    x = qkvg.to(dtype)
+    if dtype is torch.float32:                                   # the TF32 core: q | k | g and v^T
+        buf = torch.cat([x[:, :2 * D], x[:, 3 * D:]], 1).contiguous()
+        vt = x[:, 2 * D:3 * D].t().contiguous()
+        core(buf, bias.to(dtype).contiguous(), 1, S, vt)
+        assert torch.equal(vt, x[:, 2 * D:3 * D].t()), "v^T is read only"
+    else:
+        buf = x.contiguous()
+        core(buf, bias.to(dtype).contiguous(), 1, S)
+    torch.cuda.synchronize()
+    e = float((buf[:, :D].double() - want).norm() / want.norm())
+    assert math.isfinite(e), f"{dtype} S{S} L{L}: {e}"
+    assert e < tol, f"{dtype} S{S} L{L}: {e:.2e}"
+    rest = torch.cat([x[:, D:2 * D], x[:, 3 * D:]], 1) if dtype is torch.float32 else x[:, D:]
+    assert torch.equal(buf[:, D:], rest), "only q's columns may be written"

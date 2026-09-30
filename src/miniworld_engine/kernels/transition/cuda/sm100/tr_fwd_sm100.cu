@@ -11,7 +11,11 @@
 #include "sm100.cuh"
 using namespace s100;
 
-constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128;
+#ifndef HID
+#define HID 512                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = 128, H_ = HID, HS = 64, NCH = H_ / HS, ROWS = 128;
+static_assert((NCH & (NCH - 1)) == 0 && NCH >= 2, "power-of-two chunk count");
 constexpr int NW = 4;                                          // weight ring depth (both rings)
 constexpr int WAB_SLOT = 16384, WS_SLOT = 8192;                // this CTA's half: [64 n][128 k] as 2 K-blocks of 8 KB; Ws [64 d][64 k]
 constexpr int O_WAB = 0, O_WS = NW * WAB_SLOT;
@@ -129,7 +133,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     if (leader) {
       if (warp == 1) {
         for (int c = 0; c < nch; ++c) {
-          const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1, sw = c % NW;
+          const int i = c / NCH, j = c & (NCH - 1), s = c & 1, u = c >> 1, sw = c % NW;
           if (lane == 0) TR2(0, 4 * c);
           if (j == 0) mbar_wait_cl(&B.xn_full[i & 1], (i >> 1) & 1);
           mbar_wait(&B.wab_full[sw], (c / NW) & 1);
@@ -151,7 +155,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
         }
       } else {
         for (int q = 0; q < nch; ++q) {
-          const int i = q >> 3, j = q & (NCH - 1), s = q & 1, u = q >> 1, sw = q % NW;
+          const int i = q / NCH, j = q & (NCH - 1), s = q & 1, u = q >> 1, sw = q % NW;
           if (lane == 0) TR2(1, 4 * q);
           mbar_wait(&B.ws_full[sw], (q / NW) & 1);
           if (lane == 0) TR2(1, 4 * q + 1);

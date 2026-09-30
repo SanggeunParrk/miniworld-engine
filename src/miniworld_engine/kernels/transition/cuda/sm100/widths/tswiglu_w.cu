@@ -12,7 +12,10 @@ using namespace s100;
 #ifndef DIM
 #define DIM 384
 #endif
-constexpr int D_ = DIM, H_ = 4 * DIM, HC = 128, NCH = H_ / HC, ROWS = 128, NKB = D_ / 64;
+#ifndef HID
+#define HID (4 * DIM)                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = DIM, H_ = HID, HC = 128, NCH = H_ / HC, ROWS = 128, NKB = D_ / 64;
 #ifdef SAVE_AB
 constexpr int NST = 4;                                         // a / b staging takes a ring stage's room
 #else

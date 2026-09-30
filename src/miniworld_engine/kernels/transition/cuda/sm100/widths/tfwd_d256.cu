@@ -15,7 +15,11 @@
 #include "sm100.cuh"
 using namespace s100;
 
-constexpr int D_ = 256, H_ = 1024, HS = 64, NCH = H_ / HS, ROWS = 128, NKB = D_ / 64;
+#ifndef HID
+#define HID 1024                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = 256, H_ = HID, HS = 64, NCH = H_ / HS, ROWS = 128, NKB = D_ / 64;
+static_assert((NCH & (NCH - 1)) == 0 && NCH >= 2, "power-of-two chunk count");
 constexpr int NW = 2;                                          // weight ring depth (both rings)
 constexpr int WAB_SLOT = NKB * 8192, WS_SLOT = (D_ / 2) * 128;   // [64 n][256 k] as 4 K-blocks of 8 KB; Ws [128 d][64 k]
 constexpr int TILE = ROWS * D_ * 2;                            // 64 KB: four K-blocks of 128 rows
@@ -27,7 +31,7 @@ constexpr int O_GB = O_XN + TILE;
 constexpr int O_BAR = O_GB + 2 * D_ * 4;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
-static_assert(SMEM_BYTES == 231936, "bench_w.py SMEM[256]");
+static_assert(HID != 1024 || SMEM_BYTES == 231936, "bench_w.py SMEM[256]");
 constexpr int KS_EX = D_ / 16, KS_SQ = HS / 16;
 constexpr uint32_t T_AB = 0, T_OUT = 256;                      // AB x2 (128 each; h_j in place over its first 32), OUT 256
 constexpr uint32_t IDESC_EX = idesc_bf16(256, 128), IDESC_SQ = idesc_bf16(256, D_);

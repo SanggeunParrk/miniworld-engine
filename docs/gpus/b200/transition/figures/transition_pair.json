@@ -471,7 +471,166 @@
    ]
   },
   "inference_d384": {
-   "title": "B200 · Transition (pair, n = 4) · inference · D384 / D512, bf16, whole 128-row tiles",
+   "title": "B200 · Transition (pair, n = 4 / 2) · inference · D384, bf16, whole 128-row tiles (more than 16)",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd_d384_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(n * D // 64):  # 64 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T  # TMEM",
+        "  h = F.silu(a) * b   # shared memory only",
+        "  acc += h @ W_s[:, j].T               # TMEM",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32"
+      }
+     ]
+    }
+   ]
+  },
+  "training_d384": {
+   "title": "B200 · Transition (pair, n = 4 / 2) · training · D384, bf16, whole 128-row tiles (more than 16)",
+   "panels": [
+    {
+     "label": "forward (saves x_n, rstd, c1, h, a, b)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · transition_fwd_d384_sm100 (2-CTA)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(n * D // 64):  # 64 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b",
+        "  acc += h @ W_s[:, j].T",
+        "y = x + acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "y",
+        "x_n, rstd, c1",
+        "h, a, b"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y, x_n",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "h, a, b",
+       "shape": "[L,L,nD] bf16"
+      },
+      {
+       "name": "rstd, c1",
+       "shape": "[L·L] fp32"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "gate + d_xn + LayerNorm backward + residual",
+       "impl": "CUDA · transition_bwd_d384_sm100 (2-CTA)",
+       "code": [
+        "for j in range(n * D // 64):  # 64 hidden units",
+        "  dh = dy @ W_s[:, j]                   # TMEM",
+        "  dA, dB = swiglu_bwd(dh, a[j], b[j])  # TMEM + HBM",
+        "  d_xn += [dA | dB] @ [W_a; W_b][j]     # TMEM",
+        "dx = dy + layer_norm_bwd(d_xn, x, rstd, c1, γ)",
+        "dγ, dβ partials per CTA"
+       ],
+       "reads": [
+        "dy, x, a, b",
+        "W_s^T, W_a, W_b, rstd, c1, γ"
+       ],
+       "writes": [
+        "dx",
+        "dA | dB",
+        "partials"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "partial-sum reduction",
+       "impl": "CUDA · transition_bwd_d384_reduce",
+       "code": [
+        "dγ, dβ = partials.sum(0)  # fixed order"
+       ],
+       "reads": [
+        "partials"
+       ],
+       "writes": [
+        "dγ, dβ"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "dW GEMMs (fp32 out)",
+       "impl": "cuBLAS · torch.mm(out_dtype=fp32)",
+       "code": [
+        "dW_s = dy.T @ h",
+        "[dW_a; dW_b] = [dA | dB].T @ x_n"
+       ],
+       "reads": [
+        "dy, h, dA|dB, x_n"
+       ],
+       "writes": [
+        "dW_*"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "dy, dx",
+       "shape": "[L,L,D] bf16"
+      },
+      {
+       "name": "dA | dB",
+       "shape": "[L,L,2nD] bf16"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "fp32"
+      }
+     ]
+    }
+   ]
+  },
+  "inference_d512": {
+   "title": "B200 · Transition (pair, n = 4; n = 2 at D768) · inference · D512 (n = 4 / 2), D768 (n = 2), bf16, whole 128-row tiles",
    "panels": [
     {
      "label": "forward (x_n and h pass through HBM; nothing saved)",
@@ -510,7 +669,7 @@
       {
        "id": "F3",
        "name": "squeeze + residual",
-       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA)",
+       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA; D768: two 384-column launches)",
        "code": [
         "y = x + h @ W_s.T"
        ],
@@ -531,18 +690,18 @@
       },
       {
        "name": "h",
-       "shape": "[L,L,4D] bf16"
+       "shape": "[L,L,nD] bf16"
       },
       {
        "name": "W_a, W_b, W_s, γ, β",
-       "shape": "bf16 / fp32, 3.5 / 6.3 MB"
+       "shape": "bf16 / fp32"
       }
      ]
     }
    ]
   },
-  "training_d384": {
-   "title": "B200 · Transition (pair, n = 4) · training · D384 / D512, bf16, whole 128-row tiles",
+  "training_d512": {
+   "title": "B200 · Transition (pair, n = 4; n = 2 at D768) · training · D512 (n = 4 / 2), D768 (n = 2), bf16, whole 128-row tiles",
    "panels": [
     {
      "label": "forward (saves x_n, rstd, c1, h, a, b)",
@@ -583,7 +742,7 @@
       {
        "id": "F3",
        "name": "squeeze + residual",
-       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA)",
+       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA; D768: two 384-column launches)",
        "code": [
         "y = x + h @ W_s.T"
        ],
@@ -604,7 +763,7 @@
       },
       {
        "name": "h, a, b",
-       "shape": "[L,L,4D] bf16"
+       "shape": "[L,L,nD] bf16"
       },
       {
        "name": "rstd, c1",
@@ -649,7 +808,7 @@
       {
        "id": "B3",
        "name": "d_xn GEMM",
-       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA, EPI_PLAIN)",
+       "impl": "CUDA · transition_gemm_nd_sm100 (2-CTA, EPI_PLAIN; D768: two 384-column launches)",
        "code": [
         "d_xn = [dA | dB] @ [W_a; W_b]"
        ],
@@ -687,7 +846,7 @@
       },
       {
        "name": "h, a, b, dA | dB",
-       "shape": "[L,L,4D] / [L,L,8D] bf16"
+       "shape": "[L,L,nD] / [L,L,2nD] bf16"
       },
       {
        "name": "dW_*, dγ, dβ",

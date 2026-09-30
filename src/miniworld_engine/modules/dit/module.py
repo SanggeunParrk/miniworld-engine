@@ -76,7 +76,7 @@ class DiTBlock(nn.Module):
         if _h100.serves(self, single, cond, pair, compute_dtype):
             return _h100.update(self, single, cond, pair, mask)
         if _train.serves(self, single, cond, pair, mask, compute_dtype):
-            return _train.block(self, single, cond, pair, mask)
+            return _train.block(self, single, cond, pair, mask, compute_dtype)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = single + self.attention(single, cond, pair, mask, **kw)
         return single + self.transition(single, cond)

@@ -1,5 +1,5 @@
-"""sm_100a (B200) pair-bias attention core, bf16 operands, fp32 accumulation, forward AND backward, plus the gated
-inference core the fused token DiT step uses.
+"""sm_100a (B200) pair-bias attention core, forward AND backward in bf16 (fp32 accumulation) and in fp32 (TF32 tensor cores),
+plus the gated inference cores the fused token DiT step uses.
 
 The token DiT's attention (16 heads x 48, one pair bias per head shared by all A augmented samples) as tcgen05 / TMEM /
 TMA kernels, developed on branch ``b200/token-dit`` (``experiments/augattn_sm100``, rounds v1-v3). B200, A = 48,
@@ -17,8 +17,14 @@ The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers):
   attn_dkv.cu   dK and dV (one key row per thread, the bias read transposed).
   attn_inf.cu   the inference step's core: q | k | v | g read as column views of the q|k|v|g GEMM output (logits
                 pre-scaled into exp2 units), sigmoid(g) * o written over q.
+  attn_fwd_tf32.cu, attn_dkv_tf32.cu, attn_dqb_tf32.cu, attn_inf_tf32.cu
+                the fp32 twins (kind::tf32 MMAs, fp32 softmax): 32-key / 32-query blocks, 48-wide fp32 rows as a
+                32-column 128-B-swizzled box + a 16-column 64-B one, MN-major operands in the 128-B swizzle with 32-B atoms
+                (sm100.cuh); the inference twin reads v^T (q | k | g + v^T).
+  glue.cu       dO -> bf16 with D = rowsum(dO O), and the bf16 bias transpose attn_dkv reads.
 
-Numerics against fp64 at A = 48: O 1.6e-3, dq 3.0e-3, dk 2.9e-3, dv 2.9e-3, dbias 2.4e-3 (bf16-input-rounding floor).
+Numerics against fp64 at A = 48: O 1.6e-3, dq 3.0e-3, dk 2.9e-3, dv 2.9e-3, dbias 2.4e-3 (bf16-input-rounding floor). The fp32
+kernels: O, dq, dk, dv, dbias within 3e-3 of fp64 (tests/numerics/test_augmented_attention_tf32_sm100_gpu.py).
 
 The cubins are built with this environment's nvcc on first use and cached under ``MINIWORLD_ENGINE_JIT_ROOT``
 (keyed by the sources and flags). They are launched through the CUDA driver (``driver.py``, cuda.bindings) with 2-D
@@ -38,8 +44,6 @@ import warnings
 from pathlib import Path
 
 import torch
-import triton
-import triton.language as tl
 
 H, D = 16, 48
 _dir = Path(__file__).parent
@@ -143,17 +147,66 @@ def _grid(items: int, device_index: int) -> tuple[int, int, int]:
     return (min(torch.cuda.get_device_properties(device_index).multi_processor_count, items), 1, 1)
 
 
+def _rs(t: torch.Tensor) -> int:
+    """Row stride in bytes: q / k / v may be column views of a wider projection output (rows 16-byte aligned)."""
+    assert t.stride(1) == 1 and (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
+    return t.stride(0) * t.element_size()
+
+
 def forward(q2, k2, v2, bias_hll, A, L):
     """q2, k2, v2 [A L, 768] bf16 contiguous, bias [16, L, L] bf16 (natural units) -> O [A L, 768] fp32, LSE [A, 16, L] (log2)."""
     dev = _index(q2)
     O = torch.empty(A * L, H * D, device=q2.device, dtype=torch.float32)
     LSE = torch.empty(A, H, L, device=q2.device, dtype=torch.float32)
-    maps = (_tm(q2, [H * D, A * L], H * D * 2, [D, 128]), _tm(k2, [H * D, A * L], H * D * 2, [D, 64]),
-            _tm(v2, [H * D, A * L], H * D * 2, [D, 64]), _tm(bias_hll, [L, H * L], L * 2, [64, 128]),
+    maps = (_tm(q2, [H * D, A * L], _rs(q2), [D, 128]), _tm(k2, [H * D, A * L], _rs(k2), [D, 64]),
+            _tm(v2, [H * D, A * L], _rs(v2), [D, 64]), _tm(bias_hll, [L, H * L], L * 2, [64, 128]),
             _tm(O, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, dtype="f32"),
             _tm(O, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, dtype="f32"))
     _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev)(_grid((A // 2) * H * (L // 128), dev), (384, 1, 1), *maps, O, LSE, int(L), int(A))
     return O, LSE
+
+
+def forward_tf32(q, k, v, bias_hll, A, L):
+    """The fp32 training forward (``attn_fwd_tf32.cu``, TF32 tensor cores): q, k, v [A L, 768] fp32 rows, bias [16, L, L]
+    fp32 (natural units) -> O [A L, 768] fp32, LSE [A, 16, L] (log2)."""
+    dev = _index(q)
+    O = torch.empty(A * L, H * D, device=q.device, dtype=torch.float32)
+    LSE = torch.empty(A, H, L, device=q.device, dtype=torch.float32)
+    f32 = dict(dtype="f32")
+    dims, rs = [H * D, A * L], H * D * 4
+    maps = (_tm(q, dims, _rs(q), [32, 128], swizzle=128, **f32), _tm(q, dims, _rs(q), [16, 128], swizzle=64, **f32),
+            _tm(k, dims, _rs(k), [32, 32], swizzle=128, **f32), _tm(k, dims, _rs(k), [16, 32], swizzle=64, **f32),
+            _tm(v, dims, _rs(v), [32, 32], swizzle="128a32", **f32),
+            _tm(bias_hll, [L, H * L], L * 4, [32, 128], swizzle=128, **f32),
+            _tm(O, dims, rs, [32, 128], swizzle=128, **f32), _tm(O, dims, rs, [16, 128], swizzle=64, **f32))
+    _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev)(_grid((A // 2) * H * (L // 128), dev), (384, 1, 1), *maps, LSE,
+                                                                  int(L), int(A))
+    return O, LSE
+
+
+def backward_tf32(q, k, v, do, bias_hll, LSE, Dd, A, L):
+    """The fp32 training backward (``attn_dkv_tf32.cu`` then ``attn_dqb_tf32.cu``, TF32 tensor cores): q, k, v, do [A L, 768] fp32
+    contiguous, bias [16, L, L] fp32 as given to ``forward_tf32``, LSE from it, Dd = rowsum(dO O) [A, 16, L] fp32 -> dQ, dK, dV
+    [A L, 768] fp32 and dbias [16, L, L] fp32."""
+    dev = _index(q)
+    DQ = torch.empty(A * L, H * D, device=q.device, dtype=torch.float32)
+    DB = torch.empty(H, L, L, device=q.device, dtype=torch.float32)
+    DK, DV = torch.empty_like(DQ), torch.empty_like(DQ)
+    f32 = dict(dtype="f32")
+    dims = [H * D, A * L]
+    a = lambda t, rows: _tm(t, dims, _rs(t), [32, rows], swizzle=128, **f32)       # noqa: E731  K-major, columns 0-31
+    b = lambda t, rows: _tm(t, dims, _rs(t), [16, rows], swizzle=64, **f32)        # noqa: E731  K-major, columns 32-47
+    m = lambda t, rows: _tm(t, dims, _rs(t), [32, rows], swizzle="128a32", **f32)  # noqa: E731  MN-major, 32-column atoms
+    dkv_maps = (a(q, 32), b(q, 32), m(q, 32), a(do, 32), b(do, 32), m(do, 32), a(k, 128), b(k, 128), a(v, 128), b(v, 128),
+                _tm(bias_hll, [L, H * L], L * 4, [32, 32], swizzle=0, **f32), a(DK, 128), b(DK, 128), a(DV, 128), b(DV, 128))
+    dqb_maps = (a(q, 128), b(q, 128), a(do, 128), b(do, 128), a(v, 64), b(v, 64), a(k, 64), b(k, 64), m(k, 64),
+                _tm(bias_hll, [L, H * L], L * 4, [32, 128], swizzle=128, **f32))
+    # attn_dkv_tf32 zero-fills dQ on the way; attn_dqb_tf32 then adds one partial per 64-key chunk.
+    _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev)(_grid(A * H * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd, DQ,
+                                                                  int(L), int(A))
+    _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev)(_grid(H * (L // 128) * (L // 64), dev), (384, 1, 1), *dqb_maps, LSE, Dd,
+                                                                  DQ, DB, int(L), int(A))
+    return DQ, DK, DV, DB
 
 
 def backward(q2, k2, v2, dob, bias_hll, LSE, Dd, A, L):
@@ -164,12 +217,12 @@ def backward(q2, k2, v2, dob, bias_hll, LSE, Dd, A, L):
     DB = torch.empty(H, L, L, device=q2.device, dtype=torch.float32)
     DK, DV = torch.empty_like(DQ), torch.empty_like(DQ)
     f32 = dict(dtype="f32")
-    dkv_maps = (_tm(q2, [H * D, A * L], H * D * 2, [D, 64]), _tm(k2, [H * D, A * L], H * D * 2, [D, 128]),
-                _tm(v2, [H * D, A * L], H * D * 2, [D, 128]), _tm(dob, [H * D, A * L], H * D * 2, [D, 64]),
+    dkv_maps = (_tm(q2, [H * D, A * L], _rs(q2), [D, 64]), _tm(k2, [H * D, A * L], _rs(k2), [D, 128]),
+                _tm(v2, [H * D, A * L], _rs(v2), [D, 128]), _tm(dob, [H * D, A * L], _rs(dob), [D, 64]),
                 _tm(bias_t, [L, H * L], L * 2, [64, 128]),
                 _tm(DK, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, **f32), _tm(DK, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, **f32),
                 _tm(DV, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, **f32), _tm(DV, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, **f32))
-    dqb_maps = (*(_tm(t, [H * D, A * L], H * D * 2, [D, 128]) for t in (q2, k2, v2, dob)), _tm(bias_hll, [L, H * L], L * 2, [64, 128]),
+    dqb_maps = (*(_tm(t, [H * D, A * L], _rs(t), [D, 128]) for t in (q2, k2, v2, dob)), _tm(bias_hll, [L, H * L], L * 2, [64, 128]),
                 _tm(DQ, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, **f32), _tm(DQ, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, **f32))
     # attn_dkv zero-fills dQ on the way; attn_dqb then adds one partial per 128-key chunk.
     _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev)(_grid(A * H * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd, DK, DV, DQ, int(L), int(A))
@@ -178,42 +231,21 @@ def backward(q2, k2, v2, dob, bias_hll, LSE, Dd, A, L):
 
 
 # --------------------------------------------------------------------------------------------------- glue
-@triton.jit
-def _prep_do_kernel(do, o, dob, dd, L, NH: tl.constexpr, DH: tl.constexpr, DP: tl.constexpr, ROWS: tl.constexpr):
-    r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
-    hh = tl.arange(0, NH)
-    dcol = tl.arange(0, DP)
-    ptr = r[:, None, None] * (NH * DH) + (hh[:, None] * DH + dcol[None, :])[None, :, :]
-    msk = (dcol[None, :] < DH)[None, :, :] & (r[:, None, None] >= 0)
-    g = tl.load(do + ptr, mask=msk, other=0.0).to(tl.float32)
-    x = tl.load(o + ptr, mask=msk, other=0.0)
-    tl.store(dob + ptr, g.to(tl.bfloat16), mask=msk)
-    s = tl.sum(g * x, axis=2)
-    tl.store(dd + ((r // L)[:, None] * NH + hh[None, :]) * L + (r % L)[:, None], s)
-
-
 def prep_do(do, O, A, L):
-    """dO -> bf16 and D = rowsum(dO O) as [A, H, L] fp32."""
-    do = do.reshape(A * L, H * D).contiguous()
+    """dO -> bf16 and D = rowsum(dO O) as [A, H, L] fp32 (``glue.cu``)."""
+    do = do.reshape(A * L, H * D).float().contiguous()
     dob = torch.empty(A * L, H * D, device=do.device, dtype=torch.bfloat16)
     dd = torch.empty(A, H, L, device=do.device, dtype=torch.float32)
-    _prep_do_kernel[((A * L) // 8,)](do, O, dob, dd, L, NH=H, DH=D, DP=64, ROWS=8)
+    _sm100_kernel("glue", "prep_do_bf16", _index(do), smem=0)(((A * L * H + 255) // 256, 1, 1), (256, 1, 1), do, O, dob, dd,
+                                                             int(A * L), int(L))
     return dob, dd
 
 
-@triton.jit
-def _transpose_kernel(src, dst, L, BT: tl.constexpr):
-    h, i, j = tl.program_id(2), tl.program_id(0) * BT, tl.program_id(1) * BT
-    ri, rj = i + tl.arange(0, BT), j + tl.arange(0, BT)
-    x = tl.load(src + h * L * L + ri[:, None] * L + rj[None, :])
-    tl.store(dst + h * L * L + rj[:, None] * L + ri[None, :], tl.trans(x))
-
-
 def bias_transpose(bias):
-    """[H, L, L] -> [H, L(key), L(query)] (attn_dkv reads its key rows contiguously)."""
+    """[H, L, L] bf16 -> [H, L(key), L(query)] (attn_dkv reads its key rows contiguously; ``glue.cu``)."""
     Hh, L, _ = bias.shape
     out = torch.empty_like(bias)
-    _transpose_kernel[(L // 64, L // 64, Hh)](bias, out, L, BT=64)
+    _sm100_kernel("glue", "bias_transpose_bf16", _index(bias), smem=0)((L // 32, L // 32, Hh), (32, 8, 1), bias, out, int(L))
     return out
 
 
@@ -251,46 +283,74 @@ def augmented_attention_bf16_sm100(q, k, v, bias, *, bias_head_major: bool = Fal
 
 # --------------------------------------------------------------------------------------------------- inference core
 class GatedInferenceCore:
-    """The fused token DiT step's core on sm_100a (``attn_inf.cu``): reads q | k | v | g as column views of the
-    [S L, 4 D] q|k|v|g GEMM output (logits pre-scaled into exp2 units), the block's head-major hoisted bias (bf16,
-    [nb H, L, L] rows), and writes sigmoid(g) * o over q in bf16. Bindings (TMA descriptors) are cached per buffer."""
+    """The fused token DiT step's core on sm_100a: reads the block's head-major hoisted bias ([nb H, L, L] rows) and the
+    step's projections (logits pre-scaled into exp2 units), writes sigmoid(g) * o over q.
 
-    def __init__(self, device_index: int):
-        self.k = _sm100_kernel("attn_inf", "augattn_inf_sm100", device_index)
+    * bf16 (``attn_inf.cu``): ``qkvg`` [S L, 4 D], q | k | v | g column views of one GEMM output.
+    * fp32 with TF32 tensor cores (``attn_inf_tf32.cu``): ``qkvg`` is q | k | g, [S L, 3 D], and ``vt`` is v transposed,
+      [D, S L] -- a kind::tf32 MMA takes v only K-major. Every 48-wide fp32 q / k / g tile is a 32-column 128-B-swizzled
+      box and a 16-column 64-B-swizzled one; the v^T tile is 48 rows x 32 keys.
+
+    Bindings (TMA descriptors) are cached per buffer."""
+
+    def __init__(self, device_index: int, dtype: torch.dtype = torch.bfloat16):
+        self.fp32 = dtype is torch.float32
+        self.k = (_sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", device_index) if self.fp32
+                  else _sm100_kernel("attn_inf", "augattn_inf_sm100", device_index))
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs: dict = {}
 
-    def _bind(self, qkvg, bias, block, S, L):
-        M, D4 = qkvg.shape
-        Dm, DH = D4 // 4, D4 // 4 // H
-        rs = D4 * qkvg.element_size()
-        q, k, v, g = (qkvg[:, i * Dm:(i + 1) * Dm] for i in range(4))
+    def _bind(self, qkvg, vt, bias, block, S, L):
+        # 3-D maps (columns, row of the sample, sample | head): the last tile's rows past L load as zeros and are clipped
+        # on the store, so L need only keep the rows 16-byte aligned (a multiple of 8)
+        M, W = qkvg.shape
+        es = qkvg.element_size()
+        rs = W * es
         bv = bias[block * H:(block + 1) * H]
-        maps = (_tm(q, [Dm, M], rs, [DH, 128]), _tm(k, [Dm, M], rs, [DH, 64]), _tm(v, [Dm, M], rs, [DH, 64]),
-                _tm(bv, [L, H * L], L * bias.element_size(), [64, 128]), _tm(g, [Dm, M], rs, [DH, 128]))
-        grid = (min(self.nsm, ((S + 1) // 2) * H * (L // 128)), 1, 1)
-        mq, mk, mv, mb, mg = maps
+        grid = (min(self.nsm, ((S + 1) // 2) * H * -(-L // 128)), 1, 1)
+        bias_map = lambda box, **kw: _tm(bv, [L, L, H], [L * es, L * L * es], [*box, 1], **kw)  # noqa: E731
+        if self.fp32:
+            Dm = W // 3
+            q, k, g = (qkvg[:, i * Dm:(i + 1) * Dm] for i in range(3))
+            f32 = dict(dtype="f32")
+            a = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [32, rows, 1], swizzle=128, **f32)  # noqa: E731
+            b = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [16, rows, 1], swizzle=64, **f32)   # noqa: E731
+            maps = (a(q, 128), b(q, 128), a(k, 32), b(k, 32),
+                    _tm(vt, [L, S, Dm], [L * 4, M * 4], [32, 1, D], swizzle=128, **f32),   # v^T: key, sample, channel
+                    bias_map([32, 128], swizzle=128, **f32), a(g, 128), b(g, 128))
 
-        def run():
-            self.k(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), int(S))
-        run.keep = (maps, qkvg, bias)
+            def run():
+                self.k(grid, (384, 1, 1), *maps, int(L), int(S))
+        else:
+            Dm, DH = W // 4, W // 4 // H
+            q, k, v, g = (qkvg[:, i * Dm:(i + 1) * Dm] for i in range(4))
+            t3 = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [DH, rows, 1])  # noqa: E731
+            maps = (t3(q, 128), t3(k, 64), t3(v, 64), bias_map([64, 128]), t3(g, 128))
+            mq, mk, mv, mb, mg = maps
+
+            def run():
+                self.k(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), int(S))
+        run.keep = (maps, qkvg, vt, bias)
         return run
 
-    def __call__(self, qkvg, bias, block, S):
+    def __call__(self, qkvg, bias, block, S, vt=None):
+        """``vt`` (fp32 only): v^T [D, S L]; ``qkvg`` is then q | k | g."""
+        assert self.fp32 == (vt is not None), "the TF32 core takes q | k | g and v^T; the bf16 core q | k | v | g"
         L = qkvg.shape[0] // S
-        key = (qkvg.data_ptr(), bias.data_ptr(), block, S, L)
+        key = (qkvg.data_ptr(), None if vt is None else vt.data_ptr(), bias.data_ptr(), block, S, L)
         run = self.runs.get(key)
         if run is None:
-            run = self.runs[key] = self._bind(qkvg, bias, block, S, L)
+            run = self.runs[key] = self._bind(qkvg, vt, bias, block, S, L)
         run()
         return qkvg
 
 
 def inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
-    """bf16, d 768 as 16 x 48, L a multiple of 128, sm_100."""
+    """bf16 or fp32 (TF32 MMA), d 768 as 16 x 48, L a multiple of 8 (the fused step pads other lengths to one), sm_100."""
     if os.environ.get("MINIWORLD_AUGATTN_BF16_SM100", "1") == "0":
         return False
-    return dtype is torch.bfloat16 and d == H * D and h == H and L % 128 == 0 and _is_blackwell(device_index)
+    return (dtype in (torch.bfloat16, torch.float32) and d == H * D and h == H and L % 8 == 0 and L >= 8
+            and _is_blackwell(device_index))
 
 
 __all__ = ["GatedInferenceCore", "augmented_attention_bf16_sm100", "available", "cubin", "inference_core_supported", "supported"]

@@ -129,6 +129,8 @@ class BenchConfig(BaseModel):
     #: samples) instead of a random one per sample. The fused token runner and Anthropic's conditioning dedup only
     #: apply to the shared case, so this is how their inference rows are compared on their own terms.
     shared_cond: bool = False
+    #: dit / dit_atom: blocks with QK-norm (RMSNorm of every q / k head). Anthropic's composition has none and refuses.
+    dit_qk_norm: bool = False
     min_seq_len: int = 64
     max_seq_len: int = 384
     seq_len_step: int = 64
@@ -3441,7 +3443,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     * anthropic -- Anthropic's release AS SHIPPED (MINIWORLD_ANTHROPIC_ROOT), composed into one
       AF3 Alg. 23 block over this bench's weights the way their kits compose it (the 2026-09-22
       MiniWorld runs/diffusion_vs_anthropic_20260922 recipe): torch GEMMs with q|k|v|g as ONE
-      GEMM, `ln_proj.pair_bias` (head-major planes), `apb` row fpf_apb `apb_views` with the
+      GEMM, `ln_proj.pair_bias` (head-major planes, once per pair tensor as their samplers hoist it -- the
+      fused token runner does the same), `apb` row fpf_apb `apb_views` with the
       sigmoid gate fused, the `dit_fast` row kernels (adaln / resgate_adaln / swiglu / resgate)
       and an fp32 residual stream. Only upstream entry points (opt_core.kernels.apb's
       `carried_module` / `dit_block_rows` / `fold_mask`); nothing of this repo runs in the row.
@@ -3488,8 +3491,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         def __init__(self, impl) -> None:
             super().__init__()
             self.layers = nn.ModuleList([
-                DiTBlock(d_single=d_single, d_cond=d_cond,
-                         d_pair=d_pair, n_head=n_head, implementation=impl)
+                DiTBlock(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head,
+                         use_qk_norm=conf.dit_qk_norm, implementation=impl)
                 for _ in range(conf.n_layers)])
             self.composed = None
 
@@ -3542,16 +3545,16 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         reasons = ["autograd (the runner is inference-only)"] if is_train else []
         if settings.current().engine_backend == "triton":
             reasons.append("engine_backend=triton")
-        if att.use_qk_norm:
-            reasons.append("use_qk_norm")
+        if att.use_qk_norm and not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+            reasons.append("use_qk_norm (the fused step's QK-norm pass is B200-only)")
         widths = (single.shape[-1], att.n_head, cond.shape[-1], pair.shape[-1])
         if widths != (768, 16, 384, 128):
             reasons.append(f"widths d/heads/cond/pair={widths}, runner serves (768, 16, 384, 128)")
-        if single.shape[2] % 128:
-            reasons.append(f"L={single.shape[2]} not a multiple of 128")
-        if cond.shape[0] != 1 and cond.stride(0) != 0:
-            reasons.append(f"per-sample conditioning (cond has {cond.shape[0]} distinct samples; the "
-                           "runner requires one conditioning shared by every sample)")
+        on_b200 = single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)
+        if single.shape[2] % 128 and not on_b200:
+            reasons.append(f"L={single.shape[2]} not a multiple of 128 (only the B200 core takes any L)")
+        if cond.shape[0] not in (1, single.shape[0]):
+            reasons.append(f"cond has {cond.shape[0]} samples, single {single.shape[0]}")
         if single.is_cuda and torch.cuda.get_device_capability(single.device) not in ((9, 0), (10, 0)):
             reasons.append("not sm_90 / sm_100")
         return "; ".join(reasons) or "integrations.token_dit.serves() declined"
@@ -3562,13 +3565,13 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
                                                     shared=conf.shared_cond)
     elif spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
-    elif spec.impl == ImplementationType.MINIWORLD:
+    elif spec.impl in (ImplementationType.MINIWORLD, ImplementationType.TRITON):   # both dispatch to the fused runner
         why = token_dit_refusal(model.layers[0])
         execution_path = (
             "modules.dit.DiTBlock -> integrations.token_dit.update -> kernels.conditioned_transition.triton."
-            "token_dit_runner.FusedTokenDiT[fused runner, v2.2.0 src: cuBLAS GEMMs + gated core (sm_100a attn_inf on "
-            "B200 bf16, Triton gated2 otherwise) + Triton row passes; weights packed and pair bias hoisted inside "
-            "every call]"
+            "token_dit_runner.FusedTokenDiT[fused runner: cuBLAS GEMMs + gated core (B200: sm_100a attn_inf bf16 / "
+            "attn_inf_tf32 fp32; Triton gated2 otherwise) + row passes (CUDA on B200, Triton otherwise); weight pack "
+            "and pair bias cached across calls]"
             if why is None else
             "modules.dit.DiTBlock[module composition: AugmentedAttentionPairBias (Triton augmented_attention "
             "core; compute_dtype not passed, so not the bf16 sm90 CUDA core) + ConditionedTransition; "
@@ -3707,7 +3710,7 @@ def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
     swiglu = torch.compiler.disable(rows.swiglu)
     resgate = torch.compiler.disable(rows.resgate)
 
-    hoisted: dict = {}                      # per layer: (pair key, its pair bias) -- shared_cond only
+    hoisted: dict = {}                      # per layer: (pair key, its pair bias)
 
     def composed(single, cond, pair, mask_arg=None):
         a, b, n, _ = single.shape
@@ -3724,17 +3727,17 @@ def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
             xa = adaln(res, F.linear(cn, p["ws_a"], p["bs_a"]), F.linear(cn, p["wb_a"]), act, eps=p["eps_a"])
             qkvg = F.linear(xa, p["wqkvg"], p["bqkvg"]).view(a, n, 4 * d)
             q, k, v, g = (qkvg[:, :, i * d:(i + 1) * d].unflatten(2, (heads, head_dim)) for i in range(4))
-            # shared_cond (a sampling step): their samplers compute each layer's pair bias once per sample, as the fused
-            # token runner does; keyed on the pair tensor (pointer, version). Otherwise every call recomputes it.
+            # Their samplers compute each layer's pair bias once per sample (the pair is the same at every diffusion step),
+            # as the fused token runner does: keyed on the pair tensor (pointer, version), a new or changed pair recomputes.
             bkey = (pair.data_ptr(), pair._version)
-            hit = hoisted.get(id(p)) if shared else None
+            hit = hoisted.get(id(p))
             if hit is not None and hit[0] == bkey:
                 bias = hit[1]
             else:
                 bias = pair_bias(pair, p["pair_bias"], out_layout="bhij")      # [1, H, L, L] view
                 if key_mask is not None:
                     bias = fold_mask(bias, key_mask)
-                if shared and not torch.cuda.is_current_stream_capturing():
+                if not torch.cuda.is_current_stream_capturing():
                     hoisted[id(p)] = (bkey, bias)
             o = apb_views(q, k, v, bias, g, scale=head_dim ** -0.5)             # sigmoid(g) * attention
             o2 = F.linear(o.reshape(rows_m, d), p["wo"])
@@ -3749,9 +3752,7 @@ def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
 
     model.composed = composed
     return (f"anthropic[pristine opt_core {commit} at {root}]: torch F.linear/F.layer_norm glue + "
-            + ("opt_core.kernels.ln_proj.pair_bias (every layer, once per pair: shared_cond) + " if shared else
-               "opt_core.kernels.ln_proj.pair_bias (every layer, every call) + ")
-            + "apb row fpf_apb apb_views "
+            "opt_core.kernels.ln_proj.pair_bias (every layer, once per pair tensor) + apb row fpf_apb apb_views "
             f"(gate fused, bias shared by the S samples) + apb row {selection.row} "
             f"{rows.__name__} adaln/resgate_adaln/swiglu/resgate; fp32 residual; q|k|v|g one GEMM; "
             + ("cond dedup ON (Ns=L: one conditioning shared by the samples, shared_cond); key mask " if shared else

@@ -21,7 +21,10 @@ using namespace s100;
 #define REG_GATE 152
 #define REG_EPI 152
 
-constexpr int D_ = 64, H_ = 256, HS = 64, NSL = H_ / HS, ROWS = 128;
+#ifndef HID
+#define HID 256                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = 64, H_ = HID, HS = 64, NSL = H_ / HS, ROWS = 128;
 constexpr int KB = 16384;                                      // one K-block: [128 rows][64 bf16], 128-B swizzled
 constexpr int INB = 2 * KB, IN_XN = KB;                        // an input stage: dy | xn
 // ---- DW role shared memory: Ws_s [64 d][64 hs] | [Wa_s; Wb_s] [128][64 d] | 2 input stages | h | dA dB
@@ -32,7 +35,7 @@ constexpr int X_WS = 0, X_WAB = NSL * 8192, X_IN = X_WAB + NSL * KB;
 constexpr int X_GAM = X_IN + 2 * INB, X_BAR = X_GAM + 512;
 constexpr int SMEM_BYTES = (W_BAR > X_BAR ? W_BAR : X_BAR) + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
-static_assert(SMEM_BYTES == 164864, "bench_wbwd.py BSMEM[64]");
+static_assert(HID != 256 || SMEM_BYTES == 164864, "bench_wbwd.py BSMEM[64]");
 static_assert(W_WAB % 1024 == 0 && W_IN % 1024 == 0 && X_WAB % 1024 == 0 && X_IN % 1024 == 0, "1 KB alignment of swizzled tiles");
 constexpr int KSD = D_ / 16;                                   // K16 steps over D (K-major, one K-block)
 constexpr int KSR = ROWS / 16;                                 // K16 steps over a tile's rows / a chunk's 128 [dA | dB] columns

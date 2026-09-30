@@ -24,18 +24,23 @@ def init():
 
 
 class TensorMap:
-    """2-D tiled map: dims innermost-first, one outer stride in bytes, box innermost-first, 128-B swizzle by default (bf16; u8 = any
-    one-byte element type such as e4m3)."""
+    """Tiled map of rank len(dims) (2 or 3): dims innermost-first, the outer strides in bytes (an int for rank 2), box innermost-first, 128-B swizzle by default (bf16; u8 = any
+    one-byte element type such as e4m3). ``swizzle="128a32"``: 128-B swizzle with 32-B atomicity, the layout a kind::tf32 MMA
+    reads an MN-major operand from (UMMA layout type 1)."""
     def __init__(self, tensor, dims, stride_bytes, box, swizzle=128, dtype="bf16"):
         init()
         self.keep = tensor
-        sw = {0: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_NONE, 32: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_32B,
-              64: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_64B, 128: cu.CUtensorMapSwizzle.CU_TENSOR_MAP_SWIZZLE_128B}[swizzle]
+        S = cu.CUtensorMapSwizzle
+        sw = {0: S.CU_TENSOR_MAP_SWIZZLE_NONE, 32: S.CU_TENSOR_MAP_SWIZZLE_32B, 64: S.CU_TENSOR_MAP_SWIZZLE_64B,
+              128: S.CU_TENSOR_MAP_SWIZZLE_128B, "128a32": S.CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B}[swizzle]
         dt = {"bf16": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, "u8": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8,
               "f32": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT32}[dtype]
-        self.tm = _chk(cu.cuTensorMapEncodeTiled(dt, 2, tensor.data_ptr(),
-                                                 [cu.cuuint64_t(d) for d in dims], [cu.cuuint64_t(stride_bytes)], [cu.cuuint32_t(b) for b in box],
-                                                 [cu.cuuint32_t(1), cu.cuuint32_t(1)], cu.CUtensorMapInterleave.CU_TENSOR_MAP_INTERLEAVE_NONE, sw,
+        strides = list(stride_bytes) if isinstance(stride_bytes, (list, tuple)) else [stride_bytes]
+        assert len(strides) == len(dims) - 1 == len(box) - 1, (dims, strides, box)
+        self.tm = _chk(cu.cuTensorMapEncodeTiled(dt, len(dims), tensor.data_ptr(),
+                                                 [cu.cuuint64_t(d) for d in dims], [cu.cuuint64_t(s) for s in strides],
+                                                 [cu.cuuint32_t(b) for b in box], [cu.cuuint32_t(1)] * len(dims),
+                                                 cu.CUtensorMapInterleave.CU_TENSOR_MAP_INTERLEAVE_NONE, sw,
                                                  cu.CUtensorMapL2promotion.CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                                  cu.CUtensorMapFloatOOBfill.CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE), "cuTensorMapEncodeTiled")
         words = [int(w) for w in self.tm.opaque]

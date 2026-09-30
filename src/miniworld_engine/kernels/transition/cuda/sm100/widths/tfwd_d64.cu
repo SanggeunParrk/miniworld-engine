@@ -11,7 +11,11 @@
 #include "sm100.cuh"
 using namespace s100;
 
-constexpr int D_ = 64, H_ = 256, HS = 64, NCH = H_ / HS, ROWS = 128;
+#ifndef HID
+#define HID 256                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = 64, H_ = HID, HS = 64, NCH = H_ / HS, ROWS = 128;
+static_assert((NCH & (NCH - 1)) == 0 && NCH >= 2, "power-of-two chunk count");
 constexpr int WAB_CH = 8192, WS_CH = 4096;                     // this CTA's half of one chunk: [64 n][64 k]; Ws [32 d][64 k]
 constexpr int O_WAB = 0, O_WS = NCH * WAB_CH;
 constexpr int TILE = ROWS * D_ * 2;                            // 16 KB: one K-block of 128 rows
@@ -21,7 +25,7 @@ constexpr int O_GB = O_XN + 2 * TILE;
 constexpr int O_BAR = O_GB + 512;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
-static_assert(SMEM_BYTES == 115712, "bench_w.py SMEM[64]");
+static_assert(HID != 256 || SMEM_BYTES == 115712, "bench_w.py SMEM[64]");
 static_assert(O_X % 1024 == 0 && O_XN % 1024 == 0 && O_WS % 1024 == 0, "128-B swizzled operands need 1 KB alignment");
 constexpr int KS = 4;                                          // K = 64 in K16 steps (expand: D; squeeze: the chunk's 64 hidden units)
 constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;
@@ -115,7 +119,7 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
       mbar_wait(&B.w_full, 0);
       if (warp == 1) {
         for (int c = 0; c < nch; ++c) {
-          const int i = c >> 2, j = c & (NCH - 1), s = c & 1, u = c >> 1;
+          const int i = c / NCH, j = c & (NCH - 1), s = c & 1, u = c >> 1;
           if (j == 0) mbar_wait_cl(&B.xn_full[i & 1], (i >> 1) & 1);
           if (c >= 2) mbar_wait_cl(&B.ab_empty[s], (u - 1) & 1);
           tc_fence_after();
@@ -131,7 +135,7 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
         }
       } else {
         for (int q = 0; q < nch; ++q) {
-          const int i = q >> 2, j = q & (NCH - 1), s = q & 1, u = q >> 1;
+          const int i = q / NCH, j = q & (NCH - 1), s = q & 1, u = q >> 1;
           mbar_wait_cl(&B.h_full[s], u & 1);
           if (j == 0 && i >= 1) mbar_wait_cl(&B.out_empty, (i - 1) & 1);
           tc_fence_after();
