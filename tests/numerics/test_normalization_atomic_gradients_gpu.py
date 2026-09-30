@@ -32,7 +32,7 @@ def test_pair_bias_parameter_gradients(dtype, heads, tile):
     dx = torch.empty_like(x)
     dw = torch.zeros(n, device="cuda")
     dp = torch.zeros(heads, n, device="cuda")
-    _layer_norm_linear_bwd.fn[(triton.cdiv(m, 32),)](
+    _layer_norm_linear_bwd.fn[(triton.cdiv(m, 32),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         dy, x, w, p, mean, rs, dx, dw, dp, n, m, n, heads,
         USE_DOT=heads >= 16, BLOCK_M1=32, BLOCK_K_D=tile, BLOCK_K_NH=16,
         shape_key=0, num_warps=4, num_stages=1)
@@ -62,7 +62,7 @@ def test_transition_replica_parameter_gradients(private, tile):
     replicas = 64 if private else 1
     dw = torch.zeros(replicas, n, device="cuda")
     db = torch.zeros_like(dw)
-    _transition_ln_bwd_kernel.fn[(triton.cdiv(m, 16),)](
+    _transition_ln_bwd_kernel.fn[(triton.cdiv(m, 16),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         dy, x, rs, folded, w, dx, dw, db, m, n, 0, n, 1,
         n, 1, n, 1, BLOCK_M1=16, BLOCK_K=tile,
         NUM_REPLICAS=replicas, PRIVATIZE_DGDB=private, num_warps=4, num_stages=1)

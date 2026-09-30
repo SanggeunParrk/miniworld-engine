@@ -120,7 +120,7 @@ def _fwd_impl(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tens
     m, n = x_2d.shape
     mean = torch.empty(m, dtype=torch.float32, device=x.device)
     rstd = torch.empty(m, dtype=torch.float32, device=x.device)
-    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
+    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     layer_norm_fwd_fused[grid](
         x_2d,
         y_2d,
@@ -159,7 +159,7 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
     dx_2d = torch.empty_like(dy_2d)
     dw = torch.zeros(n, dtype=torch.float32, device=x.device)
     db = torch.zeros(n, dtype=torch.float32, device=x.device)
-    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
+    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     layer_norm_bwd_dx_fused[grid](
         dx_2d,
         dy_2d,
@@ -203,7 +203,7 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
     partial_dw = torch.empty((g, n), dtype=torch.float32, device=x.device)
     partial_db = torch.empty((g, n), dtype=torch.float32, device=x.device)
     # grid axis 1 = feature tiles; BLOCK_N is tuned now (see triton/persistent.py).
-    grid = lambda meta: (g, triton.cdiv(n, meta["BLOCK_K"]))
+    grid = lambda meta: (g, triton.cdiv(n, meta["BLOCK_K"]))  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     _ln_bwd_persistent[grid](
         dx_2d,
         partial_dw,

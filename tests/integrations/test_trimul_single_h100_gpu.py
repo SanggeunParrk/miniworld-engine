@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import trimul_h100
+from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
 
 pytestmark = [
@@ -25,7 +26,7 @@ def setup(length, outgoing, dropout=0.25):
     torch.manual_seed(19023)
     m = (
         TriangleMultiplication(
-            128, outgoing=outgoing, implementation="miniworld", p_drop=dropout
+            128, outgoing=outgoing, implementation=ImplementationType.MINIWORLD, p_drop=dropout
         )
         .cuda()
         .bfloat16()
@@ -45,7 +46,7 @@ def setup(length, outgoing, dropout=0.25):
     ds = (torch.rand(1, 1, length, 128, device="cuda") > dropout).bfloat16() / (
         1 - dropout
     )
-    m._make_drop_row_scale = lambda pair, p: ds
+    m._make_drop_row_scale = lambda pair, p: ds  # ty: ignore[invalid-assignment] -- deliberate stub
     return m, x, mask, ds
 
 
@@ -178,7 +179,7 @@ def test_single_layernorm_gradients_strict():
     with torch.no_grad():
         m.ln_pair.weight[::3] = 0
         m.ln_out.weight[::3] = 0
-    w = [
+    w = (
         m.to_left.weight,
         m.to_left_gate.weight,
         m.to_right.weight,
@@ -189,7 +190,7 @@ def test_single_layernorm_gradients_strict():
         m.ln_pair.bias,
         m.ln_out.weight,
         m.ln_out.bias,
-    ]
+    )
     pm = (mask[:, :, None] & mask[:, None, :]).bfloat16()
     dy = torch.randn_like(x)
     T._launch_module()._make_context_current(0)
@@ -200,6 +201,7 @@ def test_single_layernorm_gradients_strict():
         b = Back(x, plan.xn, plan.tri, w[5], w[4], w[8], w[9], ds, dy, debug=True)
         b.backward()
         fb = plan.front_back
+        assert fb is not None
         dxn = torch.empty_like(x)
         f = FrontBack(
             fb.d, dy, *fb.inputs[:3], xn=plan.xn, debug=dxn, **plan.config["b7"]

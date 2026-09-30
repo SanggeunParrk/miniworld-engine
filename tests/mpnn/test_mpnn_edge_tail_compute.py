@@ -54,6 +54,7 @@ def _reset_buffers_per_launch() -> list[tuple[int, str, tuple[str, ...]]]:
                 continue
             for keyword in decorator.keywords:
                 if keyword.arg == "reset_to_zero":
+                    assert isinstance(keyword.value, (ast.List, ast.Tuple))
                     resets[node.name] = (
                         [ast.literal_eval(e) for e in keyword.value.elts],
                         [a.arg for a in node.args.args],
@@ -207,10 +208,13 @@ def test_compute_tail_packed_mask_matches_philox(rows, probability):
     import triton
     import triton.language as tl
 
+    # ty cannot model Triton's JITFunction/ConstexprFunction/constexpr stubs: a jitted
+    # function called from another, `triton.cdiv`, and a plain int bound to a constexpr
+    # parameter are reported as mismatches even though Triton accepts them.
     @triton.jit
     def draws(seed_ptr, out_ptr, n: tl.constexpr, probability: tl.constexpr):
         offsets = tl.program_id(0) * 256 + tl.arange(0, 256)
-        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=7) < probability
+        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=7) < probability  # ty: ignore[invalid-argument-type]
         tl.store(out_ptr + offsets, keep, offsets < n)
 
     width = 128
@@ -221,14 +225,14 @@ def test_compute_tail_packed_mask_matches_philox(rows, probability):
     one = torch.ones(width, device="cuda")
     out, saved = torch.empty_like(values), torch.empty_like(values)
     packed = torch.empty(rows * 4, device="cuda", dtype=torch.int32)
-    compute._project_output.fn[(triton.cdiv(rows, 32),)](
+    compute._project_output.fn[(triton.cdiv(rows, 32),)](  # ty: ignore[invalid-argument-type]
         values, weight, zero, values, one, zero, seed, out, saved, packed,
         rows, 0, probability, 1.0, 1e-5,
         WIDTH=width, BLOCK_M1=32, BLOCK_K=32, DROPOUT=True,
         num_warps=4, num_stages=1,
     )
     expected = torch.empty(rows * width, device="cuda", dtype=torch.bool)
-    draws[(triton.cdiv(expected.numel(), 256),)](seed, expected, expected.numel(), probability)
+    draws[(triton.cdiv(expected.numel(), 256),)](seed, expected, expected.numel(), probability)  # ty: ignore[invalid-argument-type]
     words = packed.to(torch.int64) & 0xFFFFFFFF
     decoded = ((words[:, None] >> torch.arange(32, device="cuda")) & 1).bool().flatten()
     assert torch.equal(decoded, expected)
@@ -237,7 +241,7 @@ def test_compute_tail_packed_mask_matches_philox(rows, probability):
     grad_out = torch.randn_like(values)
     grad_values, grad_update = torch.empty_like(values), torch.empty_like(values)
     dg, db, du = (torch.zeros_like(one) for _ in range(3))
-    compute._norm_backward.fn[(triton.cdiv(rows, 32),)](
+    compute._norm_backward.fn[(triton.cdiv(rows, 32),)](  # ty: ignore[invalid-argument-type]
         grad_out, saved, packed, one, grad_values, grad_update, dg, db, du,
         rows, 0, 1.0, 1e-5, WIDTH=128, BLOCK_M1=32, DROPOUT=True,
         num_warps=4, num_stages=1,

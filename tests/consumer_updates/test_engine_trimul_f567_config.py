@@ -110,7 +110,7 @@ def test_masks_groups_and_independent_reductions(cfg, transpose_weights):
     res = torch.randn(m, n, **kw)
     ds = (torch.rand(length, n, device="cuda") > 0.25).to(torch.bfloat16) / 0.75
     y, proj, gate = (torch.full((m, n), float("nan"), **kw) for _ in range(3))
-    grid = (triton.cdiv(m, cfg["BLOCK_M1"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
+    grid = (triton.cdiv(m, cfg["BLOCK_M1"]) * triton.cdiv(n, cfg["BLOCK_N"]),)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
     _output_f567_kernel.fn[grid](
         norm,
         x,
@@ -180,7 +180,7 @@ def test_aligned_gate_tile_after_projection(kp, tile):
     residual = torch.randn(m, n, **kw)
     ds = torch.ones(length, n, **kw)
     y, proj, gate = (torch.empty_like(residual) for _ in range(3))
-    _output_f567_kernel.fn[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+    _output_f567_kernel.fn[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         norm, x, wp, wg, proj, gate, y, residual, ds, m, length, kp, kg, n,
         *wp.stride(), *wg.stride(), shape_key=token_key(length, KP=kp, KG=kg, N=n),
         BLOCK_M1=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=1,

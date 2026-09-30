@@ -203,8 +203,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
         contractions. The output projection and gate use torch because the vendor
         dual-input GEMM requires equal input widths (ours are d_pair and 2h).
         """
-        from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
-        from cuequivariance_ops_torch.gated_gemm_torch import (
+        from cuequivariance_ops_torch.fused_layer_norm_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend
+            layer_norm_transpose,
+        )
+        from cuequivariance_ops_torch.gated_gemm_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend
             fused_sigmoid_gated_dual_gemm,
         )
 

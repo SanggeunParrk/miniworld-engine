@@ -929,7 +929,7 @@ def store_ranked_configs(
                                      {repr(_sig(c)) for c in (searched or [])})
         # Keep each workload's top-K as runtime candidates. Never rank a 512-row
         # time against an 18432-row time. Runtime retimes this bounded union.
-        candidates = {}
+        candidates: dict[tuple, dict] = {}
         for item in records.values():
             for c in item["entries"]:
                 sig = _sig_from_dict(c)

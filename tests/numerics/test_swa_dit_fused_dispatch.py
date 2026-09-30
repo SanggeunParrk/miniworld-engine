@@ -32,6 +32,13 @@ def restore_policy():
     settings.configure(**asdict(previous))
 
 
+def _modulation_weight(block: SWADiTBlock) -> torch.Tensor:
+    """The adaLN projection's weight (``adaln_modulation`` is SiLU -> Linear)."""
+    linear = block.adaln_modulation[1]
+    assert isinstance(linear, torch.nn.Linear)
+    return linear.weight
+
+
 def _operands(dtype=torch.bfloat16, c=128, hidden=256, n=3, s=11, half=16):
     q = torch.randn(n, s, c, dtype=dtype)
     cos = torch.randn(n, s, half)
@@ -90,7 +97,7 @@ def test_mixed_dtypes_are_refused():
     set was written for."""
     q, cos, sin, seqused, w = _operands()
     assert "mixed dtypes" in str(refusal(q.float(), cos, sin, seqused, *w, n_head=4, half_window=64))
-    assert "mixed dtypes" in str(refusal(q, cos, sin, seqused, *w[:4], w[4].float(), n_head=4, half_window=64))
+    assert "mixed dtypes" in str(refusal(q, cos, sin, seqused, w[0], w[1], w[2], w[3], w[4].float(), n_head=4, half_window=64))
     cond = torch.randn(3, 11, 128)
     assert "mixed dtypes" in str(refusal(q, cos, sin, seqused, *w, n_head=4, half_window=64, cond=cond,
                                          wmod=torch.randn(768, 128, dtype=torch.bfloat16)))
@@ -122,7 +129,7 @@ def test_forward_hoisted_is_forward_on_the_repeated_conditioning():
     torch.manual_seed(5)
     block = SWADiTBlock(32, 24, 4, half_window=2)
     with torch.no_grad():
-        block.adaln_modulation[1].weight.normal_(std=0.1)
+        _modulation_weight(block).normal_(std=0.1)
     a, b, s = 3, 2, 7
     x = torch.randn(a * b, s, 32)
     c_base = torch.randn(b, s, 24)
@@ -153,7 +160,7 @@ def test_the_reference_is_the_modules_pytorch_statements(hoisted):
     n = a * b
     block = SWADiTBlock(d, dc, heads, half_window=hw)
     with torch.no_grad():
-        block.adaln_modulation[1].weight.normal_(std=0.2)
+        _modulation_weight(block).normal_(std=0.2)
     angle = torch.randn(b, s, d // heads // 2)
     valid = torch.ones(n, s, dtype=torch.bool)
     valid[1, 6:] = False
@@ -164,15 +171,15 @@ def test_the_reference_is_the_modules_pytorch_statements(hoisted):
     expected = block(x, c_base.repeat(a, 1, 1), ap)
     dy = torch.randn_like(expected)
     expected.backward(dy)
-    params = [block.adaln_modulation[1].weight, block.attn.Wqkv.weight, block.attn.gate_proj.weight,
+    params = [_modulation_weight(block), block.attn.Wqkv.weight, block.attn.gate_proj.weight,
               block.attn.out_proj.weight, block.ffn.w_up.weight, block.ffn.w_down.weight]
     want = [x.grad, c_base.grad, *(p.grad for p in params)]
 
     leaves = [t.detach().clone().requires_grad_() for t in (x, c_base, *params)]
-    rx, rc, rmod_w, *rw = leaves
+    rx, rc, rmod_w, rwqkv, rwg, rwo, rwu, rwd = leaves
     mod = swa_dit_hoist_modulation_reference(rc, rmod_w)
     cos, sin, seqused = ap[0][:b], ap[1][:b], ap[2]
-    got = swa_dit_block_reference(rx, mod, cos, sin, seqused, *rw, b, half_window=hw, n_head=heads)
+    got = swa_dit_block_reference(rx, mod, cos, sin, seqused, rwqkv, rwg, rwo, rwu, rwd, b, half_window=hw, n_head=heads)
     torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-4)
     got.backward(dy)
     for i, (g, w) in enumerate(zip([t.grad for t in leaves], want, strict=True)):

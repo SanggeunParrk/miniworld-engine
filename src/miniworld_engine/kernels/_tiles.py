@@ -74,7 +74,7 @@ def tile_order(pid, n_m, n_n, GROUP_M: tl.constexpr):
 
 def tile_grid(m, n, block_m, block_n):
     """The 1-D grid ``tile_order`` expects, from the two extents and their block sizes."""
-    return (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    return (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
 
 
 def check_tile_axes(kernel: str, grid_n: int, kernel_n: int, grid_name: str, kernel_name: str) -> None:

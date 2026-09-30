@@ -39,10 +39,13 @@ def test_layout_alignment_and_fresh_values():
 def test_live_packs_have_exclusive_storage():
     a = L._Packed([L.Struct([17, None])])
     b = L._Packed([L.Struct([31, None])])
+    assert a.array is not None
+    assert b.array is not None
     assert a.array[0] != b.array[0]
     assert ctypes.c_int32.from_address(a.array[0]).value == 17
     del b
     c = L._Packed([L.Struct([-83, None])])
+    assert c.array is not None
     assert ctypes.c_int32.from_address(a.array[0]).value == 17
     assert ctypes.c_int32.from_address(c.array[0]).value == -83
     assert a.array[0] % 64 == 0
@@ -52,6 +55,7 @@ def test_thread_local_host_storage():
     def pack(n):
         for i in range(100):
             a = L._Packed([L.Struct([n+i, None])])
+            assert a.array is not None
             assert ctypes.c_int32.from_address(a.array[0]).value == n+i
         return True
     with ThreadPoolExecutor(4) as pool:
@@ -72,6 +76,7 @@ def test_config_read_once(tmp_path, monkeypatch):
 def test_multiple_arguments_and_empty_pack():
     args = [L.i32(91), L.Struct([L.TensorMap(bytes(128)), None, -5]), L.f64(1.25)]
     packed = L._Packed(args)
+    assert packed.array is not None
     for i, arg in enumerate(args):
         blob, alignment = L._pack_one(arg)
         assert packed.array[i] % alignment == 0

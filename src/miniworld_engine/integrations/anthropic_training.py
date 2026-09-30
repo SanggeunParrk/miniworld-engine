@@ -20,7 +20,7 @@ WEIGHT_KEYS = ("ln_in_w", "ln_in_b", "w_ag", "w_ap", "w_bg", "w_bp",
 
 
 def native_ops():
-    from src.miniworld_engine.integrations.anthropic import configure
+    from miniworld_engine.integrations.anthropic import configure
     configure()
     build = os.environ.get("TRIMUL_NATIVE_BUILD_DIR")
     if not build:
@@ -29,7 +29,7 @@ def native_ops():
     if not (py / "trimul_native/ops.py").is_file():
         raise RuntimeError("Rebuilt native payload must retain python/ beside build/")
     loaded = sys.modules.get("trimul_native")
-    if loaded is not None and Path(loaded.__file__).resolve().parent != py / "trimul_native":
+    if loaded is not None and (loaded.__file__ is None or Path(loaded.__file__).resolve().parent != py / "trimul_native"):
         raise RuntimeError("trimul_native already loaded from a different source")
     if str(py) not in sys.path:
         sys.path.insert(0, str(py))

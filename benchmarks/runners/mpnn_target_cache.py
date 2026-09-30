@@ -162,7 +162,7 @@ def inventory(root):
     operations = sorted(
         {v["op"] for rows in plan["contexts"].values() for v in rows.values()}
     )
-    units = []
+    units: list[dict[str, Any]] = []
     for op in operations:
         by_context = {
             name: {k for k, v in rows.items() if v["op"] == op}

@@ -61,10 +61,10 @@ def bias_only_attention_bwd_pre_triton() -> Pair:
     o = torch.randn(B, HL, L, D, device=dev(), dtype=BF16)
     do = torch.randn_like(o)
     delta = torch.empty(B, HL, L, device=dev(), dtype=torch.float32)
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     _attn_bwd_preprocess[grid](
         o, do, delta, B, L, D,
-        shape_key=token_key(L, HEAD_DIM=D), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L, HEAD_DIM=D), HEAD_DIM_PAD=triton.next_power_of_2(D),  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     )
     return delta, _rowsum(o, do)
 

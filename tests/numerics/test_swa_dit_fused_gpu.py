@@ -92,15 +92,15 @@ def _case(a: int, b: int, s: int, seed: int = 0, dtype: torch.dtype = BF):
 
 
 def _fused(leaves, cos, sin, seqused, b):
-    q, c_base, wmod, *weights = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
     mod = swa_dit_hoist_modulation(c_base, wmod)
-    return swa_dit_block(q, mod, cos, sin, seqused, *weights, b, half_window=HW)
+    return swa_dit_block(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
 
 
 def _reference(leaves, cos, sin, seqused, b):
-    q, c_base, wmod, *weights = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
     mod = swa_dit_hoist_modulation_reference(c_base, wmod)
-    return swa_dit_block_reference(q, mod, cos, sin, seqused, *weights, b, half_window=HW)
+    return swa_dit_block_reference(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
 
 
 def _run(fn, leaves, dy, *args):
@@ -163,12 +163,19 @@ def test_inference_and_training_forward_agree(path):
     torch.testing.assert_close(inference, training, rtol=1e-2, atol=1e-2)
 
 
+def _modulation_weight(block: SWADiTBlock) -> torch.Tensor:
+    """The adaLN projection's weight (``adaln_modulation`` is SiLU -> Linear)."""
+    linear = block.adaln_modulation[1]
+    assert isinstance(linear, torch.nn.Linear)
+    return linear.weight
+
+
 def _block(active=True, dtype=BF):
     torch.manual_seed(11)
     block = SWADiTBlock(C, C, H, implementation=ImplementationType.MINIWORLD).to(DEV, dtype)
     if active:
         with torch.no_grad():
-            block.adaln_modulation[1].weight.normal_(std=0.05)
+            _modulation_weight(block).normal_(std=0.05)
     return block
 
 

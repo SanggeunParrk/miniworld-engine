@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 import torch
 
@@ -12,6 +14,7 @@ pytestmark = pytest.mark.gpu
 from miniworld_engine.modules.mpnn import (
     CSSBForwardAdapter,
     EncodedMPNN,
+    FeatureBackend,
     NaiveProteinMPNN,
     NeighborGraph,
     ProteinMPNN,
@@ -114,6 +117,7 @@ def _assert_parameter_gradients_match(
         _actual_name,
         actual_parameter,
     ) in iter_reference_parameter_pairs(expected, actual):
+        assert actual_parameter.grad is not None, expected_name
         torch.testing.assert_close(
             production_tensor_in_reference_layout(expected_name, actual_parameter.grad),
             expected_parameter.grad,
@@ -260,7 +264,7 @@ def test_backbone_features_expose_explicit_neighbor_graph_contract() -> None:
 @pytest.mark.parametrize("backend", ["recompute", "memory"])
 @pytest.mark.parametrize("coordinate_grad", [False, True])
 def test_feature_recompute_backend_preserves_outputs_and_gradients(
-    coordinate_grad: bool, backend: str,
+    coordinate_grad: bool, backend: FeatureBackend,
 ) -> None:
     _, reference = _models()
     _, candidate = _models()
@@ -440,7 +444,9 @@ def test_parameter_only_block_training_path_matches_reference() -> None:
 
 
 def test_encoder_post_reduce_projection_preserves_masked_bias_and_gradients() -> None:
-    dimensions = {"d_node": 5, "d_edge": 4, "d_hidden": 6, "dropout": 0.2, "scale": 7}
+    dimensions: dict[str, Any] = {
+        "d_node": 5, "d_edge": 4, "d_hidden": 6, "dropout": 0.2, "scale": 7
+    }
     reference = NaiveEncLayer(**dimensions).double()
     optimized = EncoderLayer(
         node_width=5,
@@ -504,7 +510,9 @@ def test_encoder_post_reduce_projection_preserves_masked_bias_and_gradients() ->
 
 
 def test_decoder_single_context_preserves_source_bias_and_gradients() -> None:
-    dimensions = {"d_node": 5, "d_edge": 4, "d_hidden": 6, "dropout": 0.2, "scale": 7}
+    dimensions: dict[str, Any] = {
+        "d_node": 5, "d_edge": 4, "d_hidden": 6, "dropout": 0.2, "scale": 7
+    }
     reference = NaiveDecLayer(**dimensions).double()
     optimized = DecoderLayer(
         node_width=5,
@@ -779,7 +787,8 @@ def test_optimized_packed_path_is_fullgraph_compilable() -> None:
     inputs[3] = torch.cat((torch.arange(5), torch.arange(7))).unsqueeze(0)
     inputs[5] = torch.cat((torch.randperm(5), torch.randperm(7) + 5)).unsqueeze(0)
     inputs[8] = torch.tensor([5, 7])
-    compiled = torch.compile(model, backend="eager", fullgraph=True)
+    # torch.compile is typed as returning a bare callable; given a module it returns one.
+    compiled = cast(torch.nn.Module, torch.compile(model, backend="eager", fullgraph=True))
     with torch.no_grad():
         expected = _forward(model, tuple(inputs))
         actual = _forward(compiled, tuple(inputs))
@@ -828,6 +837,8 @@ def test_bf16_mixed_forward_and_coordinate_gradient_track_reference() -> None:
 
     expected.float().square().mean().backward()
     actual.float().square().mean().backward()
+    assert xyz_optimized.grad is not None
+    assert xyz_reference.grad is not None
     assert _cosine(xyz_optimized.grad, xyz_reference.grad) >= 0.995
     assert _relative_frobenius(xyz_optimized.grad, xyz_reference.grad) <= 0.08
     assert (

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 
 from miniworld_engine.modules.mpnn import ProteinMPNN, ProteinMPNNConfig
 from miniworld_engine.modules.mpnn.layers import ResidualTransition
@@ -30,7 +33,7 @@ def _transition_pair(
 
 
 def _run_transition(
-    module: ResidualTransition,
+    module: nn.Module,
     values: torch.Tensor,
     upstream: torch.Tensor,
     *,
@@ -218,8 +221,9 @@ def test_transition_update_recompute_fullgraph_rng_and_gradient_parity() -> None
     # eager exactness of the boundary is covered by the CPU test above.
     torch._dynamo.reset()
     with torch._inductor.config.patch(fallback_random=True):
-        compiled_reference = torch.compile(reference, fullgraph=True)
-        compiled_candidate = torch.compile(candidate, fullgraph=True)
+        # torch.compile is typed as returning a bare callable; given a module it returns one.
+        compiled_reference = cast(nn.Module, torch.compile(reference, fullgraph=True))
+        compiled_candidate = cast(nn.Module, torch.compile(candidate, fullgraph=True))
 
         # Warm compilation separately, then compare stable compiled graphs.
         _run_transition(compiled_reference, values, upstream, seed=1234, autocast=True)

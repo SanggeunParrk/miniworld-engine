@@ -23,7 +23,7 @@ def configure(root=None):
     if not (core / "opt_core/__init__.py").is_file():
         raise RuntimeError("Anthropic sources missing: run `miniworld-engine dev import-anthropic` or set MINIWORLD_ANTHROPIC_ROOT")
     loaded = sys.modules.get("opt_core")
-    if loaded is not None and Path(loaded.__file__).resolve().parent != core / "opt_core":
+    if loaded is not None and (loaded.__file__ is None or Path(loaded.__file__).resolve().parent != core / "opt_core"):
         raise RuntimeError(f"opt_core already loaded from a different source: {loaded.__file__}")
     if _ROOT is not None and root != _ROOT:
         raise RuntimeError("Changing the upstream source in a live process is not supported")
@@ -118,7 +118,7 @@ def triangle_multiplication(z, mask=None, *, weights, direction="outgoing", row=
         if not (py / "trimul_native/face.py").is_file():
             raise RuntimeError("Rebuilt payload must retain its source python/ and testvectors/ next to build/")
         loaded = sys.modules.get("trimul_native")
-        if loaded is not None and Path(loaded.__file__).resolve().parent != py / "trimul_native":
+        if loaded is not None and (loaded.__file__ is None or Path(loaded.__file__).resolve().parent != py / "trimul_native"):
             raise RuntimeError("trimul_native already loaded from a different source")
         if str(py) not in sys.path:
             sys.path.insert(0, str(py))
@@ -175,7 +175,7 @@ def module_transition(module, x):
 def module_trimul(module, pair, mask, dropout_p):
     import torch
     if torch.is_grad_enabled() or (module.training and dropout_p):
-        from src.miniworld_engine.integrations.anthropic_training import module_update
+        from miniworld_engine.integrations.anthropic_training import module_update
         update = module_update(module, pair, mask)
         if module.training and dropout_p:
             update = update * module._make_drop_row_scale(pair, dropout_p)

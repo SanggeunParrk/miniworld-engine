@@ -63,11 +63,11 @@ def augmented_attention_bwd_pre_triton() -> Pair:
     o = torch.randn(A, B, L, H, D, device=dev(), dtype=BF16)
     do = torch.randn_like(o)
     delta = torch.empty(A, B, H, L, device=dev(), dtype=torch.float32)
-    grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B, H)
+    grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B, H)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     _attn_bwd_preprocess[grid](
         o, do, delta, L,
         o.stride(1), o.stride(2), o.stride(3), o.stride(4), H, D,
-        shape_key=atom_key(L, H=H, HEAD_DIM=D), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=atom_key(L, H=H, HEAD_DIM=D), HEAD_DIM_PAD=triton.next_power_of_2(D),  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     )
     # Delta is (A,B,H,L) -- stored at off_z*H*N_CTX + off_h*N_CTX + off_m with off_z over A*B --
     # while the rowsum over d leaves (A,B,L,H), so H moves in front of L.
@@ -94,11 +94,11 @@ def augmented_attention_bwd_reduce_triton() -> Pair:
     # The split count has to match the backward's: cdiv(L, min BLOCK_M2 over the split kernel's
     # configs). Random slots (rather than real partials) make the reference exact -- fp32 in,
     # fp32 out, and the only thing under test is the sum over the slot axis.
-    num_splits = int(triton.cdiv(L, _bwd_min_block_n()))
+    num_splits = int(triton.cdiv(L, _bwd_min_block_n()))  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     dq_expand = torch.randn(num_splits, A, B, L, H, D, device=dev(), dtype=torch.float32)
     dq = torch.empty(A, B, L, H, D, device=dev(), dtype=torch.float32)
     n_elem = A * B * L * H * D
-    grid = lambda META: (triton.cdiv(n_elem, META["BLOCK_E"]),)
+    grid = lambda META: (triton.cdiv(n_elem, META["BLOCK_E"]),)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     _dq_reduce[grid](
         dq_expand, dq, num_splits, dq_expand.stride(0), 1, n_elem,
         shape_key=get_elem_group(n_elem),

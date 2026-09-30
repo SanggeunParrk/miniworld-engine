@@ -1,4 +1,4 @@
-# vendored from team-gm origin/perf/trimul@3fbb02b : src/team_gm/modules/kernels/fused_triangle_mul_dtv1.py
+# vendored from team-gm origin/perf/trimul@3fbb02b : src/team_gm/modules/kernels/fused_triangle_mul_dtv1.py  # ty: ignore[invalid-argument-type]  # file-level: ty cannot bind triton's self-typed __call__, and a per-line comment inside an autotuned kernel would change its op_identity (shipped caches go stale)
 """dt-v1: Fused Triton triangle multiplicative update — fully optimized kernel.
 
 Architecture overview
@@ -80,7 +80,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._tiles import tile_order
-from cuequivariance_ops.triton import Layout
+from cuequivariance_ops.triton import Layout  # ty: ignore[unresolved-import]  # optional cuequivariance backend
 
 from miniworld_engine.autotune import tensor_dtype_of
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
@@ -95,7 +95,7 @@ def _output_layer_norm_transpose(x, weight, bias, b, n, d, eps):
     Accepts x shaped (D, B, I*J) from the triangle contraction and returns
     (B, I*J, D) ready for the output GEMM.
     """
-    from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
+    from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose  # ty: ignore[unresolved-import]  # optional cuequivariance backend
 
     return layer_norm_transpose(
         x.reshape(d, b, n),

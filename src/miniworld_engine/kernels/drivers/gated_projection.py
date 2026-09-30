@@ -1,3 +1,4 @@
+# ty: ignore[invalid-argument-type]  # file-level: ty cannot bind triton's self-typed __call__, and a per-line comment inside a driver function would change its driver_identity
 """Drivers for the ``gated_projection`` family.
 
 trimul_inproj, tm1, tm2 and gated_projection were one module (``drivers_trimul.py``) and still

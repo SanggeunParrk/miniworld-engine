@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -178,28 +179,29 @@ def test_production_config_rejects_invalid_values(field: str, value: float) -> N
     # The message names the field that was wrong, which is the part worth pinning: a config
     # validator that rejects the right value with the wrong name is a worse bug than one that
     # does not reject at all, because the caller fixes the wrong knob.
+    overrides: dict[str, Any] = {field: value}
     with pytest.raises(ValueError, match=field):
-        ProteinMPNNConfig(**{field: value})
+        ProteinMPNNConfig(**overrides)
 
 
 def test_production_config_rejects_unknown_edge_mlp_backend() -> None:
     with pytest.raises(ValueError, match="edge_mlp_backend"):
-        ProteinMPNNConfig(edge_mlp_backend="triton")
+        ProteinMPNNConfig(edge_mlp_backend=cast(Any, "triton"))
 
 
 def test_production_config_rejects_unknown_message_backend() -> None:
     with pytest.raises(ValueError, match="message_backend"):
-        ProteinMPNNConfig(message_backend="triton_fastest")
+        ProteinMPNNConfig(message_backend=cast(Any, "triton_fastest"))
 
 
 def test_production_config_rejects_unknown_feature_backend() -> None:
     with pytest.raises(ValueError, match="feature_backend"):
-        ProteinMPNNConfig(feature_backend="checkpoint_everything")
+        ProteinMPNNConfig(feature_backend=cast(Any, "checkpoint_everything"))
 
 
 def test_production_config_rejects_unknown_edge_norm_backend() -> None:
     with pytest.raises(ValueError, match="edge_norm_backend"):
-        ProteinMPNNConfig(edge_norm_backend="triton")
+        ProteinMPNNConfig(edge_norm_backend=cast(Any, "triton"))
 
 
 def test_edge_w1_checkpoint_requires_memory_edge_mlp() -> None:
@@ -213,13 +215,13 @@ def test_encoder_node_w1_checkpoint_requires_memory_message_backend() -> None:
     with pytest.raises(ValueError, match="encoder_node_w1_recompute"):
         ProteinMPNNConfig(
             message_backend="triton_memory",
-            encoder_node_w1_recompute="always",
+            encoder_node_w1_recompute=cast(Any, "always"),
         )
 
 
 def test_production_config_rejects_unknown_transition_recompute() -> None:
     with pytest.raises(ValueError, match="transition_recompute"):
-        ProteinMPNNConfig(transition_recompute="checkpoint")
+        ProteinMPNNConfig(transition_recompute=cast(Any, "checkpoint"))
 
 
 def test_memory_execution_policies_do_not_change_state_dict_schema() -> None:

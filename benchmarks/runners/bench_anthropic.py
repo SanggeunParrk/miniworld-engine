@@ -81,12 +81,13 @@ def fixture():
             TriangleAttention,
             TriangleMultiplication,
         )
+        from miniworld_engine.modules.exceptions import ImplementationType
         if a.family=="trimul":
-            m=init(TriangleMultiplication(C, outgoing=a.direction=="outgoing", implementation="pytorch"))
+            m=init(TriangleMultiplication(C, outgoing=a.direction=="outgoing", implementation=ImplementationType.PYTORCH))
         elif a.family=="transition":
-            m=init(Transition(C, implementation="pytorch"))
+            m=init(Transition(C, implementation=ImplementationType.PYTORCH))
         else:
-            m=init(TriangleAttention(C,n_head=4,d_hidden=C,implementation="pytorch"))
+            m=init(TriangleAttention(C,n_head=4,d_hidden=C,implementation=ImplementationType.PYTORCH))
         x=rand(1,L,L,C)
         mask=torch.ones(1,L,device=dev,dtype=torch.bool); mask[:,::7]=False
         mr=copy.deepcopy(m).float()
@@ -99,12 +100,24 @@ def fixture():
                 m._backend=KernelBackend.TRITON
             if a.row=="pytorch_compile": m=torch.compile(m, dynamic=False, fullgraph=True)
             return lambda:call(m),ref,residual
+        # TriangleMultiplication and Transition no longer take anthropic_row (and dispatch.resolve
+        # serves implementation="anthropic" for the TriMul payload only), so the row runs through
+        # the integration's module adapters on a pytorch module, as benchmarks/runners/bench.py does.
+        row=a.row
         if a.family=="trimul":
-            target=init(TriangleMultiplication(C,outgoing=a.direction=="outgoing",implementation="anthropic",anthropic_row=a.row))
+            class AnthropicTriMul(TriangleMultiplication):
+                anthropic_row=row
+                def forward(self,pair,mask=None,dropout_p=None):
+                    return A.module_trimul(self,pair,mask,self.p_drop if dropout_p is None else dropout_p)
+            target=init(AnthropicTriMul(C,outgoing=a.direction=="outgoing",implementation=ImplementationType.PYTORCH))
         elif a.family=="transition":
-            target=init(Transition(C,implementation="anthropic",anthropic_row=a.row))
+            class AnthropicTransition(Transition):
+                anthropic_row=row
+                def forward(self,x):
+                    return A.module_transition(self,x)
+            target=init(AnthropicTransition(C,implementation=ImplementationType.PYTORCH))
         else:
-            target=init(TriangleAttention(C,n_head=4,d_hidden=C,implementation="anthropic",anthropic_row=a.row))
+            target=init(TriangleAttention(C,n_head=4,d_hidden=C,implementation=ImplementationType.ANTHROPIC,anthropic_row=a.row))
         target.load_state_dict(m.state_dict())
         def fn():
             y=call(target)
@@ -132,11 +145,15 @@ def fixture():
             be=b[:,0].to(dt).masked_fill(~mask[:,0,0,0,None,None,:],torch.finfo(dt).min).contiguous()
             return lambda:triton_triangle_attention_pair_bias(qe,ke,ve,be).permute(0,2,1,3,4),ref,None
         if a.row=="cueq":
-            from cuequivariance_torch import triangle_attention
+            from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuEquivariance backend
+                triangle_attention,
+            )
             return lambda:triangle_attention(q,k,v,b,mask,D**-.5),ref,None
         T=A.provider("triattn")
         stack=T._tensor_facts(q,k)
-        from opt_core.kernels.triattn import cuda_sm90a
+        from opt_core.kernels.triattn import (  # ty: ignore[unresolved-import]  # optional Anthropic opt_core runtime
+            cuda_sm90a,
+        )
         sel=T.select(*stack,word=a.row,stack=cuda_sm90a.stack_key())
         record["selection"]=selection(sel)
         return lambda:A.triangle_attention(q,k,v,b,mask,row=a.row,selection=sel),ref,None
@@ -169,6 +186,7 @@ def fixture():
         filename={"atom_window":"test_atom_window_gpu","gather":"test_gather_attn_gpu","template":"test_templ_embed_gpu"}[a.family]
         path=A.configure()/"common/opt_core/tests/gpu"/f"{filename}.py"
         spec=importlib.util.spec_from_file_location("_upstream_fixture",path)
+        assert spec is not None and spec.loader is not None, path
         T=importlib.util.module_from_spec(spec);spec.loader.exec_module(T)
         record["fixture_source"]=str(path)
         if a.family=="atom_window":

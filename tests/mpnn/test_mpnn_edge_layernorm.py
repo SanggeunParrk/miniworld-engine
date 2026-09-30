@@ -9,7 +9,12 @@ from miniworld_engine.kernels.mpnn_edge_layernorm.interface import (
     _INT32_MAX,
     _select_backend,
 )
-from miniworld_engine.modules.mpnn import ProteinMPNN, ProteinMPNNConfig
+from miniworld_engine.modules.mpnn import (
+    EdgeNormBackend,
+    ProteinMPNN,
+    ProteinMPNNConfig,
+)
+from miniworld_engine.modules.mpnn.layers import EncoderLayer
 
 
 def test_mpnn_edge_layernorm_cpu_and_unsupported_memory_fall_back() -> None:
@@ -39,10 +44,12 @@ def test_mpnn_edge_layernorm_signed_int_limit_is_conservative() -> None:
 
 @pytest.mark.parametrize("backend", ["auto", "pytorch"])
 def test_mpnn_edge_layernorm_compute_policy_preserves_module_hooks(
-    backend: str,
+    backend: EdgeNormBackend,
 ) -> None:
     model = ProteinMPNN(ProteinMPNNConfig(edge_norm_backend=backend))
-    message = model.encoder.layers[0].edge_message
+    layer = model.encoder.layers[0]
+    assert isinstance(layer, EncoderLayer)
+    message = layer.edge_message
     calls: list[torch.Tensor] = []
     handle = message.norm.register_forward_hook(
         lambda _module, _inputs, output: calls.append(output)
@@ -96,7 +103,9 @@ def test_mpnn_edge_layernorm_preserves_forward_and_tracks_native_gradients(
 
     with torch.autocast("cuda", dtype=torch.bfloat16):
         actual = edge_layer_norm(
-            *actual_inputs[:3],
+            actual_inputs[0],
+            actual_inputs[1],
+            actual_inputs[2],
             1e-5,
             backend="memory",
         )
@@ -169,8 +178,12 @@ def test_mpnn_edge_layernorm_module_boundary_matches_native() -> None:
         ProteinMPNNConfig(dropout=0.0, edge_norm_backend="memory")
     ).cuda()
     candidate_model.load_state_dict(reference_model.state_dict(), strict=True)
-    reference = reference_model.encoder.layers[0].edge_message
-    candidate = candidate_model.encoder.layers[0].edge_message
+    reference_layer = reference_model.encoder.layers[0]
+    candidate_layer = candidate_model.encoder.layers[0]
+    assert isinstance(reference_layer, EncoderLayer)
+    assert isinstance(candidate_layer, EncoderLayer)
+    reference = reference_layer.edge_message
+    candidate = candidate_layer.edge_message
 
     reference_states = torch.randn(
         257,

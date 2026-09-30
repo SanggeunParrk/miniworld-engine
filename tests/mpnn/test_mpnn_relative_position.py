@@ -8,10 +8,13 @@ give the same answer twice.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 import torch
 
 from miniworld_engine.kernels.mpnn_relative_position import (
+    RelativePositionBackend,
     relative_position_embed,
     relative_position_embed_pytorch,
     relative_position_supported,
@@ -46,7 +49,7 @@ def _inputs(rows: int = 200_000, buckets: int = 66, width: int = 16, skew: bool 
     return bucket, table, bias, grad
 
 
-def _gradients(backend: str, bucket, table, bias, grad):
+def _gradients(backend: RelativePositionBackend, bucket, table, bias, grad):
     table = table.detach().clone().requires_grad_(True)
     bias = bias.detach().clone().requires_grad_(True)
     out = relative_position_embed(bucket, table, bias, backend=backend)
@@ -131,7 +134,7 @@ def test_relative_position_rejects_contracts_it_cannot_honor() -> None:
 def test_relative_position_backend_is_off_by_default_and_validated() -> None:
     assert ProteinMPNNConfig().relative_position_backend == "off"
     with pytest.raises(ValueError, match="relative_position_backend"):
-        ProteinMPNNConfig(relative_position_backend="sorted")  # type: ignore[arg-type]
+        ProteinMPNNConfig(relative_position_backend=cast(Any, "sorted"))
 
 
 def test_relative_position_model_matches_the_default_path() -> None:
@@ -176,10 +179,9 @@ def test_relative_position_model_matches_the_default_path() -> None:
             )
         logits = model(*values)
         logits.float().square().mean().backward()
-        outputs[backend] = (
-            logits.detach(),
-            model.backbone_features.relative_position.embedding.weight.grad.clone(),
-        )
+        embedding_grad = model.backbone_features.relative_position.embedding.weight.grad
+        assert embedding_grad is not None
+        outputs[backend] = (logits.detach(), embedding_grad.clone())
 
     reference_logits, reference_grad = outputs["off"]
     scale = reference_grad.abs().max().item()

@@ -49,7 +49,7 @@ def test_dual_tails_and_rounding(cfg, strided):
         v = v.t().contiguous().t()
     y = torch.full((m, n), float("nan"), **kw)
     _input_dual_bwd_kernel.fn[
-        (triton.cdiv(m, cfg["BLOCK_M1"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
+        (triton.cdiv(m, cfg["BLOCK_M1"]) * triton.cdiv(n, cfg["BLOCK_N"]),)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
     ](
         g,
         f,
@@ -102,7 +102,7 @@ def test_ln_residual_tails(cfg, dtype):
     dx = torch.full_like(x, float("nan"))
     dw = torch.zeros(n, device="cuda")
     db = torch.zeros_like(dw)
-    _ln_bwd_residual_kernel.fn[(triton.cdiv(m, cfg["BLOCK_M1"]),)](
+    _ln_bwd_residual_kernel.fn[(triton.cdiv(m, cfg["BLOCK_M1"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         dx,
         dy,
         dw,

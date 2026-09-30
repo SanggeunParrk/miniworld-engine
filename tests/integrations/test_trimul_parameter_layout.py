@@ -1,8 +1,11 @@
 """Native storage remains a real parameter with the legacy checkpoint contract."""
+from typing import Any
+
 import pytest
 import torch
 
 from miniworld_engine.integrations.optimizer import align_optimizer_state_layout_
+from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_multiplication.bidirectional import (
     BidirectionalTriangleMultiplication,
 )
@@ -10,8 +13,8 @@ from miniworld_engine.modules.triangle_multiplication.bidirectional import (
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_front_parameter_layout_checkpoint_and_optimizer(dtype):
-    model = BidirectionalTriangleMultiplication(128, implementation="miniworld").to(dtype)
-    legacy = BidirectionalTriangleMultiplication(128, implementation="pytorch").to(dtype)
+    model = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.MINIWORLD).to(dtype)
+    legacy = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.PYTORCH).to(dtype)
     model.load_state_dict(legacy.state_dict())
     assert model.state_dict().keys() == legacy.state_dict().keys()
     names = ("to_left", "to_left_gate", "to_right", "to_right_gate")
@@ -44,10 +47,11 @@ def test_front_parameter_layout_checkpoint_and_optimizer(dtype):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("mode", ["foreach", "fused"])
 def test_native_layout_adamw_resume_on_cuda(mode):
-    model = BidirectionalTriangleMultiplication(128, implementation="miniworld").cuda().bfloat16()
-    legacy = BidirectionalTriangleMultiplication(128, implementation="pytorch").cuda().bfloat16()
+    model = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    legacy = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.PYTORCH).cuda().bfloat16()
     model.load_state_dict(legacy.state_dict())
-    opts = [torch.optim.AdamW(m.parameters(), lr=.001, **{mode: True}) for m in (model, legacy)]
+    impl: dict[str, Any] = {mode: True}
+    opts = [torch.optim.AdamW(m.parameters(), lr=.001, **impl) for m in (model, legacy)]
     for step in range(3):
         for p, q in zip(model.parameters(), legacy.parameters(), strict=True):
             grad = torch.randn_like(q)

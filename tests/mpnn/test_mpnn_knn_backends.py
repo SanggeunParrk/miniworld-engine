@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 import torch
 
@@ -16,8 +18,8 @@ from miniworld_engine.modules.mpnn import (
 )
 
 
-def _features(**overrides) -> BackboneFeatures:
-    settings = {"edge_width": 16, "num_rbf": 4, "k_neighbors": 8, "coordinate_noise": 0.0}
+def _features(**overrides: Any) -> BackboneFeatures:
+    settings: dict[str, Any] = {"edge_width": 16, "num_rbf": 4, "k_neighbors": 8, "coordinate_noise": 0.0}
     settings.update(overrides)
     torch.manual_seed(0)
     return BackboneFeatures(**settings)
@@ -134,7 +136,7 @@ def _brute_force_capped(
     segment_lengths: torch.Tensor | None,
     k: int,
     cutoff: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The rule stated directly: the k nearest that are strictly within cutoff."""
     length = coordinates.shape[1]
     pair = residue_mask[:, None] * residue_mask[:, :, None]
@@ -251,7 +253,7 @@ def test_grid_cutoff_ordering_is_defined_by_distance_then_index() -> None:
 
 def test_model_rejects_unknown_knn_settings() -> None:
     with pytest.raises(ValueError, match="knn_backend"):
-        ProteinMPNNConfig(knn_backend="grid")  # type: ignore[arg-type]
+        ProteinMPNNConfig(knn_backend=cast(Any, "grid"))
     with pytest.raises(ValueError, match="knn_query_chunk"):
         ProteinMPNNConfig(knn_query_chunk=0)
     with pytest.raises(ValueError, match="knn_cutoff"):
@@ -259,7 +261,7 @@ def test_model_rejects_unknown_knn_settings() -> None:
 
 
 def test_chunked_backend_leaves_the_model_output_untouched() -> None:
-    common = {
+    common: dict[str, Any] = {
         "node_width": 16,
         "edge_width": 16,
         "hidden_width": 16,
@@ -316,6 +318,7 @@ def test_segment_blocked_cdist_matches_the_flattened_form_bitwise(
     # blocked-versus-blocked if the dispatch changes
     pair_mask = mask[:, None] * mask[:, :, None]
     segment = features._segment_ids(coordinates, lengths)
+    assert segment is not None
     pair_mask = pair_mask * (segment[:, None] == segment[None, :])
     distances = torch.cdist(coordinates, coordinates) * pair_mask
     row_max = distances.max(dim=-1, keepdim=True).values

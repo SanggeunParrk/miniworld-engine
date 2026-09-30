@@ -172,26 +172,26 @@ def _pair_fwd_kernel(Z, MASK, LNW, LNB, WBT, W, N, eps, DZ: tl.constexpr, HP: tl
     wbt = tl.load(WBT + d[:, None] * HP + hh[None, :])                                  # [DZ, HP] bf16, columns >= H are zero
     # pass 1: online max / rescaled sum per head
     mx = tl.full((HP,), -1e30, dtype=tl.float32)
-    den = tl.zeros((HP,), dtype=tl.float32)
+    den = tl.zeros((HP,), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     for j0 in range(0, N, BJ):
         j = j0 + tl.arange(0, BJ)
         x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)          # [BJ, DZ]
-        mean = tl.sum(x, 1) / DZ
+        mean = tl.sum(x, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         xc = x - mean[:, None]
-        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
+        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         zn = (xc * rstd[:, None] * lw[None, :] + lb[None, :]).to(tl.bfloat16)
         b = tl.dot(zn, wbt).to(tl.bfloat16).to(tl.float32)                              # [BJ, HP]: the stock proj_z output is bf16
         m = tl.load(MASK + i * N + j).to(tl.float32)
         b = tl.where(m[:, None] > 0.5, b, -1e30)
-        mn = tl.maximum(mx, tl.max(b, 0))
-        den = den * tl.exp(mx - mn) + tl.sum(tl.exp(b - mn[None, :]), 0)
+        mn = tl.maximum(mx, tl.max(b, 0))  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        den = den * tl.exp(mx - mn) + tl.sum(tl.exp(b - mn[None, :]), 0)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         mx = mn
     for j0 in range(jo * BJO, (jo + 1) * BJO, BJ):
         j = j0 + tl.arange(0, BJ)
         x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)
-        mean = tl.sum(x, 1) / DZ
+        mean = tl.sum(x, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         xc = x - mean[:, None]
-        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
+        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         zn = (xc * rstd[:, None] * lw[None, :] + lb[None, :]).to(tl.bfloat16)
         b = tl.dot(zn, wbt).to(tl.bfloat16).to(tl.float32)
         m = tl.load(MASK + i * N + j).to(tl.float32)
@@ -215,16 +215,16 @@ def _pair_bwd_kernel(Z, W, DW, SDOT, LNW, LNB, WB, DZO, PWB, PLN, N, eps, DZ: tl
     if HAS_SDOT:
         sdot = tl.load(SDOT + hh * N + i, mask=hmask, other=0.0)
     else:
-        sdot = tl.zeros((HP,), dtype=tl.float32)
+        sdot = tl.zeros((HP,), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         for j0 in range(0, N, BJ):
             j = j0 + tl.arange(0, BJ)
             off = (hh * N + i)[None, :] * N + j[:, None]
             w = tl.load(W + off, mask=hmask[None, :], other=0.0).to(tl.float32)
             dw = tl.load(DW + off, mask=hmask[None, :], other=0.0)
-            sdot += tl.sum(w * dw, 0)
-    pwb = tl.zeros((HP, DZ), dtype=tl.float32)
-    pg = tl.zeros((DZ,), dtype=tl.float32)
-    pb = tl.zeros((DZ,), dtype=tl.float32)
+            sdot += tl.sum(w * dw, 0)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    pwb = tl.zeros((HP, DZ), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    pg = tl.zeros((DZ,), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    pb = tl.zeros((DZ,), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     for j0 in range(jo * BJO, (jo + 1) * BJO, BJ):
         j = j0 + tl.arange(0, BJ)
         off = (hh * N + i)[None, :] * N + j[:, None]
@@ -232,19 +232,19 @@ def _pair_bwd_kernel(Z, W, DW, SDOT, LNW, LNB, WB, DZO, PWB, PLN, N, eps, DZ: tl
         dw = tl.load(DW + off, mask=hmask[None, :], other=0.0)
         db = w * (dw - sdot[None, :])                                                     # [BJ, HP] softmax backward
         x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)            # [BJ, DZ]
-        mean = tl.sum(x, 1) / DZ
+        mean = tl.sum(x, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         xc = x - mean[:, None]
-        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
+        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         xh = xc * rstd[:, None]
         zn = (xh * lw[None, :] + lb[None, :]).to(tl.bfloat16)
         db16 = db.to(tl.bfloat16)
         dzn = tl.dot(db16, wb).to(tl.float32)                                             # [BJ, DZ] = db Wb  (the stock proj_z is a bf16 GEMM)
         pwb += tl.dot(tl.trans(db16), zn)                                                 # [HP, DZ] += db^T zn
-        pg += tl.sum(dzn * xh, 0)
-        pb += tl.sum(dzn, 0)
+        pg += tl.sum(dzn * xh, 0)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        pb += tl.sum(dzn, 0)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         g = dzn * lw[None, :]
-        gs = tl.sum(g, 1) / DZ
-        gx = tl.sum(g * xh, 1) / DZ
+        gs = tl.sum(g, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        gx = tl.sum(g * xh, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         dz = rstd[:, None] * (g - gs[:, None] - xh * gx[:, None])
         tl.store(DZO + (i * N + j)[:, None] * DZ + d[None, :], dz.to(DZO.dtype.element_ty))
     tl.store(PWB + pid * HP * DZ + hh[:, None] * DZ + d[None, :], pwb)
@@ -345,6 +345,7 @@ class _PwaMath(torch.autograd.Function):
                                            int(wb.dtype == bf), int(lnz_w.dtype == bf))
             return (dm[None], dz[None], None, dlw.to(lnm_w.dtype), dlb.to(lnm_b.dtype), dWv.to(wv.dtype), dWg.to(wg.dtype),
                     dzw.to(lnz_w.dtype), dzb.to(lnz_b.dtype), dWb.to(wb.dtype), dWo.to(wo.dtype), None, None, None)
+        assert k is not None  # the sm_100 branch above returned; dres and m share a device, so _k() ran
         dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)               # dgp | dv: one [S,N,512] buffer
         if k["glue3"] is not None:                                                  # dWo partials fused: go never touches memory
             d_o, _, dWo = k["glue3"].pwa_glue3(o, y, dres0, wg16, wo16.t().contiguous(), dgv, 2, 1, dmask, ctx.dscale)

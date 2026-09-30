@@ -104,7 +104,7 @@ def test_saved_stats_tail_and_offset(bk):
     y = torch.empty(m, n, device="cuda")
     mean = torch.empty(m, device="cuda")
     inv = torch.empty_like(mean)
-    _lnl_fwd_kernel.fn[(triton.cdiv(m, 8),)](
+    _lnl_fwd_kernel.fn[(triton.cdiv(m, 8),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         x,
         w,
         x,
