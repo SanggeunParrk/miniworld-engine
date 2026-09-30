@@ -327,6 +327,7 @@ def test_small_training_graph_capture(width, kind):
         for p in m.parameters():
             p.grad = None
         m(x).backward(dy)
+        assert x.grad is not None
         return x.grad.clone()
 
     eager = step()

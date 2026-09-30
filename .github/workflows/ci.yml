@@ -31,11 +31,11 @@ jobs:
           # absent, every `import torch` is an unresolved import and every torch attribute is
           # Unknown, so ty reports a wall of noise and none of the real findings. Nothing in
           # this job runs a kernel, so the CPU wheel is enough.
-          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
           # `[dev]` = pytest + ruff + ty; the core deps (triton, einops, jaxtyping, numpy) come
           # with the package. The optional backends (cute/baselines/bench) stay out -- the code
           # that needs them imports them lazily and the checker suppresses those imports by name.
-          pip install -e ".[dev]"
+          pip install -e ".[dev,bench]"
 
       - name: Lint (ruff)
         run: ruff check src tests benchmarks
@@ -138,8 +138,12 @@ jobs:
           }
           bad = {k: v for k, v in want.items() if v[0] != v[1]}
           # A reused setuptools build/lib can silently ship deleted modules.
+          # Not shipped by design (pyproject `exclude`): the optimization logs (notes/) and the build-time
+          # generator of swa_dit's wgmma_bf16.inc (kernels/swa_dit/cuda/gen/; the .inc ships, its script does not).
           expected_py = {"miniworld_engine/" + p.relative_to(src).as_posix()
-                         for p in src.rglob("*.py") if "notes" not in p.parts}
+                         for p in src.rglob("*.py")
+                         if "notes" not in p.parts
+                         and not p.relative_to(src).as_posix().startswith("kernels/swa_dit/cuda/gen/")}
           actual_py = {n for n in names if n.startswith("miniworld_engine/") and n.endswith(".py")}
           assert actual_py == expected_py, {
               "missing_python": sorted(expected_py - actual_py),
@@ -161,6 +165,10 @@ jobs:
         # The other half. `pip install --target` into an empty directory and import from there, so
         # a module that only resolves because the source tree is next to it fails here.
         run: |
+          # The wheel's dependencies (torch from the CPU index), then the wheel itself uninstalled
+          # again: only the --target copy below may provide miniworld_engine.
+          python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
+          python -m pip install --quiet dist/*.whl && python -m pip uninstall --quiet -y miniworld-engine
           python -m pip install --quiet --no-deps --target /tmp/site dist/*.whl
           cd /tmp && PYTHONPATH=/tmp/site python -c "
           import miniworld_engine as m, miniworld_engine.kernels, miniworld_engine.ops
@@ -172,7 +180,7 @@ jobs:
 
       - name: Core wheel constructs an ordinary DiT block without optional backends
         run: |
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
           python -m pip install dist/*.whl
           cd /tmp
           python - <<'PY'
@@ -214,8 +222,8 @@ jobs:
       - name: Install (CPU wheels, no GPU backends)
         run: |
           python -m pip install --upgrade pip
-          pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install -e ".[dev]"
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
+          pip install -e ".[dev,bench]"
 
       - name: The package imports at the floor
         # Separate from the suite so a failure here is unambiguous: an import error at 3.10 is a

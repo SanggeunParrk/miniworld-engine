@@ -60,14 +60,16 @@ def can_use(model,pair,mask=None):
 
 
 
-def _fake(z,wq,wk,wv,wg,b):
+def _native_fake(z,wq,wk,wv,wg,b):
+    """Out, then fp32 [1, 4, L, L], then three head-major [1, 4, L, L, 32] views (z-shaped storage), then one tensor like z."""
     L=z.shape[1]
     def value():return torch.empty_like(z).view(1,L,L,4,32).permute(0,3,1,2,4)
     return value(),torch.empty((1,4,L,L),device=z.device,dtype=torch.float32),value(),value(),value(),torch.empty_like(z)
 
 
-@opaque(fake=_fake,name='triangle_qkv_projection_attention_cuda')
+@opaque(fake=_native_fake,name='triangle_attention_qkv_projection_attention_cuda')
 def native(z:torch.Tensor,wq:torch.Tensor,wk:torch.Tensor,wv:torch.Tensor,wg:torch.Tensor,b:torch.Tensor)->tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
+    """Fused q, k, v projection(s) + attention forward (H100 CUDA, 4 heads x 32)."""
     return tuple(extension().forward(z,wq,wk,wv,wg,b))
 
 

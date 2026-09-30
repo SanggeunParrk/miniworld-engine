@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from typing import Any, cast
 
 import pytest
 import torch
@@ -17,9 +18,11 @@ from miniworld_engine.kernels.mpnn_edge_dropout.interface import (
 )
 from miniworld_engine.modules.mpnn import (
     EdgeDropout,
+    EdgeDropoutBackend,
     ProteinMPNN,
     ProteinMPNNConfig,
 )
+from miniworld_engine.modules.mpnn.layers import DecoderLayer, EncoderLayer
 
 # Runs the family in a subprocess, which needs a card.
 pytestmark = pytest.mark.gpu
@@ -45,14 +48,16 @@ def test_mpnn_edge_dropout_rejects_unknown_backend() -> None:
             torch.randn(7),
             0.1,
             training=True,
-            backend="unknown",  # type: ignore[arg-type]
+            backend=cast(Any, "unknown"),
         )
     with pytest.raises(ValueError, match="edge_dropout_backend"):
-        ProteinMPNNConfig(edge_dropout_backend="unknown")  # type: ignore[arg-type]
+        ProteinMPNNConfig(edge_dropout_backend=cast(Any, "unknown"))
 
 
 @pytest.mark.parametrize("backend", ["auto", "pytorch", "bitpack"])
-def test_mpnn_edge_dropout_cpu_preserves_native_output_and_rng(backend: str) -> None:
+def test_mpnn_edge_dropout_cpu_preserves_native_output_and_rng(
+    backend: EdgeDropoutBackend,
+) -> None:
     values = torch.linspace(-2.0, 2.0, 257, requires_grad=True)
 
     torch.manual_seed(101)
@@ -64,7 +69,7 @@ def test_mpnn_edge_dropout_cpu_preserves_native_output_and_rng(backend: str) -> 
         values,
         0.1,
         training=True,
-        backend=backend,  # type: ignore[arg-type]
+        backend=backend,
     )
     actual_rng = torch.get_rng_state().clone()
 
@@ -142,11 +147,13 @@ assert "miniworld_engine.kernels.mpnn_edge_dropout.triton.main" not in sys.modul
 def test_mpnn_edge_dropout_is_encoder_edge_only() -> None:
     model = ProteinMPNN(ProteinMPNNConfig(edge_dropout_backend="bitpack"))
     for layer in model.encoder.layers:
+        assert isinstance(layer, EncoderLayer)
         assert isinstance(layer.edge_message.dropout, EdgeDropout)
         assert layer.edge_message.dropout.backend == "bitpack"
         assert type(layer.node_message.dropout) is nn.Dropout
         assert type(layer.node_transition.dropout) is nn.Dropout
     for layer in model.decoder.layers:
+        assert isinstance(layer, DecoderLayer)
         assert type(layer.node_message.dropout) is nn.Dropout
         assert type(layer.node_transition.dropout) is nn.Dropout
 
@@ -162,7 +169,10 @@ def test_mpnn_edge_dropout_preserves_state_dict_and_module_hooks() -> None:
     }
     packed.load_state_dict(native_state, strict=True)
 
-    dropout = packed.encoder.layers[0].edge_message.dropout
+    layer = packed.encoder.layers[0]
+    assert isinstance(layer, EncoderLayer)
+    dropout = layer.edge_message.dropout
+    assert isinstance(dropout, EdgeDropout)
     forward_calls: list[torch.Tensor] = []
     backward_calls: list[torch.Tensor] = []
     forward_handle = dropout.register_forward_hook(

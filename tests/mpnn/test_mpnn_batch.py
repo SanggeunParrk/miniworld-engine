@@ -530,18 +530,22 @@ def test_item_balanced_batch_gradients_match_mean_of_independent_graphs(
         atol=2e-6,
         rtol=2e-6,
     )
+    batched_grad = batched_backbone.grad
+    assert batched_grad is not None
     for row, (sample, independent_backbone) in enumerate(
         zip(samples, independent_backbones, strict=True)
     ):
+        independent_grad = independent_backbone.grad
+        assert independent_grad is not None
         torch.testing.assert_close(
-            batched_backbone.grad[row, : sample.length],
-            independent_backbone.grad[0],
+            batched_grad[row, : sample.length],
+            independent_grad[0],
             atol=2e-5,
             rtol=2e-5,
         )
         torch.testing.assert_close(
-            batched_backbone.grad[row, sample.length :],
-            torch.zeros_like(batched_backbone.grad[row, sample.length :]),
+            batched_grad[row, sample.length :],
+            torch.zeros_like(batched_grad[row, sample.length :]),
             atol=0,
             rtol=0,
         )

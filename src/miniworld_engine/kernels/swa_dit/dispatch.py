@@ -155,12 +155,12 @@ def swa_dit_block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin
             PKs = torch.empty_like(qf)
         else:
             Xs = PQs = PKs = G
-        _swa_qkvg_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](
+        _swa_qkvg_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qf, mod, cos, sin, wqkv, wg, Qh, Kh, Vh, G, r1, Xs, PQs, PKs, M, S, B, eps, FP32_EPS,
             shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, MODW=6 * C, SAVE=save)
     O = torch.empty_like(qf)
     lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
-    _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](
+    _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         Qh, Kh, Vh, seqused, O, lse, S, D ** -0.5, shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, HW=half_window)
     ext = _cuda("fwd", policy.swa_dit_ffn_fwd_cuda and C == D_ATOM and NHID == N_HIDDEN and q.dtype == torch.bfloat16, q.device)
     if ext is not None:
@@ -176,7 +176,7 @@ def swa_dit_block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin
             FFs = torch.empty_like(qf)
         else:
             Att = Ys = ABs = FFs = q2
-        _swa_oproj_ffn_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](
+        _swa_oproj_ffn_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qf, O, G, mod, wo, wu, wd, q1, q2, r2, Att, Ys, ABs, FFs, M, S, B, eps,
             shape_key=atom_key(S, A=A, C=C, NHID=NHID), C=C, NHID=NHID, MODW=6 * C, SAVE=save)
     outputs = [q2.view(N, S, C)]
@@ -207,12 +207,12 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
         PKs = torch.empty_like(qf)
     else:
         Xs = PQs = PKs = G
-    _swa_qkvg_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](
+    _swa_qkvg_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qf, mod, cos, sin, wqkv, wg, Qh, Kh, Vh, G, r1, Xs, PQs, PKs, M, S, B, eps, FP32_EPS,
         shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, MODW=6 * C, SAVE=save)
     O = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
     lse = torch.empty(N, H, S, device=dev, dtype=torch.float32)
-    _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](
+    _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         Qh, Kh, Vh, seqused, O, lse, S, D ** -0.5, shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, HW=half_window)
     q2 = torch.empty_like(qf)
     q1 = torch.empty_like(qf) if save else q2
@@ -223,7 +223,7 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
         FFs = torch.empty_like(qf)
     else:
         Att = Ys = FFs = q2
-    _swa_oproj_ffn_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](
+    _swa_oproj_ffn_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qf, O, G, mod, wo, wu, wd, q1, q2, r2, Att, Ys, FFs, M, S, B, eps,
         shape_key=atom_key(S, A=A, C=C, NHID=NHID), C=C, NHID=NHID, MODW=6 * C, SAVE=save)
     outputs = [q2.view(N, S, C)]
@@ -276,7 +276,7 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
         dffn = torch.empty_like(dO)
     datt = torch.empty_like(dO)
     gated = torch.empty_like(dO)
-    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)
+    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     dy2 = dy.reshape(M, C)
     dwu: torch.Tensor | None = None
     dwd: torch.Tensor | None = None
@@ -292,7 +292,7 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
             dwu32 = torch.zeros(2 * NHID, C, device=dev, dtype=torch.float32)
             dwd32 = torch.zeros(C, NHID, device=dev, dtype=torch.float32)
             sms = _sm_count(dev.index if dev.index is not None else torch.cuda.current_device())
-            ns = lambda m: max(1, min(triton.cdiv(M, m["BR"]), 2 * sms // (NHID // m["HS"])))
+            ns = lambda m: max(1, min(triton.cdiv(M, m["BR"]), 2 * sms // (NHID // m["HS"])))  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             _swa_ffn_dw_kernel[lambda m: (ns(m), NHID // m["HS"])](
                 dy2, mod, wu, wd, y, dwu32, dwd32, M, S, B,
                 shape_key=atom_key(S, A=Ak, C=C, NHID=NHID), NSPLIT=0, C=C, NHID=NHID, MODW=6 * C)
@@ -304,9 +304,9 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
     dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
     dKh = torch.empty_like(dQh)
     dVh = torch.empty_like(dQh)
-    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](
+    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh, kh, vh, dO, lse, Dv, seqused, dQh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, HW=half_window)
-    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](
+    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh, kh, vh, dO, lse, Dv, seqused, dKh, dVh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D,
         HW=half_window)
     dq = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
@@ -347,7 +347,7 @@ def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     dffn = torch.empty(M, C, device=dev, dtype=f32)
     datt = torch.empty(M, C, device=dev, dtype=f32)
     gated = torch.empty(M, C, device=dev, dtype=f32)
-    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)
+    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     _swa_ffn_bwd_fp32_kernel[grid_t](
         dy.reshape(M, C), q1, mod, wu, wd, y, ffn, dq1, dab, hh, dffn, dmod, S, A, B, eps,
         shape_key=atom_key(S, A=Ak, C=C, NHID=NHID), C=C, NHID=NHID, MODW=6 * C)
@@ -357,9 +357,9 @@ def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
     dKh = torch.empty_like(dQh)
     dVh = torch.empty_like(dQh)
-    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](
+    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh, kh, vh, dO, lse, Dv, seqused, dQh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, HW=half_window)
-    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](
+    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh, kh, vh, dO, lse, Dv, seqused, dKh, dVh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D,
         HW=half_window)
     dq = torch.empty(M, C, device=dev, dtype=f32)

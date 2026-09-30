@@ -1150,9 +1150,11 @@ def bench_module_triangle_attention(
     model = model.to(device=DEVICE, dtype=dtype)
     model.train(not is_inference_mode(conf.mode))
     for layer in model.layers:
+        assert isinstance(layer, TriangleAttention)
         layer._b200_cuda = conf.tri_b200_cuda
     if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
         compile_module_for_benchmark(model)
+    layers = model.layers  # the same ModuleList the Fabric wrapper forwards to
     model = fabric.setup_module(model)
 
     pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
@@ -1179,7 +1181,7 @@ def bench_module_triangle_attention(
     }.get(spec.impl, spec.impl.value)
     if spec.impl == ImplementationType.TRITON:
         from miniworld_engine.integrations import triattn_b200
-        layer0 = getattr(model, "module", model).layers[0]
+        layer0 = layers[0]
         if triattn_b200.serves(layer0, pair, mask):
             execution_path = ("integrations.triattn_b200 (sm_100a CUDA): tri_pack_params + tri_front -> triattn_fwd -> tri_tail; "
                               "backward tri_gate_bwd -> triattn_bwd_kv + triattn_bwd_q -> tri_head_bwd -> tri_wgrad")
@@ -1204,7 +1206,7 @@ def bench_module_triangle_attention(
             accuracy = _acc_fwd(model(pair, mask), reference(pair.float(), mask))
         del reference
         # What the upstream planner actually selected on that call (row, surround plan, residual).
-        selection = getattr(model.layers[0], "anthropic_selection", None)
+        selection = getattr(layers[0], "anthropic_selection", None)
         if selection is not None:
             execution_path += " selected=" + " ".join(str(selection).split())[:400]
     return measured_result(
@@ -1294,6 +1296,7 @@ def bench_module_transition(
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
         compile_module_for_benchmark(model)
+    layers = model.layers  # the same ModuleList the Fabric wrapper forwards to
     model = fabric.setup_module(model)
 
     ref_spec = ImplementationSpec(ImplementationType.PYTORCH, None, "pytorch")
@@ -1368,7 +1371,7 @@ def bench_module_transition(
     )
     if anthropic:
         # the upstream Selection of the correctness call: row / variant / cfg / tier actually served
-        selection = getattr(model.layers[0], "anthropic_selection", None)
+        selection = getattr(layers[0], "anthropic_selection", None)
         if selection is not None:
             execution_path += " selected=" + " ".join(str(selection).split())[:400]
     return measured_result(
@@ -2055,6 +2058,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
         execution_path = "module.reference.torch"
 
     def correctness() -> AccuracyFields:
+        assert reference is not None  # released only after this call, below
         m_ref = msa.detach().float().requires_grad_(is_train)
         p_ref = pair.detach().float().requires_grad_(is_train)
         m_impl = msa.detach().clone().requires_grad_(is_train)
@@ -2068,7 +2072,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
         if is_train:
             actual.backward(dy)
             expected.backward(dy.float())
-            assert m_impl.grad is not None and m_ref.grad is not None
+            assert m_impl.grad is not None and m_ref.grad is not None and p_impl.grad is not None and p_ref.grad is not None
             grads = tensor_metrics(torch.cat([m_impl.grad.flatten(), p_impl.grad.flatten()]),
                                    torch.cat([m_ref.grad.flatten(), p_ref.grad.flatten()]))
             fields.update({"grad_max_abs": grads[0], "grad_rel_frob": grads[1], "grad_cosine": grads[2]})
@@ -2077,7 +2081,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
     accuracy = correctness()
     for item in [*model.parameters(), *reference.parameters()]:
         item.grad = None
-    del reference
+    reference = None  # free the fp32 reference before timing (`del` would unbind correctness()'s closure)
     if conf.compile:
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
@@ -2223,6 +2227,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
         execution_path = "module.reference.torch"
 
     def correctness() -> AccuracyFields:
+        assert reference is not None  # released only after this call, below
         m_ref = msa.detach().float().requires_grad_(is_train)
         p_ref = pair.detach().float().requires_grad_(is_train)
         m_impl = msa.detach().clone().requires_grad_(is_train)
@@ -2236,7 +2241,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
         if is_train:
             actual.backward(dy)
             expected.backward(dy.float())
-            assert m_impl.grad is not None and m_ref.grad is not None
+            assert m_impl.grad is not None and m_ref.grad is not None and p_impl.grad is not None and p_ref.grad is not None
             grads = tensor_metrics(torch.cat([m_impl.grad.flatten(), p_impl.grad.flatten()]),
                                    torch.cat([m_ref.grad.flatten(), p_ref.grad.flatten()]))
             fields.update({"grad_max_abs": grads[0], "grad_rel_frob": grads[1], "grad_cosine": grads[2]})
@@ -2247,7 +2252,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
     accuracy: AccuracyFields = correctness() if not (is_train and conf.dropout) else {}
     for item in [*model.parameters(), *reference.parameters()]:
         item.grad = None
-    del reference
+    reference = None  # free the fp32 reference before timing (`del` would unbind correctness()'s closure)
     if conf.compile:
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
@@ -2310,7 +2315,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
 
     class CueqAttentionPairBias(AttentionPairBias):
         def forward(self, single, pair, mask=None):
-            import cuequivariance_torch as cuet
+            import cuequivariance_torch as cuet  # ty: ignore[unresolved-import]  # optional cuEquivariance backend
 
             act = single.dtype
 
@@ -2343,6 +2348,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     reference = MultiAPB(ImplementationType.PYTORCH)
     _nondefault_parameters(reference)
     for layer in reference.layers:
+        assert isinstance(layer, AttentionPairBias)
         if layer.use_qk_norm or layer.ln_single.eps != layer.ln_pair.eps:
             raise UnsupportedBenchmark("cuet.attention_pair_bias takes one eps and no per-head qk norm")
     state = reference.state_dict()
@@ -2359,6 +2365,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     dy = torch.randn_like(single)
 
     def correctness() -> AccuracyFields:
+        assert reference is not None  # released only after this call, below
         s_ref = single.detach().float().requires_grad_(is_train)
         p_ref = pair.detach().float().requires_grad_(is_train)
         s_impl = single.detach().clone().requires_grad_(is_train)
@@ -2372,7 +2379,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
         if is_train:
             actual.backward(dy)
             expected.backward(dy.float())
-            assert s_impl.grad is not None and s_ref.grad is not None
+            assert s_impl.grad is not None and s_ref.grad is not None and p_impl.grad is not None and p_ref.grad is not None
             grads = tensor_metrics(torch.cat([s_impl.grad.flatten(), p_impl.grad.flatten()]),
                                    torch.cat([s_ref.grad.flatten(), p_ref.grad.flatten()]))
             fields.update({"grad_max_abs": grads[0], "grad_rel_frob": grads[1], "grad_cosine": grads[2]})
@@ -2381,7 +2388,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     accuracy = correctness()
     for item in [*model.parameters(), *reference.parameters()]:
         item.grad = None
-    del reference
+    reference = None  # free the fp32 reference before timing (`del` would unbind correctness()'s closure)
     if conf.compile:
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
@@ -3664,7 +3671,7 @@ def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
     def wf(t):
         return t.detach().float().contiguous()
 
-    packs = []
+    packs: list[dict[str, Any]] = []
     for block in blocks:
         at, tr = block.attention, block.transition
         try:
@@ -3675,19 +3682,19 @@ def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
                 f"Anthropic has no dense pair-bias DiT block at these widths: {exc} (served c_pair "
                 f"{lnp.SERVED_C_PAIR}); its atom attention (apb row fpf_atom) is the AF3 32x128 windowed "
                 "op, a different function, and is not substituted") from exc
-        packs.append(dict(
-            lnc_a=wf(at.ada_ln_in.ln_cond.weight), eps_ca=at.ada_ln_in.ln_cond.eps, eps_a=at.ada_ln_in.ln_in.eps,
-            ws_a=w(at.ada_ln_in.to_scale.weight), bs_a=w(at.ada_ln_in.to_scale.bias), wb_a=w(at.ada_ln_in.to_bias.weight),
-            wqkvg=torch.cat([w(at.to_query.weight), w(at.to_key.weight), w(at.to_value.weight),
+        packs.append({
+            "lnc_a": wf(at.ada_ln_in.ln_cond.weight), "eps_ca": at.ada_ln_in.ln_cond.eps, "eps_a": at.ada_ln_in.ln_in.eps,
+            "ws_a": w(at.ada_ln_in.to_scale.weight), "bs_a": w(at.ada_ln_in.to_scale.bias), "wb_a": w(at.ada_ln_in.to_bias.weight),
+            "wqkvg": torch.cat([w(at.to_query.weight), w(at.to_key.weight), w(at.to_value.weight),
                              w(at.to_gate.weight)], 0).contiguous(),
-            bqkvg=torch.cat([w(at.to_query.bias), torch.zeros(3 * d, device=at.to_query.bias.device,
+            "bqkvg": torch.cat([w(at.to_query.bias), torch.zeros(3 * d, device=at.to_query.bias.device,
                                                               dtype=act)]).contiguous(),
-            pair_bias=pair_bias_pack,
-            wo=w(at.to_out.weight), wsc_a=w(at.to_scale.weight), bsc_a=w(at.to_scale.bias),
-            lnc_t=wf(tr.ada_ln_in.ln_cond.weight), eps_ct=tr.ada_ln_in.ln_cond.eps, eps_t=tr.ada_ln_in.ln_in.eps,
-            ws_t=w(tr.ada_ln_in.to_scale.weight), bs_t=w(tr.ada_ln_in.to_scale.bias), wb_t=w(tr.ada_ln_in.to_bias.weight),
-            wab=torch.cat([w(tr.expand_a.weight), w(tr.expand_b.weight)], 0).contiguous(),
-            wsq=w(tr.squeeze.weight), wsc_t=w(tr.to_scale.weight), bsc_t=w(tr.to_scale.bias)))
+            "pair_bias": pair_bias_pack,
+            "wo": w(at.to_out.weight), "wsc_a": w(at.to_scale.weight), "bsc_a": w(at.to_scale.bias),
+            "lnc_t": wf(tr.ada_ln_in.ln_cond.weight), "eps_ct": tr.ada_ln_in.ln_cond.eps, "eps_t": tr.ada_ln_in.ln_in.eps,
+            "ws_t": w(tr.ada_ln_in.to_scale.weight), "bs_t": w(tr.ada_ln_in.to_scale.bias), "wb_t": w(tr.ada_ln_in.to_bias.weight),
+            "wab": torch.cat([w(tr.expand_a.weight), w(tr.expand_b.weight)], 0).contiguous(),
+            "wsq": w(tr.squeeze.weight), "wsc_t": w(tr.to_scale.weight), "bsc_t": w(tr.to_scale.bias)})
 
     # A key mask is folded into the bias by upstream's own recipe (the mask-free rows take it that
     # way); an all-true mask is not folded. Decided once here: the bench's mask is a fixed tensor.

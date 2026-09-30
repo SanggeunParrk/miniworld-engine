@@ -42,11 +42,13 @@ def extension():
         spec.loader.exec_module(_EXT)
     return _EXT
 
-def _fake(dy, z, split):
+def _backward_fake(dy, z, split):
+    """The four stacked weight gradients [4, 128, 128] in z's dtype."""
     return torch.empty((4, 128, 128), device=z.device, dtype=z.dtype)
 
-@opaque(fake=_fake, name='triangle_four_weight_grad_cuda')
+@opaque(fake=_backward_fake, name='triangle_attention_four_weight_grad_cuda')
 def _backward(dy: list[torch.Tensor], z: torch.Tensor, split: int) -> torch.Tensor:
+    """Weight gradients of the four projections, z^T dy[i], as one [4, 128, 128] tensor (split-K by `split`)."""
     return extension().backward(dy, z, split)
 
 def backward(dy, z):

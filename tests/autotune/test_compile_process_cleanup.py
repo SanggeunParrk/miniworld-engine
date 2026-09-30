@@ -150,7 +150,7 @@ def test_setsid_racing_with_group_lookup_still_kills_assembler(monkeypatch, desc
     _assert_assembler_killed(record, sibling)
 
 
-@pytest.mark.parametrize("pid", [0, -1, os.getpid(), os.getpgrp()])
+@pytest.mark.parametrize("pid", [0, -1, os.getpid(), os.getpgrp()], ids=["zero", "broadcast", "self", "own_group"])
 def test_cleanup_rejects_parent_and_broadcast_targets(pid):
     with pytest.raises(ValueError, match="isolated compile"):
         capture._kill_compile_process_group(pid)

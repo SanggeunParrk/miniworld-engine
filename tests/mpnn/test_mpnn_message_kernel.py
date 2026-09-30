@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from miniworld_engine.kernels.mpnn_message import (
+    MessageBackend,
     message_hidden_reduce,
     message_hidden_reduce_pytorch,
 )
 from miniworld_engine.kernels.mpnn_message.interface import _should_use_triton
+from miniworld_engine.kernels.mpnn_node_message import NodeMessageBackend
 from miniworld_engine.modules.mpnn import ProteinMPNN, ProteinMPNNConfig
 
 # Every test here launches a kernel, so it needs a card. Without the marker pytest runs it
@@ -117,6 +121,14 @@ def test_mpnn_message_backward_survives_dynamic_shape_compilation() -> None:
         assert all(gradient is not None for gradient in gradients)
 
 
+def _flat_parameter_grad(model: nn.Module) -> torch.Tensor:
+    gradients = []
+    for parameter in model.parameters():
+        assert parameter.grad is not None
+        gradients.append(parameter.grad.detach().float().flatten())
+    return torch.cat(gradients)
+
+
 def _cuda_inputs(groups: int):
     torch.manual_seed(7)
     preactivation = torch.randn(
@@ -139,7 +151,7 @@ def _cuda_inputs(groups: int):
 @pytest.mark.parametrize("backend", ["triton", "triton_memory"])
 def test_mpnn_message_triton_matches_bf16_reference(
     groups: int,
-    backend: str,
+    backend: MessageBackend,
 ) -> None:
     actual_inputs = _cuda_inputs(groups)
     expected_inputs = tuple(
@@ -149,8 +161,10 @@ def test_mpnn_message_triton_matches_bf16_reference(
     upstream = actual_inputs[4]
 
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        actual = message_hidden_reduce(*actual_inputs[:4], 48, backend=backend)
-        expected = message_hidden_reduce_pytorch(*expected_inputs, 48)
+        actual = message_hidden_reduce(
+            *actual_inputs[:4], neighbor_scale=48, backend=backend
+        )
+        expected = message_hidden_reduce_pytorch(*expected_inputs, neighbor_scale=48)
 
     actual_gradients = torch.autograd.grad(
         actual, actual_inputs[:3], upstream, retain_graph=False
@@ -310,7 +324,7 @@ def test_mpnn_message_atomic_bias_gradient_matches_emitted_dp() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("backend", ["triton", "triton_memory"])
 def test_mpnn_message_deterministic_mode_has_repeatable_bias_gradient(
-    backend: str,
+    backend: MessageBackend,
 ) -> None:
     preactivation, weight, bias, edge_mask, upstream = _cuda_inputs(17)
     was_deterministic = torch.are_deterministic_algorithms_enabled()
@@ -346,7 +360,7 @@ def test_mpnn_message_forced_triton_requires_bf16_projection() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("backend", ["triton", "triton_memory"])
-def test_mpnn_message_triton_is_fullgraph_compilable(backend: str) -> None:
+def test_mpnn_message_triton_is_fullgraph_compilable(backend: MessageBackend) -> None:
     preactivation, weight, bias, edge_mask, upstream = _cuda_inputs(8)
 
     def forward(x, w, b, mask):
@@ -389,7 +403,9 @@ def test_mpnn_message_inference_fusion_is_fullgraph_compilable() -> None:
 @pytest.mark.parametrize("backend", ["triton", "triton_memory"])
 @pytest.mark.parametrize("node_backend", ["off", "triton_compute"])
 def test_mpnn_message_backend_matches_full_model_gradients(
-    backend: str, node_backend: str, monkeypatch: pytest.MonkeyPatch,
+    backend: MessageBackend,
+    node_backend: NodeMessageBackend,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from miniworld_engine.kernels.mpnn_node_message.triton import main as node_main
 
@@ -401,7 +417,7 @@ def test_mpnn_message_backend_matches_full_model_gradients(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(node_main, "_compute_forward_op", witnessed_compute)
-    common = {
+    common: dict[str, Any] = {
         "node_width": 128,
         "edge_width": 128,
         "hidden_width": 128,
@@ -473,18 +489,8 @@ def test_mpnn_message_backend_matches_full_model_gradients(
         atol=4e-2,
         rtol=4e-2,
     )
-    expected_parameter_grad = torch.cat(
-        [
-            parameter.grad.detach().float().flatten()
-            for parameter in reference.parameters()
-        ]
-    )
-    actual_parameter_grad = torch.cat(
-        [
-            parameter.grad.detach().float().flatten()
-            for parameter in candidate.parameters()
-        ]
-    )
+    expected_parameter_grad = _flat_parameter_grad(reference)
+    actual_parameter_grad = _flat_parameter_grad(candidate)
     relative_error = torch.linalg.vector_norm(
         actual_parameter_grad - expected_parameter_grad
     ) / torch.linalg.vector_norm(expected_parameter_grad).clamp_min(1e-12)

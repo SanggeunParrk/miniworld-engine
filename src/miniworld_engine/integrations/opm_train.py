@@ -134,9 +134,9 @@ def _opm_prologue_kernel(M, MASK, LNW, LNB, WA, WB, BA, BB, A2, BT, STATS,
     valid = (r_s < S) & (r_i < N)
     cols = tl.arange(0, CM)
     x = tl.load(M + r_s[:, None] * stride_ms + r_i[:, None] * stride_mi + cols[None, :], mask=valid[:, None], other=0.0).to(tl.float32)   # [R, CM]
-    mean = tl.sum(x, axis=1) / CM
+    mean = tl.sum(x, axis=1) / CM  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     xc = x - mean[:, None]
-    var = tl.sum(xc * xc, axis=1) / CM
+    var = tl.sum(xc * xc, axis=1) / CM  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     rstd = 1.0 / tl.sqrt(var + eps)
     if SAVE_STATS:   # the LayerNorm statistics, for a backward that would otherwise re-derive them from m: STATS[s, i] = (mean, rstd)
         tl.store(STATS + (r_s * N + r_i) * 2, mean, mask=valid)
@@ -174,11 +174,11 @@ def _opm_prologue_kernel(M, MASK, LNW, LNB, WA, WB, BA, BB, A2, BT, STATS,
 def fused_prologue(m, mask, lnw, lnb, eps, wa_t, wb_t, BI=1, BJ=1, BK=64, num_warps=8, BS=32, BIP=8, save_stats=True):
     """m: [S, N, CM] bf16, mask: [S, N] bf16 0/1 -> (A2 [N*CH, SK], BT [N*CH, SK]) bf16 with A2 row = i*CH + c, and stats [S, N, 2] fp32 (mean, rstd)."""
     S, N, cm = m.shape
-    NA = triton.cdiv(N, BI) * BI; NBj = triton.cdiv(N, BJ) * BJ; SK = triton.cdiv(S, BK) * BK
+    NA = triton.cdiv(N, BI) * BI; NBj = triton.cdiv(N, BJ) * BJ; SK = triton.cdiv(S, BK) * BK  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     A2 = torch.empty(NA * CH, SK, device=m.device, dtype=torch.bfloat16)
     BT = torch.empty(NBj * CH, SK, device=m.device, dtype=torch.bfloat16)
     assert SK % BS == 0 and m.stride(2) == 1, (SK, BS, m.stride())
-    grid = (SK // BS, triton.cdiv(max(NA, NBj), BIP))
+    grid = (SK // BS, triton.cdiv(max(NA, NBj), BIP))  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     mask_c = mask.contiguous()
     stats = torch.empty(S, N, 2, device=m.device, dtype=torch.float32) if save_stats else None
     cast(Any, _opm_prologue_kernel)[grid](m, mask_c, lnw, lnb, wa_t, wb_t, wa_t, wa_t, A2, BT, stats if stats is not None else A2,
@@ -347,7 +347,8 @@ def _inference_fake(args, eps):
 def _inference_op(args: list[torch.Tensor], eps: float) -> torch.Tensor:
     # No training activations or LN statistics escape the inference boundary.
     if torch.cuda.get_device_capability(args[0].device) == (10, 0):
-        return _forward_sm100(_ext(args[0].device), *args[:8], eps, args[8] if args[8].numel() else None, False)[0]
+        return _forward_sm100(_ext(args[0].device), *args[:8], eps=eps,
+                              residual=args[8] if args[8].numel() else None, save_stats=False)[0]
     return _OpmMath.forward(_SavedContext(), *args[:8], eps, False,
                             residual=args[8] if args[8].numel() else None, save_stats=False)
 

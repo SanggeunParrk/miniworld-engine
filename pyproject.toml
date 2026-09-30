@@ -33,7 +33,9 @@ bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
 # Dev: tests, lint, static typing. `ty`, not pyright -- pyright cannot parse jaxtyping shape
 # strings (`Float[Tensor, "N S 3"]`) and reported 144 parse errors and no real findings, so
 # `[tool.pyright]` now turns it off outright and `pixi run types` / CI run ty.
-dev = ["pytest", "ruff", "ty"]
+# ruff / ty pinned: CI and a contributor must see the same findings (unpinned, CI moved to a ruff
+# whose new rules turned main red while every local run was clean).
+dev = ["pytest", "ruff==0.16.9", "ty==0.0.84"]
 # FlashAttention-4 (Blackwell/sm_100) — EXTERNAL CuTeDSL JIT wheel, used only as a
 # benchmark comparison backend (miniworld-engine ships no flash kernel of its own).
 # Opt-in so it never enters the default/parent solve; it is a prerelease wheel, so
@@ -113,6 +115,9 @@ miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebui
 # that marker, `pixi run test-gpu` selects it. Registering the marker here is what makes an
 # unmarked typo an error instead of a silently-skipped test.
 testpaths = ["tests"]
+# Tests import `tests.paths` and `benchmarks.runners`; a bare `pytest` (CI) does not put the
+# repository root on sys.path the way `python -m pytest` does.
+pythonpath = ["."]
 markers = [
   "gpu: needs a CUDA device (excluded from the CPU suite CI runs)",
 ]

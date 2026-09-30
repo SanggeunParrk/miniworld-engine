@@ -3,7 +3,12 @@ import pytest
 import torch
 
 from miniworld_engine.autotune import native, native_compile
-from miniworld_engine.autotune.fused_config import transition_candidates, trimul_candidates, unpack_trimul, validator
+from miniworld_engine.autotune.fused_config import (
+    transition_candidates,
+    trimul_candidates,
+    unpack_trimul,
+    validator,
+)
 
 
 @pytest.mark.parametrize("sms", [114, 132])
@@ -21,8 +26,11 @@ def test_transition_grid_roundtrips_and_keeps_previous_default(sms, backward):
 @pytest.mark.parametrize("length", [128, 256, 384, 512, 640, 768])
 @pytest.mark.parametrize("direction", [0, 1, 2])
 def test_trimul_inference_grid_covers_existing_lengths_and_directions(length, direction):
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_infer_kernel import TILE_TABLE, lookup
-    for (arch, cz, ch, form), _ in TILE_TABLE.items():
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_infer_kernel import (
+        TILE_TABLE,
+        lookup,
+    )
+    for (arch, cz, ch, form) in TILE_TABLE:
         if arch != "sm_90a" or form != "b":
             continue
         grid = trimul_candidates(cz, ch, length, direction)
@@ -57,4 +65,6 @@ def test_candidate_validation_rejects_wrong_results_and_ignores_unwritten_infere
 def test_native_inference_cli_is_explicit():
     from miniworld_engine.cli import build_parser
     args = build_parser().parse_args(["build", "all", "--backend", "native", "--mode", "eval"])
-    assert args.backend == "native" and args.mode == "eval" and args.config_type == "default"
+    assert args.backend == "native"
+    assert args.mode == "eval"
+    assert args.config_type == "default"

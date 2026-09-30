@@ -47,8 +47,8 @@ def test_persistent_backward_wide_warps(dtype, transposed, width, covering, warp
     dx = torch.empty_like(x)
     dw = torch.empty((3, width), device="cuda")
     db = torch.empty_like(dw)
-    bk = triton.next_power_of_2(width) if covering else 64
-    _ln_bwd_persistent.fn[(3, triton.cdiv(width, bk))](
+    bk = triton.next_power_of_2(width) if covering else 64  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
+    _ln_bwd_persistent.fn[(3, triton.cdiv(width, bk))](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         dx, dw, db, dy, x, w, mean, rstd, width, *x.stride(), x.shape[0], width,
         BLOCK_M1=32, BLOCK_K=bk, shape_key=0, num_warps=warps, num_stages=1)
     check((dx, dw.sum(0), db.sum(0)), reference(x, dy, w), dtype)
@@ -74,7 +74,7 @@ def test_atomic_backward_mask_and_residual(dtype, rowscale, residual, block_k):
         args.append(dr)
     args += [x, w, mean, rstd, scale, 1, 1, *x.stride(), x.shape[0], x.shape[1]]
     kernel = _ln_bwd_residual_kernel if residual else layer_norm_bwd_dx_fused
-    kernel.fn[(triton.cdiv(x.shape[0], 64),)](
+    kernel.fn[(triton.cdiv(x.shape[0], 64),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         *args, BLOCK_M1=64, BLOCK_K=block_k, shape_key=0, HAS_ROWSCALE=rowscale,
         num_warps=4, num_stages=1)
     rdx, rdw, rdb = reference(x, dy, w, scale if rowscale else None)
@@ -92,8 +92,8 @@ def test_strided_atomic_backward(dtype, transposed, width):
     dx = torch.empty_like(x)
     dw = torch.zeros(width, device="cuda")
     db = torch.zeros_like(dw)
-    _ln_bwd_kernel.fn[(triton.cdiv(x.shape[0], 32),)](
+    _ln_bwd_kernel.fn[(triton.cdiv(x.shape[0], 32),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         dy, x, w, mean, rstd, dx, dw, db, x.shape[0], width,
-        *dy.stride(), *x.stride(), *dx.stride(), N_PAD=triton.next_power_of_2(width),
+        *dy.stride(), *x.stride(), *dx.stride(), N_PAD=triton.next_power_of_2(width),  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         BLOCK_M1=32, shape_key=0, num_warps=8, num_stages=1)
     check((dx, dw, db), reference(x, dy, w), dtype)

@@ -929,7 +929,7 @@ def store_ranked_configs(
                                      {repr(_sig(c)) for c in (searched or [])})
         # Keep each workload's top-K as runtime candidates. Never rank a 512-row
         # time against an 18432-row time. Runtime retimes this bounded union.
-        candidates = {}
+        candidates: dict[tuple, dict] = {}
         for item in records.values():
             for c in item["entries"]:
                 sig = _sig_from_dict(c)
@@ -1334,8 +1334,11 @@ def _cached_subset(autotuner, configs, nargs, meta, resource_prune=None):
     # Capture records the declared grid; shape/device pruning only limits which
     # of its winners may launch. Comparing the pruned subset falsely invalidates
     # a valid cache whenever an early prune removes even one unsafe schedule.
-    from miniworld_engine.autotune.configs import using_default_space, validated_global_configs
     from miniworld_engine import settings
+    from miniworld_engine.autotune.configs import (
+        using_default_space,
+        validated_global_configs,
+    )
     reuse_global = (using_default_space() and not settings.current().run_autotune
                     and bool(data.get("op_identity"))
                     and bool(validated_global_configs(op, data.get("entries", {}).get(f"{dtype}|{bucket}", []))))

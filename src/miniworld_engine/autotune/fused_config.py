@@ -4,6 +4,7 @@ Candidate declarations do not certify correctness or performance on a new GPU.
 The build validates outputs against the retained default before timing a candidate.
 """
 from itertools import product
+from typing import Any
 
 
 def transition_candidates(sms, *, backward=False):
@@ -18,8 +19,12 @@ def transition_candidates(sms, *, backward=False):
 
 
 def trimul_candidates(cz, ch, length, direction):
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_infer_kernel import TILE_TABLE, lookup
-    table = TILE_TABLE.get(("sm_90a", cz, ch, "b"))
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_infer_kernel import (
+        TILE_TABLE,
+        lookup,
+    )
+    # One heterogeneous dict per arch/width (tile tuples, variant lists, mode tags, per-N overrides).
+    table: dict[str, Any] | None = TILE_TABLE.get(("sm_90a", cz, ch, "b"))
     if table is None:
         return []
     default = lookup("sm_90a", cz, ch, "b", length,

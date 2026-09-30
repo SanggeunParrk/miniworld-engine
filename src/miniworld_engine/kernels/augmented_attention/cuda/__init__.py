@@ -45,6 +45,7 @@ import torch
 import triton
 import triton.language as tl
 
+from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent
@@ -175,8 +176,17 @@ def _bias_prep(bias_hll):
 FWD_LAUNCHES = [0]
 
 
-def _fwd_impl(qs: torch.Tensor, kb: torch.Tensor, vb: torch.Tensor, bb: torch.Tensor,
-              km: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+def _fwd_launch_fake(qs, kb, vb, bb, km):
+    """O fp32 [A L, H D] (qs's shape) and the LSE fp32 [A, H, L]."""
+    L = bb.shape[1]
+    return (qs.new_empty(qs.shape, dtype=torch.float32),
+            qs.new_empty((qs.shape[0] // L, H, L), dtype=torch.float32))
+
+
+@opaque(fake=_fwd_launch_fake, name="augmented_attention_bf16_sm90_fwd")
+def _fwd_launch(qs: torch.Tensor, kb: torch.Tensor, vb: torch.Tensor, bb: torch.Tensor,
+                km: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Attention forward on the prepared operands: (O fp32, LSE fp32)."""
     FWD_LAUNCHES[0] += 1
     L = bb.shape[1]
     A = qs.shape[0] // L
@@ -186,19 +196,11 @@ def _fwd_impl(qs: torch.Tensor, kb: torch.Tensor, vb: torch.Tensor, bb: torch.Te
     return o, lse
 
 
-def _fwd_fake(qs, kb, vb, bb, km):
-    L = bb.shape[1]
-    return (qs.new_empty(qs.shape, dtype=torch.float32),
-            qs.new_empty((qs.shape[0] // L, H, L), dtype=torch.float32))
-
-
-_FWD_NAME = "miniworld_engine::augattn_bf16_sm90_fwd"
-try:
-    _fwd_op = torch.library.custom_op(_FWD_NAME, _fwd_impl, mutates_args=())
-    _fwd_op.register_fake(_fwd_fake)
-except RuntimeError:                        # already registered in this process (module reloaded)
-    pass
-FWD_OP = torch.ops.miniworld_engine.augattn_bf16_sm90_fwd.default
+# What the checkpoint policy matches: the registered OpOverload under compile_wrap="custom_op" (the default). Under
+# "disable" there is no op to name, so FWD_OP is the plain launcher and the policy recomputes it like everything else --
+# same results, without the saving.
+FWD_OP = (torch.ops.miniworld_engine.augmented_attention_bf16_sm90_fwd.default
+          if hasattr(torch.ops.miniworld_engine, "augmented_attention_bf16_sm90_fwd") else _fwd_launch)
 
 
 def checkpoint_context_keeping_attention():

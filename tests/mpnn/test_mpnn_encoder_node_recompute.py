@@ -3,13 +3,19 @@ from __future__ import annotations
 import copy
 import warnings
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 
 from miniworld_engine.modules.mpnn import ProteinMPNN, ProteinMPNNConfig
-from miniworld_engine.modules.mpnn.layers import EncoderLayer
+from miniworld_engine.modules.mpnn.layers import (
+    DecoderLayer,
+    EncoderLayer,
+    PackedEncoderProjection,
+)
 
 # Launches kernels under autocast, so it needs a card.
 pytestmark = pytest.mark.gpu
@@ -127,11 +133,13 @@ def test_encoder_node_w1_policy_falls_back_and_only_dispatches_for_training_grad
     # while retaining the stack-level explicit policy under test.
     for model in (candidate, baseline):
         for layer in (*model.encoder.layers, *model.decoder.layers):
+            assert isinstance(layer, (EncoderLayer, DecoderLayer))
             layer.node_message.reduction_backend = "pytorch"
     values = _model_inputs(batch=1, length=4, device="cpu")
 
     calls = 0
     layer = candidate.encoder.layers[0]
+    assert isinstance(layer, EncoderLayer)
     original = layer.forward_zero_node_training_recompute
 
     def tracked(*args, **kwargs):
@@ -280,7 +288,7 @@ def test_encoder_node_w1_checkpoint_gpu_contract_fallback(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_encoder_node_w1_checkpoint_fullgraph_parity() -> None:
-    common = {
+    common: dict[str, Any] = {
         "node_width": 128,
         "edge_width": 128,
         "hidden_width": 128,
@@ -309,8 +317,9 @@ def test_encoder_node_w1_checkpoint_fullgraph_parity() -> None:
     candidate.train()
 
     values = _model_inputs(batch=1, length=64, device="cuda")
-    baseline_fn = torch.compile(baseline, fullgraph=True)
-    candidate_fn = torch.compile(candidate, fullgraph=True)
+    # torch.compile is typed as returning a bare callable; given a module it returns one.
+    baseline_fn = cast(nn.Module, torch.compile(baseline, fullgraph=True))
+    candidate_fn = cast(nn.Module, torch.compile(candidate, fullgraph=True))
 
     def run(model: nn.Module) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         model.zero_grad(set_to_none=True)
@@ -368,6 +377,7 @@ def test_encoder_node_w1_checkpoint_drops_w1_activation_from_tape(
 
     def w1_is_saved(layer: EncoderLayer, *, recompute: bool) -> bool:
         projection = layer.node_message.input_projection
+        assert isinstance(projection, PackedEncoderProjection)
         original = projection.edge_only
         preactivations: list[torch.Tensor] = []
         saved: list[torch.Tensor] = []
@@ -451,6 +461,8 @@ def test_encoder_node_w1_checkpoint_keeps_dropout_rng_outside_replay() -> None:
         forward_rng = torch.cuda.get_rng_state()
         torch.autograd.backward(output, (node_upstream, edge_upstream))
         backward_rng = torch.cuda.get_rng_state()
+        assert nodes.grad is not None
+        assert edges.grad is not None
         gradients = (
             nodes.grad.detach().clone(),
             edges.grad.detach().clone(),

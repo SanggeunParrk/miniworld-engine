@@ -150,6 +150,10 @@ One extension is **not** in the table because it is not in the registry: `transi
 which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on
 sm_86 ("Error building extension"). `autotune/builder.py` excludes `cuda` from that case's
 implementations for exactly this reason.
+
+The B200 (sm_100a) kernels are not in the table either: like the H100 hand-CUDA paths they are
+integrations wired into the modules (`integrations/`, gated on compute capability 10.0), not
+registry kernels. What runs there, for which shapes: [docs/gpus/b200/b200.md](docs/gpus/b200/b200.md).
 ## CLI
 
 `miniworld-engine` (installed by the package; `python -m miniworld_engine.cli` works too):
@@ -187,7 +191,6 @@ kernel lives in `src/`. Everything is still in git:
 | tag `archive/docs-20260928`, `archive/records-20260928` | removed docs: dated records, verdicts, design proposals, analyses, release pages |
 | tag `archive/scripts-20260928` | the Sept H100 bring-up scripts |
 | tag `archive/a100-sm80-branch-20260928` | the A100 branch as merged: `experiments/a100_trimul_fwd` (sm_80 CUDA TriMul, not ported), `a100_transition_*`, `a100_msa_fwd`, `a100_anthropic_baseline`, `a100_trimul_triton`, `msa_triton` |
-| tag `archive/wip-main-20260928` | the Sept 27–28 local-H100/Vast research (was tag `archive/wip-main-20260928`) |
 
 ```sh
 git show archive/experiments-20260928:experiments/transition_fused/README.md

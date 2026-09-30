@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from miniworld_engine.kernels.mpnn_edge_tail import (
+    EdgeTailBackend,
     edge_tail_supported,
     edge_tail_update,
     edge_tail_update_pytorch,
@@ -30,7 +33,7 @@ _GRADIENT_NAMES = (
 
 
 def _reproduce_keep_mask(
-    seed: torch.Tensor, shape: torch.Size, probability: float
+    seed: torch.Tensor, shape: tuple[int, ...], probability: float
 ) -> torch.Tensor:
     """Regenerate the kernel's dropout decision for the PyTorch reference.
 
@@ -54,7 +57,10 @@ def _reproduce_keep_mask(
         ROUNDS: tl.constexpr,
     ):
         offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=ROUNDS) < keep_probability
+        # ty cannot model Triton's JITFunction/ConstexprFunction/constexpr stubs: calling one
+        # jitted function from another, `triton.cdiv`, and launch-time constexpr/`num_warps`
+        # keywords are all reported as mismatches even though Triton accepts them.
+        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=ROUNDS) < keep_probability  # ty: ignore[invalid-argument-type]
         tl.store(mask_ptr + offsets, keep, mask=offsets < elements)
 
     elements = 1
@@ -62,14 +68,14 @@ def _reproduce_keep_mask(
         elements *= size
     flat = torch.empty(elements, dtype=torch.bool, device=seed.device)
     block = 1024
-    _keep_mask_kernel[(triton.cdiv(elements, block),)](
+    _keep_mask_kernel[(triton.cdiv(elements, block),)](  # ty: ignore[invalid-argument-type]
         seed,
         flat,
         elements,
         1.0 - probability,
-        BLOCK=block,
+        BLOCK=block,  # ty: ignore[invalid-argument-type]
         ROUNDS=_PHILOX_ROUNDS.value,
-        num_warps=4,
+        num_warps=4,  # ty: ignore[unknown-argument]
     )
     return flat.view(shape)
 
@@ -106,7 +112,7 @@ def _leaves(batch: int, length: int, neighbors: int, *, double: bool):
 
 def _evaluate(
     made, indices, seed, probability, keep_mask, *, fused: bool,
-    backend: str = "triton",
+    backend: EdgeTailBackend = "triton",
 ):
     edge, node, packed, packed_bias = made[0], made[1], made[2], made[3]
     hidden_weight, hidden_bias, output_weight, output_bias = made[4:8]
@@ -324,7 +330,7 @@ def test_mpnn_edge_tail_rejects_contracts_it_cannot_honor() -> None:
 def test_mpnn_edge_tail_backend_is_off_by_default_and_validated() -> None:
     assert ProteinMPNNConfig().edge_tail_backend == "off"
     with pytest.raises(ValueError, match="edge_tail_backend must be one of"):
-        ProteinMPNNConfig(edge_tail_backend="fused")  # type: ignore[arg-type]
+        ProteinMPNNConfig(edge_tail_backend=cast(Any, "fused"))
     with pytest.raises(ValueError, match="subsumes edge_w1_recompute"):
         ProteinMPNNConfig(
             edge_tail_backend="triton",
@@ -342,7 +348,7 @@ def test_mpnn_edge_tail_model_matches_the_separate_operation_encoder() -> None:
     inside BF16 activation noise rather than merely being finite.
     """
 
-    def build(backend: str) -> ProteinMPNN:
+    def build(backend: EdgeTailBackend) -> ProteinMPNN:
         torch.manual_seed(5)
         model = (
             ProteinMPNN(
@@ -356,7 +362,7 @@ def test_mpnn_edge_tail_model_matches_the_separate_operation_encoder() -> None:
                     edge_mlp_backend="triton_memory",
                     edge_norm_backend="memory",
                     feature_backend="recompute",
-                    edge_tail_backend=backend,  # type: ignore[arg-type]
+                    edge_tail_backend=backend,
                 )
             )
             .cuda()
@@ -444,15 +450,17 @@ def test_mpnn_edge_tail_shared_gelu_matches_the_unshared_form_bitwise() -> None:
         _gelu_grad_from_erf,
     )
 
+    # ty cannot model Triton's JITFunction/constexpr stubs: a jitted function called from
+    # another, and a launch-time constexpr keyword, are reported as mismatches.
     @triton.jit
     def _probe(x_ptr, plain_ptr, shared_ptr, dplain_ptr, dshared_ptr, N: tl.constexpr):
         columns = tl.arange(0, N)
         x = tl.load(x_ptr + columns)
-        erf_term = _gelu_erf(x)
-        tl.store(plain_ptr + columns, _gelu(x))
-        tl.store(shared_ptr + columns, _gelu_from_erf(x, erf_term))
-        tl.store(dplain_ptr + columns, _gelu_grad(x))
-        tl.store(dshared_ptr + columns, _gelu_grad_from_erf(x, erf_term))
+        erf_term = _gelu_erf(x)  # ty: ignore[invalid-argument-type]
+        tl.store(plain_ptr + columns, _gelu(x))  # ty: ignore[invalid-argument-type]
+        tl.store(shared_ptr + columns, _gelu_from_erf(x, erf_term))  # ty: ignore[invalid-argument-type]
+        tl.store(dplain_ptr + columns, _gelu_grad(x))  # ty: ignore[invalid-argument-type]
+        tl.store(dshared_ptr + columns, _gelu_grad_from_erf(x, erf_term))  # ty: ignore[invalid-argument-type]
 
     width = 1024
     generator = torch.Generator(device="cuda").manual_seed(7)
@@ -461,7 +469,7 @@ def test_mpnn_edge_tail_shared_gelu_matches_the_unshared_form_bitwise() -> None:
     values = torch.randn(width, device="cuda", generator=generator) * 8.0
     values[0] = 0.0
     outputs = [torch.empty_like(values) for _ in range(4)]
-    _probe[(1,)](values, *outputs, N=width)
+    _probe[(1,)](values, *outputs, N=width)  # ty: ignore[invalid-argument-type]
 
     plain, shared, dplain, dshared = outputs
     assert torch.equal(plain.view(torch.int32), shared.view(torch.int32))

@@ -31,6 +31,10 @@ from miniworld_engine.kernels._nvcc import (
     wait_for_lock,
 )
 
+#: The real clock, taken before any test moves `time.time`: `_lock` is called twice in one test, and
+#: reading the (already moved) clock the second time added the first age to the second.
+_REAL_TIME = time.time
+
 
 def _lock(tmp_path: Path, age_seconds: float, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A lock created now, seen `age_seconds` later.
@@ -40,7 +44,7 @@ def _lock(tmp_path: Path, age_seconds: float, monkeypatch: pytest.MonkeyPatch) -
     """
     lock = tmp_path / "lock"
     lock.touch()
-    later = time.time() + age_seconds
+    later = _REAL_TIME() + age_seconds
     monkeypatch.setattr(time, "time", lambda: later)
     return lock
 

@@ -133,7 +133,7 @@ def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeyp
 def test_residual_epilogue_rounding_and_identity_gradient(length, monkeypatch):
     monkeypatch.setenv(ot.ENV, "1")
     torch.manual_seed(71)
-    m = OuterProductMean(64, 128, 32, implementation="miniworld").cuda().bfloat16()
+    m = OuterProductMean(64, 128, 32, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
     with torch.no_grad():
         m.to_out.weight.normal_(std=.03)
     x = torch.randn(1, 256, length, 64, device=DEV, dtype=DT, requires_grad=True)

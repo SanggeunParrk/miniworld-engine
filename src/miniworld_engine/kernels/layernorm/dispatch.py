@@ -85,6 +85,8 @@ def _load(device_index: int) -> dict:
 
 @device_constant
 def lookup(device: torch.device, n: int, mb: int, *, regime: str | None = None) -> str | None:
+    if device.type != "cuda":  # the cache is per GPU; a CPU tensor has none (and must not init CUDA)
+        return None
     idx = device.index if device.index is not None else torch.cuda.current_device()
     key = f"{n}|{mb}" if regime is None else f"{n}|{mb}|{regime}"
     entry = _load(idx).get(key)

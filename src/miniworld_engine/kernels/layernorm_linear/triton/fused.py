@@ -221,14 +221,15 @@ def layernorm_linear_triton_fwd(
     return _launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=False)[0]
 
 
-def _with_stats_fake(x, ln_weight, ln_bias, weight, bias, eps=1e-5):
+def _layernorm_linear_triton_fwd_stats_fake(x, ln_weight, ln_bias, weight, bias, eps=1e-5):
+    """y [..., N] like x; the LayerNorm mean and rstd as fp32 [rows]."""
     m = x.numel() // x.shape[-1]
     return (x.new_empty((*x.shape[:-1], weight.shape[0])),
             x.new_empty((m,), dtype=torch.float32),
             x.new_empty((m,), dtype=torch.float32))
 
 
-@opaque(fake=_with_stats_fake, name="layernorm_linear_fwd_stats")
+@opaque(fake=_layernorm_linear_triton_fwd_stats_fake, name="layernorm_linear_fwd_stats")
 def layernorm_linear_triton_fwd_stats(
     x: torch.Tensor, ln_weight: torch.Tensor, ln_bias: torch.Tensor,
     weight: torch.Tensor, bias: torch.Tensor | None, eps: float = 1e-5,

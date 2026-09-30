@@ -137,7 +137,11 @@ def test_replay_is_bit_identical():
             t.grad = None
         y = fused_sm80.transition_fused_sm80(x, gamma, beta, wa, wb, ws, 1e-5)
         y.backward(dy)
-        return [y.detach().clone()] + [t.grad.clone() for t in (x, wa, wb, ws)]
+        grads = []
+        for t in (x, wa, wb, ws):
+            assert t.grad is not None
+            grads.append(t.grad.clone())
+        return [y.detach().clone(), *grads]
 
     first, second = once(), once()
     assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))

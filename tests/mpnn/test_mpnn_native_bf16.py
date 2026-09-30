@@ -24,10 +24,19 @@ def test_norm_cast_preserves_affine_and_double():
     y = norm(x)
     assert y.dtype == torch.bfloat16
     y.float().square().sum().backward()
+    assert norm.weight.grad is not None
     assert norm.weight.grad.dtype == torch.float32
     norm.double()
     assert norm.weight.dtype == torch.float64
     assert norm(x.double()).dtype == torch.float64
+
+
+def _flat_grad(model: torch.nn.Module) -> torch.Tensor:
+    gradients = []
+    for p in model.parameters():
+        assert p.grad is not None
+        gradients.append(p.grad.flatten().float())
+    return torch.cat(gradients)
 
 
 def _config(backend, feature_backend):
@@ -138,10 +147,8 @@ def test_compiled_native_bf16_matches_pytorch(backend, feature_backend, bounded_
     assert all(p.grad is not None for p in model.parameters())
     relative = lambda a, b: (a.double() - b.double()).norm() / b.double().norm()
     assert relative(actual, expected) < 0.02
-    actual_grad = torch.cat([p.grad.flatten().float() for p in model.parameters()])
-    reference_grad = torch.cat(
-        [p.grad.flatten().float() for p in reference.parameters()]
-    )
+    actual_grad = _flat_grad(model)
+    reference_grad = _flat_grad(reference)
     assert relative(actual_grad, reference_grad) < 0.02
     assert (
         F.cosine_similarity(actual_grad.double(), reference_grad.double(), dim=0)
@@ -163,6 +170,9 @@ def test_native_bf16_memory_norm_dispatch(bounded_tuning):
     actual = edge_layer_norm(values, norm.weight, norm.bias, norm.eps, backend="memory")
     torch.testing.assert_close(actual, expected)
     actual.float().square().mean().backward()
+    assert values.grad is not None
+    assert norm.weight.grad is not None
+    assert norm.bias.grad is not None
     assert values.grad.dtype == torch.bfloat16
     assert norm.weight.grad.dtype == norm.bias.grad.dtype == torch.float32
     assert torch.isfinite(norm.weight.grad).all()

@@ -23,7 +23,7 @@ def run_case(m, n, k, dtype, config, offset=0):
     c1 = x.float().mean(-1) * r
     y = torch.empty_like(x)
     bm, bn, bk, warps, stages, group = config
-    compiled = _adaln_gemm_gate_kernel.fn[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+    compiled = _adaln_gemm_gate_kernel.fn[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         c,
         sw,
         sb,

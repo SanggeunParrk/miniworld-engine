@@ -29,8 +29,9 @@ def test_radial_projection_autocast_and_saved_storage(compiled, dtype):
     with torch.autocast("cuda", dtype=dtype, enabled=dtype != torch.float32):
         expected = F.linear(_radial_features(distances, 16), expected_weight[:, 16:])
     expected.backward(upstream)
+    forward = run
     if compiled:
-        run = torch.compile(run, fullgraph=True, options={"triton.cudagraphs": False})
+        forward = torch.compile(run, fullgraph=True, options={"triton.cudagraphs": False})
     saved = []
 
     def pack(t):
@@ -38,7 +39,7 @@ def test_radial_projection_autocast_and_saved_storage(compiled, dtype):
         return t
 
     with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
-        actual = run(actual_weight)
+        actual = forward(actual_weight)
         actual.backward(upstream)
     assert actual.dtype == dtype
     assert not any(shape[-1:] == (400,) for shape, _ in saved), saved
@@ -47,4 +48,5 @@ def test_radial_projection_autocast_and_saved_storage(compiled, dtype):
     relative = lambda a, b: (a.float() - b.float()).norm() / b.float().norm()
     assert relative(actual, expected) < tol
     assert relative(actual_weight.grad, expected_weight.grad) < tol
+    assert actual_weight.grad is not None
     assert torch.count_nonzero(actual_weight.grad[:, :16]) == 0

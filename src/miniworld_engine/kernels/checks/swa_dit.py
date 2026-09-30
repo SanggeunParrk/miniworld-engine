@@ -39,9 +39,9 @@ def _forward_pair(precision, **pins):
     _fixed()
     q, mod, cos, sin, seqused, *weights, b, hw = _inputs(**_SHAPE)
     with _no_tf32():
-        expected = swa_dit_block_reference(_f(q), _f(mod), cos, sin, seqused, *map(_f, weights), b, hw)
+        expected = swa_dit_block_reference(_f(q), _f(mod), cos, sin, seqused, *map(_f, weights), B=b, half_window=hw)
     with _pinned(**pins), torch.no_grad():
-        actual = swa_dit_block(q, mod, cos, sin, seqused, *weights, b, hw)
+        actual = swa_dit_block(q, mod, cos, sin, seqused, *weights, B=b, half_window=hw)
     return {"out": (actual, expected)}
 
 
@@ -53,8 +53,8 @@ def _backward_pairs(names, precision, **pins):
     _fixed()
     q, mod, cos, sin, seqused, *weights, b, hw = _inputs(**_SHAPE)
     with _no_tf32(), _pinned(**pins):
-        got = _grads(lambda q_, m_, *w: swa_dit_block(q_, m_, cos, sin, seqused, *w, b, hw), [q, mod, *weights],
-                     lambda q_, m_, *w: swa_dit_block_reference(q_, m_, cos, sin, seqused, *w, b, hw), _NAMES)
+        got = _grads(lambda q_, m_, *w: swa_dit_block(q_, m_, cos, sin, seqused, *w, B=b, half_window=hw), [q, mod, *weights],
+                     lambda q_, m_, *w: swa_dit_block_reference(q_, m_, cos, sin, seqused, *w, B=b, half_window=hw), _NAMES)
     return {n: got[n] for n in names}
 
 

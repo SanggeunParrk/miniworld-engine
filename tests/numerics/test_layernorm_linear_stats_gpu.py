@@ -1,9 +1,13 @@
-import pytest
 import os
+
+import pytest
 import torch
 import triton
+
 from miniworld_engine import settings
-from miniworld_engine.kernels.layernorm_linear.autograd import layernorm_linear_triton_fn
+from miniworld_engine.kernels.layernorm_linear.autograd import (
+    layernorm_linear_triton_fn,
+)
 from miniworld_engine.kernels.layernorm_linear.triton.fused import (
     _lnl_fwd_kernel,
 )
@@ -67,7 +71,7 @@ if "NORM_CHECK_PART" in os.environ:
 
 @pytest.mark.parametrize("dt", _dtypes)
 @pytest.mark.parametrize(
-    "k,n,layout",
+    ("k", "n", "layout"),
     [
         (64, 64, "2d"),
         (128, 16, "3d"),
@@ -86,7 +90,7 @@ def test_output_all_gradients(dt, k, n, layout, bias):
     dy = torch.randn_like(y)
     gs = torch.autograd.grad(y, params, dy)
     ws = torch.autograd.grad(want, params, dy)
-    for a, b in zip((y, *gs), (want, *ws)):
+    for a, b in zip((y, *gs), (want, *ws), strict=False):
         check(a, b, dt)
 
 
@@ -100,7 +104,7 @@ def test_saved_stats_tail_and_offset(bk):
     y = torch.empty(m, n, device="cuda")
     mean = torch.empty(m, device="cuda")
     inv = torch.empty_like(mean)
-    _lnl_fwd_kernel.fn[(triton.cdiv(m, 8),)](
+    _lnl_fwd_kernel.fn[(triton.cdiv(m, 8),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton.ConstexprFunction's self-typed __call__
         x,
         w,
         x,
@@ -165,7 +169,7 @@ def test_graph_changed_inputs_and_compile():
     torch.cuda.synchronize()
     ref = reference(*args)
     gr = torch.autograd.grad(ref, params, dy)
-    for a, b in zip(out, (ref, *gr)):
+    for a, b in zip(out, (ref, *gr), strict=False):
         check(a, b, torch.bfloat16)
 
 

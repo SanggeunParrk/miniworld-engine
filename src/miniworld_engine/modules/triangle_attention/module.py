@@ -187,7 +187,9 @@ class TriangleAttention(nn.Module):
 
         if backend == KernelBackend.CUEQUIVARIANCE:
             # cuequiv backend (opt-in): lazy import so the default path never needs cuequiv.
-            from cuequivariance_torch import triangle_attention
+            from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend
+                triangle_attention,
+            )
             # Feed cuequiv CONTIGUOUS inputs in its native (B, L1, H, L2, D) layout: its kernel is
             # ~35% slower on the strided rearrange view (measured H100), so a strided input
             # unfairly penalizes the baseline. .contiguous() pays one copy but hits cuequiv's fast
@@ -196,7 +198,7 @@ class TriangleAttention(nn.Module):
             k = rearrange(key, "B H L1 L2 D -> B L1 H L2 D").contiguous()
             v = rearrange(value, "B H L1 L2 D -> B L1 H L2 D").contiguous()
             out = triangle_attention(q, k, v, bias.unsqueeze(1).float())
-            return rearrange(out, "B L1 H L2 D -> B H L1 L2 D")  # ty: ignore[invalid-return-type]
+            return rearrange(out, "B L1 H L2 D -> B H L1 L2 D")
 
         raise InvalidImplementationError(self.implementation)
 

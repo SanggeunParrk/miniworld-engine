@@ -52,7 +52,7 @@ the manifest it cites, so this table cannot age past its evidence again.
 |---|---|---|
 | sm80 | 132 | yes, on sm86 (which satisfies sm80) |
 | sm90 | 13 | **no**: the H100 manifest lists them `untested` or not at all |
-| sm100 | 0 | nothing declares sm100 since v2.2.0 removed the CuTe DSL kernels |
+| sm100 | 0 | the registry declares none; the hand-written sm_100a paths (TriMul, TriangleAttention, Transition, token DiT, OPM / PWA training) are integrations outside it -- see [b200/b200.md](b200/b200.md) |
 
 No full-registry manifest has been run on sm90 yet. The three TriMul parity kernels the
 SM90 report (`archive/records-20260928:docs/records/trimul-sm90-parity.md`) covered were CuTe kernels and left the registry in

@@ -7,7 +7,7 @@ import shutil
 import sys
 
 import torch
-from torch.utils.cpp_extension import load
+from miniworld_engine.kernels._nvcc import load_extension as load   # the lock-guarded torch load
 
 ROOT = Path(__file__).resolve().parent
 os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0a"

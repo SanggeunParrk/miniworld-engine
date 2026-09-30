@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.utils.checkpoint
 
 from miniworld_engine.kernels.mpnn_edge_mlp import (
+    EdgeMLPBackend,
     edge_mlp_update,
     edge_mlp_update_pytorch,
 )
 from miniworld_engine.kernels.mpnn_edge_mlp.interface import _select_backend
-from miniworld_engine.modules.mpnn.layers import EncoderLayer
+from miniworld_engine.modules.mpnn.layers import EdgeW1Recompute, EncoderLayer
 
 
 def test_mpnn_edge_mlp_reference_contract_and_cpu_fallback() -> None:
@@ -82,12 +84,14 @@ def _cosine(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 
 def _assert_tracks(
-    actual: torch.Tensor,
-    expected: torch.Tensor,
+    actual: torch.Tensor | None,
+    expected: torch.Tensor | None,
     *,
     relative: float,
     cosine: float = 0.99999,
 ) -> None:
+    assert actual is not None
+    assert expected is not None
     assert _relative_error(actual, expected) < relative
     if expected.detach().float().norm() > 1e-12:
         assert _cosine(actual, expected) > cosine
@@ -100,7 +104,7 @@ def _assert_tracks(
 @pytest.mark.parametrize("rows", [1, 17, 257])
 def test_mpnn_edge_mlp_triton_matches_bf16_reference(
     rows: int,
-    backend: str,
+    backend: EdgeMLPBackend,
 ) -> None:
     actual_values = _cuda_inputs(rows)
     expected_values = tuple(
@@ -175,7 +179,7 @@ def test_mpnn_edge_mlp_memory_recompute_drift_stays_bounded() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("backend", ["triton_compute", "triton_memory"])
-def test_mpnn_edge_mlp_rank_one_backward_preserves_bias_shapes(backend: str) -> None:
+def test_mpnn_edge_mlp_rank_one_backward_preserves_bias_shapes(backend: EdgeMLPBackend) -> None:
     values = _cuda_inputs(1)
     rank_one_values = (values[0][0], *values[1:-1])
     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -214,7 +218,7 @@ def test_mpnn_edge_mlp_crop_2048_gradient_quality() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("backend", ["triton_compute", "triton_memory"])
-def test_mpnn_encoder_edge_backend_matches_pytorch(backend: str) -> None:
+def test_mpnn_encoder_edge_backend_matches_pytorch(backend: EdgeMLPBackend) -> None:
     torch.manual_seed(41)
     reference = EncoderLayer(
         128,
@@ -326,11 +330,14 @@ def test_mpnn_encoder_edge_backend_matches_pytorch(backend: str) -> None:
     zero_gradient_failures: list[str] = []
 
     def record(
-        actual_value: torch.Tensor,
-        expected_value: torch.Tensor,
-        truth_value: torch.Tensor,
+        actual_value: torch.Tensor | None,
+        expected_value: torch.Tensor | None,
+        truth_value: torch.Tensor | None,
         label: str,
     ) -> None:
+        assert actual_value is not None, label
+        assert expected_value is not None, label
+        assert truth_value is not None, label
         if truth_value.float().norm() <= 1e-12:
             # Production zero-initializes the transition output projection, so
             # its expand projection legitimately receives no gradient here, and a
@@ -557,7 +564,7 @@ def test_mpnn_edge_w1_checkpoint_preserves_layer_outputs_and_gradients() -> None
 def _small_edge_w1_case(
     *,
     dropout: float,
-    recompute: str,
+    recompute: EdgeW1Recompute,
 ) -> EncoderLayer:
     return EncoderLayer(
         node_width=128,
@@ -700,7 +707,7 @@ def test_mpnn_edge_w1_checkpoint_is_bypassed_under_no_grad(
     [("triton_compute", 2), ("triton_memory", 1)],
 )
 def test_mpnn_edge_mlp_forward_saved_tensor_policy(
-    backend: str,
+    backend: EdgeMLPBackend,
     expected_edge_tensors: int,
 ) -> None:
     values = _cuda_inputs(17)
@@ -724,7 +731,7 @@ def test_mpnn_edge_mlp_forward_saved_tensor_policy(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("backend", ["triton_compute", "triton_memory"])
-def test_mpnn_edge_mlp_triton_is_fullgraph_compilable(backend: str) -> None:
+def test_mpnn_edge_mlp_triton_is_fullgraph_compilable(backend: EdgeMLPBackend) -> None:
     values = _cuda_inputs(257)
 
     def forward(*inputs):

@@ -30,7 +30,7 @@ def gated_projection_gate_triton():
 
     gate, x = _rows(), _rows()
     out = torch.empty_like(x)
-    grid = lambda meta: [triton.cdiv(M, meta["BLOCK_M1"])]
+    grid = lambda meta: [triton.cdiv(M, meta["BLOCK_M1"])]  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     sigmoid_gate_fwd_kernel[grid](gate, x, gate.stride(0), x.stride(0), out, M, D,
                                   shape_key=both_key(M, R=D))
     return out, torch.sigmoid(_f(gate)) * _f(x)
@@ -48,7 +48,7 @@ def gated_projection_bwd_gate_triton():
 
     gate, x, grad_out = _rows(), _rows(), _rows()
     dgate, dx = torch.empty_like(gate), torch.empty_like(x)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     sigmoid_gate_bwd_kernel[grid](gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0),
                                   M, D, shape_key=both_key(M, R=D))
     s = torch.sigmoid(_f(gate))

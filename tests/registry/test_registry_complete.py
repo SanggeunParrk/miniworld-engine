@@ -434,7 +434,10 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     #: Keep it explicit until it has a driver, checker and autotune ladder.
     # H100's live weight pack is an untuned copy/reorder helper (BLOCK=1024,
     # four warps), not a registered GEMM or an autotuned launch.
-    NOT_TUNED = {"_zero_bias_grad_kernel", "_message_inference_kernel", "_pack"}
+    # `_fold` (kernels/trimul_inproj/cuda/h100_wide_inference.py) is the same kind: one program per
+    # output row folding the LayerNorm affine into the projection weights once per call, not a
+    # registered kernel.
+    NOT_TUNED = {"_zero_bias_grad_kernel", "_message_inference_kernel", "_pack", "_fold"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:

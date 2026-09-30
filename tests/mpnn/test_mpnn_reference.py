@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.modules.mpnn import NaiveProteinMPNN
-from miniworld_engine.modules.mpnn.naive import gather_edges, gather_nodes
+from miniworld_engine.modules.mpnn.naive import EncLayer, gather_edges, gather_nodes
 
 
 def _inputs(length: int = 8) -> tuple[torch.Tensor, ...]:
@@ -98,7 +98,9 @@ def test_forward_shape_log_probs_and_gradients() -> None:
     logits.square().mean().backward()
     assert inputs[0].grad is not None
     assert torch.isfinite(inputs[0].grad).all()
-    assert model.encoder_layers[0].W1.weight.grad is not None
+    first_encoder_layer = model.encoder_layers[0]
+    assert isinstance(first_encoder_layer, EncLayer)
+    assert first_encoder_layer.W1.weight.grad is not None
 
     log_probs = model(*_inputs(), return_log_prob=True)
     assert log_probs.shape == (1, 8, 21)
@@ -184,6 +186,7 @@ def test_frozen_reference_has_committed_numerical_anchor() -> None:
         ]
     )
     torch.testing.assert_close(logits[0, :5, :3], expected_logits, atol=2e-6, rtol=2e-6)
+    assert xyz.grad is not None
     torch.testing.assert_close(
         xyz.grad[0, :3, 1], expected_ca_grad, atol=2e-7, rtol=2e-5
     )

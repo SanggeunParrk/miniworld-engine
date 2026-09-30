@@ -299,7 +299,7 @@ def using_default_space() -> bool:
     return _DIR is not None and _DIR.resolve() == (CONFIG_ROOT / "default").resolve()
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _global_rows(op):
     path = CONFIG_ROOT / "grid" / f"{op}.csv"
     if not path.is_file():

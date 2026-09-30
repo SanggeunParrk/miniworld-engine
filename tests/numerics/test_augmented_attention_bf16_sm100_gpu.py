@@ -74,7 +74,7 @@ def test_matches_fp64_at_the_bf16_input_floor(A, L, bias_scale, head_major):
     leaves = [t.clone().requires_grad_() for t in (q, k, v)]
     b = (bias.permute(3, 0, 1, 2).contiguous() if head_major else bias.clone()).requires_grad_()
     assert sm100.available(leaves[0], b, bias_head_major=head_major)
-    o = sm100.augmented_attention_bf16_sm100(*leaves, b, bias_head_major=head_major)
+    o = sm100.augmented_attention_bf16_sm100(leaves[0], leaves[1], leaves[2], b, bias_head_major=head_major)
     o.backward(do)
     db = b.grad.permute(1, 2, 3, 0) if head_major else b.grad
     got = (o.detach(), leaves[0].grad, leaves[1].grad, leaves[2].grad, db)
@@ -134,7 +134,7 @@ def test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error():
     truth = run(ref)
     calls = []
     orig = sm100.augmented_attention_bf16_sm100
-    sm100.augmented_attention_bf16_sm100 = lambda *a, **k: calls.append(1) or orig(*a, **k)
+    sm100.augmented_attention_bf16_sm100 = lambda *a, **k: calls.append(1) or orig(*a, **k)  # ty: ignore[invalid-assignment] -- deliberate spy
     try:
         got = run(eng, compute_dtype=torch.bfloat16)
     finally:

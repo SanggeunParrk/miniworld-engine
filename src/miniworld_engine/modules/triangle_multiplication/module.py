@@ -266,7 +266,9 @@ class TriangleMultiplication(nn.Module):
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
         # cuequiv backend (opt-in): lazy import so the default miniworld path never needs cuequiv.
-        from cuequivariance_torch import triangle_multiplicative_update
+        from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend
+            triangle_multiplicative_update,
+        )
 
         mask_2d = None
         if mask is not None:
