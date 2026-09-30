@@ -360,19 +360,14 @@ def install_native_recorders() -> None:
             raise RuntimeError("native derivation recorder received a real tensor")
 
     if torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0):
-        # B200 TriMul D128 (integrations.trimul_b200): its opaque ops run eagerly here, so each
+        # B200 TriMul (integrations.trimul_b200): its opaque ops run eagerly here, so each
         # one is replaced by its fake -- same contract as the H100 composites below, no launches.
-        from miniworld_engine.kernels.trimul_inproj.cuda import b200_bidir
-
         def b200_contract(fake):
             def run(*args, **kwargs):
                 require_fake(args[0][0])
                 return fake(*args, **kwargs)
             return run
 
-        for entry, fake in (("forward", "_forward_fake"), ("backward", "_backward_fake"),
-                            ("forward_nograd", "_forward_nograd_fake")):
-            setattr(b200_bidir, entry, b200_contract(getattr(b200_bidir, fake)))
         from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer
 
         b200_infer.inference = b200_contract(b200_infer._inference_fake)

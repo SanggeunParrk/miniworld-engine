@@ -1,17 +1,16 @@
-"""B200 (sm_100a) TriMul training for D = 64 (either direction), D = 128 (one direction) and D = 256 / 384 / 512 (either
-direction), bf16, B=1. (D128 bidirectional training: ``b200_bidir``.)
+"""B200 (sm_100a) TriMul training for every width D64-D512, either direction, bf16, B=1.
 
-D64 / D128 one direction (``forward_small`` / ``backward_small``; L a multiple of 128): forward = the inference front (k1w,
+D64 / D128 (``forward_small`` / ``backward_small``; L a multiple of 128): forward = the inference front (k1w,
 cuBLAS contractions) and k3g's saving epilogue (x_n, LN_out statistics); backward = two fused kernels around the contraction
 gradients:
   b1s / b1g   output side: gate / projection gradients, LN_out backward -> dG, dt; dWg, dWp, dg_o, db_o (front CTAs hand dP
-              to LN-backward CTAs through an L2 ring). b1s: D64 (H = 64 / 128); b1g: the D128 B1r generalised over H.
+              to LN-backward CTAs through an L2 ring). b1s: D64 (H = 64 / 128); b1g: D128 (H = 256 bidirectional / 128).
   cuBLAS      contraction gradients -> plane gradient da [P, L, L]
   b7m         D64 input side, one CTA per 128-token tile: pre-activations recomputed, gate gradients,
               dxn = [dpre | dG] [W1 ; Wg] (packed W1 resident in shared memory, dW1 in TMEM), LN_in backward + residual -> dx;
               dW1, dg_i, db_i
-  b7g         D128 input side: the D128 B7r generalised over the chunk count (source CTAs per group = P / 64 = 4 here; the
-              packed W1, 128 KB, does not fit next to b7m's buffers)
+  b7g         D128 input side, over P / 64 plane chunks (8 bidirectional, 4 one direction) per source group (the packed
+              W1, 128 / 256 KB, does not fit next to b7m's buffers)
 
 D256 / 384 / 512:
 
@@ -42,7 +41,6 @@ EPS = 1e-5
 TOK = 128
 B1_RSF = 4       # b1s / b1g ring slots per front CTA
 B7_RD = 12       # b7g ring slots per source group
-B7_SG = 18       # b7g source groups (x 4 source CTAs), measured on L256-L768
 
 
 def _ext():
@@ -56,16 +54,25 @@ def supports(width: int, length: int, direction: int) -> bool:
     """direction 0 = bidirectional, 1 / 2 = one direction. k1w / k1wb / k3w tile 128 tokens and lnout_bwd 256, so L is a
     multiple of 16; the D64 / D128 path's k3g save and b1s / b1g group tiles by column (L a multiple of 128, at most 80 columns
     of tiles for the front CTAs)."""
-    if width == 64 or (width == 128 and direction != 0):
-        return 0 < length <= 80 * TOK and length % TOK == 0
-    return width in WIDTHS and width != 128 and length > 0 and length % 16 == 0
+    if width <= 128:
+        return width in WIDTHS and 0 < length <= 80 * TOK and length % TOK == 0
+    return width in WIDTHS and length > 0 and length % 16 == 0
 
 
 def _front_ctas(length: int, width: int, direction: int) -> int:
-    """b1s / b1g front CTAs: the largest multiple of L/128 <= 80 (D64 bidirectional) / 96 (D64 one direction) / 112 (D128),
-    measured on L384 / L768."""
+    """b1s / b1g front CTAs: the largest multiple of L/128 <= 80 (D64 bidirectional) / 96 (D64 one direction, D128
+    bidirectional) / 112 (D128 one direction), measured on L128-L768."""
     rows = length // TOK
-    return ((112 if width == 128 else 80 if direction == 0 else 96) // rows) * rows
+    cap = {(64, True): 80, (64, False): 96, (128, True): 96, (128, False): 112}[width, direction == 0]
+    return (cap // rows) * rows
+
+
+def _b7_source_groups(length: int, nch: int) -> int:
+    """b7g source groups of nch source CTAs each (the rest of the SMs consume): 18 x 4 one direction; 11 / 12 x 8
+    bidirectional (L <= 384 / above), measured on L128-L768."""
+    if nch == 4:
+        return 18
+    return 11 if length <= 384 else 12
 
 
 def _pack_w1(wl, wlg, wr, wrg):
@@ -246,8 +253,8 @@ def _backward_small_fake(leaves, mask, ds, direction, saved, dy):
 def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
                saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
     """b1s / b1g -> contraction gradients -> b7m / b7g. Weight gradients accumulate atomically in one fp32 buffer (one memset),
-    which also holds the ring flags and the kernels' per-CTA LayerNorm-gradient rows: the fp32 LayerNorm gradients are row sums
-    in a fixed order (atomics would add ~1e-4 relative run-to-run noise to them)."""
+    which also holds the ring flags and the kernels' per-CTA LayerNorm-gradient rows: the fp32 LayerNorm gradients are those
+    rows summed in a fixed order by ``lnpart_sum`` (atomics would add ~1e-4 relative run-to-run noise to them)."""
     x, wl, wlg, wr, wrg, wg, wp, gi, _bi, go, bo = leaves
     planes, t, xn, mo, ro = saved
     n, d = x.shape[1], x.shape[-1]
@@ -256,7 +263,8 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
     h = p // 2
     nf = _front_ctas(n, d, direction)
     nch = p // 64
-    nflag7 = B7_SG * B7_RD * nch if d == 128 else 0
+    sg = _b7_source_groups(n, nch)
+    nflag7 = sg * B7_RD * nch if d == 128 else 0
     nsm = torch.cuda.get_device_properties(x.device).multi_processor_count
     shapes = [(d, d), (d, h), (nsm, 2 * h), (2 * p, d), (nsm, 2 * d)]
     sizes = [int(torch.Size(s).numel()) for s in shapes]
@@ -287,14 +295,15 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
         dx = torch.empty_like(x)
         w1 = _pack_w1(wl, wlg, wr, wrg)
         if d == 128:
-            ring7 = x.new_empty((B7_SG * B7_RD * nch * TOK, 128))
+            ring7 = x.new_empty((sg * B7_RD * nch * TOK, 128))
             E.b7g_backward(x2, xn, dy2, dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, ring7, flags7, EPS,
-                           B7_SG)
+                           sg)
         else:
             E.b7m_backward(x2, xn, dy2, dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, EPS)
         dwl, dwlg, dwr, dwrg = _unpack_w1(dw1, p)
-        dgo, dbo = lnp_o.sum(0).split(h)
-        dgi, dbi = lnp_i.sum(0).split(d)
+        lns = x.new_empty((2 * h + 2 * d,), dtype=torch.float32)
+        E.lnpart_sum(lnp_o, lnp_i, lns)
+        dgo, dbo, dgi, dbi = lns.split((h, h, d, d))
     grads = [dwl, dwlg, dwr, dwrg, dwg, dwp, dgi, dbi, dgo, dbo]
     return [dx, *(g.to(tl.dtype, copy=True) for g, tl in zip(grads, leaves[1:], strict=True))]
 

@@ -1,7 +1,7 @@
 // Python bindings of the B200 TriMul kernels built as ONE extension (two extensions compiling the same sources interpose each
 // other's host symbols -- a launch helper's static "attribute set" flag then belongs to the other library's kernel):
 //   inference (b200_infer): k1w (front), k3g (fused output, D <= 128), k3w (fused output, LayerNorms folded, D >= 256), wide_aux
-//   training (b200_train): D64 / D128 one direction -- k3g with saves, b1s / b1g (output-side backward), b7m / b7g (input side);
+//   training (b200_train): D64 / D128 -- k3g with saves, b1s / b1g (output-side backward), b7m / b7g (input side), lnpart_sum;
 //                           D >= 256 -- k3w with saves, k1wb (front backward), wide_bwd
 #include <torch/extension.h>
 void k1w_stats(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, double eps);
@@ -33,6 +33,7 @@ void wide_lnout_bwd(torch::Tensor dout, torch::Tensor t, torch::Tensor mu_o, tor
 void wide_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor mu_i, torch::Tensor rs_i, torch::Tensor gi,
                    torch::Tensor dx, torch::Tensor dgb);
 void wide_ln_apply(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, torch::Tensor g, torch::Tensor b, torch::Tensor xn);
+void lnpart_sum(torch::Tensor a, torch::Tensor b, torch::Tensor out);
 void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::Tensor ds, torch::Tensor mean_o, torch::Tensor rs_o,
                   torch::Tensor wg, torch::Tensor wp, torch::Tensor go, torch::Tensor bo, torch::Tensor dg, torch::Tensor dtri,
                   torch::Tensor dwg, torch::Tensor dwp, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags,
@@ -63,6 +64,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("wide_lnout_bwd", &wide_lnout_bwd);
   m.def("wide_lnin_bwd", &wide_lnin_bwd);
   m.def("wide_ln_apply", &wide_ln_apply);
+  m.def("lnpart_sum", &lnpart_sum);
   m.def("b1s_backward", &b1s_backward);
   m.def("b7m_backward", &b7m_backward);
   m.def("b1g_backward", &b1g_backward);

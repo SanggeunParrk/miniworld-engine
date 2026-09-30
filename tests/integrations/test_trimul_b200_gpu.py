@@ -1,4 +1,5 @@
-"""B200 TriMul: module dispatch, inference and training accuracy (D128 bidirectional at every L; every width D64-D512)."""
+"""B200 TriMul: module dispatch, inference and training accuracy (D128 bidirectional at every L; every width D64-D512,
+both modules)."""
 
 import pytest
 import torch
@@ -59,7 +60,7 @@ def test_inference(length):
     x = torch.randn(1, length, length, 128, device="cuda", dtype=torch.bfloat16)
     mask = torch.rand(1, length, device="cuda") > 0.2
     with torch.no_grad():
-        assert trimul_b200.serves(m, x)
+        assert trimul_b200.serves_inference(m, x, bidirectional=True)
         got = m(x, mask)
         want = ref(x.float(), mask)
     assert relative(got, want) < 0.006
@@ -77,7 +78,7 @@ def test_training(length):
     xr = x.detach().float().requires_grad_()
     mask = torch.rand(1, length, device="cuda") > 0.2
     dy = torch.randn(1, length, length, 128, device="cuda") * 0.1
-    assert trimul_b200.serves(m, x)
+    assert trimul_b200.serves_train(m, x, bidirectional=True)
     y = m(x, mask)
     y.backward(dy.to(y.dtype))
     yr = ref(xr, mask)
@@ -89,7 +90,7 @@ def test_training(length):
 
 
 def test_nograd_dropout_matches_training_forward():
-    """No-grad dropout forward (the saving K3 into throwaway buffers) equals the grad-enabled forward."""
+    """No-grad dropout forward (b200_infer through k3g's training epilogue) equals the grad-enabled forward (b200_train)."""
     torch.manual_seed(313)
     m = randomize(BidirectionalTriangleMultiplication(128, p_drop=0.25, implementation=ImplementationType.MINIWORLD)
                   .cuda().bfloat16()).train()
@@ -102,30 +103,23 @@ def test_nograd_dropout_matches_training_forward():
     assert torch.equal(a, b.detach())
 
 
-def test_serves_train_d128_one_direction_only():
-    """D128: one direction goes to b200_train, bidirectional stays with b200_bidir (``serves``)."""
+def test_serves_train_d128_both_directions():
+    """D128 training goes to b200_train in either direction."""
     x = torch.randn(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
     uni = _wide_module("out", 128, ImplementationType.MINIWORLD).cuda()
     bi = _wide_module("bidir", 128, ImplementationType.MINIWORLD).cuda()
     assert trimul_b200.serves_train(uni, x, bidirectional=False)
-    assert not trimul_b200.serves_train(bi, x, bidirectional=True)
-    assert trimul_b200.serves(bi, x)
+    assert trimul_b200.serves_train(bi, x, bidirectional=True)
 
 
 def test_serves_rejects_other_shapes():
     m = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.MINIWORLD).cuda()
     for shape in ((1, 200, 200, 128), (2, 128, 128, 128)):
-        assert not trimul_b200.serves(m, torch.zeros(shape, device="cuda", dtype=torch.bfloat16))
-    assert not trimul_b200.serves(m, torch.zeros(1, 128, 128, 128, device="cuda"))
-    m64 = BidirectionalTriangleMultiplication(64, implementation=ImplementationType.MINIWORLD).cuda()
-    assert not trimul_b200.serves(m64, torch.zeros(1, 128, 128, 64, device="cuda", dtype=torch.bfloat16))
-
-
-def test_pack_wp_matches_the_extension():
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_bidir
-
-    wp = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    assert torch.equal(b200_bidir.pack_wp(wp), b200_bidir._ext().k3_pack_wp(wp))
+        assert not trimul_b200.serves_train(m, torch.zeros(shape, device="cuda", dtype=torch.bfloat16), bidirectional=True)
+    assert not trimul_b200.serves_train(m, torch.zeros(1, 128, 128, 128, device="cuda"), bidirectional=True)
+    with torch.no_grad():
+        assert not trimul_b200.serves_train(m, torch.zeros(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16),
+                                            bidirectional=True)
 
 
 @pytest.mark.parametrize("grad", [False, True])
@@ -257,10 +251,8 @@ def test_wide_training_dropout():
 @pytest.mark.parametrize("length", [128, 256])
 @pytest.mark.parametrize("width", [64, 128])
 def test_small_training(width, length, kind):
-    """D64 (b1s / b7m) and D128 one direction (b1g / b7g) fused training: bf16 input, fp32 master parameters, masked; every
-    gradient against fp32 autograd. (D128 bidirectional is b200_bidir's: test_training.)"""
-    if width == 128 and kind == "bidir":
-        pytest.skip("D128 bidirectional training is b200_bidir (test_training)")
+    """D64 (b1s / b7m) and D128 (b1g / b7g) fused training: bf16 input, fp32 master parameters, masked; every gradient
+    against fp32 autograd."""
     torch.manual_seed(347)
     ref = randomize(_wide_module(kind, width, ImplementationType.PYTORCH).cuda()).train()
     ref.p_drop = 0.0
@@ -282,15 +274,14 @@ def test_small_training(width, length, kind):
         assert relative(p.grad, pr.grad) < 0.012, name
 
 
-@pytest.mark.parametrize("width", [64, 128])
-def test_small_training_dropout(width):
-    """D64 / D128 one direction: the row-dropout scale enters the output and every gradient (ds applied to the fp32 reference
-    by hand)."""
+@pytest.mark.parametrize(("width", "kind"), [(64, "out"), (128, "out"), (128, "bidir")])
+def test_small_training_dropout(width, kind):
+    """D64 / D128: the row-dropout scale enters the output and every gradient (ds applied to the fp32 reference by hand)."""
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_train import trimul_train
 
     torch.manual_seed(349)
     length = 256
-    ref = randomize(_wide_module("out", width, ImplementationType.PYTORCH).cuda()).train()
+    ref = randomize(_wide_module(kind, width, ImplementationType.PYTORCH).cuda()).train()
     ref.p_drop = 0.0
     x = torch.randn(1, length, length, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     xr = x.detach().float().requires_grad_()
@@ -300,7 +291,7 @@ def test_small_training_dropout(width):
     ws = [p.detach().to(bf).clone().requires_grad_() for p in (ref.to_left.weight, ref.to_left_gate.weight, ref.to_right.weight,
                                                                ref.to_right_gate.weight, ref.to_gate.weight, ref.to_out.weight)]
     lns = [p.detach().float().clone().requires_grad_() for p in (ref.ln_pair.weight, ref.ln_pair.bias, ref.ln_out.weight, ref.ln_out.bias)]
-    y = trimul_train([x, *ws, *lns], None, ds.to(bf).contiguous(), 1)
+    y = trimul_train([x, *ws, *lns], None, ds.to(bf).contiguous(), 0 if kind == "bidir" else 1)
     y.backward(dy.to(bf))
     yr = xr + (ref(xr) - xr) * ds
     yr.backward(dy)
@@ -313,7 +304,7 @@ def test_small_training_dropout(width):
         assert relative(p.grad, pr.grad) < 0.012, name
 
 
-@pytest.mark.parametrize(("width", "kind"), [(64, "bidir"), (128, "out")])
+@pytest.mark.parametrize(("width", "kind"), [(64, "bidir"), (128, "out"), (128, "bidir")])
 def test_small_training_graph_capture(width, kind):
     """D64 / D128 forward + backward replay in a CUDA graph (the ring flags return to 0 inside every launch)."""
     torch.manual_seed(351)
@@ -345,7 +336,8 @@ def test_small_training_graph_capture(width, kind):
     assert torch.equal(out, eager)
 
 
-@pytest.mark.parametrize(("width", "kind"), [(64, "bidir"), (64, "out"), (128, "out"), (256, "bidir"), (512, "out")])
+@pytest.mark.parametrize(("width", "kind"), [(64, "bidir"), (64, "out"), (128, "out"), (128, "bidir"), (256, "bidir"),
+                                             (512, "out")])
 def test_training_layernorm_gradients_deterministic(width, kind):
     """The fp32 LayerNorm gradients are fixed-order sums: two backward passes give identical bits (the benchmark harness
     compares its timed execution against a preparation run at 1e-4 relative for fp32 tensors)."""
