@@ -93,6 +93,16 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   1.3-3.6x, training 1.08-2.5x. The D128 kernels drop two cluster-scope releases per launch (D128 L128 inference
   15.1 -> 13.5 us kernel time, bit-identical outputs). Kernel sources under `sm100/` are generated from the research
   capsule (`experiments/transition_fused_sm100/export_engine.py`).
+- B200 (sm_100): hand-CUDA Transition at n=2 for D64/128/256/384/512/768, bf16 (`fused_wide_sm100a`, same kernels
+  built with `-DHID=2D`; D768 runs the D512 chain with the squeeze and d_xn GEMMs as two 384-column launches), for the
+  pair, MSA and single streams (any whole number of 128-row tiles). D384 (n=2 and 4) is now one fused forward kernel
+  (`widths/tfwd_d384.cu`) and one fused backward kernel for the gate, d_xn and the LayerNorm backward + a fixed-order
+  dgamma / dbeta reduction (`widths/tbwd_d384.cu`; dW stays cuBLAS); single-stream D384 calls of at most 16 tiles take a
+  cluster forward that splits the hidden units (`widths/tsmall_w.cu`) and the item-scheduled backward gate. Module
+  (bf16 parameters, CUDA graph) vs the faster of Triton / torch.compile: pair L384 n=2 inference 1.8-2.8x, training
+  1.2-1.9x; diffusion conditioning [48, L, 384] n=2 training 174.2 / 296.8 us at L384 / L768 (was 220.7 / 328.9 with the
+  three-kernel D384 chain; torch.compile 228.1 / 370.5); single stream [1, L, 384] inference on par with Triton, training
+  1.5-1.6x slower. Page: `docs/gpus/b200/transition/transition.md`.
 - B200 (sm_100a) hand-CUDA TriangleAttention, the whole module (`integrations/triattn_b200.py`,
   `kernels/triangle_attention/cuda/b200_triattn.py`, `b200_sources/`): d_pair 128 / 4 heads fused for inference and
   training (L a multiple of 128), d_pair 64-512 inference. `module._b200_cuda = False` keeps the Triton path.

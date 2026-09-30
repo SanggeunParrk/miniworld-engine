@@ -22,7 +22,12 @@ using namespace s100;
 #define EPIF2                                                  // fp32x2 LayerNorm-backward epilogue in the DX role (EPI_SCALAR: v9)
 #define GATE2                                                  // fp32x2 gate arithmetic, bit-identical to the scalar form (GATE1)
 
-constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128;
+#ifndef HID
+#define HID 512                                                // hidden units (n x D); n = 4 by default
+#endif
+constexpr int D_ = 128, H_ = HID, HS = 64, NCH = H_ / HS, ROWS = 128;
+static_assert((NCH & (NCH - 1)) == 0 && NCH >= 2, "power-of-two chunk count");
+constexpr int LNCH = NCH == 2 ? 1 : NCH == 4 ? 2 : NCH == 8 ? 3 : 4;    // log2(NCH): shifts, as the n = 4 build always had
 constexpr int KB = 16384;                                      // one K-block: [128 rows][64 bf16], 128-B swizzled
 // ---- DW role shared memory
 constexpr int W_WS = 0, W_WAB = 16384, W_IN = 49152, INB = 65536, IN_XN = 32768;
@@ -78,7 +83,7 @@ DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint
 DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
   const uint32_t su = smem_u32(sm);
   BarsW& B = *reinterpret_cast<BarsW*>(sm + W_BAR);
-  const int slice = cta & 7, repl = cta >> 3, R = p.ndw >> 3;
+  const int slice = cta & (NCH - 1), repl = cta >> LNCH, R = p.ndw >> LNCH;
   const int crank = (int)cluster_rank();                   // == slice % CL: the CL consecutive CTAs of a cluster are slices of one replica
   const int n_local = (p.tiles > repl) ? (p.tiles - repl + R - 1) / R : 0;
   constexpr uint32_t T_DH = 0, T_AB = 64, T_DWAB = 256, T_DWS = 384;
@@ -369,7 +374,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
   } else if (warp == 1) {
     // dh_j and [a|b]_j (converged warp, elected issue)
     for (int c = 0; c < nch; ++c) {
-      const int i = c >> 3, j = c & (NCH - 1), s = c & 1, u = c >> 1;
+      const int i = c >> LNCH, j = c & (NCH - 1), s = c & 1, u = c >> 1;
       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c);
       const int sw = c % NWAB;
       if (j == 0) mbar_wait(&B.in_full[i & 1], (i >> 1) & 1);
@@ -403,7 +408,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
   } else if (warp == 2) {
     // d_xn += [dA | dB] [Wa_j; Wb_j]  (A from TMEM)
     for (int q = 0; q < nch; ++q) {
-      const int i = q >> 3, j = q & (NCH - 1), s = q & 1, u = q >> 1;
+      const int i = q >> LNCH, j = q & (NCH - 1), s = q & 1, u = q >> 1;
       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q);
       mbar_wait(&B.g_full[s], u & 1);
       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 1);
@@ -601,16 +606,16 @@ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_const
 extern "C" __global__ void transition_bwd_reduce(const float* __restrict__ partab, const float* __restrict__ parts, const float* __restrict__ dgbw,
                                                  __nv_bfloat16* __restrict__ dwa, __nv_bfloat16* __restrict__ dwb, __nv_bfloat16* __restrict__ dws,
                                                  float* __restrict__ dgam, float* __restrict__ dbeta, int ndw, int nrows_dg) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x, R = ndw >> 3;
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x, R = ndw >> LNCH;
   if (idx < 2 * H_ * D_) {                                  // dWa / dWb element: (which, slice, hs, d)
     const int which = idx / (H_ * D_), rem = idx % (H_ * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
     float v = 0.f;
-    for (int rr = 0; rr < R; ++rr) v += partab[((size_t)(rr * 8 + slice) * 128 + which * 64 + hs) * 128 + d];
+    for (int rr = 0; rr < R; ++rr) v += partab[((size_t)(rr * NCH + slice) * 128 + which * 64 + hs) * 128 + d];
     (which == 0 ? dwa : dwb)[(slice * HS + hs) * D_ + d] = __float2bfloat16_rn(v);
   } else if (idx < 3 * H_ * D_) {                           // dWs element (d, slice, hs)
     const int rem = idx - 2 * H_ * D_, d = rem / H_, hh = rem % H_, slice = hh / HS, hs = hh % HS;
     float v = 0.f;
-    for (int rr = 0; rr < R; ++rr) v += parts[((size_t)(rr * 8 + slice) * 128 + d) * 64 + hs];
+    for (int rr = 0; rr < R; ++rr) v += parts[((size_t)(rr * NCH + slice) * 128 + d) * 64 + hs];
     dws[d * H_ + hh] = __float2bfloat16_rn(v);
   } else if (idx < 3 * H_ * D_ + 256) {
     const int c = idx - 3 * H_ * D_;

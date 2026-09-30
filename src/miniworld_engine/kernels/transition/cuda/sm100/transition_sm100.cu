@@ -59,6 +59,7 @@ struct Driver {
   CUresult (*attribute)(CUfunction, CUfunction_attribute, int);
   CUresult (*launch)(const CUlaunchConfig*, CUfunction, void**, void**);
   CUresult (*error)(CUresult, const char**);
+  CUresult (*clusters)(int*, CUfunction, const CUlaunchConfig*);
 };
 
 const Driver& drv() {
@@ -72,6 +73,7 @@ const Driver& drv() {
     x.attribute = entry<decltype(x.attribute)>("cuFuncSetAttribute");
     x.launch = entry<decltype(x.launch)>("cuLaunchKernelEx");
     x.error = entry<decltype(x.error)>("cuGetErrorString");
+    x.clusters = entry<decltype(x.clusters)>("cuOccupancyMaxActiveClusters");
     return x;
   }();
   return d;
@@ -300,6 +302,16 @@ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor 
 // ---------------------------------------------------------------------------------------------------------------- generic surface
 namespace {
 
+// Make `index`'s primary context current on this thread. The backward runs on autograd's device thread, whose first driver call
+// (cuTensorMapEncodeTiled) otherwise fails with "invalid device context"; cudaSetDevice (not cudaFree(nullptr)) is safe under
+// CUDA-graph capture.
+void make_current(int index) {
+  int dev = -1;
+  cudaGetDevice(&dev);
+  if (index < 0) index = dev;
+  cudaSetDevice(index);
+}
+
 struct TMap {
   CUtensorMap map;
 };
@@ -326,7 +338,9 @@ Cubin& cubin(const std::string& name) {
   c.module = load_module(p->second);
   CUdeviceptr ptr = 0;
   size_t bytes = 0;
-  if (drv().global(&ptr, &bytes, c.module, "transition_smem_bytes") == CUDA_SUCCESS) c.smem = read_int(c.module, "transition_smem_bytes");
+  // the widths kernels export transition_smem_bytes; the D = 128 ones (also built at n = 2) keep their own names
+  for (const char* sym : {"transition_smem_bytes", "transition_sm100_fwd_smem_bytes", "transition_sm100_bwd_smem_bytes"})
+    if (drv().global(&ptr, &bytes, c.module, sym) == CUDA_SUCCESS) { c.smem = read_int(c.module, sym); break; }
   return g_cubins.emplace(key, std::move(c)).first->second;
 }
 
@@ -336,6 +350,7 @@ CUfunction function(Cubin& c, const std::string& name) {
   CUfunction f = nullptr;
   check(drv().function(&f, c.module, name.c_str()), "cuModuleGetFunction(" + name + ")");
   if (c.smem > 0) check(drv().attribute(f, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, c.smem), name + " smem opt-in");
+  check(drv().attribute(f, CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED, 1), name + " cluster size opt-in");   // 12-CTA clusters
   return c.functions.emplace(name, f).first->second;
 }
 
@@ -350,25 +365,35 @@ void load_cubin(const std::string& name, const std::string& path) {
   cubin(name);                                               // load on the current device now: a rejected cubin fails here
 }
 
-// 2-D bf16 descriptor over a contiguous [outer][inner] tensor with a (box_inner x box_outer) box and 128-B swizzle.
-TMap tmap(const torch::Tensor& t, int64_t inner, int64_t outer, int64_t box_inner, int64_t box_outer) {
-  static std::map<std::array<uint64_t, 5>, CUtensorMap> cache;
+// 2-D bf16 (or fp32, from the tensor) descriptor over [outer][inner] elements with rows `row_stride` elements apart (-1: inner, i.e. contiguous), a
+// (box_inner x box_outer) box and 128-B swizzle. A row stride wider than `inner` describes a column slice of a wider matrix.
+TMap tmap(const torch::Tensor& t, int64_t inner, int64_t outer, int64_t box_inner, int64_t box_outer, int64_t row_stride) {
+  static std::map<std::array<uint64_t, 6>, CUtensorMap> cache;
   static std::mutex lock;
-  expect(t.is_cuda() && t.is_contiguous() && t.scalar_type() == torch::kBFloat16 && t.numel() == inner * outer,
-         "tmap: contiguous cuda bf16 tensor of inner x outer elements");
-  const std::array<uint64_t, 5> key{reinterpret_cast<uint64_t>(t.data_ptr()), static_cast<uint64_t>(inner), static_cast<uint64_t>(outer),
-                                    static_cast<uint64_t>(box_inner), static_cast<uint64_t>(box_outer)};
+  if (row_stride < 0) row_stride = inner;
+  make_current(t.device().index());
+  const bool f32 = t.scalar_type() == torch::kFloat32;
+  const int64_t esz = f32 ? 4 : 2;
+  expect(t.is_cuda() && (f32 || t.scalar_type() == torch::kBFloat16) && row_stride >= inner && (row_stride * esz) % 16 == 0,
+         "tmap: cuda bf16 or fp32 tensor, row stride >= inner and a multiple of 16 bytes");
+  expect(row_stride == inner ? (t.is_contiguous() && t.numel() == inner * outer)
+                             : (t.dim() == 2 && t.size(0) == outer && t.size(1) == inner && t.stride(0) == row_stride && t.stride(1) == 1),
+         "tmap: a contiguous tensor of inner x outer elements, or a [outer, inner] view with that row stride");
+  const std::array<uint64_t, 6> key{reinterpret_cast<uint64_t>(t.data_ptr()), static_cast<uint64_t>(inner), static_cast<uint64_t>(outer),
+                                    static_cast<uint64_t>(box_inner), static_cast<uint64_t>(box_outer),
+                                    static_cast<uint64_t>(row_stride) | (f32 ? (1ull << 62) : 0ull)};
   std::lock_guard<std::mutex> guard(lock);
   auto it = cache.find(key);
   if (it == cache.end()) {
     if (cache.size() > 4096) cache.clear();                  // pointers recur through the caching allocator; bound the rest
     CUtensorMap map{};
     const cuuint64_t dims[2] = {static_cast<cuuint64_t>(inner), static_cast<cuuint64_t>(outer)};
-    const cuuint64_t strides[1] = {static_cast<cuuint64_t>(inner) * 2};
+    const cuuint64_t strides[1] = {static_cast<cuuint64_t>(row_stride * esz)};
     const cuuint32_t box[2] = {static_cast<cuuint32_t>(box_inner), static_cast<cuuint32_t>(box_outer)};
     const cuuint32_t elem[2] = {1, 1};
-    check(drv().encode(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, t.data_ptr(), dims, strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE,
-                       CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+    check(drv().encode(&map, f32 ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32 : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, t.data_ptr(), dims, strides,
+                       box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                       CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
           "cuTensorMapEncodeTiled");
     it = cache.emplace(key, map).first;
   }
@@ -377,6 +402,7 @@ TMap tmap(const torch::Tensor& t, int64_t inner, int64_t outer, int64_t box_inne
 
 // Launch `kernel` of cubin `name` on the current stream with the cubin's dynamic shared memory. `args` in the kernel's parameter order.
 void launch_kernel(const std::string& name, const std::string& kernel, int64_t grid, int64_t block, int64_t cluster, py::list args) {
+  make_current(-1);
   CUfunction f = nullptr;
   int smem = 0;
   {
@@ -414,10 +440,36 @@ void launch_kernel(const std::string& name, const std::string& kernel, int64_t g
          at::cuda::getCurrentCUDAStream(), params, kernel.c_str());
 }
 
+// How many `cluster`-CTA clusters of `kernel` can be resident at once on the current device (one wave).
+int64_t max_active_clusters(const std::string& name, const std::string& kernel, int64_t block, int64_t cluster) {
+  make_current(-1);
+  CUfunction f = nullptr;
+  int smem = 0;
+  {
+    std::lock_guard<std::mutex> guard(g_lock);
+    Cubin& c = cubin(name);
+    f = function(c, kernel);
+    smem = c.smem;
+  }
+  CUlaunchConfig cfg{};
+  cfg.gridDimX = static_cast<unsigned>(cluster); cfg.gridDimY = 1; cfg.gridDimZ = 1;
+  cfg.blockDimX = static_cast<unsigned>(block); cfg.blockDimY = 1; cfg.blockDimZ = 1;
+  cfg.sharedMemBytes = static_cast<unsigned>(smem);
+  CUlaunchAttribute attr[1];
+  attr[0].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
+  attr[0].value.clusterDim.x = static_cast<unsigned>(cluster); attr[0].value.clusterDim.y = 1; attr[0].value.clusterDim.z = 1;
+  cfg.attrs = attr; cfg.numAttrs = 1;
+  int n = 0;
+  check(drv().clusters(&n, f, &cfg), "cuOccupancyMaxActiveClusters(" + kernel + ")");
+  return n;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("max_active_clusters", &max_active_clusters, "resident clusters of a loaded kernel at this cluster size (one wave)");
   py::class_<TMap>(m, "TMap");
   m.def("load_cubin", &load_cubin, "register a named cubin and load it on the current device");
-  m.def("tmap", &tmap, "2-D bf16 128-B-swizzled tensor map (inner, outer, box_inner, box_outer)");
+  m.def("tmap", &tmap, "2-D bf16 128-B-swizzled tensor map (inner, outer, box_inner, box_outer, row_stride = -1: contiguous)",
+        py::arg("t"), py::arg("inner"), py::arg("outer"), py::arg("box_inner"), py::arg("box_outer"), py::arg("row_stride") = -1);
   m.def("launch_kernel", &launch_kernel, "launch a kernel of a loaded cubin on the current stream");
   m.def("load", &load, "set the forward / backward cubins (loaded lazily per device)");
   m.def("transition_fused_fwd", &transition_fused_fwd, "fused sm_100a Transition forward (LN + SwiGLU expand + squeeze + residual)");
