@@ -8,6 +8,18 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- `implementation="anthropic"` for TriangleMultiplication on B200 (sm_100). The release ships no sm_100 binary, so
+  `miniworld-engine dev build-anthropic-sm100a <payload>/build` compiles its sm_80 member (unmodified sources) for sm_100a with the
+  release's own builder and manifest; `integrations.anthropic_trimul` registers cc 10.0 as `sm_100a` in the release's loader and
+  assembles the member as `sm80_ops.serve_sm80` does (K1 -> torch.bmm -> K3; the bidirectional module as one unit at twice the
+  hidden width). Served: one direction D64-D384, bidirectional D64 / D128; everything else refuses with the reason. The harness's
+  `anthropic` row runs it through `ANTHROPIC_TRIMUL_BUILD_DIR`; `tests/integrations/test_anthropic_trimul_b200_gpu.py` (23 tests)
+  checks it against the fp32 reference.
+- `miniworld_engine.viz.measure_bars`: a length sweep and a dimension sweep bar chart under every measurement table of a GPU page
+  (the rule is in docs/gpus/README.md).
+
 ### Changed
 
 - B200 TriMul D128 bidirectional training runs the shared D64 / D128 kernels (k1w -> k3g -> b1g at H = 256 -> b7g at

@@ -37,7 +37,7 @@ implementations:
   - pytorch
   - cuequivariance
   - miniworld
-# miniworld tries the hand-written CUDA H100 kernels first and otherwise resolves to the
+# miniworld tries the hand-written CUDA kernels (H100, B200) first and otherwise resolves to the
 # triton path on every arch (see modules/dispatch.py). TriangleMultiplication also accepts,
 # explicitly:
 #   triton | dtv1 | triton_pytorch_ln | triton_ln
@@ -48,6 +48,9 @@ implementations:
 #   composition. INFERENCE ONLY. The harness sets TRIMUL_NATIVE_BUILD_DIR for the row to
 #   $ANTHROPIC_TRIMUL_BUILD_DIR or $MINIWORLD_ANTHROPIC_ROOT/common/opt_core/opt_core/kernels/
 #   trimul/native/pkg/v5/build and refuses an overlay payload; the shipped cubins are nvcc 13.0.
+#   On B200 the shipped payload has no sm_100 binary: point ANTHROPIC_TRIMUL_BUILD_DIR at a copy
+#   with the sm_80 member built for sm_100a (miniworld-engine dev build-anthropic-sm100a; see
+#   docs/kernels/anthropic-trimul-payload.md, B200).
 #   anthropic_hybrid -- the payload the caller exported in TRIMUL_NATIVE_BUILD_DIR (an overlay
 #   build needs the tmn90_z128_h256 unit: build_payload.py --unit tmn90_z128_h256). Separate
 #   invocation from `anthropic`. Masked for every non-anthropic row.
