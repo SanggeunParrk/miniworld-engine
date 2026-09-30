@@ -18,10 +18,28 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   `anthropic` row runs it through `ANTHROPIC_TRIMUL_BUILD_DIR`; `tests/integrations/test_anthropic_trimul_b200_gpu.py` (23 tests)
   checks it against the fp32 reference.
 - `miniworld_engine.viz.measure_bars`: a length sweep and a dimension sweep bar chart under every measurement table of a GPU page
-  (the rule is in docs/gpus/README.md).
+  (the rule is in docs/gpus/README.md). Tables keyed `(Length, MSA depth)` get an MSA-depth sweep instead of the dimension one;
+  `(Length, Dimension)` pages chart as before.
+- docs/gpus/b200/opm/opm.md, docs/gpus/b200/pwa/pwa.md: kernel tables, flow figures and harness measurements of the B200
+  OuterProductMean / MSAPairWeightedAveraging paths (inference L128-768 x S1024 / 2048 / 4096, training S1024), and their
+  completion tables in b200.md.
 
 ### Changed
 
+- B200 MSAPairWeightedAveraging: the contractions o = w · v and dv = wᵀ · do (and dw) run on cuBLAS `bmm` (5-15 % faster than
+  the tcgen05 kernels at L256-1024, same bits), followed by one gate / out-projection / dropout / residual pass
+  (`pwa_gate_out`, bf16x2 gate math); inference takes the same forward. Removed the unused sm_100a kernels (`pwa_ctr`,
+  `pwa_plain`, `pwa_fwd`, `pwa_fwd2`, `pwa_glue`, `dgv_bwd`, `dgv_finish`, the ablation switches; `pwa_sm100.cu` ~3100 ->
+  ~1950 lines) and the H100 `pair3` build on B200. The per-CTA partial sums of `pwa_glue2` / `dv_bwd` are combined by 8 split
+  groups in a fixed order inside their finish kernels. `refusal` on B200 also requires S a multiple of 128 and N <= 1024.
+  Harness speedup over the fastest other row: inference 2.00-2.44x, training (CUDA graph, dropout 0.15) 1.68-1.91x.
+- B200 OuterProductMean: the prologue backward's column sums are finished by `opm_pbwd_finalize` (the ticket reduction
+  `opm_pbwd_reduce` is removed). Harness speedup over the fastest other row: inference 1.16-1.57x, training (CUDA graph)
+  1.24-1.57x.
+- The forward fakes of the B200 OPM / PWA custom ops return the sm_100a saved-tensor shapes (compiled training on B200).
+- `tests/integrations/test_{opm,pwa}_train_gpu.py` run on B200 as well; new: dropout in `pwa_glue2` matches a materialized
+  gradient bit for bit, and the B200 PWA output, gradients and inference update stay within 1.15x of the module's own bf16
+  statements' error against an fp32 copy (the out / dmsa tolerance against the Triton path is 8e-3 on B200).
 - B200 TriMul D128 bidirectional training runs the shared D64 / D128 kernels (k1w -> k3g -> b1g at H = 256 -> b7g at
   eight plane chunks) instead of its own K1 / K3 / B1r / B7r extension (`b200_bidir.py`, removed). Its fp32
   LayerNorm-parameter gradients are now bit-identical across runs, and the 148-SM restriction is gone. The per-CTA
@@ -42,6 +60,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   read the token mask [L] and form m[i] & m[j] themselves: no [L, L] pair mask is built per call
   (inference; bidirectional D128 training). The bidirectional wide inference front reads the
   projection weights in place (no pack). Outputs and gradients bitwise-identical.
+
+### Fixed
+
+- B200 OuterProductMean training was not deterministic from run to run at L >= 384 (whole rows of one group): the prologue
+  backward released an input stage to the next TMA load while its generic shared-memory reads could still be in flight. A
+  `fence.proxy.async.shared::cta` before the release fixes it; the same fence now precedes the stage releases of the PWA
+  `pair_fwd` / `pair_bwd`. Both paths give identical results across runs at every tested L; no speed change.
 
 ### Added
 

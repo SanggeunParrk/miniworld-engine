@@ -914,6 +914,9 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
       uint4 xu[8];
 #pragma unroll
       for (int c8 = 0; c8 < 8; ++c8) xu[c8] = *reinterpret_cast<const uint4*>(xr + ((c8 ^ (r & 7)) << 3));
+      // the loads above may still be in flight here (their values are used only after the TMEM wait), and the next TMA write into
+      // this slot is another proxy: without the proxy fence it could land first (seen as run-to-run differences in whole rows)
+      fence_proxy_async();
       __syncwarp();
       if (lane == 0) arrive(xempty + sx);
       wait(d1f + gr, (lt >> 1) & 1);
@@ -1196,47 +1199,13 @@ __device__ __forceinline__ void pbwd_finalize_body(const float* __restrict__ RED
 // The prologue backward's tail in ONE launch: column blocks sum the per-CTA partials [splits][65][64] in a fixed order
 // (8 split groups, then the groups in order: deterministic), and the last block to finish runs the finalize.  Three
 // serial latency-bound launches (a two-pass column sum and a one-block finalize) were ~15 us of the training step.
-// the finalize on its own launch after colsum: the last-block ticket of opm_pbwd_reduce cost ~10 us of serial tail per call
+// the finalize on its own launch after colsum (a last-block ticket in the reduce cost ~10 us of serial tail per call)
 template <typename GT, typename OT>
 __global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict__ RED, const __nv_bfloat16* __restrict__ WA,
                                                          const __nv_bfloat16* __restrict__ WB, const GT* __restrict__ GAM,
                                                          const GT* __restrict__ BET, OT* __restrict__ DWA, OT* __restrict__ DWB,
                                                          GT* __restrict__ DGAM, GT* __restrict__ DBET) {
   pbwd_finalize_body<GT, OT>(RED, WA, WB, GAM, BET, DWA, DWB, DGAM, DBET);
-}
-template <typename GT, typename OT>
-__global__ void __launch_bounds__(256) opm_pbwd_reduce(const float* __restrict__ PART, int splits, float* __restrict__ RED, int* __restrict__ CNT,
-                                                       const __nv_bfloat16* __restrict__ WA, const __nv_bfloat16* __restrict__ WB,
-                                                       const GT* __restrict__ GAM, const GT* __restrict__ BET, OT* __restrict__ DWA,
-                                                       OT* __restrict__ DWB, GT* __restrict__ DGAM, GT* __restrict__ DBET) {
-  constexpr int W = 65 * 64, VC = W / 4;
-  __shared__ float4 red[8][32];
-  __shared__ int last;
-  const int v4 = blockIdx.x * 32 + (threadIdx.x & 31), g = threadIdx.x >> 5;
-  float4 s = make_float4(0.f, 0.f, 0.f, 0.f);
-  if (v4 < VC) {
-#pragma unroll 4
-    for (int k = g; k < splits; k += 8) {
-      const float4 q = __ldg(reinterpret_cast<const float4*>(PART + (size_t)k * W) + v4);
-      s.x += q.x; s.y += q.y; s.z += q.z; s.w += q.w;
-    }
-  }
-  red[g][threadIdx.x & 31] = s;
-  __syncthreads();
-  if (g == 0 && v4 < VC) {
-    float4 t = red[0][threadIdx.x];
-#pragma unroll
-    for (int k = 1; k < 8; ++k) { const float4 q = red[k][threadIdx.x]; t.x += q.x; t.y += q.y; t.z += q.z; t.w += q.w; }
-    reinterpret_cast<float4*>(RED)[v4] = t;
-  }
-  __threadfence();
-  __syncthreads();
-  if (threadIdx.x == 0) last = atomicAdd(CNT, 1) == (int)gridDim.x - 1;
-  __syncthreads();
-  if (!last) return;
-  __threadfence();
-  pbwd_finalize_body<GT, OT>(RED, WA, WB, GAM, BET, DWA, DWB, DGAM, DBET);
-  if (threadIdx.x == 0) *CNT = 0;              // ready for the next call (and the next graph replay)
 }
 }  // namespace
 

@@ -14,6 +14,10 @@ Measured H100, L=384, S=1024, bf16: fwd+bwd 1.81 ms vs this engine's own path 4.
 every gradient within 6e-3 of the engine's (the LayerNorm backward is CLOSER to fp32 truth than the engine's:
 dy never rounds to bf16).
 
+On sm_100a (B200) the same boundaries run `csrc/sm100/pwa_sm100.cu`: forward pair_fwd (LN_z folded into proj_z), ln_vg,
+cuBLAS bmm (o = w . v), pwa_gate_out; backward pwa_glue2 (do, dyg = dgp . Wg, dWo, dWg -- dgp stays on chip), cuBLAS bmm
+(dv = w^T . do, dw = do . v^T), dv_bwd, pair_bwd.
+
 Automatic in auto mode; MINIWORLD_PWA_TRAIN=0 disables this path. It serves a grad-enabled call of a module built with
 implementation="miniworld" or "anthropic" when the shapes fit (d_msa=64, d_pair=128, 8 heads x 32, batch 1,
 N a multiple of 128, S even, bf16 activations on sm_90a); anything else falls through to the module's own statements. The residual AND the
@@ -71,6 +75,8 @@ def refusal(msa: torch.Tensor, pair: torch.Tensor, d_msa: int, d_pair: int, n_he
         n, s = msa.shape[2], msa.shape[1]
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
+        if cap == (10, 0) and (s % 128 or n > 1024):             # ln_vg / dv_bwd tiles are 128 MSA rows; pair_fwd holds a row of N
+            return f"the sm_100a kernels need S a multiple of 128 and N <= 1024, got N={n}, S={s}"
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
@@ -110,21 +116,18 @@ _SM100_TRAIN = True        # the sm_100a backward kernels (csrc/sm100/pwa_sm100.
 
 
 def _k100():
-    """B200: `csrc/sm100/pwa_sm100.cu` (ln_vg and the forward on tcgen05 / TMEM) and the H100 `pair3.cu` as it is
-    (mma.sync + ldmatrix + cp.async, all valid on sm_100a), built for sm_100a."""
+    """B200: `csrc/sm100/pwa_sm100.cu` (the pair side, ln_vg, the gate / out pass and the backward on tcgen05 / TMEM), built for
+    sm_100a; the contractions are cuBLAS bmm."""
     if "sm100" not in _EXT:
         from miniworld_engine.kernels._nvcc import load_extension as load
         root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
         csrc = Path(__file__).with_name("csrc")
-        flags = ["-O3", "-gencode=arch=compute_100a,code=sm_100a", "--use_fast_math"]
-        k = {}
-        for name, src, inc in (("miniworld_pwa_sm100", csrc / "sm100" / "pwa_sm100.cu", [str(csrc / "sm100")]),
-                               ("miniworld_pwa_pair3_sm100", csrc / "pair3.cu", [])):
-            build = root / name
-            build.mkdir(parents=True, exist_ok=True)
-            k[name] = load(name=name, sources=[str(src)], build_directory=str(build), extra_include_paths=inc,
-                           extra_cuda_cflags=flags, extra_cflags=["-O3"])
-        _EXT["sm100"] = {"pwa": k["miniworld_pwa_sm100"], "pair3": k["miniworld_pwa_pair3_sm100"]}
+        build = root / "miniworld_pwa_sm100"
+        build.mkdir(parents=True, exist_ok=True)
+        pwa = load(name="miniworld_pwa_sm100", sources=[str(csrc / "sm100" / "pwa_sm100.cu")], build_directory=str(build),
+                   extra_include_paths=[str(csrc / "sm100")], extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a", "--use_fast_math"],
+                   extra_cflags=["-O3"])
+        _EXT["sm100"] = {"pwa": pwa}
     return _EXT["sm100"]
 
 
@@ -311,7 +314,8 @@ class _PwaMath(torch.autograd.Function):
             dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
         if sm100:
-            out, o = k["pwa"].pwa_fwd2(w16, v, m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), eps_m, wg16, wo16, True,
+            o = torch.bmm(w16, v)                   # the contraction on cuBLAS: 5-15 % faster than pwa_ctr at L 256-1024, bit-identical
+            out = k["pwa"].pwa_gate_out(o, m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), eps_m, wg16, wo16,
                                        dmask, dscale)   # split: contraction, then gate / out (y recomputed; ln_vg's y kept for the backward)
         else:
             out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)       # residual fused; o kept for the backward
@@ -338,7 +342,7 @@ class _PwaMath(torch.autograd.Function):
             wot, wgvT = k.pwa_wprep(wg16, wv16, wo16)                              # Wo^T, [Wg; Wv]^T: one launch
             # glue2: dgp never leaves the chip -- its consumers (dWg = dgp^T y, dyg = dgp Wg) run inside; dv_bwd adds dv Wv to dyg
             d_o, dyg, dWo, dWg = k.pwa_glue2(o, y, dres0, wg16, wot, dmask, ctx.dscale, int(wo.dtype == bf))
-            dv = k.pwa_plain(w16, d_o)                                               # head-major [H, N, S*C]
+            dv = torch.bmm(w16.transpose(1, 2), d_o)                                 # head-major [H, N, S*C], cuBLAS (as the forward)
             dw = torch.bmm(d_o, v.transpose(1, 2))                                   # [H][N][N] bf16 (PyTorch's dw is bf16 too), K = S*C
             dm, dWv, dlw, dlb = k.dv_bwd(dv, dyg, y, m, dres0, wgvT, lnm_w.detach().contiguous(), eps_m, int(wv.dtype == bf), int(lnm_w.dtype == bf))
             dz, dWb, dzw, dzb = k.pair_bwd(z, w16, dw, lnz_w.detach().contiguous(), lnz_b.detach().contiguous(), eps_z, wb.detach().contiguous(),
@@ -379,8 +383,8 @@ def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
                                 module.to_bias.weight.detach().contiguous())
         lnw, lnb = module.ln_msa.weight.detach().contiguous(), module.ln_msa.bias.detach().contiguous()
         v, _ = k["pwa"].ln_vg(m, lnw, lnb, module.to_value.weight.detach().to(bf).contiguous(), eps_m, False)   # y is recomputed downstream
-        out, _ = k["pwa"].pwa_fwd2(w16, v, m, lnw, lnb, eps_m, module.to_gate.weight.detach().to(bf).contiguous(),
-                                   module.to_out.weight.detach().to(bf).contiguous(), False, None, 1.0)
+        out = k["pwa"].pwa_gate_out(torch.bmm(w16, v), m, lnw, lnb, eps_m, module.to_gate.weight.detach().to(bf).contiguous(),
+                                   module.to_out.weight.detach().to(bf).contiguous(), None, 1.0)
         return out[None]
     pm = torch.ones(n, n, dtype=bf, device=m.device) if mask is None else mask[0].to(bf)[None, :].expand(n, n).contiguous()
     lnz_w = module.ln_pair.weight.detach().float().contiguous(); lnz_b = module.ln_pair.bias.detach().float().contiguous()
@@ -422,8 +426,10 @@ class _SavedContext:
 
 def _forward_fake(args,eps_m,eps_z,p_drop):
     m=args[0];_,s,n,_=m.shape
+    # o is head-major [H, N, S*C] on sm_100a (cuBLAS bmm(w, v)), natural [S, N, HC] on sm_90a
+    o_shape=(H,n,s*C) if torch.cuda.get_device_capability(m.device)==(10,0) else (s,n,HC)
     return [torch.empty_like(m),torch.empty((H,n,n),device=m.device,dtype=torch.bfloat16),torch.empty((H,n,s*C),device=m.device,dtype=torch.bfloat16),
-            torch.empty((s,n,D),device=m.device,dtype=torch.bfloat16),torch.empty((s,n,HC),device=m.device,dtype=torch.bfloat16),
+            torch.empty((s,n,D),device=m.device,dtype=torch.bfloat16),torch.empty(o_shape,device=m.device,dtype=torch.bfloat16),
             torch.empty((n,D) if p_drop else (0,),device=m.device,dtype=torch.bfloat16)]
 
 

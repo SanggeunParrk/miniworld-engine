@@ -1,0 +1,152 @@
+{
+ "figures": {
+  "inference": {
+   "title": "B200 · MSAPairWeightedAveraging · inference · d_msa 64, d_pair 128, 8 heads × 32, bf16, MSA residual",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "F1", "name": "pair LN + bias + softmax", "impl": "CUDA · pair_fwd",
+       "code": [
+        "b = LN_z(z) @ W_b.T   # LN folded into W_b:",
+        "#   rstd (z @ (W_b∘γ_z).T - μ s) + c",
+        "b = b.masked_fill(~mask[None, None, :], min)",
+        "w = softmax(b, -1)   # [H, L, L]"
+       ],
+       "reads": ["z", "mask", "γ_z, β_z, W_b"],
+       "writes": ["w"]
+      },
+      {
+       "id": "F2", "name": "LN + value projection", "impl": "CUDA · ln_vg",
+       "code": ["y = LN_m(m)   # not stored", "v = y @ W_v.T   # head-major [H, L, S·32]"],
+       "reads": ["m", "γ_m, β_m, W_v"],
+       "writes": ["v"]
+      },
+      {
+       "id": "F3", "name": "weighted average", "impl": "cuBLAS · bmm",
+       "code": ["o = w @ v   # [H, L, S·32]", "# = einsum(\"bhij,bmjhd->bmihd\")"],
+       "reads": ["w", "v"],
+       "writes": ["o"]
+      },
+      {
+       "id": "F4", "name": "gate + out projection + residual", "impl": "CUDA · pwa_gate_out",
+       "code": [
+        "y = LN_m(m)   # recomputed",
+        "g = sigmoid(y @ W_g.T)   # bf16, as the module",
+        "out = m + (g * o) @ W_o.T"
+       ],
+       "reads": ["o", "m", "γ_m, β_m, W_g, W_o"],
+       "writes": ["out"]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 384, S = 1024)",
+     "hbm": [
+      {"name": "m, out", "shape": "[1,S,L,64] bf16", "size": "50 MB each"},
+      {"name": "z", "shape": "[1,L,L,128] bf16", "size": "38 MB"},
+      {"name": "w", "shape": "[H,L,L] bf16", "size": "2.4 MB"},
+      {"name": "v, o", "shape": "[H, L, S·32] bf16", "size": "201 MB each"}
+     ]
+    }
+   ]
+  },
+  "training": {
+   "title": "B200 · MSAPairWeightedAveraging · training · d_msa 64, d_pair 128, 8 heads × 32, bf16, MSA residual, row dropout",
+   "panels": [
+    {
+     "label": "forward (saves w, v, y, o and the dropout keep-mask)",
+     "kernels": [
+      {
+       "id": "F1", "name": "pair LN + bias + softmax", "impl": "CUDA · pair_fwd",
+       "code": ["b = LN_z(z) @ W_b.T   # LN folded into W_b", "w = softmax(b.masked_fill(~mask, min), -1)"],
+       "reads": ["z", "mask", "γ_z, β_z, W_b"],
+       "writes": ["w"]
+      },
+      {
+       "id": "F2", "name": "LN + value projection", "impl": "CUDA · ln_vg",
+       "code": ["y = LN_m(m)", "v = y @ W_v.T   # head-major"],
+       "reads": ["m", "γ_m, β_m, W_v"],
+       "writes": ["y", "v"]
+      },
+      {
+       "id": "F3", "name": "weighted average", "impl": "cuBLAS · bmm",
+       "code": ["o = w @ v"],
+       "reads": ["w", "v"],
+       "writes": ["o (kept)"]
+      },
+      {
+       "id": "F4", "name": "gate + out projection + dropout + residual", "impl": "CUDA · pwa_gate_out",
+       "code": ["g = sigmoid(LN_m(m) @ W_g.T)", "out = m + drop((g * o) @ W_o.T)", "# keep-mask [L, 64] shared over the rows"],
+       "reads": ["o", "m", "keep", "γ_m, β_m, W_g, W_o"],
+       "writes": ["out"]
+      }
+     ],
+     "hbm_title": "HBM, forward (sizes at L = 384, S = 1024)",
+     "hbm": [
+      {"name": "m, y, out", "shape": "[1,S,L,64] bf16", "size": "50 MB each"},
+      {"name": "z", "shape": "[1,L,L,128] bf16", "size": "38 MB"},
+      {"name": "w", "shape": "[H,L,L] bf16", "size": "2.4 MB"},
+      {"name": "v, o", "shape": "[H, L, S·32] bf16", "size": "201 MB each"}
+     ]
+    },
+    {
+     "label": "backward (dres; the residual's gradient is dres itself)",
+     "kernels": [
+      {
+       "id": "B1", "name": "weight layouts", "impl": "CUDA · pwa_wprep",
+       "code": ["W_o^T, [W_g; W_v]^T   # bf16, one launch"],
+       "reads": ["W_o, W_g, W_v"],
+       "writes": ["W_o^T, W_gv^T"]
+      },
+      {
+       "id": "B2", "name": "gate glue (dgp stays on chip)", "impl": "CUDA · pwa_glue2",
+       "code": [
+        "dr = dres * keep / (1 - p)",
+        "g = sigmoid(y @ W_g_h.T);  du = dr @ W_o_h",
+        "do = du * g;  dgp = du * o * g (1 - g)",
+        "dW_o += dr^T (g o);  dW_g += y^T dgp",
+        "dy_g = dgp @ W_g   # the gate branch of dy"
+       ],
+       "reads": ["o", "y", "dres", "keep", "W_g, W_o^T"],
+       "writes": ["do", "dy_g", "dW_o, dW_g"]
+      },
+      {
+       "id": "B3", "name": "value / weight grads", "impl": "cuBLAS · bmm ×2",
+       "code": ["dv = w.T @ do", "dw = do @ v.T   # [H, L, L]"],
+       "reads": ["w", "do", "v"],
+       "writes": ["dv", "dw"]
+      },
+      {
+       "id": "B4", "name": "MSA-side tail", "impl": "CUDA · dv_bwd",
+       "code": [
+        "dy = dy_g + dv @ W_v",
+        "dm = LN_bwd(dy; m, γ_m) + dres",
+        "dW_v = dv^T y;  dγ_m, dβ_m = 1^T [dy x̂ | dy]",
+        "#   (column sums on the tensor core)"
+       ],
+       "reads": ["dv", "dy_g", "y", "m", "dres", "W_gv^T"],
+       "writes": ["dm", "dW_v, dγ_m, dβ_m"]
+      },
+      {
+       "id": "B5", "name": "pair-side backward", "impl": "CUDA · pair_sdot + pair_bwd",
+       "code": [
+        "db = w (dw - sum_j w dw)   # softmax backward",
+        "dz = LN_bwd(db @ W_b; z, γ_z)",
+        "dW_b, dγ_z, dβ_z from M = db^T x̂, sum db"
+       ],
+       "reads": ["z", "w", "dw", "γ_z, β_z, W_b"],
+       "writes": ["dz", "dW_b, dγ_z, dβ_z"]
+      }
+     ],
+     "hbm_title": "HBM, backward (sizes at L = 384, S = 1024)",
+     "hbm": [
+      {"name": "dres, dm, dy_g", "shape": "[1,S,L,64] bf16", "size": "50 MB each"},
+      {"name": "do, dv", "shape": "[H, L, S·32] bf16", "size": "201 MB each"},
+      {"name": "dw", "shape": "[H,L,L] bf16", "size": "2.4 MB"},
+      {"name": "dz", "shape": "[1,L,L,128] bf16", "size": "38 MB"}
+     ]
+    }
+   ]
+  }
+ }
+}
