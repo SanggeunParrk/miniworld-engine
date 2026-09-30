@@ -14,7 +14,7 @@ from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.primitives import Linear
+from miniworld_engine.modules.primitives import LayerNorm, Linear
 
 
 class AdaptiveLayerNorm(nn.Module):
@@ -38,7 +38,10 @@ class AdaptiveLayerNorm(nn.Module):
         # and converting, which is what a parent passing its own dtype down needs.
         self.dtype = dtype
         self.ln_in = nn.LayerNorm(d_hidden, elementwise_affine=False, dtype=dtype)
-        self.ln_cond = nn.LayerNorm(d_cond, bias=False, dtype=dtype)
+        # The only norm affine here stays fp32 whatever ``dtype`` the rest runs in, including
+        # after a parent's bulk ``.to(torch.bfloat16)``: a bf16 gamma at 1.0 cannot move by one
+        # Adam step (see primitives._Fp32ParamsMixin). Every fused path already reads it as fp32.
+        self.ln_cond = LayerNorm(d_cond, bias=False)
         self.to_scale = Linear(d_cond, d_hidden, init="gating", dtype=dtype)
         self.to_bias = Linear(d_cond, d_hidden, bias=False, init="zero", dtype=dtype)
 
