@@ -38,7 +38,7 @@ torch 2.13 + cu129, triton 3.7, Transformer Engine, cuequivariance 0.12, FlashAt
   never eager for final numbers.
 - Per-GPU completion status (which op is finished for which shapes): `docs/gpus/<gpu>/<gpu>.md` (module level;
   per-module kernel tables and figures in `docs/gpus/<gpu>/<module>/`; format: `docs/gpus/README.md`).
-  The **성능 확인** row is filled by the maintainer, not by an agent.
+  The **성능 확인** row is filled by the maintainer, not by an agent: ✓ / △ (the fastest measured, not yet complete) / ✗.
 - Dated measurements and audits: `docs/records/`, never edited after the fact.
 - Local scratch lives outside the checkout. Removed research lives in git (see
   README "Research history").

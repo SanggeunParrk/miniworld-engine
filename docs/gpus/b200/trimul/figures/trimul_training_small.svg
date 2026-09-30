@@ -5,7 +5,7 @@
 <marker id="head-1a5fb4" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#1a5fb4"/></marker>
 </defs>
 <rect width="1804" height="967" fill="#ffffff"/>
-<text x="30.0" y="28.0" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="bold" fill="#1f2328" text-anchor="start">B200 · TriMul · training · D64 (either direction), D128 (one direction), bf16, every L = 128k</text>
+<text x="30.0" y="28.0" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="bold" fill="#1f2328" text-anchor="start">B200 · TriMul · training · D64 / D128 (either direction), bf16, every L = 128k</text>
 <text x="1774.0" y="24.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#b3261e" text-anchor="end">red: written to HBM</text>
 <text x="1774.0" y="38.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a5fb4" text-anchor="end">blue, dashed: read from HBM</text>
 <text x="30.0" y="60.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#57606a" text-anchor="start">forward (saves a, b, t, x_n, LN_out stats)</text>

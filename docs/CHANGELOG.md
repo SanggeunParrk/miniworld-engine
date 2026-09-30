@@ -10,6 +10,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Changed
 
+- B200 TriMul D128 bidirectional training runs the shared D64 / D128 kernels (k1w -> k3g -> b1g at H = 256 -> b7g at
+  eight plane chunks) instead of its own K1 / K3 / B1r / B7r extension (`b200_bidir.py`, removed). Its fp32
+  LayerNorm-parameter gradients are now bit-identical across runs, and the 148-SM restriction is gone. The per-CTA
+  LayerNorm-gradient rows of every D64 / D128 backward are summed by one fixed-order kernel (`lnpart_sum`) instead of two
+  torch reductions. Harness training step (CUDA graph, dropout 0.25) 0.99-1.06x the retired path's 2026-09-29 numbers;
+  a same-card A/B of the two paths varied from 0.93x to 1.08x between cards.
 - H100 TriMul inference K1 reads row-major `W_l, W_lg, W_r, W_rg` in place (`K1ParamsQ`, four
   TMA maps) instead of a per-call packed `w1`: no weight-pack kernels on bidirectional D64 and
   single-direction D64–384; output bitwise-identical. The column-major D128 bidirectional storage
