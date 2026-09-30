@@ -115,6 +115,9 @@ miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebui
 # that marker, `pixi run test-gpu` selects it. Registering the marker here is what makes an
 # unmarked typo an error instead of a silently-skipped test.
 testpaths = ["tests"]
+# Tests import `tests.paths` and `benchmarks.runners`; a bare `pytest` (CI) does not put the
+# repository root on sys.path the way `python -m pytest` does.
+pythonpath = ["."]
 markers = [
   "gpu: needs a CUDA device (excluded from the CPU suite CI runs)",
 ]
