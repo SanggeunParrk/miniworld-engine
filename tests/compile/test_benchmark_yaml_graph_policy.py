@@ -44,7 +44,13 @@ def test_yaml_defaults_resolve_graph_by_mode(config_class, path, mode, expected)
 
 
 def test_native_default_comparisons_include_only_equivalent_paths():
-    assert len(CONFIGS) == 12
+    # The module targets that ship a bench.yaml. Named rather than counted, so a new target is added
+    # here on purpose and a lost one says which.
+    assert {path.parent.parent.name for path in CONFIGS} == {
+        "adaptive_layernorm", "attention_pair_bias", "augmented_attention_atom", "augmented_attention_token",
+        "conditioned_transition", "dit", "dit_atom", "msa_pair_weighted_averaging", "outer_product",
+        "swa_atom_attention", "swa_dit", "transition", "triangle_attention", "triangle_multiplication",
+        "triangle_multiplication_bidirectional"}
     configs = {path.parent.parent.name: yaml.safe_load(path.read_text()) for path in CONFIGS}
     for name in ("triangle_multiplication", "triangle_attention", "triangle_multiplication_bidirectional"):
         assert {"pytorch", "cuequivariance", "miniworld"} <= set(configs[name]["implementations"])

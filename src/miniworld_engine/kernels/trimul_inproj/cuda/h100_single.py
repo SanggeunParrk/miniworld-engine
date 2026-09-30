@@ -157,6 +157,7 @@ class Plan:
 
 
 def _forward_fake(leaves, mask, ds, outgoing):
+    """y like x; saved planes [2D, L, L], contraction [D, L, L], x_n like x, packed W1 [4D, D]."""
     x = leaves[0]
     n, d = x.shape[1], x.shape[-1]
     return [
@@ -172,6 +173,7 @@ def _forward_fake(leaves, mask, ds, outgoing):
 def forward(
     leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool
 ) -> list[torch.Tensor]:
+    """One-direction D128 training forward on one stream: [y, planes, contraction, x_n, packed W1]."""
     x = leaves[0]
     with torch.cuda.device(x.device):
         T._launch_module()._make_context_current(x.device.index)
@@ -181,6 +183,7 @@ def forward(
 
 
 def _backward_fake(leaves, mask, ds, saved, dy, outgoing):
+    """dx like x, the packed front-weight gradient [4, 128, 128], then one gradient like each remaining leaf."""
     return [
         torch.empty_like(leaves[0]),
         leaves[0].new_empty((4, 128, 128)),
@@ -197,6 +200,7 @@ def backward(
     dy: torch.Tensor,
     outgoing: bool,
 ) -> list[torch.Tensor]:
+    """Backward of ``forward`` from its saved tensors: dx, the packed front-weight gradient, then the other leaves' gradients."""
     x = leaves[0]
     with torch.cuda.device(x.device):
         T._launch_module()._make_context_current(x.device.index)

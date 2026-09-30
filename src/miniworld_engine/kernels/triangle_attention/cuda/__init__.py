@@ -67,12 +67,14 @@ def _extension():
     return _EXT
 
 
-def _fake(dy, weights):
+def _dgrad_fake(dy, weights):
+    """dz [M, 128] in dy[0]'s dtype, M = dy[0].numel() / 128 rows."""
     return torch.empty((dy[0].numel() // 128, 128), device=dy[0].device, dtype=dy[0].dtype)
 
 
-@opaque(fake=_fake, name="triangle_projection_dgrad_cuda")
+@opaque(fake=_dgrad_fake, name="triangle_attention_projection_dgrad_cuda")
 def _dgrad(dy: list[torch.Tensor], weights: list[torch.Tensor]) -> torch.Tensor:
+    """Input gradient of the projections: sum_i dy[i] @ weights[i] -> dz [M, 128] (H100 CUDA, 64-row tiles)."""
     return _extension().dgrad(dy, weights, 64)
 
 

@@ -229,7 +229,8 @@ def install_recorder(sink: list) -> None:
             raise ValueError(f"{op}: no declared native schedule")
         sink.append((op, dtype.removeprefix("torch."), bucket))
         return dict(candidates[0])
-    native.choose_config = native_choice
+    # Monkeypatch: a module-level def is its own literal type to ty, so any replacement is refused.
+    native.choose_config = native_choice  # ty: ignore[invalid-assignment]
     autotuner_mod.Autotuner.run = tuned_run
     if hasattr(autotuner_mod, "Heuristics"):
         autotuner_mod.Heuristics.run = tuned_run
@@ -401,13 +402,13 @@ def install_native_recorders() -> None:
             ("kernels.trimul_inproj.cuda.h100_wide_inference", (("wide_inference", "_wide_inference_fake"),)),
             ("kernels.trimul_inproj.cuda.h100_uni_wide_inference", (("uni_wide_inference", "_uni_wide_inference_fake"),)),
             # TriangleAttention's prebuilt extensions (their opaque wrappers run eagerly here).
-            ("kernels.triangle_attention.cuda", (("_dgrad", "_fake"),)),
-            ("kernels.triangle_attention.cuda.ln_backward", (("_backward", "_fake"),)),
-            ("kernels.triangle_attention.cuda.wgrad_backward", (("_backward", "_fake"),)),
-            ("kernels.triangle_attention.cuda.gate_backward", (("gate_backward", "_gate_fake"),)),
-            ("kernels.triangle_attention.cuda.q_projection_attention", (("native", "_fake"),)),
-            ("kernels.triangle_attention.cuda.qg_projection_attention", (("native", "_fake"),)),
-            ("kernels.triangle_attention.cuda.qkv_projection_attention", (("native", "_fake"),)),
+            ("kernels.triangle_attention.cuda", (("_dgrad", "_dgrad_fake"),)),
+            ("kernels.triangle_attention.cuda.ln_backward", (("_backward", "_backward_fake"),)),
+            ("kernels.triangle_attention.cuda.wgrad_backward", (("_backward", "_backward_fake"),)),
+            ("kernels.triangle_attention.cuda.gate_backward", (("gate_backward", "_gate_backward_fake"),)),
+            ("kernels.triangle_attention.cuda.q_projection_attention", (("native", "_native_fake"),)),
+            ("kernels.triangle_attention.cuda.qg_projection_attention", (("native", "_native_fake"),)),
+            ("kernels.triangle_attention.cuda.qkv_projection_attention", (("native", "_native_fake"),)),
         )
 
         def native_contract(fake, selector=None):
@@ -443,11 +444,12 @@ def install_native_recorders() -> None:
             L = q.shape[2]
             return q.new_empty((1, L, L, 128)).view(1, L, L, 4, 32).permute(0, 3, 1, 2, 4)
 
-        tri_fwd.forward = lambda q, k, v, b: (
+        # Shape-only fakes replace the leaf extension wrappers (monkeypatch; see ln_cuda below).
+        tri_fwd.forward = lambda q, k, v, b: (  # ty: ignore[invalid-assignment]
             projection_like(q), q.new_empty((1, 4, q.shape[2], q.shape[2]), dtype=torch.float32))
-        tri_bias.native_backward = lambda q, k, v, b, m, delta, dy: (
+        tri_bias.native_backward = lambda q, k, v, b, m, delta, dy: (  # ty: ignore[invalid-assignment]
             projection_like(q), projection_like(q), torch.empty_like(b))
-        tri_dq.backward = lambda q, k, v, b, m, delta, dy: projection_like(q)
+        tri_dq.backward = lambda q, k, v, b, m, delta, dy: projection_like(q)  # ty: ignore[invalid-assignment]
 
     class TransitionExtension:
         def transition_b2b_fwd(self, x, rstd, c1, g, beta, wa, wb, ws, residual=True):

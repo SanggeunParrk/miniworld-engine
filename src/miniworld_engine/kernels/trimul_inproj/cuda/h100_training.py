@@ -93,8 +93,12 @@ def forward(
                 x.new_empty((0,), dtype=torch.float32)]
 
 
-@opaque(fake=lambda leaves, mask, ds: torch.empty_like(leaves[0]),
-        name="trimul_h100_dropout_nograd_wide_port")
+def _forward_nograd_fake(leaves, mask, ds):
+    """y like x."""
+    return torch.empty_like(leaves[0])
+
+
+@opaque(fake=_forward_nograd_fake, name="trimul_h100_dropout_nograd_wide_port")
 def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor) -> torch.Tensor:
     """Preserve training dropout/residual without backward-only D128 saves."""
     x = leaves[0]

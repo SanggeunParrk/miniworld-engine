@@ -39,12 +39,14 @@ def extension():
         spec.loader.exec_module(_EXT)
     return _EXT
 
-def _fake(dy,w,x,mean,rstd,gamma,residual,L,ending):
+def _backward_fake(dy,w,x,mean,rstd,gamma,residual,L,ending):
+    """dx like x; dgamma and dbeta like gamma."""
     return torch.empty_like(x),torch.empty_like(gamma),torch.empty_like(gamma)
 
-@opaque(fake=_fake,name='triangle_projection_ln_residual_cuda')
+@opaque(fake=_backward_fake,name='triangle_attention_projection_ln_residual_cuda')
 def _backward(dy:list[torch.Tensor],w:list[torch.Tensor],x:torch.Tensor,mean:torch.Tensor,rstd:torch.Tensor,
               gamma:torch.Tensor,residual:torch.Tensor,L:int,ending:bool)->tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+    """Projection dgrad + LayerNorm backward + residual: (dx, dgamma, dbeta); ending transposes back."""
     dx,dg,db=extension().backward(dy,w,x,mean,rstd,gamma,residual.contiguous(),L,ending)
     return dx.view_as(x),dg,db
 

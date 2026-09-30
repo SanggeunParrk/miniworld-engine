@@ -51,7 +51,7 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
     dgamma = torch.zeros(K, dtype=torch.float32, device=x.device)
     dbeta = torch.zeros(K, dtype=torch.float32, device=x.device)
     xc = x.to(dx_normed.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     layer_norm_bwd_dx_fused[grid](
         dx, dx_normed, dgamma, dbeta,
         xc, gamma, mean, rstd, rstd,

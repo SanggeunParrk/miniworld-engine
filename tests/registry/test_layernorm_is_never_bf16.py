@@ -70,8 +70,14 @@ NOT_A_NORMALISATION = {
      "empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),"):
         "The row-broadcast dropout keep-mask (0 / 1, exact in bf16) as the kernel's operand, not a normalized activation.",
     ("trimul_inproj/cuda/h100_b7.py",
-     'self.mask = d["mask"].bfloat16().reshape(-1)'):
+     'self.mask = d["mask"] if mode & 128 else d["mask"].bfloat16().reshape(-1)'):
         "Mask storage for the H100 projection path, not a normalized activation.",
+    ("trimul_inproj/cuda/h100_uni_wide_inference.py",
+     "mask.to(torch.bfloat16).contiguous(), outgoing)"):
+        "The [L, L] pair mask handed to the one-direction wide inference kernels, not a normalized activation.",
+    ("trimul_inproj/cuda/h100_wide_training.py",
+     "return mask.reshape(n, n).to(torch.bfloat16).contiguous()"):
+        "The [L, L] pair mask for the wide training kernels, not a normalized activation.",
     ("trimul_inproj/cuda/h100_single.py",
      "self.mask = mask.reshape(n, n).bfloat16().contiguous()"):
         "Mask storage for the H100 projection path, not a normalized activation.",

@@ -26,8 +26,6 @@ DRIVERS = ROOT / "src" / "miniworld_engine" / "kernels" / "drivers"
 #: `file:symbol` -> why this site names a fixed precision. An ACTIVATION here is a bug unless the
 #: reason says the kernel genuinely runs at one precision and the registry declares the same.
 ALLOWED = {
-    "trimul_inproj.py:torch.float32":
-        "the pair mask handed to the H100 trimul forward is an fp32 row weight, not an activation",
     "adaln.py:FP32": "a LayerNorm statistic (mean/rstd) is fp32 whatever the activation is",
     "triangle_multiplication.py:torch.float32": "sigma is fp32 by definition, not an activation",
     "rope.py:torch.float32": "cos/sin are fp32 angle tensors (rotation precision), not activations",

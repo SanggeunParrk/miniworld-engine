@@ -32,21 +32,25 @@ def extension():
         _EXT=importlib.util.module_from_spec(spec);spec.loader.exec_module(_EXT)
     return _EXT
 
-def _gate_fake(dy,w,gate,out):
+def _gate_backward_fake(dy,w,gate,out):
+    """Three tensors like gate, and the fp32 delta [4, rows]."""
     return (torch.empty_like(gate),torch.empty_like(gate),torch.empty_like(gate),
             torch.empty((4,gate.shape[0]),device=gate.device,dtype=torch.float32))
 
-@opaque(fake=_gate_fake,name='triangle_gate_delta_cuda')
+@opaque(fake=_gate_backward_fake,name='triangle_attention_gate_delta_cuda')
 def gate_backward(dy:torch.Tensor,w:torch.Tensor,gate:torch.Tensor,out:torch.Tensor)->tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
+    """Gate backward: three gate-shaped gradients and the fp32 softmax delta [4, rows] the attention backward consumes."""
     return tuple(extension().backward(dy,w,gate,out))
 
-def _attention_fake(q,k,v,b,m,delta,dy):
+def _attention_backward_fake(q,k,v,b,m,delta,dy):
+    """dq, dk, dv as [B, H, L, L, D] views of [B, L, L, H*D] storage, and db like b."""
     B,H,L,_,D=q.shape
     def grad():return torch.empty((B,L,L,H*D),device=q.device,dtype=q.dtype).view(B,L,L,H,D).permute(0,3,1,2,4)
     return grad(),grad(),grad(),torch.empty_like(b)
 
-@opaque(fake=_attention_fake,name='triangle_attention_precomputed_delta_cuda')
+@opaque(fake=_attention_backward_fake,name='triangle_attention_precomputed_delta_cuda')
 def attention_backward(q:torch.Tensor,k:torch.Tensor,v:torch.Tensor,b:torch.Tensor,m:torch.Tensor,delta:torch.Tensor,dy:torch.Tensor)->tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
+    """Attention backward from a precomputed softmax delta (4 heads x 32): (dq, dk, dv, db)."""
     L=q.shape[2]
     delta=delta.view(1,4,L,L)
     dy=dy.view(1,L,L,4,32).permute(0,3,1,2,4)

@@ -178,18 +178,21 @@ def _pack(gamma, beta, wa, wb, ws):
 # ------------------------------------------------------------------------------------------------------------------ launches
 def _pack_launch_fake(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, idx16: torch.Tensor,
                       idx32: torch.Tensor, out16: torch.Tensor, gb: torch.Tensor) -> None:
+    """Nothing: the op writes out16 and gb in place."""
     return None
 
 
 @opaque(fake=_pack_launch_fake, name="transition_fused_pack_sm80", mutates_args=("out16", "gb"))
 def _pack_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, idx16: torch.Tensor,
                  idx32: torch.Tensor, out16: torch.Tensor, gb: torch.Tensor) -> None:
+    """Packs the three weights (bf16 / fp16 tiles in out16) and the LayerNorm affine (gb) for the sm80 kernels, in place."""
     if _is_fake(wa, out16):
         return None
     _ext().pack(wa, wb, ws, gamma, beta, idx16, idx32, out16, gb)
 
 
 def _fwd_launch_fake(x, w, gb, eps, save):
+    """out like x; xn [rows, D] and fp32 stats [rows, 2] when save, else empty."""
     rows = x.shape[0] if save else 0
     return (torch.empty_like(x), x.new_empty((rows, D)) if save else x.new_empty((0,)),
             torch.empty((rows, 2), dtype=torch.float32, device=x.device))
@@ -205,6 +208,7 @@ def _fwd_launch(x: torch.Tensor, w: torch.Tensor, gb: torch.Tensor, eps: float, 
 
 
 def _bwd_launch_fake(dy, x, xn, stats, wdw, wx, gamma, beta, eps, adt, wdt):
+    """dx like x; dgamma, dbeta [D] in adt; dWa, dWb [H, D] and dWs [D, H] in wdt."""
     return (torch.empty_like(x), torch.empty((D,), dtype=adt, device=x.device), torch.empty((D,), dtype=adt, device=x.device),
             torch.empty((H, D), dtype=wdt, device=x.device), torch.empty((H, D), dtype=wdt, device=x.device),
             torch.empty((D, H), dtype=wdt, device=x.device))

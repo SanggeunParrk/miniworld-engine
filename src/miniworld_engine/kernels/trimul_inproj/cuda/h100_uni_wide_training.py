@@ -109,6 +109,7 @@ def _run_forward(leaves, mask, ds, outgoing, save):
 
 
 def _forward_fake(leaves, mask, ds, outgoing):
+    """y like x, then the saved set (``saved_like``)."""
     x = leaves[0]
     return [torch.empty_like(x), *saved_like(x)]
 
@@ -121,6 +122,7 @@ def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, ou
 
 
 def _forward_nograd_fake(leaves, mask, ds, outgoing):
+    """y like x."""
     return torch.empty_like(leaves[0])
 
 

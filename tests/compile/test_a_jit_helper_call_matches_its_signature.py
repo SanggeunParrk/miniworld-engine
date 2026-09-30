@@ -20,7 +20,7 @@ from pathlib import Path
 SRC = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src"
 
 
-def _jit_functions(tree: ast.AST) -> dict[str, ast.FunctionDef]:
+def _jit_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
     """Module-level functions carrying a bare ``@triton.jit``."""
     return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)
             and any(isinstance(d, ast.Attribute) and d.attr == "jit" for d in n.decorator_list)}
@@ -60,7 +60,7 @@ def test_every_jit_helper_call_passes_what_the_helper_declares() -> None:
             names, flexible = _accepts(helper)
             if flexible:
                 continue
-            given = [k.arg for k in node.keywords]
+            given = [k.arg for k in node.keywords if k.arg is not None]  # none are, per the skip above
             unknown = sorted(set(given) - names)
             where = f"{path.relative_to(SRC)}:{node.lineno}: {node.func.id}()"
             if unknown:

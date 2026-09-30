@@ -38,8 +38,8 @@ def test_exact_leaf_axes_do_not_enter_unrelated_gemm_ladders():
     assert set(NAMES) <= set(CASE_NAMES)
     for case in cases():
         if case.name in NAMES:
-            assert case.factory
-            assert case.inputs
+            assert callable(case.factory)
+            assert callable(case.inputs)
             assert case.rows
             assert len(case.dims) == len(case.streams) == len(case.lengths_by_dim)
 

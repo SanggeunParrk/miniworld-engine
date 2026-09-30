@@ -47,13 +47,15 @@ def native_backward(q,k,v,b,m,delta,dy):
     ext=_extension()
     return ext.backward(q,k,v,b,m,delta,dy,getattr(ext,'row_group',4))
 
-def _fake(q,k,v,b,m,out,dy,native_dq):
+def _backward_fake(q,k,v,b,m,out,dy,native_dq):
+    """dq, dk, dv as [B, H, L, L, D] views of [B, L, L, H*D] storage, and db like b."""
     B,H,L,_,D=q.shape
     def grad():return torch.empty((B,L,L,H*D),device=q.device,dtype=q.dtype).view(B,L,L,H,D).permute(0,3,1,2,4)
     return grad(),grad(),grad(),torch.empty_like(b)
 
-@opaque(fake=_fake,name='triangle_attention_grouped_bwd_cuda')
+@opaque(fake=_backward_fake,name='triangle_attention_grouped_bwd_cuda')
 def _backward(q:torch.Tensor,k:torch.Tensor,v:torch.Tensor,b:torch.Tensor,m:torch.Tensor,out:torch.Tensor,dy:torch.Tensor,native_dq:bool)->tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
+    """Attention backward with the grouped bias gradient: (dq, dk, dv, db); native_dq selects the CUDA dq kernel."""
     from miniworld_engine.kernels.triangle_attention.triton import main as core
     B,H,L,_,D=q.shape
     if dy.dtype!=q.dtype:dy=dy.to(q.dtype)
