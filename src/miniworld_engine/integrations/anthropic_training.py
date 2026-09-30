@@ -6,10 +6,10 @@ gradients, using the actual saved native planes. This is a correctness baseline,
 not an optimized native backward. First-order gradients only; eager API (Dynamo
 graph break). BF16 pair activations, one pair plane per call, SM90 only initially.
 """
-from importlib import import_module
 import os
-from pathlib import Path
 import sys
+from importlib import import_module
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -20,7 +20,7 @@ WEIGHT_KEYS = ("ln_in_w", "ln_in_b", "w_ag", "w_ap", "w_bg", "w_bp",
 
 
 def native_ops():
-    from .anthropic import configure
+    from src.miniworld_engine.integrations.anthropic import configure
     configure()
     build = os.environ.get("TRIMUL_NATIVE_BUILD_DIR")
     if not build:
@@ -65,7 +65,7 @@ def native_forward(z, mask, weights, direction, eps):
     n, _, c = z.shape
     h = weights[2].shape[0]
     np = ops.ceil16(n)
-    packed = ops.pack_weights(dict(zip(WEIGHT_KEYS, weights)))
+    packed = ops.pack_weights(dict(zip(WEIGHT_KEYS, weights, strict=False)))
     kk = ops.kernels()
     ops._check(z, packed)
     ent = ops.K.lookup(kk.arch, c, h, "b", n,
@@ -112,7 +112,7 @@ class _NativeTraining(torch.autograd.Function):
             gy = torch.autograd.grad(_back(x, t, w, ctx.eps),
                                      (x, t, *(w[i] for i in ids)), dy)
         dx, dt, *gw = gy
-        grads = dict(zip(ids, gw))
+        grads = dict(zip(ids, gw, strict=False))
         a, b = ab[:h, :n, :n], ab[h:, :n, :n]
         if ctx.direction == "bidirectional":
             k = h // 2
@@ -158,7 +158,7 @@ def triangle_multiplication_training(z, mask, *, weights, direction="outgoing", 
     shapes = ((c,), (c,), (h,c), (h,c), (h,c), (h,c), (h,), (h,), (c,h), (c,c))
     if direction == "bidirectional" and h % 2:
         raise ValueError("Bidirectional hidden width must be even")
-    for key, v, shape in zip(WEIGHT_KEYS, w, shapes):
+    for key, v, shape in zip(WEIGHT_KEYS, w, shapes, strict=False):
         if tuple(v.shape) != shape or v.device != z.device or v.dtype not in (torch.bfloat16, torch.float32):
             raise ValueError(f"Invalid native training weight {key}: expected {shape} BF16/FP32 on {z.device}")
     if mask is None:
@@ -180,11 +180,11 @@ def module_update(module, pair, mask, *, bidirectional=False):
     weights = dict(zip(WEIGHT_KEYS, (module.ln_pair.weight, module.ln_pair.bias,
         module.to_left_gate.weight, module.to_left.weight,
         module.to_right_gate.weight, module.to_right.weight,
-        module.ln_out.weight, module.ln_out.bias, module.to_out.weight, module.to_gate.weight)))
+        module.ln_out.weight, module.ln_out.bias, module.to_out.weight, module.to_gate.weight), strict=False))
     pairmask = None if mask is None else mask.unsqueeze(-1) & mask.unsqueeze(-2)
     direction = "bidirectional" if bidirectional else ("outgoing" if module.outgoing else "incoming")
-    module.anthropic_selection = dict(row="native_rebuilt", forward="original K1 + cuBLAS + original K3",
-        backward="PyTorch surround recomputation + cuBLAS contraction gradients",
-        residual_dropout="external", direction=direction, compile="eager graph break")
+    module.anthropic_selection = {"row": "native_rebuilt", "forward": "original K1 + cuBLAS + original K3",
+        "backward": "PyTorch surround recomputation + cuBLAS contraction gradients",
+        "residual_dropout": "external", "direction": direction, "compile": "eager graph break"}
     return triangle_multiplication_training(pair, pairmask, weights=weights,
                                             direction=direction, eps=module.ln_pair.eps)

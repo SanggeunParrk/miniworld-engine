@@ -202,7 +202,7 @@ def test_d64_persistent_input_buffer_reuse(monkeypatch):
             graph.replay()
         else:
             step()
-        for p, reference in zip(params, expected):
+        for p, reference in zip(params, expected, strict=False):
             torch.testing.assert_close(p.grad, reference, rtol=0, atol=0)
 
 

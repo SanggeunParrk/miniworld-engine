@@ -17,14 +17,14 @@ from __future__ import annotations
 from miniworld_engine.autotune import builder
 from miniworld_engine.build import audit
 
-_WEIGHT_ONLY = '''
+_WEIGHT_ONLY = """
 import triton
 
 @triton.autotune(configs=[], key=['N', 'K'])
 @triton.jit
 def _weight_only_kernel(w_ptr, N, K):
     pass
-'''
+"""
 
 
 def test_a_kernel_without_shape_key_does_not_key_on_shape(tmp_path):

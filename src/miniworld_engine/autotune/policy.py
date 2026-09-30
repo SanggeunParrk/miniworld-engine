@@ -59,8 +59,7 @@ def filter_op_units(units):
             continue
         token = levels.get(unit.op) == "token" or (
             levels.get(unit.op) == "both" and unit.side in ("pair", "token", "msa"))
-        if token and (run_mode == "train" or training):
-            if unit.length not in TRAIN_TOKEN_LENGTHS:
-                continue
+        if token and (run_mode == "train" or training) and unit.length not in TRAIN_TOKEN_LENGTHS:
+            continue
         selected.append(unit)
     return selected

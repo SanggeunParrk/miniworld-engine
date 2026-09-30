@@ -18,7 +18,10 @@ def transition_candidates(sms, *, backward=False):
 
 
 def trimul_candidates(cz, ch, length, direction):
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_infer_kernel import TILE_TABLE, lookup
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_infer_kernel import (
+        TILE_TABLE,
+        lookup,
+    )
     table = TILE_TABLE.get(("sm_90a", cz, ch, "b"))
     if table is None:
         return []

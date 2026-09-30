@@ -1,5 +1,6 @@
 import pytest
 import torch
+
 from miniworld_engine import settings
 from miniworld_engine.kernels.layernorm import dispatch
 from miniworld_engine.kernels.layernorm.compile_native import _resolve_bwd_path
@@ -84,7 +85,7 @@ def test_rms_cache_graph():
     xh = xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + 1e-5)
     expected = (xh * w).to(x.dtype)
     grads = torch.autograd.grad(expected, (x, w), dy)
-    for actual, ref in zip(out, (expected, *grads)):
+    for actual, ref in zip(out, (expected, *grads), strict=False):
         rel = (actual.double() - ref.double()).norm() / ref.double().norm().clamp_min(
             1e-10
         )

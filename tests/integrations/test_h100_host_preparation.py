@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch
+
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_launch as L
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
@@ -14,18 +15,18 @@ def reference(fields):
             b, a = reference(f.fields)
         else:
             b, a = L._pack_one(f)
-        blob += b'\0' * ((-len(blob)) % a)
+        blob += b"\0" * ((-len(blob)) % a)
         blob += b
         align = max(align, a)
-    blob += b'\0' * ((-len(blob)) % align)
+    blob += b"\0" * ((-len(blob)) % align)
     return bytes(blob), align
 
 
 def test_layout_alignment_and_fresh_values():
     tensor = torch.empty(7)
     tm = L.TensorMap(bytes(range(128)))
-    inner = L.Struct([3, tensor, False, L.f64(.7), b'ab'])
-    fields = [1, tm, inner, None, L.u64(2**40), bytearray(b'xyz'), 2.5]
+    inner = L.Struct([3, tensor, False, L.f64(.7), b"ab"])
+    fields = [1, tm, inner, None, L.u64(2**40), bytearray(b"xyz"), 2.5]
     s = L.Struct(fields)
     assert s.layout() == reference(fields)
     inner.fields[0] = -99
@@ -58,13 +59,13 @@ def test_thread_local_host_storage():
 
 
 def test_config_read_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(T, 'SOURCES', tmp_path)
+    monkeypatch.setattr(T, "SOURCES", tmp_path)
     T.read_config.cache_clear()
-    p = tmp_path/'fixed.json'
+    p = tmp_path/"fixed.json"
     p.write_text('{"tile":64}')
-    assert T.read_config('fixed.json')['tile'] == 64
+    assert T.read_config("fixed.json")["tile"] == 64
     p.unlink()
-    assert T.read_config('fixed.json')['tile'] == 64
+    assert T.read_config("fixed.json")["tile"] == 64
     T.read_config.cache_clear()
 
 
@@ -79,15 +80,15 @@ def test_multiple_arguments_and_empty_pack():
 
 
 def test_fixed_abi_updates_pointers_and_nested_values():
-    key='test_fixed_abi_updates_pointers'
-    inner=L.Struct.fixed('test_fixed_inner',[None,19])
+    key="test_fixed_abi_updates_pointers"
+    inner=L.Struct.fixed("test_fixed_inner",[None,19])
     first=L.Struct.fixed(key,[L.TensorMap(bytes(128)),inner,None,1.25])
     assert first.layout()==reference(first.fields)
     t=torch.empty(11)
     inner.fields[:]=[t,-4]
     second=L.Struct.fixed(key,[L.TensorMap(bytes([7])*128),inner,t,3.5])
     assert second.layout()==reference(second.fields)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="fixed ABI field count"):
         L.Struct.fixed(key,[None]).pack()
 
 
@@ -99,7 +100,7 @@ def test_map_spec_validation_and_context_scope(monkeypatch):
             self.calls+=1
             return bytes([self.ctx])*128
     a,b=Driver(1),Driver(2)
-    monkeypatch.setattr(L,'driver',lambda:a)
+    monkeypatch.setattr(L,"driver",lambda:a)
     t=torch.empty(4,4)
     L._encoded_tensor_map.cache_clear()
     with L.tensor_map_scope(a):
@@ -109,13 +110,13 @@ def test_map_spec_validation_and_context_scope(monkeypatch):
             assert L.tensor_map(t,[4,4]).raw==bytes([2])*128
         assert L.tensor_map(t,[4,4]).raw==bytes([1])*128
     assert L._map_scope.active is None
-    assert a.calls==1 and b.calls==1
-    with pytest.raises(ValueError):
+    assert a.calls==1
+    assert b.calls==1
+    with pytest.raises(ValueError, match="tensor_map: "):
         L.tensor_map(t,[4,4],dims=[4,4],strides_bytes=[4])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="tensor_map: "):
         L.tensor_map(t,[3,4])
-    with pytest.raises(RuntimeError):
-        with L.tensor_map_scope(a):
-            raise RuntimeError('scope cleanup')
+    with pytest.raises(RuntimeError), L.tensor_map_scope(a):
+        raise RuntimeError("scope cleanup")
     assert L._map_scope.active is None
     L._encoded_tensor_map.cache_clear()

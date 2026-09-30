@@ -72,7 +72,9 @@ def test_cli_default_and_explicit_global_modes():
     assert args.config_type == "default"
     assert not args.include_alternatives
     args = parse(["build", "all", "grid", "--include-alternatives", "--mode", "eval"])
-    assert args.config_type == "grid" and args.include_alternatives and args.mode == "eval"
+    assert args.config_type == "grid"
+    assert args.include_alternatives
+    assert args.mode == "eval"
 
 
 def test_per_op_modes_preserve_atom_and_mpnn(monkeypatch):
@@ -88,8 +90,10 @@ def test_per_op_modes_preserve_atom_and_mpnn(monkeypatch):
     units = [edge, atom, pair, dataclasses.replace(pair, length=384), *inference]
     monkeypatch.setenv("MINIWORLD_BUILD_MODE", "train")
     selected = policy.filter_op_units(units)
-    assert edge in selected and atom in selected
-    assert pair not in selected and dataclasses.replace(pair, length=384) in selected
+    assert edge in selected
+    assert atom in selected
+    assert pair not in selected
+    assert dataclasses.replace(pair, length=384) in selected
     assert not any(u.op == "trimul_fwd_sm90_cuda" for u in selected)
     monkeypatch.setenv("MINIWORLD_BUILD_MODE", "eval")
     assert policy.filter_op_units(units) == inference
@@ -97,6 +101,7 @@ def test_per_op_modes_preserve_atom_and_mpnn(monkeypatch):
 
 def test_global_cache_winner_is_rechecked_by_resource_pruning(monkeypatch):
     from types import SimpleNamespace
+
     from miniworld_engine import settings
     from miniworld_engine.autotune import cache
     op = "rmsnorm_fwd_triton"

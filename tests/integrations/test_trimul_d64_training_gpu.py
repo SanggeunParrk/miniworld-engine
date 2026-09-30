@@ -81,13 +81,13 @@ def test_matches_fp32_reference(n, masked, dropout):
     yr = _reference(ref_leaves[0], ref_leaves[1:7], ref_leaves[7:], pm.float(), ds.float())
     gr = torch.autograd.grad(yr, ref_leaves, dy.float())
     x = leaves[0].detach().float()
-    errors = [_rel(y.float() - x, yr - x)] + [_rel(a, b) for a, b in zip(grads, gr)]
+    errors = [_rel(y.float() - x, yr - x)] + [_rel(a, b) for a, b in zip(grads, gr, strict=False)]
     # Measured (L384, every mask/dropout case): update 3-6e-3, gradients 1.7-5.4e-3, each
     # below the Triton path's error against the same reference.
-    for name, e in zip(NAMES, errors):
+    for name, e in zip(NAMES, errors, strict=False):
         assert e < 1.2e-2, (name, e)
     assert all(torch.isfinite(g).all() for g in grads)
-    assert all(g.dtype == t.dtype and g.shape == t.shape for g, t in zip(grads, leaves))
+    assert all(g.dtype == t.dtype and g.shape == t.shape for g, t in zip(grads, leaves, strict=False))
 
 
 def test_graph_replay_follows_changed_inputs_and_weights():
@@ -113,11 +113,11 @@ def test_graph_replay_follows_changed_inputs_and_weights():
     for seed in (11, 12):
         fresh = _leaves(n, seed)
         with torch.no_grad():
-            for dst, src in zip(static, fresh):
+            for dst, src in zip(static, fresh, strict=False):
                 dst.copy_(src)
         graph.replay()
         expected = step(fresh)
-        for i, (a, b) in enumerate(zip(out, expected)):
+        for i, (a, b) in enumerate(zip(out, expected, strict=False)):
             if b.dtype == torch.float32:
                 # LN affine sums use shared-memory atomics inside a CTA (order not fixed).
                 assert _rel(a, b) < 1e-5, i
@@ -136,7 +136,7 @@ def test_independent_forwards_and_nograd_match():
     ga = torch.autograd.grad(a, leaves, dy)
     gb = torch.autograd.grad(b, leaves, dy)
     torch.testing.assert_close(a, b, rtol=0, atol=0)
-    for u, v in zip(ga, gb):
+    for u, v in zip(ga, gb, strict=False):
         assert _rel(u, v) < 1e-5
     with torch.no_grad():
         c = H.bidirectional_trimul(*leaves, pm, ds)
@@ -193,7 +193,7 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch):
                     p.data = p.data.to(torch.bfloat16)
         ref = BidirectionalTriangleMultiplication(D, implementation=I.PYTORCH, p_drop=0.0).cuda().train()
         with torch.no_grad():
-            for p, q in zip(ref.parameters(), m.parameters()):
+            for p, q in zip(ref.parameters(), m.parameters(), strict=False):
                 p.copy_(q.float())
         mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
         mask[:, n - 40:] = False
@@ -207,7 +207,7 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch):
         gr = torch.autograd.grad(yr, [xr, *ref.parameters()], dy.float())
         xf = x.detach().float()
         assert _rel(y.float() - xf, yr - xf) < 1.2e-2
-        for a, b in zip(grads, gr):
+        for a, b in zip(grads, gr, strict=False):
             assert a.shape == b.shape
             assert _rel(a, b) < 1.2e-2
     finally:

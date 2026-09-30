@@ -387,7 +387,10 @@ def transition_squeeze_residual_triton():
 
 def _fused_transition(backward):
     from miniworld_engine.autotune import policy
-    from miniworld_engine.kernels.transition.cuda.fused_sm90a import _fwd_launch, _bwd_launch
+    from miniworld_engine.kernels.transition.cuda.fused_sm90a import (
+        _bwd_launch,
+        _fwd_launch,
+    )
     length = driver_length(384)
     rows = length * length if both_level_is_pair(length) else length
     x = torch.randn(rows, 128, device="cuda", dtype=BF16)
@@ -399,6 +402,7 @@ def _fused_transition(backward):
         return _bwd_launch(torch.randn_like(x), x, xn, rstd, c1, gamma, wa, wb, ws)
     for save in ((False,) if policy.mode() == "eval" else (True,) if policy.mode() == "train" else (False, True)):
         _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, save)
+    return None
 
 
 def transition_fwd_residual_sm90_cuda():

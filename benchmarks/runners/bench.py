@@ -2077,7 +2077,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
     accuracy = correctness()
     for item in [*model.parameters(), *reference.parameters()]:
         item.grad = None
-    del reference
+    reference = None  # free the fp32 reference before timing (`del` would unbind correctness()'s closure)
     if conf.compile:
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
@@ -2247,7 +2247,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
     accuracy: AccuracyFields = correctness() if not (is_train and conf.dropout) else {}
     for item in [*model.parameters(), *reference.parameters()]:
         item.grad = None
-    del reference
+    reference = None  # free the fp32 reference before timing (`del` would unbind correctness()'s closure)
     if conf.compile:
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
@@ -2381,7 +2381,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     accuracy = correctness()
     for item in [*model.parameters(), *reference.parameters()]:
         item.grad = None
-    del reference
+    reference = None  # free the fp32 reference before timing (`del` would unbind correctness()'s closure)
     if conf.compile:
         compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
@@ -3675,19 +3675,19 @@ def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
                 f"Anthropic has no dense pair-bias DiT block at these widths: {exc} (served c_pair "
                 f"{lnp.SERVED_C_PAIR}); its atom attention (apb row fpf_atom) is the AF3 32x128 windowed "
                 "op, a different function, and is not substituted") from exc
-        packs.append(dict(
-            lnc_a=wf(at.ada_ln_in.ln_cond.weight), eps_ca=at.ada_ln_in.ln_cond.eps, eps_a=at.ada_ln_in.ln_in.eps,
-            ws_a=w(at.ada_ln_in.to_scale.weight), bs_a=w(at.ada_ln_in.to_scale.bias), wb_a=w(at.ada_ln_in.to_bias.weight),
-            wqkvg=torch.cat([w(at.to_query.weight), w(at.to_key.weight), w(at.to_value.weight),
+        packs.append({
+            "lnc_a": wf(at.ada_ln_in.ln_cond.weight), "eps_ca": at.ada_ln_in.ln_cond.eps, "eps_a": at.ada_ln_in.ln_in.eps,
+            "ws_a": w(at.ada_ln_in.to_scale.weight), "bs_a": w(at.ada_ln_in.to_scale.bias), "wb_a": w(at.ada_ln_in.to_bias.weight),
+            "wqkvg": torch.cat([w(at.to_query.weight), w(at.to_key.weight), w(at.to_value.weight),
                              w(at.to_gate.weight)], 0).contiguous(),
-            bqkvg=torch.cat([w(at.to_query.bias), torch.zeros(3 * d, device=at.to_query.bias.device,
+            "bqkvg": torch.cat([w(at.to_query.bias), torch.zeros(3 * d, device=at.to_query.bias.device,
                                                               dtype=act)]).contiguous(),
-            pair_bias=pair_bias_pack,
-            wo=w(at.to_out.weight), wsc_a=w(at.to_scale.weight), bsc_a=w(at.to_scale.bias),
-            lnc_t=wf(tr.ada_ln_in.ln_cond.weight), eps_ct=tr.ada_ln_in.ln_cond.eps, eps_t=tr.ada_ln_in.ln_in.eps,
-            ws_t=w(tr.ada_ln_in.to_scale.weight), bs_t=w(tr.ada_ln_in.to_scale.bias), wb_t=w(tr.ada_ln_in.to_bias.weight),
-            wab=torch.cat([w(tr.expand_a.weight), w(tr.expand_b.weight)], 0).contiguous(),
-            wsq=w(tr.squeeze.weight), wsc_t=w(tr.to_scale.weight), bsc_t=w(tr.to_scale.bias)))
+            "pair_bias": pair_bias_pack,
+            "wo": w(at.to_out.weight), "wsc_a": w(at.to_scale.weight), "bsc_a": w(at.to_scale.bias),
+            "lnc_t": wf(tr.ada_ln_in.ln_cond.weight), "eps_ct": tr.ada_ln_in.ln_cond.eps, "eps_t": tr.ada_ln_in.ln_in.eps,
+            "ws_t": w(tr.ada_ln_in.to_scale.weight), "bs_t": w(tr.ada_ln_in.to_scale.bias), "wb_t": w(tr.ada_ln_in.to_bias.weight),
+            "wab": torch.cat([w(tr.expand_a.weight), w(tr.expand_b.weight)], 0).contiguous(),
+            "wsq": w(tr.squeeze.weight), "wsc_t": w(tr.to_scale.weight), "bsc_t": w(tr.to_scale.bias)})
 
     # A key mask is folded into the bias by upstream's own recipe (the mask-free rows take it that
     # way); an all-true mask is not folded. Decided once here: the bench's mask is a fixed tensor.

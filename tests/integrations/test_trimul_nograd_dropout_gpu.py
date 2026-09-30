@@ -1,6 +1,7 @@
 """No-grad recycles retain dropout semantics while omitting D128 LN saves."""
 import pytest
 import torch
+
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_training as H
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
