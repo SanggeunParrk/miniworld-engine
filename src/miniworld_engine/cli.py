@@ -1226,6 +1226,15 @@ def cmd_import_anthropic(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_anthropic_sm100a(args: argparse.Namespace) -> int:
+    """`dev build-anthropic-sm100a`: see ``integrations.anthropic_trimul.build_sm100a``."""
+    from miniworld_engine.integrations.anthropic_trimul import build_sm100a
+
+    for key in build_sm100a(args.build_dir, nvcc=args.nvcc or None):
+        print(f"built {key}")
+    return 0
+
+
 def cmd_make_default_configs(args: argparse.Namespace) -> int:
     """`dev make-default-configs`: see ``tools/make_default_configs.py``."""
     from miniworld_engine.tools import make_default_configs
@@ -1920,6 +1929,13 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("source", help="checkout of the pinned upstream revision")
     imp.add_argument("destination", help="usually third_party/anthropic")
     imp.set_defaults(func=cmd_import_anthropic)
+
+    bas = dev.add_parser("build-anthropic-sm100a",
+                         help="compile the Anthropic TriMul payload's sm_80 member for sm_100a (B200) into <build_dir>/sm_100a "
+                              "with the release's own builder, so implementation=\"anthropic\" runs on B200")
+    bas.add_argument("build_dir", help="the payload's build/ directory (TRIMUL_NATIVE_BUILD_DIR)")
+    bas.add_argument("--nvcc", default="", help="an nvcc that knows sm_100a (CUDA 12.8+), no newer than the driver")
+    bas.set_defaults(func=cmd_build_anthropic_sm100a)
 
     mdc = dev.add_parser("make-default-configs",
                          help="regenerate autotune/configs/default from the global grid domains "
