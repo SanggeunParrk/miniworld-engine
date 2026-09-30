@@ -165,6 +165,10 @@ jobs:
         # The other half. `pip install --target` into an empty directory and import from there, so
         # a module that only resolves because the source tree is next to it fails here.
         run: |
+          # The wheel's dependencies (torch from the CPU index), then the wheel itself uninstalled
+          # again: only the --target copy below may provide miniworld_engine.
+          python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
+          python -m pip install --quiet dist/*.whl && python -m pip uninstall --quiet -y miniworld-engine
           python -m pip install --quiet --no-deps --target /tmp/site dist/*.whl
           cd /tmp && PYTHONPATH=/tmp/site python -c "
           import miniworld_engine as m, miniworld_engine.kernels, miniworld_engine.ops
