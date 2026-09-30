@@ -7,8 +7,8 @@ product (``bkid,bkjd->bijd``). The two are concatenated to ``2 * d_hidden`` and
 projected down to ``d_pair``.
 
 PYTORCH is the reference. On H100 the hand-CUDA kernels (``integrations.trimul_h100``)
-serve the qualified training/inference shapes, on B200 the sm_100a D128 kernels
-(``integrations.trimul_b200``, every L that is a multiple of 128); everything else runs the Triton pipeline
+serve the qualified training/inference shapes, on B200 the sm_100a kernels
+(``integrations.trimul_b200``, D64-D512); everything else runs the Triton pipeline
 (``kernels/trimul_inproj/triton/bidirectional.py``): one wider gated GEMM front
 (left/right each ``2*d_hidden``), two contractions, and a shared ``2*d_hidden`` back.
 """
@@ -136,8 +136,6 @@ class BidirectionalTriangleMultiplication(nn.Module):
             return _b200.update_inference(self, pair, mask, _ds, bidirectional=True)
         if _b200.serves_train(self, pair, bidirectional=True):
             return _b200.update_train(self, pair, mask, _ds, bidirectional=True)
-        if _b200.serves(self, pair):
-            return _b200.update(self, pair, mask, _ds)
 
         if (torch.is_grad_enabled() or _ds is not None) and _h100.serves(self, pair):
             return _h100.update(self, pair, mask, _ds)

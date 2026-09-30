@@ -12,7 +12,7 @@
 //   warps 4-7   LN_in: row per thread, xn -> TMEM (32x32b) [+ in place into the x tile -> TMA store xn]
 //   warps 8-11  LN_out: ldmatrix.trans of the [ch][tok] tri tile gives each thread channel pairs of tokens t/4, t/4+8 (the mma
 //               fragment layout); statistics by quad shuffles; xo -> TMEM with tcgen05.st.16x256b. The resulting TMEM K order is
-//               a fixed permutation of the channels; Wp's columns are permuted identically on the host (k3_pack_wp).
+//               a fixed permutation of the channels; Wp's columns are permuted identically on the host (k1w_prep writes it as wpp).
 //   warps 12-15 epilogue: thread = token row; y written in place into the x tile, TMA store.
 // TMEM: xo [0,128)  xn [128,192)  acc_p [256,384)  acc_g [384,512)
 #include "sm100.cuh"
@@ -486,7 +486,7 @@ int num_sms() {
 
 }  // namespace k3g
 
-// x [M, C] bf16, tri [H, M] bf16, wp_perm [C, H] (columns in the TMEM K order, see b200_bidir.pack_wp), wg [C, C], y [M, C];
+// x [M, C] bf16, tri [H, M] bf16, wp_perm [C, H] (columns in the TMEM K order, written by k1w_prep as wpp), wg [C, C], y [M, C];
 // training (save = 1): ds [L, C] bf16, xn_out [M, C], mean_out / rs_out [M] fp32 (then L % 128 == 0).
 void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torch::Tensor wg, torch::Tensor g_in, torch::Tensor b_in,
                  torch::Tensor g_out, torch::Tensor b_out, torch::Tensor y, int64_t L, double eps, int64_t save,

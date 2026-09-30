@@ -254,7 +254,7 @@
    ]
   },
   "training_small": {
-   "title": "B200 · TriMul · training · D64 (either direction), D128 (one direction), bf16, every L = 128k",
+   "title": "B200 · TriMul · training · D64 / D128 (either direction), bf16, every L = 128k",
    "panels": [
     {
      "label": "forward (saves a, b, t, x_n, LN_out stats)",

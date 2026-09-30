@@ -18,7 +18,8 @@ Table rules (both pages):
   bf16-only modules (TriMul, TriAttn): (Length, Dimension); otherwise (Length, Dimension, dtype).
 - Rows = implementation / 성능 확인 / cache build.
   implementation: CUDA on H100, or 미구현 where no CUDA path exists (kernel tables name the backend).
-  성능 확인: maintainer only, ✓ / ✗.  cache build: ✓ / ✗ (✓ also when nothing needs a cache).
+  성능 확인: maintainer only, ✓ / △ / ✗ (△ = the fastest measured, not yet complete).
+  cache build: ✓ / ✗ (✓ also when nothing needs a cache).
 - Kernel tables only for CUDA / Triton kernels; PyTorch and cuBLAS steps appear in the figures only.
 - Measurements (module page): one table per variant and mode; columns PyTorch compiled /
   cuEquivariance / Anthropic / ours / × (ours vs the fastest other); rows = shapes and conditions.

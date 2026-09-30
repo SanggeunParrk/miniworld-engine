@@ -26,7 +26,7 @@ EPS = 1e-5
 def _ext():
     ensure_cuda_home()
     return load_extension(
-        name="trimul_b200_v4",
+        name="trimul_b200_v5",
         sources=[str(_SRC / f) for f in ("k1w.cu", "k3g.cu", "k3w.cu", "wide_aux.cu", "k1wb.cu", "wide_bwd.cu", "b1s.cu", "b7m.cu", "b1g.cu", "b7g.cu",
                                          "bind_b200.cpp")],
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a"), "--expt-relaxed-constexpr",

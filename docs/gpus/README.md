@@ -37,7 +37,8 @@ docs/gpus/<gpu>/
 
 Tables: columns are shapes (`(Length, Dimension)` for bf16-only TriMul / TriAttn, otherwise
 `(Length, Dimension, dtype)`); rows are **implementation** (agent: the backend default dispatch
-runs, or 미구현), **성능 확인** (maintainer only, ✓ / ✗) and **cache build** (agent, ✓ / ✗).
+runs, or 미구현), **성능 확인** (maintainer only: ✓ finished, △ the fastest measured but not yet complete,
+✗ not confirmed) and **cache build** (agent, ✓ / ✗).
 Kernel tables cover CUDA / Triton kernels; PyTorch and cuBLAS steps appear only in the figures.
 Measurements compare PyTorch compiled / cuEquivariance / Anthropic / ours, CUDA-graph or compiled
 timing only (`benchmarks/cautions.md`). Shapes come from the model shape registry

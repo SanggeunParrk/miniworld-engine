@@ -1,6 +1,7 @@
 // wide_aux.cu -- small pieces around the B200 wide TriMul kernels (k1w front, k3w output):
 //   ln_stats   per-token mean / rstd over the H channels of the channel-major contraction output t [H, M] (k3w's LN_out fold)
 //   fold_prep  k3w's folded weight operands bf16(Wp g_o), bf16(Wg g_i) and their row sums / bias projections
+//   lnpart_sum the D64 / D128 backward's per-CTA LayerNorm-gradient rows summed in a fixed order
 #include <cuda_bf16.h>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -112,6 +113,32 @@ __global__ void __launch_bounds__(256) fold_prep_kernel(const __nv_bfloat16* __r
   }
 }
 
+// -------------------------------------------------------------------------------------------------------------- lnpart_sum
+// Column sums of two row-partial matrices a [R, Wa], b [R, Wb] -> out [Wa + Wb]. Per column, warp g adds rows g, g + 8, ...
+// and the 8 warp sums are added in warp order: a fixed order, so bit-identical across runs. One launch of 32-column blocks
+// replaces two torch dim-0 sums (a strided reduce of ~8 us each at R = 148).
+__global__ void __launch_bounds__(256) lnpart_sum_kernel(const float* __restrict__ a, int wa, const float* __restrict__ b, int wb,
+                                                         int R, float* __restrict__ out) {
+  __shared__ float part[8][32];
+  const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
+  const int c = blockIdx.x * 32 + lane;
+  const bool in_a = c < wa, live = c < wa + wb;
+  const float* src = in_a ? a : b;
+  const int w = in_a ? wa : wb, col = in_a ? c : c - wa;
+  float s = 0.f;
+  if (live)
+#pragma unroll 4
+    for (int r = g; r < R; r += 8) s += src[(size_t)r * w + col];
+  part[g][lane] = s;
+  __syncthreads();
+  if (g == 0 && live) {
+    float t = 0.f;
+#pragma unroll
+    for (int k = 0; k < 8; ++k) t += part[k][lane];
+    out[c] = t;
+  }
+}
+
 }  // namespace wide
 
 // mean / rstd [M] over the H channels of channel-major t [H, M]
@@ -140,5 +167,17 @@ void wide_fold_prep(torch::Tensor wp, torch::Tensor go, torch::Tensor bo, torch:
       reinterpret_cast<const __nv_bfloat16*>(wp.data_ptr()), go.data_ptr<float>(), bo.data_ptr<float>(),
       reinterpret_cast<const __nv_bfloat16*>(wg.data_ptr()), gi.data_ptr<float>(), bi.data_ptr<float>(),
       reinterpret_cast<__nv_bfloat16*>(wpq.data_ptr()), reinterpret_cast<__nv_bfloat16*>(wgq.data_ptr()), vec.data_ptr<float>(), D, H);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// a [R, Wa], b [R, Wb] fp32 row partials -> out [Wa + Wb] fp32 column sums (fixed order)
+void lnpart_sum(torch::Tensor a, torch::Tensor b, torch::Tensor out) {
+  using namespace wide;
+  TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && a.size(0) == b.size(0) && a.is_contiguous() && b.is_contiguous() &&
+              out.is_contiguous() && a.scalar_type() == torch::kFloat32 && b.scalar_type() == torch::kFloat32 &&
+              out.scalar_type() == torch::kFloat32 && out.numel() == a.size(1) + b.size(1));
+  const int wa = (int)a.size(1), wb = (int)b.size(1);
+  lnpart_sum_kernel<<<(wa + wb + 31) / 32, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      a.data_ptr<float>(), wa, b.data_ptr<float>(), wb, (int)a.size(0), out.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
