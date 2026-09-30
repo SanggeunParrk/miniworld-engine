@@ -70,7 +70,7 @@ def test_backward_tf32_matches_fp64(A, L, masked):
     torch.cuda.synchronize()
     leaves = [t.double().requires_grad_() for t in (q, k, v)]
     bd = bias.double().requires_grad_()
-    o, _, _ = _reference(*leaves, bd, A, L)
+    o, _, _ = _reference(leaves[0], leaves[1], leaves[2], bd, A, L)
     o.backward(do.double())
     for name, got, want in (("dq", DQ, leaves[0].grad), ("dk", DK, leaves[1].grad), ("dv", DV, leaves[2].grad), ("dbias", DB, bd.grad)):
         assert _rel(got, want) < 3e-3, f"{name}: {_rel(got, want):.2e}"

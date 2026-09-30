@@ -8,27 +8,30 @@ import pytest
 import torch
 
 from miniworld_engine.modules import AdaptiveLayerNorm, ConditionedTransition
+from miniworld_engine.modules.exceptions import ImplementationType
+
+PT = ImplementationType.PYTORCH
 
 
 @pytest.mark.parametrize("build", ["cast", "constructed"])
 def test_ln_cond_weight_stays_fp32(build):
     if build == "cast":
-        ln = AdaptiveLayerNorm(16, 8, implementation="pytorch").to(torch.bfloat16)
+        ln = AdaptiveLayerNorm(16, 8, implementation=PT).to(torch.bfloat16)
     else:
-        ln = AdaptiveLayerNorm(16, 8, implementation="pytorch", dtype=torch.bfloat16)
+        ln = AdaptiveLayerNorm(16, 8, implementation=PT, dtype=torch.bfloat16)
     assert ln.ln_cond.weight.dtype == torch.float32
     assert ln.to_scale.weight.dtype == torch.bfloat16
     assert ln.to_bias.weight.dtype == torch.bfloat16
 
 
 def test_conditioned_transition_norm_affine_stays_fp32():
-    tr = ConditionedTransition(16, 8, 2, implementation="pytorch").to(torch.bfloat16)
+    tr = ConditionedTransition(16, 8, 2, implementation=PT).to(torch.bfloat16)
     assert tr.ada_ln_in.ln_cond.weight.dtype == torch.float32
 
 
 def test_pytorch_path_runs_bf16_and_matches_fp32():
     torch.manual_seed(0)
-    ln = AdaptiveLayerNorm(16, 8, implementation="pytorch")
+    ln = AdaptiveLayerNorm(16, 8, implementation=PT)
     with torch.no_grad():
         ln.ln_cond.weight.uniform_(0.5, 1.5)
         ln.to_bias.weight.normal_()
@@ -39,4 +42,6 @@ def test_pytorch_path_runs_bf16_and_matches_fp32():
     assert actual.dtype == torch.bfloat16
     torch.testing.assert_close(actual.float(), expected, atol=5e-2, rtol=5e-2)
     actual.float().sum().backward()
-    assert ln_bf16.ln_cond.weight.grad.dtype == torch.float32
+    grad = ln_bf16.ln_cond.weight.grad
+    assert grad is not None
+    assert grad.dtype == torch.float32
