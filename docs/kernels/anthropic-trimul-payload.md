@@ -40,13 +40,37 @@ A width with no unit in the payload is an ordinary fallback, so a missing one co
 | anything else | untouched | untouched |
 
 `integrations.anthropic_trimul.refusal()` is the single list of reasons, and all of them are ordinary fallbacks for the auto option:
-no payload named, autograd enabled, a live row-dropout scale, a non-bf16 pair, a non-CUDA or non-sm_90 device, more than one square
-pair plane, or no unit for the module's `(c_z, c_hidden)`. **Training is therefore never affected**: a forward under grad, or with
+no payload named, autograd enabled, a live row-dropout scale, a non-bf16 pair, a non-CUDA device or one that is neither sm_90 nor
+sm_100, more than one square pair plane, no unit for the module's `(c_z, c_hidden)`, or (sm_100) no sm_100a build of the sm_80
+member in the payload. **Training is therefore never affected**: a forward under grad, or with
 dropout active, always takes the engine's own path.
 
 One direction goes through `trimul_native.face.serve`, which applies the release's manifest and test-vector gate (so a payload must
 keep its `python/`, `csrc/` and `testvectors/` beside `build/`, and a rebuild must regenerate vectors). The bidirectional composition
 has no face entry and is composed in the adapter from the package's own primitives after the same `face.check()`.
+
+## B200 (sm_100)
+
+No binary for sm_100 ships with the release: its `sm_90a` units are TMA + WGMMA and cannot run there. Its **sm_80 member**
+(`csrc/sm80/trimul_k1_sm80.cu`, `trimul_k3_sm80.cu`: cp.async + mma.sync) can, once compiled for `sm_100a`. The command below does
+that with the release's own builder (`trimul_native.build.build_unit`: the release's fixed flags, source hashes and ptxas report,
+recorded in `build/manifest.json`); the sources stay unmodified, and their `// build: archs=sm_80` line only filters the builder's
+default job list.
+
+```bash
+cp -a <upstream>/common/opt_core/opt_core/kernels/trimul/native/pkg/v5 $PAYLOAD      # a copy: the checkout stays as shipped
+miniworld-engine dev build-anthropic-sm100a $PAYLOAD/build --nvcc /usr/local/cuda-13.1/bin/nvcc   # ~1 min
+export TRIMUL_NATIVE_BUILD_DIR=$PAYLOAD/build            # the module layer (implementation="anthropic" / "miniworld")
+export ANTHROPIC_TRIMUL_BUILD_DIR=$PAYLOAD/build         # the harness's `anthropic` rows (a rebuild of unmodified sources)
+```
+
+What runs: `integrations.anthropic_trimul` registers cc 10.0 as `sm_100a` in the release's loader, which then loads
+`build/sm_100a/trimul_k{1,3}_sm80.cubin` manifest-verified, and assembles the member as `sm80_ops.serve_sm80` does (that function
+admits cc 8.x only): K1 -> `torch.bmm` -> K3 with the residual fused. The bidirectional module is ONE unit at twice the hidden
+width, composed as on sm_90 (natural planes, outgoing half NT, incoming half TN). Served: the member's tile rows,
+`sm80_ops.TILES` -- one direction at D64 / D128 / D256 / D384, bidirectional at D64 / D128 (units h128 / h256); every other width
+refuses with the reason (bidirectional D256+ and D512 have no unit). The release's test-vector gate has no sm_100 class, so
+`tests/integrations/test_anthropic_trimul_b200_gpu.py` holds the path to the fp32 reference (and to CUDA-graph capture) instead.
 
 ## Measured, node02 H100, bf16, C128, module level, one-call CUDA graph
 

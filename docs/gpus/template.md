@@ -23,6 +23,8 @@ Table rules (both pages):
 - Kernel tables only for CUDA / Triton kernels; PyTorch and cuBLAS steps appear in the figures only.
 - Measurements (module page): one table per variant and mode; columns PyTorch compiled /
   cuEquivariance / Anthropic / ours / × (ours vs the fastest other); rows = shapes and conditions.
+  Under each table, two bar charts drawn from it by `python -m miniworld_engine.viz.measure_bars <page>`:
+  length sweep at D128, dimension sweep at L384 (latency, log axis, one bar per implementation).
 -->
 
 ## `<gpu>/<gpu>.md`
@@ -85,4 +87,6 @@ Scope, dtype, figure legend, where dispatch lives.
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
+
+<!-- measure_bars --> ![<Variant> · Inference, length sweep at D128](figures/<module>_<variant>_inference_length.png) ![<Variant> · Inference, dimension sweep at L384](figures/<module>_<variant>_inference_dimension.png)
 ```

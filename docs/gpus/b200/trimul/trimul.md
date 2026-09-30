@@ -241,7 +241,7 @@ cover both.
 | (Length, Dimension) | (128, 64) | (256, 64) | (384, 64) | (512, 64) | (640, 64) | (768, 64) | (128, 128) | (256, 128) | (384, 128) | (512, 128) | (640, 128) | (768, 128) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
-| 성능 확인 | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 성능 확인 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ##### F1 · input LN + gated proj (k1w)
@@ -249,7 +249,7 @@ cover both.
 | (Length, Dimension) | (128, 64) | (256, 64) | (384, 64) | (512, 64) | (640, 64) | (768, 64) | (128, 128) | (256, 128) | (384, 128) | (512, 128) | (640, 128) | (768, 128) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
-| 성능 확인 | ✗ | △ | △ | △ | ✓ | ✓ | △ | △ | △ | ✓ | ✓ | ✓ |
+| 성능 확인 | △ | △ | △ | △ | ✓ | ✓ | △ | △ | △ | ✓ | ✓ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ##### F3 · output LN + proj + gate (k3g)
@@ -257,7 +257,7 @@ cover both.
 | (Length, Dimension) | (128, 64) | (256, 64) | (384, 64) | (512, 64) | (640, 64) | (768, 64) | (128, 128) | (256, 128) | (384, 128) | (512, 128) | (640, 128) | (768, 128) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
-| 성능 확인 | ✗ | △ | △ | △ | △ | △ | △ | △ | △ | △ | △ | △ |
+| 성능 확인 | △ | △ | △ | △ | △ | △ | △ | △ | △ | △ | △ | △ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 #### Wide path · D256 / D384 / D512, every L
@@ -436,55 +436,64 @@ D512 is not a registered single-direction shape; the path serves it anyway.
 | 성능 확인 | △ | △ | ✓ | ✓ | ✓ | ✓ | △ | △ | △ | △ | △ | △ | △ | △ | ✓ | ✓ | ✓ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Measurements (2026-09-29)
+## Measurements
 
-B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, cuEquivariance 0.12.0, B=1, bf16-mixed (the
-module's LayerNorm parameters stay fp32), `benchmarks/runners/bench.py target=<module> d_pair=<D>
-min_seq_len=128 max_seq_len=768` (compiled; inference CUDA graph; training with and without a
-graph). Latency in ms, median. × = ours vs the fastest of the others. Anthropic: the shipped
-payload is sm_90 only and is not run by the harness on B200 (—; a rebuild for sm_100a is compared
-separately below). The single-direction rows are outgoing (incoming runs the same kernels). The
-D128 bidirectional rows were re-measured on 2026-09-30, after its training moved to the shared D64 /
-D128 kernels (same harness and arguments). The other rows are from the final code (training re-measured after the deterministic LayerNorm-gradient
-change). Accuracy against the harness's fp32 reference, max over every row:
-inference output rel. Frobenius 3.8e-3 (PyTorch compiled 4.1e-3, cuEquivariance 3.8e-3);
-training output 4.0e-3, gradients 5.4e-3 (PyTorch compiled 4.3e-3 / 5.4e-3, cuEquivariance
-4.0e-3 / 5.5e-3).
+2026-09-29. Re-measured 2026-09-30: the D128 bidirectional training rows (its training moved to the shared D64 / D128
+kernels) and both inference tables, all four implementations in one harness run per width.
+
+- Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, cuEquivariance 0.12.0, B = 1, bf16-mixed (the module's
+  LayerNorm parameters stay fp32).
+- Harness: `benchmarks/runners/bench.py target=<module> level=module mode=<inference|training> d_pair=<D>
+  min_seq_len=128 max_seq_len=768 seq_len_step=128`; compiled, inference in a CUDA graph, training with and without one.
+- Tables: latency in ms (median); × = ours against the fastest of the others. Single direction = outgoing (incoming
+  runs the same kernels).
+- Anthropic: the harness's `anthropic` row -- Anthropic's trimul_native v5 from its unmodified sources. No binary for sm_100
+  ships with the release, so the payload named by `ANTHROPIC_TRIMUL_BUILD_DIR` carries the release's sm_80 member built for
+  sm_100a (`miniworld-engine dev build-anthropic-sm100a`, [anthropic-trimul-payload.md](../../../kernels/anthropic-trimul-payload.md#b200-sm_100)).
+  Served where the release has a unit: one direction D64-D384, bidirectional D64 / D128 (one unit at twice the hidden width);
+  bidirectional D256+ and D512 have none (—). Forward-only, so the training tables have no Anthropic column (—).
+- Accuracy against the harness's fp32 reference, max over every row: inference output rel. Frobenius 3.8e-3
+  (PyTorch compiled 4.1e-3, cuEquivariance 3.8e-3, Anthropic 3.8e-3); training output 4.0e-3, gradients 5.4e-3 (PyTorch compiled
+  4.3e-3 / 5.4e-3, cuEquivariance 4.0e-3 / 5.5e-3).
+- Charts: under each table, a length sweep at D128 and a dimension sweep at L384, drawn from the table
+  (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/trimul/trimul.md`).
 
 ### Bidirectional · Inference (CUDA graph)
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (128, 64) | 0.070 | 0.045 | — | 0.026 | 1.70 |
-| (256, 64) | 0.176 | 0.100 | — | 0.047 | 2.13 |
-| (384, 64) | 0.358 | 0.199 | — | 0.078 | 2.56 |
-| (512, 64) | 0.565 | 0.342 | — | 0.125 | 2.74 |
-| (640, 64) | 0.979 | 0.532 | — | 0.197 | 2.71 |
-| (768, 64) | 1.627 | 0.739 | — | 0.258 | 2.87 |
-| (128, 128) | 0.106 | 0.065 | — | 0.039 | 1.68 |
-| (256, 128) | 0.311 | 0.188 | — | 0.078 | 2.42 |
-| (384, 128) | 0.623 | 0.408 | — | 0.143 | 2.84 |
-| (512, 128) | 1.080 | 0.680 | — | 0.244 | 2.79 |
-| (640, 128) | 1.784 | 1.094 | — | 0.420 | 2.61 |
-| (768, 128) | 2.934 | 1.514 | — | 0.564 | 2.68 |
-| (128, 256) | 0.182 | 0.121 | — | 0.059 | 2.04 |
-| (256, 256) | 0.617 | 0.410 | — | 0.171 | 2.40 |
-| (384, 256) | 1.225 | 0.889 | — | 0.356 | 2.49 |
-| (512, 256) | 2.153 | 1.605 | — | 0.623 | 2.57 |
-| (640, 256) | 3.821 | 2.655 | — | 1.045 | 2.54 |
-| (768, 256) | 6.544 | 3.649 | — | 1.491 | 2.45 |
-| (128, 384) | 0.261 | 0.203 | — | 0.086 | 2.36 |
-| (256, 384) | 0.961 | 0.732 | — | 0.290 | 2.52 |
-| (384, 384) | 2.039 | 1.843 | — | 0.587 | 3.14 |
-| (512, 384) | 3.856 | 3.138 | — | 1.095 | 2.87 |
-| (640, 384) | 6.704 | 5.227 | — | 1.873 | 2.79 |
-| (768, 384) | 11.456 | 7.066 | — | 2.471 | 2.86 |
-| (128, 512) | 0.342 | 0.299 | — | 0.123 | 2.43 |
-| (256, 512) | 1.164 | 1.100 | — | 0.429 | 2.56 |
-| (384, 512) | 2.868 | 2.821 | — | 0.942 | 3.00 |
-| (512, 512) | 5.583 | 4.899 | — | 1.748 | 2.80 |
-| (640, 512) | 9.391 | 7.748 | — | 2.851 | 2.72 |
-| (768, 512) | 15.346 | 11.953 | — | 4.331 | 2.76 |
+| (128, 64) | 0.070 | 0.045 | 0.031 | 0.026 | 1.15 |
+| (256, 64) | 0.176 | 0.100 | 0.061 | 0.047 | 1.31 |
+| (384, 64) | 0.358 | 0.199 | 0.117 | 0.078 | 1.50 |
+| (512, 64) | 0.567 | 0.342 | 0.201 | 0.125 | 1.61 |
+| (640, 64) | 0.978 | 0.532 | 0.313 | 0.195 | 1.60 |
+| (768, 64) | 1.621 | 0.739 | 0.424 | 0.264 | 1.61 |
+| (128, 128) | 0.107 | 0.065 | 0.068 | 0.039 | 1.68 |
+| (256, 128) | 0.309 | 0.190 | 0.158 | 0.078 | 2.03 |
+| (384, 128) | 0.623 | 0.401 | 0.307 | 0.141 | 2.17 |
+| (512, 128) | 1.081 | 0.682 | 0.517 | 0.236 | 2.19 |
+| (640, 128) | 1.787 | 1.117 | 0.823 | 0.420 | 1.96 |
+| (768, 128) | 2.952 | 1.568 | 1.145 | 0.569 | 2.01 |
+| (128, 256) | 0.182 | 0.121 | — | 0.059 | 2.03 |
+| (256, 256) | 0.616 | 0.410 | — | 0.164 | 2.50 |
+| (384, 256) | 1.226 | 0.886 | — | 0.346 | 2.56 |
+| (512, 256) | 2.151 | 1.678 | — | 0.637 | 2.64 |
+| (640, 256) | 3.823 | 2.655 | — | 1.081 | 2.46 |
+| (768, 256) | 6.399 | 3.842 | — | 1.479 | 2.60 |
+| (128, 384) | 0.262 | 0.203 | — | 0.086 | 2.36 |
+| (256, 384) | 0.958 | 0.735 | — | 0.274 | 2.68 |
+| (384, 384) | 2.037 | 1.777 | — | 0.613 | 2.90 |
+| (512, 384) | 3.851 | 3.232 | — | 1.091 | 2.96 |
+| (640, 384) | 6.697 | 5.281 | — | 1.880 | 2.81 |
+| (768, 384) | 11.384 | 7.513 | — | 2.632 | 2.85 |
+| (128, 512) | 0.342 | 0.299 | — | 0.121 | 2.48 |
+| (256, 512) | 1.163 | 1.121 | — | 0.416 | 2.70 |
+| (384, 512) | 2.864 | 2.805 | — | 0.943 | 2.98 |
+| (512, 512) | 5.577 | 5.006 | — | 1.662 | 3.01 |
+| (640, 512) | 9.407 | 8.195 | — | 2.608 | 3.14 |
+| (768, 512) | 15.327 | 11.805 | — | 3.758 | 3.14 |
+
+![Bidirectional · Inference (CUDA graph), length sweep at D128](figures/trimul_bidirectional_inference_cuda_graph_length.png) ![Bidirectional · Inference (CUDA graph), dimension sweep at L384](figures/trimul_bidirectional_inference_cuda_graph_dimension.png) <!-- measure_bars -->
 
 ### Bidirectional · Training, dropout 0.25 (CUDA graph)
 
@@ -521,6 +530,8 @@ training output 4.0e-3, gradients 5.4e-3 (PyTorch compiled 4.3e-3 / 5.4e-3, cuEq
 | (640, 512) | 31.952 | 25.537 | — | 11.551 | 2.21 |
 | (768, 512) | 53.310 | 35.812 | — | 16.300 | 2.20 |
 
+![Bidirectional · Training, dropout 0.25 (CUDA graph), length sweep at D128](figures/trimul_bidirectional_training_dropout_0_25_cuda_graph_length.png) ![Bidirectional · Training, dropout 0.25 (CUDA graph), dimension sweep at L384](figures/trimul_bidirectional_training_dropout_0_25_cuda_graph_dimension.png) <!-- measure_bars -->
+
 ### Bidirectional · Training, dropout 0.25 (no CUDA graph)
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
@@ -556,40 +567,44 @@ training output 4.0e-3, gradients 5.4e-3 (PyTorch compiled 4.3e-3 / 5.4e-3, cuEq
 | (640, 512) | 32.228 | 25.294 | — | 11.586 | 2.18 |
 | (768, 512) | 53.520 | 35.464 | — | 16.116 | 2.20 |
 
+![Bidirectional · Training, dropout 0.25 (no CUDA graph), length sweep at D128](figures/trimul_bidirectional_training_dropout_0_25_no_cuda_graph_length.png) ![Bidirectional · Training, dropout 0.25 (no CUDA graph), dimension sweep at L384](figures/trimul_bidirectional_training_dropout_0_25_no_cuda_graph_dimension.png) <!-- measure_bars -->
+
 ### Single direction (outgoing) · Inference (CUDA graph)
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (128, 64) | 0.049 | 0.035 | — | 0.022 | 1.55 |
-| (256, 64) | 0.117 | 0.067 | — | 0.035 | 1.94 |
-| (384, 64) | 0.211 | 0.125 | — | 0.053 | 2.35 |
-| (512, 64) | 0.336 | 0.213 | — | 0.082 | 2.60 |
-| (640, 64) | 0.529 | 0.330 | — | 0.125 | 2.64 |
-| (768, 64) | 0.864 | 0.454 | — | 0.166 | 2.73 |
-| (128, 128) | 0.070 | 0.043 | — | 0.029 | 1.50 |
-| (256, 128) | 0.168 | 0.088 | — | 0.053 | 1.66 |
-| (384, 128) | 0.380 | 0.176 | — | 0.092 | 1.91 |
-| (512, 128) | 0.606 | 0.310 | — | 0.153 | 2.03 |
-| (640, 128) | 1.055 | 0.483 | — | 0.252 | 1.92 |
-| (768, 128) | 1.682 | 0.672 | — | 0.352 | 1.91 |
-| (128, 256) | 0.108 | 0.059 | — | 0.045 | 1.32 |
-| (256, 256) | 0.332 | 0.162 | — | 0.109 | 1.49 |
-| (384, 256) | 0.668 | 0.358 | — | 0.246 | 1.46 |
-| (512, 256) | 1.174 | 0.608 | — | 0.419 | 1.45 |
-| (640, 256) | 1.934 | 0.963 | — | 0.675 | 1.43 |
-| (768, 256) | 3.134 | 1.432 | — | 0.979 | 1.46 |
-| (128, 384) | 0.149 | 0.147 | — | 0.063 | 2.32 |
-| (256, 384) | 0.522 | 0.534 | — | 0.184 | 2.83 |
-| (384, 384) | 1.061 | 1.287 | — | 0.411 | 2.58 |
-| (512, 384) | 1.898 | 2.256 | — | 0.696 | 2.73 |
-| (640, 384) | 3.115 | 3.664 | — | 1.142 | 2.73 |
-| (768, 384) | 5.142 | 5.295 | — | 1.691 | 3.04 |
-| (128, 512) | 0.190 | 0.215 | — | 0.082 | 2.32 |
-| (256, 512) | 0.684 | 0.850 | — | 0.268 | 2.55 |
-| (384, 512) | 1.419 | 2.021 | — | 0.602 | 2.36 |
-| (512, 512) | 2.502 | 3.743 | — | 1.059 | 2.36 |
-| (640, 512) | 4.383 | 5.829 | — | 1.657 | 2.65 |
-| (768, 512) | 7.226 | 8.347 | — | 2.515 | 2.87 |
+| (128, 64) | 0.049 | 0.035 | 0.022 | 0.022 | 1.00 |
+| (256, 64) | 0.117 | 0.068 | 0.041 | 0.035 | 1.18 |
+| (384, 64) | 0.211 | 0.127 | 0.070 | 0.051 | 1.36 |
+| (512, 64) | 0.336 | 0.213 | 0.119 | 0.082 | 1.45 |
+| (640, 64) | 0.530 | 0.330 | 0.188 | 0.125 | 1.51 |
+| (768, 64) | 0.848 | 0.453 | 0.254 | 0.166 | 1.53 |
+| (128, 128) | 0.070 | 0.043 | 0.039 | 0.029 | 1.36 |
+| (256, 128) | 0.168 | 0.090 | 0.088 | 0.053 | 1.66 |
+| (384, 128) | 0.381 | 0.176 | 0.170 | 0.092 | 1.84 |
+| (512, 128) | 0.606 | 0.309 | 0.294 | 0.153 | 1.91 |
+| (640, 128) | 1.056 | 0.483 | 0.467 | 0.250 | 1.87 |
+| (768, 128) | 1.678 | 0.670 | 0.647 | 0.354 | 1.83 |
+| (128, 256) | 0.108 | 0.059 | 0.082 | 0.045 | 1.32 |
+| (256, 256) | 0.330 | 0.162 | 0.254 | 0.109 | 1.49 |
+| (384, 256) | 0.668 | 0.365 | 0.512 | 0.231 | 1.58 |
+| (512, 256) | 1.176 | 0.631 | 0.878 | 0.416 | 1.52 |
+| (640, 256) | 1.955 | 0.986 | 1.391 | 0.675 | 1.46 |
+| (768, 256) | 3.129 | 1.459 | 1.957 | 0.954 | 1.53 |
+| (128, 384) | 0.149 | 0.147 | 0.180 | 0.063 | 2.33 |
+| (256, 384) | 0.522 | 0.535 | 0.579 | 0.184 | 2.83 |
+| (384, 384) | 1.060 | 1.288 | 1.260 | 0.414 | 2.56 |
+| (512, 384) | 1.924 | 2.331 | 2.180 | 0.710 | 2.71 |
+| (640, 384) | 3.138 | 3.599 | 3.437 | 1.197 | 2.62 |
+| (768, 384) | 5.098 | 5.152 | 4.868 | 1.537 | 3.17 |
+| (128, 512) | 0.190 | 0.215 | — | 0.082 | 2.33 |
+| (256, 512) | 0.684 | 0.862 | — | 0.264 | 2.59 |
+| (384, 512) | 1.392 | 2.024 | — | 0.588 | 2.37 |
+| (512, 512) | 2.495 | 3.558 | — | 1.069 | 2.33 |
+| (640, 512) | 4.337 | 5.856 | — | 1.788 | 2.43 |
+| (768, 512) | 7.178 | 8.489 | — | 2.396 | 3.00 |
+
+![Single direction (outgoing) · Inference (CUDA graph), length sweep at D128](figures/trimul_single_direction_outgoing_inference_cuda_graph_length.png) ![Single direction (outgoing) · Inference (CUDA graph), dimension sweep at L384](figures/trimul_single_direction_outgoing_inference_cuda_graph_dimension.png) <!-- measure_bars -->
 
 ### Single direction (outgoing) · Training, dropout 0.25 (CUDA graph)
 
@@ -626,6 +641,8 @@ training output 4.0e-3, gradients 5.4e-3 (PyTorch compiled 4.3e-3 / 5.4e-3, cuEq
 | (640, 512) | 13.815 | 18.246 | — | 6.957 | 1.99 |
 | (768, 512) | 23.348 | 26.028 | — | 9.553 | 2.44 |
 
+![Single direction (outgoing) · Training, dropout 0.25 (CUDA graph), length sweep at D128](figures/trimul_single_direction_outgoing_training_dropout_0_25_cuda_graph_length.png) ![Single direction (outgoing) · Training, dropout 0.25 (CUDA graph), dimension sweep at L384](figures/trimul_single_direction_outgoing_training_dropout_0_25_cuda_graph_dimension.png) <!-- measure_bars -->
+
 ### Single direction (outgoing) · Training, dropout 0.25 (no CUDA graph)
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
@@ -661,6 +678,8 @@ training output 4.0e-3, gradients 5.4e-3 (PyTorch compiled 4.3e-3 / 5.4e-3, cuEq
 | (640, 512) | 14.046 | 18.193 | — | 7.052 | 1.99 |
 | (768, 512) | 22.818 | 25.956 | — | 9.548 | 2.39 |
 
+![Single direction (outgoing) · Training, dropout 0.25 (no CUDA graph), length sweep at D128](figures/trimul_single_direction_outgoing_training_dropout_0_25_no_cuda_graph_length.png) ![Single direction (outgoing) · Training, dropout 0.25 (no CUDA graph), dimension sweep at L384](figures/trimul_single_direction_outgoing_training_dropout_0_25_no_cuda_graph_dimension.png) <!-- measure_bars -->
+
 Without a graph, ours costs about 0.6-0.9 ms per training step at L128 (and D64 / D128 one
 direction at L256) whatever the width: host-side time (tensor-map encoding, custom-op dispatch,
 weight packs, small launches) above the GPU work. Those are the rows where ours loses (× < 1, to
@@ -695,27 +714,6 @@ path. The weight-side kernels (k1w_prep, wide_fold_prep: 2-3 µs, fixed) have no
 | D256-D512 | wide_lnin_bwd | HBM | 39-53 % | 51-68 % | 56-87 % |
 
 성능 확인 (kernel tables above, 2026-09-30): ✓ = the fastest measured and SoL >= 70 % (the weight-side prep kernels: ✓);
-△ = the fastest measured, SoL below 70 %; ✗ = slower than another implementation (one direction, D64, L128 inference:
-Anthropic v5, see below). A module cell in [../b200.md](../b200.md) takes the lowest of its kernels.
-
-### Inference against Anthropic v5 rebuilt for sm_100a
-
-Anthropic's trimul_native v5, sm80 member rebuilt unmodified for sm_100a (the shipped payload has
-no B200 image), same weights, module forward in a CUDA graph (`experiments/trimul_b200` loader,
-not the repo runner). Native where the payload has the unit (hidden = D one direction, 2D
-bidirectional up to D128); bidirectional D256 / D384 composed from its K1 / K3 like the
-cuEquivariance composition; no unit for D512. Output rel. Frobenius vs fp32: ours ≤ 3.0e-3,
-Anthropic ≤ 3.2e-3.
-
-| module · D | Anthropic unit | ours vs Anthropic, L128-L768 |
-|---|---|---|
-| bidirectional · D64 | native | 1.18-1.33× |
-| bidirectional · D128 | native | 1.70-2.06× |
-| bidirectional · D256 | composed (K1 + 2 bmm + K3) | 2.27-6.90× |
-| bidirectional · D384 | composed (K1 + 2 bmm + K3) | 2.66-6.07× |
-| one direction · D64 | native | 0.93-1.40× |
-| one direction · D128 | native | 1.40-1.81× |
-| one direction · D256 | native | 1.78-2.21× |
-| one direction · D384 | native | 2.73-3.28× |
-
-The one row below 1: one direction D64 at L128 (19.1 vs 17.8 µs).
+△ = the fastest measured, SoL below 70 %; ✗ = slower than another implementation (none in the current tables; one direction,
+D64, L128 inference ties Anthropic v5 at 22.46 µs, 1.00×). A module cell in [../b200.md](../b200.md) takes the lowest of its
+kernels.
