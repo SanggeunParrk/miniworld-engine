@@ -1,14 +1,15 @@
 """Bar charts for the Measurements section of docs/gpus/<gpu>/<module>/<module>.md.
 
-    python -m miniworld_engine.viz.measure_bars docs/gpus/b200/trimul/trimul.md [--length-d 128] [--dim-l 384]
+    python -m miniworld_engine.viz.measure_bars docs/gpus/b200/trimul/trimul.md [--length-d 128] [--dim-l 384] [--length-prefix L]
 
 Every table under ``## Measurements`` whose first column is ``(Length, <axis>)`` -- ``Dimension``, or e.g. ``MSA depth``
 for the MSA modules -- gets two charts, drawn from the table itself so they cannot disagree with it: a length sweep at one
 value of the second axis (``--length-d``, default 128) and a sweep of the second axis at one length (``--dim-l``, default
-384). One bar per implementation column (columns that are all "—" are
-skipped), latency in ms on a log axis, ours labelled with the table's × column. The figures are written to
-``figures/<page>_<table>_{length,dimension}.{svg,png}`` next to the page, and one image line (ending in the
-``<!-- measure_bars -->`` marker) is placed or replaced directly under each table. Needs matplotlib (the ``bench`` extra).
+384); length ticks read L<n>, or N<n> with ``--length-prefix N`` (the atom pages: the length is the atom count). One bar
+per implementation column (columns that are all "—" are skipped), latency in ms on a log axis, ours labelled with the
+table's × column. The figures are written to ``figures/<page>_<table>_{length,dimension}.{svg,png}`` next to the page,
+and one image line (ending in the ``<!-- measure_bars -->`` marker) is placed or replaced directly under each table.
+Needs matplotlib (the ``bench`` extra).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from miniworld_engine.viz import style
 AXES = {"Dimension": ("D", "dimension"), "MSA depth": ("S", "msa_depth")}
 #: table column -> style identity (colour / legend order)
 IDENTITY = {"PyTorch compiled": "torch.compile", "cuEquivariance": "cuequivariance", "Anthropic": "anthropic",
-            "Triton path": "triton", "ours": "miniworld"}
+            "Triton path": "triton", "engine v2.2": "triton", "ours": "miniworld"}
 MARK = "<!-- measure_bars -->"
 TIMES = "\u00d7"     # the speed-up column's header (multiplication sign)
 
@@ -67,7 +68,7 @@ def value(cell: str) -> float | None:
         return None
 
 
-def chart(title, header, rows, axis, fixed, out: Path, second: str = "Dimension") -> bool:
+def chart(title, header, rows, axis, fixed, out: Path, second: str = "Dimension", lpre: str = "L") -> bool:
     import matplotlib.pyplot as plt
 
     impls = [h for h in header if h != TIMES]
@@ -93,9 +94,10 @@ def chart(title, header, rows, axis, fixed, out: Path, second: str = "Dimension"
     ax.set_yscale("log")
     ax.set_xticks(range(len(sel)))
     pre, name = AXES[second]
-    ax.set_xticklabels([f"L{v}" if axis == "length" else f"{pre}{v}" for v, _ in sel])
+    ax.set_xticklabels([f"{lpre}{v}" if axis == "length" else f"{pre}{v}" for v, _ in sel])
     ax.set_ylabel("latency (ms, log)")
-    ax.set_title(f"{title} · {'length sweep, ' + pre if axis == 'length' else name.replace('_', ' ') + ' sweep, L'}{fixed}", fontsize=10.5)
+    sweep = "length sweep, " + pre if axis == "length" else name.replace("_", " ") + " sweep, " + lpre
+    ax.set_title(f"{title} · {sweep}{fixed}", fontsize=10.5)
     ax.legend(ncol=len(impls), fontsize=8.5, loc="upper left")
     ax.margins(y=0.15)
     style.save_figure(fig, out, formats=("svg", "png"))
@@ -108,6 +110,7 @@ def main(argv=None) -> None:
     ap.add_argument("page", type=Path)
     ap.add_argument("--length-d", type=int, default=128)
     ap.add_argument("--dim-l", type=int, default=384)
+    ap.add_argument("--length-prefix", default="L", help="length tick prefix (N for the atom pages)")
     args = ap.parse_args(argv)
     page: Path = args.page
     figdir = page.parent / "figures"
@@ -119,8 +122,9 @@ def main(argv=None) -> None:
         pre, name = AXES[second]
         links = []
         for axis, fixed in (("length", args.length_d), (name, args.dim_l)):
-            if chart(title, header, rows, axis, fixed, figdir / f"{base}_{axis}", second):
-                what = f"length sweep at {pre}{fixed}" if axis == "length" else f"{name.replace('_', ' ')} sweep at L{fixed}"
+            if chart(title, header, rows, axis, fixed, figdir / f"{base}_{axis}", second, args.length_prefix):
+                what = (f"length sweep at {pre}{fixed}" if axis == "length"
+                        else f"{name.replace('_', ' ')} sweep at {args.length_prefix}{fixed}")
                 links.append(f"![{title}, {what}](figures/{base}_{axis}.png)")
         if links:
             inserts.append((end, " ".join(links) + " " + MARK))   # the marker last: a line that STARTS with <!-- is raw HTML
