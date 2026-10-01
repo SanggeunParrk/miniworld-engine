@@ -6,12 +6,14 @@ sliding-window attention (|i - j| <= 64, 4 heads x 32) -> gated out-projection +
 d_single = d_cond = 128. Columns are (Length, Dimension) from the shape registry (`swa_atom_attention`, atom axis, bf16 only);
 Length is the atom count S. The module-level summary is in [b200.md](../b200.md).
 
-**Where the code is.** The hand-written sm_100a kernels below live in the B200 research capsule
-`experiments/swaatom_sm100` (ignored by git, not in this repository) and are measured there on the block of the H100 fused
-Triton algorithm with its launches swapped for the sm_100a kernels (`b200_block.install()`). **The engine does not dispatch them
-yet**: on B200 the engine's `SWADiTBlock` runs FA4 window attention + Triton row kernels + cuBLAS. "CUDA" in the kernel tables
-therefore means "a hand-written kernel exists and was run at that shape in the capsule"; the module-level table in b200.md
-says 미구현 until the engine dispatches it.
+**Where the code is.** The kernels are `src/miniworld_engine/kernels/swa_dit/cuda/sm100/` (the sources of the B200 research
+capsule `experiments/swaatom_sm100`, unchanged, built on first use by the newest nvcc on the machine that knows sm_100a: 13.1 on
+the B200 box). The engine's fused block (`kernels/swa_dit/dispatch.py`, which `SWADiTBlock` takes) runs every stage on them on
+B200 in bf16 at the served widths, and the hoisted modulation (`swa_dit_hoist_modulation`) on `mod_fwd` / `mod_bwd`;
+`MINIWORLD_SWA_DIT_SM100=0` keeps the Triton path. `tests/integrations/test_b200_swa_dit_gpu.py` checks the output and every
+gradient against the fp32 reference (no worse than the Triton path: worst ratio 1.006; inference 2.4-2.6e-3, as Triton) at
+A = 1 / 3 / 5 / 8 / 48. The measurements below were taken in the capsule on the same sources; "CUDA" in the kernel tables means
+the kernel ran at that shape there.
 
 - Everything is hand CUDA (tcgen05 / TMEM / TMA) except the four weight-gradient GEMMs (cuBLAS). No Triton, no quack.
 - Shapes: A = augments per sample (rows = A S). Inference A = 5 and A = 1 at S = 1024 / 2048 / 4096; training A = 48 at
@@ -273,8 +275,8 @@ remaining lever is fewer kernels (fusing I1-I4), not faster ones.
 
 ## Limits and next
 
-- **Not in the engine.** Next: move the kernels and their dispatch into `kernels/swa_dit` + `modules/swa_dit`, build them in the pixi
-  env with nvcc 13.1 (as measured here), add GPU tests; then b200.md's row says CUDA for the engine.
+- In the engine since 2026-10-01 (`kernels/swa_dit/cuda/sm100`); the timings above are the capsule's and were not re-taken
+  through `SWADiTBlock`. The atom-count rule holds there too: S % 128 != 0 raises `ValueError` on B200.
 - Measured only at B = 1 and at the lengths above; A = 2 - 4 inference ran the kernels' accuracy check only.
 - The modulation gradient accumulates with atomics (as the Triton path): not bitwise deterministic.
 - Forward kernels and `attn_dkvq` sit near 45-50 % SoL (one tile at a time through serial thread phases); the block is at 16-18 %

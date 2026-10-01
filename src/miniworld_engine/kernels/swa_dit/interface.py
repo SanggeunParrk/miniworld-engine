@@ -91,6 +91,26 @@ def refusal(q: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torc
     return None
 
 
+def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
+    """Whether the hoisted modulation runs on the sm_100a kernels: B200, bf16 c and Wmod, d_cond = C = 128, rows a multiple
+    of 128, and the kernels load (``MINIWORLD_SWA_DIT_SM100=0`` or ``engine_backend="triton"`` keep the fp32 GEMM)."""
+    import os
+
+    from miniworld_engine import settings
+
+    if os.environ.get("MINIWORLD_SWA_DIT_SM100", "1") == "0" or settings.current().engine_backend == "triton":
+        return False
+    if not (c_base.is_cuda and c_base.dtype == torch.bfloat16 and wmod.dtype == torch.bfloat16):
+        return False
+    if c_base.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or (c_base.numel() // D_ATOM) % 128:
+        return False
+    if torch.cuda.get_device_capability(c_base.device) != (10, 0):
+        return False
+    from miniworld_engine.kernels.swa_dit.dispatch import _sm100
+
+    return _sm100(c_base.reshape(1, -1, D_ATOM), N_HIDDEN, HALF_WINDOW, FP32_EPS) is not None
+
+
 def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
     """The block's adaLN modulation, once per (batch element, atom): ``[B*S, 6C]`` fp32 = silu(c) @ Wmod^T.
 
@@ -98,6 +118,15 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
     conditioning [N, S, d_cond] when there is no augment structure. silu runs in ``c_base``'s dtype, then the product is
     accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable.
     """
+    if _mod_sm100(c_base, wmod):                         # B200, bf16, d_cond 128: the sm_100a mod_fwd / mod_bwd kernels
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationSm100
+        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm100
+
+        c2 = c_base.reshape(-1, c_base.shape[-1]).contiguous()
+        w = wmod.contiguous()
+        if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
+            return SWADiTModulationSm100.apply(c2, w)
+        return swa_dit_mod_fwd_sm100(c2, w)
     a = F.silu(c_base).float()
     return (a.reshape(-1, a.shape[-1]) @ wmod.float().t()).contiguous()
 
