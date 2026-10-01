@@ -3,12 +3,13 @@
     a = a + sigmoid(to_scale(s)) * to_out(sigmoid(g) * softmax(q k^T / sqrt 32 + bias) v)     bias = LN(z) Wb^T [4, N, N]
     a = a + ConditionedTransition(a, s)                                                          SwiGLU 128 -> 256 -> 128
 
-d_single = d_cond = 128, d_pair = 16, 4 heads x 32, B = 1, N a multiple of 128, no key mask; the A samples share one pair
-tensor. Developed in ``experiments/atomdit_sm100`` (rounds v1-v2); page: ``docs/gpus/b200/atom_dit/atom_dit.md``.
+d_single = d_cond = 128, d_pair = 16, 4 heads x 32, B = 1, N a multiple of 128; the A samples share one pair tensor and one
+key mask, which the pair-bias producer folds into the bias (masked keys -1e4), so the attention kernels need no mask of
+their own; the caller pads the atoms to a multiple of 128 and masks the padding. Developed in ``experiments/atomdit_sm100`` (rounds v1-v2); page: ``docs/gpus/b200/atom_dit/atom_dit.md``.
 
 The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers):
-  pair_bias.cu    bias[h, i, j] = LN(z[i, j]) . Wb[h] in both layouts the attention reads (head-major and transposed), and its
-                  backward (dz, partial d(gamma * Wb)) from dbias.
+  pair_bias.cu    bias[h, i, j] = LN(z[i, j]) . Wb[h] in both layouts the attention reads (head-major and transposed), with
+                  the key mask and the padding folded in, and its backward (dz, partial d(gamma * Wb)) from dbias.
   cond_fwd.cu     the six conditioning projections -> mod [M, 768] = s1 | bi1 | so | s2 | bi2 | st (gates as rn(sigmoid)).
   pre_fwd.cu      AdaLN 1 + the q / k / v / gate projections.
   attn_fwd.cu     O = softmax(q k^T / sqrt 32 + bias) v and the row LSE (log2 units).
@@ -87,6 +88,7 @@ KERNELS = {
     "dbias": ("attn_dbias", "atom_dbias_sm100", _SMEM, False),
     "dd": ("attn_dd", "atom_dd", 0, False),
     "pb_f": ("pair_bias", "pair_bias_fwd", 0, False),
+    "pb_fp": ("pair_bias", "pair_bias_fwd_pad", 0, False),
     "pb_b": ("pair_bias", "pair_bias_bwd", 0, False),
     "cond": ("cond_fwd", "atom_cond_fwd_sm100", _SMEM, True),
     "pre": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True),
@@ -170,26 +172,32 @@ def post_params(blk):
 
 
 # --------------------------------------------------------------------------------------------------- launches
-def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True):
-    """z [1, N, N, 16] bf16 -> bias [4, N, N] bf16 (head-major) and, for the backward, bias^T [4, N(key), N(query)]."""
+def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True, n=None, kv=None):
+    """z [1, NZ, NZ, 16] bf16 -> bias [4, n, n] bf16 (head-major) and, for the backward, bias^T [4, n(key), n(query)].
+    n (default NZ) is the attention's length, a multiple of 128 >= NZ; kv [NZ] bool marks the valid keys (None: all of them).
+    Masked and padded keys get -1e4 (bf16 -9984), padded query rows 0."""
     z = z.reshape(z.shape[-3], z.shape[-2], DP)
-    N = z.shape[0]
+    NZ = z.shape[0]
+    N = NZ if n is None else n
     w = (wb.float() * gamma.float()[None]).contiguous()
     bo = torch.empty(NH, N, N, device=z.device, dtype=torch.bfloat16)
     bt = torch.empty_like(bo) if trans else None
-    atom_kernel("pb_f", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, bo, bt, int(N), float(eps))
+    atom_kernel("pb_f" if N == NZ else "pb_fp", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, bo, bt, int(N), int(NZ), kv,
+                                                        float(eps))
     return bo, bt
 
 
-def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
-    """dbias [4, N, N] fp32 (summed over the samples) -> dz (z's dtype and layout), dgamma [16], dWb [4, 16] (fp32)."""
+def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5, kv=None):
+    """dbias [4, n, n] fp32 (summed over the samples) -> dz (z's dtype and layout), dgamma [16], dWb [4, 16] (fp32); dbias on
+    keys kv marks invalid is dropped."""
     z = z.reshape(z.shape[-3], z.shape[-2], DP)
-    N = z.shape[0]
+    NZ, N = z.shape[0], dbias.shape[-1]
     w = (wb.float() * gamma.float()[None]).contiguous()
     dz = torch.empty_like(z)
     nb = (N // 64) * (N // 32)
     pw = torch.empty(nb, NH, DP, device=z.device, dtype=torch.float32)
-    atom_kernel("pb_b", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, dbias.contiguous(), dz, pw, int(N), float(eps))
+    atom_kernel("pb_b", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, dbias.contiguous(), dz, pw, int(N), int(NZ), kv,
+                                 float(eps))
     dw = pw.sum(0)
     return dz, (dw * wb.float()).sum(0), dw * gamma.float()[None]
 
