@@ -52,6 +52,13 @@ PATHS = {
 
 
 @pytest.fixture(autouse=True)
+def triton_not_sm100(monkeypatch):
+    """These tests pin the Triton kernels (and the sm_90 CUDA stages) at atom counts off the 128 grid; on B200 the sm_100a
+    path would refuse those counts. It has its own tests (tests/integrations/test_b200_swa_dit_gpu.py)."""
+    monkeypatch.setenv("MINIWORLD_SWA_DIT_SM100", "0")
+
+
+@pytest.fixture(autouse=True)
 def restore_settings():
     previous = settings.current()
     yield

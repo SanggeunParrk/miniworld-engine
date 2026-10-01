@@ -10,6 +10,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 (sm_100a) SWA atom DiT block: the fused block of `kernels/swa_dit` (what `SWADiTBlock` takes) runs every stage on
+  hand-written kernels on B200 in bf16 (`kernels/swa_dit/cuda/sm100/`: qkvg forward / backward, window attention forward and
+  dQ / dK dV, out-projection backward, out-projection + FFN forward, FFN backward; the weight gradients on cuBLAS, dWqkv | dWg
+  as one GEMM), and the hoisted adaLN modulation on `mod_fwd` / `mod_bwd`. The atom count must be a multiple of 128 there
+  (callers pad; `seqused` masks the padding) -- the block raises `ValueError` otherwise. `MINIWORLD_SWA_DIT_SM100=0` keeps the
+  Triton path. Sources from the research capsule `experiments/swaatom_sm100`; tests:
+  `tests/integrations/test_b200_swa_dit_gpu.py` (the Triton tests in `tests/numerics/test_swa_dit_fused_gpu.py` pin that path).
 - B200 (sm_100a) AF3-style atom DiT block: `DiTBlock` at atom widths (d_single = d_cond = 128, 4 heads x 32, d_pair 16,
   transition n = 2) runs the whole block, inference and training, on hand-written kernels (`kernels/augmented_attention/cuda/sm100_atom/`:
   conditioning projections, AdaLN + q / k / v / gate, the pair bias in both layouts, attention forward / dK dV / dQ / dbias, the

@@ -21,6 +21,10 @@ on sm_90 with materialised dW operands, else ``_swa_ffn_bwd_kernel`` [+ ``_swa_f
 ``swa_dit_ffn_dw="fused"``]) -> out-projection -> attention dq, dk/dv -> qkvg, then the weight gradients as cuBLAS GEMMs
 over the saved operands.
 
+B200 (sm_100a), bf16, the served widths (``cuda/sm100.supported``): every stage on the hand-written sm_100a kernels of
+``cuda/sm100`` (``_sm100``); the atom count must be a multiple of 128 there -- the block refuses otherwise.
+``MINIWORLD_SWA_DIT_SM100=0`` keeps the Triton path; a build or load failure warns once and keeps it too.
+
 fp32 stages (q fp32; Triton only -- the hand-CUDA kernels are bf16 wgmma code): ``triton/forward_fp32.py`` and
 ``triton/backward_fp32.py`` for qkvg, out-projection + FFN and their backwards, around the SAME window-attention kernels on
 bf16 operands (what FlashAttention-4 runs in the per-op fp32 path). ``swa_dit_ffn_dw`` and ``swa_dit_dq1`` are bf16 knobs;
@@ -29,6 +33,8 @@ the fp32 backward always materialises the dW operands and keeps dq1 in fp32.
 from __future__ import annotations
 
 import functools
+import os
+import warnings
 from typing import Any
 
 import torch
@@ -86,6 +92,27 @@ def _cuda(which: str, wanted: bool, device: torch.device) -> Any:
     return extension(which)
 
 
+_SM100_FAILED = False
+
+
+def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
+    """The sm_100a kernels (``cuda/sm100``) when they serve this bf16 call, else None -> the Triton path."""
+    global _SM100_FAILED
+    if _SM100_FAILED or os.environ.get("MINIWORLD_SWA_DIT_SM100", "1") == "0" or settings.current().engine_backend == "triton":
+        return None
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    if not sm100.supported(q, nhid, half_window, eps):
+        return None
+    try:
+        sm100.kernels(q.device.index if q.device.index is not None else torch.cuda.current_device())
+    except Exception as exc:  # a toolchain or driver problem keeps the Triton path
+        _SM100_FAILED = True
+        warnings.warn(f"sm_100a SWA atom DiT kernels unavailable, keeping the Triton path: {exc!r}", RuntimeWarning, stacklevel=2)
+        return None
+    return sm100
+
+
 @functools.lru_cache(maxsize=16)
 def _sm_count(index: int) -> int:
     return torch.cuda.get_device_properties(index).multi_processor_count
@@ -132,6 +159,9 @@ def swa_dit_block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin
     [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads)."""
     if q.dtype == torch.float32:
         return _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
+    sm100 = _sm100(q, wd.shape[1], half_window, eps)
+    if sm100 is not None:
+        return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save)
     N, S, C = q.shape
     H = N_HEAD
     D = C // H
@@ -252,6 +282,10 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
     if q.dtype == torch.float32:
         return _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x,
                                         pq, pk, att, y, ffn, B, half_window, eps)
+    sm100 = _sm100(q, wd.shape[1], half_window, eps)
+    if sm100 is not None:
+        return sm100.block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att,
+                               y, ffn, B)
     N, S, C = q.shape
     H = N_HEAD
     D = C // H
@@ -373,3 +407,30 @@ def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     dwu = dab.t() @ y
     dwd = dffn.t() @ hh
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
+
+
+def _swa_dit_mod_fwd_sm100_fake(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
+    """Shape of the output: [R, 6C] fp32."""
+    return c.new_empty((c.shape[0], wmod.shape[0]), dtype=torch.float32)
+
+
+@opaque(fake=_swa_dit_mod_fwd_sm100_fake, name="swa_dit_mod_fwd_sm100")
+def swa_dit_mod_fwd_sm100(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
+    """silu(c) Wmod^T [R, 6C] fp32 on the sm_100a mod_fwd kernel; c [R, C] bf16 contiguous, Wmod [6C, C] bf16."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    return sm100.mod_fwd(c, wmod)
+
+
+def _swa_dit_mod_bwd_sm100_fake(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """Shapes of the outputs: dc like c, dWmod like Wmod."""
+    return [torch.empty_like(c), torch.empty_like(wmod)]
+
+
+@opaque(fake=_swa_dit_mod_bwd_sm100_fake, name="swa_dit_mod_bwd_sm100")
+def swa_dit_mod_bwd_sm100(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """[dc, dWmod] (bf16) of :func:`swa_dit_mod_fwd_sm100` from g = d mod [R, 6C] fp32; R a multiple of 128."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    dc, dw = sm100.mod_bwd(g, c, wmod)
+    return [dc, dw]
