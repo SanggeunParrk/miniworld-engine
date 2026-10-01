@@ -36,7 +36,9 @@ import torch
 from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
-D, DC, DP, H, DH = 768, 384, 128, 16, 48
+D, DC, DP, H, DH = 768, 384, 128, 16, 48          # the default layout; serves() takes LAYOUTS
+#: (heads, d_single): 16 x 48 (bf16 and fp32); 24 x 32, 12 x 64 and 16 x 64 (d 1024) in bf16
+LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
 EPS = 1e-5
 BF = torch.bfloat16
 
@@ -64,12 +66,15 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         return False
     if not any(t.requires_grad for t in (single, cond, pair)) and not any(p.requires_grad for p in module.parameters()):
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != D or single.shape[0] % 2 or single.shape[2] % 128:
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[0] % 2 or single.shape[2] % 128:
         return False
+    d = single.shape[-1]
     if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP):
         return False
-    if (a.n_head, module.transition.expand_a.weight.shape[0]) != (H, 2 * D):
+    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
+    if (a.n_head, d) != (H, D) and operand_dtype(single, compute_dtype) is not BF:
+        return False                         # fp32 (TF32 kernels) at 16 x 48 only
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
         return False
     norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, module.transition.ada_ln_in.ln_in,
@@ -119,6 +124,8 @@ def _pack(P, qk, dev, at):
     if hit is not None and hit[0] == key:
         return hit[1]
     g = lambda n: P[n]
+    D = g("attention.to_out.weight").shape[0]
+    DH = D // g("attention.to_bias.weight").shape[0]
     w1, w2 = _f32(g("attention.ada_ln_in.ln_cond.weight")), _f32(g("transition.ada_ln_in.ln_cond.weight"))
     Wraw = torch.cat([_f32(g("attention.ada_ln_in.to_scale.weight")), _f32(g("attention.ada_ln_in.to_bias.weight")),
                       _f32(g("transition.ada_ln_in.to_scale.weight")), _f32(g("transition.ada_ln_in.to_bias.weight"))])
@@ -167,39 +174,40 @@ def _names_for(qk):
     return ["attention." + n for n in ATT + (QKN if qk else ())] + ["transition." + n for n in TRN]
 
 
-def _saved_like(single, pair, fp32, qk=True):
+def _saved_like(single, pair, fp32, qk=True, H=H):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd)."""
-    A, _, L, _ = single.shape
+    A, _, L, D = single.shape
     M, R, e = A * L, L * L, single.new_empty
     f32, at = torch.float32, (torch.float32 if fp32 else BF)
     return [e((M, D), dtype=f32), e((M, DC), dtype=at), e((M, DC), dtype=at), e((M, 2), dtype=f32), e((M, 4 * D), dtype=at),
-            e((M, 2 * D), dtype=at), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at), e((M, 32), dtype=f32),
+            e((M, 2 * D), dtype=at), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at), e((M, 2 * H), dtype=f32),
             *(e((M, D), dtype=at) for _ in range(3 if qk else 0)), e((H, L, L), dtype=at), e((M, D), dtype=f32),
             e((A, H, L), dtype=f32), e((M, D), dtype=at), e((M, D), dtype=at), e((M, D), dtype=f32), e((M, 2), dtype=f32),
             e((M, D), dtype=at), e((M, 4 * D), dtype=at), e((M, D), dtype=at), e((R, DP), dtype=at), e((R, 2), dtype=f32)]
 
 
-def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32):
-    return [torch.empty_like(single), *_saved_like(single, pair, fp32, qk)]
+def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads):
+    return [torch.empty_like(single), *_saved_like(single, pair, fp32, qk, heads)]
 
 
 @opaque(fake=_fwd_fake, name="token_dit_train_sm100_fwd")
 def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
-         qk: bool, eq: float, ek: float, fp32: bool) -> list[torch.Tensor]:
+         qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
     """The block's forward: [out, *saved activations] (every output freshly allocated); ``fp32``: fp32 GEMM operands (on TF32
     tensor cores, whatever the caller's allow_tf32) and the TF32 attention kernels, else bf16."""
     with _tf32(fp32):
-        return _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32)
+        return _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, heads)
 
 
-def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32):
+def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
-    T = ext()
+    A, _, L, D = single.shape
+    DH = D // H
+    T = ext(D, DH)
     names = _names_for(qk)
     P = dict(zip(names, params, strict=False))
-    A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
     at = torch.float32 if fp32 else BF
     x = torch.empty(M, D, device=dev)                                          # the fp32 residual, written by adaln_a
@@ -216,7 +224,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32):
     T.adaln_a(single.reshape(M, D).contiguous(), G, bs1, xa, xst, EPS, x)  # reads the input, writes x on the way
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
     qkvg = torch.addmm(bqkvg, xa, Wqkvg.t())
-    rqk = torch.empty(M, 32, device=dev)
+    rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
     if qk:
         qn = torch.empty(M, D, device=dev, dtype=at); kn = torch.empty_like(qn); vc = torch.empty_like(qn)
@@ -229,7 +237,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32):
     bias = torch.mm(W["Wf_at"], ph.t()).view(H, L, L)                           # head-major, natural units; Wf = Wb diag(wp)
     if mask is not None:
         bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
-    O, LSE = (sm100.forward_tf32 if fp32 else sm100.forward)(qn, kn, vc, bias, A, L)
+    O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
     og = torch.empty(M, D, device=dev, dtype=at)
     T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
@@ -255,22 +263,24 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32):
             ab, z, ph, pst]
 
 
-def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32):
+def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads):
     return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
 
 
 @opaque(fake=_bwd_fake, name="token_dit_train_sm100_bwd")
 def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
-         saved: list[torch.Tensor], dout: torch.Tensor, qk: bool, eq: float, ek: float, fp32: bool) -> list[torch.Tensor]:
+         saved: list[torch.Tensor], dout: torch.Tensor, qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
     """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes."""
     with _tf32(fp32):
-        return _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32)
+        return _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads)
 
 
-def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32):
+def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H):
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
-    T = ext()
+    D = single.shape[-1]
+    DH = D // H
+    T = ext(D, DH)
     if not qk:                                 # the forward's q / k / v: column views of qkvg (see _fwd_body)
         saved = [*saved[:10], *(saved[8][:, i * D:(i + 1) * D] for i in range(3)), *saved[10:]]   # after qkvg (8), rqk (9)
     (x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, bias, O, LSE, og, y, x1, x1st, xt, ab, z, ph, pst) = saved
@@ -304,7 +314,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32):
     dob = torch.empty(M, D, device=dev, dtype=at); dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
     T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
-    DQ, DK, DV, DB = (sm100.backward_tf32 if fp32 else sm100.backward)(qn, kn, vc, dob, bias, LSE, dd, A, L)
+    DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L) if fp32
+                      else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
     dxa = torch.mm(dqkvg, Wqkvg)
     dWqkvg = _mm32(dqkvg.t(), xa)
@@ -350,20 +361,20 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32):
 
 class _Block(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, *params):
-        out, *saved = _fwd(single, cond, pair, mask, list(params), qk, eq, ek, fp32)
+    def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, *params):
+        out, *saved = _fwd(single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads)
         ctx.save_for_backward(single, cond, pair, *params, *saved)
-        ctx.meta = (mask, qk, eq, ek, fp32, len(params))
+        ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads)
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        mask, qk, eq, ek, fp32, npar = ctx.meta
+        mask, qk, eq, ek, fp32, npar, heads = ctx.meta
         vals = ctx.saved_tensors
         single, cond, pair = vals[:3]
         params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
-        dx, dc, dpair, *pg = _bwd(single, cond, pair, mask, params, saved, dout.contiguous(), qk, eq, ek, fp32)
-        return (dx, dc, dpair, None, None, None, None, None, *(g if ctx.needs_input_grad[8 + i] else None for i, g in enumerate(pg)))
+        dx, dc, dpair, *pg = _bwd(single, cond, pair, mask, params, saved, dout.contiguous(), qk, eq, ek, fp32, heads)
+        return (dx, dc, dpair, None, None, None, None, None, None, *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)))
 
 
 def block(module, single, cond, pair, mask=None, compute_dtype=None):
@@ -374,7 +385,8 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     eq = float(a.norm_query.effective_eps(torch.float32)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
     fp32 = operand_dtype(single, compute_dtype) is torch.float32
-    return _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, *[module.get_parameter(n) for n in _names_for(qk)])
+    return _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
+                        *[module.get_parameter(n) for n in _names_for(qk)])
 
 
 __all__ = ["block", "serves"]

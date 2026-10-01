@@ -6,6 +6,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import attention_pair_bias_b200 as _b200
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_augmented_attention
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
@@ -78,6 +79,11 @@ class AttentionPairBias(nn.Module):
         """Forward pass. ALWAYS applies the residual: single + attention_pair_bias(single, pair).
         The residual is UNCONDITIONAL (domain standard) and applied EXPLICITLY here (team-gm layer,
         not kernel-fused). The residual is unconditional and has no flag."""
+        # Hand-CUDA B200 (integrations.attention_pair_bias_b200 states its contract; the residual is folded there).
+        if _b200.serves_inference(self, single, pair, mask):
+            return _b200.update_inference(self, single, pair, mask)
+        if _b200.serves_train(self, single, pair, mask):
+            return _b200.update_train(self, single, pair, mask)
         single_res = single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
         single = self.ln_single(single)
         query = self.to_query(single)

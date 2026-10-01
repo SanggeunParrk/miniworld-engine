@@ -110,3 +110,24 @@ class Kernel:
             _chk(cu.cuLaunchKernel(self.func, grid[0], grid[1], grid[2], block[0], block[1], block[2], self.smem, cu.CUstream(st),
                                    ctypes.addressof(arr), 0), "cuLaunchKernel")
         self._keep = (holders, arr)
+
+    def bind(self, grid, block, *args):
+        """A launcher with the arguments packed once (tensors by their current address): ``run()`` launches on the current
+        stream. For callers that cache launches per buffer address (TensorMap arguments should not hold tensors then)."""
+        holders, ptrs = [], []
+        for a in args:
+            if isinstance(a, TensorMap):
+                holders.append(a); ptrs.append(a.addr)
+            else:
+                h = (ctypes.c_uint64(a.data_ptr()) if isinstance(a, torch.Tensor) else ctypes.c_uint64(0) if a is None
+                     else ctypes.c_float(a) if isinstance(a, float) else ctypes.c_int32(int(a)))
+                holders.append(h); ptrs.append(ctypes.addressof(h))
+        arr = (ctypes.c_void_p * len(ptrs))(*ptrs)
+        assert not (self.cluster or self.pdl), "bind: plain launches only"
+        func, smem, g, b, addr = self.func, self.smem, grid, block, ctypes.addressof(arr)
+
+        def run():
+            st = torch.cuda.current_stream().cuda_stream
+            _chk(cu.cuLaunchKernel(func, g[0], g[1], g[2], b[0], b[1], b[2], smem, cu.CUstream(st), addr, 0), "cuLaunchKernel")
+        run.keep = (holders, arr)
+        return run

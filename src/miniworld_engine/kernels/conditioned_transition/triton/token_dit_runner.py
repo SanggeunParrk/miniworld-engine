@@ -95,7 +95,7 @@ class FusedTokenDiT:
         self.eps = 1e-5
         dev = a0.to_query.weight.device
         self.K = _row_kernels(dev)
-        # QK-norm (RMSNorm of every 48-wide q / k head after the projection) runs as one in-place CUDA row pass; the
+        # QK-norm (RMSNorm of every q / k head after the projection) runs as one in-place CUDA row pass; the
         # sm_scale log2 e fold then moves from Wq / bq, which the norm would cancel, into the q norm's weight
         self.qk = bool(a0.use_qk_norm)
         if self.qk:
@@ -285,11 +285,11 @@ class FusedTokenDiT:
             if not tf32_core:
                 self._mm(xa, p["wqkvg"], qkvg, p["bqkvg"])
                 if self.qk:
-                    self.K.qknorm_rows(qkvg, p["nq"], p["nk"], self.eq, self.ek)
+                    self.K.qknorm_rows(qkvg, p["nq"], p["nk"], self.eq, self.ek, D)
             if tf32_core:
                 self._mm(xa, p["wqkvg"][:3 * D], qkg, p["bqkvg"][:3 * D])    # q | k | g
                 if self.qk:
-                    self.K.qknorm_rows(qkg, p["nq"], p["nk"], self.eq, self.ek)
+                    self.K.qknorm_rows(qkg, p["nq"], p["nk"], self.eq, self.ek, D)
                 torch.mm(p["wqkvg"][3 * D:], xa.t(), out=vt)                 # v^T (v has no bias)
                 sm100(qkg, bias, b, S, vt)                                # sigmoid(g)*o over q, one sm_100a kernel
                 self._mm(qkg[:, :D], p["wo"], y)
@@ -348,8 +348,9 @@ class FusedTokenDiT:
         return cache[key]
 
     def _sm100_core(self, device, L, D, H):
-        """The sm_100a gated core (``augmented_attention/cuda/sm100``: attn_inf.cu for bf16, attn_inf_tf32.cu for fp32 with
-        TF32 MMA) where it fits -- 16 x 48, L a multiple of 8, B200 -- and builds; the Triton gated2 core otherwise.
+        """The sm_100a gated core (``augmented_attention/cuda/sm100``: attn_inf.cu for bf16 at 16 x 48, 24 x 32, 12 x 64, 16 x 64;
+        attn_inf_tf32.cu for fp32 with TF32 MMA at 16 x 48) where it fits -- L a multiple of 8, B200 -- and builds; the Triton
+        gated2 core otherwise.
         Same contract: pre-scaled logits in, sigmoid(g) * o written over q."""
         idx = device.index if device.index is not None else torch.cuda.current_device()
         cores = self.__dict__.setdefault("_sm100_cores", {})
@@ -358,7 +359,7 @@ class FusedTokenDiT:
             core = None
             if sm100.inference_core_supported(self.dtype, L, D, H, idx) and not torch.compiler.is_compiling():
                 try:
-                    core = sm100.GatedInferenceCore(idx, self.dtype)
+                    core = sm100.GatedInferenceCore(idx, self.dtype, H, D // H)
                 except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
                     import warnings
                     warnings.warn(f"sm100 token DiT core unavailable, keeping the Triton core: {exc!r}", RuntimeWarning, stacklevel=2)

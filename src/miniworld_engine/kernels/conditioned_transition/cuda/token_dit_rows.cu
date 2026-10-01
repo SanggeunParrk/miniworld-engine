@@ -150,23 +150,25 @@ __global__ void __launch_bounds__(256) layernorm128_rows_kernel(const ZT* __rest
   V4<OutT>::store(OUT + row * 128 + lane * 4, z);
 }
 
-// QK-norm in place: one block of 384 threads per row, threads 0-191 on q (columns 0-767), 192-383 on k (768-1535), 4 columns
-// each; a head is 12 consecutive threads, summed through shared memory. The weight carries any logit scale folded into it.
-template <typename T>
-__global__ void __launch_bounds__(384) qknorm_rows_kernel(T* __restrict__ QK, long sq, const float* __restrict__ WQ,
+// QK-norm in place: one block of D / 2 threads per row (D = the model width), the first half on q (columns 0 .. D - 1), the
+// second on k (D .. 2D - 1), 4 columns each; a head is HD / 4 consecutive threads, summed through shared memory. The weight
+// carries any logit scale folded into it.
+template <typename T, int D, int HD>
+__global__ void __launch_bounds__(D / 2) qknorm_rows_kernel(T* __restrict__ QK, long sq, const float* __restrict__ WQ,
     const float* __restrict__ WK, float eq, float ek) {
-  __shared__ float part[384];
-  const int t = threadIdx.x, which = t / 192, c = (t % 192) * 4;
-  T* p = QK + (long)blockIdx.x * sq + which * 768 + c;
+  constexpr int NQ = D / 4, HT = HD / 4;
+  __shared__ float part[2 * NQ];
+  const int t = threadIdx.x, which = t / NQ, c = (t % NQ) * 4;
+  T* p = QK + (long)blockIdx.x * sq + which * D + c;
   float4 x = V4<T>::load(p);
   part[t] = x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;
   __syncthreads();
-  const int h0 = (t / 12) * 12;
+  const int h0 = (t / HT) * HT;
   float ss = 0.f;
 #pragma unroll
-  for (int j = 0; j < 12; ++j) ss += part[h0 + j];
-  const float r = rsqrtf(ss / 48.f + (which ? ek : eq));
-  const float4 w = *reinterpret_cast<const float4*>((which ? WK : WQ) + c % 48);
+  for (int j = 0; j < HT; ++j) ss += part[h0 + j];
+  const float r = rsqrtf(ss / (float)HD + (which ? ek : eq));
+  const float4 w = *reinterpret_cast<const float4*>((which ? WK : WQ) + c % HD);
   x.x *= r * w.x; x.y *= r * w.y; x.z *= r * w.z; x.w *= r * w.w;
   V4<T>::store(p, x);
 }
@@ -189,10 +191,17 @@ void check_rows(const at::Tensor& t, const char* name, int64_t cols) {
   }()
 
 template <typename C> auto ptr(const at::Tensor& t) { return reinterpret_cast<C*>(t.data_ptr()); }
+// the model widths the row kernels take: 768 (192 threads, a float4 each) and 1024 (256)
+#define TDR_WIDTH(D, NT, ...)                                                                        \
+  [&] {                                                                                              \
+    TORCH_CHECK((D) == 768 || (D) == 1024, "token DiT rows: width 768 or 1024");                     \
+    if ((D) == 768) { constexpr int NT = 192; return __VA_ARGS__(); }                                \
+    constexpr int NT = 256; return __VA_ARGS__();                                                    \
+  }()
 
 void adaln_rows(at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int64_t L, double eps) {
   const int64_t M = x.size(0), D = x.size(1);
-  TORCH_CHECK(D == 768 && x.scalar_type() == at::kFloat, "adaln_rows: fp32 x of width 768");
+  TORCH_CHECK(x.scalar_type() == at::kFloat, "adaln_rows: fp32 x");
   for (auto* t : {&ms, &mb}) check_rows(*t, "adaln_rows ms/mb", D);
   check_rows(x, "adaln_rows x", D); check_rows(out, "adaln_rows out", D);
   TORCH_CHECK(ms.scalar_type() == mb.scalar_type() && out.is_contiguous(), "adaln_rows: ms/mb dtypes, contiguous out");
@@ -200,8 +209,10 @@ void adaln_rows(at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int6
   auto st = at::cuda::getCurrentCUDAStream();
   TDR_DISPATCH(ms.scalar_type(), GT, [&] {
     TDR_DISPATCH(out.scalar_type(), OT, [&] {
-      adaln_rows_kernel<192, GT, OT><<<(unsigned)M, 192, 0, st>>>(ptr<float>(x), ptr<const GT>(ms), ptr<const GT>(mb),
-          ptr<OT>(out), (int)L, x.stride(0), ms.stride(0), mb.stride(0), (float)eps);
+      TDR_WIDTH(D, NT, [&] {
+        adaln_rows_kernel<NT, GT, OT><<<(unsigned)M, NT, 0, st>>>(ptr<float>(x), ptr<const GT>(ms), ptr<const GT>(mb),
+            ptr<OT>(out), (int)L, x.stride(0), ms.stride(0), mb.stride(0), (float)eps);
+      });
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -210,7 +221,7 @@ void adaln_rows(at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int6
 void resgate_adaln_rows(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional<at::Tensor> ms, c10::optional<at::Tensor> mb,
                         at::Tensor out, int64_t L, double eps) {
   const int64_t M = x.size(0), D = x.size(1);
-  TORCH_CHECK(D == 768 && x.scalar_type() == at::kFloat, "resgate_adaln_rows: fp32 x of width 768");
+  TORCH_CHECK(x.scalar_type() == at::kFloat, "resgate_adaln_rows: fp32 x");
   const bool has = ms.has_value();
   check_rows(x, "x", D); check_rows(y, "y", D); check_rows(gl, "gl", D);
   const at::Tensor& msv = has ? *ms : gl;
@@ -222,9 +233,11 @@ void resgate_adaln_rows(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional
   TDR_DISPATCH(y.scalar_type(), YT, [&] {
     TDR_DISPATCH(gl.scalar_type(), GT, [&] {
       TDR_DISPATCH(out.scalar_type(), OT, [&] {
-        resgate_adaln_rows_kernel<192, YT, GT, OT><<<(unsigned)M, 192, 0, st>>>(ptr<float>(x), ptr<const YT>(y),
-            ptr<const GT>(gl), ptr<const GT>(msv), ptr<const GT>(mbv), ptr<OT>(out), (int)L, x.stride(0), y.stride(0),
-            gl.stride(0), msv.stride(0), mbv.stride(0), (float)eps, has);
+        TDR_WIDTH(D, NT, [&] {
+          resgate_adaln_rows_kernel<NT, YT, GT, OT><<<(unsigned)M, NT, 0, st>>>(ptr<float>(x), ptr<const YT>(y),
+              ptr<const GT>(gl), ptr<const GT>(msv), ptr<const GT>(mbv), ptr<OT>(out), (int)L, x.stride(0), y.stride(0),
+              gl.stride(0), msv.stride(0), mbv.stride(0), (float)eps, has);
+        });
       });
     });
   });
@@ -233,7 +246,7 @@ void resgate_adaln_rows(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional
 
 void adaln_in_rows(at::Tensor xin, at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int64_t L, double eps) {
   const int64_t M = x.size(0), D = x.size(1);
-  TORCH_CHECK(D == 768 && x.scalar_type() == at::kFloat && x.is_contiguous() && xin.size(0) == M, "adaln_in_rows: fp32 x [M, 768]");
+  TORCH_CHECK(x.scalar_type() == at::kFloat && x.is_contiguous() && xin.size(0) == M, "adaln_in_rows: fp32 x [M, D]");
   check_rows(xin, "xin", D); check_rows(ms, "ms", D); check_rows(mb, "mb", D); check_rows(out, "out", D);
   TORCH_CHECK(ms.scalar_type() == mb.scalar_type() && out.is_contiguous(), "adaln_in_rows: ms/mb dtypes, contiguous out");
   const at::cuda::CUDAGuard g(x.device());
@@ -241,8 +254,10 @@ void adaln_in_rows(at::Tensor xin, at::Tensor x, at::Tensor ms, at::Tensor mb, a
   TDR_DISPATCH(xin.scalar_type(), XT, [&] {
     TDR_DISPATCH(ms.scalar_type(), GT, [&] {
       TDR_DISPATCH(out.scalar_type(), OT, [&] {
-        adaln_in_rows_kernel<192, XT, GT, OT><<<(unsigned)M, 192, 0, st>>>(ptr<const XT>(xin), ptr<float>(x), ptr<const GT>(ms),
-            ptr<const GT>(mb), ptr<OT>(out), (int)L, xin.stride(0), ms.stride(0), mb.stride(0), (float)eps);
+        TDR_WIDTH(D, NT, [&] {
+          adaln_in_rows_kernel<NT, XT, GT, OT><<<(unsigned)M, NT, 0, st>>>(ptr<const XT>(xin), ptr<float>(x), ptr<const GT>(ms),
+              ptr<const GT>(mb), ptr<OT>(out), (int)L, xin.stride(0), ms.stride(0), mb.stride(0), (float)eps);
+        });
       });
     });
   });
@@ -251,15 +266,17 @@ void adaln_in_rows(at::Tensor xin, at::Tensor x, at::Tensor ms, at::Tensor mb, a
 
 void resgate_out_rows(at::Tensor x, at::Tensor y, at::Tensor gl, at::Tensor out, int64_t L) {
   const int64_t M = x.size(0), D = x.size(1);
-  TORCH_CHECK(D == 768 && x.scalar_type() == at::kFloat && out.is_contiguous() && out.size(0) == M, "resgate_out_rows");
+  TORCH_CHECK(x.scalar_type() == at::kFloat && out.is_contiguous() && out.size(0) == M, "resgate_out_rows");
   check_rows(x, "x", D); check_rows(y, "y", D); check_rows(gl, "gl", D); check_rows(out, "out", D);
   const at::cuda::CUDAGuard g(x.device());
   auto st = at::cuda::getCurrentCUDAStream();
   TDR_DISPATCH(y.scalar_type(), YT, [&] {
     TDR_DISPATCH(gl.scalar_type(), GT, [&] {
       TDR_DISPATCH(out.scalar_type(), FT, [&] {
-        resgate_out_rows_kernel<192, YT, GT, FT><<<(unsigned)M, 192, 0, st>>>(ptr<const float>(x), ptr<const YT>(y),
-            ptr<const GT>(gl), ptr<FT>(out), (int)L, x.stride(0), y.stride(0), gl.stride(0));
+        TDR_WIDTH(D, NT, [&] {
+          resgate_out_rows_kernel<NT, YT, GT, FT><<<(unsigned)M, NT, 0, st>>>(ptr<const float>(x), ptr<const YT>(y),
+              ptr<const GT>(gl), ptr<FT>(out), (int)L, x.stride(0), y.stride(0), gl.stride(0));
+        });
       });
     });
   });
@@ -319,14 +336,24 @@ void layernorm128_rows(at::Tensor z, at::Tensor out, double eps) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void qknorm_rows(at::Tensor qk, at::Tensor wq, at::Tensor wk, double eq, double ek) {
-  check_rows(qk, "qk", 1536);
+// d: the model width (q = columns 0 .. d - 1, k = d .. 2d - 1); the head dim is the weights' length (d / heads)
+void qknorm_rows(at::Tensor qk, at::Tensor wq, at::Tensor wk, double eq, double ek, int64_t d) {
+  check_rows(qk, "qk", 2 * d);
+  const int64_t hd = wq.numel();
   TORCH_CHECK(wq.scalar_type() == at::kFloat && wk.scalar_type() == at::kFloat && wq.is_contiguous() && wk.is_contiguous() &&
-              wq.numel() == 48 && wk.numel() == 48, "qknorm_rows: fp32 [48] weights");
+              wk.numel() == hd, "qknorm_rows: fp32 [head dim] weights");
+  TORCH_CHECK((d == 768 && (hd == 48 || hd == 32 || hd == 64)) || (d == 1024 && hd == 64), "qknorm_rows: 768 x 48 / 32 / 64, 1024 x 64");
   const at::cuda::CUDAGuard g(qk.device());
+  auto st = at::cuda::getCurrentCUDAStream();
   TDR_DISPATCH(qk.scalar_type(), T, [&] {
-    qknorm_rows_kernel<T><<<(unsigned)qk.size(0), 384, 0, at::cuda::getCurrentCUDAStream()>>>(
-        ptr<T>(qk), qk.stride(0), ptr<const float>(wq), ptr<const float>(wk), (float)eq, (float)ek);
+    auto go = [&](auto kern, int threads) {
+      kern<<<(unsigned)qk.size(0), threads, 0, st>>>(ptr<T>(qk), qk.stride(0), ptr<const float>(wq), ptr<const float>(wk), (float)eq,
+                                                     (float)ek);
+    };
+    if (d == 1024) go(qknorm_rows_kernel<T, 1024, 64>, 512);
+    else if (hd == 48) go(qknorm_rows_kernel<T, 768, 48>, 384);
+    else if (hd == 32) go(qknorm_rows_kernel<T, 768, 32>, 384);
+    else go(qknorm_rows_kernel<T, 768, 64>, 384);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

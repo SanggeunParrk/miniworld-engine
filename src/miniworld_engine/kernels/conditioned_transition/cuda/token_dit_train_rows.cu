@@ -25,7 +25,16 @@ namespace {
 using namespace tdr;
 using bf = __nv_bfloat16;
 
-constexpr int D = 768, NT = D / 4, DC = 384, NTC = DC / 4, RPB = 8, HD = 48;
+// The model width and head dim are build-time: -DTD_D (768 | 1024) -DTD_HD (48 | 32 | 64); one extension per layout
+#ifndef TD_D
+#define TD_D 768
+#endif
+#ifndef TD_HD
+#define TD_HD 48
+#endif
+constexpr int D = TD_D, NT = D / 4, DC = 384, NTC = DC / 4, RPB = 8, HD = TD_HD;
+constexpr int HT = HD / 4, NHH = D / HD;                                   // threads per head, heads
+static_assert(D % HD == 0 && NT % 32 == 0, "token DiT train rows: layout");
 
 __device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
 __device__ __forceinline__ float4 mul4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
@@ -87,14 +96,14 @@ __global__ void __launch_bounds__(NT) adaln_a_k(const XT* __restrict__ X, float*
   }
 }
 
-// Per-head (48 columns = 12 threads) sum through shared memory: part holds NT partials.
+// Per-head (HD columns = HT threads) sum through shared memory: part holds NT partials.
 __device__ __forceinline__ float head_sum(float v, float* part) {
   part[threadIdx.x] = v;
   __syncthreads();
-  const int h0 = (threadIdx.x / 12) * 12;
+  const int h0 = (threadIdx.x / HT) * HT;
   float t = 0.f;
 #pragma unroll
-  for (int j = 0; j < 12; ++j) t += part[h0 + j];
+  for (int j = 0; j < HT; ++j) t += part[h0 + j];
   __syncthreads();
   return t;
 }
@@ -104,7 +113,7 @@ __global__ void __launch_bounds__(NT) qknorm_k(const AT* __restrict__ QKVG, cons
     const float* __restrict__ WK, AT* __restrict__ QN, AT* __restrict__ KN, AT* __restrict__ VC, float* __restrict__ RQK,
     int M, float eq, float ek, int qk) {
   __shared__ float part[NT];
-  const int col = threadIdx.x * 4, h = threadIdx.x / 12;
+  const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   const float4 wq = qk ? V4<float>::load(WQ + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
   const float4 wk = qk ? V4<float>::load(WK + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
   for (int i = 0; i < RPB; ++i) {
@@ -117,7 +126,7 @@ __global__ void __launch_bounds__(NT) qknorm_k(const AT* __restrict__ QKVG, cons
       const float rk = rsqrtf(head_sum(sum4(mul4(k, k)), part) / HD + ek);
       q = mul4(make_float4(q.x * rq, q.y * rq, q.z * rq, q.w * rq), wq);
       k = mul4(make_float4(k.x * rk, k.y * rk, k.z * rk, k.w * rk), wk);
-      if (threadIdx.x % 12 == 0) { RQK[r * 32 + h] = rq; RQK[r * 32 + 16 + h] = rk; }
+      if (threadIdx.x % HT == 0) { RQK[r * 2 * NHH + h] = rq; RQK[r * 2 * NHH + NHH + h] = rk; }
     }
     V4<AT>::store(QN + r * D + col, q);
     V4<AT>::store(KN + r * D + col, k);
@@ -265,7 +274,7 @@ template <typename AT>
 __global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, const float* __restrict__ O, const AT* __restrict__ QKVG,
     AT* __restrict__ DOB, float* __restrict__ DD, AT* __restrict__ DQKVG, int M, int L) {
   __shared__ float part[NT];
-  const int col = threadIdx.x * 4, h = threadIdx.x / 12;
+  const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   for (int i = 0; i < RPB; ++i) {
     const long r = (long)blockIdx.x * RPB + i;
     if (r >= M) break;
@@ -274,7 +283,7 @@ __global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, c
     const float4 d_o = mul4(dog, s);
     V4<AT>::store(DOB + r * D + col, d_o);
     const float dsum = head_sum(sum4(mul4(d_o, o)), part);
-    if (threadIdx.x % 12 == 0) DD[((r / L) * 16 + h) * L + r % L] = dsum;
+    if (threadIdx.x % HT == 0) DD[((r / L) * NHH + h) * L + r % L] = dsum;
     V4<AT>::store(DQKVG + r * 4 * D + 3 * D + col, dsig4(mul4(dog, o), s));
   }
 }
@@ -286,7 +295,7 @@ __global__ void __launch_bounds__(NT) qknorm_bwd_k(const float* __restrict__ DQ,
     const AT* __restrict__ QKVG, const float* __restrict__ RQK, const float* __restrict__ WQ, const float* __restrict__ WK,
     AT* __restrict__ DQKVG, float* __restrict__ PBQ, float* __restrict__ DWQK, long sp, long sw, int M, int qk) {
   __shared__ float part[NT];
-  const int col = threadIdx.x * 4, h = threadIdx.x / 12;
+  const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   const float4 wq = qk ? V4<float>::load(WQ + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
   const float4 wk = qk ? V4<float>::load(WK + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
   float4 acc_b = make_float4(0.f, 0.f, 0.f, 0.f), acc_wq = acc_b, acc_wk = acc_b;
@@ -299,7 +308,7 @@ __global__ void __launch_bounds__(NT) qknorm_bwd_k(const float* __restrict__ DQ,
       float4 dx = dn;
       if (qk) {
         const float4 x = V4<AT>::load(QKVG + r * 4 * D + t * D + col);
-        const float rr = RQK[r * 32 + t * 16 + h];
+        const float rr = RQK[r * 2 * NHH + t * NHH + h];
         const float4 xh = make_float4(x.x * rr, x.y * rr, x.z * rr, x.w * rr);
         const float4 dxh = mul4(dn, t == 0 ? wq : wk);
         const float m = head_sum(sum4(mul4(dxh, xh)), part) / HD;

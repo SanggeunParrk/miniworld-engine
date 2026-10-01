@@ -10,6 +10,16 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 (sm_100a) AttentionPairBias (the Pairformer single track): `AttentionPairBias.forward` runs hand-written CUDA and
+  cuBLAS only through `integrations/attention_pair_bias_b200.py` (`kernels/augmented_attention/cuda/apb/`: pair LayerNorm +
+  projection and its backward on TMA rings, the sm_100a attention cores, CUDA row kernels) for implementation MINIWORLD, bf16,
+  B = 1, no QK-norm, (heads, d_single) in 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 at 384 and 16 x 32 at 512, d_pair 128;
+  inference at L % 16 == 0, training at L % 128 == 0. `bench.py` (+`apb_n_head`, `apb_anthropic_core`): inference 1.17-1.66x
+  the fastest other row, training with CUDA graphs 1.38-1.90x. Page: `docs/gpus/b200/attention_pair_bias/attention_pair_bias.md`;
+  tests: `tests/integrations/test_b200_apb_gpu.py`, `tests/numerics/test_apb_b200_gpu.py`.
+- B200 token DiT head layouts: the sm_100a attention cores and the fused token DiT paths also serve 24 x 32 and 12 x 64 at
+  d768 and 16 x 64 at d1024 in bf16 (16 x 48 stays the only fp32 layout); `bench.py +tdit_n_head`. Tests:
+  `tests/integrations/test_b200_token_dit_layouts_gpu.py`, `tests/numerics/test_tdit_heads_sm100_gpu.py`.
 - B200 (sm_100a) SWA atom DiT block: the fused block of `kernels/swa_dit` (what `SWADiTBlock` takes) runs every stage on
   hand-written kernels on B200 in bf16 (`kernels/swa_dit/cuda/sm100/`: qkvg forward / backward, window attention forward and
   dQ / dK dV, out-projection backward, out-projection + FFN forward, FFN backward; the weight gradients on cuBLAS, dWqkv | dWg
