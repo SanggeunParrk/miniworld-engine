@@ -131,6 +131,12 @@ class BenchConfig(BaseModel):
     shared_cond: bool = False
     #: dit / dit_atom: blocks with QK-norm (RMSNorm of every q / k head). Anthropic's composition has none and refuses.
     dit_qk_norm: bool = False
+    apb_anthropic_core: str = "apb_attn"   # attention_pair_bias anthropic row: apb_attn | fpf_apb
+    #: attention_pair_bias heads: 8 (x 48, the registry row) or 16 (x 24, AF3 / MiniWorld's confidence-head Pairformer)
+    apb_n_head: int = 8
+    #: dit (token) heads: 16 (x 48 at d_single_token 768, the registry row); 24 (x 32) / 12 (x 64) at 768, 16 x 64 at
+    #: `+d_single_token=1024`. Not a yaml key: `+tdit_n_head=24`.
+    tdit_n_head: int = 16
     n_head: int = 16                 # bias_only_dit: 16 heads x 48, 24 x 32 or 12 x 64
     d_head: int = 0                  # bias_only_dit: the head width (0: 768 / n_head; 64 with n_head 16: 16 x 64)
     min_seq_len: int = 64
@@ -2284,7 +2290,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     """AttentionPairBias (the Pairformer single track), `modules/attention_pair_bias`.
 
     MiniWorld's shape (registry_module.csv): d_single=`conf.d_single` (384), d_pair=`conf.d_pair`
-    (128), 8 heads x 48, B=1, L=`seq_len`, token key mask, use_qk_norm=False; residual inside.
+    (128), `conf.apb_n_head` heads (8 x 48, the registry row; 16 x 24 = AF3), B=1, L=`seq_len`, token key mask, use_qk_norm=False; residual inside.
 
     * pytorch        -- the module's statements (SDPA with the additive pair bias).
     * triton         -- implementation="triton": Triton LayerNorms + the augmented-attention
@@ -2301,20 +2307,25 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
       whole-op route admits (cuequivariance_ops_torch attention_pair_bias._compiled_bf16_dtype_contract);
       cueq's own router still picks its route per shape/mode (on sm90 compiled INFERENCE it keeps
       its native PyTorch composition by policy).
-    anthropic has no module-level AttentionPairBias integration (integrations.anthropic only
-    exposes the core `pair_bias_attention` primitive), so it is `unsupported`.
+    * anthropic      -- inference only (the release's APB rows have no backward): its module row
+      `composed` for the `mod_pf_c384cz128` cell -- `ln_proj.pair_bias` (LN(z) + Linear, head-major
+      planes) + the `apb_attn` core (key mask and sigmoid gate fused), torch LayerNorm / Linear /
+      residual around them (`_anthropic_apb_composition`). `+apb_anthropic_core=fpf_apb` swaps the
+      core for `fpf_apb.apb_views` (the token DiT comparison's core; the mask folded into the bias).
     """
     from miniworld_engine.modules import AttentionPairBias
 
     key = implementation.strip().lower()
-    supported = {"pytorch", "triton", MINIWORLD_IMPL, ImplementationType.CUEQUIVARIANCE.value}
+    supported = {"pytorch", "triton", MINIWORLD_IMPL, ImplementationType.CUEQUIVARIANCE.value, ImplementationType.ANTHROPIC.value}
     if key not in supported:
-        raise UnsupportedBenchmark(
-            f"attention_pair_bias implements {sorted(supported)}, not {implementation!r} "
-            "(anthropic has no module-level AttentionPairBias integration)")
+        raise UnsupportedBenchmark(f"attention_pair_bias implements {sorted(supported)}, not {implementation!r}")
     cueq = key == ImplementationType.CUEQUIVARIANCE.value
+    anthropic = key == ImplementationType.ANTHROPIC.value
     is_train = not is_inference_mode(conf.mode)
-    n_head = 8
+    if anthropic and is_train:
+        raise UnsupportedBenchmark("Anthropic's AttentionPairBias rows (composed, apb_attn, fpf_apb) have no backward")
+    upstream = _anthropic_upstream_or_unsupported() if anthropic else None
+    n_head = conf.apb_n_head
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class CueqAttentionPairBias(AttentionPairBias):
@@ -2342,8 +2353,11 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
             self.layers = nn.ModuleList([
                 cls(conf.d_single, conf.d_pair, n_head, implementation=layer_impl)
                 for _ in range(conf.n_layers)])
+            self.composed = None
 
         def forward(self, single, pair, mask):
+            if self.composed is not None:
+                return self.composed(single, pair, mask)
             for layer in self.layers:
                 single = layer(single, pair, mask)
             return single
@@ -2358,6 +2372,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     state = reference.state_dict()
     reference = reference.to(DEVICE).train(is_train)
     model = (MultiAPB(ImplementationType.PYTORCH, CueqAttentionPairBias) if cueq
+             else MultiAPB(ImplementationType.PYTORCH) if anthropic
              else MultiAPB(ImplementationType(key)))
     model.load_state_dict(state)
     model = model.to(device=DEVICE, dtype=dtype).train(is_train)
@@ -2367,6 +2382,8 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
     mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
+    anthropic_path = (_anthropic_apb_composition(upstream, model, mask, dtype, conf.apb_anthropic_core)
+                      if anthropic else None)
 
     def correctness() -> AccuracyFields:
         assert reference is not None  # released only after this call, below
@@ -2410,8 +2427,9 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     execution_path = {
         "pytorch": "module.reference.torch",
         "triton": "modules.attention_pair_bias[triton LN + triton_augmented_attention_pair_bias]",
-        MINIWORLD_IMPL: "modules.attention_pair_bias[auto LN + triton_augmented_attention_pair_bias]",
-    }.get(key, "cuequivariance_torch.attention_pair_bias+module_residual")
+        MINIWORLD_IMPL: "modules.attention_pair_bias[auto LN + triton_augmented_attention_pair_bias; on sm_100 "
+                        "integrations.attention_pair_bias_b200 (CUDA + cuBLAS)]",
+    }.get(key, anthropic_path or "cuequivariance_torch.attention_pair_bias+module_residual")
     return measured_result(
         conf=conf, func=training_step if is_train else inference_step,
         grad_to_none=[single, pair, *list(model.parameters())], params=list(model.parameters()),
@@ -2434,6 +2452,88 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
 # =============================================================================================
 BF16 = torch.bfloat16
 
+
+
+def _anthropic_apb_composition(upstream, model, mask, act: "torch.dtype", core_row: str = "apb_attn") -> str:
+    """Install Anthropic's shipped AttentionPairBias module row as `model.composed`; return its execution path.
+
+    The row is `composed` of the release's `mod_pf_c384cz128` cell (`opt_core.kernels.apb`): the pair bias from
+    `ln_proj.pair_bias` (LayerNorm(z) + Linear in one kernel, head-major planes), the core `apb_attn` (key mask and
+    sigmoid gate fused), torch LayerNorm / Linear / residual around them. `core_row="fpf_apb"` takes
+    `fpf_apb.apb_views` as the core instead (the mask folded into the bias by `apb.fold_mask`). Weights are packed ONCE
+    here, as a kit packs at install time. Upstream calls run under `torch.compiler.disable`, so a compiled row compiles
+    only the torch glue between them. Inference only.
+    """
+    import torch.nn.functional as F
+
+    root = upstream.configure()
+    apb = upstream.provider("apb")
+    try:
+        lnp = apb.carried_module("ln_proj")
+        views = apb.carried_module("fpf_apb").apb_views if core_row == "fpf_apb" else None
+    except apb.Refusal as exc:
+        raise UnsupportedBenchmark(f"opt_core.kernels.apb refuses: {exc}") from exc
+    if core_row not in ("apb_attn", "fpf_apb"):
+        raise ValueError(f"apb_anthropic_core: apb_attn | fpf_apb, not {core_row!r}")
+    try:
+        commit = (Path(root) / "UPSTREAM_COMMIT.txt").read_text().split()[0][:12]
+    except (OSError, IndexError):
+        commit = "?"
+
+    def w(t):
+        return t.detach().to(act).contiguous()
+
+    packs = []
+    for at in model.layers:
+        d = at.to_query.weight.shape[0]
+        try:
+            pb = lnp.pack_pair_bias_weights(at.ln_pair.weight.detach().float(), at.ln_pair.bias.detach().float(),
+                                            w(at.to_bias.weight), at.ln_pair.eps, at.to_bias.weight.device)
+        except lnp.Unsupported as exc:
+            raise UnsupportedBenchmark(f"ln_proj refuses the pair width: {exc} (served c_pair {lnp.SERVED_C_PAIR})") from exc
+        packs.append({"ln_w": w(at.ln_single.weight), "ln_b": w(at.ln_single.bias), "eps": at.ln_single.eps, "heads": at.n_head,
+                      "wqkvg": torch.cat([w(at.to_query.weight), w(at.to_key.weight), w(at.to_value.weight),
+                                          w(at.to_gate.weight)], 0).contiguous(),
+                      "bqkvg": torch.cat([w(at.to_query.bias), torch.zeros(3 * d, device=at.to_query.bias.device, dtype=act)]),
+                      "pair_bias": pb, "wo": w(at.to_out.weight)})
+    # the key mask is a fixed tensor of the bench: an all-true mask is not passed (decided once, as the DiT composition does)
+    key_mask = None if bool(mask.all()) else mask.reshape(1, -1)
+    pair_bias = torch.compiler.disable(lnp.pair_bias)
+
+    if core_row == "apb_attn":
+        @torch.compiler.disable
+        def core(q, k, v, bias, g):
+            o, _ = apb.pair_bias_attention(q, k, v, bias, key_mask, g, word="apb_attn", cell=None,
+                                           capture=torch.cuda.is_current_stream_capturing())
+            return o
+    else:
+        assert views is not None, "core_row is fpf_apb here"
+        fold_mask = apb.fold_mask
+
+        @torch.compiler.disable
+        def core(q, k, v, bias, g):
+            if key_mask is not None:
+                bias = fold_mask(bias, key_mask)
+            return views(q, k, v, bias[0], g, scale=q.shape[-1] ** -0.5)
+
+    def composed(single, pair, mask_arg=None):
+        b, n, d = single.shape
+        for p in packs:
+            h = p["heads"]
+            x = F.layer_norm(single, (d,), p["ln_w"], p["ln_b"], float(p["eps"]))
+            qkvg = F.linear(x, p["wqkvg"], p["bqkvg"])
+            q, k, v, g = (qkvg[..., i * d:(i + 1) * d].unflatten(2, (h, d // h)) for i in range(4))
+            bias = pair_bias(pair, p["pair_bias"], out_layout="bhij")          # [1, H, N, N] view
+            o = core(q, k, v, bias, g)                                         # sigmoid(g) * attention, [B, N, H, D]
+            single = single + F.linear(o.reshape(b, n, d), p["wo"])
+        return single
+
+    model.composed = composed
+    core_desc = ("apb row apb_attn (opt_core.attn.apb_core; key mask and sigmoid gate fused)" if core_row == "apb_attn"
+                 else "apb row fpf_apb apb_views (gate fused; key mask folded by apb.fold_mask)")
+    return (f"anthropic[pristine opt_core {commit} at {root}]: row composed of mod_pf_c384cz128 -- torch F.layer_norm / "
+            f"F.linear glue + opt_core.kernels.ln_proj.pair_bias (every call) + {core_desc}; q|k|v|g one GEMM; "
+            f"key mask {'none (all kept)' if key_mask is None else 'applied'}; weights packed once")
 
 def _acc_fwd(actual: torch.Tensor, expected: torch.Tensor) -> AccuracyFields:
     mx, rel, cos = tensor_metrics(actual, expected)
@@ -3469,7 +3569,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     d_single = conf.d_single_atom if atom else conf.d_single_token
     d_cond = conf.d_single_atom if atom else conf.d_single
     d_pair = conf.d_pair_atom if atom else conf.d_pair
-    n_head = 4 if atom else 16
+    n_head = 4 if atom else conf.tdit_n_head
 
     anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
     upstream = None
@@ -3533,6 +3633,11 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     mask = torch.rand(1, length, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
 
+    def _token_dit_train_serves(block, single, cond, pair, mask) -> bool:
+        from miniworld_engine.integrations import token_dit_train
+        with torch.enable_grad():
+            return token_dit_train.serves(block, single, cond, pair, mask)
+
     def token_dit_refusal(block) -> str | None:
         """None when `integrations.token_dit.serves()` takes this call (the fused H100 token
         runner), else why not, named from the conditions `serves()` checks. Nested: the CPU
@@ -3550,8 +3655,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         if att.use_qk_norm and not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
             reasons.append("use_qk_norm (the fused step's QK-norm pass is B200-only)")
         widths = (single.shape[-1], att.n_head, cond.shape[-1], pair.shape[-1])
-        if widths != (768, 16, 384, 128):
-            reasons.append(f"widths d/heads/cond/pair={widths}, runner serves (768, 16, 384, 128)")
+        if (widths[1], widths[0]) not in token_dit.LAYOUTS or widths[2:] != (384, 128):
+            reasons.append(f"widths d/heads/cond/pair={widths}, runner serves (heads, d) in {token_dit.LAYOUTS}, cond 384, pair 128")
         on_b200 = single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)
         if single.shape[2] % 128 and not on_b200:
             reasons.append(f"L={single.shape[2]} not a multiple of 128 (only the B200 core takes any L)")
@@ -3567,6 +3672,11 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
                                                     shared=conf.shared_cond)
     elif spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
+    elif is_train and spec.impl in (ImplementationType.MINIWORLD, ImplementationType.TRITON) and _token_dit_train_serves(
+            model.layers[0], single, cond, pair, mask):
+        execution_path = (
+            "modules.dit.DiTBlock -> integrations.token_dit_train.block[fused B200 training block: cuBLAS GEMMs + sm_100a "
+            "attn_fwd2 / attn_dkv / attn_dqb + CUDA row kernels (token_dit_train_rows.cu), one opaque op forward and backward]")
     elif spec.impl in (ImplementationType.MINIWORLD, ImplementationType.TRITON):   # both dispatch to the fused runner
         why = token_dit_refusal(model.layers[0])
         execution_path = (

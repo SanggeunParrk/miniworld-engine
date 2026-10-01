@@ -49,6 +49,8 @@ WEIGHTS = (
     "transition.expand_b.weight",
     "transition.squeeze.weight",
 )
+#: (heads, d_single) layouts the fused step serves: 16 x 48 everywhere; 24 x 32, 12 x 64 and 16 x 64 (d 1024) on B200 (bf16)
+LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
 #: the QK-norm weights, appended to WEIGHTS when the block has use_qk_norm
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
 _TUNING: dict = {}
@@ -69,14 +71,10 @@ def serves(module, single, cond, pair, compute_dtype=None):
         return False
     if compute_dtype is not None and compute_dtype != single.dtype:
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != 768 or single.shape[2] < 8:
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[2] < 8:
         return False
-    if (
-        a.n_head,
-        cond.shape[-1],
-        pair.shape[-1],
-        module.transition.expand_a.weight.shape[0],
-    ) != (16, 384, 128, 1536):
+    d = single.shape[-1]
+    if (a.n_head, d) not in LAYOUTS or (cond.shape[-1], pair.shape[-1], module.transition.expand_a.weight.shape[0]) != (384, 128, 2 * d):
         return False
     # One conditioning shared by the samples (a sampling step: L table rows) or one per sample (S L rows); the runner
     # takes either (FusedTokenDiT._cond). Anything else does not describe these samples.
@@ -94,14 +92,16 @@ def serves(module, single, cond, pair, compute_dtype=None):
     cap = torch.cuda.get_device_capability(single.device)
     if a.use_qk_norm and not (cap == (10, 0) and _cuda_rows()):
         return False                         # the QK-norm pass is a CUDA row kernel (B200)
+    if (a.n_head, d) != (16, 768) and not (cap == (10, 0) and _cuda_rows()):
+        return False                         # the other head layouts: B200's CUDA rows and sm_100a core only
     if cap == (10, 0):
         # any length, through the sm_100a core (a length the Triton gated core cannot tile needs it)
-        if single.shape[2] % 128 == 0:
+        if single.shape[2] % 128 == 0 and (a.n_head, d) == (16, 768):
             return True
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
         idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
-        return sm100.inference_core_supported(single.dtype, _pad8(single.shape[2]), 768, 16, idx)
-    return cap == (9, 0) and single.shape[2] % 128 == 0
+        return sm100.inference_core_supported(single.dtype, _pad8(single.shape[2]), d, a.n_head, idx)
+    return cap == (9, 0) and single.shape[2] % 128 == 0 and (a.n_head, d) == (16, 768)
 
 
 def _pad8(L: int) -> int:
@@ -121,7 +121,7 @@ def _cuda_rows() -> bool:
         return False
 
 
-def _fake(single, cond, pair, mask, weights, qk, eq, ek):
+def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads):
     return torch.empty_like(single)
 
 
@@ -135,6 +135,7 @@ def _infer(
     qk: bool,
     eq: float,
     ek: float,
+    heads: int,
 ) -> torch.Tensor:
     from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
         FusedTokenDiT,
@@ -152,7 +153,7 @@ def _infer(
             setattr(node, names[-1], weight)
         block.attention.use_qk_norm = qk
         block.attention.qk_eps = (eq, ek) if qk else None
-        block.attention.n_head = 16
+        block.attention.n_head = heads
         return FusedTokenDiT([block], dtype=single.dtype)
 
     with torch.cuda.device(single.device):
@@ -161,7 +162,7 @@ def _infer(
         # call, more than the block's step at L384): reuse the pack while every weight's (pointer, version) is the same
         # -- an in-place update bumps ``_version`` and misses -- also inside a CUDA-graph capture, whose replays then
         # read the pack made before it. A pack built during a capture lives in the graph's pool and is not cached.
-        wkey = (single.dtype, qk, eq, ek, *((w.data_ptr(), w._version) for w in weights))
+        wkey = (single.dtype, qk, eq, ek, heads, *((w.data_ptr(), w._version) for w in weights))
         runner = _RUNNERS.get(wkey)
         if runner is None:
             runner = build()
@@ -212,4 +213,4 @@ def update(module, single, cond, pair, mask):
     names = WEIGHTS + (QK_WEIGHTS if qk else ())
     eq = float(a.norm_query.effective_eps(single.dtype)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(single.dtype)) if qk else 0.0
-    return _infer(single.contiguous(), cond, pair, mask, [module.get_parameter(name) for name in names], qk, eq, ek)
+    return _infer(single.contiguous(), cond, pair, mask, [module.get_parameter(name) for name in names], qk, eq, ek, int(a.n_head))

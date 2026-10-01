@@ -2,7 +2,9 @@
 
 Kernel-level status of the token DiT block (AF3 Alg. 23: AdaLN + AugmentedAttention with pair bias + conditioned SwiGLU
 transition; d_single 768, d_cond 384, d_pair 128, 16 heads x 48, transition n = 2) on B200; the module-level summary is in
-[b200.md](../b200.md). Columns are (Length, Dimension, dtype) from the shape registry (`token_single`, d_hidden 768).
+[b200.md](../b200.md). Columns are (Length, Dimension, dtype) from the shape registry (`token_single`, d_hidden 768). The
+same paths also serve three other head layouts in bf16 -- 24 x 32 and 12 x 64 at d_single 768, 16 x 64 at d_single 1024 --
+described in "Head layouts" below; everything else on this page is the 16 x 48 registry row.
 
 Summary (2026-09-30). Inference and training, bf16 and fp32 (fp32 = TF32 tensor cores with fp32 softmax, residual and
 LayerNorm), QK-norm on or off; inference at any L (L128-768 tested and measured), training at L % 128 == 0 (measured at
@@ -10,6 +12,11 @@ L384 / L768, A = 48). Against the fastest other implementation (`bench.py`): inf
 1.02-1.29x (with QK-norm, which Anthropic lacks, 1.7-2.9x over PyTorch compiled); training over PyTorch compiled bf16
 1.65-2.17x, fp32 1.53-1.83x. Time-roofline SoL of the step: inference 16-39 % bf16 / 19-43 % fp32 (small L is latency),
 training 51-52 % bf16 / 53-57 % fp32 (cuBLAS at its power-capped 58-61 %, the attention at 14-47 %).
+
+Head layouts (2026-10-01). 24 x 32, 12 x 64 (d 768) and 16 x 64 (d 1024) run the same two paths in bf16, inference and
+training, built from the same kernels with the head count and width as compile-time flags; 16 x 48 is unchanged. Inference
+leads Anthropic by 1.30-1.56x and training (CUDA graph on) PyTorch compiled by 1.20-2.73x at L256-768. fp32 stays 16 x 48
+only.
 
 On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, no quack -- on two paths that
 `modules/dit` dispatches to:
@@ -451,6 +458,95 @@ What bounds the step:
 of the group below 70 % SoL; ✓ would need every kernel of the group at 70 % or more; ✗ = slower than another implementation
 (none); — = not measured (training: L384 / L768 only).
 
+## Head layouts (2026-10-01)
+
+| heads x head dim | d_single | inference bf16 | inference fp32 | training bf16 | training fp32 |
+|---|---|---|---|---|---|
+| 16 x 48 (registry row) | 768 | ✓ | ✓ | ✓ | ✓ |
+| 24 x 32 | 768 | ✓ | module path | ✓ | module path |
+| 12 x 64 | 768 | ✓ | module path | ✓ | module path |
+| 16 x 64 | 1024 | ✓ | module path | ✓ | module path |
+
+d_cond 384, d_pair 128 and transition n = 2 in every layout; the transition and the projections scale with d_single.
+`integrations/token_dit.py` and `integrations/token_dit_train.py` list the layouts as `LAYOUTS` ((heads, d_single) pairs);
+`serves()` takes a layout from the block's `n_head` and the input width, and the fp32 path stays 16 x 48 (the TF32 kernels'
+tiles are built around 48-wide rows: see T1'-T3').
+
+How each piece takes a layout:
+- **Attention cores** (`attn_inf`, `attn_fwd2`, `attn_dkv`, `attn_dqb`): one cubin per layout, built with `-DNHEAD=<heads>
+  -DDHP=<head dim> -DRSQDV=<1 / sqrt(head dim)>` (`sm100._tdit_defs`; no flags for 16 x 48, so its cubins are the same as
+  before). The head width sets the K steps of every MMA (DH / 16), the q / k / v / dO boxes (DH columns, 128-B rows padded
+  for the swizzle) and the fp32 output staging: 48 = a 32-column box in the 128-B swizzle + a 16-column box in the 64-B
+  swizzle, 32 = the 32-column box alone, 64 = two 32-column halves through the same 128-B staging buffer in turn. TMEM:
+  dkv holds dK at 384 and dV at 384 + DH (DH 64 fills the 512 columns); dqb keeps 3 dQ buffers at 320 + DH b (DH 64: exactly
+  512) and, at DH 64, 2 K slots instead of 3 (the wider dQ staging). `sm100.forward / backward(..., heads, dh)` and
+  `GatedInferenceCore(idx, dtype, heads, dh)` take the layout.
+- **Inference rows** (`token_dit_rows.cu`): the row kernels take the width at run time (192 threads at 768, 256 at 1024);
+  `qknorm_rows(qk, wq, wk, eq, ek, d)` is templated on (d, head dim).
+- **Training rows** (`token_dit_train_rows.cu`): one extension per layout (`train.ext(d, hd)`, `-DTD_D -DTD_HD`): the per-head
+  sums of `qknorm`, `gate_o_bwd` and `qknorm_bwd` run over HD / 4 threads, and the saved q / k RMS statistics are
+  [M, 2 x heads].
+
+Fixed on the way: `attn_dkv` and `attn_dqb` cleared their TMEM accumulators at start for the 48-wide case only (96 dK / dV
+columns, 3 x 48 dQ columns). TMEM is not cleared between kernels, so at DH 64 the last 32 dV columns (and part of the dQ
+buffers) started each CTA's first work item from what the previous kernel left there. The attention tests alone passed;
+the block's gradients depended on which kernel ran before (to_value.weight 0.13 relative error against 0.011 for the bf16
+PyTorch block, and not with a synchronize after every call). The clears now cover 2 DH and 3 DH columns; the other widths
+were already covered.
+
+Tests: `tests/numerics/test_tdit_heads_sm100_gpu.py` (every layout's training forward / backward at L128 / 384 and gated
+inference core at L128 / 200 / 384 against fp64) and `tests/integrations/test_b200_token_dit_layouts_gpu.py` (the fused
+inference step against the PyTorch block at S L = 5 x 384, 4 x 200, 3 x 333, shared / per-sample conditioning, QK-norm,
+key mask, CUDA-graph replay; the fused training block against the fp32 block at L128 / 384, QK-norm on / off, every
+gradient within 1.3x the bf16 PyTorch block's error).
+
+Measurements (2026-10-01, `benchmarks/runners/bench.py target=dit level=module +tdit_n_head=<heads>
+d_single_token=<d>`, one DiTBlock, no key mask, compiled; one GPU through `gpuq`, every row of the table from one run;
+script `scratch/apb/tdit_layouts.sh` on the B200 host). Inference: S = 5, one conditioning shared by the samples, CUDA
+graph; Anthropic `compile=false`. Output error against the fp32 IEEE PyTorch block: ours 3.3-3.6e-3, Anthropic 3.4e-3,
+bf16 PyTorch 4.2e-3, in every layout.
+
+Inference, bf16, ms (× = ours against the faster of Anthropic and PyTorch compiled):
+
+| layout | (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × |
+|---|---|---|---|---|---|
+| 16 x 48 | (256, 768, bf16) | 0.125 | 0.105 | **0.065** | 1.61 |
+| 16 x 48 | (512, 768, bf16) | 0.223 | 0.156 | **0.100** | 1.55 |
+| 16 x 48 | (768, 768, bf16) | 0.372 | 0.209 | **0.121** | 1.73 |
+| 24 x 32 | (256, 768, bf16) | 0.135 | 0.102 | **0.065** | 1.56 |
+| 24 x 32 | (512, 768, bf16) | 0.262 | 0.151 | **0.100** | 1.51 |
+| 24 x 32 | (768, 768, bf16) | 0.448 | 0.203 | **0.133** | 1.52 |
+| 12 x 64 | (256, 768, bf16) | 0.121 | 0.098 | **0.066** | 1.50 |
+| 12 x 64 | (512, 768, bf16) | 0.211 | 0.139 | **0.090** | 1.55 |
+| 12 x 64 | (768, 768, bf16) | 0.334 | 0.170 | **0.123** | 1.38 |
+| 16 x 64 | (256, 1024, bf16) | 0.135 | 0.108 | **0.076** | 1.43 |
+| 16 x 64 | (512, 1024, bf16) | 0.248 | 0.160 | **0.123** | 1.30 |
+| 16 x 64 | (768, 1024, bf16) | 0.416 | 0.225 | **0.158** | 1.43 |
+
+Training, bf16, A = 48, CUDA graph off / on, ms (× = graph on; Anthropic has no backward):
+
+| layout | (Length, Dimension, dtype) | PyTorch compiled | ours | × |
+|---|---|---|---|---|
+| 16 x 48 | (256, 768, bf16) | 1.832 / 1.605 | 1.941 / **1.210** | 1.33 |
+| 16 x 48 | (512, 768, bf16) | 4.383 / 4.170 | 2.487 / **2.381** | 1.75 |
+| 16 x 48 | (768, 768, bf16) | 8.532 / 8.310 | 3.891 / **3.789** | 2.19 |
+| 24 x 32 | (256, 768, bf16) | 2.137 / 1.914 | 1.732 / **1.243** | 1.54 |
+| 24 x 32 | (512, 768, bf16) | 5.538 / 5.319 | 2.676 / **2.504** | 2.12 |
+| 24 x 32 | (768, 768, bf16) | 11.320 / 11.093 | 4.219 / **4.062** | 2.73 |
+| 12 x 64 | (256, 768, bf16) | 1.691 / 1.458 | 1.736 / **1.217** | 1.20 |
+| 12 x 64 | (512, 768, bf16) | 3.832 / 3.612 | 2.477 / **2.345** | 1.54 |
+| 12 x 64 | (768, 768, bf16) | 7.164 / 6.934 | 3.686 / **3.603** | 1.92 |
+| 16 x 64 | (256, 1024, bf16) | 2.180 / 1.957 | 1.774 / **1.624** | 1.20 |
+| 16 x 64 | (512, 1024, bf16) | 5.052 / 4.833 | 3.288 / **3.267** | 1.48 |
+| 16 x 64 | (768, 1024, bf16) | 9.503 / 9.289 | 5.139 / **4.997** | 1.86 |
+
+The 16 x 48 rows reproduce the tables above (training L768 3.79 against 3.85 ms). At d 768, 24 x 32 costs ours 10 %
+(inference) and 7 % (training) more than 16 x 48 at L768 (inference the same, training 3-5 % more at L256-512), while
+PyTorch compiled slows down by 20 / 33 % at L768, hence the larger ×. 12 x 64 is ours' fastest d-768 layout in training at
+L512-768 (2.35 / 3.60 ms). Where the 24 x 32 difference goes is not profiled per kernel: the SoL
+tables above are 16 x 48 only. With CUDA graphs off, ours trails PyTorch compiled at L256 in 16 x 48 (0.94x) and 12 x 64
+(0.97x); host time, as in the 16 x 48 tables.
+
 ## What was tried and not kept
 
 | attempt | result |
@@ -467,6 +563,7 @@ of the group below 70 % SoL; ✓ would need every kernel of the group at 70 % or
 
 ## Limits and next
 
+- Head layouts other than 16 x 48: bf16 only (fp32 keeps the module path), and no per-kernel SoL yet.
 - A DiTBlock call sees one block, so the pair bias and the cond LayerNorm are recomputed per block; the research stack
   runner (branch `b200/token-dit`) hoisted them for the whole stack (training 1.62 / 3.56 ms per block there, with Triton
   and quack).

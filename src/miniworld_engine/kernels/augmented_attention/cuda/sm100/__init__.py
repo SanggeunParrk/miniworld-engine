@@ -153,16 +153,31 @@ def _rs(t: torch.Tensor) -> int:
     return t.stride(0) * t.element_size()
 
 
-def forward(q2, k2, v2, bias_hll, A, L):
-    """q2, k2, v2 [A L, 768] bf16 contiguous, bias [16, L, L] bf16 (natural units) -> O [A L, 768] fp32, LSE [A, 16, L] (log2)."""
+#: token DiT head layouts the bf16 kernels take: (heads, head dim) -> d = heads x head dim (16 x 48 is the default build)
+TDIT_HEADS = ((16, 48), (24, 32), (12, 64), (16, 64))
+
+
+def _tdit_defs(heads: int = H, dh: int = D):
+    """-D flags for a token DiT head layout (none for the default 16 x 48)."""
+    if (heads, dh) == (H, D):
+        return ()
+    assert (heads, dh) in TDIT_HEADS, (heads, dh)
+    return (f"NHEAD={heads}", f"DHP={dh}", f"RSQDV={dh ** -0.5!r}f")
+
+
+def forward(q2, k2, v2, bias_hll, A, L, heads: int = H, dh: int = D):
+    """q2, k2, v2 [A L, heads dh] bf16 rows, bias [heads, L, L] bf16 (natural units) -> O [A L, heads dh] fp32, LSE [A, heads, L]
+    (log2). Default 16 x 48 (d 768)."""
     dev = _index(q2)
-    O = torch.empty(A * L, H * D, device=q2.device, dtype=torch.float32)
-    LSE = torch.empty(A, H, L, device=q2.device, dtype=torch.float32)
-    maps = (_tm(q2, [H * D, A * L], _rs(q2), [D, 128]), _tm(k2, [H * D, A * L], _rs(k2), [D, 64]),
-            _tm(v2, [H * D, A * L], _rs(v2), [D, 64]), _tm(bias_hll, [L, H * L], L * 2, [64, 128]),
-            _tm(O, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, dtype="f32"),
-            _tm(O, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, dtype="f32"))
-    _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev)(_grid((A // 2) * H * (L // 128), dev), (384, 1, 1), *maps, O, LSE, int(L), int(A))
+    W = heads * dh
+    O = torch.empty(A * L, W, device=q2.device, dtype=torch.float32)
+    LSE = torch.empty(A, heads, L, device=q2.device, dtype=torch.float32)
+    maps = (_tm(q2, [W, A * L], _rs(q2), [dh, 128]), _tm(k2, [W, A * L], _rs(k2), [dh, 64]),
+            _tm(v2, [W, A * L], _rs(v2), [dh, 64]), _tm(bias_hll, [L, heads * L], L * 2, [64, 128]),
+            _tm(O, [W, A * L], W * 4, [32, 128], swizzle=128, dtype="f32"),
+            _tm(O, [W, A * L], W * 4, [16, 128], swizzle=64, dtype="f32"))
+    _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=_tdit_defs(heads, dh))(
+        _grid((A // 2) * heads * (L // 128), dev), (384, 1, 1), *maps, O, LSE, int(L), int(A))
     return O, LSE
 
 
@@ -209,24 +224,30 @@ def backward_tf32(q, k, v, do, bias_hll, LSE, Dd, A, L):
     return DQ, DK, DV, DB
 
 
-def backward(q2, k2, v2, dob, bias_hll, LSE, Dd, A, L):
-    """dQ, dK, dV [A L, 768] fp32 and dbias [16, L, L] fp32. dob [A L, 768] bf16, Dd = rowsum(dO O) [A, 16, L] fp32."""
+def backward(q2, k2, v2, dob, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int = D):
+    """dQ, dK, dV [A L, heads dh] fp32 and dbias [heads, L, L] fp32. dob [A L, heads dh] bf16, Dd = rowsum(dO O) [A, heads, L]
+    fp32. Default 16 x 48 (d 768)."""
     dev = _index(q2)
+    W = heads * dh
     bias_t = bias_transpose(bias_hll)
-    DQ = torch.empty(A * L, H * D, device=q2.device, dtype=torch.float32)
-    DB = torch.empty(H, L, L, device=q2.device, dtype=torch.float32)
+    DQ = torch.empty(A * L, W, device=q2.device, dtype=torch.float32)
+    DB = torch.empty(heads, L, L, device=q2.device, dtype=torch.float32)
     DK, DV = torch.empty_like(DQ), torch.empty_like(DQ)
     f32 = dict(dtype="f32")
-    dkv_maps = (_tm(q2, [H * D, A * L], _rs(q2), [D, 64]), _tm(k2, [H * D, A * L], _rs(k2), [D, 128]),
-                _tm(v2, [H * D, A * L], _rs(v2), [D, 128]), _tm(dob, [H * D, A * L], _rs(dob), [D, 64]),
-                _tm(bias_t, [L, H * L], L * 2, [64, 128]),
-                _tm(DK, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, **f32), _tm(DK, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, **f32),
-                _tm(DV, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, **f32), _tm(DV, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, **f32))
-    dqb_maps = (*(_tm(t, [H * D, A * L], _rs(t), [D, 128]) for t in (q2, k2, v2, dob)), _tm(bias_hll, [L, H * L], L * 2, [64, 128]),
-                _tm(DQ, [H * D, A * L], H * D * 4, [32, 128], swizzle=128, **f32), _tm(DQ, [H * D, A * L], H * D * 4, [16, 128], swizzle=64, **f32))
+    dims = [W, A * L]
+    dkv_maps = (_tm(q2, dims, _rs(q2), [dh, 64]), _tm(k2, dims, _rs(k2), [dh, 128]),
+                _tm(v2, dims, _rs(v2), [dh, 128]), _tm(dob, dims, _rs(dob), [dh, 64]),
+                _tm(bias_t, [L, heads * L], L * 2, [64, 128]),
+                _tm(DK, dims, W * 4, [32, 128], swizzle=128, **f32), _tm(DK, dims, W * 4, [16, 128], swizzle=64, **f32),
+                _tm(DV, dims, W * 4, [32, 128], swizzle=128, **f32), _tm(DV, dims, W * 4, [16, 128], swizzle=64, **f32))
+    dqb_maps = (*(_tm(t, dims, _rs(t), [dh, 128]) for t in (q2, k2, v2, dob)), _tm(bias_hll, [L, heads * L], L * 2, [64, 128]),
+                _tm(DQ, dims, W * 4, [32, 128], swizzle=128, **f32), _tm(DQ, dims, W * 4, [16, 128], swizzle=64, **f32))
+    defs = _tdit_defs(heads, dh)
     # attn_dkv zero-fills dQ on the way; attn_dqb then adds one partial per 128-key chunk.
-    _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev)(_grid(A * H * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd, DK, DV, DQ, int(L), int(A))
-    _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev)(_grid(H * (L // 128) * (L // 128), dev), (384, 1, 1), *dqb_maps, LSE, Dd, DQ, DB, int(L), int(A))
+    _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=defs)(_grid(A * heads * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd,
+                                                                  DK, DV, DQ, int(L), int(A))
+    _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, defs=defs)(_grid(heads * (L // 128) * (L // 128), dev), (384, 1, 1), *dqb_maps,
+                                                                  LSE, Dd, DQ, DB, int(L), int(A))
     return DQ, DK, DV, DB
 
 
@@ -293,10 +314,12 @@ class GatedInferenceCore:
 
     Bindings (TMA descriptors) are cached per buffer."""
 
-    def __init__(self, device_index: int, dtype: torch.dtype = torch.bfloat16):
+    def __init__(self, device_index: int, dtype: torch.dtype = torch.bfloat16, heads: int = H, dh: int = D):
         self.fp32 = dtype is torch.float32
+        self.heads, self.dh = heads, dh
+        assert not self.fp32 or (heads, dh) == (H, D), "the TF32 core is 16 x 48"
         self.k = (_sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", device_index) if self.fp32
-                  else _sm100_kernel("attn_inf", "augattn_inf_sm100", device_index))
+                  else _sm100_kernel("attn_inf", "augattn_inf_sm100", device_index, defs=_tdit_defs(heads, dh)))
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs: dict = {}
 
@@ -306,9 +329,10 @@ class GatedInferenceCore:
         M, W = qkvg.shape
         es = qkvg.element_size()
         rs = W * es
-        bv = bias[block * H:(block + 1) * H]
-        grid = (min(self.nsm, ((S + 1) // 2) * H * -(-L // 128)), 1, 1)
-        bias_map = lambda box, **kw: _tm(bv, [L, L, H], [L * es, L * L * es], [*box, 1], **kw)  # noqa: E731
+        Hh = self.heads
+        bv = bias[block * Hh:(block + 1) * Hh]
+        grid = (min(self.nsm, ((S + 1) // 2) * Hh * -(-L // 128)), 1, 1)
+        bias_map = lambda box, **kw: _tm(bv, [L, L, Hh], [L * es, L * L * es], [*box, 1], **kw)  # noqa: E731
         if self.fp32:
             Dm = W // 3
             q, k, g = (qkvg[:, i * Dm:(i + 1) * Dm] for i in range(3))
@@ -322,7 +346,7 @@ class GatedInferenceCore:
             def run():
                 self.k(grid, (384, 1, 1), *maps, int(L), int(S))
         else:
-            Dm, DH = W // 4, W // 4 // H
+            Dm, DH = W // 4, self.dh
             q, k, v, g = (qkvg[:, i * Dm:(i + 1) * Dm] for i in range(4))
             t3 = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [DH, rows, 1])  # noqa: E731
             maps = (t3(q, 128), t3(k, 64), t3(v, 64), bias_map([64, 128]), t3(g, 128))
@@ -345,12 +369,144 @@ class GatedInferenceCore:
         return qkvg
 
 
+# --------------------------------------------------------------------------------------------------- AttentionPairBias
+# One sample, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 (-DDHP=16) or 16 x 24, or d_single 512 as 16 x 32: the same kernels built with -DQPAIR=1 (a work item pairs two 128-query
+# tiles of a head, sharing its k / v blocks; attn_inf, attn_fwd2), -DNHEAD (attn_dkv, attn_dqb: A = 1 needs no other change) and,
+# for 16 x 24, -DDHP=32: each head's rows are 32 wide in memory and in the MMAs, the caller's projection writing its 24 channels
+# and 8 zeros (so the pads of q, k, v, dO, and with them of O, dQ, dK, dV, are exactly 0); -DRSQDV is 1 / sqrt(24).
+# (heads, d_single) -> (head width in memory, real head dim); 16 x 32 at d_single 512
+APB_GEOMETRY = {(8, 384): (48, 48), (12, 384): (32, 32), (16, 384): (32, 24), (24, 384): (16, 16), (16, 512): (32, 32)}
+
+
+def apb_width(heads: int, d: int = 384) -> int:
+    """Row width of q / k / v / g / O (d_single, or 512 for 16 x 24 padded to 32)."""
+    return heads * APB_GEOMETRY[(heads, d)][0]
+
+
+def _apb_defs(heads: int, qpair: bool, d: int = 384):
+    dhp, dreal = APB_GEOMETRY[(heads, d)]
+    defs = (("QPAIR=1",) if qpair else ()) + (f"NHEAD={heads}",)
+    if dhp != 48 or dreal != 48:
+        defs += (f"DHP={dhp}", f"RSQDV={dreal ** -0.5!r}f")
+    return defs
+
+
+_apb_runs: dict = {}
+
+
+def _apb_bound(key, build):
+    """Prepared launches cached by the buffers' addresses (and L): in steady state the caching allocator hands the same
+    addresses back every step, so the TMA descriptors are encoded once. The descriptors hold no tensors: a key match means
+    the current tensors sit at exactly those addresses."""
+    run = _apb_runs.get(key)
+    if run is None:
+        if len(_apb_runs) >= 64:
+            _apb_runs.clear()
+        run = _apb_runs[key] = build()
+    return run
+
+
+def _tmn(t, dims, stride_bytes, box, **kw):
+    m = _tm(t, dims, stride_bytes, box, **kw)
+    m.keep = None
+    return m
+
+
+class ApbInferenceCore:
+    """AttentionPairBias's inference core: ``qkvg`` [L, 4 W] bf16 (q | k | v | g, W = ``apb_width(heads)``, logits pre-scaled into
+    exp2 units), the head-major bias [heads, L, L] bf16 (exp2 units, masked keys very negative); sigmoid(g) * o written over q."""
+
+    def __init__(self, device_index: int, heads: int = 8, d: int = 384):
+        self.heads, self.d, self.dhp = heads, d, APB_GEOMETRY[(heads, d)][0]
+        self.k = _sm100_kernel("attn_inf", "augattn_inf_sm100", device_index, defs=_apb_defs(heads, True, d))
+        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+
+    def _bind(self, qkvg, bias, L):
+        W, es, H_, dh = qkvg.shape[1], qkvg.element_size(), self.heads, self.dhp
+        Dm = W // 4
+        q, k, v, g = (qkvg[:, i * Dm:(i + 1) * Dm] for i in range(4))
+        t3 = lambda t, rows: _tmn(t, [Dm, L, 1], [W * es, L * W * es], [dh, rows, 1])  # noqa: E731
+        mq, mk, mv, mg = t3(q, 128), t3(k, 64), t3(v, 64), t3(g, 128)
+        mb = _tmn(bias, [L, L, H_], [L * es, L * L * es], [64, 128, 1])
+        grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * H_), 1, 1)
+        return self.k.bind(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), 1)
+
+    def __call__(self, qkvg, bias):
+        L = qkvg.shape[0]
+        assert qkvg.shape[1] == 4 * apb_width(self.heads, self.d) and bias.shape[0] == self.heads
+        _apb_bound(("inf", self.heads, self.d, qkvg.device.index, qkvg.data_ptr(), bias.data_ptr(), L), lambda: self._bind(qkvg, bias, L))()
+        return qkvg
+
+
+def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
+    """AttentionPairBias training forward (``attn_fwd2 -DQPAIR``): q, k, v [L, W] bf16 rows (W = ``apb_width(heads)``, column
+    views welcome), bias [heads, L, L] bf16 natural units -> O [L, W] fp32, LSE [heads, L] (log2)."""
+    dev = _index(q)
+    dh, W = APB_GEOMETRY[(heads, d)][0], apb_width(heads, d)
+    O = torch.empty(L, W, device=q.device, dtype=torch.float32)
+    LSE = torch.empty(heads, L, device=q.device, dtype=torch.float32)
+
+    def build():
+        maps = (_tmn(q, [W, L], _rs(q), [dh, 128]), _tmn(k, [W, L], _rs(k), [dh, 64]), _tmn(v, [W, L], _rs(v), [dh, 64]),
+                _tmn(bias, [L, heads * L], L * 2, [64, 128]),
+                _tmn(O, [W, L], W * 4, [32, 128], swizzle=128, dtype="f32"), _tmn(O, [W, L], W * 4, [16, 128], swizzle=64, dtype="f32"))
+        grid = _grid(((L // 128 + 1) // 2) * heads, dev)
+        return _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=_apb_defs(heads, True, d)).bind(
+            grid, (384, 1, 1), *maps, O, LSE, int(L), 1)
+
+    key = ("fwd", heads, d, dev, L, *(t.data_ptr() for t in (q, k, v, bias, O, LSE)), _rs(q), _rs(k), _rs(v))
+    _apb_bound(key, build)()
+    return O, LSE
+
+
+def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
+    """AttentionPairBias training backward (``attn_dkv``, ``attn_dqb`` with -DNHEAD, A = 1): q, k, v, dob [L, W] bf16 rows, bias
+    [heads, L, L] bf16 as given to ``apb_forward``, LSE from it, Dd = rowsum(dO O) [heads, L] fp32 -> dQ, dK, dV [L, W] fp32 and
+    dbias [heads, L, L] fp32. dQ comes as L / 128 key-chunk partials [L / 128, L, W] (``attn_dqb -DDQPART=1`` stores each
+    chunk's slice instead of reduce-adding into one buffer, so the sum -- the caller's, in chunk order -- is deterministic)."""
+    dev = _index(q)
+    dh, W = APB_GEOMETRY[(heads, d)][0], apb_width(heads, d)
+    nch = L // 128
+    bias_t = torch.empty_like(bias)
+    DQ = torch.empty(nch, L, W, device=q.device, dtype=torch.float32)
+    DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
+    DK, DV = (torch.empty(L, W, device=q.device, dtype=torch.float32) for _ in range(2))
+
+    def build():
+        f32 = dict(dtype="f32")
+        dims = [W, L]
+        dkv_maps = (_tmn(q, dims, _rs(q), [dh, 64]), _tmn(k, dims, _rs(k), [dh, 128]), _tmn(v, dims, _rs(v), [dh, 128]),
+                    _tmn(dob, dims, _rs(dob), [dh, 64]), _tmn(bias_t, [L, heads * L], L * 2, [64, 128]),
+                    _tmn(DK, dims, W * 4, [32, 128], swizzle=128, **f32), _tmn(DK, dims, W * 4, [16, 128], swizzle=64, **f32),
+                    _tmn(DV, dims, W * 4, [32, 128], swizzle=128, **f32), _tmn(DV, dims, W * 4, [16, 128], swizzle=64, **f32))
+        dq_dims = [W, nch * L]
+        dqb_maps = (*(_tmn(t, dims, _rs(t), [dh, 128]) for t in (q, k, v, dob)), _tmn(bias, [L, heads * L], L * 2, [64, 128]),
+                    _tmn(DQ, dq_dims, W * 4, [32, 128], swizzle=128, **f32), _tmn(DQ, dq_dims, W * 4, [16, 128], swizzle=64, **f32))
+        defs = _apb_defs(heads, False, d)
+        tr = _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0).bind((L // 32, L // 32, heads), (32, 8, 1), bias, bias_t, int(L))
+        dkv = _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=defs).bind(
+            _grid(heads * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd, DK, DV, None, int(L), 1)    # no dQ zero fill
+        dqb = _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, defs=defs + ("DQPART=1",)).bind(
+            _grid(heads * (L // 128) * (L // 128), dev), (384, 1, 1), *dqb_maps, LSE, Dd, DQ, DB, int(L), 1)
+
+        def run():
+            tr(); dkv(); dqb()
+        run.keep = (tr, dkv, dqb)
+        return run
+
+    key = ("bwd", heads, d, dev, L, *(t.data_ptr() for t in (q, k, v, dob, bias, LSE, Dd, bias_t, DQ, DB, DK, DV)), _rs(q), _rs(k), _rs(v),
+           _rs(dob))
+    _apb_bound(key, build)()
+    return DQ, DK, DV, DB
+
+
 def inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
-    """bf16 or fp32 (TF32 MMA), d 768 as 16 x 48, L a multiple of 8 (the fused step pads other lengths to one), sm_100."""
-    if os.environ.get("MINIWORLD_AUGATTN_BF16_SM100", "1") == "0":
+    """bf16 at a head layout of TDIT_HEADS (d = heads x head dim), or fp32 (TF32 MMA) at 16 x 48; L a multiple of 8 (the fused
+    step pads other lengths to one), sm_100."""
+    if os.environ.get("MINIWORLD_AUGATTN_BF16_SM100", "1") == "0" or d % h:
         return False
-    return (dtype in (torch.bfloat16, torch.float32) and d == H * D and h == H and L % 8 == 0 and L >= 8
-            and _is_blackwell(device_index))
+    ok = (h, d // h) == (H, D) if dtype is torch.float32 else dtype is torch.bfloat16 and (h, d // h) in TDIT_HEADS
+    return ok and L % 8 == 0 and L >= 8 and _is_blackwell(device_index)
 
 
-__all__ = ["GatedInferenceCore", "augmented_attention_bf16_sm100", "available", "cubin", "inference_core_supported", "supported"]
+__all__ = ["APB_GEOMETRY", "TDIT_HEADS", "ApbInferenceCore", "GatedInferenceCore", "apb_backward", "apb_forward", "apb_width", "augmented_attention_bf16_sm100", "available", "cubin", "inference_core_supported", "supported"]

@@ -25,7 +25,7 @@ using namespace s100;
 #define STA 2                            // q | dO | V ring (48 KB slots): released as soon as both S / dP MMAs of the step are done
 #endif
 #ifndef STK
-#define STK 3                            // K ring (16 KB slots): released after the step's dQ MMAs
+#define STK (DHP == 64 ? 2 : 3)          // K ring (16 KB slots): released after the step's dQ MMAs (DH 64: 2, for the wider dQ staging)
 #endif
 #ifndef BSL
 #define BSL 1                            // bias item slots (1 frees 32 KB for a third stage)
@@ -39,18 +39,31 @@ using namespace s100;
 #ifndef ROTK
 #define ROTK 1                           // sample offset per key chunk (0: A / chunks, spread evenly); small keeps the working set in L2
 #endif
-constexpr int BN = 64, KC = 128, DH = 48, QM = 128, DM = 768;
+#ifndef NHEAD
+#define NHEAD 16                         // heads (AttentionPairBias: 8, rows NHEAD * 48 wide)
+#endif
+#ifndef DQPART
+#define DQPART 0                         // 1: each key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (deterministic;
+#endif                                   // the caller adds the L / 128 slices in order) instead of reduce-added into one zeroed dQ
+#ifndef DHP
+#define DHP 48                           // head width in memory and in the MMAs: 48 (token DiT 16 x 48), 64, 32, 16; 16 x 24: 32 (the
+#endif                                   // projection pads each head's 24 channels with 8 zero ones, so q / k / v / dO pads are exactly 0)
+#ifndef RSQDV
+#define RSQDV 0.14433756729740643f       // 1 / sqrt(real head dim): 1 / sqrt 48; 1 / sqrt 24 = 0.2041241452319315f; 1 / sqrt 16 = 0.25f; 1 / sqrt 32, 1 / sqrt 64 = 0.125f
+#endif
+static_assert(DHP == 64 || DHP == 48 || DHP == 32 || DHP == 16, "head width 64, 48, 32 or 16");
+constexpr int BN = 64, KC = 128, DH = DHP, QM = 128, DM = NHEAD * DH;
 constexpr int T128 = 128 * 128;                                            // one [128 rows][128 B] tile
 constexpr int SA = 3 * T128;                                               // q | dO | V = 48 KB
 constexpr int O_A = 0, O_K = STA * SA, O_B = O_K + STK * T128, O_X = O_B + BSL * 2 * T128;   // bias: BSL item slots x ([128 q][64 keys] x 2)
-constexpr int XA = 128 * 32 * 4, XB = 128 * 16 * 4;                        // dQ staging: cols 0-31 (128-B swizzle), 32-47 (64-B swizzle)
+constexpr int XA = 128 * 32 * 4, XB = 128 * (DH == 64 ? 32 : 16) * 4;     // dQ staging: cols 0-31 (128-B swizzle), the rest
 constexpr int O_BAR = O_X + (TRED ? 2 * (XA + XB) : 0);                    // double-buffered per warpgroup
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
-constexpr uint32_t T_S = 0, T_DS = 256, T_DQ = 320;                      // dQ[b] at 320 + 48 b
-static_assert(T_DQ + NDQ * 48 <= 512, "TMEM");
+constexpr uint32_t T_S = 0, T_DS = 256, T_DQ = 320;                      // dQ[b] at 320 + DH b
+static_assert(T_DQ + NDQ * DH <= 512, "TMEM");
 constexpr uint32_t I_S = idesc_bf16(128, BN), I_DQ = idesc_bf16(128, DH, 0, 1);
-constexpr float LOG2E = 1.4426950408889634f, RSQD = 0.14433756729740643f;
+constexpr float LOG2E = 1.4426950408889634f, RSQD = RSQDV;
 
 #ifdef TRACE
 __device__ unsigned long long g_tr[12][256];   // CTA 0: 0 prod issued, 1 S(g,0) issued, 2 wg0 s_full seen, 3 wg0 S/dP loaded, 4 wg0 ds_free seen, 5 wg0 dS done, 6 wg0 epi(g-1) done, 7 dQ(g,1) issued
@@ -101,7 +114,7 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int mt = L / QM, nch = L / KC;
-  const int items = 16 * mt * nch;
+  const int items = NHEAD * mt * nch;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int ng = my_items * A;                                             // (item, sample) steps of this CTA
   auto item_of = [&](int li, int& c, int& m0, int& head) {
@@ -130,7 +143,7 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
   if (warp >= 4 && warp < 8) {                                             // the dQ buffers start at zero; every dQ MMA accumulates
     const uint32_t z[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     const uint32_t trow = tmem + ((uint32_t)(warp & 3) * 32 << 16);
-    for (int c = 0; c < NDQ * 3; ++c) tmem_st16(trow + T_DQ + c * 16, z);
+    for (int c = 0; c < NDQ * DH / 16; ++c) tmem_st16(trow + T_DQ + c * 16, z);
     tmem_wait_st();
   }
   tc_fence_before();
@@ -179,9 +192,9 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       const uint64_t dk = desc_k128(su + O_K + (g % STK) * T128 + w * BN * 128), dv = desc_k128(pa + 2 * T128 + w * BN * 128);
       if (elect_one()) {
 #pragma unroll
-        for (int ks = 0; ks < 3; ++ks) umma_ss(tmem + T_S + w * 128, dq + (uint64_t)(ks * 2), dk + (uint64_t)(ks * 2), I_S, ks > 0 ? 1u : 0u);
+        for (int ks = 0; ks < DH / 16; ++ks) umma_ss(tmem + T_S + w * 128, dq + (uint64_t)(ks * 2), dk + (uint64_t)(ks * 2), I_S, ks > 0 ? 1u : 0u);
 #pragma unroll
-        for (int ks = 0; ks < 3; ++ks) umma_ss(tmem + T_S + w * 128 + 64, ddo + (uint64_t)(ks * 2), dv + (uint64_t)(ks * 2), I_S, ks > 0 ? 1u : 0u);
+        for (int ks = 0; ks < DH / 16; ++ks) umma_ss(tmem + T_S + w * 128 + 64, ddo + (uint64_t)(ks * 2), dv + (uint64_t)(ks * 2), I_S, ks > 0 ? 1u : 0u);
         tc_commit(&B.s_full[w]);
         tc_commit(&B.emptyA[g % STA]);
       }
@@ -203,7 +216,7 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks)
-          umma_ts(tmem + T_DQ + b * 48, tmem + T_DS + w * 32 + ks * 8, dk + (uint64_t)(ks * 2048 >> 4), I_DQ, 1u);
+          umma_ts(tmem + T_DQ + b * DH, tmem + T_DS + w * 32 + ks * 8, dk + (uint64_t)(ks * 2048 >> 4), I_DQ, 1u);
         tc_commit(&B.ds_free[w]);
         tc_commit(&B.emptyK[g % STK]);
         tc_commit(&B.dq_full[b]);
@@ -229,22 +242,28 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       mbar_wait(&B.dq_full[b], (g / NDQ) & 1);
       if (w == 0 && r == 0) TR(8, g);
       tc_fence_after();
-      const int nc = w == 0 ? 32 : 16;                                     // warpgroup 0: columns 0-31, warpgroup 1: 32-47
+      // DH 48: warpgroup 0 columns 0-31 (128-B swizzle), warpgroup 1 32-47 (64-B); DH 32: 0-15 / 16-31, both 64-B; DH 16: warpgroup
+      // 0 alone (64-B)
+      // DH 64: both warpgroups 32 columns, 128-B swizzle
+      constexpr bool W48 = DH == 48, W64 = DH == 64;
+      const int nc = (W64 || (W48 && w == 0)) ? 32 : 16, c0 = (W48 || W64) ? w * 32 : w * 16;
+      const bool wide = W64 || (W48 && w == 0), active = DH > 16 || w == 0;
       uint32_t v[32];
-      if (w == 0) tmem_ld32(trow + T_DQ + b * 48, v);
-      else tmem_ld16(trow + T_DQ + b * 48 + 32, *reinterpret_cast<uint32_t(*)[16]>(v));
+      if (wide) tmem_ld32(trow + T_DQ + b * DH + c0, v);
+      else if (active) tmem_ld16(trow + T_DQ + b * DH + c0, *reinterpret_cast<uint32_t(*)[16]>(v));
       tmem_wait_ld();
-      {
+      if (active) {
         const uint32_t z[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        tmem_st16(trow + T_DQ + b * 48 + w * 32, z);
-        if (w == 0) tmem_st16(trow + T_DQ + b * 48 + 16, z);
+        tmem_st16(trow + T_DQ + b * DH + c0, z);
+        if (wide) tmem_st16(trow + T_DQ + b * DH + c0 + 16, z);
         tmem_wait_st();
       }
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.dq_free[b]);
       if (w == 0 && r == 0) TR(9, g);
-      if (TRED) {
+      if (!active) {
+      } else if (TRED) {
         const bool issuer = r == 0;
         const int xb = g & 1;
         const uint32_t xs = su + O_X + (w == 0 ? xb * XA : 2 * XA + xb * XB);
@@ -256,22 +275,27 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           if (q * 4 >= nc) break;
           const uint4 u = make_uint4(__float_as_uint(__uint_as_float(v[4 * q]) * RSQD), __float_as_uint(__uint_as_float(v[4 * q + 1]) * RSQD),
                                      __float_as_uint(__uint_as_float(v[4 * q + 2]) * RSQD), __float_as_uint(__uint_as_float(v[4 * q + 3]) * RSQD));
-          sts128(xs + (w == 0 ? sw128(r, q) : sw64(r, q)), u);
+          sts128(xs + (wide ? sw128(r, q) : sw64(r, q)), u);
         }
         fence_proxy_async();
         named_bar_sync(1 + w, 128);
         if (w == 0 && r == 0) TR(11, g);
         if (issuer) {
-          tma_reduce_add_2d(w == 0 ? &mqa : &mqb, xs, head * DH + w * 32, arow);
+          if (DQPART) tma_store_2d(wide ? &mqa : &mqb, xs, head * DH + c0, arow);
+          else tma_reduce_add_2d(wide ? &mqa : &mqb, xs, head * DH + c0, arow);
           tma_store_commit();
         }
       } else {
-        float* drow = DQ + ((size_t)arow + r) * DM + head * DH + w * 32;
+        float* drow = DQ + ((size_t)arow + r) * DM + head * DH + c0;
 #pragma unroll
         for (int k = 0; k < 8; ++k) {
           if (k * 4 >= nc) break;
-          red4(drow + 4 * k, __uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD, __uint_as_float(v[4 * k + 2]) * RSQD,
-               __uint_as_float(v[4 * k + 3]) * RSQD);
+          if (DQPART)
+            *reinterpret_cast<float4*>(drow + 4 * k) = make_float4(__uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD,
+                                                                   __uint_as_float(v[4 * k + 2]) * RSQD, __uint_as_float(v[4 * k + 3]) * RSQD);
+          else
+            red4(drow + 4 * k, __uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD, __uint_as_float(v[4 * k + 2]) * RSQD,
+                 __uint_as_float(v[4 * k + 3]) * RSQD);
         }
       }
     };
@@ -285,14 +309,14 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     if (ng > 0) { item_of(0, c, m0, head); a = samp(c, 0); }
     int nli = li, ni = i, nc_ = c, nm0 = m0, nh = head, na = a;          // the next step's position (LSE / D prefetch)
     float lse_n = 0.f, dd_n = 0.f;
-    if (ng > 0) { const size_t ri = ((size_t)a * 16 + head) * L + m0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
+    if (ng > 0) { const size_t ri = ((size_t)a * NHEAD + head) * L + m0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
     int e1r = 0, e1h = 0, e2r = 0, e2h = 0;                                // (DQ row, head) of steps g - 1 and g - 2
     static_assert(NDQ == 3, "the epilogue lag below is NDQ - 1 = 2 steps");
     for (int g = 0; g < ng; ++g) {
       const int bs = li % BSL;
       const float lse = lse_n, dd = dd_n;                                  // loaded one step ahead
       advance(nli, ni, nc_, nm0, nh, na);
-      if (g + 1 < ng) { const size_t ri = ((size_t)na * 16 + nh) * L + nm0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
+      if (g + 1 < ng) { const size_t ri = ((size_t)na * NHEAD + nh) * L + nm0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
       if (i == 0) {
 #pragma unroll
         for (int j = 0; j < BN / 2; ++j) db[j] = mk2(0.f, 0.f);
@@ -364,7 +388,7 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         for (int k = 0; k < BN / 4; ++k)
           *reinterpret_cast<float4*>(brow + 4 * k) = make_float4(lo2(db[2 * k]), hi2(db[2 * k]), lo2(db[2 * k + 1]), hi2(db[2 * k + 1]));
       }
-      e2r = e1r; e2h = e1h; e1r = a * L + m0; e1h = head;
+      e2r = e1r; e2h = e1h; e1r = (DQPART ? c * A * L : 0) + a * L + m0; e1h = head;
       advance(li, i, c, m0, head, a);
     }
     if (ng >= 2) epi(ng - 2, e2r, e2h);

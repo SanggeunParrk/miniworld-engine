@@ -39,7 +39,7 @@ def available() -> bool:
 
 
 def adaln_rows(x, ms, mb, out, L, eps=1e-5):
-    """out = LN(x) * sigmoid(ms[row % L]) + mb[row % L]; x fp32 [M, 768], ms / mb per-token tables."""
+    """out = LN(x) * sigmoid(ms[row % L]) + mb[row % L]; x fp32 [M, D] (D 768 or 1024), ms / mb per-token tables."""
     _ext().adaln_rows_cuda(x, ms, mb, out, int(L), float(eps))
 
 
@@ -74,10 +74,10 @@ def layernorm_rows(z, out, eps=1e-5):
     _ext().layernorm_rows_cuda(z, out, float(eps))
 
 
-def qknorm_rows(qk, wq, wk, eq, ek):
-    """QK-norm in place: q = qk[:, 0:768], k = qk[:, 768:1536] of every row, RMSNorm per 48-wide head times wq / wk (fp32
-    [48], any logit scale folded in), eps eq / ek."""
-    _ext().qknorm_rows_cuda(qk, wq, wk, float(eq), float(ek))
+def qknorm_rows(qk, wq, wk, eq, ek, d=768):
+    """QK-norm in place: q = qk[:, 0:d], k = qk[:, d:2d] of every row, RMSNorm per head (head dim = len(wq): 48, 32 or 64 at
+    d 768, 64 at d 1024) times wq / wk (fp32, any logit scale folded in), eps eq / ek."""
+    _ext().qknorm_rows_cuda(qk, wq, wk, float(eq), float(ek), int(d))
 
 
 #: ``pair_bias_all`` applies the key mask itself (the runner then skips its own -inf fill).
