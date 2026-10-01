@@ -2,14 +2,16 @@
 
 Mirrors team-gm's ConditionedTransition (AF3 Algorithm 25). The MODULE owns the input
 AdaLN (``ada_ln_in``); the fused KERNEL is the post-AdaLN tail and receives the already-
-normalized activation. Given the RAW activation ``x`` and conditioning ``cond``::
+normalized activation. ``forward`` returns the residual output ``x_in + y``; ``delta`` returns
+the update ``y`` alone. Given the RAW activation ``x_in`` and conditioning ``cond``::
 
-    x = ada_ln_in(x, cond)                 # AdaLN (module; step 1)
+    x = ada_ln_in(x_in, cond)              # AdaLN (module; step 1)
     a = x @ Wa^T ; b = x @ Wb^T            # expand_a, expand_b (no bias)
     h = silu(a) * b                        # SwiGLU
     out = h @ Ws^T                         # squeeze (no bias)
     scale = cond @ Wsc^T + b_sc            # to_scale (with bias)
-    y = sigmoid(scale) * out               # output gate
+    y = sigmoid(scale) * out               # output gate (delta)
+    return x_in + y                        # residual (forward)
 
 fp32 weights/activations with TF32 tensor-core matmuls. Two implementations:
 
@@ -117,7 +119,18 @@ class ConditionedTransition(nn.Module):
         x: Float[torch.Tensor, "*"],
         cond: Float[torch.Tensor, "*"],
     ) -> Float[torch.Tensor, "*"]:
-        """Forward pass. ``x`` is the RAW residual-stream activation, ``cond`` the
+        """Forward pass. ALWAYS returns the residual output ``x + delta(x, cond)`` (the residual is
+        this module's own input). A caller that composes the update some other way (a
+        magnitude-preserving sum, a released checkpoint's own residual) takes :meth:`delta`."""
+        return x + self.delta(x, cond)
+
+    @typecheck
+    def delta(
+        self,
+        x: Float[torch.Tensor, "*"],
+        cond: Float[torch.Tensor, "*"],
+    ) -> Float[torch.Tensor, "*"]:
+        """The update alone (no residual). ``x`` is the RAW residual-stream activation, ``cond`` the
         conditioning signal.
 
         The module applies AdaLN (``ada_ln_in``) first (AF3 Alg. 25 step 1), then the

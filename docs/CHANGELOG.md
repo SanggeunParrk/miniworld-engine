@@ -26,6 +26,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Changed
 
+- **Breaking -- every `x = x + f(x)` module returns `x + f(x)`.** `AugmentedAttentionPairBias`, `ConditionedTransition`,
+  `TrianglePairAttention` and `BidirectionalTriangleAttention` now add their own input as the residual, like TriangleAttention,
+  TriangleMultiplication, Transition, AttentionPairBias and MSAPairWeightedAveraging already did; `DiTBlock` only chains its two
+  parts. A caller that wrote `x = x + module(x)` must write `x = module(x)` (the old form adds the residual twice, with no error).
+  `AugmentedAttentionPairBias.delta` and `ConditionedTransition.delta` return the update alone through the same dispatch, for a
+  caller that composes it some other way (a magnitude-preserving sum, a released checkpoint's own residual). Cross-tensor or
+  externally gated updates are unchanged: OuterProduct / OuterProductMean (`residual=`), the SWA DiT's attention / FFN parts.
 - B200 MSAPairWeightedAveraging: the contractions o = w · v and dv = wᵀ · do (and dw) run on cuBLAS `bmm` (5-15 % faster than
   the tcgen05 kernels at L256-1024, same bits), followed by one gate / out-projection / dropout / residual pass
   (`pwa_gate_out`, bf16x2 gate math); inference takes the same forward. Removed the unused sm_100a kernels (`pwa_ctr`,

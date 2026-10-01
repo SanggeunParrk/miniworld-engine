@@ -240,8 +240,9 @@ class BidirectionalTriangleAttention(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass. Routes on the resolved internal backend, degrading to the
-        pytorch reference (with a warning) on a dtype the fused kernels can't run."""
+        """Forward pass. ALWAYS returns the residual output ``pair + bidir_attention(pair)``.
+        Routes on the resolved internal backend, degrading to the pytorch reference (with a
+        warning) on a dtype the fused kernels can't run."""
         backend = _dispatch.guard_dtype(
             self._backend, pair.dtype, op="BidirectionalTriangleAttention"
         )
@@ -257,7 +258,7 @@ class BidirectionalTriangleAttention(nn.Module):
                 out = self._attend_sa(pln, mask, backend)
             else:
                 out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
-            return self.to_out(sigmoid_gate(self.to_gate(pln), out))
+            return pair + self.to_out(sigmoid_gate(self.to_gate(pln), out))
 
         if backend == KernelBackend.TRITON:
             # Inference max-fusion (LN folded into the projections), gated like the
@@ -270,13 +271,13 @@ class BidirectionalTriangleAttention(nn.Module):
                 and _bo_dispatch.use_kernels(pair.shape[1])
                 and _bo_dispatch.use_infer_concat(self.to_value.weight.shape[0])
             ):
-                return self._inference(pair, mask)
+                return pair + self._inference(pair, mask)
 
             pln = self._layernorm(pair, backend)
             if self.use_self_attention:
                 out = self._attend_sa(pln, mask, backend)
             else:
                 out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
-            return self._gate_out(self.to_gate(pln), out)
+            return pair + self._gate_out(self.to_gate(pln), out)
 
         raise InvalidImplementationError(self.implementation)

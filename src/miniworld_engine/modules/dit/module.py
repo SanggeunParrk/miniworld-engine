@@ -1,7 +1,7 @@
 """The full pair-bias diffusion transformer block (AF3 Alg. 23).
 
-    a = a + AugmentedAttentionPairBias(a, s, z, mask)
-    a = a + ConditionedTransition(a, s)
+    a = AugmentedAttentionPairBias(a, s, z, mask)     # a + attention(a, s, z)
+    a = ConditionedTransition(a, s)                  # a + transition(a, s)
 
 Token and ordinary atom DiT share this algorithm, with different widths and head counts.
 Attention covers the full sequence with a pair bias, and owns its AdaLN conditioning.
@@ -13,10 +13,10 @@ bench pays once and a block pays once per part -- and, the other way, `torch.com
 ACROSS parts in the reference but cannot fuse across our opaque ops. Measured on adaLN alone:
 0.74x without CUDA graphs, 1.09x with them, same kernels. A block is where both effects land.
 
-The residual is EXPLICIT here, and it belongs here: neither ``AugmentedAttentionPairBias`` nor
-``ConditionedTransition`` adds one -- they return the update and the block owns the stream.
-(Contrast the pairformer's trimul and transition, which fuse their residual into the kernel
-epilogue because there it is one operand of a store the kernel is already making.)
+Each part owns its residual, like every ``x = x + f(x)`` module in the engine:
+``AugmentedAttentionPairBias`` and ``ConditionedTransition`` return ``x + f(x)``, so the block
+only chains them. The fused block paths (``integrations.token_dit`` / ``token_dit_train``) fold
+both residuals into their row kernels.
 """
 
 from __future__ import annotations
@@ -72,11 +72,11 @@ class DiTBlock(nn.Module):
         *,
         compute_dtype: torch.dtype | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
-        """AF3 Alg. 23, both residuals explicit (the parts return updates, not streams)."""
+        """AF3 Alg. 23; each part returns its residual output (stream in, stream out)."""
         if _h100.serves(self, single, cond, pair, compute_dtype):
             return _h100.update(self, single, cond, pair, mask)
         if _train.serves(self, single, cond, pair, mask, compute_dtype):
             return _train.block(self, single, cond, pair, mask, compute_dtype)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
-        single = single + self.attention(single, cond, pair, mask, **kw)
-        return single + self.transition(single, cond)
+        single = self.attention(single, cond, pair, mask, **kw)
+        return self.transition(single, cond)
