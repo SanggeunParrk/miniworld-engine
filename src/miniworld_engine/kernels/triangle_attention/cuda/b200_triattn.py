@@ -133,11 +133,12 @@ def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e
 
 # ------------------------------------------------------------------------------------------------------------------------------
 # Other widths: d_pair C in 64 .. 512 (a multiple of 64), heads of 16 or 32 channels. Forward: tri_wfront (LN + the five
-# projections, weights streamed in 64-column chunks) -> the head-dim-32 core above (a head dim of 16 is zero-padded to 32) ->
-# tri_wtail (sigmoid gate + out-projection + dropout + residual). Backward (WideTrain): tri_wgbwd (du = dy_s . Wo on tcgen05,
-# the gate math and delta in its drain) -> the core's backward -> tri_whbwd ([dq | dk | dv | dg | db] . W on tcgen05, the LN
-# backward and the residual in its drain, xhat | 1 written) -> the weight gradients from G = d^T [xhat | 1] (cuBLAS, K = L^2)
-# by the algebra of the d_pair 128 path. All hand kernels in triattn_wide_sm100.cu.
+# projections as 2-CTA products, weights streamed in 64-column chunks; row statistics kept when training) -> the head-dim-32
+# core above (a head dim of 16 is zero-padded to 32) -> tri_wtail (sigmoid gate + out-projection + dropout + residual).
+# Backward (WideTrain): tri_scale_rows (dropout) -> tri_wgbwd (du = dy_s . Wo on tcgen05, the gate math and delta in its
+# drain) -> the core's backward -> tri_whbwd ([dq | dk | dv | dg | db] . W on tcgen05, the LN backward and the residual in its
+# drain, xhat | 1 written) -> the weight gradients from G = D^T [xhat | 1] (one cuBLAS GEMM, K = L^2) by the algebra of the
+# d_pair 128 path, finished by tri_wfinish. All hand kernels in triattn_wide_sm100.cu.
 WIDE_HEAD_DIMS = (16, 32)
 WIDE_MAX_HEADS = 16                   # the packed bias block is 16 rows
 
@@ -150,7 +151,7 @@ def _wide():
 
 
 def wide_supports(d_pair: int, d_hidden: int, n_head: int, length: int) -> bool:
-    """Shapes the wide inference path takes."""
+    """Shapes the wide path takes (inference and training)."""
     if d_pair % 64 or not 64 <= d_pair <= 512 or d_hidden % n_head or not supports(length):
         return False
     return d_hidden // n_head in WIDE_HEAD_DIMS and n_head <= WIDE_MAX_HEADS

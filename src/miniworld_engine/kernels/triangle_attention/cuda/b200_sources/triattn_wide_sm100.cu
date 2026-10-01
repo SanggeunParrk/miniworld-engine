@@ -1,12 +1,15 @@
-// TriangleAttention on B200 for the widths other than d_pair 128: the small row kernels around one cuBLAS projection GEMM, the
-// sm_100a attention core (triattn_sm100.cu, head dim 32) and one cuBLAS out-projection (addmm with the residual):
+// TriangleAttention on B200 for the widths other than d_pair 128 (C = 64 .. 512, a multiple of 64; heads of 16 or 32 channels),
+// around the sm_100a attention core (triattn_sm100.cu, head dim 32):
 //
-//   y = LN(x)                                   tri_ln_rows          x [R, C] bf16 -> y [R, C] bf16   (C = 64 .. 512, a multiple of 64)
-//   P = y . [Wq; Wk; Wv; Wg; Wb]^T              cuBLAS               P [R, 4 HDp + 16] bf16
-//   bias[b, h, j, k] = P[(b, j, k), 4 HDp + h]  tri_bias_heads       masked keys = finfo(bf16).min, head-major for the core
-//   o = attention(q, k, v, bias)                triattn_fwd          q / k / v = column slices of P (rows at stride 4 HDp + 16)
-//   u = sigmoid(g) o o                          tri_gate_mul         g = a column slice of P
-//   out = x + u . Wo^T                          cuBLAS addmm_ in place on a copy of x the LN kernel wrote while reading x
+//   q | k | v | g, bias = LN(x) . [Wq; Wk; Wv; Wg; Wb]^T   tri_wfront<C, ND>  2-CTA clusters; bias head-major, masked keys = finfo(bf16).min
+//   o = attention(q, k, v, bias)                          triattn_fwd
+//   out = x + drop o ((sigmoid(g) o o) . Wo^T)            tri_wtail<C>       without dropout the residual enters the accumulator by MMA
+//
+// Backward (b200_triattn.WideTrain): tri_scale_rows (dy_s = dy o drop, with dropout) -> tri_wgbwd<C> (do, dg, u = sigmoid(g) o o,
+// delta) -> the core's backward (dq, dk, dv, dbias) -> tri_db_rows -> tri_whbwd<C> (dx and [xhat | 1], from the row statistics
+// tri_wfront wrote); dg, dq, dk, dv and the dbias rows land in one buffer D = [dq | dk | dv | dg | db] [R, 4 HDp + 64], so the
+// parameter gradients are one cuBLAS GEMM G = D^T [xhat | 1] (K = R) plus dWo = dy_s^T u, finished by tri_wfinish (dW, dWb,
+// dgamma, dbeta).  tri_ln_rows / tri_bias_heads / tri_gate_mul are unfused row kernels outside the module path (comparisons).
 //
 // Training adds the dropout scale in the tail and the backward (tri_scale_rows -> tri_wgbwd -> the core's backward ->
 // tri_db_rows -> tri_whbwd -> cuBLAS weight-gradient GEMMs, see b200_triattn.WideTrain).

@@ -6,7 +6,7 @@ The maintainer makes that call; the pages record it.
 | GPU | arch | cluster / partition | page | summary |
 |---|---|---|---|---|
 | H100 80GB HBM3 | sm90 | cssb, `h100` partition | [h100/h100.md](h100/h100.md) · [module dispatch](h100/dispatch.md) | hand CUDA for TriMul, Transition (n=4), TriAttn training, OPM/PWA, token DiT; Triton elsewhere |
-| B200 | sm100 | lab-external server, no scheduler (see page) | [b200/b200.md](b200/b200.md) · [TriMul](b200/trimul/trimul.md) · [TriAttn](b200/triattn/triattn.md) · [Transition](b200/transition/transition.md) · [token DiT](b200/token_dit/token_dit.md) · [OPM](b200/opm/opm.md) · [PWA](b200/pwa/pwa.md) | hand CUDA for TriMul (both modules, D64-D512, inference and training), TriAttn, Transition (n=4, D64-512), token DiT, OPM / PWA (inference and training); Triton elsewhere |
+| B200 | sm100 | lab-external server, no scheduler (see page) | [b200/b200.md](b200/b200.md) · [TriMul](b200/trimul/trimul.md) · [TriAttn](b200/triattn/triattn.md) · [Transition](b200/transition/transition.md) · [token DiT](b200/token_dit/token_dit.md) · [OPM](b200/opm/opm.md) · [PWA](b200/pwa/pwa.md) · [atom DiT](b200/atom_dit/atom_dit.md) · [SWA atom DiT](b200/swa_atom_dit/swa_atom_dit.md) | hand CUDA for TriMul (both modules, D64-D512, inference and training), TriAttn, Transition (n=4, D64-512), token DiT, OPM / PWA (inference and training); Triton elsewhere |
 | A100 80GB PCIe | sm80 | cssb (same cluster as H100) | [a100/a100.md](a100/a100.md) | Triton only |
 | RTX A6000 / A5000 | sm86 | `cssb-master`, `gpu` partition | [ampere-workstation/ampere-workstation.md](ampere-workstation/ampere-workstation.md) | Triton only (no completion table) |
 
