@@ -15,8 +15,8 @@ ACROSS parts in the reference but cannot fuse across our opaque ops. Measured on
 
 Each part owns its residual, like every ``x = x + f(x)`` module in the engine:
 ``AugmentedAttentionPairBias`` and ``ConditionedTransition`` return ``x + f(x)``, so the block
-only chains them. The fused block paths (``integrations.token_dit`` / ``token_dit_train``) fold
-both residuals into their row kernels.
+only chains them. The fused block paths (``integrations.token_dit`` / ``token_dit_train`` at token
+widths, ``integrations.atom_dit`` at atom widths on B200) fold both residuals into their kernels.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
+from miniworld_engine.integrations import atom_dit as _atom
 from miniworld_engine.integrations import token_dit as _h100
 from miniworld_engine.integrations import token_dit_train as _train
 from miniworld_engine.modules.augmented_attention import AugmentedAttentionPairBias
@@ -77,6 +78,8 @@ class DiTBlock(nn.Module):
             return _h100.update(self, single, cond, pair, mask)
         if _train.serves(self, single, cond, pair, mask, compute_dtype):
             return _train.block(self, single, cond, pair, mask, compute_dtype)
+        if _atom.serves(self, single, cond, pair, mask, compute_dtype):
+            return _atom.block(self, single, cond, pair)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = self.attention(single, cond, pair, mask, **kw)
         return self.transition(single, cond)

@@ -6,11 +6,15 @@ out-projection + residual -> AdaLN + SwiGLU transition (hidden 256) + residual; 
 on B200. Columns are (Length, Dimension) on the atom axis of the shape registry (`atom_single`, d128, bf16 only); Length is the
 atom count N. The module-level summary is in [b200.md](../b200.md).
 
-**Where the code is.** The hand-written sm_100a kernels below live in the B200 research capsule `experiments/atomdit_sm100`
-(ignored by git, not in this repository) and are measured there on the engine's own `DiTBlock` parameters (an autograd Function
-over the whole block for training, a kernel chain for inference). **The engine does not dispatch them yet**: on B200 the engine's
-`DiTBlock` at atom widths runs its Triton path. "CUDA" in the kernel tables therefore means "a hand-written kernel exists and was
-run at that shape in the capsule"; the module-level table in b200.md says 미구현 until the engine dispatches it.
+**Where the code is.** The kernels are `src/miniworld_engine/kernels/augmented_attention/cuda/sm100_atom/` (the sources of the B200 research
+capsule `experiments/atomdit_sm100`, unchanged, built on first use by the newest nvcc on the machine that knows sm_100a: 13.1 on
+the B200 box). The engine's `DiTBlock` dispatches them through `integrations/atom_dit.py` (an autograd Function over the whole
+block for training, a kernel chain for inference) when `serves()` accepts the call: B200, `implementation` MINIWORLD / TRITON,
+bf16 single / cond / pair, the atom widths below, B = 1, N a multiple of 128, no key mask, no QK-norm; anything else keeps the
+Triton path, and `MINIWORLD_ATOM_DIT_SM100=0` turns it off. `tests/integrations/test_b200_atom_dit_gpu.py` checks the output and
+every gradient against an fp64 PyTorch block (no worse than the Triton path's; inference 4.3e-3 vs 3.9e-3) at N128-1024. The
+measurements below were taken in the capsule on the same sources and the engine's own `DiTBlock` parameters; "CUDA" in the
+kernel tables means the kernel ran at that shape there.
 
 - Everything is hand CUDA (tcgen05 / TMEM / TMA) except the weight-gradient GEMMs (cuBLAS). No Triton, no quack. What is left in
   PyTorch is glue: the stacked / transposed weight packs (made once per parameter version), zero fills of the fp32 bias /
@@ -371,8 +375,9 @@ items of a sample pair over 148 SMs, the third sample pair half empty; A1: one s
 
 ## Limits and next
 
-- **Not in the engine.** Next: move the kernels and their dispatch into `kernels/` + `modules/dit` (atom widths, B = 1, N % 128 ==
-  0), build them in the pixi env with nvcc 13.1, add GPU tests; then b200.md's row says CUDA for the engine.
+- In the engine since 2026-10-01 (`DiTBlock` -> `integrations/atom_dit.py`). The timings above are the capsule's and were not
+  re-taken through `DiTBlock`. team-gm's `DiffusionTransformerBlock` composes `AugmentedAttentionPairBias` and
+  `ConditionedTransition` itself, so a model built on it does not reach this path.
 - No key mask, B = 1, measured only at the shapes above.
 - Bias / LayerNorm-weight gradients accumulate with fp32 atomics: not bitwise deterministic across runs.
 - The attention passes (78 / 85 % of a training step at N4096 / N8192) are at 39-55 % SoL: fusing dQ into the dK / dV pass (one P recomputation fewer)

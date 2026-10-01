@@ -10,6 +10,14 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 (sm_100a) AF3-style atom DiT block: `DiTBlock` at atom widths (d_single = d_cond = 128, 4 heads x 32, d_pair 16,
+  transition n = 2) runs the whole block, inference and training, on hand-written kernels (`kernels/augmented_attention/cuda/sm100_atom/`:
+  conditioning projections, AdaLN + q / k / v / gate, the pair bias in both layouts, attention forward / dK dV / dQ / dbias, the
+  post-attention + transition forward, and their backwards; the weight gradients on cuBLAS) through `integrations/atom_dit.py`.
+  Gate: B200, bf16 inputs, B = 1, N a multiple of 128, no key mask, no QK-norm; anything else keeps the Triton path;
+  `MINIWORLD_ATOM_DIT_SM100=0` turns it off. The sources are the research capsule's (`experiments/atomdit_sm100`), built on
+  first use by the newest nvcc that knows sm_100a. Page: `docs/gpus/b200/atom_dit/atom_dit.md`; tests:
+  `tests/integrations/test_b200_atom_dit_gpu.py`.
 - B200 (sm_100a) TriangleAttention at d_pair 64-512 (heads of 16 or 32 channels) now serves training as well as inference
   (`b200_triattn.WideTrain`: the module's dropout, bf16 or fp32 parameters). The backward runs a gate backward and a
   projection-dgrad + LayerNorm-backward kernel on tcgen05; dq / dk / dv / dg / db land in one buffer, so the parameter
