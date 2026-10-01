@@ -17,6 +17,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   (callers pad; `seqused` masks the padding) -- the block raises `ValueError` otherwise. `MINIWORLD_SWA_DIT_SM100=0` keeps the
   Triton path. Sources from the research capsule `experiments/swaatom_sm100`; tests:
   `tests/integrations/test_b200_swa_dit_gpu.py` (the Triton tests in `tests/numerics/test_swa_dit_fused_gpu.py` pin that path).
+- B200 atom DiT (`integrations/atom_dit.py`): the sm_100a path now serves a [B, N] key mask and any atom count N, so MiniWorld's
+  atom transformer (which always passes the structure's `atom_mask`) takes it. N is padded to a multiple of 128 inside the call
+  (the padded keys masked, the pair tensor read in place); `pair_bias.cu` folds the mask and the padding into the pair bias
+  (masked keys -1e4: zero softmax weight in any row with a valid key) and drops dbias on masked keys, so the attention kernels
+  are unchanged. Tests: masked and padded training / inference / CUDA-graph cases in `tests/integrations/test_b200_atom_dit_gpu.py`.
+
 - B200 (sm_100a) AF3-style atom DiT block: `DiTBlock` at atom widths (d_single = d_cond = 128, 4 heads x 32, d_pair 16,
   transition n = 2) runs the whole block, inference and training, on hand-written kernels (`kernels/augmented_attention/cuda/sm100_atom/`:
   conditioning projections, AdaLN + q / k / v / gate, the pair bias in both layouts, attention forward / dK dV / dQ / dbias, the

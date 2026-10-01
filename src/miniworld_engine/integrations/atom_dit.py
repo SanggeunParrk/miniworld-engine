@@ -10,8 +10,10 @@ Both residuals are inside post_fwd (the block returns the stream, as DiTBlock do
 
 ``serves()`` is the whole gate: B200, the engine's kernel backend (implementation MINIWORLD or TRITON), bf16 single / cond /
 pair (``compute_dtype`` None or bf16), the atom widths (d_single = d_cond = 128, 4 heads x 32, d_pair = 16, transition n = 2,
-no QK-norm), B == 1, N a multiple of 128 (callers pad the atoms), no key mask, LayerNorm eps 1e-5, eager (not under
-torch.compile or fake tensors). Anything else keeps the module path. ``MINIWORLD_ATOM_DIT_SM100=0`` turns it off. A build or
+no QK-norm), B == 1, any N, a [B, N] bool key mask or none, LayerNorm eps 1e-5, eager (not under torch.compile or fake
+tensors). N that is not a multiple of 128 is padded here (zero single / cond rows, the padded keys masked; the pair tensor is
+read in place) and the first N rows come back; the key mask and the padding are folded into the pair bias (masked keys
+-1e4), so the attention kernels run unmasked. Anything else keeps the module path. ``MINIWORLD_ATOM_DIT_SM100=0`` turns it off. A build or
 load failure warns once and keeps the module path.
 
 Parameters may be bf16 or fp32 (the kernels read bf16 copies, rebuilt when a parameter changes); their gradients come back
@@ -42,13 +44,15 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
     from miniworld_engine.modules.dispatch import KernelBackend
 
     a, tr = module.attention, module.transition
-    if a._backend != KernelBackend.TRITON or a.use_qk_norm or mask is not None:
+    if a._backend != KernelBackend.TRITON or a.use_qk_norm:
         return False
     if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF) or compute_dtype not in (None, BF):
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != DS_ or single.shape[2] % 128 or single.shape[2] == 0:
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != DS_ or single.shape[2] == 0:
+        return False
+    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, single.shape[2]) or mask.device != single.device):
         return False
     if tuple(cond.shape) != (*single.shape[:3], DC_) or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP_):
         return False
@@ -95,19 +99,37 @@ def _weights(blk):
     return ent[1:]
 
 
-def _infer(blk, single, cond, pair):
+def _padded(t, n):
+    """[A, 1, N, d] -> [A, 1, n, d], zero rows appended (the tensor itself when n == N)."""
+    return t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
+
+
+def _keys(mask):
+    """The valid-key bytes [N] the pair-bias kernels read: the bool mask itself (None: every key valid; the kernels treat
+    keys past N, the padding, as masked)."""
+    return None if mask is None else mask[0].contiguous()
+
+
+def _unpadded(t, shape):
+    """[A, 1, n, d] (a view of the kernels' rows) -> the caller's [A, 1, N, d]."""
+    return t if t.shape == shape else t[:, :, : shape[2]].contiguous()
+
+
+def _infer(blk, single, cond, pair, mask):
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as sm100
 
     a = blk.attention
     A, _, N, _ = single.shape
-    M = A * N
-    s2, c2 = single.reshape(M, DS_).contiguous(), cond.reshape(M, DC_).contiguous()
+    n = (N + 127) // 128 * 128
+    kv = _keys(mask)
+    M = A * n
+    s2, c2 = _padded(single, n).reshape(M, DS_).contiguous(), _padded(cond, n).reshape(M, DC_).contiguous()
     wc, wp, wo, _ = _weights(blk)
     mod = sm100.cond_fwd(c2, *wc)
     q, k, v, sg, _ = sm100.pre_fwd(s2, mod, *wp)
-    bias, _ = sm100.pair_bias_fwd(pair, a.ln_pair.weight, a.to_bias.weight, trans=False)
-    O, _ = sm100.attn_fwd(q.view(A, N, DS_), k.view(A, N, DS_), v.view(A, N, DS_), bias)
-    return sm100.post_fwd(s2, O, sg, mod, *wo)[0].view(single.shape)
+    bias, _ = sm100.pair_bias_fwd(pair, a.ln_pair.weight, a.to_bias.weight, trans=False, n=n, kv=kv)
+    O, _ = sm100.attn_fwd(q.view(A, n, DS_), k.view(A, n, DS_), v.view(A, n, DS_), bias)
+    return _unpadded(sm100.post_fwd(s2, O, sg, mod, *wo)[0].view(A, 1, n, DS_), single.shape)
 
 
 class _AtomBlock(torch.autograd.Function):
@@ -115,24 +137,26 @@ class _AtomBlock(torch.autograd.Function):
     (``named_parameters`` order)."""
 
     @staticmethod
-    def forward(ctx, blk, single, cond, pair, *params):
+    def forward(ctx, blk, mask, single, cond, pair, *params):
         from miniworld_engine.kernels.augmented_attention.cuda import (
             sm100_atom as sm100,
         )
 
         a = blk.attention
-        A, _, N, _ = single.shape
+        A, _, N0, _ = single.shape
+        N = (N0 + 127) // 128 * 128                                    # the kernels' length (padded atoms are masked keys)
+        kv = _keys(mask)
         M = A * N
         wc, wp, wo, _ = _weights(blk)
-        s2, c2 = single.reshape(M, DS_).contiguous(), cond.reshape(M, DC_).contiguous()
+        s2, c2 = _padded(single, N).reshape(M, DS_).contiguous(), _padded(cond, N).reshape(M, DC_).contiguous()
         mod = sm100.cond_fwd(c2, *wc)
         q, k, v, sg, x1 = sm100.pre_fwd(s2, mod, *wp, save=True)
-        bias, bias_t = sm100.pair_bias_fwd(pair, a.ln_pair.weight, a.to_bias.weight, trans=True)
+        bias, bias_t = sm100.pair_bias_fwd(pair, a.ln_pair.weight, a.to_bias.weight, trans=True, n=N, kv=kv)
         O, LSE = sm100.attn_fwd(q.view(A, N, DS_), k.view(A, N, DS_), v.view(A, N, DS_), bias)
         a3, u, a2, x2, t = sm100.post_fwd(s2, O, sg, mod, *wo, save=True)
         ctx.save_for_backward(s2, c2, pair, mod, q, k, v, sg, x1, bias, bias_t, O, LSE, u, a2, x2, t)
-        ctx.blk, ctx.dims, ctx.shapes = blk, (A, N), (single.shape, cond.shape)
-        return a3.view(single.shape)
+        ctx.blk, ctx.dims, ctx.shapes, ctx.kv = blk, (A, N), (single.shape, cond.shape), kv
+        return _unpadded(a3.view(A, 1, N, DS_), single.shape)
 
     @staticmethod
     def backward(ctx, dy):
@@ -147,7 +171,7 @@ class _AtomBlock(torch.autograd.Function):
         M = A * N
         wc, _, wo, wb = _weights(blk)
         dev = s2.device
-        dy = dy.reshape(M, DS_).to(BF).contiguous()
+        dy = _padded(dy, N).reshape(M, DS_).to(BF).contiguous()       # zero rows: the padded atoms contribute nothing
         dmod = torch.empty(M, 6 * DS_, device=dev, dtype=BF)          # [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts]
         dP = torch.empty(M, 4 * DS_, device=dev, dtype=BF)            # [dq | dk | dv | dg]
         DBIAS = torch.zeros(6 * DS_, device=dev)
@@ -157,7 +181,7 @@ class _AtomBlock(torch.autograd.Function):
         DT, HH, DAB = sm100.tr_bwd_gate(dy, t, mod, x2, wo[1], wb["WsT"], dmod, DBIAS[640:])
         DA, DU, GATED, DO = sm100.post_bwd(DAB, dy, a2, mod, u, sg, O, wb["WuT"], wb["WoT"], dmod, dP, Dd, DBIAS, N)
         DB = sm100.attn_bwd(q.view(A, N, DS_), k.view(A, N, DS_), v.view(A, N, DS_), DO.view(A, N, DS_), bias, bias_t, LSE, Dd, dP)
-        dz, dgam, dwb = sm100.pair_bias_bwd(z, a.ln_pair.weight, a.to_bias.weight, DB)
+        dz, dgam, dwb = sm100.pair_bias_bwd(z, a.ln_pair.weight, a.to_bias.weight, DB, kv=ctx.kv)
         DS = sm100.pre_bwd(dP, s2, mod, DA, wb["WpT"], dmod, DBIAS, DBQ)
         dc, cn1, cn2 = sm100.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], DG)
         # weight gradients (cuBLAS)
@@ -178,12 +202,12 @@ class _AtomBlock(torch.autograd.Function):
              "transition.to_scale.bias": DBIAS[640:768]}
         pg = [g[n].to(p.dtype).view(p.shape) for n, p in blk.named_parameters()]
         sshape, cshape = ctx.shapes
-        return (None, DS.view(sshape), dc.view(cshape), dz.view(z.shape), *pg)
+        return (None, None, _unpadded(DS.view(A, 1, N, DS_), sshape), _unpadded(dc.view(A, 1, N, DC_), cshape), dz.view(z.shape), *pg)
 
 
-def block(module, single, cond, pair):
+def block(module, single, cond, pair, mask=None):
     """The block's output stream (both residuals included), on the sm_100a kernels; ``serves()`` must have accepted the call."""
     params = tuple(module.parameters())
     if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params)):
-        return _AtomBlock.apply(module, single, cond, pair, *params)
-    return _infer(module, single, cond, pair)
+        return _AtomBlock.apply(module, mask, single, cond, pair, *params)
+    return _infer(module, single, cond, pair, mask)

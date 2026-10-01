@@ -10,9 +10,17 @@ atom count N. The module-level summary is in [b200.md](../b200.md).
 capsule `experiments/atomdit_sm100`, unchanged, built on first use by the newest nvcc on the machine that knows sm_100a: 13.1 on
 the B200 box). The engine's `DiTBlock` dispatches them through `integrations/atom_dit.py` (an autograd Function over the whole
 block for training, a kernel chain for inference) when `serves()` accepts the call: B200, `implementation` MINIWORLD / TRITON,
-bf16 single / cond / pair, the atom widths below, B = 1, N a multiple of 128, no key mask, no QK-norm; anything else keeps the
-Triton path, and `MINIWORLD_ATOM_DIT_SM100=0` turns it off. `tests/integrations/test_b200_atom_dit_gpu.py` checks the output and
-every gradient against an fp64 PyTorch block (no worse than the Triton path's; inference 4.3e-3 vs 3.9e-3) at N128-1024. The
+bf16 single / cond / pair, the atom widths below, B = 1, any N, a [B, N] bool key mask or none, no QK-norm; anything else
+keeps the Triton path, and `MINIWORLD_ATOM_DIT_SM100=0` turns it off. N that is not a multiple of 128 is padded inside the call
+(zero single / cond rows, the padded keys masked, the pair tensor read in place) and the first N rows come back. The key mask
+(MiniWorld always passes the structure's `atom_mask`) is folded into the pair bias by `pair_bias_fwd` -- masked and padded keys
+get -1e4 (bf16 -9984), so their softmax weight is exactly 0 in any row with a valid key -- and `pair_bias_bwd` drops dbias on
+them, so the attention kernels run unmasked. (In a row whose keys are all masked the weights are the softmax of the scores,
+where the module's finfo.min fill makes them uniform; forward and backward agree with each other there.)
+`tests/integrations/test_b200_atom_dit_gpu.py` checks the output and every gradient against an fp64 PyTorch block, with and
+without a key mask, at N100-1024 including N not a multiple of 128 (no worse than the Triton path's: inference 4.3e-3 vs
+3.8-3.9e-3, worst gradient ratio 1.69 on `ln_pair.weight`); a profile of a masked, padded call (A5 N300) shows no Triton
+kernel. The
 measurements below were taken in the capsule on the same sources and the engine's own `DiTBlock` parameters; "CUDA" in the
 kernel tables means the kernel ran at that shape there.
 
@@ -21,7 +29,7 @@ kernel tables means the kernel ran at that shape there.
   LayerNorm-weight gradient accumulators, the pair-bias weight gradient's partial sum ([N/64 N/32, 4, 16] -> [4, 16]) and the
   bf16 casts of the parameter gradients.
 - Shapes: A = samples (rows = A N), B = 1. Inference A = 5 and A = 1 at N = 1024 / 2048 / 4096; training A = 48 at N = 4096 /
-  8192. **N must be a multiple of 128** (callers pad the atoms); no key mask (the benchmark block has none).
+  8192, no key mask (the measurements below). The kernels themselves take N a multiple of 128; the engine path pads.
 - Dtypes: activations, weights and their gradients bf16; the pair bias bf16 (both layouts); dbias, LSE, the attention D term and
   the bias / LayerNorm-weight gradient sums fp32; every MMA accumulates in fp32 (TMEM).
 - Rounding points follow the eager bf16 module (LayerNorm and Linear outputs, every elementwise product rounded to bf16 where
@@ -375,10 +383,12 @@ items of a sample pair over 148 SMs, the third sample pair half empty; A1: one s
 
 ## Limits and next
 
-- In the engine since 2026-10-01 (`DiTBlock` -> `integrations/atom_dit.py`). The timings above are the capsule's and were not
-  re-taken through `DiTBlock`. team-gm's `DiffusionTransformerBlock` composes `AugmentedAttentionPairBias` and
-  `ConditionedTransition` itself, so a model built on it does not reach this path.
-- No key mask, B = 1, measured only at the shapes above.
+- In the engine since 2026-10-01 (`DiTBlock` -> `integrations/atom_dit.py`), key mask and any N since the same day. The timings
+  above are the capsule's and were not re-taken through `DiTBlock`. team-gm's `DiffusionTransformerBlock` (af2bda75) calls
+  `DiTBlock.forward` when it gets the pair tensor and a [B, L] mask or none -- MiniWorld's atom transformer does -- and so reaches
+  this path; its hoisted pair-bias form (`hoist_pair_bias`) and an [A, B, L] mask do not.
+- B = 1; a per-sample ([A, B, N]) key mask is not served. Measured only at the shapes above, without a key mask (the mask
+  changes only the pair-bias kernels' writes).
 - Bias / LayerNorm-weight gradients accumulate with fp32 atomics: not bitwise deterministic across runs.
 - The attention passes (78 / 85 % of a training step at N4096 / N8192) are at 39-55 % SoL: fusing dQ into the dK / dV pass (one P recomputation fewer)
   and sharing dbias' sample walk are the next levers; for small-A inference, a key split for more work items. The pair-bias
