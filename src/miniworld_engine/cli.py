@@ -133,6 +133,15 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     "dit_atom": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition")),
     "swa_dit": ModuleTarget(
         ("swa_atom_attention", "adaptive_layernorm", "conditioned_transition"), "precision=32"),
+    # The bias-only token DiT block (no query / key). Its engine path is hand CUDA + cuBLAS (kernels/bias_only_dit):
+    # nothing on it autotunes, so no build case fills a cache for it (BUILDLESS).
+    "bias_only_dit": ModuleTarget(()),
+}
+
+#: Module targets whose engine path launches no autotuned kernel, and why: the pre-bench build has nothing to fill for
+#: them, and an empty ``cases`` means exactly that rather than a forgotten mapping.
+BUILDLESS: dict[str, str] = {
+    "bias_only_dit": "hand-written CUDA (fixed launch shapes, cubins built on first use) and cuBLAS; no Triton",
 }
 
 #: Named groups so `capture pairformer` means something. A group is just a set of targets.
@@ -144,7 +153,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom",
-                  "swa_atom_attention", "dit", "dit_atom", "swa_dit"),
+                  "swa_atom_attention", "dit", "dit_atom", "swa_dit", "bias_only_dit"),
     "attention": ("triangle_attention",
                   "augmented_attention_token", "augmented_attention_atom"),
 }
@@ -703,6 +712,8 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
 
     cases: list[str] = []
     for target in targets:
+        if target in BUILDLESS:
+            continue
         mapped = mapping.get(target)
         if not mapped:
             print(f"target {target!r} has no build case mapping; add it to {table} or the bench "
@@ -710,6 +721,9 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
             return 2
         cases.extend(mapped)
     names = tuple(dict.fromkeys(cases))
+    if not names:
+        print(f"=== nothing to build: {', '.join(f'{t} ({BUILDLESS[t]})' for t in targets)}", flush=True)
+        return 0
 
     directory = resolve_config_dir(config_type, repo)
     if isinstance(directory, int):
