@@ -49,7 +49,10 @@ def _run(m, single, cond, pair, mask, w, tf32=None):
             return _run(m, single, cond, pair, mask, w)
         finally:
             torch.backends.cuda.matmul.allow_tf32 = old
-    ins = [t.detach().clone().to(next(m.parameters()).dtype).requires_grad_() for t in (single, cond, pair)]
+    # the block's activation dtype is its narrowest parameter: the norm affines stay fp32 under .to(bf16)
+    # (primitives._Fp32ParamsMixin), so the first parameter does not name it
+    dtype = min((p.dtype for p in m.parameters()), key=lambda d: d.itemsize)
+    ins = [t.detach().clone().to(dtype).requires_grad_() for t in (single, cond, pair)]
     out = m(*ins, mask)
     (out.float() * w).sum().backward()
     res = {"out": out.detach().float(), "dsingle": ins[0].grad.float(), "dcond": ins[1].grad.float(), "dpair": ins[2].grad.float()}
