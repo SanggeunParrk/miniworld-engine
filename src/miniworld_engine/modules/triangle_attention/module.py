@@ -488,7 +488,8 @@ class TrianglePairAttention(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass."""
+        """Forward pass. ALWAYS returns the residual output ``pair + pair_attention(pair)``."""
+        pair_res = pair  # residual == the ORIGINAL input (before the transpose / ln_pair rebind `pair`)
         if not self.starting:
             pair = pair.transpose(1, 2).contiguous()
         pair = self.ln_pair(pair)
@@ -510,4 +511,4 @@ class TrianglePairAttention(nn.Module):
 
         if not self.starting:
             out = out.transpose(1, 2).contiguous()
-        return out
+        return pair_res + out

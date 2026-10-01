@@ -189,7 +189,23 @@ class AugmentedAttentionPairBias(nn.Module):
         *,
         compute_dtype: torch.dtype | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
-        """Forward pass.
+        """Forward pass. ALWAYS returns the residual output ``single + delta(single, cond, pair, mask)``
+        (the residual is this module's own input), so a block just calls ``single = module(...)``.
+        A caller that composes the update some other way (a magnitude-preserving sum, a released
+        checkpoint's own residual) takes :meth:`delta`."""
+        return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype)
+
+    @typecheck
+    def delta(
+        self,
+        single: Float[torch.Tensor, "A B L d_single"],
+        cond: Float[torch.Tensor, "A B L d_cond"],
+        pair: Float[torch.Tensor, "B L L d_pair"],
+        mask: Bool[torch.Tensor, "B L"] | Bool[torch.Tensor, "A B L"] | None = None,
+        *,
+        compute_dtype: torch.dtype | None = None,
+    ) -> Float[torch.Tensor, "A B L d_single"]:
+        """The update alone (no residual), through the same dispatch as :meth:`forward`.
 
         ``compute_dtype`` sets the precision the ATTENTION CORE runs in, per call. It is taken
         here rather than at construction because the surrounding projections and the core are not
