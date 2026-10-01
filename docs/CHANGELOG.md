@@ -39,6 +39,19 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - docs/gpus/b200/opm/opm.md, docs/gpus/b200/pwa/pwa.md: kernel tables, flow figures and harness measurements of the B200
   OuterProductMean / MSAPairWeightedAveraging paths (inference L128-768 x S1024 / 2048 / 4096, training S1024), and their
   completion tables in b200.md.
+- `modules/bias_only_dit`: `BiasOnlyDiTBlock` / `BiasOnlyAttention`, the token DiT block whose attention logits are the pair
+  bias alone (no query, no key; the `bias_only_v` bench ablation made a module). On B200, bf16 inference with no autograd
+  runs `integrations/bias_only_dit.py` -> `kernels/bias_only_dit` (hand CUDA + cuBLAS): the attention weights
+  softmax(pair bias) are made once per pair, and the per-step attention is the sm_100a `pv_gate_inf` GEMM (P in tensor
+  memory, sigmoid(g) in its epilogue). `bench.py target=bias_only_dit`: 1.52-2.22x PyTorch compiled (L128-768, per-sample
+  conditioning), 1.58-2.55x with a shared conditioning. Training (bf16, autograd on) runs
+  `integrations/bias_only_dit_train.py`: one opaque forward / backward per block (`dpb_sm100` for the bias gradient, the pair
+  LayerNorm and bias on mma.sync in both directions, two-warp-per-row CUDA rows, the expand GEMM + SwiGLU keeping a | b),
+  1.20-1.27x PyTorch compiled at A = 48 (L384 / L768), every gradient within 0.96-0.99x PyTorch bf16's error against fp32.
+  Both paths serve 24 heads x 32 (`n_head=24`), 12 x 64 (`n_head=12`) and 16 x 64 (`BiasOnlyDiTBlock(d_head=64)`, 1024
+  attention channels) as well as 16 x 48: training 1.15-1.30x, inference 1.46-2.63x (`bench.py target=bias_only_dit
+  +n_head=24 | +n_head=12 | +d_head=64`).
+  Page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`.
 
 ### Changed
 

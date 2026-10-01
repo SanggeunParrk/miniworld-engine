@@ -118,6 +118,9 @@ def test_every_target_builds_from_a_real_case() -> None:
     for level, table in (("kernel", cli.KERNEL_TARGETS),
                          ("module", {k: v.cases for k, v in cli.MODULE_TARGETS.items()})):
         for target, cases in table.items():
+            if level == "module" and target in cli.BUILDLESS:     # declared: launches no autotuned kernel
+                assert not cases, f"module target {target!r} is BUILDLESS but maps build cases {cases}"
+                continue
             assert cases, f"{level} target {target!r} has no build case"
             unknown = [c for c in cases if c not in CASE_NAMES]
             assert not unknown, f"{level} target {target!r} -> unknown case(s) {unknown}"

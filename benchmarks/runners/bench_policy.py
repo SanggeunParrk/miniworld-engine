@@ -80,6 +80,8 @@ MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
                                    "the Anthropic msa_pwa cell are bf16-only",
     "attention_pair_bias": "no registry family of its own; benched at bf16 like the trunk it sits "
                            "in (cuequivariance's compiled whole-op route is a BF16 contract)",
+    "bias_only_dit": "no registry family of its own: the fused path (integrations/bias_only_dit.py, "
+                     "kernels/bias_only_dit/cuda) is bf16-only; fp32 falls to the module's PyTorch composition",
 }
 
 # module bench target -> does miniworld have an end-to-end fp32 kernel? The diffusion blocks do
@@ -102,6 +104,7 @@ MODULE_SUPPORTS_FP32: dict[str, bool] = {
     "outer_product": False,
     "msa_pair_weighted_averaging": False,
     "attention_pair_bias": False,
+    "bias_only_dit": False,
 }
 
 

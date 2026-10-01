@@ -131,6 +131,8 @@ class BenchConfig(BaseModel):
     shared_cond: bool = False
     #: dit / dit_atom: blocks with QK-norm (RMSNorm of every q / k head). Anthropic's composition has none and refuses.
     dit_qk_norm: bool = False
+    n_head: int = 16                 # bias_only_dit: 16 heads x 48, 24 x 32 or 12 x 64
+    d_head: int = 0                  # bias_only_dit: the head width (0: 768 / n_head; 64 with n_head 16: 16 x 64)
     min_seq_len: int = 64
     max_seq_len: int = 384
     seq_len_step: int = 64
@@ -4034,6 +4036,136 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         reference="module.reference.torch",
     )
 
+def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
+    """Bias-only token DiT block (`modules/bias_only_dit`): AF3 Alg. 23 with the attention's query-key half removed --
+    softmax(pair bias) v, gated -- then the conditioned transition, at the token widths of the `dit` target.
+
+    * pytorch -- `BiasOnlyDiTBlock(implementation=PYTORCH)`, the reference composition.
+    * miniworld -- the same block on the engine's kernels: `integrations.bias_only_dit` (inference) or
+      `integrations.bias_only_dit_train` (training) on B200 in bf16, CUDA and cuBLAS only, where they serve the call, else the
+      reference composition -- `execution_path` says which one ran.
+
+    No other implementation of this op exists. The fused path computes a pair's attention weights (softmax of every head's
+    pair bias) once and reuses them while the pair tensor is unchanged, as a sampler does over its steps; the timed calls
+    reuse one pair. `+shared_cond=true` gives every sample one conditioning (a sampling step), as in the `dit` target;
+    `+n_head=24` / `+n_head=12` the 24 heads x 32 / 12 x 64 layouts (default 16 x 48), `+d_head=64` 16 x 64 (1024 attention
+    channels).
+    Inference rows carry accuracy columns against an fp32 PyTorch block on the same (non-default) weights and inputs.
+    """
+    from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+
+    spec = triton_miniworld_spec(implementation)      # miniworld -> TRITON: the engine's kernels
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+        raise UnsupportedBenchmark(f"bias_only_dit does not implement {implementation!r}")
+    is_train = not is_inference_mode(conf.mode)
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    d_single, d_cond, d_pair, length = conf.d_single_token, conf.d_single, conf.d_pair, seq_len
+    n_head = conf.n_head                              # 16 x 48 (the dit target's), 24 x 32 or 12 x 64: `+n_head=24`
+
+    class MultiBiasOnlyDiT(nn.Module):
+        def __init__(self, impl) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([
+                BiasOnlyDiTBlock(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head, d_head=conf.d_head or None,
+                                 implementation=impl)
+                for _ in range(conf.n_layers)])
+
+        def forward(self, single, cond, pair, mask=None):
+            for layer in self.layers:
+                single = layer(single, cond, pair, mask)
+            return single
+
+    model = MultiBiasOnlyDiT(spec.impl)
+    # `to_out`, `squeeze` and `to_bias` are zero-initialised and the norms start at identity, which would make every accuracy
+    # column vacuous. Timing does not depend on the values.
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for prm in model.parameters():
+            if prm.ndim == 2:
+                prm.normal_(std=prm.shape[1] ** -0.5)
+            elif prm.ndim == 1 and prm.numel() > 1:
+                prm.add_(torch.randn_like(prm) * 0.1)
+    state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    model = model.to(device=DEVICE, dtype=dtype)
+    model.train(is_train)
+
+    torch.manual_seed(1)
+    single = torch.randn(conf.n_augment, 1, length, d_single, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    if conf.shared_cond:           # one conditioning for every sample (stride 0 over the samples)
+        cond = torch.randn(1, 1, length, d_cond, device=DEVICE, dtype=dtype,
+                           requires_grad=is_train).expand(conf.n_augment, 1, length, d_cond)
+    else:
+        cond = torch.randn(conf.n_augment, 1, length, d_cond, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    pair = torch.randn(1, length, length, d_pair, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    mask = torch.rand(1, length, device=DEVICE) > conf.mask_prob
+    dy = torch.randn_like(single)
+
+    if spec.impl == ImplementationType.PYTORCH:
+        execution_path = "module.reference.torch"
+    else:
+        from miniworld_engine.integrations import bias_only_dit as fused
+        from miniworld_engine.integrations import bias_only_dit_train as fused_train
+
+        with torch.set_grad_enabled(is_train):
+            served = (fused_train if is_train else fused).serves(model.layers[0], single, cond, pair, mask)
+        execution_path = (
+            ("modules.bias_only_dit.BiasOnlyDiTBlock -> integrations.bias_only_dit_train[cuBLAS GEMMs + token DiT train rows + "
+             "softmax_rows / pv_gate_inf / gate_bwd_rows / dpb_sm100 (sm_100a)]" if is_train else
+             "modules.bias_only_dit.BiasOnlyDiTBlock -> integrations.bias_only_dit -> kernels.bias_only_dit.cuda.runner."
+             "FusedBiasOnlyDiT[cuBLAS GEMMs + pv_gate_inf (sm_100a) + CUDA rows; weights packed, attention weights hoisted]")
+            if served else
+            "modules.bias_only_dit.BiasOnlyDiTBlock[reference composition: integrations.bias_only_dit.serves() declined]")
+
+    accuracy: AccuracyFields = {}
+    reference = "module.reference.torch"
+    if not is_train and single.is_cuda:
+        # fp32 reference on the same weights and inputs, IEEE (TF32 off for its matmuls even when the run allows TF32)
+        tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+        try:
+            ref_model = MultiBiasOnlyDiT(ImplementationType.PYTORCH)
+            ref_model.load_state_dict(state)
+            ref_model = ref_model.to(DEVICE).eval()
+            with torch.no_grad():
+                torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+                try:
+                    expected = ref_model(single.float(), cond.float(), pair.float(), mask)
+                finally:
+                    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+                del ref_model
+                actual = model(single, cond, pair, mask)
+            out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+            accuracy = {"output_max_abs": out_max, "output_rel_frob": out_rel, "output_cosine": out_cos}
+            reference = "module.reference.torch[fp32 IEEE]"
+            del actual, expected
+        except torch.cuda.OutOfMemoryError:
+            print(f"  [{implementation}] fp32 reference did not fit at L={length}: no accuracy columns", flush=True)
+        torch.cuda.empty_cache()
+
+    if conf.compile:
+        compile_module_for_benchmark(model)
+    model = fabric.setup_module(model)
+
+    def inference_step():
+        with torch.no_grad():
+            return model(single, cond, pair, mask)
+
+    def training_step() -> torch.Tensor:
+        y = model(single, cond, pair, mask)
+        fabric.backward(y, dy)
+        return y
+
+    return measured_result(
+        conf=conf,
+        func=inference_step if not is_train else training_step,
+        grad_to_none=[single, cond, pair, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=is_train,
+        input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
+        execution_path=execution_path,
+        reference=reference,
+    )._replace(**accuracy)
+
 # A module target is named after the production module it benches, spelled as the engine spells
 # it. The key is the directory `benchmarks/modules/<target>/` and the function is
 # `bench_module_<target>` (asserted below). Names may repeat KERNEL_TARGETS keys on purpose: the
@@ -4052,6 +4184,7 @@ MODULE_TARGETS = {
     "dit": bench_module_dit,
     "dit_atom": bench_module_dit_atom,
     "swa_dit": bench_module_swa_dit,
+    "bias_only_dit": bench_module_bias_only_dit,
     "outer_product": bench_module_outer_product,
     "msa_pair_weighted_averaging": bench_module_msa_pair_weighted_averaging,
     "attention_pair_bias": bench_module_attention_pair_bias,
@@ -4122,6 +4255,7 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             # 32x128 windowed op, not this dense block (see bench_module_dit).
             "dit_atom": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             "swa_dit": ("pytorch", "triton", "miniworld"),
+            "bias_only_dit": ("pytorch", "miniworld"),
         }
         if set(supported) != set(MODULE_TARGETS):
             raise RuntimeError("module benchmark implementation matrix is incomplete")

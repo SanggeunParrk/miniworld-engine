@@ -15,6 +15,7 @@ from miniworld_engine.modules import (
     ConditionedTransition,
     TrianglePairAttention,
 )
+from miniworld_engine.modules.bias_only_dit import BiasOnlyAttention, BiasOnlyDiTBlock
 from miniworld_engine.modules.dit import DiTBlock
 
 
@@ -34,6 +35,8 @@ CASES = {
         lambda m, s, c, p: m(s, c, p), AugmentedAttentionPairBias(32, 16, 8, 4), _token),
     "ConditionedTransition": lambda: (lambda m, s, c, p: m(s, c), ConditionedTransition(32, 16, 2), _token),
     "DiTBlock": lambda: (lambda m, s, c, p: m(s, c, p), DiTBlock(32, 16, 8, 4), _token),
+    "BiasOnlyAttention": lambda: (lambda m, s, c, p: m(s, c, p), BiasOnlyAttention(32, 16, 8, 4), _token),
+    "BiasOnlyDiTBlock": lambda: (lambda m, s, c, p: m(s, c, p), BiasOnlyDiTBlock(32, 16, 8, 4), _token),
     "TrianglePairAttention(starting)": lambda: (lambda m, p: m(p), TrianglePairAttention(16, 4, starting=True), _pair),
     "TrianglePairAttention(ending)": lambda: (lambda m, p: m(p), TrianglePairAttention(16, 4, starting=False), _pair),
     "BidirectionalTriangleAttention": lambda: (lambda m, p: m(p), BidirectionalTriangleAttention(16, 4), _pair),
