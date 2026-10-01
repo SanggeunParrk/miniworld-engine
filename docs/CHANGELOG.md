@@ -10,6 +10,14 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 (sm_100a) TriangleAttention at d_pair 64-512 (heads of 16 or 32 channels) now serves training as well as inference
+  (`b200_triattn.WideTrain`: the module's dropout, bf16 or fp32 parameters). The backward runs a gate backward and a
+  projection-dgrad + LayerNorm-backward kernel on tcgen05; dq / dk / dv / dg / db land in one buffer, so the parameter
+  gradients are one cuBLAS GEMM (K = L^2) and a finish kernel. The wide forward's projection kernel runs as 2-CTA clusters
+  (`cta_group::2`, each SM streaming half of the weights) and the output kernel adds the residual through the MMA. Module
+  step (CUDA graph) vs the fastest of PyTorch compiled / cuEquivariance / Anthropic: inference 1.23-1.86x, training
+  1.84-3.05x; vs the repository's Triton path 1.30-2.04x / 1.44-2.23x. `viz.measure_bars` draws a "Triton path" column in
+  the Triton colour. Page: `docs/gpus/b200/triattn/triattn.md` (measurement tables regrouped by head layout, with charts).
 - `implementation="anthropic"` for TriangleMultiplication on B200 (sm_100). The release ships no sm_100 binary, so
   `miniworld-engine dev build-anthropic-sm100a <payload>/build` compiles its sm_80 member (unmodified sources) for sm_100a with the
   release's own builder and manifest; `integrations.anthropic_trimul` registers cc 10.0 as `sm_100a` in the release's loader and
