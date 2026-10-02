@@ -37,7 +37,7 @@ def cubin(stem: str) -> str:
     nvcc, rel, host = kernel_toolchain()
     flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}")
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    for f in (_dir / "local.cuh", _dir / f"{stem}.cu"):
+    for f in (_dir / "local.cuh", _dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
     root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
     out = root / "atom_local_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
@@ -55,11 +55,12 @@ def cubin(stem: str) -> str:
 
 #: (stem, function, dynamic smem bytes) of every kernel
 KERNELS = {
-    "fwd": ("lattn_fwd", "local_attn_fwd", 91648),
-    "dq": ("lattn_dq", "local_attn_dq", 99840),
-    "dkv": ("lattn_dkv", "local_attn_dkv", 101376),
+    "fwd": ("lattn_fwd", "local_attn_fwd", 203264),
+    "dq": ("lattn_dq", "local_attn_dq", 222720),
+    "dkv": ("lattn_dkv", "local_attn_dkv", 223744),
     "pb_f": ("lbias", "local_bias_fwd", 0),
     "pb_b": ("lbias", "local_bias_bwd", 0),
+    "pb_fin": ("lbias", "local_bias_fin", 0),
     "cond_ln": ("lcross", "local_cond_ln", 0),
     "kv_f": ("lcross", "local_kv_fwd", 0),
     "kv_b": ("lcross", "local_kv_bwd", 0),
@@ -90,62 +91,109 @@ def nwindows(n: int) -> int:
     return (n + WQ - 1) // WQ
 
 
+_TMAPS: dict = {}
+
+
+def _tmap(t, dims, strides, box, swizzle, dtype="bf16"):
+    """A TMA descriptor, cached by everything it encodes (address, dims, strides, box, swizzle, dtype): building one costs ~5-10 us of
+    host time per call. The cache does not hold the tensor (a reused address with the same geometry encodes the same descriptor)."""
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    key = (t.data_ptr(), tuple(dims), tuple(strides), tuple(box), swizzle, dtype)
+    m = _TMAPS.get(key)
+    if m is None:
+        if len(_TMAPS) >= 512:
+            _TMAPS.clear()
+        m = driver.TensorMap(t, dims, strides, box, swizzle=swizzle, dtype=dtype)
+        m.keep = None
+        _TMAPS[key] = m
+    return m
+
+
+def _rows(t, n):
+    """TMA map of a contiguous [A, N, 128] bf16 tensor: boxes of n rows x one head (32 columns), 64-B swizzle."""
+    A, N, _ = t.shape
+    return _tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (DH, n, 1), 64)
+
+
+def _vec(t, n):
+    """TMA map of a contiguous [A, 4, N] fp32 tensor (LSE, D): boxes of n rows of one head."""
+    A, _, N = t.shape
+    return _tmap(t, (N, NH, A), (N * 4, NH * N * 4), (n, 1, 1), 0, "f32")
+
+
 def attn_fwd(q, k, v, bias, kmask=None):
-    """q, k, v [A, N, 128] bf16; bias [4, nwin, 32, 128] fp32; kmask [N] bool/uint8 or None -> O [A, N, 128] bf16, LSE [A, 4, N] fp32 (log2)."""
+    """q, k, v [A, N, 128] bf16 (contiguous); bias [4, nwin, 32, 128] fp32; kmask [N] bool/uint8 or None -> O [A, N, 128] bf16,
+    LSE [A, 4, N] fp32 (log2). tcgen05: a CTA per (128-query chunk, head) and sample range."""
     A, N, _ = q.shape
     nwin = nwindows(N)
     d = _dev(q)
     o = torch.empty_like(q)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
-    npair = (A + 1) // 2
-    ctas = nwin * NH
-    psplit = max(1, min(npair, (2 * nsm(d) + ctas - 1) // ctas))      # about two CTAs per SM
     km = None if kmask is None else kmask.to(torch.uint8).contiguous()
-    _load("fwd", d)((nwin, NH, psplit), (128, 1, 1), q, k, v, bias, km, o, lse, int(N), int(A), int(nwin), int(psplit))
+    nq = (N + 127) // 128
+    sp = max(1, min(A, nsm(d) // (nq * NH)))
+    out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
+    _load("fwd", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows(q, 128), _rows(k, 224), _rows(v, 224), out, bias, km, lse,
+                    int(N), int(A), int(nwin), int(sp))
     return o, lse
 
 
 def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     """dQ, dK, dV (bf16) into dkv [A N, 512] (blocks 0 / 1 / 2) and dbias [4, nwin, 32, 128] fp32 (summed over the samples).
 
-    ``dd`` is D = rowsum(dO * O) per head [A, 4, N] fp32, ``lse`` the forward's [A, 4, N] (log2 units)."""
+    ``dd`` is D = rowsum(dO * O) per head [A, 4, N] fp32, ``lse`` the forward's [A, 4, N] (log2 units). q, k, v, do are contiguous
+    [A, N, 128]. dQ (query-centric) and dK / dV / dbias (key-centric) run on tcgen05, a CTA per (128-row chunk, head) and sample range,
+    through TMA maps over the [A, N, *] operands (zero fill outside [0, N), stores clipped at N)."""
     A, N, _ = q.shape
     nwin = nwindows(N)
     d = _dev(q)
     ldd = dkv.stride(0)
     km = None if kmask is None else kmask.to(torch.uint8).contiguous()
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
-    npair = (A + 1) // 2
-    ctas = nwin * NH
-    psplit = max(1, min(npair, (2 * nsm(d) + ctas - 1) // ctas))
-    _load("dq", d)((nwin, NH, psplit), (128, 1, 1), q, k, v, do, bias, km, lse, dd, dkv, int(ldd), int(N), int(A), int(nwin), int(psplit))
-    units = (N + 15) // 16
-    _load("dkv", d)(((units + 3) // 4, NH, 1), (128, 1, 1), q, k, v, do, bias, km, lse, dd, dkv, dbias, int(ldd), int(N), int(A), int(nwin))
+    out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
+    nq = (N + 127) // 128
+    sp = max(1, min(A, nsm(d) // (nq * NH)))                         # split the samples when there are few chunks
+    _load("dq", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows(q, 128), _rows(k, 224), _rows(v, 224), _rows(do, 128), _vec(lse, 128), _vec(dd, 128),
+                   out, bias, km, int(N), int(A), int(nwin), int(sp))
+    nk = (N + 112 + 127) // 128
+    sp = 2 if 2 * nk * NH <= nsm(d) and A > 1 else 1                  # two sample halves add into dbias exactly (0 + a + b)
+    _load("dkv", d)((nk * NH * sp, 1, 1), (512, 1, 1), _rows(q, 224), _rows(k, 128), _rows(v, 128), _rows(do, 224), _vec(lse, 224), _vec(dd, 224),
+                    out, bias, km, dkv, dbias, int(ldd), int(N), int(A), int(nwin), int(sp))
     return dbias
+
+
+def _params(wb, gamma):
+    """Wb [4, 16] and gamma [16] as the kernels read them: contiguous, bf16 or fp32 (anything else is converted to fp32)."""
+    if wb.dtype != gamma.dtype or wb.dtype not in (torch.bfloat16, torch.float32):
+        wb, gamma = wb.float(), gamma.float()
+    return wb.contiguous(), gamma.contiguous(), int(wb.dtype == torch.bfloat16)
 
 
 def pair_bias_fwd(z, gamma, wb, eps=1e-5):
     """z [nwin, 32, 128, 16] bf16 -> bias [4, nwin, 32, 128] fp32."""
     nwin = z.shape[0]
     rows = z.numel() // DP
-    w = (wb.float() * gamma.float()[None]).contiguous()
+    wb, gamma, bf = _params(wb, gamma)
     out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
     d = _dev(z)
-    _load("pb_f", d)((min(4 * nsm(d), (rows + 255) // 256), 1, 1), (256, 1, 1), z.contiguous(), w, out, int(rows), float(eps))
+    _load("pb_f", d)((min(4 * nsm(d), (rows + 255) // 256), 1, 1), (256, 1, 1), z.contiguous(), wb, gamma, out, int(rows), float(eps), bf)
     return out
 
 
 def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
     """dbias [4, nwin, 32, 128] fp32 -> dz (z's layout and dtype), dgamma [16], dWb [4, 16] (fp32)."""
     rows = z.numel() // DP
-    w = (wb.float() * gamma.float()[None]).contiguous()
+    wb, gamma, bf = _params(wb, gamma)
     dz = torch.empty_like(z)
     d = _dev(z)
-    nb = min(4 * nsm(d), (rows + 255) // 256)
+    nb = min(nsm(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
-    _load("pb_b", d)((nb, 1, 1), (256, 1, 1), z.contiguous(), w, dbias.contiguous(), dz, part, int(rows), float(eps))
-    G = part.sum(0).reshape(NH, DP)
-    return dz, (G * wb.float()).sum(0), G * gamma.float()[None]
+    dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
+    dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
+    _load("pb_b", d)((nb, 1, 1), (256, 1, 1), z.contiguous(), wb, gamma, dbias.contiguous(), dz, part, int(rows), float(eps), bf)
+    _load("pb_fin", d)((1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf)
+    return dz, dgamma, dwb
 
 
 # ------------------------------------------------------------------------------------------------ cross-attention mode (second AdaLN for K / V)

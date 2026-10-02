@@ -1,133 +1,192 @@
-// lattn_dq.cu — dQ of the AF3 windowed atom attention (window-local: the 32 queries of a window own their dq entirely), sm_100a.
+// lattn_dq.cu — dQ of the AF3 windowed atom attention on tcgen05 (sm_100a), the query-centric mirror of lattn_dkv.cu.
 //
 //   P = exp2(S - LSE)    dP = dO V^T    dS = P (dP - D)    dQ = dS K / sqrt(32)     (bf16 into dq[row, h * 32 + d], row stride ldd)
 //
-// Same CTA structure as lattn_fwd.cu: (window, head, sample chunk), 4 warps = 2 samples x 2 query tiles, the window's bias in shared memory.
+// A CTA owns 128 queries [q0, q0 + 128) (windows 4 c .. 4 c + 3), one head and a range of samples (SP CTAs split the samples); they see
+// the 224 keys [q0 - 48, q0 + 176). TMEM lane = query:  S = Q K^T [128 x 224] cols 0..223,  dP = dO V^T cols 224..447,  dQ cols 448..479.
+// Warp w (lane quadrant w & 3 = one window, band quarter w >> 2) reads its 32 x 32 band cells, computes dS = exp2(S c + bias - LSE) (dP - D)
+// and -- after the quadrant's warps have read -- writes dS as packed bf16 over S (cols 0..111, out-of-band cells zero): the TMEM A operand
+// of dQ += dS K (B = the K tile, MN-major). Warps with band quarter < 2 drain 32 x 16 of dQ each through shared memory with a TMA store.
+// Warp 16 issues the TMA loads (3 stages, refilled when a sample's MMAs commit) and the MMAs; the window's bias (log2 domain, key mask folded in) stays in shared memory.
 // SPDX-License-Identifier: Apache-2.0
-#include "local.cuh"
+#include "../sm100/sm100.cuh"
+using namespace s100;
 
-constexpr int BS = 136;
-constexpr int TQB = WQ * 64, TKB = WK * 64;
-constexpr int SLOT = 2 * TQB + 2 * TKB;                           // q | K | V | dO
-constexpr int O_BIAS = 0, O_KADD = WQ * BS * 4, O_ST = O_KADD + WK * 4;
-constexpr int SMEM_BYTES = O_ST + 2 * 2 * SLOT;
+constexpr int NH = 4, DH = 32, WQ = 32, WK = 128, KOFF = 48, QN = 128, KN = 224, NST = 3;
+constexpr float LOG2E = 1.4426950408889634f, QSCALE = 0.17677669529663687f;
+constexpr int T_Q = 0, T_DO = QN * 64, T_K = 2 * QN * 64, T_V = T_K + KN * 64, T_L = T_V + KN * 64, T_D = T_L + QN * 4;
+constexpr int STAGE = 46080;
+static_assert(T_D + QN * 4 <= STAGE && STAGE % 1024 == 0, "stage");
+constexpr int BSTR = 33;                                            // padded bias rows: conflict-free both ways
+constexpr int O_B = NST * STAGE, O_O = O_B + 16 * 32 * BSTR * 4, O_BAR = O_O + 16 * 1024;
+constexpr int SMEM_BYTES = O_BAR + 256;
+constexpr int C_S = 0, C_DP = 224, C_DQ = 448, C_PS = 0;
+constexpr uint32_t TX = 2 * QN * 64 + 2 * KN * 64 + 2 * QN * 4;
 
-extern "C" __global__ void __launch_bounds__(128)
-local_attn_dq(const __nv_bfloat16* __restrict__ gq, const __nv_bfloat16* __restrict__ gk, const __nv_bfloat16* __restrict__ gv,
-              const __nv_bfloat16* __restrict__ gdo, const float* __restrict__ gbias, const uint8_t* __restrict__ kmask,
-              const float* __restrict__ LSE, const float* __restrict__ Dd, __nv_bfloat16* __restrict__ dq, int ldd,
-              int N, int A, int nwin, int psplit) {
+DEVI void tmem_st16z(uint32_t taddr) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x16.b32 [%0], {%1,%1,%1,%1,%1,%1,%1,%1,%1,%1,%1,%1,%1,%1,%1,%1};" :: "r"(taddr), "r"(0u) : "memory");
+}
+
+extern "C" __global__ void __launch_bounds__(544, 1)
+local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ CUtensorMap tm_k, const __grid_constant__ CUtensorMap tm_v,
+                 const __grid_constant__ CUtensorMap tm_do, const __grid_constant__ CUtensorMap tm_l, const __grid_constant__ CUtensorMap tm_d,
+                 const __grid_constant__ CUtensorMap tm_o, const float* __restrict__ gbias, const uint8_t* __restrict__ kmask,
+                 int N, int A, int nwin, int SP) {
   extern __shared__ __align__(1024) uint8_t sm[];
-  float* sbias = reinterpret_cast<float*>(sm + O_BIAS);
-  float* kadd = reinterpret_cast<float*>(sm + O_KADD);
   const uint32_t su = smem_u32(sm);
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sm + O_BAR);
+  uint64_t *full = bars, *sready = bars + NST, *tready = bars + NST + 1, *dready = bars + NST + 2, *empty = bars + NST + 3;
+  uint32_t* tptr = reinterpret_cast<uint32_t*>(sm + O_BAR + 128);
+  float* sbias = reinterpret_cast<float*>(sm + O_B);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int w = blockIdx.x, h = blockIdx.y, z = blockIdx.z;
-  const int npair = (A + 1) >> 1;
-  const int kbase = WQ * w - KOFF;
-  {
-    const float* src = gbias + ((size_t)h * nwin + w) * (WQ * WK);
-    for (int i = tid; i < WQ * WK / 4; i += 128) {
-      const int r = i >> 5, c = (i & 31) * 4;
-      *reinterpret_cast<float4*>(sbias + r * BS + c) = *reinterpret_cast<const float4*>(src + i * 4);
-    }
-    for (int j = tid; j < WK; j += 128) {
-      const int key = kbase + j;
-      kadd[j] = (key >= 0 && key < N && (kmask == nullptr || kmask[key])) ? 0.f : -INFINITY;
+  const int pair = blockIdx.x / SP, part = blockIdx.x - pair * SP;
+  const int jc = pair >> 2, h = pair & 3;
+  const int q0 = 128 * jc, kb = q0 - KOFF;
+  const int a_lo = (int)((long)A * part / SP), a_hi = (int)((long)A * (part + 1) / SP);
+  const int nit = a_hi - a_lo;
+  const bool ctl = warp == 16;                                       // TMA + MMA warp (no TMEM lanes)
+
+  if (tid == 0) {
+    for (int i = 0; i < NST; ++i) mbar_init(&full[i], 1);
+    mbar_init(sready, 1); mbar_init(tready, 16); mbar_init(dready, 1);
+    for (int i = 0; i < NST; ++i) mbar_init(&empty[i], 1);
+    fence_barrier_init();
+  }
+  if (warp == 0) tmem_alloc(smem_u32(tptr), 512);
+  const int qd = warp & 3, qt = warp >> 2;
+  const int wq = 4 * jc + qd;                                        // this quadrant's window; lane = query qq of it
+  if (!ctl) {                                                                  // lane = key offset jj (coalesced rows of the bias), loop over the queries
+    const int key = 32 * wq - KOFF + 32 * qt + lane;
+    const bool kok = key >= 0 && key < N && (kmask == nullptr || kmask[key]);
+    const float* src = gbias + (((size_t)h * nwin + (wq < nwin ? wq : 0)) * WQ) * WK + 32 * qt + lane;
+#pragma unroll 8
+    for (int qq = 0; qq < 32; ++qq) {
+      float v = 0.f;
+      if (wq < nwin) v = kok ? src[qq * WK] * LOG2E : -INFINITY;
+      sbias[(warp * 32 + lane) * BSTR + qq] = v;
     }
   }
-  constexpr int PER = 2 * WQ * 4 + 2 * WK * 4;                    // 16-byte copies per sample: q, dO, K, V
-  auto issue = [&](int stage, int p) {
-    const uint32_t st = su + O_ST + stage * 2 * SLOT;
-    for (int idx = tid; idx < 2 * PER; idx += 128) {
-      const int slot = idx / PER, rem = idx - slot * PER;
-      const int a = 2 * p + slot;
-      const bool ok_a = a < A;
-      const uint32_t sbase = st + slot * SLOT;
-      if (rem < 2 * WQ * 4) {
-        const int which = rem >= WQ * 4, rr = which ? rem - WQ * 4 : rem;
-        const int row = rr >> 2, ch = rr & 3, q = WQ * w + row;
-        const bool ok = ok_a && q < N;
-        const __nv_bfloat16* src = (which ? gdo : gq) + ((size_t)a * N + (ok ? q : 0)) * DM + h * DH + ch * 8;
-        cp_async16(tile_addr(sbase + (which ? TQB + 2 * TKB : 0), row, ch), src, ok);
-      } else {
-        const int r2 = rem - 2 * WQ * 4, which = r2 >= WK * 4, rr = which ? r2 - WK * 4 : r2;
-        const int row = rr >> 2, ch = rr & 3, key = kbase + row;
-        const bool ok = ok_a && key >= 0 && key < N;
-        const __nv_bfloat16* src = (which ? gv : gk) + ((size_t)a * N + (ok ? key : 0)) * DM + h * DH + ch * 8;
-        cp_async16(tile_addr(sbase + TQB + which * TKB, row, ch), src, ok);
-      }
-    }
-    cp_commit();
+  tc_fence_before(); __syncthreads(); tc_fence_after();
+  const uint32_t tm = *tptr;
+  const uint32_t id_s = idesc_bf16(128, KN, 0, 0), id_d = idesc_bf16(128, 32, 0, 1);
+
+  auto load = [&](int it) {
+    const int s = it % NST, a = a_lo + it;
+    const uint32_t st = su + s * STAGE;
+    mbar_expect_tx(&full[s], TX);
+    tma_load_3d(st + T_Q, &tm_q, &full[s], h * DH, q0, a);
+    tma_load_3d(st + T_DO, &tm_do, &full[s], h * DH, q0, a);
+    tma_load_3d(st + T_K, &tm_k, &full[s], h * DH, kb, a);
+    tma_load_3d(st + T_V, &tm_v, &full[s], h * DH, kb, a);
+    tma_load_3d(st + T_L, &tm_l, &full[s], q0, h, a);
+    tma_load_3d(st + T_D, &tm_d, &full[s], q0, h, a);
   };
-  int p = z;
-  if (p < npair) issue(0, p);
-  __syncthreads();
-  const int mt = warp & 1, sl = warp >> 1;
-  const int r0 = lane >> 2, c0 = 2 * (lane & 3);
-  for (int stage = 0; p < npair; p += psplit, stage ^= 1) {
-    if (p + psplit < npair) { issue(stage ^ 1, p + psplit); cp_wait<1>(); } else { cp_wait<0>(); }
-    __syncthreads();
-    const int a = 2 * p + sl;
-    if (a < A) {
-      const uint32_t sbase = su + O_ST + stage * 2 * SLOT + sl * SLOT, tq = sbase, tk = sbase + TQB, tv = tk + TKB, td = tv + TKB;
-      const int q0 = WQ * w + 16 * mt + r0, q1 = q0 + 8;
-      const float lse0 = q0 < N ? LSE[((size_t)a * NH + h) * N + q0] : 1e30f, lse1 = q1 < N ? LSE[((size_t)a * NH + h) * N + q1] : 1e30f;
-      const float d0 = q0 < N ? Dd[((size_t)a * NH + h) * N + q0] : 0.f, d1 = q1 < N ? Dd[((size_t)a * NH + h) * N + q1] : 0.f;
-      uint32_t qa[2][4], da[2][4];
-      load_a(qa, tq, 16 * mt, lane);
-      load_a(da, td, 16 * mt, lane);
-      float s[16][4], dp[16][4];
+  auto mma_s = [&](int it) {
+    const int s = it % NST;
+    const uint32_t st = su + s * STAGE;
+    mbar_wait(&full[s], (it / NST) & 1);
+    tc_fence_after();
+    const uint64_t dq = desc_sw64(st + T_Q), dk = desc_sw64(st + T_K), ddo = desc_sw64(st + T_DO), dv = desc_sw64(st + T_V);
+    if (elect_one()) {
+      umma_ss(tm + C_S, dq, dk, id_s, 0);
+      umma_ss(tm + C_DP, ddo, dv, id_s, 0);
+      umma_ss(tm + C_S, dq + 2, dk + 2, id_s, 1);
+      umma_ss(tm + C_DP, ddo + 2, dv + 2, id_s, 1);
+      tc_commit(sready);
+    }
+    __syncwarp();
+  };
+  auto mma_d = [&](int it) {                                         // dQ = dS K (A = packed bf16 dS in TMEM, B = K tile MN-major)
+    const uint32_t st = su + (it % NST) * STAGE;
+    const uint64_t dk = desc_sw64(st + T_K);
+    if (elect_one()) {
 #pragma unroll
-      for (int i = 0; i < 16; ++i) s[i][0] = s[i][1] = s[i][2] = s[i][3] = dp[i][0] = dp[i][1] = dp[i][2] = dp[i][3] = 0.f;
-#pragma unroll
-      for (int np = 0; np < 8; ++np)
-#pragma unroll
-        for (int ks = 0; ks < 2; ++ks) {
-          uint32_t b0, b1, b2, b3;
-          load_b_rows(b0, b1, b2, b3, tk, 16 * np, ks, lane);
-          mma16816(s[2 * np], qa[ks], b0, b1);
-          mma16816(s[2 * np + 1], qa[ks], b2, b3);
-          load_b_rows(b0, b1, b2, b3, tv, 16 * np, ks, lane);
-          mma16816(dp[2 * np], da[ks], b0, b1);
-          mma16816(dp[2 * np + 1], da[ks], b2, b3);
-        }
-#pragma unroll
-      for (int nt = 0; nt < 16; ++nt) {
-        const int c = 8 * nt + c0;
-        const float2 ka = *reinterpret_cast<const float2*>(kadd + c);
-        const float2 b_lo = *reinterpret_cast<const float2*>(sbias + (16 * mt + r0) * BS + c);
-        const float2 b_hi = *reinterpret_cast<const float2*>(sbias + (16 * mt + r0 + 8) * BS + c);
-        const float p0 = ex2f(fmaf(s[nt][0], QSCALE * LOG2E, b_lo.x * LOG2E + ka.x) - lse0);
-        const float p1 = ex2f(fmaf(s[nt][1], QSCALE * LOG2E, b_lo.y * LOG2E + ka.y) - lse0);
-        const float p2 = ex2f(fmaf(s[nt][2], QSCALE * LOG2E, b_hi.x * LOG2E + ka.x) - lse1);
-        const float p3 = ex2f(fmaf(s[nt][3], QSCALE * LOG2E, b_hi.y * LOG2E + ka.y) - lse1);
-        s[nt][0] = p0 * (dp[nt][0] - d0);
-        s[nt][1] = p1 * (dp[nt][1] - d0);
-        s[nt][2] = p2 * (dp[nt][2] - d1);
-        s[nt][3] = p3 * (dp[nt][3] - d1);
-      }
-      float acc[4][4];
-#pragma unroll
-      for (int i = 0; i < 4; ++i) acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
-#pragma unroll
-      for (int ks = 0; ks < 8; ++ks) {
-        uint32_t sa[4] = {pack_bf16(s[2 * ks][0], s[2 * ks][1]), pack_bf16(s[2 * ks][2], s[2 * ks][3]),
-                          pack_bf16(s[2 * ks + 1][0], s[2 * ks + 1][1]), pack_bf16(s[2 * ks + 1][2], s[2 * ks + 1][3])};
-#pragma unroll
-        for (int dpair = 0; dpair < 2; ++dpair) {
-          uint32_t b0, b1, b2, b3;
-          load_b_cols(b0, b1, b2, b3, tk, 16 * ks, dpair, lane);
-          mma16816(acc[2 * dpair], sa, b0, b1);
-          mma16816(acc[2 * dpair + 1], sa, b2, b3);
-        }
-      }
-#pragma unroll
-      for (int dt = 0; dt < 4; ++dt) {
-        if (q0 < N) *reinterpret_cast<uint32_t*>(dq + ((size_t)a * N + q0) * ldd + h * DH + 8 * dt + c0) = pack_bf16(acc[dt][0] * QSCALE, acc[dt][1] * QSCALE);
-        if (q1 < N) *reinterpret_cast<uint32_t*>(dq + ((size_t)a * N + q1) * ldd + h * DH + 8 * dt + c0) = pack_bf16(acc[dt][2] * QSCALE, acc[dt][3] * QSCALE);
+      for (int ks = 0; ks < KN / 16; ++ks) umma_ts(tm + C_DQ, tm + C_PS + 8 * ks, dk + (uint64_t)(ks * 1024 >> 4), id_d, ks);
+      tc_commit(dready);
+      tc_commit(&empty[it % NST]);
+    }
+    __syncwarp();
+  };
+  if (ctl) {
+    if (lane == 0) for (int i = 0; i < NST && i < nit; ++i) load(i);
+    __syncwarp();
+    if (nit > 0) mma_s(0);
+    for (int it = 0; it < nit; ++it) {
+      mbar_wait(tready, it & 1);
+      tc_fence_after();
+      mma_d(it);                                                     // commits dready and empty[stage of it]
+      if (it + 1 < nit) mma_s(it + 1);
+      if (it + NST < nit) {
+        mbar_wait(&empty[it % NST], (it / NST) & 1);
+        if (lane == 0) load(it + NST);
+        __syncwarp();
       }
     }
-    __syncthreads();
+  } else {
+
+  auto drain = [&](int itd) {                                        // warps with qt < 2: 32 queries x 16 columns of dQ
+    if (qt >= 2) return;
+    uint32_t v[16];
+    tmem_ld16(tm + ((uint32_t)(32 * qd) << 16) + C_DQ + 16 * qt, v);
+    tmem_wait_ld();
+    uint8_t* ob = sm + O_O + warp * 1024;
+    if (lane == 0) tma_store_wait_read0();
+    __syncwarp();
+#pragma unroll
+    for (int g = 0; g < 2; ++g) {
+      uint4 o;
+      o.x = pack_bf16(__uint_as_float(v[8 * g + 0]) * QSCALE, __uint_as_float(v[8 * g + 1]) * QSCALE);
+      o.y = pack_bf16(__uint_as_float(v[8 * g + 2]) * QSCALE, __uint_as_float(v[8 * g + 3]) * QSCALE);
+      o.z = pack_bf16(__uint_as_float(v[8 * g + 4]) * QSCALE, __uint_as_float(v[8 * g + 5]) * QSCALE);
+      o.w = pack_bf16(__uint_as_float(v[8 * g + 6]) * QSCALE, __uint_as_float(v[8 * g + 7]) * QSCALE);
+      *reinterpret_cast<uint4*>(ob + lane * 32 + 16 * g) = o;
+    }
+    fence_proxy_async();
+    __syncwarp();
+    if (lane == 0) {
+      tma_store_3d(&tm_o, su + O_O + warp * 1024, h * DH + 16 * qt, q0 + 32 * qd, a_lo + itd);
+      tma_store_commit();
+    }
+  };
+
+  const uint32_t tl = tm + ((uint32_t)(32 * qd) << 16);
+  const int x0 = 32 * qd + 32 * qt;                                  // chunk-relative key column of the band quarter
+  const float* sb = sbias + warp * 32 * BSTR + lane;
+  for (int it = 0; it < nit; ++it) {
+    const int s = it % NST;
+    mbar_wait(sready, it & 1);
+    tc_fence_after();
+    const float lse = reinterpret_cast<const float*>(sm + s * STAGE + T_L)[32 * qd + lane];
+    const float dd = reinterpret_cast<const float*>(sm + s * STAGE + T_D)[32 * qd + lane];
+    uint32_t dw[16];
+#pragma unroll
+    for (int c = 0; c < 2; ++c) {
+      uint32_t sv[16], dv[16];
+      tmem_ld16(tl + C_S + x0 + 16 * c, sv);
+      tmem_ld16(tl + C_DP + x0 + 16 * c, dv);
+      tmem_wait_ld();
+#pragma unroll
+      for (int jj = 0; jj < 16; jj += 2) {
+        const int b = 16 * c + jj;
+        const float p0 = ex2f(fmaf(__uint_as_float(sv[jj]), QSCALE * LOG2E, sb[b * BSTR]) - lse);
+        const float p1 = ex2f(fmaf(__uint_as_float(sv[jj + 1]), QSCALE * LOG2E, sb[(b + 1) * BSTR]) - lse);
+        dw[b >> 1] = pack_bf16(p0 * (__uint_as_float(dv[jj]) - dd), p1 * (__uint_as_float(dv[jj + 1]) - dd));
+      }
+    }
+    tc_fence_before();
+    named_bar_sync(1 + qd, 128);
+    tc_fence_after();
+    tmem_st16(tl + C_PS + x0 / 2, dw);
+    if (qt < 3) tmem_st16z(tl + C_PS + (qt < qd ? 16 * qt : 16 * qt + 64));
+    tmem_wait_st();
+    tc_fence_before(); __syncwarp();
+    if (lane == 0) mbar_arrive(tready);
+    mbar_wait(dready, it & 1);
+    tc_fence_after();
+    drain(it);
   }
+  }
+  if (lane == 0) tma_store_wait0();
+  tc_fence_before(); __syncthreads(); tc_fence_after();
+  if (warp == 0) tmem_dealloc(tm, 512);
 }
