@@ -195,6 +195,8 @@ OP_FAMILIES = (
     "swa_gate_out",    # SWA-specific row-keyed gated output projection
     "swa_dit",         # the fused SWA atom DiT block (kernels/swa_dit): one forward op, one backward op
     "token_pair_init", # the input feature embedder pair stream (kernels/token_pair_init): one forward op, one backward op
+    "atom_dit",        # the AF3 atom DiT block (integrations/atom_dit): one forward op, one backward op
+    "local_dit",       # the AF3 block-local atom block (integrations/local_dit): one forward op, one backward op
     "tm1",
     "tm2",
     "transition",

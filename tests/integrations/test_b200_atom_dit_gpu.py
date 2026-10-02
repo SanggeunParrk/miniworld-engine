@@ -147,3 +147,126 @@ def test_calls_it_does_not_serve_keep_the_module_path(monkeypatch):
                                torch.zeros(2, 1, 128, 384, device="cuda", dtype=torch.bfloat16),
                                torch.zeros(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16), None)
     assert calls == [], calls
+
+
+def test_the_ops_take_every_parameter_of_the_block():
+    _, eng = _block(8)
+    assert len(atom_dit.WEIGHTS) == len(set(atom_dit.WEIGHTS))
+    assert set(atom_dit.WEIGHTS) == {name for name, _ in eng.named_parameters()}
+
+
+def _kernel_names(fn):
+    """Names of the CUDA kernels one call of ``fn`` launches."""
+    from torch.profiler import ProfilerActivity, profile
+
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        fn()
+        torch.cuda.synchronize()
+    return {e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA}
+
+
+@pytest.mark.parametrize(("A", "N", "masked"), [(3, 384, True), (2, 300, False)])
+def test_compiled_training_runs_the_sm100_kernels_and_matches_the_module_path(A, N, masked, monkeypatch):
+    """The block is two opaque ops, so ``torch.compile(fullgraph=True)`` keeps it in the graph and serves it: the kernels run
+    inside the compiled step, and the output and every gradient are no worse than the module path's against fp64."""
+    ref, eng = _block(9)
+    ins = _inputs(A, N, 10)
+    mask = _mask(N, 12) if masked else None
+    w = torch.randn(A, 1, N, DS, device="cuda", dtype=torch.float64)
+    truth = _train(ref, ins, torch.float64, w, mask)
+    compiled = torch.compile(eng, fullgraph=True, dynamic=False)
+
+    def step():
+        leaves = [t.detach().clone().to(torch.bfloat16).requires_grad_() for t in ins]
+        out = compiled(*leaves, mask)
+        (out.double() * w).sum().backward()
+        return out, leaves
+
+    names = _kernel_names(step)
+    assert any("atom_pre_fwd_sm100" in n for n in names), sorted(names)[:12]
+    assert any("atom_post_bwd_sm100" in n for n in names), sorted(names)[:12]
+    eng.zero_grad(set_to_none=True)
+    out, leaves = step()
+    got = {"out": out.detach(), "dsingle": leaves[0].grad, "dcond": leaves[1].grad, "dpair": leaves[2].grad,
+           **{n: p.grad.clone() for n, p in eng.named_parameters()}}
+    monkeypatch.setenv("MINIWORLD_ATOM_DIT_SM100", "0")
+    module = _train(eng, ins, torch.bfloat16, w, mask)
+    assert set(got) == set(truth)
+    for k in truth:
+        ec, em = _rel(got[k], truth[k]), _rel(module[k], truth[k])
+        assert torch.isfinite(got[k]).all(), k
+        assert got[k].dtype == module[k].dtype, k
+        assert ec < 1.5 * em + 3e-3, f"{k}: compiled sm_100a {ec:.2e} vs module path {em:.2e}"
+
+
+def test_compiled_inference_runs_the_sm100_kernels():
+    _, eng = _block(11)
+    s, c, z = (t.bfloat16() for t in _inputs(2, 256, 12))
+    compiled = torch.compile(eng, fullgraph=True, dynamic=False)
+    with torch.no_grad():
+        eager = eng(s, c, z, None)
+        names = _kernel_names(lambda: compiled(s, c, z, None))
+        out = compiled(s, c, z, None)
+    assert any("atom_pre_fwd_sm100" in n for n in names), sorted(names)[:12]
+    torch.testing.assert_close(out, eager, atol=0, rtol=0)
+
+
+def test_a_captured_training_step_reads_the_weights_of_every_replay():
+    """The weight packs are made inside the capture (a cache hit would record no pack kernel), so a replay after an optimizer
+    update gives the gradients of the NEW weights: close to an eager step on them and far from the gradients of the old ones.
+    (Not bitwise: the conditioning LayerNorm gradients are summed with atomics, whose order differs from run to run.)"""
+    _, eng = _block(13)
+    s, c, z = (t.bfloat16() for t in _inputs(2, 256, 14))
+    leaves = [t.clone().requires_grad_() for t in (s, c, z)]
+    dy = torch.randn_like(s)
+
+    def step():
+        eng.zero_grad(set_to_none=False)
+        out = eng(*leaves, None)
+        out.backward(dy)
+        return out
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            step()
+    torch.cuda.current_stream().wait_stream(stream)
+    old = {n: p.grad.clone() for n, p in eng.named_parameters()}   # the gradients of the weights the graph is captured on
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = step()
+    with torch.no_grad():
+        for p in eng.parameters():
+            p.mul_(1.1)                                   # what an optimizer step does between replays
+    graph.replay()
+    torch.cuda.synchronize()
+    replayed = {n: p.grad.clone() for n, p in eng.named_parameters()}
+    replay_out = out.clone()
+    eager_out = step()
+    torch.testing.assert_close(replay_out, eager_out, atol=0, rtol=0)   # the forward has no atomics
+    eager = {n: p.grad.clone() for n, p in eng.named_parameters()}
+
+    def total(a, b):
+        keys = sorted(a)
+        x = torch.cat([a[k].double().flatten() for k in keys])
+        y = torch.cat([b[k].double().flatten() for k in keys])
+        return float((x - y).norm() / y.norm())
+
+    to_new, to_old = total(replayed, eager), total(replayed, old)
+    assert to_new < 0.05, f"the replay is {to_new:.2e} from an eager step on the new weights"
+    assert to_old > 3 * to_new, f"the replay is {to_old:.2e} from the old weights' gradients and {to_new:.2e} from the new ones"
+
+
+def test_an_in_place_weight_update_is_seen_by_the_next_eager_call(monkeypatch):
+    _, eng = _block(15)
+    s, c, z = (t.bfloat16() for t in _inputs(2, 256, 16))
+    with torch.no_grad():
+        before = eng(s, c, z, None).clone()
+        for p in eng.parameters():
+            p.mul_(1.2)
+        after = eng(s, c, z, None)
+        monkeypatch.setenv("MINIWORLD_ATOM_DIT_SM100", "0")
+        module = eng(s, c, z, None)
+    assert not torch.equal(before, after)
+    assert _rel(after, module) < 3e-2

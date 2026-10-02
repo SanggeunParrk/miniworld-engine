@@ -11,7 +11,7 @@ capsule `experiments/atomdit_sm100`, unchanged, built on first use by the newest
 the B200 box). The engine's `DiTBlock` dispatches them through `integrations/atom_dit.py` (an autograd Function over the whole
 block for training, a kernel chain for inference) when `serves()` accepts the call: B200, `implementation` MINIWORLD / TRITON,
 bf16 single / cond / pair, the atom widths below, B = 1, any N, a [B, N] bool key mask or none, no QK-norm; anything else
-keeps the Triton path, and `MINIWORLD_ATOM_DIT_SM100=0` turns it off. N that is not a multiple of 128 is padded inside the call
+keeps the Triton path, and `MINIWORLD_ATOM_DIT_SM100=0` turns it off. The block is two opaque ops (`atom_dit_block_fwd` / `atom_dit_block_bwd`), so it is served under `torch.compile` and in CUDA graphs too (compiled training no longer falls back to the module path). N that is not a multiple of 128 is padded inside the call
 (zero single / cond rows, the padded keys masked, the pair tensor read in place) and the first N rows come back. The key mask
 (MiniWorld always passes the structure's `atom_mask`) is folded into the pair bias by `pair_bias_fwd` -- masked and padded keys
 get -1e4 (bf16 -9984), so their softmax weight is exactly 0 in any row with a valid key -- and `pair_bias_bwd` drops dbias on
