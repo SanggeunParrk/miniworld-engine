@@ -9,7 +9,8 @@ from miniworld_engine import settings
 from miniworld_engine.modules.exceptions import ImplementationType
 
 #: Largest batch the native D64 path takes: the j-class assignment of k3g / b1s needs (B L / 128) CTAs at most, and the plane bmm batch is d B.
-_MAX_BATCH = 8
+#: Public: a caller that folds samples into the batch (MiniWorld's template embedder) asks it; an engine without batched samples has no such name.
+MAX_BATCH = 8
 
 
 def serves_inference(module, pair: torch.Tensor, *, bidirectional: bool, dropscale: torch.Tensor | None = None) -> bool:
@@ -25,7 +26,7 @@ def serves_inference(module, pair: torch.Tensor, *, bidirectional: bool, dropsca
         return False
     if pair.ndim != 4 or pair.shape[1] != pair.shape[2]:
         return False
-    if pair.shape[0] != 1 and (pair.shape[-1] != 64 or pair.shape[0] > _MAX_BATCH):
+    if pair.shape[0] != 1 and (pair.shape[-1] != 64 or pair.shape[0] > MAX_BATCH):
         return False                  # samples are native (b-major tokens) for D64 only; the others take one sample
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import supports
 
@@ -75,7 +76,7 @@ def serves_train(module, pair: torch.Tensor, *, bidirectional: bool) -> bool:
         return False
     if pair.ndim != 4 or pair.shape[1] != pair.shape[2]:
         return False
-    if pair.shape[0] != 1 and (pair.shape[-1] != 64 or pair.shape[0] > _MAX_BATCH):
+    if pair.shape[0] != 1 and (pair.shape[-1] != 64 or pair.shape[0] > MAX_BATCH):
         return False                  # samples are native (b-major tokens) for D64 only; the others take one sample
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_train import supports
 

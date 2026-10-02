@@ -89,6 +89,8 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - B200 TriMul, D64 native path: B samples (B <= 8) in one call (tokens b-major, per-sample token mask and row-dropout scale, the plane bmm batched
   over d x B) instead of B calls; MiniWorld's template embedder runs its templates this way. 1.1-2.1x the B sequential calls at L128-384
   in inference, 1.2-2.6x in training (page: `docs/gpus/b200/trimul/trimul.md`); tests: `tests/integrations/test_b200_trimul_batch_gpu.py`.
+  `integrations.trimul_b200.MAX_BATCH` (8) states the limit for callers that fold samples into the batch; on an engine without it a B > 1 call
+  takes the slow path.
 
 ### Changed
 

@@ -24,7 +24,9 @@ Every other shape runs the Triton path.
 The D64 native path takes B samples in one call: tokens b-major, one launch per stage instead of B calls (MiniWorld's template
 embedder runs its templates as the B samples of one pair stack). `k3g` / `b1s` take a per-sample token mask and a per-sample
 row-dropout scale (a tile reloads it when its sample changes), `k1w` the per-sample mask, and the plane bmm batches over d x B.
-Wider D keeps one sample per call (`serves_*` refuse B > 1 there) and B > 8 is refused. Tests:
+Wider D keeps one sample per call (`serves_*` refuse B > 1 there) and B > 8 is refused; the limit is
+`integrations.trimul_b200.MAX_BATCH`, which a caller that folds samples into the batch asks (an engine without batched samples has no
+such name, and a B > 1 call there takes the slow path). Tests:
 `tests/integrations/test_b200_trimul_batch_gpu.py` compares B samples in one call with B calls of one sample, inference and
 training; every sample draws its own dropout scale and mask, so an index mix-up between samples is a large error.
 
