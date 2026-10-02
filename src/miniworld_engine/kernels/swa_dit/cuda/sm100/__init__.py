@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import importlib.util
 import os
 import subprocess
+import weakref
 from pathlib import Path
 
 import torch
@@ -565,14 +567,31 @@ _PACKS: dict = {}
 
 
 def _cached(fn, *ts):
-    """fn(*ts), cached on the tensors' storage and version (the weight forms are rebuilt only when a weight changes)."""
-    key = (fn.__name__, *((t.data_ptr(), t._version, tuple(t.shape)) for t in ts))
+    """fn(*ts), cached while the very same tensor objects are alive and unmodified (the weight forms are rebuilt when a weight is
+    updated in place -- its version moves -- or replaced). The key holds the objects themselves (weakly): a new tensor that the
+    allocator happens to place at a freed one's address, with the same shape and version -- a fresh bf16 cast of an fp32 master
+    weight, a test's next set of weights -- must not be served the old tensor's packed form.
+
+    Not cached: while a CUDA graph is being captured (a hit would record no pack kernel, and every replay would then read the
+    packed copy of the weights as they were at capture, never refreshed after an optimizer step), and for inference tensors
+    (they carry no version counter)."""
+    if torch.cuda.is_current_stream_capturing():
+        return fn(*ts)
+    try:
+        versions = tuple(t._version for t in ts)
+    except RuntimeError:                                  # inference tensors do not track a version counter
+        return fn(*ts)
+    key = (fn.__name__, *(id(t) for t in ts))
     hit = _PACKS.get(key)
-    if hit is None:
-        if len(_PACKS) > 64:
-            _PACKS.clear()
-        hit = _PACKS[key] = fn(*ts)
-    return hit
+    if hit is not None:
+        refs, vers, out = hit
+        if vers == versions and all(r() is t for r, t in zip(refs, ts, strict=True)):
+            return out
+    if len(_PACKS) > 64:
+        _PACKS.clear()
+    out = fn(*ts)
+    _PACKS[key] = (tuple(weakref.ref(t) for t in ts), versions, out)
+    return out
 
 
 def _w_qkvg(wqkv, wg):
