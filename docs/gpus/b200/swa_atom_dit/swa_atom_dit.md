@@ -259,6 +259,29 @@ At these sizes a kernel's compulsory work is 0.2-8 µs while one launch of a per
 (TMEM allocation, weight prologue, one tile's latency chain), so time SoL stays low even where the energy is near its floor. The
 remaining lever is fewer kernels (fusing I1-I4), not faster ones.
 
+## FlashAttention-4 attention and the global variant (2026-10-02)
+
+Two additions around the block, both for MiniWorld's input embedder (SWA atom blocks at A = 1 with a global window):
+
+- **The FlashAttention-4 forward saves its lse** (`modules/swa_atom_attention`, `settings.swa_flash_saves_lse`, default on).
+  `flash_window_fa4` saves the output and the log-sum-exp in the forward and the backward reads them; the legacy
+  `flash_window_seqused` re-ran the flash forward in its backward and cleaned q / k / v / dq / dk / dv with about 11 eager elementwise
+  launches per block. Same numbers either way (`tests/integrations/test_swa_fa4_attention_gpu.py`). In the embedder (three blocks, 4096 atoms
+  / 384 tokens, forward + backward, CUDA graph, one B200) this step takes 1.84 ms to 1.41 ms; the other steps are in
+  [../token_pair_init/token_pair_init.md](../token_pair_init/token_pair_init.md).
+- **Global-attention variant of the fused block** (`kernels/swa_dit`, `interface.is_global(half_window)`: `< 0` or `>= 65536`). The
+  window-attention stage (I3 / T3 / T8) is replaced by FlashAttention-4 (`attn_global_fwd` / `attn_global_bwd`); every other stage is
+  the kernels above. bf16 and B200 only, `refusal()` says why a call is not served, and the output and every gradient match the
+  windowed block at a window that covers the sequence (`tests/integrations/test_b200_swa_dit_global_gpu.py`). **At A = 1 it is slower than
+  the per-op path**: 1.25 ms against 1.08 ms for the same embedder (opt-in switches of team-gm,
+  `MINIWORLD_SWA_FUSED=1` and `MINIWORLD_SWA_GLOBAL_BF16=1`; the stream runs in bf16, a precision change for an fp32 caller), so
+  MiniWorld keeps it opt-in.
+
+The weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) is keyed on the tensor objects (weak references) and their versions since
+2026-10-02. The old key (data_ptr, version, shape) served the old tensor's packed copy to a new weight placed at a freed one's address; the
+cache is also bypassed while a CUDA graph is captured, so that the pack kernels are recorded into the graph and every replay repacks the
+weights an optimizer step changed (`tests/integrations/test_swa_dit_pack_cache.py`).
+
 ## What was tried and not kept
 
 | attempt | result |

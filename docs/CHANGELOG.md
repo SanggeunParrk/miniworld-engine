@@ -10,6 +10,17 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 (sm_100a) token-pair initialisation `kernels/token_pair_init` (ops `token_pair_init_fwd` / `token_pair_init_bwd`): the input
+  feature embedder's `left[i] + right[j] + Linear(relative-position one-hot) + Linear(bond one-hot)` as one kernel pair that never builds
+  the 139-wide fp32 one-hot (84 MB at 384 tokens), in exact fp32, any B and ragged L, CUDA-graph capturable. 5.6-16.9x the dense
+  reference forward and 4.0-6.2x forward + backward at L128-768. Page: `docs/gpus/b200/token_pair_init/token_pair_init.md`; tests:
+  `tests/integrations/test_token_pair_init_gpu.py`.
+- `modules.swa_atom_attention`: the FlashAttention-4 forward saves its output and lse and the backward reads them (`flash_window_fa4`,
+  `settings.swa_flash_saves_lse`, default on) instead of re-running the flash forward and cleaning q / k / v / dq / dk / dv with about 11
+  eager launches per block; same numbers (`tests/integrations/test_swa_fa4_attention_gpu.py`). The legacy op stays behind the setting.
+- B200 SWA atom DiT block: a global-attention variant (`kernels/swa_dit.interface.is_global`, a window `< 0` or `>= 65536`) that runs
+  FlashAttention-4 between the sm_100a stages (bf16, B200). Slower than the per-op path at A = 1, so callers opt in. Tests:
+  `tests/integrations/test_b200_swa_dit_global_gpu.py`.
 - B200 (sm_100a) AttentionPairBias (the Pairformer single track): `AttentionPairBias.forward` runs hand-written CUDA and
   cuBLAS only through `integrations/attention_pair_bias_b200.py` (`kernels/augmented_attention/cuda/apb/`: pair LayerNorm +
   projection and its backward on TMA rings, the sm_100a attention cores, CUDA row kernels) for implementation MINIWORLD, bf16,
@@ -122,6 +133,11 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Fixed
 
+- B200 SWA atom DiT weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) keyed on (data_ptr, version, shape) served the old
+  tensor's packed copy to a new weight placed at a freed one's address (a bf16 cast, the next test's weights). It is keyed on the tensor
+  objects now (weak references plus version), and bypassed while a CUDA graph is captured (a hit would record no pack kernel, so every
+  replay would read the packed weights of the capture-time step) and for inference tensors. Tests:
+  `tests/integrations/test_swa_dit_pack_cache.py`.
 - B200 OuterProductMean training was not deterministic from run to run at L >= 384 (whole rows of one group): the prologue
   backward released an input stage to the next TMA load while its generic shared-memory reads could still be in flight. A
   `fence.proxy.async.shared::cta` before the release fixes it; the same fence now precedes the stage releases of the PWA
