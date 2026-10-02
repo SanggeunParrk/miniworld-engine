@@ -23,6 +23,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- A100 (sm_80) hand-CUDA TriMul, inference and training (`kernels/trimul_inproj/cuda/sm80.py`, wired through
+  `integrations/trimul_sm80.py`): D128, one direction or bidirectional, B = 1, L % 16 == 0. Module-level on an
+  A100 80GB PCIe: inference 1.32–1.48×, training 1.20–1.25× the Triton path (`docs/gpus/a100/a100.md`).
+  Ported from the `experiments/a100_trimul_fwd` research (tag `archive/a100-sm80-branch-20260928`) with a
+  one-launch weight pack (no weight cache: captured graphs repack after an optimizer step) and deterministic
+  LN_in dγ / dβ partials. `MINIWORLD_TRIMUL_SM80=0` keeps the Triton path.
 - `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
   writes) from a JSON spec.
 

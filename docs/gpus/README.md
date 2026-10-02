@@ -7,7 +7,7 @@ The maintainer makes that call; the pages record it.
 |---|---|---|---|---|
 | H100 80GB HBM3 | sm90 | cssb, `h100` partition | [h100/h100.md](h100/h100.md) · [module dispatch](h100/dispatch.md) | hand CUDA for TriMul, Transition (n=4), TriAttn training, OPM/PWA, token DiT; Triton elsewhere |
 | B200 | sm100 | cssb (same cluster as H100/A100) | [b200/b200.md](b200/b200.md) | Triton only in this repo (CUDA work is happening elsewhere) |
-| A100 80GB PCIe | sm80 | cssb (same cluster as H100/B200) | [a100/a100.md](a100/a100.md) | Triton only |
+| A100 80GB PCIe | sm80 | cssb (same cluster as H100/B200) | [a100/a100.md](a100/a100.md) | hand CUDA for TriMul (D128) and Transition (n=4); Triton elsewhere |
 | RTX A6000 / A5000 | sm86 | `cssb-master`, `gpu` partition | [ampere-workstation/ampere-workstation.md](ampere-workstation/ampere-workstation.md) | Triton only (no completion table) |
 
 ## Common to all
