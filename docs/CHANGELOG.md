@@ -10,6 +10,15 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 (sm_100a) block-local AF3 atom transformer block `modules/local_dit.LocalDiTBlock` (ops `local_dit_block_fwd` / `local_dit_block_bwd`):
+  AF3 Alg. 23 with the 32 x 128 trunked attention (atom `i` sees the atoms `[32 (i // 32) - 48, 32 (i // 32) + 80)`, per-window pair bias
+  from the trunked atom pair `[B, nwin, 32, 128, d_pair]`, `to_windows` makes it from a dense pair), hand-CUDA `mma.sync` attention and
+  pair-bias kernels (`kernels/augmented_attention/cuda/sm100_atom_local`, forward and backward) on the atom DiT's row kernels. Inference and
+  training, any N, optional key mask, eager / `torch.compile` / CUDA graph; A48 N4096 training 1.90 ms (7.4x the PyTorch path). Page:
+  `docs/gpus/b200/local_dit/local_dit.md`; tests: `tests/integrations/test_b200_local_dit_gpu.py`, `tests/numerics/test_local_dit_reference.py`.
+- B200 atom DiT block (`integrations/atom_dit`) is now two opaque ops under an autograd Function: it is served under `torch.compile` and
+  in CUDA graphs (it used to refuse inside a compiled graph and take the module path); the weight pack is reused per parameter version and
+  rebuilt inside a graph capture. Tests: `tests/integrations/test_b200_atom_dit_gpu.py`.
 - B200 (sm_100a) token-pair initialisation `kernels/token_pair_init` (ops `token_pair_init_fwd` / `token_pair_init_bwd`): the input
   feature embedder's `left[i] + right[j] + Linear(relative-position one-hot) + Linear(bond one-hot)` as one kernel pair that never builds
   the 139-wide fp32 one-hot (84 MB at 384 tokens), in exact fp32, any B and ragged L, CUDA-graph capturable. 5.6-16.9x the dense
