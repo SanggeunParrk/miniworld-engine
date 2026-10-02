@@ -351,6 +351,91 @@ if hasattr(flash_window_seqused, "register_autograd"):
         _flash_window_backward, setup_context=_flash_window_setup_context)
 
 
+def _fa4_window(half_window: int, s: int) -> int:
+    """FA4's ``window_size_{left,right}`` for a half window over rows of ``s`` atoms: -1 -- no windowing, so no per-block mask
+    arithmetic -- when the window covers the whole row (a negative half window, or one at least s - 1), else the half window."""
+    return -1 if half_window < 0 or half_window >= s - 1 else half_window
+
+
+def _fa4_fwd_fake(q, k, v, seqused, scale, half_window):
+    """[out [N, S, H, D] in q's dtype, lse [N, H, S] fp32]."""
+    n, s, h, _ = q.shape
+    return [torch.empty(q.shape, dtype=q.dtype, device=q.device), torch.empty((n, h, s), dtype=torch.float32, device=q.device)]
+
+
+@opaque(fake=_fa4_fwd_fake, name="swa_atom_attention_fa4_fwd")
+def _fa4_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor, scale: float,
+             half_window: int) -> list[torch.Tensor]:
+    """FA4 forward launch on [N, S, H, D] bf16 with ``seqused`` for both q and k: [out, lse]. Rows at or past ``seqused`` are
+    skipped by flash and come back unwritten (the caller selects them away)."""
+    from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+        _flash_attn_fwd,
+    )
+
+    w = _fa4_window(half_window, q.shape[1])
+    out, lse, _, _ = _flash_attn_fwd(q, k, v, seqused_q=seqused, seqused_k=seqused, softmax_scale=scale, causal=False, softcap=0.0,
+                                     window_size_left=w, window_size_right=w, return_lse=True)
+    return [out, lse]
+
+
+def _fa4_bwd_fake(q, k, v, out, lse, dout, seqused, scale, half_window):
+    """[dq, dk, dv], each shaped and typed like its input."""
+    return [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in (q, k, v)]
+
+
+@opaque(fake=_fa4_bwd_fake, name="swa_atom_attention_fa4_bwd")
+def _fa4_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, lse: torch.Tensor, dout: torch.Tensor,
+             seqused: torch.Tensor, scale: float, half_window: int) -> list[torch.Tensor]:
+    """FA4 backward launch from the forward's saved output and lse: [dq, dk, dv] (rows past ``seqused`` unwritten)."""
+    from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+        _flash_attn_bwd,
+    )
+
+    w = _fa4_window(half_window, q.shape[1])
+    dq, dk, dv = _flash_attn_bwd(q, k, v, out, dout, lse, softmax_scale=scale, causal=False, softcap=0.0, window_size_left=w,
+                                 window_size_right=w, seqused_q=seqused, seqused_k=seqused)[:3]
+    return [dq, dk, dv]
+
+
+class _FA4Attention(torch.autograd.Function):
+    """FA4 attention over the fixed-stride [N, S] layout, differentiable in q / k / v. The forward keeps flash's output and lse for
+    the backward, so nothing is recomputed there."""
+
+    @staticmethod
+    def forward(ctx, q, k, v, seqused, scale, half_window):
+        out, lse = _fa4_fwd(q, k, v, seqused, scale, half_window)
+        ctx.save_for_backward(q, k, v, out, lse, seqused)
+        ctx.meta = (scale, half_window)
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):
+        q, k, v, out, lse, seqused = ctx.saved_tensors
+        scale, half_window = ctx.meta
+        dq, dk, dv = _fa4_bwd(q, k, v, out, lse, dout.contiguous(), seqused, scale, half_window)
+        return dq, dk, dv, None, None, None
+
+
+def flash_window_fa4(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor, valid: torch.Tensor,
+                     scale: float, half_window: int) -> torch.Tensor:
+    """Sliding-window / global attention on FA4, [N, S, H, D] -> [N, S, H, D] in q's dtype.
+
+    The same attention as :func:`flash_window_seqused` -- bf16 operands, rows at or past ``seqused`` zero in q / k / v going in
+    and in the output coming out -- with the zeroing written as plain ops OUTSIDE the two launches: ``torch.compile`` fuses
+    the casts and the selects into the neighbouring pointwise kernels (and their backward does the same to dq / dk / dv)
+    where the legacy op ran them as ~11 eager launches per block, and the backward needs no recomputed forward. ``torch.where``
+    selects rather than multiplies, so flash's unwritten padding rows never reach a valid one as NaN."""
+    n, s = q.shape[:2]
+    rows = valid.reshape(n, s, 1, 1)
+
+    def clean(t: torch.Tensor) -> torch.Tensor:
+        t = t.to(torch.bfloat16)
+        return torch.where(rows, t, torch.zeros_like(t))
+
+    out = _FA4Attention.apply(clean(q), clean(k), clean(v), seqused, scale, half_window)
+    return torch.where(rows, out, torch.zeros_like(out)).to(q.dtype)
+
+
 def sparse_neighbor_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -651,7 +736,8 @@ class SWA3DRoPEAttention(nn.Module):
 
         qkv = self.Wqkv(x).view(n, s, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
-        if q.is_cuda and self.implementation != ImplementationType.PYTORCH:
+        engine_pointwise = self.implementation != ImplementationType.PYTORCH and not getattr(self, "torch_pointwise", False)
+        if q.is_cuda and engine_pointwise:
             from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
             q, k = qk_norm_rope_3d(q, k, cos, sin)
         else:
@@ -682,13 +768,13 @@ class SWA3DRoPEAttention(nn.Module):
 
         out = out.reshape(n, s, -1)
         gate = self.gate_proj(x)
-        if self._can_fuse_output_projection(gate, out):
+        if engine_pointwise and self._can_fuse_output_projection(gate, out):
             from miniworld_engine.kernels.gated_projection.triton.swa import (
                 swa_gate_out_inference,
             )
 
             return swa_gate_out_inference(gate, out, self.out_proj.weight)
-        if out.is_cuda and self.implementation != ImplementationType.PYTORCH:
+        if out.is_cuda and engine_pointwise:
             # `sigmoid(gate) * out` in ONE triton pass instead of torch's sigmoid-then-multiply,
             # which reads and writes the whole [N, S, d] twice. The kernel is gated_projection's
             # `_sigmul`, already public as `kernels.sigmoid_gate_fused` and already tuned on this
@@ -731,6 +817,8 @@ class SWA3DRoPEAttention(nn.Module):
         n: int,
         s: int,
     ) -> torch.Tensor:
+        if _flash_backend(q.device) == "fa4" and settings.current().swa_flash_saves_lse:
+            return flash_window_fa4(q, k, v, seqused, valid, self.scale, self.half_window)
         return flash_window_seqused(
             q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s,
             self.scale, self.half_window,

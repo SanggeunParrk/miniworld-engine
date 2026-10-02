@@ -284,6 +284,11 @@ class Settings:
     #: Assert that SWA's atom blocks really are front-packed, at runtime. Formerly
     #: SWA_CHECK_FRONT_PACKED.
     swa_check_front_packed: bool = False
+    #: FlashAttention-4 SWA attention (`modules.swa_atom_attention`): the forward saves its output and log-sum-exp and the backward
+    #: reads them (`flash_window_fa4`), with the padding-row cleaning left to the compiled graph around the op. Off keeps
+    #: `flash_window_seqused`, whose backward re-runs the flash forward and cleans q/k/v/dq/dk/dv with eager elementwise
+    #: kernels (about 11 launches per block and a recomputed forward). Same numbers either way.
+    swa_flash_saves_lse: bool = True
 
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
