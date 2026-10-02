@@ -263,6 +263,9 @@ class Settings:
     #: `kernels.swa_dit.interface.refusal` accepts the call (bf16 or fp32, d_atom 128 / 4 heads, window 128, SwiGLU hidden 256);
     #: off keeps the per-op path. Formerly team-gm's opt-in MINIWORLD_SWA_FUSED on SWAAtomTransformer.
     swa_dit_fused: bool = True
+    #: B200 only: keep the engine's hand-written Triton norm kernels (`LayerNorm` / `RMSNorm` with implementation MINIWORLD) instead of
+    #: PyTorch ops that `torch.compile` fuses (the default on B200: no hand-written Triton on that card). Other cards are unaffected.
+    b200_engine_triton: bool = False
     #: Serve the qkvg forward (RMSNorm + adaLN + Q/K/V/gate projections + q/k-norm + RoPE) with the hand-CUDA sm_90a
     #: wgmma kernel on sm_90; off (or any other card, or a failed build) takes the Triton kernel. Formerly SWA_QKVG_FWD.
     swa_dit_qkvg_fwd_cuda: bool = True

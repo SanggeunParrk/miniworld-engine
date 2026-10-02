@@ -240,6 +240,22 @@ def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     return KernelBackend.TRITON
 
 
+def _torch_on_b200(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:
+    """B200 runs this op as PyTorch ops that ``torch.compile`` fuses; every other card keeps ``default``.
+    ``settings.b200_engine_triton`` brings the engine's Triton kernels back on B200 (A/B). Resolved once, when the module is built."""
+
+    def pick(device: torch.device | None) -> KernelBackend:
+        from miniworld_engine import settings
+
+        if torch.cuda.is_available() and not settings.current().b200_engine_triton:
+            index = device.index if device is not None and device.type == "cuda" else None
+            if torch.cuda.get_device_capability(index) == (10, 0):
+                return KernelBackend.PYTORCH
+        return default
+
+    return pick
+
+
 #: A fixed backend, or a device-dependent chooser. Spelled out rather than `object` so that
 #: `resolve`'s `best(device) if callable(best) else best` narrows to `KernelBackend` on both
 #: arms instead of returning `object`.
@@ -249,8 +265,8 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     "triangle_multiplication": _trimul_known_best,
     # layernorm's MINIWORLD is the auto-routing layernorm_kernel (fused triton fwd +
     # per-shape auto-dispatched backward), grouped under the CUDA-family entry.
-    "layernorm": KernelBackend.CUDA,
-    "rmsnorm": KernelBackend.TRITON,
+    "layernorm": _torch_on_b200(KernelBackend.CUDA),
+    "rmsnorm": _torch_on_b200(KernelBackend.TRITON),
     # These have no faster module-layer backend than the TRITON family (whose kernels do
     # their own shape/arch sub-dispatch, incl. hand-CUDA on H100 internally). Listed
     # explicitly so the policy is auditable rather than implicit-by-omission.

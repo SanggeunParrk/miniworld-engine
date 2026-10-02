@@ -148,9 +148,13 @@ def test_trimul_settings_override_wins(arch):
         settings.configure(**dataclasses.asdict(previous))
 
 
-def test_arch_independent_resolvers(arch):
+def test_arch_independent_resolvers(arch, monkeypatch):
     """Transition / triangle-attention / adaln / cond-transition / augmented all
-    resolve MINIWORLD to TRITON regardless of arch; LayerNorm to CUDA."""
+    resolve MINIWORLD to TRITON regardless of arch; LayerNorm to CUDA.
+
+    The faked arch does not reach ``torch.cuda``, and a real B200 runs LayerNorm as PyTorch ops that ``torch.compile`` fuses
+    (``test_b200_norm_dispatch.py``), so the card is taken away: this test is about the table, not about the machine it runs on."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     mw = ImplementationType.MINIWORLD
     for major in (8, 9, 10):
         arch(major)

@@ -135,6 +135,9 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   read the token mask [L] and form m[i] & m[j] themselves: no [L, L] pair mask is built per call
   (inference; bidirectional D128 training). The bidirectional wide inference front reads the
   projection weights in place (no pack). Outputs and gradients bitwise-identical.
+- B200 LayerNorm / RMSNorm with implementation MINIWORLD resolve to PyTorch ops that `torch.compile` fuses (known-best table,
+  compute capability 10.0); other cards are unchanged. `settings.b200_engine_triton` (default off) keeps the engine's Triton kernels on a
+  B200. A strict `engine_backend="triton"` process still wins. Tests: `tests/compile/test_b200_norm_dispatch.py`.
 
 ### Fixed
 
