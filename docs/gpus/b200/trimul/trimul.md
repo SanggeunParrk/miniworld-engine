@@ -19,6 +19,33 @@ eps 1e-5, compute capability (10, 0), and:
 - training: D64 / D128 either direction: L a multiple of 128 (L <= 10240); D256 / D384 / D512: L a multiple of 16.
 Every other shape runs the Triton path.
 
+## Batched samples (D64, B <= 8)
+
+The D64 native path takes B samples in one call: tokens b-major, one launch per stage instead of B calls (MiniWorld's template
+embedder runs its templates as the B samples of one pair stack). `k3g` / `b1s` take a per-sample token mask and a per-sample
+row-dropout scale (a tile reloads it when its sample changes), `k1w` the per-sample mask, and the plane bmm batches over d x B.
+Wider D keeps one sample per call (`serves_*` refuse B > 1 there) and B > 8 is refused. Tests:
+`tests/integrations/test_b200_trimul_batch_gpu.py` compares B samples in one call with B calls of one sample, inference and
+training; every sample draws its own dropout scale and mask, so an index mix-up between samples is a large error.
+
+Measured 2026-10-02 on one B200 (sm_100a, 1000 W cap), torch 2.13.0+cu129, bf16, D64, a mask and a dropout scale per sample, CUDA-graph
+timing (30 replays after warm-up); the incoming direction matches the outgoing one to within 2 %:
+
+| L | B | direction | inference: one call / B calls (ms) | × | training fwd + bwd: one call / B calls (ms) | × |
+|---|---|---|---|---|---|---|
+| 128 | 2 | bidirectional | 0.031 / 0.048 | 1.54 | 0.145 / 0.234 | 1.61 |
+| 128 | 2 | outgoing | 0.026 / 0.037 | 1.44 | 0.115 / 0.198 | 1.73 |
+| 128 | 4 | bidirectional | 0.045 / 0.093 | 2.06 | 0.208 / 0.465 | 2.23 |
+| 128 | 4 | outgoing | 0.036 / 0.073 | 2.02 | 0.152 / 0.393 | 2.58 |
+| 256 | 2 | bidirectional | 0.072 / 0.091 | 1.26 | 0.292 / 0.412 | 1.41 |
+| 256 | 2 | outgoing | 0.052 / 0.065 | 1.26 | 0.222 / 0.306 | 1.37 |
+| 256 | 4 | bidirectional | 0.127 / 0.180 | 1.41 | 0.483 / 0.827 | 1.71 |
+| 256 | 4 | outgoing | 0.089 / 0.130 | 1.45 | 0.355 / 0.615 | 1.73 |
+| 384 | 2 | bidirectional | 0.145 / 0.164 | 1.13 | 0.538 / 0.656 | 1.22 |
+| 384 | 2 | outgoing | 0.101 / 0.113 | 1.12 | 0.394 / 0.480 | 1.22 |
+| 384 | 4 | bidirectional | 0.261 / 0.325 | 1.24 | 0.952 / 1.308 | 1.37 |
+| 384 | 4 | outgoing | 0.184 / 0.224 | 1.22 | 0.701 / 0.957 | 1.37 |
+
 ## Bidirectional (`BidirectionalTriangleMultiplication`)
 
 ### Inference

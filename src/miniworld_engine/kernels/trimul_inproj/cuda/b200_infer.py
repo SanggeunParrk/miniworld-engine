@@ -26,7 +26,7 @@ EPS = 1e-5
 def _ext():
     ensure_cuda_home()
     return load_extension(
-        name="trimul_b200_v5",
+        name="trimul_b200_v6",
         sources=[str(_SRC / f) for f in ("k1w.cu", "k3g.cu", "k3w.cu", "wide_aux.cu", "k1wb.cu", "wide_bwd.cu", "b1s.cu", "b7m.cu", "b1g.cu", "b7g.cu",
                                          "bind_b200.cpp")],
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a"), "--expt-relaxed-constexpr",
@@ -52,17 +52,31 @@ def _front(E, wl, wlg, wr, wrg, wp=None, wpp=None):
     return ws if wc is None else tuple(wc.unbind(0))
 
 
+def _fold(x):
+    """[c, (B,) n, n] -> [c * B, n, n]: the samples join the channel planes in cuBLAS's batch dim (a view, the planes are contiguous)."""
+    n = x.shape[-1]
+    return x.view(-1, n, n)
+
+
 def _contract(planes, d, direction):
-    n = planes.shape[1]
-    t = planes.new_empty(((2 if direction == 0 else 1) * d, n, n))
+    """Planes [P, n, n] or [P, B, n, n] (batch b-major per plane) -> t [(2 d or d), (B,) n, n], per sample the same products as B = 1.
+
+    The ``out=`` buffer is the 3-D folded tensor itself and the caller's shape is a view of it: ``bmm(out=<3-D view of a 4-D buffer>)``
+    makes functionalization re-apply the view with the 3-D strides to the 4-D base (``as_strided`` "mismatch in length of strides and
+    shape") whenever this body is traced."""
+    n = planes.shape[-1]
+    channels = (2 if direction == 0 else 1) * d
+    samples = planes.numel() // (planes.shape[0] * n * n)
+    t = planes.new_empty((channels * samples, n, n))
+    pl = lambda a, b: _fold(planes[a:b])
     if direction == 0:
-        torch.bmm(planes[:d], planes[2 * d:3 * d].transpose(1, 2), out=t[:d])
-        torch.bmm(planes[d:2 * d].transpose(1, 2), planes[3 * d:], out=t[d:])
+        torch.bmm(pl(0, d), pl(2 * d, 3 * d).transpose(1, 2), out=t[:d * samples])
+        torch.bmm(pl(d, 2 * d).transpose(1, 2), pl(3 * d, 4 * d), out=t[d * samples:])
     elif direction == 1:
-        torch.bmm(planes[:d], planes[d:].transpose(1, 2), out=t)
+        torch.bmm(pl(0, d), pl(d, 2 * d).transpose(1, 2), out=t)
     else:
-        torch.bmm(planes[:d].transpose(1, 2), planes[d:], out=t)
-    return t
+        torch.bmm(pl(0, d).transpose(1, 2), pl(d, 2 * d), out=t)
+    return t.view(channels, *planes.shape[1:])
 
 
 def _inference_fake(leaves, mask, ds, direction):
@@ -73,16 +87,17 @@ def _inference_fake(leaves, mask, ds, direction):
 @opaque(fake=_inference_fake, name="trimul_b200_inference")
 def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int) -> torch.Tensor:
     """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]; the front four may be strided), gi, bi, go, bo (fp32);
-    mask [L] bool token mask or None (k1w forms the pair mask); ds [L, D] bf16 row-dropout scale or None;
-    direction 0 = bidirectional, 1 = outgoing, 2 = incoming."""
+    mask [B * L] bool token mask or None (k1w forms the pair mask); ds [B * L, D] bf16 row-dropout scale or None;
+    direction 0 = bidirectional, 1 = outgoing, 2 = incoming. x is [B, L, L, D]: B > 1 only for D <= 128 (the kernels take b-major
+    tokens, M = B L L), D >= 256 is B = 1."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
-    n, d = x.shape[1], x.shape[-1]
-    m = n * n
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    m = bsz * n * n
     E = _ext()
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
         p = (4 if direction == 0 else 2) * d
-        planes = x.new_empty((p, n, n))
+        planes = x.new_empty((p, bsz, n, n) if d <= 128 else (p, n, n))
         y = torch.empty_like(x)
         if d <= 128:
             wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order

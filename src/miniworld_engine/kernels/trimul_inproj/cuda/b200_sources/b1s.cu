@@ -220,15 +220,22 @@ __global__ void __launch_bounds__(512, 1)
       const int q = warp & 3, kq = (warp - 4) >> 2, wi = warp - 4, t4 = lane & 3, tr = lane >> 2;
       const int c_lo = kq * 4 / 3, c_hi = (kq + 1) * 4 / 3;     // 16-column chunks 0..3: (1, 1, 2)
       uint4 dsv[4];
-      {
-        const uint4* dsr = reinterpret_cast<const uint4*>(a.ds + (size_t)(jc * TOK + q * 32 + lane) * C);
+      // ds is [B, L, 64]: a front CTA's tiles (tile_of(i) = cta + NF i, its j class fixed since NF % LC == 0) run over the samples in
+      // order, L LC tiles each, so the CTA's ds rows are reloaded when a tile's sample changes (once for B = 1)
+      int cur_sb = -1;
+      auto load_ds = [&](int sb) {
+        const uint4* dsr = reinterpret_cast<const uint4*>(a.ds + ((size_t)sb * a.L + jc * TOK + q * 32 + lane) * C);
 #pragma unroll
         for (int k = 0; k < 4; ++k)
           if (c_lo * 2 + k < c_hi * 2) dsv[k] = __ldg(dsr + c_lo * 2 + k);
-      }
+      };
       constexpr int NU = H / 8, HQ = H / 64;       // LN units: 8 token groups x H / 64 channel quarters
       for (int i = 0; i < n_local; ++i) {
         const int row0 = tile_of(i) * TOK, b = i & 1;
+        {
+          const int sb = tile_of(i) / (a.L * LC);
+          if (sb != cur_sb) { load_ds(sb); cur_sb = sb; }
+        }
         const uint32_t trow = tmem + ((uint32_t)(q * 32) << 16) + T0 + 64 * b;
         const int sdp = fb(b) + XT, sdg = fb(b) + 2 * XT, stt_ = fb(b) + 3 * XT;
         float stt[2][4];
@@ -546,7 +553,8 @@ void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::
   using namespace b1s;
   const int64_t M = dy.size(0);
   const int H = (int)tri.size(0);
-  TORCH_CHECK(dy.size(1) == C && M == L * L && L % TOK == 0 && tri.numel() == H * M && (H == 64 || H == 128));
+  TORCH_CHECK(dy.size(1) == C && M % (L * L) == 0 && L % TOK == 0 && tri.numel() == H * M && (H == 64 || H == 128));   // M = B L L, tokens b-major
+  TORCH_CHECK(ds.numel() == (M / (L * L)) * L * C, "b1s_backward: ds must be [B, L, 64]");
   int nsm = 0, dev = 0;
   cudaGetDevice(&dev);
   cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);

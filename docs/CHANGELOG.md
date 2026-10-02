@@ -86,6 +86,9 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   attention channels) as well as 16 x 48: training 1.15-1.30x, inference 1.46-2.63x (`bench.py target=bias_only_dit
   +n_head=24 | +n_head=12 | +d_head=64`).
   Page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`.
+- B200 TriMul, D64 native path: B samples (B <= 8) in one call (tokens b-major, per-sample token mask and row-dropout scale, the plane bmm batched
+  over d x B) instead of B calls; MiniWorld's template embedder runs its templates this way. 1.1-2.1x the B sequential calls at L128-384
+  in inference, 1.2-2.6x in training (page: `docs/gpus/b200/trimul/trimul.md`); tests: `tests/integrations/test_b200_trimul_batch_gpu.py`.
 
 ### Changed
 

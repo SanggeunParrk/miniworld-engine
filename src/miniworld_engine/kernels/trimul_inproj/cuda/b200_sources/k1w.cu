@@ -196,7 +196,9 @@ __global__ void __launch_bounds__(NTHREADS, 1)
     int s = 0; uint32_t ph = 0;
     for (int i = 0; i < n_local; ++i) {
       const int row = (cta + i * G) * TOK + r, b = (NXN == 1) ? 0 : (i & 1);
-      const uint32_t kmask = (tokmask == nullptr || (tokmask[row / L] && tokmask[row % L])) ? 0xffffffffu : 0u;
+      // tokens are b-major: row = (sample * L + i) * L + j, the token mask is [B, L]
+      const int ll = L * L, sb = row / ll, rin = row - sb * ll;
+      const uint32_t kmask = (tokmask == nullptr || (tokmask[sb * L + rin / L] && tokmask[sb * L + rin % L])) ? 0xffffffffu : 0u;
       float mu, rs;
       if constexpr (D <= 128) {
         // whole row resident (KB <= 2 ring slots): two-pass statistics here, as k1.cu (packed f32x2 sums)
@@ -425,9 +427,12 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
                  double eps) {
   using namespace k1w;
   const int64_t M = x.size(0), D = x.size(1), P = planes.size(0);
-  TORCH_CHECK(M % TOK == 0 && planes.numel() == P * M && x.is_contiguous() && planes.is_contiguous() && planes.dim() == 3);
-  const int L = (int)planes.size(1);
-  TORCH_CHECK(!tokmask.has_value() || (tokmask->numel() == L && tokmask->element_size() == 1 && tokmask->is_contiguous()));
+  TORCH_CHECK(M % TOK == 0 && planes.numel() == P * M && x.is_contiguous() && planes.is_contiguous() && (planes.dim() == 3 || planes.dim() == 4));
+  // planes [P, L, L] (one sample) or [P, B, L, L]; the tokens of x are b-major, M = B L L
+  const int L = (int)planes.size(planes.dim() - 1);
+  const int64_t nb = M / ((int64_t)L * L);
+  TORCH_CHECK(nb * L * L == M && planes.size(planes.dim() - 2) == L);
+  TORCH_CHECK(!tokmask.has_value() || (tokmask->numel() == nb * L && tokmask->element_size() == 1 && tokmask->is_contiguous()));
   const auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
   WMaps mw;

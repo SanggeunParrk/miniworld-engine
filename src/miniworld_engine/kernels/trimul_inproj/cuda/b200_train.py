@@ -90,35 +90,31 @@ def _unpack_w1(d, p):
     return v[:h], g[:h], v[h:], g[h:]          # dWl, dWlg, dWr, dWrg
 
 
-def _contract(planes, d, direction):
-    n = planes.shape[1]
-    t = planes.new_empty(((2 if direction == 0 else 1) * d, n, n))
-    if direction == 0:
-        torch.bmm(planes[:d], planes[2 * d:3 * d].transpose(1, 2), out=t[:d])
-        torch.bmm(planes[d:2 * d].transpose(1, 2), planes[3 * d:], out=t[d:])
-    elif direction == 1:
-        torch.bmm(planes[:d], planes[d:].transpose(1, 2), out=t)
-    else:
-        torch.bmm(planes[:d].transpose(1, 2), planes[d:], out=t)
-    return t
+from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _contract, _fold
 
 
 def _contract_bwd(planes, dt, d, direction):
-    """Outgoing t = a b^T: da = dt b, db = dt^T a; incoming t = a^T b: da = b dt^T, db = a dt."""
-    dpl = torch.empty_like(planes)
+    """Outgoing t = a b^T: da = dt b, db = dt^T a; incoming t = a^T b: da = b dt^T, db = a dt. Planes [P, (B,) n, n]; the samples fold
+    into cuBLAS's batch dim as in ``_contract`` (whose note on the ``out=`` buffer applies here too)."""
+    n = planes.shape[-1]
+    samples = planes.numel() // (planes.shape[0] * n * n)
+    dpl = torch.empty((planes.shape[0] * samples, n, n), dtype=planes.dtype, device=planes.device)
+    f = _fold
+    h, h2, h3 = d * samples, 2 * d * samples, 3 * d * samples
     if direction == 0:
-        a_o, a_i, b_o, b_i = planes[:d], planes[d:2 * d], planes[2 * d:3 * d], planes[3 * d:]
-        torch.bmm(dt[:d], b_o, out=dpl[:d])
-        torch.bmm(dt[:d].transpose(1, 2), a_o, out=dpl[2 * d:3 * d])
-        torch.bmm(b_i, dt[d:].transpose(1, 2), out=dpl[d:2 * d])
-        torch.bmm(a_i, dt[d:], out=dpl[3 * d:])
+        a_o, a_i, b_o, b_i = f(planes[:d]), f(planes[d:2 * d]), f(planes[2 * d:3 * d]), f(planes[3 * d:])
+        dt_o, dt_i = f(dt[:d]), f(dt[d:])
+        torch.bmm(dt_o, b_o, out=dpl[:h])
+        torch.bmm(dt_o.transpose(1, 2), a_o, out=dpl[h2:h3])
+        torch.bmm(b_i, dt_i.transpose(1, 2), out=dpl[h:h2])
+        torch.bmm(a_i, dt_i, out=dpl[h3:])
     elif direction == 1:
-        torch.bmm(dt, planes[d:], out=dpl[:d])
-        torch.bmm(dt.transpose(1, 2), planes[:d], out=dpl[d:])
+        torch.bmm(f(dt), f(planes[d:]), out=dpl[:h])
+        torch.bmm(f(dt).transpose(1, 2), f(planes[:d]), out=dpl[h:])
     else:
-        torch.bmm(planes[d:], dt.transpose(1, 2), out=dpl[:d])
-        torch.bmm(planes[:d], dt, out=dpl[d:])
-    return dpl
+        torch.bmm(f(planes[d:]), f(dt).transpose(1, 2), out=dpl[:h])
+        torch.bmm(f(planes[:d]), f(dt), out=dpl[h:])
+    return dpl.view(planes.shape)
 
 
 def _forward_fake(leaves, mask, ds, direction):
@@ -213,26 +209,27 @@ def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Te
 def _forward_small_fake(leaves, mask, ds, direction):
     """y and the saved set: planes, t, x_n, LN_out mean / rstd."""
     x = leaves[0]
-    n, d = x.shape[1], x.shape[-1]
-    m, p = n * n, (4 if direction == 0 else 2) * d
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    m, p = bsz * n * n, (4 if direction == 0 else 2) * d
     f32 = torch.float32
-    return [torch.empty_like(x), x.new_empty((p, n, n)), x.new_empty((p // 2, n, n)), x.new_empty((m, d)),
+    return [torch.empty_like(x), x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n)), x.new_empty((m, d)),
             x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32)]
 
 
 @opaque(fake=_forward_small_fake, name="trimul_b200_train_small_fwd")
 def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int) -> list[torch.Tensor]:
-    """D64 / D128 training forward; arguments as ``forward`` except ds, which is required ([L, D] bf16, ones without dropout)."""
+    """D64 / D128 training forward; arguments as ``forward`` except ds, which is required ([B * L, D] bf16, ones without dropout), and
+    x [B, L, L, D] with the samples b-major (B > 1 for D64 only: the D128 backward kernels take one sample); mask [B * L]."""
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _front
 
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
-    n, d = x.shape[1], x.shape[-1]
-    m = n * n
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    m = bsz * n * n
     E = _ext()
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
         p = (4 if direction == 0 else 2) * d
-        planes = x.new_empty((p, n, n))
+        planes = x.new_empty((p, bsz, n, n))
         wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
         E.k1w_forward(x2, *_front(E, wl, wlg, wr, wrg, wp, wpp), mask, None, None, gi, bi, planes, 0, EPS)
         t = _contract(planes, d, direction)
@@ -257,8 +254,8 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
     rows summed in a fixed order by ``lnpart_sum`` (atomics would add ~1e-4 relative run-to-run noise to them)."""
     x, wl, wlg, wr, wrg, wg, wp, gi, _bi, go, bo = leaves
     planes, t, xn, mo, ro = saved
-    n, d = x.shape[1], x.shape[-1]
-    m = n * n
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    m = bsz * n * n
     p = planes.shape[0]
     h = p // 2
     nf = _front_ctas(n, d, direction)
@@ -291,7 +288,8 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
         if mask is None:
             pair_mask = x.new_ones((m,), dtype=torch.float32)
         else:
-            pair_mask = (mask[:, None] & mask[None, :]).float().view(m)
+            tm = mask.view(bsz, n)
+            pair_mask = (tm[:, :, None] & tm[:, None, :]).float().view(m)
         dx = torch.empty_like(x)
         w1 = _pack_w1(wl, wlg, wr, wrg)
         if d == 128:
@@ -348,6 +346,6 @@ def trimul_train(leaves, mask, ds, direction):
     d = x.shape[-1]
     if d <= 128:
         if ds is None:
-            ds = x.new_ones((x.shape[1], d))
+            ds = x.new_ones((x.shape[0] * x.shape[1], d))
         return _TrainingSmall.apply(direction, mask, ds, *leaves)
     return _Training.apply(direction, mask, ds, *leaves)

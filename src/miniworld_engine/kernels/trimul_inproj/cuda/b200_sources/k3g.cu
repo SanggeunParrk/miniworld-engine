@@ -390,8 +390,11 @@ __global__ void __launch_bounds__(512, 1)
     // ------------------------------------------------------------------ epilogue: thread = token row
     const int r = (warp & 3) * 32 + lane;
     const uint32_t trow = tmem + ((uint32_t)((warp & 3) * 32) << 16);
-    if (SAVE && n_local > 0) {                           // this CTA's ds rows jc*128 + r -> TMEM (lane r, 64 columns of bf16 pairs)
-      const uint4* dsr = reinterpret_cast<const uint4*>(ds + (size_t)(jc * TOK + r) * C);
+    // this CTA's ds rows (sample sb, rows jc*128 + r) -> TMEM (lane r, 64 columns of bf16 pairs). ds is [B, L, C]: the tiles of a j class
+    // run over the samples in order (L tile rows each), so it is reloaded when a tile's sample changes (once per CTA for B = 1).
+    int cur_sb = -1;
+    auto load_ds = [&](int sb) {
+      const uint4* dsr = reinterpret_cast<const uint4*>(ds + ((size_t)sb * L + jc * TOK + r) * C);
 #pragma unroll
       for (int q8 = 0; q8 < C / 16; ++q8) {
         const uint4 a0 = __ldg(dsr + 2 * q8), a1 = __ldg(dsr + 2 * q8 + 1);
@@ -399,9 +402,13 @@ __global__ void __launch_bounds__(512, 1)
         tmem_st8(trow + T_DS + q8 * 8, w);
       }
       tmem_wait_st();
-    }
+    };
     for (int i = 0; i < n_local; ++i) {
       const int b = i & 1, row0 = tile_row0(i);
+      if (SAVE) {
+        const int sb = (row0 / TOK) / (L * LC);
+        if (sb != cur_sb) { load_ds(sb); cur_sb = sb; }
+      }
       // training: the residual x has been reloaded into the x tile after the xn save; ds comes from TMEM
       PW(0, mbar_wait(&B.acc_full, i & 1));
       tc_fence_after();
@@ -494,7 +501,7 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
                  c10::optional<torch::Tensor> rs_out, int64_t grid, c10::optional<torch::Tensor> zero_buf) {
   using namespace k3g;
   const int64_t M = x.size(0), C = x.size(1), H = tri.size(0);
-  TORCH_CHECK(tri.numel() == H * M && M % TOK == 0 && M == L * L && (!save || L % TOK == 0));
+  TORCH_CHECK(tri.numel() == H * M && M % TOK == 0 && M % (L * L) == 0 && (!save || L % TOK == 0));   // M = B L L, tokens b-major
   auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)C, (uint64_t)M}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
   auto mt = tmap::make(tri.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, (uint32_t)H}, CU_TENSOR_MAP_SWIZZLE_128B);
@@ -507,6 +514,7 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
   if (save) {
     TORCH_CHECK(ds.has_value() && xn_out.has_value() && mean_out.has_value() && rs_out.has_value());
     mxn = tmap::make(xn_out->data_ptr(), bf, {(uint64_t)C, (uint64_t)M}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
+    TORCH_CHECK(ds->numel() == (M / (L * L)) * L * C, "k3g_forward: ds must be [B, L, C]");
     dsp = reinterpret_cast<const __nv_bfloat16*>(ds->data_ptr());
     mo = mean_out->data_ptr<float>();
     ro = rs_out->data_ptr<float>();
