@@ -137,7 +137,9 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   projection weights in place (no pack). Outputs and gradients bitwise-identical.
 - B200 LayerNorm / RMSNorm with implementation MINIWORLD resolve to PyTorch ops that `torch.compile` fuses (known-best table,
   compute capability 10.0); other cards are unchanged. `settings.b200_engine_triton` (default off) keeps the engine's Triton kernels on a
-  B200. A strict `engine_backend="triton"` process still wins. Tests: `tests/compile/test_b200_norm_dispatch.py`.
+  B200. A strict `engine_backend="triton"` process still wins. The PyTorch `RMSNorm` that stands in for the kernel returns the
+  input dtype like the kernel does (torch's `rms_norm` returns fp32 under autocast, which gave the attention's Triton kernels an
+  fp32 q next to a bf16 k). Tests: `tests/compile/test_b200_norm_dispatch.py`.
 
 ### Fixed
 

@@ -73,3 +73,20 @@ def test_an_explicit_backend_is_never_rewritten(monkeypatch, op, engine):
     _card(monkeypatch, (10, 0))
     assert dispatch.resolve(op, "pytorch") is KernelBackend.PYTORCH
     assert dispatch.resolve(op, "triton") is KernelBackend.TRITON
+
+
+def test_the_pytorch_stand_in_for_rmsnorm_returns_the_input_dtype(monkeypatch):
+    """Torch's rms_norm runs in fp32 under autocast and returns fp32 (torch 2.13); the Triton kernel the B200 policy replaces
+    returns the input dtype. A qk-norm feeds the attention kernels, which need q and k in the same dtype."""
+    from miniworld_engine.modules import RMSNorm
+
+    def autocast_like(self, x):  # what ``nn.RMSNorm.forward`` returns under CUDA autocast
+        return torch.nn.functional.rms_norm(x.float(), self.normalized_shape, self.weight, self.eps)
+
+    _card(monkeypatch, (10, 0))
+    monkeypatch.setattr(torch.nn.RMSNorm, "forward", autocast_like)
+    x = torch.randn(2, 16, dtype=torch.bfloat16)
+    stand_in = RMSNorm(16, implementation="miniworld")
+    assert stand_in._backend is KernelBackend.PYTORCH
+    assert stand_in(x).dtype is torch.bfloat16
+    assert RMSNorm(16, implementation="pytorch")(x).dtype is torch.float32  # an explicit request keeps torch's behaviour
