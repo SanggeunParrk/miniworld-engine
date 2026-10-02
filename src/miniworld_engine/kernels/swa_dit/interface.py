@@ -20,7 +20,8 @@ conditioning (``swa_dit_hoist_modulation``) and every augment ``a`` of batch ele
 reads row ``b*S + s`` of it. A caller without that structure passes ``B = N`` (one modulation row per sequence row).
 
 Served: bf16 or fp32 (all activations, conditioning and weights in one of the two), d_atom 128 with 4 heads of 32, SwiGLU
-hidden 256, half window 64 (window 128), 3D-RoPE cos/sin of D/2 = 16 frequencies. bf16 runs the Triton kernels
+hidden 256, half window 64 (window 128) -- or GLOBAL attention (``is_global``: bf16 on B200 only, the attention stage runs
+FlashAttention-4 around the same sm_100a stages) -- 3D-RoPE cos/sin of D/2 = 16 frequencies. bf16 runs the Triton kernels
 (``triton/forward.py``, ``backward.py``) with hand-CUDA wgmma stages on sm_90; fp32 runs ``triton/forward_fp32.py`` and
 ``backward_fp32.py`` (Triton only), which keep the residual stream and every elementwise step in fp32, run the
 projections as TF32 and the window attention on bf16 operands -- the precisions of the per-op fp32 path it replaces (see
@@ -37,6 +38,32 @@ N_HEAD = 4
 N_HIDDEN = 256
 HALF_WINDOW = 64
 FP32_EPS = float(torch.finfo(torch.float32).eps)
+#: A half window at or above this (or negative) means global attention: every valid atom attends to every valid atom. The
+#: model configures it as a large ``swa_window_size`` (``flash_window_seqused``'s ``half_window < 0`` is the same thing).
+GLOBAL_HALF_WINDOW = 1 << 16
+
+
+def is_global(half_window: int) -> bool:
+    """Whether ``half_window`` selects global attention (no window) -- negative, or at least ``GLOBAL_HALF_WINDOW``."""
+    return half_window < 0 or half_window >= GLOBAL_HALF_WINDOW
+
+
+def _global_gate() -> str | None:
+    """Why global attention cannot run in this process (it has no Triton fallback, unlike the windowed block), or None: the switches
+    that turn the sm_100a stages off, an earlier build / load failure of them, and a missing FlashAttention-4."""
+    import os
+
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.swa_dit import dispatch
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    if os.environ.get("MINIWORLD_SWA_DIT_SM100", "1") == "0" or settings.current().engine_backend == "triton":
+        return "global attention runs on the sm_100a stages only, and MINIWORLD_SWA_DIT_SM100=0 / engine_backend='triton' turn them off"
+    if dispatch._SM100_FAILED:
+        return "the sm_100a SWA atom DiT kernels failed to build or load earlier in this process"
+    if not sm100.FA4_AVAILABLE:
+        return "global attention needs FlashAttention-4 (flash_attn.cute), which is not installed"
+    return None
 
 
 def refusal(q: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torch.Tensor, wqkv: torch.Tensor,
@@ -66,8 +93,17 @@ def refusal(q: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torc
     c = q.shape[-1]
     if (c, n_head) != (D_ATOM, N_HEAD):
         return f"the kernels serve d_atom={D_ATOM} with {N_HEAD} heads, got d_atom={c}, n_head={n_head}"
-    if half_window != HALF_WINDOW:
-        return f"the fused block is validated at half_window={HALF_WINDOW} (window {2 * HALF_WINDOW}), got {half_window}"
+    if is_global(half_window):
+        if q.dtype != torch.bfloat16:
+            return f"global attention is served in bf16 (sm_100a stages + FlashAttention-4), got {q.dtype}"
+        if q.is_cuda and torch.cuda.get_device_capability(q.device) != (10, 0):
+            return "global attention is served on B200 (sm_100a) only"
+        why = _global_gate()
+        if why is not None:
+            return why
+    elif half_window != HALF_WINDOW:
+        return (f"the fused block is validated at half_window={HALF_WINDOW} (window {2 * HALF_WINDOW}) or global attention, "
+                f"got {half_window}")
     shapes = {"Wqkv": (wqkv, (3 * c, c)), "gate_proj": (wg, (c, c)), "out_proj": (wo, (c, c)),
               "w_up": (wu, (2 * N_HIDDEN, c)), "w_down": (wd, (c, N_HIDDEN))}
     for name, (t, want) in shapes.items():
@@ -159,4 +195,5 @@ def swa_dit_block(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: to
     return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, B, half_window, FP32_EPS, False)[0]
 
 
-__all__ = ["D_ATOM", "FP32_EPS", "HALF_WINDOW", "N_HEAD", "N_HIDDEN", "refusal", "swa_dit_block", "swa_dit_hoist_modulation"]
+__all__ = ["D_ATOM", "FP32_EPS", "GLOBAL_HALF_WINDOW", "HALF_WINDOW", "N_HEAD", "N_HIDDEN", "is_global", "refusal", "swa_dit_block",
+           "swa_dit_hoist_modulation"]

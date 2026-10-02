@@ -48,6 +48,7 @@ from miniworld_engine.kernels.swa_dit.interface import (
     FP32_EPS,
     N_HEAD,
     N_HIDDEN,
+    is_global,
 )
 from miniworld_engine.kernels.swa_dit.triton.backward import (
     _swa_attn_bwd_dkv_kernel,
@@ -157,11 +158,17 @@ def swa_dit_block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin
     """The block forward. q [N, S, C] bf16 or fp32 (the weights in the same dtype); mod [B*S, 6C] fp32 (hoisted adaLN
     modulation of this block); cos / sin [B*S, D/2] fp32; seqused [N] int32. Returns [out] or, with ``save``,
     [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads)."""
+    if is_global(half_window):
+        sm100 = _sm100(q, wd.shape[1], half_window, eps)
+        if sm100 is None:
+            raise RuntimeError("swa_dit_block: global attention runs on the sm_100a stages (bf16, B200) only -- check "
+                               "interface.refusal first")
+        return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
     if q.dtype == torch.float32:
         return _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
     if sm100 is not None:
-        return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save)
+        return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
     N, S, C = q.shape
     H = N_HEAD
     D = C // H
@@ -279,13 +286,20 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
                       eps: float) -> list[torch.Tensor]:
     """Backward of :func:`swa_dit_block_fwd` from its saved tensors. dy [N, S, C] in q's dtype. Returns [dq [N, S, C],
     dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd], each in its input's dtype."""
+    if is_global(half_window):
+        sm100 = _sm100(q, wd.shape[1], half_window, eps)
+        if sm100 is None:
+            raise RuntimeError("swa_dit_block: global attention runs on the sm_100a stages (bf16, B200) only -- check "
+                               "interface.refusal first")
+        return sm100.block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att,
+                               y, ffn, B, half_window)
     if q.dtype == torch.float32:
         return _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x,
                                         pq, pk, att, y, ffn, B, half_window, eps)
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
     if sm100 is not None:
         return sm100.block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att,
-                               y, ffn, B)
+                               y, ffn, B, half_window)
     N, S, C = q.shape
     H = N_HEAD
     D = C // H

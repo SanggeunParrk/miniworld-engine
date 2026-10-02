@@ -12,7 +12,11 @@ cuBLAS. Developed in ``experiments/swaatom_sm100`` (rounds v1-v13, sources uncha
               pass when every CTA gets >= 2 items, else attn_dq + attn_dkv) -> qkvg (qkvg_bwd), then dWqkv | dWg as one GEMM
     modulation  silu(c) Wmod^T (mod_fwd) and its backward (mod_bwd)
 
-Served (:func:`supported`): B200, bf16, C = 128 with 4 heads of 32, SwiGLU hidden 256, half window 64, fp32 eps. The atom
+Global attention (``interface.is_global(half_window)``): the window attention stage (attn_fwd3 / attn_fwd1h forward, attn_dq /
+attn_dkv / attn_dkvq backward) is swapped for FlashAttention-4 on the head-major Q / K / V the qkvg stage already writes
+(``attn_global_fwd`` / ``attn_global_bwd``); every other stage is unchanged.
+
+Served (:func:`supported`): B200, bf16, C = 128 with 4 heads of 32, SwiGLU hidden 256, half window 64 or global, fp32 eps. The atom
 count S must be a multiple of 128 -- callers pad the atoms and ``seqused`` masks the padding; the block refuses with
 ValueError otherwise (no other path for it on B200). The cubins are built on first use by the newest nvcc here that knows
 sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``) and cached under ``MINIWORLD_ENGINE_JIT_ROOT``; the launches go
@@ -553,8 +557,25 @@ def kernels(index: int) -> _Kernels:
 
 def supported(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> bool:
     """The shapes and dtypes the kernels serve (``S % 128`` is checked by the block, which refuses instead of falling back)."""
+    from miniworld_engine.kernels.swa_dit.interface import is_global
+
     return (q.is_cuda and q.dtype == torch.bfloat16 and q.dim() == 3 and q.shape[-1] == C and nhid == NHID
-            and half_window == HW and eps == EPS and torch.cuda.get_device_capability(q.device) == (10, 0))
+            and (half_window == HW or is_global(half_window)) and eps == EPS
+            and torch.cuda.get_device_capability(q.device) == (10, 0))
+
+
+def _has_fa4() -> bool:
+    """FlashAttention-4 (``flash_attn.cute``) installed -- looked up without importing it."""
+    try:
+        spec = importlib.util.find_spec("flash_attn")
+    except (ImportError, ValueError):
+        return False
+    return bool(spec is not None and spec.submodule_search_locations
+                and any((Path(r) / "cute" / "__init__.py").exists() for r in spec.submodule_search_locations))
+
+
+#: Global attention runs on FlashAttention-4; resolved once at import so ``interface.refusal`` can read it while tracing.
+FA4_AVAILABLE = _has_fa4()
 
 
 def need_s128(S: int) -> None:
@@ -606,9 +627,34 @@ def _t(w):
     return w.t().contiguous()
 
 
-def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save):
+def attn_global_fwd(Qh, Kh, Vh, seqused, O, lse):
+    """Global attention forward on FlashAttention-4: Qh, Kh, Vh head-major [N, H, S, D] bf16 (read through their [N, S, H, D]
+    transposed views), seqused [N] int32 -> O [N S, C] bf16 and lse [N, H, S] fp32, written in place. Rows at or past
+    ``seqused`` are skipped by FA4 -- ``O`` must arrive zeroed there (and their lse stays unwritten); keys past ``seqused``
+    are never attended. FA4 keeps its own lse convention, which only :func:`attn_global_bwd` reads."""
+    from flash_attn.cute.interface import _flash_attn_fwd  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+
+    N, _, S, _ = Qh.shape
+    _flash_attn_fwd(Qh.transpose(1, 2), Kh.transpose(1, 2), Vh.transpose(1, 2), seqused_q=seqused, seqused_k=seqused,
+                    softmax_scale=D ** -0.5, causal=False, return_lse=True, out=O.view(N, S, H, D), lse=lse)
+
+
+def attn_global_bwd(Qh, Kh, Vh, O, dO, lse, seqused, dQh, dKh, dVh):
+    """Global attention backward on FlashAttention-4 (its own softmax-delta pass included): dQh, dKh, dVh head-major
+    [N, H, S, D] bf16 written in place -- zero them first, FA4 leaves the rows at or past ``seqused`` alone."""
+    from flash_attn.cute.interface import _flash_attn_bwd  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+
+    N, _, S, _ = Qh.shape
+    _flash_attn_bwd(Qh.transpose(1, 2), Kh.transpose(1, 2), Vh.transpose(1, 2), O.view(N, S, H, D), dO.view(N, S, H, D), lse,
+                    softmax_scale=D ** -0.5, causal=False, seqused_q=seqused, seqused_k=seqused,
+                    dq=dQh.transpose(1, 2), dk=dKh.transpose(1, 2), dv=dVh.transpose(1, 2))
+
+
+def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window=HW):
     """The bf16 forward: [out] or, with ``save``, [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] -- the layout of
-    ``dispatch.swa_dit_block_fwd``."""
+    ``dispatch.swa_dit_block_fwd``. ``half_window`` is the window (64) or a global-attention value (``is_global``)."""
+    from miniworld_engine.kernels.swa_dit.interface import is_global
+
     N, S, _ = q.shape
     need_s128(S)
     A = N // B
@@ -618,11 +664,15 @@ def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save):
         qk = (K.qkvg2a if A < 4 else K.qkvg2) if A < 5 or A * B * S <= 2 * 148 * 32 else K.qkvg
         run, (Qh, Kh, Vh, G, X, PQ, PK) = qk.bind(q, mod, cos, sin, None, None, A, B, save=save, W=W)
         run()
-        O = torch.empty(N * S, C, device=q.device, dtype=torch.bfloat16)
         lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
-        at = K.attn1h if Qh.shape[0] * (S // 128) * 4 <= nsm() else K.attn
-        run, _, _ = at.bind(Qh, Kh, Vh, seqused, O=O, LSE=lse)
-        run()
+        if is_global(half_window):
+            O = torch.zeros(N * S, C, device=q.device, dtype=torch.bfloat16)
+            attn_global_fwd(Qh, Kh, Vh, seqused, O, lse)
+        else:
+            O = torch.empty(N * S, C, device=q.device, dtype=torch.bfloat16)
+            at = K.attn1h if Qh.shape[0] * (S // 128) * 4 <= nsm() else K.attn
+            run, _, _ = at.bind(Qh, Kh, Vh, seqused, O=O, LSE=lse)
+            run()
         run, (out, q1, att, y, ffn) = (K.ffn if A >= 4 else K.ffna).bind(q.reshape(N * S, C), G, O, mod, wo, wu, wd, A, B,
                                                                          save=save)
         run()
@@ -631,8 +681,11 @@ def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save):
     return [out.view(N, S, C), Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, att, y, ffn]
 
 
-def block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B):
+def block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B,
+              half_window=HW):
     """The bf16 backward: [dq, dmod, dWqkv, dWg, dWo, dWu, dWd] -- the layout of ``dispatch.swa_dit_block_bwd``."""
+    from miniworld_engine.kernels.swa_dit.interface import is_global
+
     N, S, _ = q.shape
     need_s128(S)
     A = N // B
@@ -650,16 +703,20 @@ def block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
         Dv = torch.empty(N, H, S, device=dev, dtype=torch.float32)
         run, _ = K.oproj.bind(dq1, o, g, mod, wo, att, A, B, dmod=dmod, WOT=_cached(_t, wo), outs=(dO, dG, Dv, datt, gated))
         run()
-        dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
-        dKh, dVh = torch.empty_like(dQh), torch.empty_like(dQh)
-        if os.environ.get("MINIWORLD_SWA_DIT_SM100_FUSED_BWD", "1") == "1" and N * (S // 128) * 2 >= 2 * nsm():
-            run, _ = K.dkvq.bind(qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh, dQh=dQh)
-            run()
+        if is_global(half_window):                         # FA4: dQ / dK / dV in one call; skipped (padding) rows stay zero
+            dQh, dKh, dVh = (torch.zeros(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3))
+            attn_global_bwd(qh, kh, vh, o, dO, lse, seqused, dQh, dKh, dVh)
         else:
-            run, _ = K.dq.bind(qh, kh, vh, dO, lse, Dv, seqused, dQh=dQh)
-            run()
-            run, _ = K.dkv.bind(qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh)
-            run()
+            dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
+            dKh, dVh = torch.empty_like(dQh), torch.empty_like(dQh)
+            if os.environ.get("MINIWORLD_SWA_DIT_SM100_FUSED_BWD", "1") == "1" and N * (S // 128) * 2 >= 2 * nsm():
+                run, _ = K.dkvq.bind(qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh, dQh=dQh)
+                run()
+            else:
+                run, _ = K.dq.bind(qh, kh, vh, dO, lse, Dv, seqused, dQh=dQh)
+                run()
+                run, _ = K.dkv.bind(qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh)
+                run()
         dq = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
         dP = torch.empty(M, 4 * C, device=dev, dtype=torch.bfloat16)
         run, _ = K.qkvgb.bind(q.reshape(M, C), dq1, pq, pk, dG, dQh, dKh, dVh, mod, cos, sin, wqkv, wg, A, B, dmod=dmod,
