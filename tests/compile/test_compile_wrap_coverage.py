@@ -194,6 +194,7 @@ OP_FAMILIES = (
     "qk_norm_rope",    # paired RMSNorm/RoPE preprocessing, distinct from standalone rope
     "swa_gate_out",    # SWA-specific row-keyed gated output projection
     "swa_dit",         # the fused SWA atom DiT block (kernels/swa_dit): one forward op, one backward op
+    "token_pair_init", # the input feature embedder pair stream (kernels/token_pair_init): one forward op, one backward op
     "tm1",
     "tm2",
     "transition",
