@@ -10,6 +10,11 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 TriMul with a hidden width twice the pair width, one direction, at D64 / D128 (`TriangleMultiplication(d_pair, d_hidden=2 *
+  d_pair)`: AF3 / Protenix template blocks, pair 64, hidden 128): served by the D64 / D128 kernels unchanged -- per token it has the
+  bidirectional block's shapes (4 D planes, LN_out over 2 D), only the cuBLAS contraction between the kernels pairs the planes in one
+  direction over all 2 D channels. Inference and training, B <= 8 samples at D64, dropout, CUDA graphs (`b200_infer.hidden_ok`).
+  Tests: `tests/integrations/test_trimul_b200_gpu.py` (`-k hidden`); page: `docs/gpus/b200/trimul/trimul.md`.
 - B200 (sm_100a) block-local AF3 atom transformer block `modules/local_dit.LocalDiTBlock` (ops `local_dit_block_fwd` / `local_dit_block_bwd`):
   AF3 Alg. 23 with the 32 x 128 trunked attention (atom `i` sees the atoms `[32 (i // 32) - 48, 32 (i // 32) + 80)`, per-window pair bias
   from the trunked atom pair `[B, nwin, 32, 128, d_pair]`, `to_windows` makes it from a dense pair), hand-CUDA `mma.sync` attention and

@@ -34,12 +34,33 @@ def _ext():
         extra_cflags=["-std=c++17", f"-I{_SRC}"], verbose=False)
 
 
-def supports(width: int, length: int, dropout: bool = False) -> bool:
+def supports(width: int, length: int, dropout: bool = False, hidden: int | None = None, direction: int = 0) -> bool:
     """k1w / k3g / k3w tile 128 tokens and ln_stats 256, so L is a multiple of 16; a dropout scale on the fused D <= 128 output
-    goes through k3g's training epilogue, which groups tiles by column (L a multiple of 128)."""
+    goes through k3g's training epilogue, which groups tiles by column (L a multiple of 128). The hidden (contraction) width is
+    the pair width, or -- one direction, D64 / D128 -- twice it (see ``hidden_ok``)."""
     if width not in WIDTHS or length <= 0 or length % 16:
         return False
+    if not hidden_ok(width, width if hidden is None else hidden, direction):
+        return False
     return not (dropout and width <= 128 and length % 128)
+
+
+def hidden_ok(width: int, hidden: int, direction: int) -> bool:
+    """hidden == width, or hidden == 2 width in one direction at D64 / D128 (Protenix's template TriMul: pair 64, hidden 128).
+    The latter has, per token, exactly the bidirectional kernels' shapes -- 4 D planes out of k1w, an LN_out over 2 D channels
+    into k3g, the same b1s / b1g / b7m / b7g backward -- only the cuBLAS contraction between them pairs the planes differently
+    (all 2 D channels in one direction instead of D per direction), so the D64 / D128 kernels serve it unchanged."""
+    return hidden == width or (direction != 0 and width <= 128 and hidden == 2 * width)
+
+
+def planes_of(width: int, hidden: int, direction: int) -> int:
+    """k1w's channel-major plane count: [a_out | a_in | b_out | b_in] (D each) bidirectional, [a | b] (hidden each) otherwise."""
+    return 4 * width if direction == 0 else 2 * hidden
+
+
+def contracted(width: int, hidden: int, direction: int) -> int:
+    """Channels per contraction product: D per direction bidirectional, the hidden width in one direction."""
+    return width if direction == 0 else hidden
 
 
 def _front(E, wl, wlg, wr, wrg, wp=None, wpp=None):
@@ -89,21 +110,22 @@ def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.T
     """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]; the front four may be strided), gi, bi, go, bo (fp32);
     mask [B * L] bool token mask or None (k1w forms the pair mask); ds [B * L, D] bf16 row-dropout scale or None;
     direction 0 = bidirectional, 1 = outgoing, 2 = incoming. x is [B, L, L, D]: B > 1 only for D <= 128 (the kernels take b-major
-    tokens, M = B L L), D >= 256 is B = 1."""
+    tokens, M = B L L), D >= 256 is B = 1. The hidden width is wl's row count (``hidden_ok``)."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     m = bsz * n * n
     E = _ext()
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
-        p = (4 if direction == 0 else 2) * d
+        hid = wl.shape[0]
+        p = planes_of(d, hid, direction)
         planes = x.new_empty((p, bsz, n, n) if d <= 128 else (p, n, n))
         y = torch.empty_like(x)
         if d <= 128:
             wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
             front = _front(E, wl, wlg, wr, wrg, wp, wpp)
             E.k1w_forward(x2, *front, mask, None, None, gi, bi, planes, 0, EPS)
-            t = _contract(planes, d, direction)
+            t = _contract(planes, contracted(d, hid, direction), direction)
             del planes
             if ds is None:
                 E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 0, None, None, None, None, 0)

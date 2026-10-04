@@ -50,20 +50,24 @@ def _ext():
     return ext()
 
 
-def supports(width: int, length: int, direction: int) -> bool:
+def supports(width: int, length: int, direction: int, hidden: int | None = None) -> bool:
     """direction 0 = bidirectional, 1 / 2 = one direction. k1w / k1wb / k3w tile 128 tokens and lnout_bwd 256, so L is a
     multiple of 16; the D64 / D128 path's k3g save and b1s / b1g group tiles by column (L a multiple of 128, at most 80 columns
-    of tiles for the front CTAs)."""
+    of tiles for the front CTAs). hidden: the contraction width (``b200_infer.hidden_ok``)."""
+    if not hidden_ok(width, width if hidden is None else hidden, direction):
+        return False
     if width <= 128:
         return width in WIDTHS and 0 < length <= 80 * TOK and length % TOK == 0
     return width in WIDTHS and length > 0 and length % 16 == 0
 
 
-def _front_ctas(length: int, width: int, direction: int) -> int:
-    """b1s / b1g front CTAs: the largest multiple of L/128 <= 80 (D64 bidirectional) / 96 (D64 one direction, D128
-    bidirectional) / 112 (D128 one direction), measured on L128-L768."""
+def _front_ctas(length: int, width: int, direction: int, planes: int | None = None) -> int:
+    """b1s / b1g front CTAs: the largest multiple of L/128 <= 80 (D64, 4 D planes) / 96 (D64, 2 D planes; D128, 4 D planes) /
+    112 (D128, 2 D planes), measured on L128-L768 -- per plane count, so a one-direction hidden-2 D block takes the
+    bidirectional value (the kernels' per-token work is the same)."""
     rows = length // TOK
-    cap = {(64, True): 80, (64, False): 96, (128, True): 96, (128, False): 112}[width, direction == 0]
+    planes = (4 if direction == 0 else 2) * width if planes is None else planes
+    cap = {(64, True): 80, (64, False): 96, (128, True): 96, (128, False): 112}[width, planes == 4 * width]
     return (cap // rows) * rows
 
 
@@ -90,7 +94,7 @@ def _unpack_w1(d, p):
     return v[:h], g[:h], v[h:], g[h:]          # dWl, dWlg, dWr, dWrg
 
 
-from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _contract, _fold
+from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _contract, _fold, contracted, hidden_ok, planes_of
 
 
 def _contract_bwd(planes, dt, d, direction):
@@ -210,7 +214,7 @@ def _forward_small_fake(leaves, mask, ds, direction):
     """y and the saved set: planes, t, x_n, LN_out mean / rstd."""
     x = leaves[0]
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
-    m, p = bsz * n * n, (4 if direction == 0 else 2) * d
+    m, p = bsz * n * n, planes_of(d, leaves[1].shape[0], direction)
     f32 = torch.float32
     return [torch.empty_like(x), x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n)), x.new_empty((m, d)),
             x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32)]
@@ -219,7 +223,8 @@ def _forward_small_fake(leaves, mask, ds, direction):
 @opaque(fake=_forward_small_fake, name="trimul_b200_train_small_fwd")
 def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int) -> list[torch.Tensor]:
     """D64 / D128 training forward; arguments as ``forward`` except ds, which is required ([B * L, D] bf16, ones without dropout), and
-    x [B, L, L, D] with the samples b-major (B > 1 for D64 only: the D128 backward kernels take one sample); mask [B * L]."""
+    x [B, L, L, D] with the samples b-major (B > 1 for D64 only: the D128 backward kernels take one sample); mask [B * L]. One
+    direction, the hidden width (wl's rows) may be 2 D (``b200_infer.hidden_ok``)."""
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _front
 
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
@@ -228,11 +233,12 @@ def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: tor
     E = _ext()
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
-        p = (4 if direction == 0 else 2) * d
+        hid = wl.shape[0]
+        p = planes_of(d, hid, direction)
         planes = x.new_empty((p, bsz, n, n))
         wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
         E.k1w_forward(x2, *_front(E, wl, wlg, wr, wrg, wp, wpp), mask, None, None, gi, bi, planes, 0, EPS)
-        t = _contract(planes, d, direction)
+        t = _contract(planes, contracted(d, hid, direction), direction)
         y = torch.empty_like(x)
         xn = torch.empty_like(x2)
         mo = x.new_empty((m,), dtype=torch.float32)
@@ -258,7 +264,7 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
     m = bsz * n * n
     p = planes.shape[0]
     h = p // 2
-    nf = _front_ctas(n, d, direction)
+    nf = _front_ctas(n, d, direction, p)
     nch = p // 64
     sg = _b7_source_groups(n, nch)
     nflag7 = sg * B7_RD * nch if d == 128 else 0
@@ -283,7 +289,7 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
         (E.b1g_backward if d == 128 else E.b1s_backward)(dy2, xn, t, ds, mo, ro, wg, wp, go, bo, dg, dt, dwg, dwp, lnp_o, ring, flags,
                                                          n, nf)
         del ring
-        dpl = _contract_bwd(planes, dt, d, direction)
+        dpl = _contract_bwd(planes, dt, contracted(d, wl.shape[0], direction), direction)
         del dt
         if mask is None:
             pair_mask = x.new_ones((m,), dtype=torch.float32)

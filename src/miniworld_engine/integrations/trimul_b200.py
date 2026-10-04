@@ -1,5 +1,6 @@
 """Automatic dispatch to the B200 (sm_100a) TriMul: inference (``b200_infer``) and training (``b200_train``), D64-D512,
-both modules."""
+both modules; the hidden width equals the pair width, or is twice it in one direction at D64 / D128 (``b200_infer.hidden_ok``:
+AF3 / Protenix template blocks, pair 64, hidden 128)."""
 
 from __future__ import annotations
 
@@ -31,7 +32,8 @@ def serves_inference(module, pair: torch.Tensor, *, bidirectional: bool, dropsca
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import supports
 
     width = pair.shape[-1]
-    if module.d_hidden != width or not supports(width, pair.shape[1], dropscale is not None):
+    direction = 0 if bidirectional else (1 if module.outgoing else 2)
+    if not supports(width, pair.shape[1], dropscale is not None, module.d_hidden, direction):
         return False
     if module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
         return False
@@ -82,7 +84,7 @@ def serves_train(module, pair: torch.Tensor, *, bidirectional: bool) -> bool:
 
     width = pair.shape[-1]
     direction = 0 if bidirectional else (1 if module.outgoing else 2)
-    if module.d_hidden != width or not supports(width, pair.shape[1], direction):
+    if not supports(width, pair.shape[1], direction, module.d_hidden):
         return False
     if module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
         return False

@@ -13,8 +13,8 @@ Both modules share one kernel family: the bidirectional module is the one-direct
 the hidden width (planes P = 4D, contraction output H = 2D), its two contractions taking one half of
 the planes each; one direction has P = 2D, H = D.
 
-Served when `implementation=miniworld`, bf16 contiguous `[1, L, L, D]` input, `d_hidden = D`, LayerNorm
-eps 1e-5, compute capability (10, 0), and:
+Served when `implementation=miniworld`, bf16 contiguous `[1, L, L, D]` input, `d_hidden = D` (or, one direction at D64 / D128,
+`d_hidden = 2D`: see below), LayerNorm eps 1e-5, compute capability (10, 0), and:
 - inference: L a multiple of 16 (with a dropout scale at D <= 128: a multiple of 128);
 - training: D64 / D128 either direction: L a multiple of 128 (L <= 10240); D256 / D384 / D512: L a multiple of 16.
 Every other shape runs the Triton path.
@@ -47,6 +47,39 @@ timing (30 replays after warm-up); the incoming direction matches the outgoing o
 | 384 | 2 | outgoing | 0.101 / 0.113 | 1.12 | 0.394 / 0.480 | 1.22 |
 | 384 | 4 | bidirectional | 0.261 / 0.325 | 1.24 | 0.952 / 1.308 | 1.37 |
 | 384 | 4 | outgoing | 0.184 / 0.224 | 1.22 | 0.701 / 0.957 | 1.37 |
+
+## Hidden twice the width (one direction, D64 / D128)
+
+`TriangleMultiplication(D, d_hidden=2D)` -- the AF3 / Protenix template block (pair 64, hidden 128) -- runs the D64 / D128 kernels
+as they are. Per token it is the bidirectional block: k1w writes 4D planes (`a` then `b`, 2D each), k3g normalises a 2D-channel
+contraction output and projects it back to D, and the backward is the same b1s / b1g -> contraction gradients -> b7m / b7g chain
+with the bidirectional front-CTA count. The only difference is the cuBLAS contraction between the kernels: all 2D channels of `a`
+and `b` in the module's one direction (`t = a b^T` outgoing, `a^T b` incoming) instead of D channels per direction
+(`b200_infer.planes_of` / `contracted`). Batched samples (B <= 8 at D64), the row-dropout scale and CUDA graphs work as for the other
+shapes; other hidden widths keep the module's other paths (`b200_infer.hidden_ok`). Tests: `tests/integrations/test_trimul_b200_gpu.py`
+(`-k hidden`: every gradient against an fp32 PyTorch reference, B = 4 at D64, dropout, graph capture).
+
+Measured 2026-10-04 on one B200 (sm_100a, 1000 W cap), torch 2.13.0+cu129, bf16, outgoing, a token mask, row dropout 0.25 in
+training, CUDA-graph timing (30 replays after warm-up), ms; cuEquivariance 0.12 and the PyTorch reference are the same module with
+`implementation=cuequivariance` / `pytorch`:
+
+| D | hidden | B | L | inference: ours / cuEq / PyTorch | × cuEq | training fwd + bwd: ours / cuEq / PyTorch | × cuEq |
+|---|---|---|---|---|---|---|---|
+| 64 | 128 | 1 | 128 | 0.021 / 0.047 / 0.148 | 2.24 | 0.112 / 0.232 / 0.630 | 2.07 |
+| 64 | 128 | 1 | 256 | 0.039 / 0.107 / 0.442 | 2.74 | 0.186 / 0.558 / 2.084 | 3.00 |
+| 64 | 128 | 1 | 384 | 0.072 / 0.203 / 0.956 | 2.82 | 0.304 / 1.042 / 2.968 | 3.43 |
+| 64 | 128 | 1 | 512 | 0.117 / 0.341 / 1.710 | 2.91 | 0.459 / 1.742 / 5.132 | 3.80 |
+| 64 | 128 | 1 | 768 | 0.249 / 0.749 / 4.231 | 3.01 | 0.932 / 3.787 / 12.787 | 4.06 |
+| 64 | 128 | 4 | 128 | 0.039 / 0.107 / 0.441 | 2.74 | 0.187 / 0.562 / 2.057 | 3.01 |
+| 64 | 128 | 4 | 256 | 0.112 / 0.339 / 1.698 | 3.03 | 0.454 / 1.739 / 4.961 | 3.83 |
+| 64 | 128 | 4 | 384 | 0.235 / 0.736 / 3.803 | 3.13 | 0.914 / 3.783 / 10.974 | 4.14 |
+| 64 | 128 | 4 | 512 | 0.476 / 1.280 / 6.730 | 2.69 | 1.590 / 6.551 / 19.356 | 4.12 |
+| 64 | 128 | 4 | 768 | 1.242 / 2.918 / 16.800 | 2.35 | 3.827 / 14.601 / 48.832 | 3.82 |
+| 128 | 256 | 1 | 128 | 0.029 / 0.066 / 0.223 | 2.28 | 0.159 / 0.353 / 0.862 | 2.22 |
+| 128 | 256 | 1 | 256 | 0.068 / 0.193 / 0.720 | 2.84 | 0.311 / 0.969 / 3.280 | 3.12 |
+| 128 | 256 | 1 | 384 | 0.132 / 0.407 / 1.652 | 3.08 | 0.559 / 2.025 / 5.224 | 3.62 |
+| 128 | 256 | 1 | 512 | 0.222 / 0.696 / 3.061 | 3.14 | 0.896 / 3.504 / 9.441 | 3.91 |
+| 128 | 256 | 1 | 768 | 0.513 / 1.555 / 7.922 | 3.03 | 1.912 / 7.607 / 26.747 | 3.98 |
 
 ## Bidirectional (`BidirectionalTriangleMultiplication`)
 

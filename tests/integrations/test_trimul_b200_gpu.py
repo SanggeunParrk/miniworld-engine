@@ -356,3 +356,97 @@ def test_training_layernorm_gradients_deterministic(width, kind):
                      m.ln_out.bias.grad.clone()])
     for a, b in zip(*runs, strict=True):
         assert torch.equal(a, b)
+
+
+# ---- hidden = 2 x width, one direction (AF3 / Protenix template TriMul: pair 64, hidden 128) on the D64 / D128 kernels ----
+def _hidden2_module(width, kind, impl, p_drop=0.0):
+    return TriangleMultiplication(width, d_hidden=2 * width, outgoing=kind == "out", implementation=impl, p_drop=p_drop)
+
+
+@pytest.mark.parametrize("kind", ["out", "in"])
+@pytest.mark.parametrize("length", [128, 384])
+@pytest.mark.parametrize("width", [64, 128])
+def test_hidden_twice_width_inference(width, length, kind):
+    torch.manual_seed(401)
+    ref = randomize(_hidden2_module(width, kind, ImplementationType.PYTORCH).cuda()).eval()
+    m = _hidden2_module(width, kind, ImplementationType.MINIWORLD).cuda().bfloat16().eval()
+    m.load_state_dict(ref.state_dict())
+    x = torch.randn(1, length, length, width, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, length, device="cuda") > 0.2
+    with torch.no_grad():
+        assert trimul_b200.serves_inference(m, x, bidirectional=False)
+        got = m(x, mask)
+        want = ref(x.float(), mask)
+    assert relative(got, want) < 0.006
+
+
+@pytest.mark.parametrize("kind", ["out", "in"])
+@pytest.mark.parametrize(("width", "batch", "length"), [(64, 1, 128), (64, 1, 384), (64, 4, 256), (128, 1, 128), (128, 1, 384)])
+def test_hidden_twice_width_training(width, batch, length, kind):
+    """bf16 input, fp32 master parameters; every gradient against an fp32 autograd reference (B > 1: D64 only, as the
+    native batched path; several templates in one call)."""
+    torch.manual_seed(403)
+    m = randomize(_hidden2_module(width, kind, ImplementationType.MINIWORLD).cuda()).train()
+    ref = _hidden2_module(width, kind, ImplementationType.PYTORCH).cuda().train()
+    ref.load_state_dict(m.state_dict())
+    x = torch.randn(batch, length, length, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    xr = x.detach().float().requires_grad_()
+    mask = torch.rand(batch, length, device="cuda") > 0.2
+    dy = torch.randn(batch, length, length, width, device="cuda") * 0.1
+    assert trimul_b200.serves_train(m, x, bidirectional=False)
+    y = m(x, mask)
+    y.backward(dy.to(y.dtype))
+    yr = ref(xr, mask)
+    yr.backward(dy)
+    assert relative(y, yr) < 0.006
+    assert relative(x.grad, xr.grad) < 0.01
+    for (name, p), (_, pr) in zip(m.named_parameters(), ref.named_parameters(), strict=True):
+        assert relative(p.grad, pr.grad) < 0.01, name
+
+
+def test_hidden_twice_width_dropout_and_graph():
+    """Row dropout: the no-grad forward equals the training forward for one draw; the training step captures in a CUDA graph."""
+    torch.manual_seed(409)
+    m = randomize(_hidden2_module(64, "out", ImplementationType.MINIWORLD, p_drop=0.25).cuda().bfloat16()).train()
+    x = torch.randn(2, 256, 256, 64, device="cuda", dtype=torch.bfloat16)
+    torch.manual_seed(5)
+    with torch.no_grad():
+        a = m(x)
+    torch.manual_seed(5)
+    b = m(x.clone().requires_grad_())
+    assert torch.equal(a, b.detach())
+    del a, b                          # a live autograd graph from before the capture would pin the default stream
+    m.p_drop = 0.0
+    xg = x.clone().requires_grad_()
+    params = [xg, *m.parameters()]
+    dy = torch.randn_like(x)
+
+    def step():
+        return torch.autograd.grad(m(xg), params, dy)
+
+    eager = [t.clone() for t in step()]
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        step()
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = step()
+    g.replay()
+    torch.cuda.synchronize()
+    for t, e in zip(out, eager, strict=True):
+        assert relative(t, e) < 1e-3
+
+
+def test_hidden_other_ratios_not_served():
+    """Bidirectional with hidden != width, hidden 2 x width at D256, and other ratios keep the module's other paths."""
+    x64 = torch.zeros(1, 128, 128, 64, device="cuda", dtype=torch.bfloat16)
+    x256 = torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
+    odd = TriangleMultiplication(64, d_hidden=96, implementation=ImplementationType.MINIWORLD).cuda()
+    wide = TriangleMultiplication(256, d_hidden=512, implementation=ImplementationType.MINIWORLD).cuda()
+    assert not trimul_b200.serves_train(odd, x64, bidirectional=False)
+    assert not trimul_b200.serves_train(wide, x256, bidirectional=False)
+    with torch.no_grad():
+        assert not trimul_b200.serves_inference(odd, x64, bidirectional=False)
+        assert not trimul_b200.serves_inference(wide, x256, bidirectional=False)
