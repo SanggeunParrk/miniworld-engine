@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
 WEIGHTS = (
@@ -160,34 +161,29 @@ def _infer(
         # This path is inference only (the token DiT is not recycled; training takes integrations/token_dit_train), so
         # the weights do not change between the calls of a sampling run. Packing is tens of small kernels (~0.2 ms a
         # call, more than the block's step at L384): reuse the pack while every weight's (pointer, version) is the same
-        # -- an in-place update bumps ``_version`` and misses -- also inside a CUDA-graph capture, whose replays then
-        # read the pack made before it. A pack built during a capture lives in the graph's pool and is not cached.
+        # -- an in-place update bumps ``_version`` and misses. Scoped to the CUDA-graph capture (``kernels._capture``): a
+        # capture packs once and records it, so a replay packs the weights as they are then (a training run that samples
+        # inside a graph -- a mini-rollout -- changes them between replays), and reuses that pack for the capture's other calls.
         wkey = (single.dtype, qk, eq, ek, heads, *((w.data_ptr(), w._version) for w in weights))
-        runner = _RUNNERS.get(wkey)
-        if runner is None:
-            runner = build()
-            if not torch.cuda.is_current_stream_capturing():
-                if len(_RUNNERS) >= 64:       # a model's worth of blocks; drop the oldest
-                    _RUNNERS.pop(next(iter(_RUNNERS)))
-                _RUNNERS[wkey] = runner
+        runner = _capture.lookup(_RUNNERS, wkey, build)
         key = (single.device, single.dtype)
         caches = _TUNING.setdefault(key, ({}, {}))
         runner._mm_cfg, runner._gated_cfg = caches
         # The pair is the trunk's output: the same at every diffusion step of a sample, so the block's pair bias (a
         # LayerNorm over L^2 pair rows + a projection, ~40 % of a call at L = 768) is computed once per sample. Keyed by
         # the caller's pair / mask tensors (pointer, version, layout): a new pair, or an in-place change of it, misses.
-        # As with the pack, a bias computed during a capture is not cached, and a replay reuses the one it captured.
-        bkey = (pair.data_ptr(), pair._version, tuple(pair.shape), pair.stride(), mask.data_ptr(), mask._version)
+        # Scoped as the pack: a capture computes the bias once (recorded), so each replay recomputes it from the pair it has.
+        bkey = _capture.scoped((pair.data_ptr(), pair._version, tuple(pair.shape), pair.stride(), mask.data_ptr(), mask._version))
         hit = runner.__dict__.get("_bias_cache")
         L, L8 = single.shape[2], _pad8(single.shape[2])
-        if hit is not None and hit[0] == bkey:
+        if bkey is not None and hit is not None and hit[0] == bkey:
             bias = hit[1]
         else:
             if L8 != L:                      # padded keys: zero pair rows / columns, masked out of every softmax
                 pair = torch.nn.functional.pad(pair, (0, 0, 0, L8 - L, 0, L8 - L))
                 mask = torch.nn.functional.pad(mask.to(torch.bool), (0, L8 - L), value=False)
             bias = runner.hoist(pair.contiguous(), mask)
-            if not torch.cuda.is_current_stream_capturing():
+            if bkey is not None:
                 runner._bias_cache = (bkey, bias)
         if L8 == L:
             return runner.step(single, cond, bias)

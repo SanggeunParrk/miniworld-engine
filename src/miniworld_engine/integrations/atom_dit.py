@@ -38,6 +38,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 
 DS_, DC_, DP_, NH_, DH_ = 128, 128, 16, 4, 32
@@ -160,18 +161,20 @@ _PACKS: dict = {}
 
 
 def _weights(weights):
-    if torch.cuda.is_current_stream_capturing():
-        return _pack(weights)
+    """Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once and records it."""
     try:
         versions = tuple(w._version for w in weights)
     except RuntimeError:  # inference tensors carry no version counter: nothing could invalidate an entry
         return _pack(weights)
-    key = tuple(id(w) for w in weights)
+    key = _capture.scoped(tuple(id(w) for w in weights))
+    if key is None:
+        return _pack(weights)
     hit = _PACKS.get(key)
     if hit is not None:
         refs, seen, pack = hit
         if seen == versions and all(r() is w for r, w in zip(refs, weights, strict=True)):
             return pack
+    _capture.prune(_PACKS)
     if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
         _PACKS.pop(next(iter(_PACKS)))
     pack = _pack(weights)

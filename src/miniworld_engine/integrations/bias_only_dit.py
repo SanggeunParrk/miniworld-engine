@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
 D, DC, DP = 768, 384, 128
@@ -112,26 +113,20 @@ def _infer(
 
     with torch.cuda.device(single.device):
         # The weights do not change between the calls of a sampling run; packing is tens of small kernels. Reuse the pack
-        # while every weight's (pointer, version) is the same -- an in-place update bumps ``_version`` and misses -- also
-        # inside a CUDA-graph capture, whose replays then read the pack made before it. A pack built during a capture lives
-        # in the graph's pool and is not cached.
+        # while every weight's (pointer, version) is the same -- an in-place update bumps ``_version`` and misses. Scoped
+        # to the CUDA-graph capture (``kernels._capture``): a capture packs once, recorded, so a replay packs the weights as
+        # they are then.
         wkey = (single.dtype, *((w.data_ptr(), w._version) for w in weights))
-        runner = _RUNNERS.get(wkey)
-        if runner is None:
-            runner = build()
-            if not torch.cuda.is_current_stream_capturing():
-                if len(_RUNNERS) >= 64:       # a model's worth of blocks; drop the oldest
-                    _RUNNERS.pop(next(iter(_RUNNERS)))
-                _RUNNERS[wkey] = runner
+        runner = _capture.lookup(_RUNNERS, wkey, build)
         # The attention weights depend on the pair and the mask only: the same at every diffusion step of a sample and for
         # every augmented sample. Keyed by the caller's pair / mask tensors (pointer, version, layout).
-        pkey = (pair.data_ptr(), pair._version, tuple(pair.shape), pair.stride(), mask.data_ptr(), mask._version)
+        pkey = _capture.scoped((pair.data_ptr(), pair._version, tuple(pair.shape), pair.stride(), mask.data_ptr(), mask._version))
         hit = runner.__dict__.get("_p_cache")
-        if hit is not None and hit[0] == pkey:
+        if pkey is not None and hit is not None and hit[0] == pkey:
             P = hit[1]
         else:
             P = runner.hoist(pair.contiguous(), mask)
-            if not torch.cuda.is_current_stream_capturing():
+            if pkey is not None:
                 runner._p_cache = (pkey, P)
         return runner.step(single, cond, P)
 

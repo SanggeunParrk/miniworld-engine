@@ -35,6 +35,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels import _capture
+
 C, H, D, NHID, HW = 128, 4, 32, 256, 64
 EPS = float(torch.finfo(torch.float32).eps)
 PDL = True                                  # programmatic dependent launch for the forward kernels
@@ -593,21 +595,22 @@ def _cached(fn, *ts):
     allocator happens to place at a freed one's address, with the same shape and version -- a fresh bf16 cast of an fp32 master
     weight, a test's next set of weights -- must not be served the old tensor's packed form.
 
-    Not cached: while a CUDA graph is being captured (a hit would record no pack kernel, and every replay would then read the
-    packed copy of the weights as they were at capture, never refreshed after an optimizer step), and for inference tensors
-    (they carry no version counter)."""
-    if torch.cuda.is_current_stream_capturing():
-        return fn(*ts)
+    Scoped to the CUDA-graph capture (``kernels._capture``): an entry made outside a capture is not used inside one (a hit
+    would record no pack kernel, and every replay would read the weights as they were at capture), and one made during a
+    capture serves that capture only. Not cached for inference tensors (they carry no version counter)."""
     try:
         versions = tuple(t._version for t in ts)
     except RuntimeError:                                  # inference tensors do not track a version counter
         return fn(*ts)
-    key = (fn.__name__, *(id(t) for t in ts))
+    key = _capture.scoped((fn.__name__, *(id(t) for t in ts)))
+    if key is None:
+        return fn(*ts)
     hit = _PACKS.get(key)
     if hit is not None:
         refs, vers, out = hit
         if vers == versions and all(r() is t for r, t in zip(refs, ts, strict=True)):
             return out
+    _capture.prune(_PACKS)
     if len(_PACKS) > 64:
         _PACKS.clear()
     out = fn(*ts)

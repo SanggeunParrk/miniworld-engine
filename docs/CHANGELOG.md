@@ -157,6 +157,17 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Fixed
 
+- B200 weight-pack caches were wrong inside CUDA graphs whose weights change between replays (an optimizer step, or a sampling
+  run inside a training graph): the token DiT (inference runner and its pair-bias cache; training pack), bias-only DiT (inference runner
+  and its attention-weight cache; training pack), TriAttn wide-width pack (inference and training), AttentionPairBias inference packs and
+  the TriAttn modules' fused-inference weight concatenation reused, during a capture, an entry built by the eager warm-up -- so the graph
+  recorded no packing kernel and every replay computed with the weights of capture time (training: gradients of stale weights). The
+  caches are now scoped to the capture (`kernels/_capture.py`: the capture sequence id from the driver): an eager entry serves only eager
+  calls; a capture packs once, recorded, so each replay repacks the current weights, and reuses that pack for its other calls; entries of
+  finished captures are dropped. The atom DiT and SWA DiT caches, which bypassed the cache during a capture, now also pack once per
+  capture instead of at every call. Updates that bypass the version counter (torch's fused optimizers) still need
+  `torch.autograd.graph.increment_version(params)` after the step. Tests: `tests/integrations/test_b200_pack_cache_capture_gpu.py`
+  (seven of its nine replay cases fail before the change).
 - B200 SWA atom DiT weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) keyed on (data_ptr, version, shape) served the old
   tensor's packed copy to a new weight placed at a freed one's address (a bf16 cast, the next test's weights). It is keyed on the tensor
   objects now (weak references plus version), and bypassed while a CUDA graph is captured (a hit would record no pack kernel, so every

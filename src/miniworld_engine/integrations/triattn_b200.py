@@ -7,6 +7,7 @@ import torch
 from einops import rearrange
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.dispatch import KernelBackend
 
 
@@ -95,9 +96,11 @@ def forward_wide(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch
 
     weights = (module.to_query.weight, module.to_key.weight, module.to_value.weight, module.to_gate.weight,
                module.to_bias.weight, module.to_out.weight)
-    key = tuple((w.data_ptr(), w._version) for w in weights)
+    # scoped to the CUDA-graph capture (kernels._capture): a pack made outside a capture is not reused inside one, whose
+    # replays would otherwise run on the weights of capture time after every optimizer step
+    key = _capture.scoped(tuple((w.data_ptr(), w._version) for w in weights))
     cache = getattr(module, "_b200_wide_pack", None)
-    if cache is None or cache[0] != key:
+    if key is None or cache is None or cache[0] != key:
         with torch.no_grad():
             cache = (key, pack_wide_weights(*weights))
         module._b200_wide_pack = cache

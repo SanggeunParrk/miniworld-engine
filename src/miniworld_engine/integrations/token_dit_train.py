@@ -34,6 +34,7 @@ import os
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
 D, DC, DP, H, DH = 768, 384, 128, 16, 48          # the default layout; serves() takes LAYOUTS
@@ -117,10 +118,11 @@ _PACKS: dict = {}
 def _pack(P, qk, dev, at):
     """The block's weights in the kernels' layouts (GEMM operands in ``at``, folded cond / pair LayerNorm weights, fp32 bias
     vectors). Rebuilt only when a parameter changes -- an optimizer step bumps ``_version`` -- so a training step pays
-    it once per block, not once per forward."""
+    it once per block, not once per forward. Scoped to the CUDA-graph capture (``kernels._capture``): an eager pack is never
+    reused inside a capture, whose replays would otherwise run on the weights of capture time after every optimizer step."""
     key = tuple((t.data_ptr(), t._version) for t in P.values())
-    slot = (next(iter(P.values())).data_ptr(), at)
-    hit = _PACKS.get(slot)
+    slot = _capture.scoped((next(iter(P.values())).data_ptr(), at))
+    hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
     g = lambda n: P[n]
@@ -146,7 +148,9 @@ def _pack(P, qk, dev, at):
         "Wab": torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).detach().to(at),
         "Wsq": g("transition.squeeze.weight").detach().to(at).contiguous(),
     }
-    _PACKS[slot] = (key, W)
+    if slot is not None:
+        _capture.prune(_PACKS)
+        _PACKS[slot] = (key, W)
     return W
 
 

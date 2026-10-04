@@ -34,6 +34,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
@@ -111,8 +112,8 @@ class BidirectionalTriangleAttention(nn.Module):
         """Concatenated [value|bias|gate] projection weight for the fused inference
         path, cached and rebuilt only when a projection weight changes."""
         w = (self.to_value.weight, self.to_bias.weight, self.to_gate.weight)
-        ver = tuple(t._version for t in w)
-        if getattr(self, "_wcat_ver", None) != ver:
+        ver = _capture.scoped(tuple(t._version for t in w))     # never an eager copy inside a CUDA-graph capture
+        if ver is None or getattr(self, "_wcat_ver", None) != ver:
             self._wcat = torch.cat(w, dim=0)
             self._wcat_ver = ver
         return self._wcat

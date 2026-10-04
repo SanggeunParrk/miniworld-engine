@@ -30,6 +30,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -101,14 +102,10 @@ def _geometry(leaves):
 # ------------------------------------------------------------------------------------------------------------ inference
 def _inference_packs(leaves):
     """``_prep`` with q scaled into exp2 units and Wf in exp2 units, cached per parameter version (the step reads them every
-    call; repacking costs a launch)."""
-    key = tuple((t.data_ptr(), t._version) for t in leaves)
-    hit = _packs.get(key)
-    if hit is None:
-        if len(_packs) >= 8:
-            _packs.clear()
-        hit = _packs[key] = (*_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E), leaves)
-    return hit[:4]
+    call; repacking costs a launch). Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once, recorded,
+    so each replay packs the weights as they are then."""
+    build = lambda: (*_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E), leaves)
+    return _capture.lookup(_packs, tuple((t.data_ptr(), t._version) for t in leaves), build, limit=8)[:4]
 
 
 def _prep(leaves, qs: float, ws: float):
