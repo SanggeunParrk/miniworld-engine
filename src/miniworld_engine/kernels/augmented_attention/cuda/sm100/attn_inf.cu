@@ -71,8 +71,12 @@ __device__ unsigned long long g_tr[8][256];   // CTA 0: 0 prod issued, 1 mma QK(
 #else
 #define TR(ev, i) do { } while (0)
 #endif
+// p_full is per P buffer (G & 1): the softmax can hand over P(G) and P(G + 1) before the MMA warp tests P(G) -- QK(G + 1) is
+// issued before that wait -- and one barrier completing two phases in between would leave the wait on a parity that never
+// comes back (a hang that only showed up under concurrent load). Two barriers: completing one twice needs P(G + 2), which
+// needs S(G + 2), issued only after the MMA warp has passed P(G).
 struct Bars {
-  uint64_t q_full[QR], q_empty[QR], kv_full[ST], kv_empty[ST], s_full[2][2], p_full[2], p_free[2][2], o_free[2], g_full[2];
+  uint64_t q_full[QR], q_empty[QR], kv_full[ST], kv_empty[ST], s_full[2][2], p_full[2][2], p_free[2][2], o_free[2], g_full[2];
   uint32_t tmem;
 };
 #ifndef PMOD
@@ -123,7 +127,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     for (int s = 0; s < ST; ++s) { mbar_init(&B.kv_full[s], 1); mbar_init(&B.kv_empty[s], 2); }
     for (int w = 0; w < 2; ++w) {
       mbar_init(&B.s_full[w][0], 1); mbar_init(&B.s_full[w][1], 1);
-      mbar_init(&B.p_full[w], 4); mbar_init(&B.p_free[w][0], 1); mbar_init(&B.p_free[w][1], 1); mbar_init(&B.o_free[w], 4); mbar_init(&B.g_full[w], 1);
+      mbar_init(&B.p_full[w][0], 4); mbar_init(&B.p_full[w][1], 4); mbar_init(&B.p_free[w][0], 1); mbar_init(&B.p_free[w][1], 1); mbar_init(&B.o_free[w], 4); mbar_init(&B.g_full[w], 1);
     }
     fence_barrier_init();
   }
@@ -179,7 +183,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     for (int G = 0; G < 2 && G < nblk; ++G) qk(G, G / nb, G % nb);
     for (int G = 0, li = 0, n = 0; G < nblk; ++G) {                        // (li, n) advance incrementally
       const int s = G % ST;
-      mbar_wait(&B.p_full[w], G & 1);
+      mbar_wait(&B.p_full[w][G & 1], (G >> 1) & 1);
       if (n == 0 && li >= 1) mbar_wait(&B.o_free[w], (li - 1) & 1);        // the previous item's O has been read out
       tc_fence_after();
       const uint64_t dv = desc_mn128(su + O_ST + s * STB + V_OFF(w), 8192);
@@ -295,7 +299,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       tmem_wait_st();
       tc_fence_before();
       __syncwarp();
-      if (lane == 0) mbar_arrive(&B.p_full[w]);
+      if (lane == 0) mbar_arrive(&B.p_full[w][G & 1]);
       if (w == 0 && r == 0) TR(5, G);
       if (w == 1 && r == 0) TR(7, G);
       if (n == nb - 1) {

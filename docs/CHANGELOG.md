@@ -157,6 +157,14 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Fixed
 
+- B200 token DiT attention cores could hang under concurrent GPU work (seen as a CUDA graph with two concurrent branches -- a sampling
+  run beside a training step -- stuck at ~240 W): in `attn_inf_tf32`, `attn_fwd_tf32` and `attn_inf` (P double-buffered) the softmax
+  warpgroup could hand over P(G) and P(G + 1) before the MMA warp tested P(G) (QK(G + 1) is issued before that wait), so the single
+  `p_full` barrier completed two phases and the wait on its parity never returned. `p_full` is now one barrier per P buffer (G & 1,
+  parity (G >> 1) & 1); completing one twice would need P(G + 2), whose S(G + 2) is only issued after the MMA warp passed P(G). Kernels
+  with a single P buffer (`attn_fwd2`, the atom `attn_fwd`, SWA `attn_dkv` / `attn_dkvq`) wait for PV(G - 1) before writing P(G) and
+  could not run ahead. Found with cuda-gdb (stuck warps' PCs mapped to source lines); a Protenix step graph with the rollout on a second
+  stream, which hung in 6 of 7 runs, completed 4 of 4 runs of 300 replays. Same results (token DiT tests unchanged).
 - B200 weight-pack caches were wrong inside CUDA graphs whose weights change between replays (an optimizer step, or a sampling
   run inside a training graph): the token DiT (inference runner and its pair-bias cache; training pack), bias-only DiT (inference runner
   and its attention-weight cache; training pack), TriAttn wide-width pack (inference and training), AttentionPairBias inference packs and

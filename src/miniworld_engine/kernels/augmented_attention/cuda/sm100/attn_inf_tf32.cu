@@ -48,8 +48,12 @@ static_assert((O_ST % 1024) == 0 && (STB % 1024) == 0 && (O_X % 1024) == 0 && (S
 constexpr uint32_t T_S = 0, T_P = 128, T_O = 256;
 constexpr uint32_t I_QK = idesc_tf32(128, BN), I_PV = idesc_tf32(128, DH);
 
+// p_full is per P buffer (G & 1): the softmax can hand over P(G) and P(G + 1) before the MMA warp tests P(G) -- QK(G + 1) is
+// issued before that wait -- and one barrier completing two phases in between would leave the wait on a parity that never
+// comes back (a hang that only showed up under concurrent load). Two barriers: completing one twice needs P(G + 2), which
+// needs S(G + 2), issued only after the MMA warp has passed P(G).
 struct Bars {
-  uint64_t q_full, q_empty, kv_full[ST], kv_empty[ST], s_full[2][2], p_full[2], p_free[2][2], o_free[2], g_full[2];
+  uint64_t q_full, q_empty, kv_full[ST], kv_empty[ST], s_full[2][2], p_full[2][2], p_free[2][2], o_free[2], g_full[2];
   uint32_t tmem;
 };
 DEVI float max3f(float a, float b, float c) { float d; asm("max.f32 %0, %1, %2, %3;" : "=f"(d) : "f"(a), "f"(b), "f"(c)); return d; }
@@ -78,7 +82,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     for (int s = 0; s < ST; ++s) { mbar_init(&B.kv_full[s], 1); mbar_init(&B.kv_empty[s], 2); }
     for (int w = 0; w < 2; ++w) {
       mbar_init(&B.s_full[w][0], 1); mbar_init(&B.s_full[w][1], 1);
-      mbar_init(&B.p_full[w], 4); mbar_init(&B.p_free[w][0], 1); mbar_init(&B.p_free[w][1], 1); mbar_init(&B.o_free[w], 4); mbar_init(&B.g_full[w], 1);
+      mbar_init(&B.p_full[w][0], 4); mbar_init(&B.p_full[w][1], 4); mbar_init(&B.p_free[w][0], 1); mbar_init(&B.p_free[w][1], 1); mbar_init(&B.o_free[w], 4); mbar_init(&B.g_full[w], 1);
     }
     fence_barrier_init();
   }
@@ -143,7 +147,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     for (int G = 0; G < 2 && G < nblk; ++G) qk(G, G / nb, G % nb);
     for (int G = 0, li = 0, n = 0; G < nblk; ++G) {
       const int s = G % ST;
-      mbar_wait(&B.p_full[w], G & 1);
+      mbar_wait(&B.p_full[w][G & 1], (G >> 1) & 1);
       if (n == 0 && li >= 1) mbar_wait(&B.o_free[w], (li - 1) & 1);
       tc_fence_after();
       const uint32_t st = su + O_ST + s * STB;
@@ -252,7 +256,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       tmem_wait_st();
       tc_fence_before();
       __syncwarp();
-      if (lane == 0) mbar_arrive(&B.p_full[w]);
+      if (lane == 0) mbar_arrive(&B.p_full[w][G & 1]);
       if (n == nb - 1) {
         // ---- epilogue of the item: o = sigmoid(g) acc / l, fp32, over q
         int a0, m0, head; item_of(li, a0, m0, head);
