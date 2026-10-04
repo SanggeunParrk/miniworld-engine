@@ -298,7 +298,7 @@ def _memeff_fwd(
         H,
         L,
         D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),   # tl.dot needs K >= 16 (as main.py)
         shape_key=pack(shape_key, H=H, HEAD_DIM=D),
     )
     return out, m
@@ -353,7 +353,7 @@ def _memeff_bwd(
         H,
         D,
         shape_key=atom_key(L, H=H, HEAD_DIM=D),
-        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),   # tl.dot needs K >= 16 (as main.py)
     )
 
     dq = torch.zeros_like(q, dtype=torch.float32)
@@ -394,7 +394,7 @@ def _memeff_bwd(
         H,
         L,
         D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),   # tl.dot needs K >= 16 (as main.py)
         shape_key=atom_key(L, H=H, HEAD_DIM=D),
     )
 

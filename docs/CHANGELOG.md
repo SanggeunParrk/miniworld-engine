@@ -157,6 +157,11 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Fixed
 
+- Triton augmented attention, memory-efficient path (`compute_efficient=False`): a head dim below 16 padded its dot lanes to
+  `next_power_of_2(D)` (8 for D = 8), under `tl.dot`'s K >= 16, so the kernels did not compile; it now pads to at least 16 as the
+  compute-efficient path does (the padded lanes are masked loads of zero). `tests/numerics/test_augmented_attention_small_head_gpu.py`
+  also picked a 32 x 32 tile that the B200 config set does not have (all 12 cases failed there); it now takes the smallest w4 / s2 tile
+  of the active set (32 x 32 where there is one). 12 passed on B200.
 - B200 token DiT attention cores could hang under concurrent GPU work (seen as a CUDA graph with two concurrent branches -- a sampling
   run beside a training step -- stuck at ~240 W): in `attn_inf_tf32`, `attn_fwd_tf32` and `attn_inf` (P double-buffered) the softmax
   warpgroup could hand over P(G) and P(G + 1) before the MMA warp tested P(G) (QK(G + 1) is issued before that wait), so the single

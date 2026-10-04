@@ -23,14 +23,18 @@ def test_padded_attention_matches_float_reference(head_dim, dtype, compute_effic
         names.append("_dq_reduce")
 
     # This tests masked padding arithmetic, not the full autotune search. Keep
-    # the same legal tile for both dimensions and precisions without shared writes.
+    # the same legal tile for both dimensions and precisions without shared writes:
+    # the smallest tile of the active GPU's config set (32 x 32 where it has one; the
+    # B200 set has no 32 x 32 attention tile, only 32 x 64 / 64 x 32).
+    def tile(config):
+        return config.kwargs.get("BLOCK_M1", 1) * config.kwargs.get("BLOCK_M2", 1)
+
     for name in names:
         tuner = getattr(backend, name)
         candidates = [config for config in tuner.configs
-                      if config.num_warps == 4 and config.num_stages == 2
-                      and all(config.kwargs.get(axis, 32) == 32 for axis in ("BLOCK_M1", "BLOCK_M2"))]
+                      if config.num_warps == 4 and config.num_stages == 2]
         assert candidates, name
-        monkeypatch.setattr(tuner, "configs", candidates[:1])
+        monkeypatch.setattr(tuner, "configs", [min(candidates, key=tile)])
         monkeypatch.setattr(tuner, "cache", {})
 
     torch.manual_seed(17)
