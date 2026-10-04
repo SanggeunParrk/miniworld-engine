@@ -78,7 +78,8 @@ def test_bond_dtypes_and_ids():
 def test_refusals():
     (left, right, w_rel, w_bond), _ids, bond = _case(1, 32, grad=False)
     assert "bond" in (refusal(left, right, w_rel, w_bond, None) or "")
-    assert "fp32" in (refusal(left.bfloat16(), right.bfloat16(), w_rel, w_bond, bond) or "")
+    assert refusal(left.bfloat16(), right.bfloat16(), w_rel, w_bond, bond) is None     # bf16 streams: cast to fp32 in the op
+    assert "fp32 or bf16" in (refusal(left.half(), right.half(), w_rel, w_bond, bond) or "")
     assert "128" in (refusal(left[..., :64], right[..., :64], w_rel, w_bond, bond) or "")
 
 

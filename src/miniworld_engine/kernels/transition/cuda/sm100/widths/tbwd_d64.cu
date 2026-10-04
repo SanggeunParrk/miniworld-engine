@@ -484,19 +484,19 @@ transition_bwd_d64_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_c
 // partab [NDW][128][64] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][64 d][64 hs] -> bf16 dWa, dWb [256][64], dWs [64][256];
 // dgbw [NDX * 4][128] -> dgamma, dbeta (fp32). Fixed summation order: a replay is bit-identical.
 extern "C" __global__ void transition_bwd_d64_reduce(const float* __restrict__ partab, const float* __restrict__ parts, const float* __restrict__ dgbw,
-                                                     __nv_bfloat16* __restrict__ dwa, __nv_bfloat16* __restrict__ dwb, __nv_bfloat16* __restrict__ dws,
+                                                     float* __restrict__ dwa, float* __restrict__ dwb, float* __restrict__ dws,
                                                      float* __restrict__ dgam, float* __restrict__ dbeta, int ndw, int nrows_dg) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x, R = ndw / NSL;
   if (idx < 2 * H_ * D_) {                                  // dWa / dWb element: (which, slice, hs, d)
     const int which = idx / (H_ * D_), rem = idx % (H_ * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
     float v = 0.f;
     for (int rr = 0; rr < R; ++rr) v += partab[((size_t)(rr * NSL + slice) * 128 + which * 64 + hs) * D_ + d];
-    (which == 0 ? dwa : dwb)[(slice * HS + hs) * D_ + d] = __float2bfloat16_rn(v);
+    (which == 0 ? dwa : dwb)[(slice * HS + hs) * D_ + d] = v;
   } else if (idx < 3 * H_ * D_) {                           // dWs element (d, slice, hs)
     const int rem = idx - 2 * H_ * D_, d = rem / H_, hh = rem % H_, slice = hh / HS, hs = hh % HS;
     float v = 0.f;
     for (int rr = 0; rr < R; ++rr) v += parts[((size_t)(rr * NSL + slice) * D_ + d) * HS + hs];
-    dws[d * H_ + hh] = __float2bfloat16_rn(v);
+    dws[d * H_ + hh] = v;
   } else if (idx < 3 * H_ * D_ + 2 * D_) {
     const int c = idx - 3 * H_ * D_;
     float v = 0.f;

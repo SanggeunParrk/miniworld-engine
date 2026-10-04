@@ -179,7 +179,8 @@ def _is_b200(index: int) -> bool:
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """The kernels' own requirements: sm_100, bf16, D = 128 / hidden 512 (tile shapes are literals), whole 128-row tiles."""
+    """The kernels' own requirements: sm_100, bf16 activations, D = 128 / hidden 512 (tile shapes are literals), whole 128-row tiles.
+    The weights may be bf16 or fp32 (an fp32 master): the entry casts them to bf16 outside autograd."""
     if os.environ.get("MINIWORLD_TRANSITION_FUSED_SM100A", "1") == "0":
         return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
@@ -188,7 +189,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return False
     if x.shape[-1] != D or wa.shape != (H, D) or ws.shape != (D, H):
         return False
-    if wa.dtype is not torch.bfloat16 or ws.dtype is not torch.bfloat16:
+    if wa.dtype not in _WEIGHT_DTYPES or ws.dtype not in _WEIGHT_DTYPES:
         return False
     rows = 1
     for s in x.shape[:-1]:
@@ -197,6 +198,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
 
 
 _BUILD_FAILED = False
+_WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 
 
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
@@ -239,9 +241,11 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
 
 
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
-    """Output structure only: the six gradients, each shaped like what it is a gradient of (dgamma / dbeta fp32 like gamma)."""
+    """Output structure only: the six gradients, each shaped like what it is a gradient of (dgamma / dbeta and the weight
+    gradients fp32)."""
+    f32 = dict(dtype=torch.float32, device=x.device)
     return (torch.empty_like(x), torch.empty_like(gamma), torch.empty_like(gamma),
-            torch.empty_like(wa), torch.empty_like(wb), torch.empty_like(ws))
+            torch.empty(wa.shape, **f32), torch.empty(wb.shape, **f32), torch.empty(ws.shape, **f32))
 
 
 @opaque(fake=_bwd_launch_fake, name="transition_fused_bwd_sm100a")
@@ -256,18 +260,20 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
 
 class _FusedTransitionSM100A(torch.autograd.Function):
     """``y = transition(x) + x`` with the residual folded into the squeeze epilogue. The forward saves ``xn`` and the LayerNorm
-    statistics; the backward's weight role reads ``xn`` directly (the sm_90a measurement: recomputing it costs more than it saves)."""
+    statistics; the backward's weight role reads ``xn`` directly (the sm_90a measurement: recomputing it costs more than it saves).
+    The parameters keep their dtype (bf16, or an fp32 master): the kernels get bf16 casts made here, outside autograd, and the
+    parameters get the kernels' fp32 gradients in their own dtype (fp32 ones unrounded)."""
 
     @staticmethod
     def forward(ctx, x, gamma, beta, wa, wb, ws, eps):
         shape = x.shape
+        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-        wa, wb, ws = wa.contiguous(), wb.contiguous(), ws.contiguous()
+        wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))
         out, xn, rstd, c1 = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True)
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws)
         ctx.shape = shape
-        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         return out.reshape(shape)
 
     @staticmethod
@@ -284,6 +290,6 @@ def transition_fused_sm100a(x, gamma, beta, wa, wb, ws, eps):
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
         out, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma.float().contiguous(), beta.float().contiguous(),
-                                   wa.contiguous(), wb.contiguous(), ws.contiguous(), float(eps), False)
+                                   *(w.to(x.dtype).contiguous() for w in (wa, wb, ws)), float(eps), False)
         return out.reshape(shape)
     return _FusedTransitionSM100A.apply(x, gamma, beta, wa, wb, ws, eps)

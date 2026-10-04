@@ -601,22 +601,23 @@ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_const
   else input_role(p, sm, blockIdx.x - ndw, gridDim.x - ndw, warp, lane);
 }
 
-// partab [NDW][128][128] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][128 d][64 hs] -> bf16 dWa, dWb [512][128], dWs [128][512];
+// partab [NDW][128][128] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][128 d][64 hs] -> fp32 dWa, dWb [512][128], dWs [128][512]
+// (unrounded: the parameters may be an fp32 master);
 // dgbw [NDX * 4][256] -> dgamma, dbeta (fp32)
 extern "C" __global__ void transition_bwd_reduce(const float* __restrict__ partab, const float* __restrict__ parts, const float* __restrict__ dgbw,
-                                                 __nv_bfloat16* __restrict__ dwa, __nv_bfloat16* __restrict__ dwb, __nv_bfloat16* __restrict__ dws,
+                                                 float* __restrict__ dwa, float* __restrict__ dwb, float* __restrict__ dws,
                                                  float* __restrict__ dgam, float* __restrict__ dbeta, int ndw, int nrows_dg) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x, R = ndw >> LNCH;
   if (idx < 2 * H_ * D_) {                                  // dWa / dWb element: (which, slice, hs, d)
     const int which = idx / (H_ * D_), rem = idx % (H_ * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
     float v = 0.f;
     for (int rr = 0; rr < R; ++rr) v += partab[((size_t)(rr * NCH + slice) * 128 + which * 64 + hs) * 128 + d];
-    (which == 0 ? dwa : dwb)[(slice * HS + hs) * D_ + d] = __float2bfloat16_rn(v);
+    (which == 0 ? dwa : dwb)[(slice * HS + hs) * D_ + d] = v;
   } else if (idx < 3 * H_ * D_) {                           // dWs element (d, slice, hs)
     const int rem = idx - 2 * H_ * D_, d = rem / H_, hh = rem % H_, slice = hh / HS, hs = hh % HS;
     float v = 0.f;
     for (int rr = 0; rr < R; ++rr) v += parts[((size_t)(rr * NCH + slice) * 128 + d) * 64 + hs];
-    dws[d * H_ + hh] = __float2bfloat16_rn(v);
+    dws[d * H_ + hh] = v;
   } else if (idx < 3 * H_ * D_ + 256) {
     const int c = idx - 3 * H_ * D_;
     float v = 0.f;

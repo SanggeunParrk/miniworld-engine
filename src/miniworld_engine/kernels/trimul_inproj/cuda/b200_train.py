@@ -163,8 +163,8 @@ def forward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Ten
 
 
 def _backward_fake(leaves, mask, ds, direction, saved, dy):
-    """One gradient per leaf, contiguous, in the leaf's dtype."""
-    return [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in leaves]
+    """One gradient per leaf, contiguous: dx in x's dtype, the parameter gradients fp32 (the kernels' accumulators)."""
+    return [torch.empty_like(leaves[0]), *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves[1:])]
 
 
 @opaque(fake=_backward_fake, name="trimul_b200_train_bwd")
@@ -206,8 +206,9 @@ def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Te
         dx = torch.empty_like(x)
         E.wide_lnin_bwd(dxn, x2, dy2, mean, rstd, gi, dx.view(m, d), acc[2 * d:4 * d])
     grads = [dwl, dwlg, dwr, dwrg, dw[2 * p:], dwp, dgi, dbi, dgo, dbo]
-    # the small gradients are views of shared buffers; a custom op may not return aliasing outputs
-    return [dx, *(g.to(tl.dtype, copy=True) for g, tl in zip(grads, leaves[1:], strict=True))]
+    # the small gradients are views of shared buffers; a custom op may not return aliasing outputs. fp32: the parameters may be
+    # an fp32 master (the autograd function casts them to bf16 for the kernels and hands these back in the parameters' dtype)
+    return [dx, *(g.to(torch.float32, copy=True) for g in grads)]
 
 
 def _forward_small_fake(leaves, mask, ds, direction):
@@ -248,8 +249,8 @@ def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: tor
 
 
 def _backward_small_fake(leaves, mask, ds, direction, saved, dy):
-    """One gradient per leaf, contiguous, in the leaf's dtype."""
-    return [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in leaves]
+    """One gradient per leaf, contiguous: dx in x's dtype, the parameter gradients fp32 (the kernels' accumulators)."""
+    return [torch.empty_like(leaves[0]), *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves[1:])]
 
 
 @opaque(fake=_backward_small_fake, name="trimul_b200_train_small_bwd")
@@ -309,13 +310,22 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
         E.lnpart_sum(lnp_o, lnp_i, lns)
         dgo, dbo, dgi, dbi = lns.split((h, h, d, d))
     grads = [dwl, dwlg, dwr, dwrg, dwg, dwp, dgi, dbi, dgo, dbo]
-    return [dx, *(g.to(tl.dtype, copy=True) for g, tl in zip(grads, leaves[1:], strict=True))]
+    return [dx, *(g.to(torch.float32, copy=True) for g in grads)]
+
+
+def _kernel_leaves(leaves):
+    """The kernels' operands: x, the six projection weights in x's dtype (bf16) and contiguous, the four LayerNorm vectors fp32.
+    The casts happen here, outside autograd, so the parameters can be an fp32 master and still receive unrounded fp32 gradients."""
+    x = leaves[0]
+    return [x, *(w.to(x.dtype).contiguous() for w in leaves[1:7]), *(v.float().contiguous() for v in leaves[7:])]
 
 
 class _TrainingSmall(torch.autograd.Function):
     @staticmethod
     def forward(ctx, direction, mask, ds, *leaves):
-        y, *saved = forward_small(list(leaves), mask, ds, direction)
+        ctx.param_dtypes = [t.dtype for t in leaves[1:]]
+        leaves = _kernel_leaves(leaves)
+        y, *saved = forward_small(leaves, mask, ds, direction)
         ctx.direction = direction
         ctx.save_for_backward(mask, ds, *leaves, *saved)
         return y
@@ -325,14 +335,16 @@ class _TrainingSmall(torch.autograd.Function):
     def backward(ctx, dy):
         vals = ctx.saved_tensors
         mask, ds, leaves, saved = vals[0], vals[1], list(vals[2:13]), list(vals[13:])
-        grads = backward_small(leaves, mask, ds, ctx.direction, saved, dy)
-        return (None, None, None, *grads)
+        dx, *grads = backward_small(leaves, mask, ds, ctx.direction, saved, dy)
+        return (None, None, None, dx, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
 
 
 class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, direction, mask, ds, *leaves):
-        y, *saved = forward(list(leaves), mask, ds, direction)
+        ctx.param_dtypes = [t.dtype for t in leaves[1:]]
+        leaves = _kernel_leaves(leaves)
+        y, *saved = forward(leaves, mask, ds, direction)
         ctx.direction = direction
         ctx.save_for_backward(mask, ds, *leaves, *saved)
         return y
@@ -342,12 +354,14 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         vals = ctx.saved_tensors
         mask, ds, leaves, saved = vals[0], vals[1], list(vals[2:13]), list(vals[13:])
-        grads = backward(leaves, mask, ds, ctx.direction, saved, dy)
-        return (None, None, None, *grads)
+        dx, *grads = backward(leaves, mask, ds, ctx.direction, saved, dy)
+        return (None, None, None, dx, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
 
 
 def trimul_train(leaves, mask, ds, direction):
-    """Training step's forward with autograd (x + ds * trimul(x)); see ``forward`` for the arguments."""
+    """Training step's forward with autograd (x + ds * trimul(x)); see ``forward`` for the arguments. The parameter leaves may be
+    in any float dtype (bf16, or an fp32 master): the kernels run bf16 and each parameter gets its gradient in its own dtype, fp32
+    ones unrounded."""
     x = leaves[0]
     d = x.shape[-1]
     if d <= 128:

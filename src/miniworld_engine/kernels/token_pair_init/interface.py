@@ -8,7 +8,10 @@ instead of a one-hot re-materialisation and a long-K weight-gradient GEMM. Exact
 Linears round the weights; this does not). The class-bin and dright sums use global atomics: run-to-run the last bits of
 dright / dW can differ.
 
-Served: B200 (sm_100a), fp32, d_pair 128. :func:`refusal` says why anything else is not served; it never raises.
+Served: B200 (sm_100a), d_pair 128. The kernels compute in fp32; ``left`` / ``right`` may be fp32 or bf16 (a bf16-autocast
+caller) and the weights fp32 or bf16 (an fp32 master or bf16 parameters): the autograd function casts them to fp32 outside
+autograd and hands every gradient back in its input's dtype. :func:`refusal` says why anything else is not served; it never
+raises.
 """
 from __future__ import annotations
 
@@ -28,8 +31,8 @@ def refusal(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor, w_bond
         return "no dense bond adjacency (token_bond_feat) to gather from"
     if not left.is_cuda:
         return "the input is not on a CUDA device"
-    if any(t.dtype != torch.float32 for t in (left, right, w_rel, w_bond)):
-        return "the fused op is fp32 (left, right and both weights)"
+    if any(t.dtype not in (torch.float32, torch.bfloat16) for t in (left, right, w_rel, w_bond)):
+        return "left, right and both weights must be fp32 or bf16 (the kernels compute in fp32)"
     if left.dim() != 3 or left.shape != right.shape or left.shape[-1] != D_PAIR:
         return f"left / right must be [B, L, {D_PAIR}], got {tuple(left.shape)} / {tuple(right.shape)}"
     if n_rel(r_max, s_max) - 2 > 255:
@@ -78,16 +81,23 @@ def token_pair_init_bwd(g: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, 
 
 
 class TokenPairInitFunction(torch.autograd.Function):
+    """The kernels read fp32: bf16 ``left`` / ``right`` (autocast) and a bf16 table are cast here, outside autograd, and the
+    gradients go back in each input's dtype (an fp32 table -- fp32 master weights -- gets its fp32 gradient unrounded)."""
+
     @staticmethod
     def forward(ctx, left, right, tbl, ids, bond, r_max, s_max):
+        ctx.dtypes = (left.dtype, right.dtype, tbl.dtype)
         ctx.save_for_backward(ids, bond)
         ctx.meta = (r_max, s_max)
-        return token_pair_init_fwd(left, right, tbl, ids, bond, r_max, s_max)
+        f32 = torch.float32
+        return token_pair_init_fwd(left.to(f32).contiguous(), right.to(f32).contiguous(), tbl.to(f32).contiguous(), ids, bond,
+                                   r_max, s_max)
 
     @staticmethod
     def backward(ctx, g):
         ids, bond = ctx.saved_tensors
-        dleft, dright, dtbl = token_pair_init_bwd(g.contiguous(), ids, bond, *ctx.meta)
+        dleft, dright, dtbl = token_pair_init_bwd(g.float().contiguous(), ids, bond, *ctx.meta)
+        dleft, dright, dtbl = (d.to(dt) for d, dt in zip((dleft, dright, dtbl), ctx.dtypes, strict=True))
         return dleft, dright, dtbl, None, None, None, None
 
 
@@ -96,7 +106,7 @@ def token_pair_init(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor
                     bond: torch.Tensor, *, r_max: int = 32, s_max: int = 2) -> torch.Tensor:
     """z [B, L, L, 128] fp32, differentiable in ``left``, ``right``, ``w_rel`` [128, n_rel] and ``w_bond`` [128, 2].
 
-    ``left`` / ``right`` [B, L, 128]; the five id tensors [B, L] (any integer dtype); ``bond`` [B, L, L] 0/1 (bool, integer or
+    ``left`` / ``right`` [B, L, 128] fp32 or bf16 (the weights fp32 or bf16; computed in fp32 either way); the five id tensors [B, L] (any integer dtype); ``bond`` [B, L, L] 0/1 (bool, integer or
     float). Check :func:`refusal` first."""
     B, L, _ = left.shape
     ids = torch.stack([asym_id, residue_idx, token_idx, entity_id, sym_id]).to(torch.int32).reshape(5, B * L)

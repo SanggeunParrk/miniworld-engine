@@ -1210,7 +1210,8 @@ __global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict
 }  // namespace
 
 // dA, dB: [S, N*32] (a row's channels contiguous); m: [S, N, 64]; stats: [N, S, 2] from the forward prologue;
-// mask: bool [S, N].  Returns dm [1, S, N, 64] and dWa, dWb [32, 64] (in wa's dtype), dgamma, dbeta [64] (in gamma's dtype).
+// mask: bool [S, N].  Returns dm [1, S, N, 64] and dWa, dWb [32, 64] (fp32: the parameters may be an fp32 master; the integration casts
+// to theirs), dgamma, dbeta [64] (in gamma's dtype).
 std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m, torch::Tensor stats, torch::Tensor mask,
                                             torch::Tensor gamma, torch::Tensor beta, torch::Tensor wa, torch::Tensor wb) {
   using namespace pb;
@@ -1238,7 +1239,7 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
   auto st = at::cuda::getCurrentCUDAStream();
   const auto* wap = reinterpret_cast<const __nv_bfloat16*>(wa.data_ptr<at::BFloat16>());
   const auto* wbp = reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>());
-  auto dwa = torch::empty({(long)CH, (long)CM}, wa.options()), dwb = torch::empty({(long)CH, (long)CM}, wb.options());
+  auto dwa = torch::empty({(long)CH, (long)CM}, wa.options().dtype(torch::kFloat32)), dwb = torch::empty({(long)CH, (long)CM}, wb.options().dtype(torch::kFloat32));
   auto dgam = torch::empty({(long)CM}, gamma.options()), dbet = torch::empty({(long)CM}, beta.options());
   if (gf) {
     static bool attr = false;
@@ -1252,11 +1253,11 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   auto red = colsum(part);                                           // [(CM + 1) * CM], the CTAs' partials in split order
-  auto* dwap = reinterpret_cast<__nv_bfloat16*>(dwa.data_ptr<at::BFloat16>());
-  auto* dwbp = reinterpret_cast<__nv_bfloat16*>(dwb.data_ptr<at::BFloat16>());
-  if (gf) opm_pbwd_finalize<float, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp, gamma.data_ptr<float>(), beta.data_ptr<float>(),
+  auto* dwap = dwa.data_ptr<float>();
+  auto* dwbp = dwb.data_ptr<float>();
+  if (gf) opm_pbwd_finalize<float, float><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp, gamma.data_ptr<float>(), beta.data_ptr<float>(),
       dwap, dwbp, dgam.data_ptr<float>(), dbet.data_ptr<float>());
-  else opm_pbwd_finalize<__nv_bfloat16, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp,
+  else opm_pbwd_finalize<__nv_bfloat16, float><<<1, 256, 0, st>>>(red.data_ptr<float>(), wap, wbp,
       reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(beta.data_ptr<at::BFloat16>()), dwap, dwbp,
       reinterpret_cast<__nv_bfloat16*>(dgam.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dbet.data_ptr<at::BFloat16>()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();

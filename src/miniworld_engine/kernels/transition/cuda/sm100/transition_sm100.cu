@@ -264,7 +264,7 @@ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor 
   auto partab = torch::empty({ndw, 128, 128}, f32);
   auto parts = torch::empty({ndw, 128, 64}, f32);
   auto dgbw = torch::empty({ndx * 4, 256}, f32);
-  auto dwa = torch::empty_like(wa), dwb = torch::empty_like(wb), dws = torch::empty_like(ws);
+  auto dwa = torch::empty(wa.sizes(), f32), dwb = torch::empty(wb.sizes(), f32), dws = torch::empty(ws.sizes(), f32);   // fp32, unrounded
   auto dgam = torch::empty({D}, f32), dbeta = torch::empty({D}, f32);
   const CUtensorMap& mdy = tile_map(dy, D, M);
   const CUtensorMap& mxn = tile_map(xn, D, M);

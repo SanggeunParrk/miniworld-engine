@@ -71,12 +71,19 @@ def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.T
 
 
 def _leaves(module) -> list[torch.Tensor]:
-    """ln_single w / b (fp32), Wq, bq, Wk, Wv, Wg, Wo (bf16), ln_pair w / b (fp32), Wb (bf16): the casts stay in autograd so
-    the module's own parameters receive the gradients."""
+    """The module's parameters as they are (any float dtype, e.g. an fp32 master): ln_single w / b, Wq, bq, Wk, Wv, Wg, Wo,
+    ln_pair w / b, Wb. The ops cast them (``_kernel_leaves``) outside autograd, so fp32 parameters get unrounded fp32 gradients."""
+    return [module.ln_single.weight, module.ln_single.bias, module.to_query.weight, module.to_query.bias, module.to_key.weight,
+            module.to_value.weight, module.to_gate.weight, module.to_out.weight, module.ln_pair.weight, module.ln_pair.bias,
+            module.to_bias.weight]
+
+
+def _kernel_leaves(leaves) -> list[torch.Tensor]:
+    """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are)."""
     bf = torch.bfloat16
-    return [module.ln_single.weight.float(), module.ln_single.bias.float(), module.to_query.weight.to(bf),
-            module.to_query.bias.to(bf), module.to_key.weight.to(bf), module.to_value.weight.to(bf), module.to_gate.weight.to(bf),
-            module.to_out.weight.to(bf), module.ln_pair.weight.float(), module.ln_pair.bias.float(), module.to_bias.weight.to(bf)]
+    lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = leaves
+    return [lnw.float(), lnb.float(), wq.to(bf), bq.to(bf), wk.to(bf), wv.to(bf), wg.to(bf), wo.to(bf), lnpw.float(), lnpb.float(),
+            wb.to(bf)]
 
 
 def _rows():
@@ -100,12 +107,13 @@ def _geometry(leaves):
 
 
 # ------------------------------------------------------------------------------------------------------------ inference
-def _inference_packs(leaves):
+def _inference_packs(params, leaves):
     """``_prep`` with q scaled into exp2 units and Wf in exp2 units, cached per parameter version (the step reads them every
-    call; repacking costs a launch). Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once, recorded,
-    so each replay packs the weights as they are then."""
-    build = lambda: (*_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E), leaves)
-    return _capture.lookup(_packs, tuple((t.data_ptr(), t._version) for t in leaves), build, limit=8)[:4]
+    call; repacking costs a launch). Keyed on the parameters themselves (``params``), not on ``leaves``, their kernel-dtype casts,
+    which are fresh tensors per call for fp32 parameters. Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs
+    once, recorded, so each replay packs the weights as they are then."""
+    build = lambda: (*_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E), params)
+    return _capture.lookup(_packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8)[:4]
 
 
 def _prep(leaves, qs: float, ws: float):
@@ -131,11 +139,12 @@ def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | Non
     """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
     L = single.shape[1]
     rows, dev = _rows(), single.device
+    params, leaves = leaves, _kernel_leaves(leaves)
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(dev):
         x = single.view(L, D)
-        wpack, bvec, wf, wop = _inference_packs(leaves)
+        wpack, bvec, wf, wop = _inference_packs(params, leaves)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
         y = torch.empty_like(x)                   # residual seed, written by ln_rows; to_out accumulates onto it
@@ -189,8 +198,8 @@ def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
 
 
 def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy):
-    """One gradient per input and leaf, contiguous, in its dtype."""
-    return [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in (single, pair, *leaves)]
+    """One gradient per input (its dtype) and per leaf (fp32), contiguous."""
+    return [torch.empty_like(single), torch.empty_like(pair), *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves)]
 
 
 @opaque(fake=_backward_fake, name="apb_b200_train_bwd")
@@ -225,7 +234,7 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
         # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel. ln_pair's
         # bias moves a head's logits by one constant: sum_j dbias[h, i, j] = 0 for every query, so its gradient and its share
         # of dWb are exactly 0 (the accumulated head sums are that 0 plus rounding noise; not used)
-        outs = [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in leaves]
+        outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
         E.finalize(dwp, dwo, acc, wb, lnpw, outs)
     return [dx.view(single.shape), dz.view(pair.shape), *outs]
 
@@ -233,7 +242,9 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, eps_s, eps_p, mask, single, pair, *leaves):
-        y, *saved = forward(single, pair, mask, list(leaves), eps_s, eps_p)
+        ctx.param_dtypes = [t.dtype for t in leaves]
+        leaves = _kernel_leaves(leaves)
+        y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
         ctx.eps = (eps_s, eps_p)
         ctx.save_for_backward(mask, single, pair, *leaves, *saved)
         return y
@@ -243,8 +254,8 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         v = ctx.saved_tensors
         mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:14]), list(v[14:])          # saved: 10 or 11 tensors
-        grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
-        return (None, None, None, *grads)
+        dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
+        return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
 
 
 def update_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:

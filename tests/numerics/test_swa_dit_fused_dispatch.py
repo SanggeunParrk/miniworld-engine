@@ -93,11 +93,13 @@ def test_refusals_name_the_reason(change, reason):
 
 
 def test_mixed_dtypes_are_refused():
-    """All-bf16 or all-fp32: an fp32 residual stream against bf16 weights (or the reverse) is not a call either kernel
-    set was written for."""
+    """bf16 or fp32 activations and conditioning, with the weights in that dtype or fp32 (an fp32 master over bf16
+    activations, cast for the kernels outside autograd): an fp32 stream against bf16 weights, or bf16 conditioning against an
+    fp32 stream, is not a call either kernel set was written for."""
     q, cos, sin, seqused, w = _operands()
     assert "mixed dtypes" in str(refusal(q.float(), cos, sin, seqused, *w, n_head=4, half_window=64))
-    assert "mixed dtypes" in str(refusal(q, cos, sin, seqused, w[0], w[1], w[2], w[3], w[4].float(), n_head=4, half_window=64))
+    assert "mixed dtypes" not in str(refusal(q, cos, sin, seqused, w[0], w[1], w[2], w[3], w[4].float(), n_head=4, half_window=64))
+    assert "mixed dtypes" in str(refusal(q, cos, sin, seqused, w[0], w[1], w[2], w[3], w[4].half(), n_head=4, half_window=64))
     cond = torch.randn(3, 11, 128)
     assert "mixed dtypes" in str(refusal(q, cos, sin, seqused, *w, n_head=4, half_window=64, cond=cond,
                                          wmod=torch.randn(768, 128, dtype=torch.bfloat16)))

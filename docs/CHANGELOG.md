@@ -10,6 +10,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- fp32 master parameters (AMP `bf16-mixed`: fp32 parameters over bf16 activations) on every B200 training path, at the speed of bf16
+  parameters: TriMul, Transition (D 64-512), AttentionPairBias, OuterProductMean, local and SWA atom DiT, token pair init (PWA,
+  TriangleAttention and the token / bias-only DiT already were). The integrations cast the parameters for the kernels inside their
+  autograd functions and return the kernels fp32 weight-gradient accumulators unrounded, in each parameters dtype; the SWA DiT and
+  token pair init no longer refuse fp32 weights over bf16 activations (token pair init also takes bf16 `left` / `right`). Tests:
+  `tests/integrations/test_b200_fp32_master_gpu.py`; page: `docs/gpus/b200/b200.md`.
 - B200 TriMul with a hidden width twice the pair width, one direction, at D64 / D128 (`TriangleMultiplication(d_pair, d_hidden=2 *
   d_pair)`: AF3 / Protenix template blocks, pair 64, hidden 128): served by the D64 / D128 kernels unchanged -- per token it has the
   bidirectional block's shapes (4 D planes, LN_out over 2 D), only the cuBLAS contraction between the kernels pairs the planes in one

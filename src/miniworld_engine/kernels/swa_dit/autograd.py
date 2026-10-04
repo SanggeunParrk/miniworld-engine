@@ -25,6 +25,10 @@ class SWADiTBlockFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window):
+        # The weights may be an fp32 master with bf16 activations: the kernels get casts made here, outside autograd, and the
+        # weights get the backward's fp32 gradients in their own dtype (fp32 ones unrounded).
+        ctx.param_dtypes = [w.dtype for w in (wqkv, wg, wo, wu, wd)]
+        wqkv, wg, wo, wu, wd = (w.to(q.dtype) for w in (wqkv, wg, wo, wu, wd))
         outputs = swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, FP32_EPS, True)
         ctx.save_for_backward(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, *outputs[1:])
         ctx.meta = (B, half_window)
@@ -34,16 +38,20 @@ class SWADiTBlockFunction(torch.autograd.Function):
     def backward(ctx, dy):
         B, half_window = ctx.meta
         grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS)
-        dq, dmod, dwqkv, dwg, dwo, dwu, dwd = grads
+        dq, dmod, *dw = grads
+        dwqkv, dwg, dwo, dwu, dwd = (g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True))
         return dq, dmod, None, None, None, dwqkv, dwg, dwo, dwu, dwd, None, None
 
 
 class SWADiTModulationSm100(torch.autograd.Function):
     """``swa_dit_hoist_modulation`` on the sm_100a kernels: silu(c) Wmod^T (mod_fwd) and its backward (mod_bwd); c [R, C]
-    bf16 contiguous with R a multiple of 128, Wmod [6C, C] bf16."""
+    bf16 contiguous with R a multiple of 128, Wmod [6C, C] bf16 or fp32 (an fp32 master: cast here, outside autograd, and its
+    gradient handed back unrounded)."""
 
     @staticmethod
     def forward(ctx, c, wmod):
+        ctx.wdtype = wmod.dtype
+        wmod = wmod.to(c.dtype).contiguous()
         ctx.save_for_backward(c, wmod)
         return swa_dit_mod_fwd_sm100(c, wmod)
 
@@ -51,4 +59,4 @@ class SWADiTModulationSm100(torch.autograd.Function):
     def backward(ctx, g):
         c, wmod = ctx.saved_tensors
         dc, dw = swa_dit_mod_bwd_sm100(g.contiguous(), c, wmod)
-        return dc, dw
+        return dc, dw.to(ctx.wdtype)

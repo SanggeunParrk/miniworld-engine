@@ -1,6 +1,6 @@
 // mod_bwd.cu — backward of the SWA atom block's adaLN modulation mod = silu(c) Wmod^T (mod_fwd.cu) on sm_100a, two kernels:
 //   swa_mod_bwd_dc_sm100: dc = silu'(c) (g Wmod)          (g = dmod fp32 [R, 768], c bf16 [R, 128], Wmod bf16 [768, 128]; dc bf16)
-//   swa_mod_bwd_dw_sm100: dWmod = rn(g^T silu(c))          (bf16 [768, 128])
+//   swa_mod_bwd_dw_sm100: dWmod = g^T silu(c)              (fp32 [768, 128]: unrounded, the weight may be an fp32 master)
 // g is not bf16-valued: it is split into three bf16 terms (g = h + m + l, 24 significant bits; each difference is exact), and the
 // three bf16 MMAs per K step form fp32-class products (c, Wmod and silu(c) are bf16 already) with fp32 accumulation.
 // Both kernels split their reduction over the CTAs of a cluster (grid x): each CTA leaves its fp32 partial [128][128] in shared
@@ -197,7 +197,7 @@ constexpr int W_BAR = W_B + 3 * 16384, W_SMEM = W_BAR + 128, W_RCV = 65536;  // 
 
 extern "C" __global__ void __launch_bounds__(288, 1)
 swa_mod_bwd_dw_sm100(const __grid_constant__ CUtensorMap mg, const __grid_constant__ CUtensorMap mc,
-                     uint16_t* __restrict__ DW, int NS) {
+                     float* __restrict__ DW, int NS) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + W_BAR);
@@ -300,7 +300,7 @@ swa_mod_bwd_dw_sm100(const __grid_constant__ CUtensorMap mg, const __grid_consta
         else { acc[0] += __uint_as_float(u.x); acc[1] += __uint_as_float(u.y); acc[2] += __uint_as_float(u.z); acc[3] += __uint_as_float(u.w); }
       }
 #pragma unroll
-      for (int e = 0; e < 4; ++e) DW[(size_t)(128 * ct + 4 * (q0 + i) + e) * DC + d] = (uint16_t)(pack_bf16(acc[e], 0.f) & 0xffffu);
+      for (int e = 0; e < 4; ++e) DW[(size_t)(128 * ct + 4 * (q0 + i) + e) * DC + d] = acc[e];
     }
   }
   cluster_sync();

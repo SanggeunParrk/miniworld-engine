@@ -269,12 +269,17 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
     return outputs
 
 
+def _mm32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """a @ b with an fp32 result: a weight gradient off bf16 operands keeps cuBLAS's fp32 accumulator instead of rounding it."""
+    return torch.mm(a, b, out_dtype=torch.float32) if a.dtype == torch.bfloat16 else a @ b
+
+
 def _swa_dit_block_bwd_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
                             att, y, ffn, B, half_window, eps):
     """Shapes of the backward's outputs: dq like q ([N, S, C], q's dtype), dmod like mod (fp32 [B*S, 6C]), and each
-    weight gradient in its weight's shape and dtype."""
-    return [torch.empty_like(q), torch.empty_like(mod), torch.empty_like(wqkv), torch.empty_like(wg), torch.empty_like(wo),
-            torch.empty_like(wu), torch.empty_like(wd)]
+    weight gradient in its weight's shape, fp32."""
+    return [torch.empty_like(q), torch.empty_like(mod),
+            *(torch.empty(w.shape, dtype=torch.float32, device=w.device) for w in (wqkv, wg, wo, wu, wd))]
 
 
 @opaque(fake=_swa_dit_block_bwd_fake, name="swa_dit_block_bwd")
@@ -284,8 +289,9 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
                       lse: torch.Tensor, q1: torch.Tensor, x: torch.Tensor, pq: torch.Tensor, pk: torch.Tensor,
                       att: torch.Tensor, y: torch.Tensor, ffn: torch.Tensor, B: int, half_window: int,
                       eps: float) -> list[torch.Tensor]:
-    """Backward of :func:`swa_dit_block_fwd` from its saved tensors. dy [N, S, C] in q's dtype. Returns [dq [N, S, C],
-    dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd], each in its input's dtype."""
+    """Backward of :func:`swa_dit_block_fwd` from its saved tensors. dy [N, S, C] in q's dtype. Returns [dq [N, S, C] in q's
+    dtype, dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd fp32]: the weight gradients leave their fp32 accumulators unrounded
+    (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype)."""
     if is_global(half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
@@ -344,8 +350,7 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
             _swa_ffn_dw_kernel[lambda m: (ns(m), NHID // m["HS"])](
                 dy2, mod, wu, wd, y, dwu32, dwd32, M, S, B,
                 shape_key=atom_key(S, A=Ak, C=C, NHID=NHID), NSPLIT=0, C=C, NHID=NHID, MODW=6 * C)
-            dwu = dwu32.to(wu.dtype)
-            dwd = dwd32.to(wd.dtype)
+            dwu, dwd = dwu32, dwd32
     _swa_oproj_bwd_kernel[grid_t](
         dq1, o, g, mod, wo, att, dO, dG, Dv, datt, gated, dmod, S, A, B,
         shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
@@ -362,12 +367,12 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
     _swa_qkvg_bwd_kernel[grid_t](
         q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG, dq1, dq, dP, dmod, S, A, B, eps, FP32_EPS,
         shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
-    dwqkv = dP[:, :3 * C].t() @ x
-    dwg = dP[:, 3 * C:].t() @ x
-    dwo = datt.t() @ gated
+    dwqkv = _mm32(dP[:, :3 * C].t(), x)
+    dwg = _mm32(dP[:, 3 * C:].t(), x)
+    dwo = _mm32(datt.t(), gated)
     if dwu is None or dwd is None:
-        dwu = dab.t() @ y
-        dwd = dffn.t() @ hh
+        dwu = _mm32(dab.t(), y)
+        dwd = _mm32(dffn.t(), hh)
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
 
 
@@ -437,13 +442,13 @@ def swa_dit_mod_fwd_sm100(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
 
 
 def _swa_dit_mod_bwd_sm100_fake(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
-    """Shapes of the outputs: dc like c, dWmod like Wmod."""
-    return [torch.empty_like(c), torch.empty_like(wmod)]
+    """Shapes of the outputs: dc like c, dWmod fp32 in Wmod's shape."""
+    return [torch.empty_like(c), torch.empty(wmod.shape, dtype=torch.float32, device=wmod.device)]
 
 
 @opaque(fake=_swa_dit_mod_bwd_sm100_fake, name="swa_dit_mod_bwd_sm100")
 def swa_dit_mod_bwd_sm100(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
-    """[dc, dWmod] (bf16) of :func:`swa_dit_mod_fwd_sm100` from g = d mod [R, 6C] fp32; R a multiple of 128."""
+    """[dc (bf16), dWmod (fp32)] of :func:`swa_dit_mod_fwd_sm100` from g = d mod [R, 6C] fp32; R a multiple of 128."""
     from miniworld_engine.kernels.swa_dit.cuda import sm100
 
     dc, dw = sm100.mod_bwd(g, c, wmod)

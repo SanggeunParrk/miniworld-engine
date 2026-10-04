@@ -699,13 +699,14 @@ __global__ void __launch_bounds__(256) prep_k(const bf* __restrict__ WQ, const b
   }
 }
 
-// Parameter gradients, each into its own tensor: dWq | dWk | dWv | dWg (bf16, the real rows of dWp [4 W, D] fp32), dWo (bf16, the
-// real columns of dWo [D, W]), and from the accumulator dlnw, dlnb (fp32), dbq (bf16), dWb = dWf ln_pair.weight (bf16),
-// dln_pair.weight = sum_h dWf Wb (fp32), dln_pair.bias = 0 (fp32: the softmax cancels a per-head constant; see the integration).
+// Parameter gradients, each into its own fp32 tensor (the parameters may be an fp32 master; the integration casts to theirs):
+// dWq | dWk | dWv | dWg (the real rows of dWp [4 W, D]), dWo (the real columns of dWo [D, W]), and from the accumulator dlnw, dlnb,
+// dbq, dWb = dWf ln_pair.weight, dln_pair.weight = sum_h dWf Wb, dln_pair.bias = 0 (the softmax cancels a per-head constant; see the
+// integration).
 __global__ void __launch_bounds__(256) finalize_k(const float* __restrict__ DWP, const float* __restrict__ DWO, const float* __restrict__ ACC,
-    const bf* __restrict__ WB, const float* __restrict__ LPW, bf* __restrict__ OQ, bf* __restrict__ OKe, bf* __restrict__ OV,
-    bf* __restrict__ OG, bf* __restrict__ OO, float* __restrict__ OLW, float* __restrict__ OLB, bf* __restrict__ OBQ,
-    bf* __restrict__ OWB, float* __restrict__ OLPW, float* __restrict__ OLPB, Geo G) {
+    const bf* __restrict__ WB, const float* __restrict__ LPW, float* __restrict__ OQ, float* __restrict__ OKe, float* __restrict__ OV,
+    float* __restrict__ OG, float* __restrict__ OO, float* __restrict__ OLW, float* __restrict__ OLB, float* __restrict__ OBQ,
+    float* __restrict__ OWB, float* __restrict__ OLPW, float* __restrict__ OLPB, Geo G) {
   const int W = G.nh * G.dhp, NHD = G.nh * DP, D = G.d;
   const float *ALNW = ACC, *ALNB = ACC + D, *ABQ = ACC + 2 * D, *AWF = ACC + 2 * D + W;
   const long nv = 5L * D * D / 4, i = (long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -713,18 +714,18 @@ __global__ void __launch_bounds__(256) finalize_k(const float* __restrict__ DWP,
     const long e = i * 4, blk = e / (D * D), off = e % (D * D), r = off / D, c = off % D;
     if (blk < 4) {                                                          // real row r of segment blk <- padded row
       const long prow = (long)blk * W + (r / G.dh) * G.dhp + r % G.dh;
-      bf* dst = (blk == 0 ? OQ : blk == 1 ? OKe : blk == 2 ? OV : OG) + off;
-      V4<bf>::store(dst, V4<float>::load(DWP + prow * D + c));
+      float* dst = (blk == 0 ? OQ : blk == 1 ? OKe : blk == 2 ? OV : OG) + off;
+      V4<float>::store(dst, V4<float>::load(DWP + prow * D + c));
     } else {                                                                // dWo row r, real columns c .. c + 3 (within one head)
-      V4<bf>::store(OO + off, V4<float>::load(DWO + r * W + (c / G.dh) * G.dhp + c % G.dh));
+      V4<float>::store(OO + off, V4<float>::load(DWO + r * W + (c / G.dh) * G.dhp + c % G.dh));
     }
     return;
   }
   const long j = i - nv;
   if (j < D) OLW[j] = ALNW[j];
   else if (j < 2 * D) OLB[j - D] = ALNB[j - D];
-  else if (j < 3 * D) { const int c = (int)(j - 2 * D); OBQ[c] = __float2bfloat16_rn(ABQ[(c / G.dh) * G.dhp + c % G.dh]); }
-  else if (j < 3 * D + NHD) { const int k = (int)(j - 3 * D); OWB[k] = __float2bfloat16_rn(AWF[k] * LPW[k % DP]); }
+  else if (j < 3 * D) { const int c = (int)(j - 2 * D); OBQ[c] = ABQ[(c / G.dh) * G.dhp + c % G.dh]; }
+  else if (j < 3 * D + NHD) { const int k = (int)(j - 3 * D); OWB[k] = AWF[k] * LPW[k % DP]; }
   else if (j < 3 * D + NHD + DP) {
     const int c = (int)(j - 3 * D - NHD);
     float t = 0.f;
@@ -938,15 +939,13 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   chk_acc(acc, G);
   TORCH_CHECK(dwp.numel() == 4 * W * D && dwo.numel() == D * W, "finalize: dwp [4 W, D], dwo [D, W]");
   TORCH_CHECK(out.size() == 11, "finalize: 11 outputs");
-  const at::ScalarType dt[11] = {at::kFloat, at::kFloat, at::kBFloat16, at::kBFloat16, at::kBFloat16, at::kBFloat16, at::kBFloat16,
-                                 at::kBFloat16, at::kFloat, at::kFloat, at::kBFloat16};
-  for (int i = 0; i < 11; ++i) chk(out[i], dt[i], "finalize output");
+  for (int i = 0; i < 11; ++i) chk(out[i], at::kFloat, "finalize output");
   const at::cuda::CUDAGuard gd(dwp.device());
   const long n = 5L * D * D / 4 + 3 * D + G.nh * DP + 2 * DP;
   // out: lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb (the leaves' order)
   finalize_k<<<(unsigned)((n + 255) / 256), 256, 0, S()>>>(CP<float>(dwp), CP<float>(dwo), CP<float>(acc), CP<bf>(wb), CP<float>(lpw),
-      P<bf>(out[2]), P<bf>(out[4]), P<bf>(out[5]), P<bf>(out[6]), P<bf>(out[7]), P<float>(out[0]), P<float>(out[1]), P<bf>(out[3]),
-      P<bf>(out[10]), P<float>(out[8]), P<float>(out[9]), G);
+      P<float>(out[2]), P<float>(out[4]), P<float>(out[5]), P<float>(out[6]), P<float>(out[7]), P<float>(out[0]), P<float>(out[1]),
+      P<float>(out[3]), P<float>(out[10]), P<float>(out[8]), P<float>(out[9]), G);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

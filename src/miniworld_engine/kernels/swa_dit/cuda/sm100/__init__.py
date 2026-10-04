@@ -507,7 +507,7 @@ class ModFwd:
 
 
 class ModBwd:
-    """Backward of ModFwd (mod_bwd.cu): g [R, 6C] fp32, c [R, C] bf16, Wmod [6C, C] bf16 -> dc [R, C] bf16, dWmod [6C, C] bf16."""
+    """Backward of ModFwd (mod_bwd.cu): g [R, 6C] fp32, c [R, C] bf16, Wmod [6C, C] bf16 -> dc [R, C] bf16, dWmod [6C, C] fp32."""
     def __init__(self, cubin="mod_bwd"):
         self.cubin = cubin
         self.kc = _load_swa_sm100_kernel(self.cubin, "swa_mod_bwd_dc_sm100", 4 * 49152 + 128, cluster=4)
@@ -519,7 +519,7 @@ class ModBwd:
         assert R % 128 == 0 and g.shape == (R, 6 * C) and g.is_contiguous() and c.is_contiguous()
         dev = c.device
         dc = torch.empty(R, C, device=dev, dtype=torch.bfloat16) if dc is None else dc
-        dw = torch.empty(6 * C, C, device=dev, dtype=torch.bfloat16) if dw is None else dw
+        dw = torch.empty(6 * C, C, device=dev, dtype=torch.float32) if dw is None else dw
         G = max(x for x in (1, 2, 4, 8, 16) if (R // 64) % x == 0)          # row groups (one cluster) of NS x 64 rows
         NS = R // 64 // G
         if G not in self.kw:
@@ -725,9 +725,11 @@ def block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
         run, _ = K.qkvgb.bind(q.reshape(M, C), dq1, pq, pk, dG, dQh, dKh, dVh, mod, cos, sin, wqkv, wg, A, B, dmod=dmod,
                               WT=_cached(_w_qkvg_t, wqkv, wg), dq=dq, dP=dP)
         run()
-    dwqkvg = dP.t() @ x                                    # dWqkv | dWg as one GEMM over dP (x read once)
+    f32 = torch.float32                                    # the weight gradients keep cuBLAS's fp32 accumulators (an fp32 master)
+    dwqkvg = torch.mm(dP.t(), x, out_dtype=f32)            # dWqkv | dWg as one GEMM over dP (x read once)
     # the op's outputs may not alias each other: dWg (128 x 128) leaves as its own tensor
-    return [dq.view(N, S, C), dmod, dwqkvg[:3 * C], dwqkvg[3 * C:].clone(), datt.t() @ gated, dab.t() @ y, dffn.t() @ hh]
+    return [dq.view(N, S, C), dmod, dwqkvg[:3 * C], dwqkvg[3 * C:].clone(), torch.mm(datt.t(), gated, out_dtype=f32),
+            torch.mm(dab.t(), y, out_dtype=f32), torch.mm(dffn.t(), hh, out_dtype=f32)]
 
 
 def mod_fwd(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
@@ -740,7 +742,7 @@ def mod_fwd(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
 
 
 def mod_bwd(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """(dc [R, C] bf16, dWmod [6C, C] bf16) from g = d mod [R, 6C] fp32; R a multiple of 128."""
+    """(dc [R, C] bf16, dWmod [6C, C] fp32) from g = d mod [R, 6C] fp32; R a multiple of 128."""
     need_s128(c.shape[0])
     with torch.cuda.device(c.device):
         K = kernels(c.device.index if c.device.index is not None else torch.cuda.current_device())

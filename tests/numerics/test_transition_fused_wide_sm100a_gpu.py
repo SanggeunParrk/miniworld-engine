@@ -43,7 +43,8 @@ def test_gate_rejects_everything_it_is_not_built_for(d, n):
     x = torch.randn(256, d, device="cuda", dtype=torch.bfloat16)
     assert w.supported(x, wa, ws) is B200
     assert not w.supported(x.float(), wa, ws)
-    assert not w.supported(x, *_weights(d, n, dtype=torch.float32))
+    assert w.supported(x, *_weights(d, n, dtype=torch.float32)) is B200          # fp32 master weights: the entry casts them
+    assert not w.supported(x, *_weights(d, n, dtype=torch.float16))
     assert not w.supported(x, *_weights(d, 3))                                                        # n = 3: no build
     assert not w.supported(torch.randn(64, d, device="cuda", dtype=torch.bfloat16), wa, ws)           # not a whole 128-row tile
     assert not w.supported(x.cpu(), wa.cpu(), ws.cpu())

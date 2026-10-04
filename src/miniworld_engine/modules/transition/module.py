@@ -124,8 +124,21 @@ class Transition(nn.Module):
         sm_80 (A100) have their own d=128/n=4 builds (``fused_sm100a``, ``fused_sm80``). Every other
         shape, dtype and architecture keeps the Triton path, which is shape-general. The gates are
         ``fused_sm90a.available`` / ``fused_wide_sm90a.available``; they are the kernels' own
-        requirements, not a policy.
+        requirements, not a policy. The sm_100 entries take the parameters themselves and cast them outside autograd, so an fp32
+        master gets unrounded fp32 gradients; the other paths take the casts in autograd.
         """
+        if _fused_sm100a_enabled():
+            from miniworld_engine.kernels.transition.cuda import (
+                fused_sm100a,
+                fused_wide_sm100a,
+            )
+
+            pa, pb, ps = self.expand_a.weight, self.expand_b.weight, self.squeeze.weight
+            for kern, entry in ((fused_sm100a, fused_sm100a.transition_fused_sm100a),
+                                (fused_wide_sm100a, fused_wide_sm100a.transition_wide_sm100a)):
+                if kern.available(x, pa, ps):
+                    return entry(x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
+
         wa = self.expand_a.weight.to(x.dtype)
         wb = self.expand_b.weight.to(x.dtype)
         ws = self.squeeze.weight.to(x.dtype)
@@ -140,19 +153,6 @@ class Transition(nn.Module):
 
             if fused_wide_sm90a.available(x, wa, ws):
                 return fused_wide_sm90a.transition_wide_sm90a(
-                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
-
-        if _fused_sm100a_enabled():
-            from miniworld_engine.kernels.transition.cuda import fused_sm100a
-
-            if fused_sm100a.available(x, wa, ws):
-                return fused_sm100a.transition_fused_sm100a(
-                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
-
-            from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a
-
-            if fused_wide_sm100a.available(x, wa, ws):
-                return fused_wide_sm100a.transition_wide_sm100a(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
 
         if _fused_sm80_enabled():

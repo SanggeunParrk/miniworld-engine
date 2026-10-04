@@ -197,6 +197,11 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     return [*saved, cn, mkv, xkv] if cross else saved
 
 
+def _wgrad(dout, x):
+    """dout^T x, fp32: the weight gradients stay unrounded for fp32 parameters (an fp32 master); bf16 ones round once, as before."""
+    return torch.mm(dout.t(), x, out_dtype=torch.float32)
+
+
 def _bwd_fake(dy, single, cond, pair, mask, weights, saved):
     return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *(torch.empty_like(w) for w in weights)]
 
@@ -237,9 +242,9 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
             wm, bs, gkv, wk, wv = _kv_pack(weights)
             dk, dv = dp[:, DS_:2 * DS_], dp[:, 2 * DS_:3 * DS_]
             dxkv = torch.addmm(dk @ wk, dv, wv)
-            dwk, dwv = dk.t() @ xkv, dv.t() @ xkv
+            dwk, dwv = _wgrad(dk, xkv), _wgrad(dv, xkv)
             dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv)
-            dwm, dbs = dmkv.t() @ cn, dmkv[:, :DS_].float().sum(0)
+            dwm, dbs = _wgrad(dmkv, cn), dmkv[:, :DS_].float().sum(0)
             dg_kv = torch.zeros(DS_, device=dev)
             dc_kv = local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv)
             dp[:, DS_:3 * DS_].zero_()      # pre_bwd's dgrad then covers q and the gate only
@@ -249,8 +254,8 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
         if cross:
             dc = dc + dc_kv
-        dws, dwu, dwo, dwp = dt.t() @ hh, dab.t() @ x2, du.t() @ gated, dp.t() @ x1
-        dw1, dw2, dw3 = dmod[:, 0:256].t() @ cn1, dmod[:, 256:512].t() @ cn2, dmod[:, 512:768].t() @ c2
+        dws, dwu, dwo, dwp = _wgrad(dt, hh), _wgrad(dab, x2), _wgrad(du, gated), _wgrad(dp, x1)
+        dw1, dw2, dw3 = _wgrad(dmod[:, 0:256], cn1), _wgrad(dmod[:, 256:512], cn2), _wgrad(dmod[:, 512:768], c2)
     grads = {
         "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128], "attention.ada_ln_in.to_scale.weight": dw1[:128],
         "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128], "attention.ada_ln_in.to_bias.weight": dw1[128:],

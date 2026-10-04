@@ -93,25 +93,16 @@ def serves_train(module, pair: torch.Tensor, *, bidirectional: bool) -> bool:
 
 def update_train(module, pair: torch.Tensor, mask: torch.Tensor | None, dropscale: torch.Tensor | None,
                  *, bidirectional: bool) -> torch.Tensor:
-    """Keep the casts in autograd so the module's original parameters receive gradients."""
+    """The module's parameters are the leaves (any float dtype; see ``b200_train.trimul_train``)."""
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_train import trimul_train
 
     bsz, n, d = pair.shape[0], pair.shape[1], pair.shape[-1]
     token_mask = None if mask is None else mask.reshape(bsz * n).to(torch.bool).contiguous()
     bf = pair.dtype
-    leaves = [
-        pair,
-        module.to_left.weight.to(bf),
-        module.to_left_gate.weight.to(bf),
-        module.to_right.weight.to(bf),
-        module.to_right_gate.weight.to(bf),
-        module.to_gate.weight.to(bf).contiguous(),
-        module.to_out.weight.to(bf).contiguous(),
-        module.ln_pair.weight.float().contiguous(),
-        module.ln_pair.bias.float().contiguous(),
-        module.ln_out.weight.float().contiguous(),
-        module.ln_out.bias.float().contiguous(),
-    ]
+    # the parameters themselves: the training op casts them for the kernels outside autograd, so an fp32 master gets fp32 gradients
+    leaves = [pair, module.to_left.weight, module.to_left_gate.weight, module.to_right.weight, module.to_right_gate.weight,
+              module.to_gate.weight, module.to_out.weight, module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight,
+              module.ln_out.bias]
     scale = None if dropscale is None else dropscale.reshape(bsz * n, d).to(bf).contiguous()
     direction = 0 if bidirectional else (1 if module.outgoing else 2)
     return trimul_train(leaves, token_mask, scale, direction)

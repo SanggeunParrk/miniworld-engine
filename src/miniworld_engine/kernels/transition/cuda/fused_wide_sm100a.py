@@ -153,8 +153,8 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     d, n = _dn(x, wa)
     if (d, n) not in SHAPES or wa.shape != (n * d, d) or ws.shape != (d, n * d):
         return False
-    if wa.dtype is not torch.bfloat16 or ws.dtype is not torch.bfloat16:
-        return False
+    if wa.dtype not in (torch.bfloat16, torch.float32) or ws.dtype not in (torch.bfloat16, torch.float32):
+        return False                   # bf16, or an fp32 master the entry casts to bf16 outside autograd
     if (d, n) in REPL:
         ndx = _sm_count(index) - _ndw(d, n)
         if ndx < 2 or ndx % 2:
@@ -310,8 +310,8 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
 
 
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b):
-    """Output structure only: (dx, dgamma, dbeta, dWa, dWb, dWs); the weight gradients are fp32 at D >= 256."""
-    wdt = torch.float32 if x.shape[-1] >= 256 else wa.dtype
+    """Output structure only: (dx, dgamma, dbeta, dWa, dWb, dWs); the weight gradients are fp32."""
+    wdt = torch.float32
     return (torch.empty_like(x), torch.empty_like(gamma), torch.empty_like(gamma),
             torch.empty(wa.shape, dtype=wdt, device=wa.device), torch.empty(wb.shape, dtype=wdt, device=wb.device),
             torch.empty(ws.shape, dtype=wdt, device=ws.device))
@@ -336,7 +336,7 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
         partab = torch.empty((ndw, 128, d), **f32)
         parts = torch.empty((ndw, d, 64), **f32)
         dgbw = torch.empty((ndx * 4, 2 * d), **f32)
-        dwa, dwb, dws = torch.empty_like(wa), torch.empty_like(wb), torch.empty_like(ws)
+        dwa, dwb, dws = torch.empty(wa.shape, **f32), torch.empty(wb.shape, **f32), torch.empty(ws.shape, **f32)   # unrounded
         dgam, dbeta = torch.empty((d,), **f32), torch.empty((d,), **f32)
         maps = (k.rows(dy), k.rows(xn), k.rows(x), k.tmap(ws, h, d), k.tmap(wa, d, h), k.tmap(wb, d, h), k.rows(dx))
         if d == 64:
@@ -391,18 +391,19 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
 
 class _WideTransitionSM100A(torch.autograd.Function):
     """``y = transition(x) + x`` for (D, n) in ``SHAPES``; the forward saves xn and the LayerNorm statistics (and h, a, b at
-    D >= 384)."""
+    D >= 384). The parameters keep their dtype (bf16, or an fp32 master): the kernels get bf16 casts made here, outside autograd,
+    and the parameters get the fp32 gradients in their own dtype (fp32 ones unrounded)."""
 
     @staticmethod
     def forward(ctx, x, gamma, beta, wa, wb, ws, eps):
         shape = x.shape
+        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-        wa, wb, ws = wa.contiguous(), wb.contiguous(), ws.contiguous()
+        wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))
         out, xn, rstd, c1, hid, a, b = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True)
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b)
         ctx.shape = shape
-        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         return out.reshape(shape)
 
     @staticmethod
@@ -420,6 +421,6 @@ def transition_wide_sm100a(x, gamma, beta, wa, wb, ws, eps):
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
         out, *_ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma.float().contiguous(), beta.float().contiguous(),
-                              wa.contiguous(), wb.contiguous(), ws.contiguous(), float(eps), False)
+                              *(w.to(x.dtype).contiguous() for w in (wa, wb, ws)), float(eps), False)
         return out.reshape(shape)
     return _WideTransitionSM100A.apply(x, gamma, beta, wa, wb, ws, eps)

@@ -85,9 +85,10 @@ def refusal(q: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torc
     if q.dtype not in (torch.bfloat16, torch.float32):
         return f"the fused block runs bf16 or fp32, got q {q.dtype}"
     for name, t in tensors.items():
-        if t.dtype != q.dtype:
+        # the weights may also be an fp32 master over bf16 activations (cast for the kernels outside autograd)
+        if t.dtype != q.dtype and not (name not in ("q", "cond") and t.dtype == torch.float32):
             return (f"mixed dtypes: q is {q.dtype} but {name} is {t.dtype}; the fused block runs all-bf16 or all-fp32 "
-                    f"(activations, conditioning and weights alike)")
+                    f"activations and conditioning, with weights in that dtype or fp32")
     if q.dim() != 3:
         return f"q must be [N, S, d_atom], got {tuple(q.shape)}"
     c = q.shape[-1]
@@ -128,7 +129,7 @@ def refusal(q: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torc
 
 
 def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
-    """Whether the hoisted modulation runs on the sm_100a kernels: B200, bf16 c and Wmod, d_cond = C = 128, rows a multiple
+    """Whether the hoisted modulation runs on the sm_100a kernels: B200, bf16 c, bf16 or fp32 Wmod, d_cond = C = 128, rows a multiple
     of 128, and the kernels load (``MINIWORLD_SWA_DIT_SM100=0`` or ``engine_backend="triton"`` keep the fp32 GEMM)."""
     import os
 
@@ -136,7 +137,7 @@ def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
 
     if os.environ.get("MINIWORLD_SWA_DIT_SM100", "1") == "0" or settings.current().engine_backend == "triton":
         return False
-    if not (c_base.is_cuda and c_base.dtype == torch.bfloat16 and wmod.dtype == torch.bfloat16):
+    if not (c_base.is_cuda and c_base.dtype == torch.bfloat16 and wmod.dtype in (torch.bfloat16, torch.float32)):
         return False
     if c_base.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or (c_base.numel() // D_ATOM) % 128:
         return False
@@ -162,7 +163,7 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
         w = wmod.contiguous()
         if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
             return SWADiTModulationSm100.apply(c2, w)
-        return swa_dit_mod_fwd_sm100(c2, w)
+        return swa_dit_mod_fwd_sm100(c2, w.to(c2.dtype))
     a = F.silu(c_base).float()
     return (a.reshape(-1, a.shape[-1]) @ wmod.float().t()).contiguous()
 
@@ -172,7 +173,7 @@ def swa_dit_block(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: to
                   half_window: int = HALF_WINDOW) -> torch.Tensor:
     """The fused block, differentiable in ``q``, ``mod`` and the five weights. Returns [N, S, C] in q's dtype.
 
-    ``q`` [N = A*B, S, C] bf16 or fp32 (the weights alike; gradients come back in each input's dtype); ``mod`` [B*S, 6C] fp32 (:func:`swa_dit_hoist_modulation`); ``cos``/``sin`` [B*S, C/8]
+    ``q`` [N = A*B, S, C] bf16 or fp32 (the weights alike, or fp32 over bf16 q; gradients come back in each input's dtype); ``mod`` [B*S, 6C] fp32 (:func:`swa_dit_hoist_modulation`); ``cos``/``sin`` [B*S, C/8]
     or [B, S, C/8] fp32 -- one row per (batch element, atom), which is what ``build_attention_params`` repeats over the
     augments, so ``cos[:B]`` of its output is this argument; ``seqused`` [N] int32 (valid atoms front-packed per row).
     Check :func:`refusal` first. A call that records no gradient runs the inference forward (nothing saved).
@@ -192,7 +193,7 @@ def swa_dit_block(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: to
     weights = [w.contiguous() for w in (wqkv, wg, wo, wu, wd)]
     if torch.is_grad_enabled() and any(t.requires_grad for t in (q, mod, *weights)):
         return SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, B, half_window)
-    return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, B, half_window, FP32_EPS, False)[0]
+    return swa_dit_block_fwd(q, mod, cos, sin, seqused, *(w.to(q.dtype) for w in weights), B, half_window, FP32_EPS, False)[0]
 
 
 __all__ = ["D_ATOM", "FP32_EPS", "GLOBAL_HALF_WINDOW", "HALF_WINDOW", "N_HEAD", "N_HIDDEN", "is_global", "refusal", "swa_dit_block",
