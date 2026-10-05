@@ -14,9 +14,9 @@ pytestmark = [pytest.mark.gpu,
               pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 
 
-def _module(d):
+def _module(d, cls=BidirectionalTriangleMultiplication):
     torch.manual_seed(7)
-    m = BidirectionalTriangleMultiplication(d, implementation=I.MINIWORLD, p_drop=0.0).cuda()
+    m = cls(d, implementation=I.MINIWORLD, p_drop=0.0).cuda()
     with torch.no_grad():
         for n, p in m.named_parameters():
             if p.ndim == 1:
@@ -99,21 +99,31 @@ def test_cuda_live_pack_strides_and_graph(d, master, monkeypatch):
 @pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
 @pytest.mark.parametrize("n", [128, 256, 384, 512, 640, 768])
 @pytest.mark.parametrize("master", [False, True])
-def test_cuda_inference_required_buckets_pytorch_and_live_graph(d, n, master, monkeypatch):
+@pytest.mark.parametrize("bidirectional", [False, True])
+def test_cuda_inference_required_buckets_pytorch_and_live_graph(d, n, master, bidirectional, monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
     from miniworld_engine.integrations import trimul_h100 as H
+    from miniworld_engine.modules.triangle_multiplication.module import TriangleMultiplication
 
-    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", "1")
-    m = _module(d)
+    if d in (64, 128):
+        from miniworld_engine.kernels.trimul_inproj.cuda import _h100_pack as P
+        monkeypatch.delenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", raising=False)
+        def reject_triton(*args):
+            raise AssertionError("promoted inference used Triton weight packing")
+        monkeypatch.setattr(P, "pack_into_triton", reject_triton)
+    else:
+        monkeypatch.setenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", "1")
+    cls = BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
+    m = _module(d, cls)
     if master:
         m.float()
-    ref = BidirectionalTriangleMultiplication(d, implementation=I.PYTORCH, p_drop=0.0).cuda().float().eval()
+    ref = cls(d, implementation=I.PYTORCH, p_drop=0.0).cuda().float().eval()
     ref.load_state_dict(m.state_dict())
     x = torch.randn(1, n, n, d, device="cuda", dtype=torch.bfloat16)
     mask = torch.rand(1, n, device="cuda") > 0.2
     with torch.no_grad():
-        assert H.serves_inference(m, x, bidirectional=True)
+        assert H.serves_inference(m, x, bidirectional=bidirectional)
         want = ref(x.float(), mask=mask)
         for _ in range(2):
             m(x, mask=mask)

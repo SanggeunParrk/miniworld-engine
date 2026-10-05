@@ -168,6 +168,8 @@ class TriangleMultiplication(nn.Module):
             # Hand-CUDA H100 kernels first (integrations.trimul_h100 states their contract).
             if _h100.serves_inference(self, pair, bidirectional=False, dropscale=_ds):
                 return _h100.update_inference(self, pair, mask, bidirectional=False)
+            if _ds is None and _h100.requires_cuda_inference(self, pair):
+                raise ValueError("H100 TriMul D64/D128 inference requires the native CUDA bucket/dtype contract")
             if _h100.serves_single(self, pair):
                 return _h100.update(self, pair, mask, _ds, bidirectional=False)
             # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
