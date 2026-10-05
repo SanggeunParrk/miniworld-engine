@@ -1,0 +1,2351 @@
+{
+  "date": "2026-10-04",
+  "scope": "Default MiniWorld A100 sm80 BF16/FP32 forward and backward for Token DiT, ConditionedTransition, TriMul, TriangleAttention, including corresponding public ops.",
+  "implementation": {
+    "general_compositions": "src/miniworld_engine/integrations/a100_families.py",
+    "cuda_primitives": "src/miniworld_engine/kernels/cuda_native/",
+    "policy": "Existing specialized CUDA kernels first; CUDA/cuBLAS general geometry paths next. Explicit Triton selection and opt-outs remain supported. Other dtypes/architectures retain previous dispatch.",
+    "coverage": [
+      "Token DiT FP32 training and general geometry/QK norm",
+      "ConditionedTransition general geometry and public post-AdaLN tail",
+      "TriMul single/bidirectional modules and ops with token/pair masks",
+      "TriangleAttention single/bidirectional self-attention and bias-only; FP32, general lengths, single-direction QK norm and public bare-update op"
+    ],
+    "fp32_token_correction": "The existing Token DiT FP32 inference attention core already used TF32 CUDA; its obsolete Triton docstring was corrected.",
+    "compile_limit": "Opaque CUDA ops support fullgraph. Inductor can generate surrounding copy/gradient bookkeeping kernels; this is not a claim that every compiler-generated kernel is hand CUDA.",
+    "memory": "General attention recomputes probabilities in backward and chunks pair rows; bias-only value packing avoids per-pair-row probability replication."
+  },
+  "validation": {
+    "distinct_gpu_cases_passed": 453,
+    "count_method": "65 new + 368 existing whole-op/CT/TriMul/TriAttn + 20 existing Token DiT; repeated cases counted once.",
+    "new_suite_and_optout_regression": {
+      "job": 63631,
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/four_release_test_63631.log",
+      "expected_summary": "66 passed",
+      "log_text": "..................................................................       [100%]\n=============================== warnings summary ===============================\ntests/integrations/test_a100_cuda_families_gpu.py: 14 warnings\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.\n    warnings.warn(\n\ntests/integrations/test_a100_cuda_families_gpu.py::test_compiled_public_trimul[False]\ntests/integrations/test_a100_cuda_families_gpu.py::test_compiled_public_trimul[True]\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/_dynamo/variables/functions.py:2590: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'sm80_wide.py:73'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.\n  \n  This call originates from:\n    File \"/home/psk6950/practice/miniworld-engine/src/miniworld_engine/kernels/trimul_inproj/cuda/sm80_wide.py\", line 73, in supports\n      return _d128._is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  \n    torch._dynamo.utils.warn_once(msg)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n66 passed, 16 warnings in 33.78s\n"
+    },
+    "existing_token": {
+      "job": 63614,
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/four_token_regression_63614.log",
+      "expected_summary": "20 passed",
+      "log_text": "....................                                                     [100%]\n=============================== warnings summary ===============================\ntests/integrations/test_a100_token_dit_gpu.py: 14 warnings\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.\n    warnings.warn(\n\ntests/integrations/test_a100_token_dit_train_gpu.py::test_train_block_under_torch_compile\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/_dynamo/variables/functions.py:2590: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'sm80.py:114'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.\n  \n  This call originates from:\n    File \"/home/psk6950/practice/miniworld-engine/src/miniworld_engine/kernels/augmented_attention/cuda/sm80.py\", line 114, in supported\n      return dtype is torch.bfloat16 and d // heads == HD and length % 128 == 0 and _is_ampere(index)\n                                                                                    ^^^^^^^^^^^^^^^^^\n  \n    torch._dynamo.utils.warn_once(msg)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n20 passed, 15 warnings in 369.52s (0:06:09)\n"
+    },
+    "existing_other_initial": {
+      "job": 63621,
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/four_old_regression_63621.log",
+      "expected_summary": "1 failed, 367 passed",
+      "log_text": "........................................................................ [ 19%]\n........................................................................ [ 39%]\n........................................................................ [ 58%]\n...................................F.................................... [ 78%]\n........................................................................ [ 97%]\n........                                                                 [100%]\n=================================== FAILURES ===================================\n___________ test_the_env_switch_leaves_the_triton_numbers_untouched ____________\ntests/integrations/test_a100_triattn_widths_gpu.py:442: in test_the_env_switch_leaves_the_triton_numbers_untouched\n    assert torch.equal(a, b)\nE   AssertionError: assert False\nE    +  where False = <built-in method equal of type object at 0x73ba013e0f20>(tensor([[[[ 0.7188, -0.4551, -1.4062,  ...,  0.0117, -1.0938, -1.0781],\\n          [ 0.1670,  0.4453,  0.9922,  ..., -0...         [-2.6719, -0.3516,  2.0625,  ..., -0.2246, -0.6250, -0.3086]]]],\\n       device='cuda:0', dtype=torch.bfloat16), tensor([[[[ 0.7227, -0.4531, -1.4062,  ...,  0.0120, -1.1016, -1.0781],\\n          [ 0.1670,  0.4453,  0.9922,  ..., -0...         [-2.6719, -0.3516,  2.0625,  ..., -0.2246, -0.6250, -0.3086]]]],\\n       device='cuda:0', dtype=torch.bfloat16))\nE    +    where <built-in method equal of type object at 0x73ba013e0f20> = torch.equal\n=============================== warnings summary ===============================\ntests/integrations/test_a100_conditioned_transition_gpu.py: 14 warnings\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.\n    warnings.warn(\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_inference_is_no_less_accurate_than_the_triton_path[128-False-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_fwd_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=8796160199130). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py: 12 warnings\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/triton/language/core.py:2284: UserWarning: tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.\n    warn(\"tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.\")\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_inference_is_no_less_accurate_than_the_triton_path[128-False-True-d64_h64_2heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_fwd_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=8796126710234). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_inference_is_no_less_accurate_than_the_triton_path[128-False-True-d384_h384_12heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_fwd_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=8796294482394). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_inference_is_no_less_accurate_than_the_triton_path[256-False-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_fwd_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=17592253221338). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_inference_is_no_less_accurate_than_the_triton_path[256-False-True-d64_h64_2heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_fwd_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=17592219732442). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_inference_is_no_less_accurate_than_the_triton_path[256-False-True-d384_h384_12heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_fwd_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=17592387504602). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_a_batch_of_two_and_a_length_that_is_not_a_power_of_two[True-d64_hd16]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_fwd_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=26388346243546). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_training_matches_the_fp32_module_as_well_as_the_triton_path[1-128-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_bwd_pre_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=2147551270). Falling back to the full grid (16 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_training_matches_the_fp32_module_as_well_as_the_triton_path[1-128-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_bwd_dkdv_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=2147551270). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_training_matches_the_fp32_module_as_well_as_the_triton_path[1-128-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_bwd_dq_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=2147551270). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_training_matches_the_fp32_module_as_well_as_the_triton_path[1-256-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_bwd_pre_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=4295034918). Falling back to the full grid (16 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_training_matches_the_fp32_module_as_well_as_the_triton_path[1-256-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_bwd_dkdv_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=4295034918). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_training_matches_the_fp32_module_as_well_as_the_triton_path[1-256-True-d64_h64_4heads]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'triangle_attention_bwd_dq_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|shape_key=4295034918). Falling back to the full grid (21 configs) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/integrations/test_a100_triattn_widths_gpu.py::test_the_compiled_module_matches_eager_in_inference_and_training[True-d64_hd16]\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/_dynamo/variables/functions.py:2590: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'sm80_wide.py:168'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.\n  \n  This call originates from:\n    File \"/home/psk6950/practice/miniworld-engine/src/miniworld_engine/kernels/triangle_attention/cuda/sm80_wide.py\", line 168, in supports\n      return _core._is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  \n    torch._dynamo.utils.warn_once(msg)\n\ntests/integrations/test_a100_trimul_gpu.py::test_compiled_calls_equal_eager[outgoing-64]\ntests/integrations/test_a100_trimul_gpu.py::test_compiled_calls_equal_eager[outgoing-256]\ntests/integrations/test_a100_trimul_gpu.py::test_compiled_calls_equal_eager[bidir-64]\ntests/integrations/test_a100_trimul_gpu.py::test_compiled_calls_equal_eager[bidir-256]\ntests/integrations/test_a100_trimul_gpu.py::test_fp32_compiled_calls_equal_eager[outgoing]\ntests/integrations/test_a100_trimul_gpu.py::test_fp32_compiled_calls_equal_eager[bidir]\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/_dynamo/variables/functions.py:2590: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'sm80_wide.py:73'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.\n  \n  This call originates from:\n    File \"/home/psk6950/practice/miniworld-engine/src/miniworld_engine/kernels/trimul_inproj/cuda/sm80_wide.py\", line 73, in supports\n      return _d128._is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  \n    torch._dynamo.utils.warn_once(msg)\n\ntests/numerics/test_whole_op_reachable_gpu.py::test_transition_whole_op_runs_and_matches_reference[16]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'layernorm_fwd_saveact_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16+float32|HAS_ROWSCALE=0,shape_key=8590000922). Falling back to a heuristic 24 of 30 configs (run `miniworld-engine build all` to tune this GPU properly) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/numerics/test_whole_op_reachable_gpu.py::test_transition_whole_op_runs_and_matches_reference[16]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'transition_expand_swiglu_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16|shape_key=35184640657574). Falling back to a heuristic 24 of 32 configs (run `miniworld-engine build all` to tune this GPU properly) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\ntests/numerics/test_whole_op_reachable_gpu.py::test_transition_whole_op_runs_and_matches_reference[16]\n  /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:1442: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_squeeze_residual_triton' on 'NVIDIA A100 80GB PCIe (sm80)' (bfloat16). Falling back to a heuristic 24 of 32 configs (run `miniworld-engine build all` to tune this GPU properly) \u2014 this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/kernels/autotune-dispatch-cache.md).\n    hit = _cached_subset(self, cfgs, nargs, meta, resource_prune=base)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/integrations/test_a100_triattn_widths_gpu.py::test_the_env_switch_leaves_the_triton_numbers_untouched\n1 failed, 367 passed, 49 warnings in 388.88s (0:06:28)\n"
+    },
+    "regression_resolution": "The one old failure was explicit MINIWORLD_TRIATTN_SM80=0 opt-out. General family dispatch now honors it; the same case passed in jobs 63627 and 63631.",
+    "profiler_audit": "14 registered-shape module cases (7 variants x BF16/FP32), eager forward and backward, assert no Triton-named CUDA events; included in the new suite.",
+    "ruff": {
+      "job": 63632,
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/four_release_lint_fix_63632.log",
+      "expected_summary": "3 fixed, 0 remaining",
+      "log_text": "Found 3 errors (3 fixed, 0 remaining).\nwarning[unused-ignore-comment]: Unused `ty: ignore` directive\n   --> src/miniworld_engine/modules/triangle_attention/module.py:193:49\n    |\n193 |             from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend\n    |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nhelp: Remove the unused suppression comment\n    |\n192 |             # cuequiv backend (opt-in): lazy import so the default path never needs cuequiv.\n    -             from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend\n193 +             from cuequivariance_torch import (  # optional cuequivariance backend\n194 |                 triangle_attention,\n    |\n\nerror[invalid-return-type]: Return type does not match returned value\n   --> src/miniworld_engine/modules/triangle_attention/module.py:204:20\n    |\n204 |             return rearrange(out, \"B L1 H L2 D -> B H L1 L2 D\")\n    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Tensor`, found `Tensor | tuple[Tensor, Tensor, Tensor]`\n    |\n   ::: src/miniworld_engine/modules/triangle_attention/module.py:159:10\n    |\n159 |     ) -> torch.Tensor:\n    |          ------------ Expected `Tensor` because of return type\ninfo: element `tuple[Tensor, Tensor, Tensor]` of union `Tensor | tuple[Tensor, Tensor, Tensor]` is not assignable to `Tensor`\n\nwarning[unused-ignore-comment]: Unused `ty: ignore` directive\n   --> src/miniworld_engine/modules/triangle_multiplication/bidirectional.py:212:72\n    |\n212 | \u2026     from cuequivariance_ops_torch.fused_layer_norm_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backe\u2026\n    |                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nhelp: Remove the unused suppression comment\n    |\n211 |         \"\"\"\n    -         from cuequivariance_ops_torch.fused_layer_norm_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend\n212 +         from cuequivariance_ops_torch.fused_layer_norm_torch import (  # optional cuequivariance backend\n213 |             layer_norm_transpose,\n    |\n\nwarning[unused-ignore-comment]: Unused `ty: ignore` directive\n   --> src/miniworld_engine/modules/triangle_multiplication/bidirectional.py:215:66\n    |\n215 |         from cuequivariance_ops_torch.gated_gemm_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend\n    |                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nhelp: Remove the unused suppression comment\n    |\n214 |         )\n    -         from cuequivariance_ops_torch.gated_gemm_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend\n215 +         from cuequivariance_ops_torch.gated_gemm_torch import (  # optional cuequivariance backend\n216 |             fused_sigmoid_gated_dual_gemm,\n    |\n\nwarning[unused-ignore-comment]: Unused `ty: ignore` directive\n   --> src/miniworld_engine/modules/triangle_multiplication/module.py:276:45\n    |\n276 |         from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend\n    |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nhelp: Remove the unused suppression comment\n    |\n275 |         # cuequiv backend (opt-in): lazy import so the default miniworld path never needs cuequiv.\n    -         from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend\n276 +         from cuequivariance_torch import (  # optional cuequivariance backend\n277 |             triangle_multiplicative_update,\n    |\n\nFound 5 diagnostics\n"
+    },
+    "typecheck": {
+      "job": 63633,
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/four_scoped_types_63633.log",
+      "expected_summary": "All checks passed",
+      "log_text": "All checks passed!\n"
+    },
+    "typecheck_limit": "Broader module check in job 63632 still reports one pre-existing cuEquivariance union-return error in triangle_attention/module.py and four unused optional-import suppressions; new CUDA primitives/integration, whole-op adapters and other scoped dispatch files pass."
+  },
+  "performance": {
+    "scope": "BF16 inference, pair width128, B1, L128/768. Identical nonzero weights and inputs; every seventh key masked. CUDA Graph replay, 9 alternating paired rounds. No TF32; default MiniWorld engine, Anthropic override disabled.",
+    "anthropic_result": "All eight conditions pass accuracy/graph checks and have median Anthropic/MiniWorld ratio >1. Connected Anthropic selections are recorded per case; this is not a claim that every comparison uses a native Anthropic CUDA core.",
+    "previous_result": "Four conditions have 7-13% greater latency than the previous MiniWorld route; two are within a 5% band; two reduce latency by 19-22%. CUDA coverage is complete for the stated scope; these regressions remain tuning work.",
+    "toggle_method": "Same process/GPU and graph inputs; disable only a100_families.serves to select the previous mixed route, retaining its prior CUDA leaf dispatch. Nine alternating rounds, ten replays per round, eight calls per graph. Output relative difference <0.006.",
+    "toggle_source": "import json, statistics\nfrom pathlib import Path\nimport torch\nfrom benchmarks.runners.compare_anthropic_a100 import fixture, capture, elapsed, metadata\nfrom miniworld_engine.integrations import a100_families\n\n@torch.no_grad()\ndef run(family,length):\n    torch.manual_seed(191)\n    model,inputs=fixture(family,length,'miniworld')\n    model=model.cuda().bfloat16().eval()\n    for name,p in model.named_parameters():\n        if p.ndim>1:p.normal_(std=p.shape[-1]**-.5)\n        elif name.endswith('weight'):p.normal_(mean=1,std=.1)\n        else:p.normal_(std=.1)\n    graphs={};outs={};orig=a100_families.serves\n    try:\n        for key in ['cuda','previous']:\n            a100_families.serves=orig if key=='cuda' else lambda *a,**kw:False\n            graphs[key],outs[key]=capture(model,inputs,'miniworld',8)\n    finally:a100_families.serves=orig\n    error=((outs['cuda'].float()-outs['previous'].float()).norm()/outs['previous'].float().norm()).item()\n    assert error<.006,error\n    samples={k:[] for k in graphs}\n    for i in range(9):\n        for k in (list(graphs) if i%2==0 else list(reversed(graphs))):samples[k].append(elapsed(graphs[k],10,8))\n    result={'family':family,'length':length,'hardware':metadata(),'relative_error':error,'samples_ms':samples,\n            'times_ms':{k:statistics.median(v) for k,v in samples.items()},\n            'cuda_speedup':statistics.median(a/b for a,b in zip(samples['previous'],samples['cuda'],strict=True))}\n    Path(f'/home/psk6950/miniworld-engine-scratch/codex_cuda_four/toggle_{family}_{length}.json').write_text(json.dumps(result,indent=2,default=str)+'\\n')\n    print(family,length,result['times_ms'],result['cuda_speedup'],flush=True)\nfor f in ['triattn_bidir_sa','triattn_bidir_bias','triattn_bias_start','triattn_bias_end']:\n    for l in [128,768]:run(f,l)\n",
+    "anthropic_pairs": [
+      {
+        "family": "triattn_bidir_sa",
+        "length": 128,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            128,
+            128,
+            128
+          ],
+          [
+            1,
+            128
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 28"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.0018335621571168303,
+            "finite": true,
+            "update_relative_frobenius": 0.013213480822741985
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0018335584318265319,
+            "finite": true,
+            "update_relative_frobenius": 0.013213453814387321
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}, {'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': False, 'bidirectional': True}",
+            "ln_pair.anthropic_selection": "Selection(row='fastln', variant='lp', word='fastln', cell='8.0|bf16o|atom_c128|N<=2048|eager|fwd', size_measured=True, stack='A100:torch2.10.0+cu128/3.6.0/cueq0.10.0', stack_measured=True, cls='tol', exact_vs=None, backward=False, capture_safe=True, x_stock=0.602, fallback='aten_autocast', reason='row word', config=None)"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_tn",
+            "ampere_bf16_s1688gemm_bf16_256x128_ldg8_f2f_stages_32x1_tn",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void a100::attn2_fwd_kernel<a100::Attn2Cfg<32, 2, 4, 32, 2, true> >(a100::Attn2Params)",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "_ln_rows_lp_kernel",
+            "ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_tn",
+            "ampere_bf16_s1688gemm_bf16_256x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 0.21029717781964472,
+            "min": 0.21024659100700827,
+            "max": 0.21039199829101562,
+            "samples": [
+              0.21039199829101562,
+              0.21032188920413747,
+              0.21026141503277948,
+              0.21029717781964472,
+              0.21030141325557933,
+              0.21031388114480412,
+              0.2102512892554788,
+              0.21026471081901998,
+              0.21024659100700827
+            ]
+          },
+          "anthropic": {
+            "median": 0.3318003741177646,
+            "min": 0.3317527337507768,
+            "max": 0.3319407376376065,
+            "samples": [
+              0.3318563591350209,
+              0.3317952806299383,
+              0.3319407376376065,
+              0.3318185372786088,
+              0.3317527337507768,
+              0.3317952806299383,
+              0.3318185372786088,
+              0.33177599039944733,
+              0.3318003741177646
+            ]
+          }
+        },
+        "speedup_miniworld": 1.5778553983410248,
+        "paired_ratio_min_max": [
+          1.5773240514403735,
+          1.5787049544295009
+        ],
+        "status": "ok"
+      },
+      {
+        "family": "triattn_bidir_sa",
+        "length": 768,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            768,
+            768,
+            128
+          ],
+          [
+            1,
+            768
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1380 MHz, 300.00 W, 31"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.001723800553008914,
+            "finite": true,
+            "update_relative_frobenius": 0.01971479505300522
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0017237935680896044,
+            "finite": true,
+            "update_relative_frobenius": 0.0197147149592638
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}, {'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': False, 'bidirectional': True}",
+            "ln_pair.anthropic_selection": "Selection(row='fastln', variant='lp', word='fastln', cell='8.0|bf16o|pair_c128|N<=800|eager|fwd', size_measured=True, stack='A100:torch2.7.1+cu126/3.3.1/cueq0.10.0', stack_measured=True, cls='tol', exact_vs=None, backward=False, capture_safe=True, x_stock=0.816, fallback='aten_autocast', reason='row word', config=None)"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void a100::attn2_fwd_kernel<a100::Attn2Cfg<32, 2, 4, 32, 2, true> >(a100::Attn2Params)",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "_ln_rows_lp_kernel",
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 10.354776763916016,
+            "min": 10.308251953125,
+            "max": 10.394644165039063,
+            "samples": [
+              10.308251953125,
+              10.32059326171875,
+              10.316212463378907,
+              10.345230865478516,
+              10.354776763916016,
+              10.365737152099609,
+              10.368672943115234,
+              10.394644165039063,
+              10.378663635253906
+            ]
+          },
+          "anthropic": {
+            "median": 16.141824340820314,
+            "min": 16.106355285644533,
+            "max": 16.186253356933594,
+            "samples": [
+              16.14226837158203,
+              16.106355285644533,
+              16.141824340820314,
+              16.107217407226564,
+              16.141578674316406,
+              16.141511535644533,
+              16.148416137695314,
+              16.16753692626953,
+              16.186253356933594
+            ]
+          }
+        },
+        "speedup_miniworld": 1.5588533719593112,
+        "paired_ratio_min_max": [
+          1.555371850115542,
+          1.565955939473173
+        ],
+        "status": "ok"
+      },
+      {
+        "family": "triattn_bidir_bias",
+        "length": 128,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            128,
+            128,
+            128
+          ],
+          [
+            1,
+            128
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 38"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.0017382887890562415,
+            "finite": true,
+            "update_relative_frobenius": 0.01730041392147541
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0017371842404827476,
+            "finite": true,
+            "update_relative_frobenius": 0.01728942058980465
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}, {'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': True, 'bidirectional': True}",
+            "ln_pair.anthropic_selection": "Selection(row='fastln', variant='lp', word='fastln', cell='8.0|bf16o|atom_c128|N<=2048|eager|fwd', size_measured=True, stack='A100:torch2.10.0+cu128/3.6.0/cueq0.10.0', stack_measured=True, cls='tol', exact_vs=None, backward=False, capture_safe=True, x_stock=0.602, fallback='aten_autocast', reason='row word', config=None)"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "Memcpy DtoD (Device -> Device)",
+            "ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_tn",
+            "ampere_bf16_s1688gemm_bf16_256x128_ldg8_f2f_stages_32x1_tn",
+            "softmax_kernel(float const*, float*, long, int)",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8::Params)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "_ln_rows_lp_kernel",
+            "ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_tn",
+            "ampere_bf16_s1688gemm_bf16_256x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+            "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 0.25192713737487793,
+            "min": 0.2518399953842163,
+            "max": 0.2523714303970337,
+            "samples": [
+              0.25231828008379253,
+              0.25214571612221853,
+              0.2518399953842163,
+              0.2519802876881191,
+              0.25192713737487793,
+              0.2519208533423288,
+              0.251899140221732,
+              0.2523714303970337,
+              0.2519057137625558
+            ]
+          },
+          "anthropic": {
+            "median": 0.2876113928281344,
+            "min": 0.2874876902653621,
+            "max": 0.2876729231614333,
+            "samples": [
+              0.2876729231614333,
+              0.2875520082620474,
+              0.28763877428494966,
+              0.2876113928281344,
+              0.2876664675199069,
+              0.2874993911156288,
+              0.2874876902653621,
+              0.28759507032541126,
+              0.287646458699153
+            ]
+          }
+        },
+        "speedup_miniworld": 1.141280950829382,
+        "paired_ratio_min_max": [
+          1.1395706315606458,
+          1.1421489023064721
+        ],
+        "status": "ok"
+      },
+      {
+        "family": "triattn_bidir_bias",
+        "length": 768,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            768,
+            768,
+            128
+          ],
+          [
+            1,
+            768
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 37"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.0016839640447869897,
+            "finite": true,
+            "update_relative_frobenius": 0.028760476037859917
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0016837888397276402,
+            "finite": true,
+            "update_relative_frobenius": 0.028757484629750252
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}, {'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': True, 'bidirectional': True}",
+            "ln_pair.anthropic_selection": "Selection(row='fastln', variant='lp', word='fastln', cell='8.0|bf16o|pair_c128|N<=800|eager|fwd', size_measured=True, stack='A100:torch2.7.1+cu126/3.3.1/cueq0.10.0', stack_measured=True, cls='tol', exact_vs=None, backward=False, capture_safe=True, x_stock=0.816, fallback='aten_autocast', reason='row word', config=None)"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "Memcpy DtoD (Device -> Device)",
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn",
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "softmax_kernel(float const*, float*, long, int)",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "_ln_rows_lp_kernel",
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 6.940757751464844,
+            "min": 6.911181640625,
+            "max": 6.992990875244141,
+            "samples": [
+              6.921804046630859,
+              6.911181640625,
+              6.981442260742187,
+              6.915409088134766,
+              6.977046966552734,
+              6.940757751464844,
+              6.98587646484375,
+              6.934556579589843,
+              6.992990875244141
+            ]
+          },
+          "anthropic": {
+            "median": 15.246316528320312,
+            "min": 15.199038696289062,
+            "max": 15.279054260253906,
+            "samples": [
+              15.231739807128907,
+              15.199038696289062,
+              15.276908874511719,
+              15.246119689941406,
+              15.279054260253906,
+              15.2466796875,
+              15.278189086914063,
+              15.246316528320312,
+              15.22986297607422
+            ]
+          }
+        },
+        "speedup_miniworld": 2.196688061081255,
+        "paired_ratio_min_max": [
+          2.1778754252332,
+          2.2046591164216447
+        ],
+        "status": "ok"
+      },
+      {
+        "family": "triattn_bias_start",
+        "length": 128,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            128,
+            128,
+            128
+          ],
+          [
+            1,
+            128
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 41"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.0017402094090357423,
+            "finite": true,
+            "update_relative_frobenius": 0.017499316483736038
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0017390670254826546,
+            "finite": true,
+            "update_relative_frobenius": 0.01748782955110073
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': True, 'bidirectional': False}"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "Memcpy DtoD (Device -> Device)",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "softmax_kernel(float const*, float*, long, int)",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8::Params)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 0.126578478977598,
+            "min": 0.12652952095557904,
+            "max": 0.12663047889183307,
+            "samples": [
+              0.12659200306596427,
+              0.12663047889183307,
+              0.12652952095557904,
+              0.1265686873731942,
+              0.126578898265444,
+              0.126578478977598,
+              0.12654896440177127,
+              0.12660703165777798,
+              0.12653862196823645
+            ]
+          },
+          "anthropic": {
+            "median": 0.1693749102679166,
+            "min": 0.1693450862711126,
+            "max": 0.1694765416058627,
+            "samples": [
+              0.1694765416058627,
+              0.16936563361774792,
+              0.1693749102679166,
+              0.1693450862711126,
+              0.16935073245655408,
+              0.16935127431696112,
+              0.16937617822126907,
+              0.16942199793728915,
+              0.1694550947709517
+            ]
+          }
+        },
+        "speedup_miniworld": 1.3381721040205816,
+        "paired_ratio_min_max": [
+          1.337479215903613,
+          1.339157105831989
+        ],
+        "status": "ok"
+      },
+      {
+        "family": "triattn_bias_start",
+        "length": 768,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            768,
+            768,
+            128
+          ],
+          [
+            1,
+            768
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 40"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.001684931106865406,
+            "finite": true,
+            "update_relative_frobenius": 0.02773961052298546
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0016847439110279083,
+            "finite": true,
+            "update_relative_frobenius": 0.02773652784526348
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': True, 'bidirectional': False}"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "Memcpy DtoD (Device -> Device)",
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "softmax_kernel(float const*, float*, long, int)",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 3.449940490722656,
+            "min": 3.4399673461914064,
+            "max": 3.467205047607422,
+            "samples": [
+              3.4399673461914064,
+              3.4415962219238283,
+              3.4589004516601562,
+              3.449443054199219,
+              3.459001922607422,
+              3.4487888336181642,
+              3.461884307861328,
+              3.449940490722656,
+              3.467205047607422
+            ]
+          },
+          "anthropic": {
+            "median": 8.776628875732422,
+            "min": 8.739398956298828,
+            "max": 8.789959716796876,
+            "samples": [
+              8.776628875732422,
+              8.739398956298828,
+              8.783351135253906,
+              8.741226959228516,
+              8.783087158203125,
+              8.740401458740234,
+              8.789959716796876,
+              8.741360473632813,
+              8.788735961914062
+            ]
+          }
+        },
+        "speedup_miniworld": 2.5390680147330253,
+        "paired_ratio_min_max": [
+          2.5337713787062364,
+          2.551369821998326
+        ],
+        "status": "ok"
+      },
+      {
+        "family": "triattn_bias_end",
+        "length": 128,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            128,
+            128,
+            128
+          ],
+          [
+            1,
+            128
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 41"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.0017423981335014105,
+            "finite": true,
+            "update_relative_frobenius": 0.017439289018511772
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0017398952040821314,
+            "finite": true,
+            "update_relative_frobenius": 0.017414238303899765
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': True, 'bidirectional': False}"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "Memcpy DtoD (Device -> Device)",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "softmax_kernel(float const*, float*, long, int)",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8::Params)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 0.14598511695861816,
+            "min": 0.14594575881958008,
+            "max": 0.14609184265136718,
+            "samples": [
+              0.14601152420043945,
+              0.14609184265136718,
+              0.14595088005065918,
+              0.1460651206970215,
+              0.14596863746643066,
+              0.14602304458618165,
+              0.14594575881958008,
+              0.14595791816711426,
+              0.14598511695861816
+            ]
+          },
+          "anthropic": {
+            "median": 0.20545044210222033,
+            "min": 0.2053673267364502,
+            "max": 0.20548310544755724,
+            "samples": [
+              0.20548021793365479,
+              0.20538577768537733,
+              0.20543489191267225,
+              0.20547310511271158,
+              0.20548310544755724,
+              0.2054240041308933,
+              0.20546555519104004,
+              0.20545044210222033,
+              0.2053673267364502
+            ]
+          }
+        },
+        "speedup_miniworld": 1.4072876717017133,
+        "paired_ratio_min_max": [
+          1.4058675279735426,
+          1.4078213498827263
+        ],
+        "status": "ok"
+      },
+      {
+        "family": "triattn_bias_end",
+        "length": 768,
+        "mode": "inference",
+        "dtype": "bf16",
+        "tf32": false,
+        "compiled": false,
+        "cudagraph": true,
+        "seed": 191,
+        "input_shapes": [
+          [
+            1,
+            768,
+            768,
+            128
+          ],
+          [
+            1,
+            768
+          ]
+        ],
+        "mask": "every seventh key masked; SWA uses two fully valid sequences",
+        "graph_batch": 8,
+        "rounds": 9,
+        "miniworld_anthropic_override": false,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63628",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 39"
+        },
+        "accuracy": {
+          "miniworld": {
+            "relative_frobenius": 0.001684880000539124,
+            "finite": true,
+            "update_relative_frobenius": 0.027698904275894165
+          },
+          "anthropic": {
+            "relative_frobenius": 0.0016847129445523024,
+            "finite": true,
+            "update_relative_frobenius": 0.0276961587369442
+          }
+        },
+        "selection": {
+          "miniworld": {},
+          "anthropic": {
+            ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': True, 'bidirectional': False}"
+          }
+        },
+        "gpu_kernel_names": {
+          "miniworld": [
+            "Memcpy DtoD (Device -> Device)",
+            "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nn",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "softmax_kernel(float const*, float*, long, int)",
+            "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float, bool)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+            "void binary_kernel<c10::BFloat16>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, long, int)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ],
+          "anthropic": [
+            "Memcpy DtoD (Device -> Device)",
+            "_apb_fwd",
+            "_gate_res_kernel",
+            "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+            "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+            "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2::Params)"
+          ]
+        },
+        "times_ms": {
+          "miniworld": {
+            "median": 4.110111236572266,
+            "min": 4.104508972167968,
+            "max": 4.126485824584961,
+            "samples": [
+              4.106802749633789,
+              4.1058204650878904,
+              4.121399688720703,
+              4.104508972167968,
+              4.1225322723388675,
+              4.1061359405517575,
+              4.122661209106445,
+              4.110111236572266,
+              4.126485824584961
+            ]
+          },
+          "anthropic": {
+            "median": 9.913103485107422,
+            "min": 9.879981994628906,
+            "max": 9.923747253417968,
+            "samples": [
+              9.913103485107422,
+              9.880387115478516,
+              9.916150665283203,
+              9.880357360839843,
+              9.918901062011718,
+              9.881078338623047,
+              9.915098571777344,
+              9.879981994628906,
+              9.923747253417968
+            ]
+          }
+        },
+        "speedup_miniworld": 2.4060214467124967,
+        "paired_ratio_min_max": [
+          2.4038235040248144,
+          2.413825082295806
+        ],
+        "status": "ok"
+      }
+    ],
+    "previous_miniworld_pairs": [
+      {
+        "family": "triattn_bidir_sa",
+        "length": 128,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1410 MHz, 300.00 W, 32"
+        },
+        "relative_error": 0.0007744065369479358,
+        "samples_ms": {
+          "cuda": [
+            0.20972919464111328,
+            0.20945920944213867,
+            0.20940799713134767,
+            0.2093951940536499,
+            0.2093951940536499,
+            0.20944640636444092,
+            0.2093440055847168,
+            0.2094719886779785,
+            0.20943360328674315
+          ],
+          "previous": [
+            0.195251202583313,
+            0.19523839950561522,
+            0.19530240297317505,
+            0.19502079486846924,
+            0.1950976014137268,
+            0.19523839950561522,
+            0.19546879529953004,
+            0.19521280527114868,
+            0.19517439603805542
+          ]
+        },
+        "times_ms": {
+          "cuda": 0.20943360328674315,
+          "previous": 0.19523839950561522
+        },
+        "cuda_speedup": 0.9319279704325981
+      },
+      {
+        "family": "triattn_bidir_sa",
+        "length": 768,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1365 MHz, 300.00 W, 43"
+        },
+        "relative_error": 0.0005090124323032796,
+        "samples_ms": {
+          "cuda": [
+            10.231915283203126,
+            10.293004608154297,
+            10.282662200927735,
+            10.289190673828125,
+            10.314278411865235,
+            10.31514892578125,
+            10.300390625,
+            10.324339294433594,
+            10.318335723876952
+          ],
+          "previous": [
+            9.311961364746093,
+            9.296575927734375,
+            9.309747314453125,
+            9.315110778808593,
+            9.321305847167968,
+            9.331123352050781,
+            9.33185272216797,
+            9.343820953369141,
+            9.341798400878906
+          ]
+        },
+        "times_ms": {
+          "cuda": 10.300390625,
+          "previous": 9.321305847167968
+        },
+        "cuda_speedup": 0.9053297848297021
+      },
+      {
+        "family": "triattn_bidir_bias",
+        "length": 128,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1410 MHz, 300.00 W, 41"
+        },
+        "relative_error": 8.334564336109906e-05,
+        "samples_ms": {
+          "cuda": [
+            0.2563891887664795,
+            0.252620792388916,
+            0.2515455961227417,
+            0.2515455961227417,
+            0.25148160457611085,
+            0.25158400535583497,
+            0.25160961151123046,
+            0.2515199899673462,
+            0.25148160457611085
+          ],
+          "previous": [
+            0.2532991886138916,
+            0.2530431985855103,
+            0.25114879608154295,
+            0.250982403755188,
+            0.25099520683288573,
+            0.2510335922241211,
+            0.25107200145721437,
+            0.25116159915924074,
+            0.2508928060531616
+          ]
+        },
+        "times_ms": {
+          "cuda": 0.2515455961227417,
+          "previous": 0.25107200145721437
+        },
+        "cuda_speedup": 0.9978633167040517
+      },
+      {
+        "family": "triattn_bidir_bias",
+        "length": 768,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1380 MHz, 300.00 W, 45"
+        },
+        "relative_error": 8.66562913870439e-05,
+        "samples_ms": {
+          "cuda": [
+            6.902537536621094,
+            6.933197021484375,
+            6.931648254394531,
+            6.928857421875,
+            6.93469467163086,
+            6.927436828613281,
+            6.947328186035156,
+            6.928806304931641,
+            6.9451133728027346
+          ],
+          "previous": [
+            6.710233306884765,
+            6.711360168457031,
+            6.738470458984375,
+            6.712371063232422,
+            6.720588684082031,
+            6.726592254638672,
+            6.7406974792480465,
+            6.723161315917968,
+            6.726809692382813
+          ]
+        },
+        "times_ms": {
+          "cuda": 6.931648254394531,
+          "previous": 6.723161315917968
+        },
+        "cuda_speedup": 0.9702575290451287
+      },
+      {
+        "family": "triattn_bias_start",
+        "length": 128,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1410 MHz, 300.00 W, 45"
+        },
+        "relative_error": 0.0009905436309054494,
+        "samples_ms": {
+          "cuda": [
+            0.12719279527664185,
+            0.1265663981437683,
+            0.1265920042991638,
+            0.12632319927215577,
+            0.12592639923095703,
+            0.12595200538635254,
+            0.1259392023086548,
+            0.12595200538635254,
+            0.1259392023086548
+          ],
+          "previous": [
+            0.16241919994354248,
+            0.16208640336990357,
+            0.16216319799423218,
+            0.1619968056678772,
+            0.16129280328750611,
+            0.1613312005996704,
+            0.16134400367736818,
+            0.16136959791183472,
+            0.1613055944442749
+          ]
+        },
+        "times_ms": {
+          "cuda": 0.12595200538635254,
+          "previous": 0.16136959791183472
+        },
+        "cuda_speedup": 1.280894258926594
+      },
+      {
+        "family": "triattn_bias_start",
+        "length": 768,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1350 MHz, 300.00 W, 48"
+        },
+        "relative_error": 5.6901546486187726e-05,
+        "samples_ms": {
+          "cuda": [
+            3.439382553100586,
+            3.4793216705322267,
+            3.4489471435546877,
+            3.4727935791015625,
+            3.4501888275146486,
+            3.4722305297851563,
+            3.4589054107666017,
+            3.4682239532470702,
+            3.457561492919922
+          ],
+          "previous": [
+            3.0387712478637696,
+            3.076620864868164,
+            3.0433280944824217,
+            3.065023994445801,
+            3.0490367889404295,
+            3.0730880737304687,
+            3.044915199279785,
+            3.0610815048217774,
+            3.0460927963256834
+          ]
+        },
+        "times_ms": {
+          "cuda": 3.4589054107666017,
+          "previous": 3.0490367889404295
+        },
+        "cuda_speedup": 0.8826077975604453
+      },
+      {
+        "family": "triattn_bias_end",
+        "length": 128,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1410 MHz, 300.00 W, 46"
+        },
+        "relative_error": 0.0010018370812758803,
+        "samples_ms": {
+          "cuda": [
+            0.14825680255889892,
+            0.14734079837799072,
+            0.14531840085983277,
+            0.14506239891052247,
+            0.1450368046760559,
+            0.14498560428619384,
+            0.14498560428619384,
+            0.14495999813079835,
+            0.14495999813079835
+          ],
+          "previous": [
+            0.18224639892578126,
+            0.18220800161361694,
+            0.17875200510025024,
+            0.17872639894485473,
+            0.17875200510025024,
+            0.17876479625701905,
+            0.1787392020225525,
+            0.1787775993347168,
+            0.17879040241241456
+          ]
+        },
+        "times_ms": {
+          "cuda": 0.1450368046760559,
+          "previous": 0.17876479625701905
+        },
+        "cuda_speedup": 1.2328065458811406
+      },
+      {
+        "family": "triattn_bias_end",
+        "length": 768,
+        "hardware": {
+          "gpu": "NVIDIA A100 80GB PCIe",
+          "capability": [
+            8,
+            0
+          ],
+          "torch": "2.13.0+cu129",
+          "cuda": "12.9",
+          "node": "gpu04",
+          "slurm_job": "63626",
+          "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+          "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+          "settings": {
+            "autotune_kernels": "frozenset()",
+            "run_autotune": false,
+            "capture": false,
+            "fill_gaps": false,
+            "compile_jobs": null,
+            "predict_unusable": false,
+            "bench_clear_mb": 0,
+            "bench_rep_ms": 0,
+            "bench_lock": "",
+            "autotune_miss_cap": 24,
+            "autotune_on_miss_shards": "",
+            "compile_wrap": "custom_op",
+            "biasonly_dispatch": "auto",
+            "layernorm_dispatch": "auto",
+            "pin_gate_backend": null,
+            "pin_infer_concat": null,
+            "engine_backend": "auto",
+            "trimul_h100_training_widths": [
+              64,
+              128,
+              256,
+              384,
+              512
+            ],
+            "transition_cuda_b2b": true,
+            "transition_fused_sm90a": true,
+            "augmented_attention_bf16_sm90": true,
+            "augmented_attention_bf16_sm100": true,
+            "transition_gatebwd_wgmma": true,
+            "transition_fuse_stats": false,
+            "transition_lnbwd_cuda": true,
+            "transition_savedxn_split_bwd": false,
+            "transition_lnbwd_privatize": true,
+            "layernorm_bwd_path": null,
+            "layernorm_cuda_bwd": false,
+            "layernorm_out_bwd_path": null,
+            "trimul_impl": null,
+            "swa_dit_fused": true,
+            "b200_engine_triton": false,
+            "swa_dit_qkvg_fwd_cuda": true,
+            "swa_dit_ffn_fwd_cuda": true,
+            "swa_dit_ffn_bwd_cuda": true,
+            "swa_dit_ffn_dw": "mat",
+            "swa_dit_dq1": "bf16",
+            "typecheck": false,
+            "swa_check_front_packed": false,
+            "swa_flash_saves_lse": true
+          },
+          "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-008d7b69-e1e5-4313-ffc2-dff9fb64d53f, 1365 MHz, 300.00 W, 48"
+        },
+        "relative_error": 5.597652489086613e-05,
+        "samples_ms": {
+          "cuda": [
+            4.090218734741211,
+            4.111846542358398,
+            4.096652984619141,
+            4.107942581176758,
+            4.115161514282226,
+            4.114585494995117,
+            4.121254348754883,
+            4.130035018920898,
+            4.1237632751464846
+          ],
+          "previous": [
+            3.7011585235595703,
+            3.7623550415039064,
+            3.7437694549560545,
+            3.7288192749023437,
+            3.721907043457031,
+            3.7136768341064452,
+            3.7139328002929686,
+            3.714150238037109,
+            3.714214324951172
+          ]
+        },
+        "times_ms": {
+          "cuda": 4.114585494995117,
+          "previous": 3.714214324951172
+        },
+        "cuda_speedup": 0.9044376582886596
+      }
+    ],
+    "summary": [
+      {
+        "family": "triattn_bidir_sa",
+        "length": 128,
+        "anthropic_over_cuda": 1.5778553983410248,
+        "previous_over_cuda": 0.9319279704325981,
+        "latency_change_percent": 7.270702800818474
+      },
+      {
+        "family": "triattn_bidir_sa",
+        "length": 768,
+        "anthropic_over_cuda": 1.5588533719593112,
+        "previous_over_cuda": 0.9053297848297021,
+        "latency_change_percent": 10.503729776547367
+      },
+      {
+        "family": "triattn_bidir_bias",
+        "length": 128,
+        "anthropic_over_cuda": 1.141280950829382,
+        "previous_over_cuda": 0.9978633167040517,
+        "latency_change_percent": 0.1886290238571453
+      },
+      {
+        "family": "triattn_bidir_bias",
+        "length": 768,
+        "anthropic_over_cuda": 2.196688061081255,
+        "previous_over_cuda": 0.9702575290451287,
+        "latency_change_percent": 3.101025376007893
+      },
+      {
+        "family": "triattn_bias_start",
+        "length": 128,
+        "anthropic_over_cuda": 1.3381721040205816,
+        "previous_over_cuda": 1.280894258926594,
+        "latency_change_percent": -21.94811971015309
+      },
+      {
+        "family": "triattn_bias_start",
+        "length": 768,
+        "anthropic_over_cuda": 2.5390680147330253,
+        "previous_over_cuda": 0.8826077975604453,
+        "latency_change_percent": 13.442560723204844
+      },
+      {
+        "family": "triattn_bias_end",
+        "length": 128,
+        "anthropic_over_cuda": 1.4072876717017133,
+        "previous_over_cuda": 1.2328065458811406,
+        "latency_change_percent": -18.867244718848752
+      },
+      {
+        "family": "triattn_bias_end",
+        "length": 768,
+        "anthropic_over_cuda": 2.4060214467124967,
+        "previous_over_cuda": 0.9044376582886596,
+        "latency_change_percent": 10.779430991753781
+      }
+    ]
+  },
+  "final_source_sha256": {
+    "src/miniworld_engine/kernels/cuda_native/__init__.py": "110c57bca081cc5a5d8b7c9345f1fcf2046c03adc638e7e42099bb86c8a52101",
+    "src/miniworld_engine/kernels/cuda_native/rows.cu": "cc9314e1671a693eeca06d428cfb2bc7f2cdffb9846f8180dff730384aec7a7a",
+    "src/miniworld_engine/integrations/a100_families.py": "285ccb3386b18e6464a275cee0bbc0933c33dc5a5e6454d99f044017f23eeb11",
+    "src/miniworld_engine/integrations/token_dit.py": "36247f10d9cd4d97febb25ad3ff36056a3da5de5554b2a6e68b93d0b95e3bb2a",
+    "src/miniworld_engine/kernels/conditioned_transition/triton/token_dit_runner.py": "a41fcf4483e00359bf6d6e21850a398decab1b81b2eb1258d31d09e5e54c02fe",
+    "src/miniworld_engine/kernels/conditioned_transition/whole_op.py": "56eb3fbb876dc67ab1288e7c03a39bd0260daf8263140290f992fbc8d9aa5180",
+    "src/miniworld_engine/kernels/triangle_attention/whole_op.py": "ddc13b9d0efbff54b79aede38252423756f0a897bfe45c9784391a2370aa9403",
+    "src/miniworld_engine/kernels/trimul_inproj/whole_op.py": "eb1bfa4ca08e10dfe3c362b79296d907314d38947302bea0ea8e19a6b81ea4f7",
+    "src/miniworld_engine/modules/conditioned_transition/module.py": "8ed87ee725675dba0d48c29a81d910c70c1383da60a314a39c01cff5c558ffe1",
+    "src/miniworld_engine/modules/dit/module.py": "a6a87fce5d8333ada5a6a59cdad86a59d15d8cbf6138fb0d768a9294b5a626ab",
+    "src/miniworld_engine/modules/triangle_attention/module.py": "71e8ddb339f120f79cefb834ae2a1b752220121cfb829436316df28b0e57cc16",
+    "src/miniworld_engine/modules/triangle_attention/bidirectional.py": "fce4af8c2809c6babf3433ce677eb8585bea11b4dc914c356caabbe70fe635f0",
+    "src/miniworld_engine/modules/triangle_multiplication/module.py": "37c55cd2a6048dd59f1b8c9dac55326a7531d3672d658deb63f9960eabf526fd",
+    "src/miniworld_engine/modules/triangle_multiplication/bidirectional.py": "26d687d5ecd51507497ca4c537fdf068d1b97f865a7bb455de3c85d8eec3ac34",
+    "tests/integrations/test_a100_cuda_families_gpu.py": "56546121a6d8de6af6754c05604240f3c4b74456eec0395e8e36b0944523c19b",
+    "benchmarks/runners/compare_anthropic_a100.py": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7"
+  },
+  "source_hash_note": "Final reviewed sources after autocast guards, formatting and import cleanup. Performance jobs ran before the final autocast-only guards; performance cases disable autocast. Existing dirty workspace changes are preserved."
+}

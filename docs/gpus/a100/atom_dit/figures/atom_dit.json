@@ -1,0 +1,446 @@
+{
+ "figures": {
+  "inference": {
+   "title": "A100 · atom DiT block (AF3 Alg. 23, dense attention over all N atoms) · inference · d 128, cond 128, pair 16, 4 heads × 32, transition n = 2, bf16",
+   "panels": [
+    {
+     "label": "one block, A samples with a conditioning per atom; the pair bias is made on every call (the pair tensor is read once per block)",
+     "kernels": [
+      {
+       "id": "I1",
+       "name": "AdaLN",
+       "impl": "Triton · _adaln_fused_kernel",
+       "code": [
+        "ĉ = LN(cond) · γ                          # weight only",
+        "xa = LN(x) · sigmoid(ĉ Wsᵀ + bs) + ĉ Wshᵀ"
+       ],
+       "reads": [
+        "single (x), cond",
+        "Ws, Wsh"
+       ],
+       "writes": [
+        "xa"
+       ]
+      },
+      {
+       "id": "I2",
+       "name": "q | k | v | g projection",
+       "impl": "cuBLAS · 1 GEMM (the four weights packed once per version)",
+       "code": [
+        "[q | k | v | g] = xa [Wq; Wk; Wv; Wg]ᵀ + [bq, 0, 0, 0]"
+       ],
+       "reads": [
+        "xa",
+        "Wqkvg (packed)"
+       ],
+       "writes": [
+        "qkvg [A N,512]"
+       ]
+      },
+      {
+       "id": "I3",
+       "name": "pair bias",
+       "impl": "CUDA · pair_bias_fwd_kernel",
+       "code": [
+        "bias[h] = rstd (z · W'[h] − mean Σ_{c} W'[h, c])    # W' = γ Wb",
+        "masked and padded keys = −1e4, padded query rows 0"
+       ],
+       "reads": [
+        "pair z [N,N,16]",
+        "W' (γ Wb), key mask"
+       ],
+       "writes": [
+        "bias [4,N,N], head-major"
+       ]
+      },
+      {
+       "id": "I4",
+       "name": "attention with the gate",
+       "impl": "CUDA · attn_fwd_kernel (MODE_PGATE)",
+       "code": [
+        "s = q kᵀ / √32 + bias          # base 2, per sample and head",
+        "og = sigmoid(g) · softmax(s) v          # the gate in the epilogue"
+       ],
+       "reads": [
+        "q, k, v, g",
+        "bias"
+       ],
+       "writes": [
+        "og (over q)"
+       ]
+      },
+      {
+       "id": "I5",
+       "name": "output projection, conditioning gate, residual",
+       "impl": "cuBLAS · 2 GEMMs + CUDA · res_gate_kernel",
+       "code": [
+        "y = og @ Woᵀ;   g2 = cond @ Wscᵀ + bsc",
+        "x1 = x + sigmoid(g2) · y                # one row pass"
+       ],
+       "reads": [
+        "og, cond, single",
+        "Wo, Wsc"
+       ],
+       "writes": [
+        "y, g2",
+        "x1"
+       ]
+      },
+      {
+       "id": "I6",
+       "name": "AdaLN of the transition",
+       "impl": "Triton · _adaln_fused_kernel",
+       "code": [
+        "xt = LN(x1) · sigmoid(ĉ Ws'ᵀ + bs') + ĉ Wsh'ᵀ"
+       ],
+       "reads": [
+        "x1, cond",
+        "Ws', Wsh'"
+       ],
+       "writes": [
+        "xt"
+       ]
+      },
+      {
+       "id": "I7",
+       "name": "conditioned transition + residual",
+       "impl": "Triton · _cond_transition_inference_kernel + PyTorch add",
+       "code": [
+        "h = silu(xt Waᵀ) · (xt Wbᵀ)     # hidden 256",
+        "out = x1 + sigmoid(cond Wsc'ᵀ + b) · (h Wsᵀ)"
+       ],
+       "reads": [
+        "xt, x1, cond",
+        "Wa, Wb, Ws, Wsc'"
+       ],
+       "writes": [
+        "out"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at N = 3072 | 6144, A = 5)",
+     "hbm": [
+      {
+       "name": "single, cond, out, xa, y, g2, x1, xt",
+       "shape": "[A N,128] bf16",
+       "size": "3.9 | 7.9 MB each"
+      },
+      {
+       "name": "qkvg (og over q)",
+       "shape": "[A N,512] bf16",
+       "size": "15.7 | 31.5 MB"
+      },
+      {
+       "name": "pair z",
+       "shape": "[N,N,16] bf16",
+       "size": "302 | 1208 MB"
+      },
+      {
+       "name": "bias",
+       "shape": "[4,N,N] bf16",
+       "size": "75.5 | 302 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training": {
+   "title": "A100 · atom DiT block (AF3 Alg. 23, dense attention over all N atoms) · training · d 128, cond 128, pair 16, 4 heads × 32, transition n = 2, bf16",
+   "panels": [
+    {
+     "label": "forward (saves the AdaLN statistics and gates, qkvg, o, lse, the bias, y, g2, the transition's activations)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "AdaLN",
+       "impl": "Triton + cuBLAS · _ln_mat_kernel, GEMM, _epilogue_train_kernel",
+       "code": [
+        "ĉ = LN(cond) · γ;   [s | b] = ĉ [Ws | Wsh]ᵀ + [bs | 0]",
+        "xa = sigmoid(s) · LN(x) + b             # statistics, gate saved"
+       ],
+       "reads": [
+        "single, cond",
+        "Ws, Wsh"
+       ],
+       "writes": [
+        "ĉ, s | b, xa",
+        "mean, rstd, gate"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "q | k | v | g projection",
+       "impl": "cuBLAS · 1 GEMM (the four weights packed once per version)",
+       "code": [
+        "[q | k | v | g] = xa [Wq; Wk; Wv; Wg]ᵀ + [bq, 0, 0, 0]"
+       ],
+       "reads": [
+        "xa",
+        "Wqkvg (packed)"
+       ],
+       "writes": [
+        "qkvg [A N,512]"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "pair bias",
+       "impl": "CUDA · pair_bias_fwd_kernel",
+       "code": [
+        "bias[h] = LN(z) Wb[h]ᵀ, head-major [4,N,N]",
+        "masked and padded keys = −1e4"
+       ],
+       "reads": [
+        "pair z",
+        "W' (γ Wb), key mask"
+       ],
+       "writes": [
+        "bias"
+       ]
+      },
+      {
+       "id": "F4",
+       "name": "attention forward",
+       "impl": "CUDA · attn_fwd_kernel (MODE_PLAIN, lse)",
+       "code": [
+        "s = q kᵀ / √32 + bias;   o = softmax(s) v",
+        "lse = log₂ Σ exp₂(s)                    # per sample, head, query"
+       ],
+       "reads": [
+        "q, k, v",
+        "bias"
+       ],
+       "writes": [
+        "o",
+        "lse"
+       ]
+      },
+      {
+       "id": "F5",
+       "name": "gate, output projection, residual",
+       "impl": "CUDA · gate_rows_kernel, res_gate_kernel + cuBLAS · 2 GEMMs",
+       "code": [
+        "og = sigmoid(g) · o;   y = og @ Woᵀ;   g2 = cond @ Wscᵀ + bsc",
+        "x1 = x + sigmoid(g2) · y                # one row pass"
+       ],
+       "reads": [
+        "o, g, single, cond",
+        "Wo, Wsc"
+       ],
+       "writes": [
+        "og, y, g2, x1"
+       ]
+      },
+      {
+       "id": "F6",
+       "name": "transition",
+       "impl": "Triton + cuBLAS · AdaLN as F1, _b2b_fwd_train_kernel",
+       "code": [
+        "xt = AdaLN(x1, cond)                    # as F1",
+        "ab = xt [Wa | Wb]ᵀ;  h = silu(a) · b;  z = h Wsᵀ",
+        "out = x1 + sigmoid(cond Wsc'ᵀ + b) · z"
+       ],
+       "reads": [
+        "x1, cond",
+        "Wa, Wb, Ws, Wsc'"
+       ],
+       "writes": [
+        "xt, ab, h, z",
+        "out"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at N = 3072, A = 48)",
+     "hbm": [
+      {
+       "name": "single, cond, out, xa, xt, o, og, y, g2, x1, z",
+       "shape": "[A N,128] bf16",
+       "size": "37.7 MB each"
+      },
+      {
+       "name": "qkvg",
+       "shape": "[A N,512] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "ab, h",
+       "shape": "[A N,512 | 256] bf16",
+       "size": "151 | 75.5 MB"
+      },
+      {
+       "name": "pair z, bias",
+       "shape": "[N,N,16], [4,N,N] bf16",
+       "size": "302, 75.5 MB"
+      },
+      {
+       "name": "lse",
+       "shape": "[A,4,N] fp32",
+       "size": "2.4 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward; the attention kernels read the saved bias, lse and the row term D = Σ dO · O; the bias gradient leaves as bf16 partials of 4 samples",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "transition backward",
+       "impl": "Triton + cuBLAS · _dh_swiglu_bwd_kernel, _sigmul_bwd",
+       "code": [
+        "dz = sigmoid(·) gate backward;  dh = dz Ws;  dWs = dzᵀ h",
+        "dab = swiglu'(ab) · dh;  dxt = dab [Wa | Wb];  dWab = dabᵀ xt"
+       ],
+       "reads": [
+        "dout, z, ab, h, xt",
+        "Ws, Wa, Wb"
+       ],
+       "writes": [
+        "dxt, dWs, dWab",
+        "dcond (partial)"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "AdaLN backward (transition)",
+       "impl": "Triton + cuBLAS · _bwd_x_kernel, _dgrad_condln_kernel",
+       "code": [
+        "dscale = dxt · x̂ · gate (1 − gate);   dĉ = [dscale | dxt] [Ws; Wsh]",
+        "dx1 = LN-bwd(dxt · gate);   dcond, dγ = LN-bwd(dĉ)"
+       ],
+       "reads": [
+        "dxt, xt statistics",
+        "x1, cond, Ws, Wsh"
+       ],
+       "writes": [
+        "dx1, dcond",
+        "dWs, dWsh"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "residual gate, output projection, attention gate",
+       "impl": "CUDA · res_gate_bwd_kernel, gate_bwd_kernel + cuBLAS · 2 GEMMs",
+       "code": [
+        "dy = dx1 · sigmoid(g2);   dg2 = dx1 · y · sigmoid'(g2)",
+        "dog = dy @ Wo;  dWo = dyᵀ og",
+        "do = sigmoid(g) · dog;  dg = dog · o · sigmoid'(g)"
+       ],
+       "reads": [
+        "dx1, y, g2, o, g",
+        "Wo, og"
+       ],
+       "writes": [
+        "dy, dg2",
+        "do (bf16), dg",
+        "dWo"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "attention backward, query side",
+       "impl": "CUDA · attn_delta_kernel, attn_bwd_dq_kernel, db_reduce_kernel",
+       "code": [
+        "D = Σ_d do · o;   P = exp₂(s − lse);   dP = do vᵀ",
+        "dS = P (dP − D);   dq = dS k;   dbias partials = Σ_{4 samples} dS",
+        "db = Σ partials                         # fixed order, bf16 → fp32"
+       ],
+       "reads": [
+        "q, k, v, do, o",
+        "bias, lse"
+       ],
+       "writes": [
+        "dq (bf16), D",
+        "partials [A/4,4,N,N] bf16, db [4,N,N] fp32"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "attention backward, key side",
+       "impl": "CUDA · bias_transpose_kernel, attn_bwd_dkv_kernel",
+       "code": [
+        "bias is read transposed [4,N(key),N(query)]",
+        "dv = Pᵀ do;   dk = dSᵀ q"
+       ],
+       "reads": [
+        "q, k, v, do",
+        "bias, lse, D"
+       ],
+       "writes": [
+        "dk, dv (bf16)",
+        "bias transposed"
+       ]
+      },
+      {
+       "id": "B6",
+       "name": "pair bias backward",
+       "impl": "CUDA · pair_bias_bwd_kernel",
+       "code": [
+        "dxh = Σ_h db[h] W'[h];   dz = rstd (dxh − mean dxh − x̂ mean(dxh x̂))",
+        "dW'[h, c] = Σ_ij db[h] x̂[c]            # per-block partials, fixed order"
+       ],
+       "reads": [
+        "pair z",
+        "db, W'"
+       ],
+       "writes": [
+        "dz [N,N,16]",
+        "dW' partials"
+       ]
+      },
+      {
+       "id": "B7",
+       "name": "projections, conditioning gate, AdaLN backward",
+       "impl": "cuBLAS · 4 GEMMs, Triton AdaLN backward as B2",
+       "code": [
+        "dxa = [dq | dk | dv | dg] Wqkvg;   dWqkvg = [dq | dk | dv | dg]ᵀ xa",
+        "dcond += dg2 Wsc;   dWsc = dg2ᵀ cond",
+        "dsingle = dx1 + AdaLN-bwd(dxa);   dcond (all the contributions)"
+       ],
+       "reads": [
+        "dqkvg, dg2, xa, cond",
+        "Wqkvg, Wsc"
+       ],
+       "writes": [
+        "dsingle, dcond",
+        "dWqkvg, dWsc"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at N = 3072, A = 48)",
+     "hbm": [
+      {
+       "name": "do, dy, dg2, dx1, dxt, dsingle, dcond",
+       "shape": "[A N,128] bf16",
+       "size": "37.7 MB each"
+      },
+      {
+       "name": "dqkvg (dq | dk | dv written in place, dg beside them)",
+       "shape": "[A N,512] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "bias partials",
+       "shape": "[A/4,4,N,N] bf16",
+       "size": "906 MB"
+      },
+      {
+       "name": "db",
+       "shape": "[4,N,N] fp32",
+       "size": "151 MB"
+      },
+      {
+       "name": "bias, bias transposed",
+       "shape": "[4,N,N] bf16",
+       "size": "75.5 MB each"
+      },
+      {
+       "name": "dz",
+       "shape": "[N,N,16] bf16",
+       "size": "302 MB"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

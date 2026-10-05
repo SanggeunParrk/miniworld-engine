@@ -1,0 +1,171 @@
+{
+ "figures": {
+  "inference": {
+   "title": "A100 · layer_norm_linear · inference · bf16, d_norm 16 / 64 / 128 / 256 / 384, 1 - 16 outputs",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "L1",
+       "name": "LayerNorm + projection",
+       "impl": "CUDA · lnl_fwd_kernel",
+       "code": [
+        "mean, rstd = statistics of the row (fp32, quad shuffles on the registers)",
+        "n = bf16((x - mean) · rstd · γ)           # the mma operand",
+        "out = n @ W.T                             # mma.sync, W from shared memory, fp32 accumulation"
+       ],
+       "reads": [
+        "x  [rows, d_norm]",
+        "W, γ"
+       ],
+       "writes": [
+        "out  [rows, n_head]"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at the token pair, L = 768, d_norm 384, 16 outputs)",
+     "hbm": [
+      {
+       "name": "x",
+       "shape": "[L,L,384] bf16",
+       "size": "453 MB"
+      },
+      {
+       "name": "out",
+       "shape": "[L,L,16] bf16",
+       "size": "18.9 MB"
+      },
+      {
+       "name": "W, γ",
+       "shape": "bf16 / fp32",
+       "size": "< 1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training": {
+   "title": "A100 · layer_norm_linear · training · bf16, d_norm 16 / 64 / 128 / 256 / 384, 1 - 16 outputs",
+   "panels": [
+    {
+     "label": "forward (saves mean / rstd and the fp32 result u)",
+     "kernels": [
+      {
+       "id": "L1",
+       "name": "LayerNorm + projection (saving)",
+       "impl": "CUDA · lnl_fwd_kernel",
+       "code": [
+        "mean, rstd = statistics of the row (fp32)",
+        "u = ((x - mean) · rstd · γ) @ W.T         # fp32, before rounding",
+        "out = bf16(u)"
+       ],
+       "reads": [
+        "x",
+        "W, γ"
+       ],
+       "writes": [
+        "out",
+        "mean / rstd, u"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at the token pair, L = 768, d_norm 384, 16 outputs)",
+     "hbm": [
+      {
+       "name": "x",
+       "shape": "[L,L,384] bf16",
+       "size": "453 MB"
+      },
+      {
+       "name": "out",
+       "shape": "[L,L,16] bf16",
+       "size": "18.9 MB"
+      },
+      {
+       "name": "mean / rstd, u",
+       "shape": "[L,L,2] fp32, [L,L,16] fp32",
+       "size": "4.7 / 37.7 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward (one pass over x)",
+     "kernels": [
+      {
+       "id": "L2",
+       "name": "dx and the weight-gradient partials",
+       "impl": "CUDA · lnl_bwd_kernel",
+       "code": [
+        "dxn = dout @ W;   s1 = dout · (W γ);   s2 = dout · u",
+        "dx = rstd (dxn γ - s1 / D - x̂ s2 / D)     # x̂ rebuilt from x, mean, rstd",
+        "Gn_partial += doutᵀ @ x̂                   # mma over the rows, summed per CTA in shared memory"
+       ],
+       "reads": [
+        "x, dout",
+        "mean / rstd, u",
+        "W, γ"
+       ],
+       "writes": [
+        "dx",
+        "Gn partials  [P, n_head, d_norm] fp32"
+       ]
+      },
+      {
+       "id": "L3",
+       "name": "weight gradient",
+       "impl": "CUDA · lnl_reduce_kernel",
+       "code": [
+        "Gn = Σ_p partials[p]          # fixed order",
+        "dW = γ · Gn                   # bf16"
+       ],
+       "reads": [
+        "Gn partials, γ"
+       ],
+       "writes": [
+        "dW, Gn"
+       ]
+      },
+      {
+       "id": "L4",
+       "name": "LayerNorm-scale gradient",
+       "impl": "CUDA · lnl_dgamma_kernel",
+       "code": [
+        "dγ[c] = Σ_h W[h, c] · Gn[h, c]"
+       ],
+       "reads": [
+        "W, Gn"
+       ],
+       "writes": [
+        "dγ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at the token pair, L = 768, d_norm 384, 16 outputs)",
+     "hbm": [
+      {
+       "name": "x, dx",
+       "shape": "[L,L,384] bf16",
+       "size": "453 MB each"
+      },
+      {
+       "name": "dout",
+       "shape": "[L,L,16] bf16",
+       "size": "18.9 MB"
+      },
+      {
+       "name": "mean / rstd, u",
+       "shape": "[L,L,2] fp32, [L,L,16] fp32",
+       "size": "4.7 / 37.7 MB"
+      },
+      {
+       "name": "Gn partials, dW, dγ",
+       "shape": "fp32 / bf16",
+       "size": "< 8 MB"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

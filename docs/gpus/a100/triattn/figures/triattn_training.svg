@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3194" height="748" viewBox="0 0 3194 748">
+<defs>
+<marker id="head-1f2328" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#1f2328"/></marker>
+<marker id="head-b3261e" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#b3261e"/></marker>
+<marker id="head-1a5fb4" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#1a5fb4"/></marker>
+</defs>
+<rect width="3194" height="748" fill="#ffffff"/>
+<text x="30.0" y="28.0" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="bold" fill="#1f2328" text-anchor="start">A100 · TriangleAttention (starting node) · training · D128, 4 heads × 32, bf16, broadcast dropout, L = 128k</text>
+<text x="3164.0" y="24.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#b3261e" text-anchor="end">red: written to HBM</text>
+<text x="3164.0" y="38.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a5fb4" text-anchor="end">blue, dashed: read from HBM</text>
+<text x="30.0" y="60.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#57606a" text-anchor="start">forward (saves x, qkvg, bias, mean / rstd, xh, o, lse, ds)</text>
+<rect x="30" y="70" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M36,70 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="30" y1="116" x2="514" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="40.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">P1 · weight pack</text>
+<text x="40.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · f1_pack_kernel</text>
+<text x="40.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">W' = bf16(cat(W_q, W_k, W_v, W_g, W_b) · γ)</text>
+<text x="40.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">b  = cat(W_q, ..., W_b) @ β</text>
+<line x1="514.0" y1="93.0" x2="557.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="88.1" y1="278.0" x2="88.1" y2="181.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="94.1" y="197.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W_q, W_k, W_v, W_g, W_b</text>
+<text x="94.1" y="210.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">γ, β</text>
+<line x1="455.9" y1="179.0" x2="455.9" y2="276.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="449.9" y="223.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">W', b</text>
+<rect x="560" y="70" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M566,70 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="560" y1="116" x2="1044" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="570.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">F1 · LN + q|k|v|g + bias (saving)</text>
+<text x="570.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · f1_kernel</text>
+<text x="570.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">xh, (mean, rstd) = LN statistics in registers</text>
+<text x="570.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">qkvg = xh @ W'.T + b;  bias = ... masked</text>
+<text x="570.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">xh1 = [xh | 1 | 0]                 # the weight-gradient operand</text>
+<line x1="1044.0" y1="93.0" x2="1087.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="618.1" y1="278.0" x2="618.1" y2="181.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="624.1" y="197.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">x</text>
+<text x="624.1" y="210.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W', b</text>
+<text x="624.1" y="223.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">mask</text>
+<line x1="985.9" y1="179.0" x2="985.9" y2="276.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="979.9" y="236.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">qkvg, bias</text>
+<text x="979.9" y="249.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">xh1, mean / rstd</text>
+<rect x="1090" y="70" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1096,70 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="1090" y1="116" x2="1574" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="1100.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">F2 · attention + LSE</text>
+<text x="1100.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · attn_fwd_kernel</text>
+<text x="1100.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">s = q[h] @ k[h].T / sqrt(32) + bias[h]</text>
+<text x="1100.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">o[h] = softmax(s, -1) @ v[h]</text>
+<text x="1100.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">lse = logsumexp(s)   # base 2, per (h, i, j)</text>
+<line x1="1574.0" y1="93.0" x2="1617.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="1148.1" y1="278.0" x2="1148.1" y2="181.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="1154.1" y="197.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">q, k, v</text>
+<text x="1154.1" y="210.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">bias</text>
+<line x1="1515.9" y1="179.0" x2="1515.9" y2="276.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="1509.9" y="223.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">o</text>
+<text x="1509.9" y="236.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">lse</text>
+<rect x="1620" y="70" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1626,70 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="1620" y1="116" x2="2104" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="1630.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">F3 · gate + out proj + dropout + residual</text>
+<text x="1630.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · f3_kernel</text>
+<text x="1630.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">a = sigmoid(g) · o</text>
+<text x="1630.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">y = x + (a @ W_o.T) · ds</text>
+<line x1="1678.1" y1="278.0" x2="1678.1" y2="181.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="1684.1" y="197.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">g, o</text>
+<text x="1684.1" y="210.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">x, ds</text>
+<text x="1684.1" y="223.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W_o</text>
+<line x1="2045.9" y1="179.0" x2="2045.9" y2="276.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="2039.9" y="236.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">y</text>
+<rect x="30" y="278" width="3134" height="88" rx="8" fill="#f6f8fa" stroke="#1f2328" stroke-width="1.4"/>
+<text x="42.0" y="300.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">HBM (sizes at L = 768)</text>
+<rect x="42" y="310" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="50.0" y="326.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">x, y, o</text>
+<text x="50.0" y="342.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L,128] bf16  151 MB each</text>
+<rect x="302" y="310" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="310.0" y="326.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">qkvg</text>
+<text x="310.0" y="342.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L,512] bf16  604 MB</text>
+<rect x="562" y="310" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="570.0" y="326.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">xh1</text>
+<text x="570.0" y="342.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L,136] bf16  160 MB</text>
+<rect x="822" y="310" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="830.0" y="326.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">bias, lse, mean / rstd</text>
+<text x="830.0" y="342.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[4,L,L] bf16 / fp32 / [L,L,2] fp32  4.7 / 9.4 / 4.7 MB</text>
+<rect x="1082" y="310" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="1090.0" y="326.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">ds, mask, W_*</text>
+<text x="1090.0" y="342.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">bf16  &lt; 1 MB</text>
+<text x="30.0" y="418.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#57606a" text-anchor="start">backward; D = [dq | dk | dv | dg | db], one buffer, each slice written by its producer</text>
+<rect x="30" y="428" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M36,428 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="30" y1="474" x2="514" y2="474" stroke="#1f2328" stroke-width="1"/>
+<text x="40.0" y="447.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">B1 · gate + out-proj backward</text>
+<text x="40.0" y="465.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · b3_kernel</text>
+<text x="40.0" y="494.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dy = dout · ds;   da = dy @ W_o</text>
+<text x="40.0" y="509.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">do = da · sigmoid(g);   dg = da · o · s · (1 - s)</text>
+<text x="40.0" y="524.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">a = sigmoid(g) · o;     Δ = Σ_d o · do</text>
+<line x1="514.0" y1="451.0" x2="557.0" y2="451.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="88.1" y1="636.0" x2="88.1" y2="539.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="94.1" y="555.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">dout, ds</text>
+<text x="94.1" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">g, o</text>
+<text x="94.1" y="581.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W_o</text>
+<line x1="455.9" y1="537.0" x2="455.9" y2="634.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="449.9" y="594.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">dg (D's gate slice), do, Δ</text>
+<text x="449.9" y="607.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">dy, a</text>
+<rect x="560" y="428" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M566,428 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="560" y1="474" x2="1044" y2="474" stroke="#1f2328" stroke-width="1"/>
+<text x="570.0" y="447.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">B2 · bias transpose</text>
+<text x="570.0" y="465.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · bias_transpose_kernel</text>
+<text x="570.0" y="494.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">bias_t[h, k, j] = bias[h, j, k]</text>
+<line x1="1044.0" y1="451.0" x2="1087.0" y2="451.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="618.1" y1="636.0" x2="618.1" y2="539.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="624.1" y="555.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">bias</text>
+<line x1="985.9" y1="537.0" x2="985.9" y2="634.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="979.9" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">bias_t</text>
+<rect x="1090" y="428" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1096,428 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="1090" y1="474" x2="1574" y2="474" stroke="#1f2328" stroke-width="1"/>
+<text x="1100.0" y="447.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">B3 · attention backward, key side</text>
+<text x="1100.0" y="465.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · attn_bwd_dkv_kernel</text>
+<text x="1100.0" y="494.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">P^T = exp2(scale · k q^T + bias_t - lse);  dS^T = P^T (v do^T - Δ)</text>
+<text x="1100.0" y="509.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dv = P^T do;   dk = sm_scale · dS^T q</text>
+<text x="1100.0" y="524.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve"># per pair row i, head h, 128-key tile</text>
+<line x1="1574.0" y1="451.0" x2="1617.0" y2="451.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="1148.1" y1="636.0" x2="1148.1" y2="539.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="1154.1" y="555.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">q, k, v</text>
+<text x="1154.1" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">do, lse, Δ</text>
+<text x="1154.1" y="581.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">bias_t</text>
+<line x1="1515.9" y1="537.0" x2="1515.9" y2="634.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="1509.9" y="594.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">dk, dv (D's k, v slices)</text>
+<rect x="1620" y="428" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1626,428 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="1620" y1="474" x2="2104" y2="474" stroke="#1f2328" stroke-width="1"/>
+<text x="1630.0" y="447.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">B4 · attention backward, query side</text>
+<text x="1630.0" y="465.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · attn_bwd_dq_kernel, db_reduce_kernel</text>
+<text x="1630.0" y="494.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">P = exp2(scale · q k^T + bias - lse);  dS = P (do v^T - Δ)</text>
+<text x="1630.0" y="509.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dq = sm_scale · dS @ k</text>
+<text x="1630.0" y="524.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">db[h, j, k] = Σ_i dS_i   # R = 4 rows per CTA, then a fixed-order reduce</text>
+<line x1="2104.0" y1="451.0" x2="2147.0" y2="451.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="1678.1" y1="636.0" x2="1678.1" y2="539.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="1684.1" y="555.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">q, k, v</text>
+<text x="1684.1" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">do, lse, Δ</text>
+<text x="1684.1" y="581.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">bias</text>
+<line x1="2045.9" y1="537.0" x2="2045.9" y2="634.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="2039.9" y="594.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">dq (D's q slice)</text>
+<text x="2039.9" y="607.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">db partials, db</text>
+<rect x="2150" y="428" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M2156,428 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="2150" y1="474" x2="2634" y2="474" stroke="#1f2328" stroke-width="1"/>
+<text x="2160.0" y="447.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">B5 · projection dgrad + LN backward + residual</text>
+<text x="2160.0" y="465.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · b1_kernel</text>
+<text x="2160.0" y="494.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dxn = D @ W_cat               # K = 516</text>
+<text x="2160.0" y="509.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dx = rstd (dxn γ - mean(dxn γ) - xh mean(dxn γ xh))</text>
+<text x="2160.0" y="524.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dx_pair = dout + dx</text>
+<line x1="2634.0" y1="451.0" x2="2677.0" y2="451.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="2208.1" y1="636.0" x2="2208.1" y2="539.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="2214.1" y="555.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">D, db</text>
+<text x="2214.1" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">x, mean / rstd, dout</text>
+<text x="2214.1" y="581.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">W_*, γ</text>
+<line x1="2575.9" y1="537.0" x2="2575.9" y2="634.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="2569.9" y="594.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">dx_pair</text>
+<rect x="2680" y="428" width="484" height="109" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M2686,428 h472 a6,6 0 0 1 6,6 v40 h-484 v-40 a6,6 0 0 1 6,-6 z" fill="#dbe7fb"/>
+<line x1="2680" y1="474" x2="3164" y2="474" stroke="#1f2328" stroke-width="1"/>
+<text x="2690.0" y="447.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">B6 · weight and LN-parameter gradients</text>
+<text x="2690.0" y="465.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">cuBLAS</text>
+<text x="2690.0" y="494.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">G = Dᵀ @ xh1                   # [516, 136] fp32, K = L²</text>
+<text x="2690.0" y="509.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dW = G[:, :128] γ + G[:, 128] βᵀ;  dγ = Σ_o W ⊙ G;  dβ = Σ_o W s</text>
+<text x="2690.0" y="524.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">dW_o = dyᵀ @ a</text>
+<line x1="2738.1" y1="636.0" x2="2738.1" y2="539.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="2744.1" y="555.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">D, db, xh1</text>
+<text x="2744.1" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">dy, a</text>
+<line x1="3105.9" y1="537.0" x2="3105.9" y2="634.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="3099.9" y="581.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">dW_*, dW_o, dγ, dβ</text>
+<rect x="30" y="636" width="3134" height="88" rx="8" fill="#f6f8fa" stroke="#1f2328" stroke-width="1.4"/>
+<text x="42.0" y="658.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">HBM (sizes at L = 768)</text>
+<rect x="42" y="668" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="50.0" y="684.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">D</text>
+<text x="50.0" y="700.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L,512] bf16  604 MB</text>
+<rect x="302" y="668" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="310.0" y="684.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">dout, dx_pair, do, dy, a</text>
+<text x="310.0" y="700.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L,L,128] bf16  151 MB each</text>
+<rect x="562" y="668" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="570.0" y="684.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">db partials</text>
+<text x="570.0" y="700.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[L/4,4,L,L] bf16  0.91 GB</text>
+<rect x="822" y="668" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="830.0" y="684.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">db, bias_t, lse, Δ</text>
+<text x="830.0" y="700.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[4,L,L] bf16 / fp32  4.7 / 9.4 MB</text>
+<rect x="1082" y="668" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="1090.0" y="684.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">G, W_*, dW_*</text>
+<text x="1090.0" y="700.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">fp32 / bf16  &lt; 1 MB</text>
+</svg>

@@ -1,0 +1,335 @@
+{
+ "figures": {
+  "inference": {
+   "title": "A100 · TriMul · inference · D128, bf16, L a multiple of 16 (one direction: H = 128, P = 2H = 256 planes; bidirectional: H = 256, P = 512)",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "weight pack",
+       "impl": "CUDA · pack_kernel",
+       "code": [
+        "w1 = bf16(0.5 W_in)   # K1's granule-major 64-row blocks",
+        "W_g' = bf16(0.5 W_g diag γ), W_o' = bf16(0.5 W_o diag γ_o)",
+        "s = Σ_k W', b = 0.5 W β   # folded LayerNorm affines"
+       ],
+       "reads": [
+        "W_l, W_lg, W_r, W_rg (any strides)",
+        "W_g, W_o",
+        "γ, β, γ_o, β_o"
+       ],
+       "writes": [
+        "w1, W_g', W_o'",
+        "s, b (row sums, bias terms)"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "input LN + gated proj",
+       "impl": "CUDA · k1_kernel",
+       "code": [
+        "x_n = layer_norm(x, (128,), γ, β)",
+        "m = mask[:, None] & mask[None, :]",
+        "a = sigmoid(x_n W_lg^T) * (x_n W_l^T) * m",
+        "b = sigmoid(x_n W_rg^T) * (x_n W_r^T) * m",
+        "# channel-major planes [P, L, L]"
+       ],
+       "reads": [
+        "x",
+        "w1",
+        "mask [L]",
+        "γ, β"
+       ],
+       "writes": [
+        "a | b planes",
+        "LN_{in} statistics"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "contractions",
+       "impl": "cuBLAS · bmm / CUDA · contract_kernel",
+       "code": [
+        "# outgoing: X[c,i,j] = Σ_k a[c,i,k] b[c,j,k]",
+        "# incoming: X[c,i,j] = Σ_k a[c,k,i] b[c,k,j]",
+        "# bidirectional: outgoing on the first H/2",
+        "# channels, incoming on the rest; one launch",
+        "# for both halves at L <= 512 (contract_kernel)"
+       ],
+       "reads": [
+        "a | b planes"
+       ],
+       "writes": [
+        "X [H, L, L]"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "output LN + proj + gate",
+       "impl": "CUDA · k3_kernel",
+       "code": [
+        "o = layer_norm(X, (H,), γ_o, β_o) @ W_o^T",
+        "g = sigmoid(layer_norm(x, (128,), γ, β) @ W_g^T)",
+        "y = x + g * o"
+       ],
+       "reads": [
+        "X",
+        "x",
+        "W_o', W_g', s, b",
+        "LN_{in} statistics"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm": [
+      {"name": "x", "shape": "[L, L, 128] bf16", "size": "256 L² B"},
+      {"name": "weights", "shape": "4 x [H, 128], [128, 128], [128, H] bf16", "size": "0.2 MB (H = 128), 0.36 MB (H = 256)"},
+      {"name": "mask", "shape": "[L] bool", "size": "L B"},
+      {"name": "a | b planes", "shape": "[2H, L, L] bf16", "size": "4H L² B"},
+      {"name": "X", "shape": "[H, L, L] bf16", "size": "2H L² B"},
+      {"name": "LN_{in} statistics", "shape": "[L², 2] fp32", "size": "8 L² B"},
+      {"name": "y", "shape": "[L, L, 128] bf16", "size": "256 L² B"}
+     ],
+     "hbm_title": "HBM"
+    }
+   ]
+  },
+  "training": {
+   "title": "A100 · TriMul · training · D128, bf16, L a multiple of 16, dropout row scale (one direction: H = 128, P = 2H = 256 planes; bidirectional: H = 256, P = 512)",
+   "panels": [
+    {
+     "label": "forward (saving for the backward)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "weight pack",
+       "impl": "CUDA · pack_kernel",
+       "code": [
+        "w1 = bf16(0.5 W_in)",
+        "W_g' = bf16(0.5 W_g diag γ), W_o' = bf16(0.5 W_o diag γ_o)",
+        "s = Σ_k W', b = 0.5 W β"
+       ],
+       "reads": [
+        "W_l, W_lg, W_r, W_rg (any strides)",
+        "W_g, W_o",
+        "γ, β, γ_o, β_o"
+       ],
+       "writes": [
+        "w1, W_g', W_o'",
+        "s, b"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "input LN + gated proj",
+       "impl": "CUDA · k1_kernel",
+       "code": [
+        "x_n = layer_norm(x, (128,), γ, β)",
+        "a = sigmoid(x_n W_lg^T) * (x_n W_l^T) * m",
+        "b = sigmoid(x_n W_rg^T) * (x_n W_r^T) * m",
+        "# channel-major planes [P, L, L]"
+       ],
+       "reads": [
+        "x",
+        "w1",
+        "mask [L]",
+        "γ, β"
+       ],
+       "writes": [
+        "a | b planes",
+        "LN_{in} statistics"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "contractions",
+       "impl": "cuBLAS · bmm / CUDA · contract_kernel",
+       "code": [
+        "# outgoing: X = a b^T ; incoming: X = a^T b",
+        "# bidirectional: one half each (H/2 channels)"
+       ],
+       "reads": [
+        "a | b planes"
+       ],
+       "writes": [
+        "X [H, L, L]"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "output LN + proj + gate, saving",
+       "impl": "CUDA · k3_kernel",
+       "code": [
+        "o = layer_norm(X, (H,), γ_o, β_o) @ W_o^T",
+        "g = sigmoid(layer_norm(x, (128,), γ, β) @ W_g^T)",
+        "y = x + ds * (g * o)",
+        "# also: μ_o, r_o, μ_i, r_i and x_n"
+       ],
+       "reads": [
+        "X",
+        "x",
+        "W_o', W_g', s, b",
+        "LN_{in} statistics",
+        "ds [L, 128]"
+       ],
+       "writes": [
+        "y",
+        "LN statistics [L², 4]",
+        "x_n"
+       ]
+      }
+     ],
+     "hbm": [
+      {"name": "x", "shape": "[L, L, 128] bf16", "size": "256 L² B"},
+      {"name": "weights", "shape": "4 x [H, 128], [128, 128], [128, H] bf16", "size": "0.2 MB (H = 128), 0.36 MB (H = 256)"},
+      {"name": "a | b planes", "shape": "[2H, L, L] bf16", "size": "4H L² B"},
+      {"name": "X", "shape": "[H, L, L] bf16", "size": "2H L² B"},
+      {"name": "LN statistics", "shape": "[L², 4] fp32", "size": "16 L² B"},
+      {"name": "x_n", "shape": "[L, L, 128] bf16", "size": "256 L² B"},
+      {"name": "y", "shape": "[L, L, 128] bf16", "size": "256 L² B"}
+     ],
+     "hbm_title": "HBM (saved for the backward: a | b planes, X, LN statistics, x_n)"
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "weight pack (training)",
+       "impl": "CUDA · pack_kernel",
+       "code": [
+        "# the forward's folds, and for the backward:",
+        "W_{dx} = [W_in ; W_g]   # unscaled rows, K1 order",
+        "W_o·γ_o and its row sums, W_g·γ"
+       ],
+       "reads": [
+        "W_l, W_lg, W_r, W_rg",
+        "W_g, W_o",
+        "γ, β, γ_o, β_o"
+       ],
+       "writes": [
+        "w1, W_{dx}",
+        "folded W_o, W_g, row sums"
+       ]
+      },
+      {
+       "id": "B1",
+       "name": "output-side backward",
+       "impl": "CUDA · b1g_kernel (H = 128) / b1_kernel (H = 256)",
+       "code": [
+        "o = r_o (X W_o'^T) - r_o μ_o s_o + b_o ;  s = sigmoid(x_n W_g^T)",
+        "d_upd = dy * ds ;  d_o = d_upd * s ;  d_g = d_upd * o * s (1 - s)",
+        "A_o = d_o r_o ;  dX = LN_out backward of (A_o W_o')",
+        "G += A_o^T X^T   # on chip at H = 128"
+       ],
+       "reads": [
+        "X, x_n",
+        "dy, ds",
+        "W_o', W_g",
+        "LN statistics"
+       ],
+       "writes": [
+        "dX [H, L, L]",
+        "d_g",
+        "G, v_o, S_o (fp32 partials)",
+        "A_o (H = 256)"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "contraction backward",
+       "impl": "cuBLAS · bmm",
+       "code": [
+        "# outgoing: dA = dX b ;  db = dX^T a",
+        "# incoming: dA = b dX^T ;  db = a dX"
+       ],
+       "reads": [
+        "dX",
+        "a | b planes"
+       ],
+       "writes": [
+        "dA | db planes"
+       ]
+      },
+      {
+       "id": "W",
+       "name": "weight gradients (side stream, under B2)",
+       "impl": "cuBLAS · GEMM + PyTorch",
+       "code": [
+        "dW_g = d_g^T x_n",
+        "dW_o = (G - v_o 1^T) γ_o + S_o β_o^T",
+        "dγ_o = Σ W_o (G - v_o) ;  dβ_o = Σ W_o S_o"
+       ],
+       "reads": [
+        "d_g, x_n",
+        "G, v_o, S_o",
+        "W_o, γ_o, β_o"
+       ],
+       "writes": [
+        "dW_g, dW_o",
+        "dγ_o, dβ_o"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "input-side backward",
+       "impl": "CUDA · b7j_kernel",
+       "code": [
+        "# sources (one 64-row weight block each):",
+        "(g, p) = x_n W_in^T ;  dp = dA s m ;  dg = dA p s (1 - s) m",
+        "dW_in += x_n^T [dg | dp]   # registers, whole launch",
+        "# dgp tile -> L2 ring -> consumers:",
+        "dx_n = [dgp | d_g] [W_in ; W_g]",
+        "dz = LN_in backward(dx_n) + dy ;  dγ, dβ partials"
+       ],
+       "reads": [
+        "dA | db planes",
+        "x_n, x, dy, d_g",
+        "W_{dx}, w1",
+        "LN statistics, mask [L]"
+       ],
+       "writes": [
+        "dz",
+        "dW_in partials (fp32)",
+        "dγ, dβ partials (fp32)"
+       ]
+      },
+      {
+       "id": "F",
+       "name": "finalize",
+       "impl": "CUDA · finalize_kernel",
+       "code": [
+        "dW_{l,lg,r,rg} = Σ_groups dW_in[row]   # fixed order, K1 row order undone",
+        "dγ, dβ = Σ_partials",
+        "# written in each parameter's strides and dtype"
+       ],
+       "reads": [
+        "dW_in partials",
+        "dγ, dβ partials"
+       ],
+       "writes": [
+        "dW_l, dW_lg, dW_r, dW_rg",
+        "dγ, dβ"
+       ]
+      }
+     ],
+     "hbm": [
+      {"name": "dy", "shape": "[L, L, 128] bf16", "size": "256 L² B"},
+      {"name": "x, x_n", "shape": "[L, L, 128] bf16 x 2", "size": "512 L² B"},
+      {"name": "X, dX", "shape": "[H, L, L] bf16 x 2", "size": "4H L² B"},
+      {"name": "a | b planes", "shape": "[2H, L, L] bf16", "size": "4H L² B"},
+      {"name": "dA | db planes", "shape": "[2H, L, L] bf16", "size": "4H L² B"},
+      {"name": "d_g", "shape": "[L, L, 128] bf16", "size": "256 L² B"},
+      {"name": "dz", "shape": "[L, L, 128] bf16", "size": "256 L² B"},
+      {"name": "gradients", "shape": "dW_l, dW_lg, dW_r, dW_rg, dW_g, dW_o, dγ, dβ, dγ_o, dβ_o", "size": "≈ 0.2-0.4 MB"}
+     ],
+     "hbm_title": "HBM (the dgp tiles of B3 stay in an L2 ring)"
+    }
+   ]
+  }
+ }
+}

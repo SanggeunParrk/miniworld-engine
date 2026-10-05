@@ -1,0 +1,2981 @@
+{
+  "date": "2026-10-04",
+  "baseline": "anthropic-compare-20261004.json",
+  "method": {
+    "dtype": "BF16 activations and GEMM weights, FP32 normalization affine where required",
+    "tf32": false,
+    "batch": 1,
+    "augmentations": 2,
+    "msa_depth": 64,
+    "swa_batch": 2,
+    "swa_valid_lengths": "[L, L]",
+    "length_meaning": "actual attention axis; atom cases use L atoms, not 8*L tokens",
+    "widths": "pair 128 (post-projection OPM output 256), MSA 64, token single 768/cond384/pair128, atom128/cond128/pair16",
+    "mask": "every seventh key masked; SWA uses fully valid sequences",
+    "timing": "9 alternating rounds on the same GPU for each pair, CUDA events, median per-call; 8 calls/captured inference graph",
+    "compile": false,
+    "warmup": "8 calls per inference backend; compilation and packing excluded",
+    "weights": "identical randomized nonzero parameters, independent FP32 reference",
+    "ownership": "TRIMUL_NATIVE_BUILD_DIR unset during MiniWorld calls; no Anthropic selection allowed; executed CUDA kernel names recorded",
+    "triangle_attention_row": "block:triattn_native in standalone self-attention and Pairformer self-attention; bias-only uses the connected APB composition",
+    "accuracy": "output relative Frobenius <4%; residual-update relative error <8% where applicable",
+    "ratio": "Anthropic ms / MiniWorld ms: >1 means MiniWorld faster",
+    "scope": "public module dispatch, including its CUDA/Triton/library compositions; not pure single-kernel latency or full-model throughput"
+  },
+  "scope": "Every measured loss, including the starting TriAttn <5% deficit; neighbouring lengths rechecked.",
+  "before_after_caveat": "Before and after are separate runs. Every reported Anthropic/MiniWorld ratio pairs the two backends on one GPU in alternating rounds.",
+  "interpretation": "All six previously slower cells have median ratios >1. The two L768 TriangleAttention ratios remain within the 5% parity band; this is not a decisive lead or a claim about unmeasured shapes/masks.",
+  "changes": [
+    "Frozen Transition computes input gradients without the two parameter-gradient GEMMs; training with trainable parameters retains the existing path.",
+    "BF16 atom ConditionedTransition with <=4096 rows uses the existing row passes and cuBLAS instead of persistent atom kernels.",
+    "Masked inference TriangleAttention at L>=768 divisible by384 uses stable GPU key indices and 48-key tiles; runtime key/bias packing is included in timings. Stable online softmax retained; backward and smaller lengths keep the dense core."
+  ],
+  "validation": {
+    "gpu_tests_passed": 342,
+    "logs": [
+      {
+        "path": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/opt_tests_ct_dx_63570.log",
+        "expected": "211 passed"
+      },
+      {
+        "path": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/opt_ffn_test_63581.log",
+        "expected": "1 passed"
+      },
+      {
+        "path": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/opt_tri_final_tests_63603.log",
+        "expected": "130 passed"
+      },
+      {
+        "path": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/opt_final_lint_63605.log",
+        "expected": "All checks passed!"
+      },
+      {
+        "path": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/opt_final_types_63606.log",
+        "expected": "All checks passed!"
+      }
+    ],
+    "notes": "Ruff passed on six Python files in 63605; its initial ty invocation could not locate Torch. The corrected explicit Pixi Python environment passed in 63606. Fullgraph compiled large starting/ending modules, backward regression, all-masked/single-key/batch-specific masks, and graph replay with changed masks are included."
+  },
+  "summary": [
+    {
+      "family": "conditioned_transition",
+      "length": 128,
+      "previously_slower": true,
+      "before_ratio": 0.8916773783040258,
+      "after_ratio": 1.8879661144422093,
+      "before_miniworld_ms": 0.04385933421906971,
+      "after_miniworld_ms": 0.02073988589373502,
+      "after_anthropic_ms": 0.03915212763116715
+    },
+    {
+      "family": "conditioned_transition",
+      "length": 384,
+      "previously_slower": false,
+      "before_ratio": 1.008368666164651,
+      "after_ratio": 1.8625805411095993,
+      "before_miniworld_ms": 0.044056903748285206,
+      "after_miniworld_ms": 0.023953490787082247,
+      "after_anthropic_ms": 0.04460881991558764
+    },
+    {
+      "family": "conditioned_transition",
+      "length": 768,
+      "previously_slower": false,
+      "before_ratio": 1.133850936866184,
+      "after_ratio": 1.8493984559831365,
+      "before_miniworld_ms": 0.04423871494474865,
+      "after_miniworld_ms": 0.02717733383178711,
+      "after_anthropic_ms": 0.05026453894537848
+    },
+    {
+      "family": "triattn",
+      "length": 128,
+      "previously_slower": false,
+      "before_ratio": 1.663078624236752,
+      "after_ratio": 1.645905300826506,
+      "before_miniworld_ms": 0.06928633743861937,
+      "after_miniworld_ms": 0.06954430184274349,
+      "after_anthropic_ms": 0.11448124796152115
+    },
+    {
+      "family": "triattn",
+      "length": 384,
+      "previously_slower": false,
+      "before_ratio": 1.1637167359882907,
+      "after_ratio": 1.1403987594062266,
+      "before_miniworld_ms": 0.6382431983947754,
+      "after_miniworld_ms": 0.6623179912567139,
+      "after_anthropic_ms": 0.755779218673706
+    },
+    {
+      "family": "triattn",
+      "length": 768,
+      "previously_slower": true,
+      "before_ratio": 0.9549305935923743,
+      "after_ratio": 1.0235016413238855,
+      "before_miniworld_ms": 3.733001708984375,
+      "after_miniworld_ms": 3.525790786743164,
+      "after_anthropic_ms": 3.598835754394531
+    },
+    {
+      "family": "triattn_ending",
+      "length": 128,
+      "previously_slower": false,
+      "before_ratio": 1.6660477310914437,
+      "after_ratio": 1.6489982283013391,
+      "before_miniworld_ms": 0.06963343440361743,
+      "after_miniworld_ms": 0.0699153981118832,
+      "after_anthropic_ms": 0.11531612277030945
+    },
+    {
+      "family": "triattn_ending",
+      "length": 384,
+      "previously_slower": false,
+      "before_ratio": 1.140568248792469,
+      "after_ratio": 1.1200323911292285,
+      "before_miniworld_ms": 0.6539371967315674,
+      "after_miniworld_ms": 0.6694116115570068,
+      "after_anthropic_ms": 0.7508232116699218
+    },
+    {
+      "family": "triattn_ending",
+      "length": 768,
+      "previously_slower": true,
+      "before_ratio": 0.9485561573261789,
+      "after_ratio": 1.0109288297212624,
+      "before_miniworld_ms": 3.7654651641845702,
+      "after_miniworld_ms": 3.5619430541992188,
+      "after_anthropic_ms": 3.6004310607910157
+    },
+    {
+      "family": "transition_frozen_dx",
+      "length": 128,
+      "previously_slower": true,
+      "before_ratio": 0.9034998652318293,
+      "after_ratio": 1.1362602009028668,
+      "before_miniworld_ms": 0.666445897973102,
+      "after_miniworld_ms": 0.5290372453886887,
+      "after_anthropic_ms": 0.6035692141606257
+    },
+    {
+      "family": "transition_frozen_dx",
+      "length": 384,
+      "previously_slower": true,
+      "before_ratio": 0.8866116954404308,
+      "after_ratio": 1.1323043094299874,
+      "before_miniworld_ms": 5.213184038798015,
+      "after_miniworld_ms": 4.060800075531006,
+      "after_anthropic_ms": 4.6189225514729815
+    },
+    {
+      "family": "transition_frozen_dx",
+      "length": 768,
+      "previously_slower": true,
+      "before_ratio": 0.913270072271851,
+      "after_ratio": 1.1301806323601353,
+      "before_miniworld_ms": 20.24072519938151,
+      "after_miniworld_ms": 16.072704315185547,
+      "after_anthropic_ms": 18.345984141031902
+    }
+  ],
+  "results": [
+    {
+      "family": "conditioned_transition",
+      "length": 128,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          2,
+          1,
+          128,
+          128
+        ],
+        [
+          1,
+          1,
+          128,
+          128
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63572",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-e20a2a7d-11a0-8a61-56dc-fe68fd56e531, 1410 MHz, 300.00 W, 27"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.002740788273513317,
+          "finite": true,
+          "update_relative_frobenius": 0.006749543361365795
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0027129887603223324,
+          "finite": true,
+          "update_relative_frobenius": 0.0066810837015509605
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'dtk_kernels.ln_modulate+swiglu+gate_residual', 'gemm': 'cuBLAS'}",
+          "ada_ln_in.anthropic_selection": "{'row': 'dtk_kernels.ln_modulate', 'conditioning': 'upstream LN + cuBLAS'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "void adl::adaln_epi_kernel<128, __nv_bfloat16>(__nv_bfloat16 const*, long, __nv_bfloat16 const*, long, __nv_bfloat16 const*, __nv_bfloat16*, float2*, long, long, float)",
+          "void adl::cond_ln_kernel<128, __nv_bfloat16>(__nv_bfloat16 const*, long, float const*, __nv_bfloat16*, float2*, long, float)",
+          "void adl::gate_res_fwd_kernel<__nv_bfloat16>(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, long, int, long)",
+          "void adl::swiglu_fwd_kernel<__nv_bfloat16>(__nv_bfloat16 const*, long, __nv_bfloat16*, long, int)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8::Params)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8::Params)"
+        ],
+        "anthropic": [
+          "_gate_res_kernel",
+          "_ln_mod_kernel",
+          "_swiglu_kernel",
+          "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8::Params)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8::Params)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.02073988589373502,
+          "min": 0.020737727934663944,
+          "max": 0.02074824950911782,
+          "samples": [
+            0.020739432085644115,
+            0.020744818178090183,
+            0.020742272788828068,
+            0.02074824950911782,
+            0.020737886428833008,
+            0.02073988589373502,
+            0.020739432085644115,
+            0.02074224975976077,
+            0.020737727934663944
+          ]
+        },
+        "anthropic": {
+          "median": 0.03915212763116715,
+          "min": 0.039138979100166484,
+          "max": 0.03916821327615291,
+          "samples": [
+            0.03916374419597869,
+            0.039143148888932895,
+            0.03916821327615291,
+            0.039140254893201464,
+            0.03915642677469457,
+            0.039138979100166484,
+            0.03915774568598321,
+            0.03914166004099744,
+            0.03915212763116715
+          ]
+        }
+      },
+      "speedup_miniworld": 1.8879661144422093,
+      "paired_ratio_min_max": [
+        1.8864364859310794,
+        1.8883711007249775
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "conditioned_transition",
+      "length": 384,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          2,
+          1,
+          384,
+          128
+        ],
+        [
+          1,
+          1,
+          384,
+          128
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63572",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-e20a2a7d-11a0-8a61-56dc-fe68fd56e531, 1410 MHz, 300.00 W, 27"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0027200193144381046,
+          "finite": true,
+          "update_relative_frobenius": 0.00660444563254714
+        },
+        "anthropic": {
+          "relative_frobenius": 0.002720121294260025,
+          "finite": true,
+          "update_relative_frobenius": 0.006604693364351988
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'dtk_kernels.ln_modulate+swiglu+gate_residual', 'gemm': 'cuBLAS'}",
+          "ada_ln_in.anthropic_selection": "{'row': 'dtk_kernels.ln_modulate', 'conditioning': 'upstream LN + cuBLAS'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn",
+          "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn",
+          "void adl::adaln_epi_kernel<128, __nv_bfloat16>(__nv_bfloat16 const*, long, __nv_bfloat16 const*, long, __nv_bfloat16 const*, __nv_bfloat16*, float2*, long, long, float)",
+          "void adl::cond_ln_kernel<128, __nv_bfloat16>(__nv_bfloat16 const*, long, float const*, __nv_bfloat16*, float2*, long, float)",
+          "void adl::gate_res_fwd_kernel<__nv_bfloat16>(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, long, int, long)",
+          "void adl::swiglu_fwd_kernel<__nv_bfloat16>(__nv_bfloat16 const*, long, __nv_bfloat16*, long, int)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8::Params)"
+        ],
+        "anthropic": [
+          "_gate_res_kernel",
+          "_ln_mod_kernel",
+          "_swiglu_kernel",
+          "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn",
+          "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8::Params)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align8::Params)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.023953490787082247,
+          "min": 0.023943659526849882,
+          "max": 0.023959660062602924,
+          "samples": [
+            0.023956314411038668,
+            0.023953490787082247,
+            0.023953333399654213,
+            0.023953595192603816,
+            0.023946693520140803,
+            0.023959660062602924,
+            0.023943659526849882,
+            0.023955973145229365,
+            0.023949464162190754
+          ]
+        },
+        "anthropic": {
+          "median": 0.04460881991558764,
+          "min": 0.04460419229714267,
+          "max": 0.04464640962072166,
+          "samples": [
+            0.04462101086076484,
+            0.04460881991558764,
+            0.04461667336613299,
+            0.04460419229714267,
+            0.044612674828035284,
+            0.04460549354553223,
+            0.04464640962072166,
+            0.044606504670108654,
+            0.04460780591849821
+          ]
+        }
+      },
+      "speedup_miniworld": 1.8625805411095993,
+      "paired_ratio_min_max": [
+        1.8616914192014786,
+        1.8646443569186313
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "conditioned_transition",
+      "length": 768,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          2,
+          1,
+          768,
+          128
+        ],
+        [
+          1,
+          1,
+          768,
+          128
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63572",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-e20a2a7d-11a0-8a61-56dc-fe68fd56e531, 1410 MHz, 300.00 W, 28"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0027334708720445633,
+          "finite": true,
+          "update_relative_frobenius": 0.006640163715928793
+        },
+        "anthropic": {
+          "relative_frobenius": 0.002726213075220585,
+          "finite": true,
+          "update_relative_frobenius": 0.006622532848268747
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'dtk_kernels.ln_modulate+swiglu+gate_residual', 'gemm': 'cuBLAS'}",
+          "ada_ln_in.anthropic_selection": "{'row': 'dtk_kernels.ln_modulate', 'conditioning': 'upstream LN + cuBLAS'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_tn",
+          "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn",
+          "void adl::adaln_epi_kernel<128, __nv_bfloat16>(__nv_bfloat16 const*, long, __nv_bfloat16 const*, long, __nv_bfloat16 const*, __nv_bfloat16*, float2*, long, long, float)",
+          "void adl::cond_ln_kernel<128, __nv_bfloat16>(__nv_bfloat16 const*, long, float const*, __nv_bfloat16*, float2*, long, float)",
+          "void adl::gate_res_fwd_kernel<__nv_bfloat16>(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, long, int, long)",
+          "void adl::swiglu_fwd_kernel<__nv_bfloat16>(__nv_bfloat16 const*, long, __nv_bfloat16*, long, int)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8::Params)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align8::Params)"
+        ],
+        "anthropic": [
+          "_gate_res_kernel",
+          "_ln_mod_kernel",
+          "_swiglu_kernel",
+          "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn",
+          "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn",
+          "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8::Params)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.02717733383178711,
+          "min": 0.027160563292326752,
+          "max": 0.02718628070972584,
+          "samples": [
+            0.027160563292326752,
+            0.02718438572353787,
+            0.02718628070972584,
+            0.02717161531801577,
+            0.027175022054601598,
+            0.02717733383178711,
+            0.027184295654296874,
+            0.027182370645028573,
+            0.027175643708970812
+          ]
+        },
+        "anthropic": {
+          "median": 0.05026453894537848,
+          "min": 0.050250810545844,
+          "max": 0.05028232368263039,
+          "samples": [
+            0.05026183901606379,
+            0.050269136557707914,
+            0.05028232368263039,
+            0.050250810545844,
+            0.050279188800502465,
+            0.050255350164465,
+            0.050274594410045725,
+            0.050262596156146075,
+            0.05026453894537848
+          ]
+        }
+      },
+      "speedup_miniworld": 1.8493984559831365,
+      "paired_ratio_min_max": [
+        1.8490880288742837,
+        1.8505447944911908
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "triattn",
+      "length": 128,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          128,
+          128,
+          128
+        ],
+        [
+          1,
+          128
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63595",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 28"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0018771825125440955,
+          "finite": true,
+          "update_relative_frobenius": 0.013576052151620388
+        },
+        "anthropic": {
+          "relative_frobenius": 0.001903665717691183,
+          "finite": true,
+          "update_relative_frobenius": 0.01376758236438036
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=256|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.51, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=256|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.06954430184274349,
+          "min": 0.06952558373505215,
+          "max": 0.06956430201260548,
+          "samples": [
+            0.06953932204336491,
+            0.06955433791538454,
+            0.06952558373505215,
+            0.06955373512124116,
+            0.06953615062641648,
+            0.06956128354342479,
+            0.06954430184274349,
+            0.06956430201260548,
+            0.06953305568335191
+          ]
+        },
+        "anthropic": {
+          "median": 0.11448124796152115,
+          "min": 0.11434762179851532,
+          "max": 0.11454712599515915,
+          "samples": [
+            0.11448124796152115,
+            0.11453737318515778,
+            0.11439675092697144,
+            0.11445137858390808,
+            0.11434762179851532,
+            0.11446850001811981,
+            0.11450900137424469,
+            0.11449625343084335,
+            0.11454712599515915
+          ]
+        }
+      },
+      "speedup_miniworld": 1.645905300826506,
+      "paired_ratio_min_max": [
+        1.6444341650841277,
+        1.647376558809637
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "triattn",
+      "length": 384,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          384,
+          384,
+          128
+        ],
+        [
+          1,
+          384
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63595",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 31"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0017943332204595208,
+          "finite": true,
+          "update_relative_frobenius": 0.017100458964705467
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0018155224388465285,
+          "finite": true,
+          "update_relative_frobenius": 0.01730239763855934
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=400|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.61, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=400|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.6623179912567139,
+          "min": 0.650977611541748,
+          "max": 0.6712887763977051,
+          "samples": [
+            0.6598159790039062,
+            0.6600984096527099,
+            0.6681931972503662,
+            0.6623179912567139,
+            0.6712887763977051,
+            0.650977611541748,
+            0.6627324104309082,
+            0.6544519901275635,
+            0.6634088039398194
+          ]
+        },
+        "anthropic": {
+          "median": 0.755779218673706,
+          "min": 0.7459395885467529,
+          "max": 0.7663931846618652,
+          "samples": [
+            0.7587411880493165,
+            0.7514103889465332,
+            0.7663931846618652,
+            0.7599463939666748,
+            0.7621004104614257,
+            0.7503972053527832,
+            0.755779218673706,
+            0.7459395885467529,
+            0.7545115947723389
+          ]
+        }
+      },
+      "speedup_miniworld": 1.1403987594062266,
+      "paired_ratio_min_max": [
+        1.1352795358072831,
+        1.1527235223582788
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "triattn",
+      "length": 768,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          768,
+          768,
+          128
+        ],
+        [
+          1,
+          768
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63595",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1395 MHz, 300.00 W, 33"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0017345878295600414,
+          "finite": true,
+          "update_relative_frobenius": 0.020035671070218086
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0017495029605925083,
+          "finite": true,
+          "update_relative_frobenius": 0.020207950845360756
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+          "compact_mask_kernel(bool const*, int*, int*, int)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 48, 2, false, true> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 3.525790786743164,
+          "min": 3.5045616149902346,
+          "max": 3.546930694580078,
+          "samples": [
+            3.508275604248047,
+            3.5051494598388673,
+            3.5407012939453124,
+            3.5280902862548826,
+            3.528249740600586,
+            3.546930694580078,
+            3.5045616149902346,
+            3.525790786743164,
+            3.5178466796875
+          ]
+        },
+        "anthropic": {
+          "median": 3.598835754394531,
+          "min": 3.5909038543701173,
+          "max": 3.62933235168457,
+          "samples": [
+            3.616348648071289,
+            3.5925758361816404,
+            3.598835754394531,
+            3.5909393310546873,
+            3.5909038543701173,
+            3.598145294189453,
+            3.5993270874023438,
+            3.62933235168457,
+            3.6005218505859373
+          ]
+        }
+      },
+      "speedup_miniworld": 1.0235016413238855,
+      "paired_ratio_min_max": [
+        1.0144391317506243,
+        1.0308051749675482
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "triattn_ending",
+      "length": 128,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          128,
+          128,
+          128
+        ],
+        [
+          1,
+          128
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63595",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 33"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.001875554327853024,
+          "finite": true,
+          "update_relative_frobenius": 0.013652258552610874
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0019027129746973515,
+          "finite": true,
+          "update_relative_frobenius": 0.013849947601556778
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=256|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.51, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=256|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.0699153981118832,
+          "min": 0.06988641450989921,
+          "max": 0.06998626241144144,
+          "samples": [
+            0.06994264080839337,
+            0.06988641450989921,
+            0.069893738008895,
+            0.06994226293743781,
+            0.0699061132826895,
+            0.06993101677804622,
+            0.0699153981118832,
+            0.06998626241144144,
+            0.06990407547860775
+          ]
+        },
+        "anthropic": {
+          "median": 0.11531612277030945,
+          "min": 0.11520499736070633,
+          "max": 0.11542512476444244,
+          "samples": [
+            0.1152615025639534,
+            0.11525075137615204,
+            0.11532224714756012,
+            0.11542512476444244,
+            0.11520499736070633,
+            0.11531612277030945,
+            0.11525750160217285,
+            0.1153702512383461,
+            0.1154244989156723
+          ]
+        }
+      },
+      "speedup_miniworld": 1.6489982283013391,
+      "paired_ratio_min_max": [
+        1.6479432465198198,
+        1.6511841137358987
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "triattn_ending",
+      "length": 384,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          384,
+          384,
+          128
+        ],
+        [
+          1,
+          384
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63595",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 33"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0017938376404345036,
+          "finite": true,
+          "update_relative_frobenius": 0.01713234931230545
+        },
+        "anthropic": {
+          "relative_frobenius": 0.001814827206544578,
+          "finite": true,
+          "update_relative_frobenius": 0.017332814633846283
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=400|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.61, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=400|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.6694116115570068,
+          "min": 0.6654627799987793,
+          "max": 0.6783224105834961,
+          "samples": [
+            0.6671763896942139,
+            0.6673756122589112,
+            0.6765875816345215,
+            0.6654627799987793,
+            0.6779868125915527,
+            0.6656583786010742,
+            0.6694116115570068,
+            0.6707911968231202,
+            0.6783224105834961
+          ]
+        },
+        "anthropic": {
+          "median": 0.7508232116699218,
+          "min": 0.7442379951477051,
+          "max": 0.7578000068664551,
+          "samples": [
+            0.7508232116699218,
+            0.7442379951477051,
+            0.7578000068664551,
+            0.7461527824401856,
+            0.7570308208465576,
+            0.7478911876678467,
+            0.7553363800048828,
+            0.7501840114593505,
+            0.7553639888763428
+          ]
+        }
+      },
+      "speedup_miniworld": 1.1200323911292285,
+      "paired_ratio_min_max": [
+        1.1135766371430589,
+        1.1283586465553246
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "triattn_ending",
+      "length": 768,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          768,
+          768,
+          128
+        ],
+        [
+          1,
+          768
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63595",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 36"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0017346491804346442,
+          "finite": true,
+          "update_relative_frobenius": 0.02001568302512169
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0017495985375717282,
+          "finite": true,
+          "update_relative_frobenius": 0.02018818072974682
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+          "compact_mask_kernel(bool const*, int*, int*, int)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 48, 2, false, true> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 3.5619430541992188,
+          "min": 3.5524463653564453,
+          "max": 3.5892799377441404,
+          "samples": [
+            3.5641231536865234,
+            3.5524463653564453,
+            3.5892799377441404,
+            3.584461212158203,
+            3.559633255004883,
+            3.5828895568847656,
+            3.5563514709472654,
+            3.5619430541992188,
+            3.5555747985839843
+          ]
+        },
+        "anthropic": {
+          "median": 3.6004310607910157,
+          "min": 3.585012435913086,
+          "max": 3.623670959472656,
+          "samples": [
+            3.6234600067138674,
+            3.5912704467773438,
+            3.6020648956298826,
+            3.5862213134765626,
+            3.6004310607910157,
+            3.5968116760253905,
+            3.585012435913086,
+            3.623670959472656,
+            3.6018123626708984
+          ]
+        }
+      },
+      "speedup_miniworld": 1.0109288297212624,
+      "paired_ratio_min_max": [
+        1.0004910365084687,
+        1.0173298405769473
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "transition_frozen_dx",
+      "length": 128,
+      "mode": "forward+input_gradient",
+      "dtype": "bf16",
+      "c": 256,
+      "hidden": 1024,
+      "eps": 1e-05,
+      "parameter_gradients": false,
+      "cudagraph": true,
+      "tf32": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63565",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 28"
+      },
+      "accuracy": {
+        "miniworld": {
+          "forward_relative_frobenius": 0.002481840318068862,
+          "dx_relative_frobenius": 0.0025562962982803583
+        },
+        "esm_kd3": {
+          "forward_relative_frobenius": 0.002957505639642477,
+          "dx_relative_frobenius": 0.0034798914566636086
+        },
+        "esm_kd3:lean": {
+          "forward_relative_frobenius": 0.002957505639642477,
+          "dx_relative_frobenius": 0.0034798914566636086
+        },
+        "esm_t15_kd3": {
+          "forward_relative_frobenius": 0.0022404079791158438,
+          "dx_relative_frobenius": 0.0034798914566636086
+        }
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 0.5290372453886887,
+          "min": 0.5040198687849373,
+          "max": 0.5358521362830853,
+          "samples": [
+            0.5040198687849373,
+            0.5231404140077788,
+            0.5268480037820751,
+            0.526035867888352,
+            0.5350753192243904,
+            0.5295668963728279,
+            0.5290372453886887,
+            0.5329743418200262,
+            0.5358521362830853
+          ]
+        },
+        "esm_kd3": {
+          "median": 0.6035692141606257,
+          "min": 0.5923643112182617,
+          "max": 0.6076652453495905,
+          "samples": [
+            0.5991187829237717,
+            0.5923643112182617,
+            0.6033920141366812,
+            0.6035692141606257,
+            0.6062867824847882,
+            0.5960467778719388,
+            0.6071729293236365,
+            0.6055975327124963,
+            0.6076652453495905
+          ]
+        },
+        "esm_kd3:lean": {
+          "median": 0.712750564921986,
+          "min": 0.7010443427345969,
+          "max": 0.7197556495666504,
+          "samples": [
+            0.7136582027782093,
+            0.7011141777038574,
+            0.7010443427345969,
+            0.7126807299527255,
+            0.7153105302290483,
+            0.7046981724825773,
+            0.7197556495666504,
+            0.712936748157848,
+            0.712750564921986
+          ]
+        },
+        "esm_t15_kd3": {
+          "median": 0.6744020340290475,
+          "min": 0.6649899584181765,
+          "max": 0.6820276138630319,
+          "samples": [
+            0.6731383952688663,
+            0.6649899584181765,
+            0.6762975327512051,
+            0.6715043250550615,
+            0.67912986430716,
+            0.6744020340290475,
+            0.6761450260243518,
+            0.6820276138630319,
+            0.673356238831865
+          ]
+        }
+      },
+      "rounds": 9,
+      "speedup_miniworld": {
+        "esm_kd3": 1.1362602009028668,
+        "esm_kd3:lean": 1.3376567917383744,
+        "esm_t15_kd3": 1.2765371451773024
+      },
+      "status": "ok"
+    },
+    {
+      "family": "transition_frozen_dx",
+      "length": 384,
+      "mode": "forward+input_gradient",
+      "dtype": "bf16",
+      "c": 256,
+      "hidden": 1024,
+      "eps": 1e-05,
+      "parameter_gradients": false,
+      "cudagraph": true,
+      "tf32": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63565",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1410 MHz, 300.00 W, 32"
+      },
+      "accuracy": {
+        "miniworld": {
+          "forward_relative_frobenius": 0.0024815720971673727,
+          "dx_relative_frobenius": 0.0025565556716173887
+        },
+        "esm_kd3": {
+          "forward_relative_frobenius": 0.0029566658195108175,
+          "dx_relative_frobenius": 0.003479213220998645
+        },
+        "esm_kd3:lean": {
+          "forward_relative_frobenius": 0.0029566658195108175,
+          "dx_relative_frobenius": 0.003479213220998645
+        },
+        "esm_t15_kd3": {
+          "forward_relative_frobenius": 0.0022409262601286173,
+          "dx_relative_frobenius": 0.003479213220998645
+        }
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 4.060800075531006,
+          "min": 4.006015777587891,
+          "max": 4.138368129730225,
+          "samples": [
+            4.060800075531006,
+            4.018176078796387,
+            4.094336032867432,
+            4.011775970458984,
+            4.091263771057129,
+            4.058495998382568,
+            4.006015777587891,
+            4.138368129730225,
+            4.096255779266357
+          ]
+        },
+        "esm_kd3": {
+          "median": 4.6189225514729815,
+          "min": 4.518911997477214,
+          "max": 4.71500809987386,
+          "samples": [
+            4.640597343444824,
+            4.552021344502767,
+            4.6189225514729815,
+            4.608170509338379,
+            4.608511924743652,
+            4.518911997477214,
+            4.71500809987386,
+            4.636842727661133,
+            4.638208071390788
+          ]
+        },
+        "esm_kd3:lean": {
+          "median": 5.622988891601563,
+          "min": 5.527347183227539,
+          "max": 5.6633342742919925,
+          "samples": [
+            5.622988891601563,
+            5.527347183227539,
+            5.6588287353515625,
+            5.608857727050781,
+            5.607219314575195,
+            5.545779037475586,
+            5.6633342742919925,
+            5.645107269287109,
+            5.650841522216797
+          ]
+        },
+        "esm_t15_kd3": {
+          "median": 5.3114879608154295,
+          "min": 5.217075347900391,
+          "max": 5.493964767456054,
+          "samples": [
+            5.319270324707031,
+            5.217075347900391,
+            5.389516830444336,
+            5.309439849853516,
+            5.292031860351562,
+            5.3037055969238285,
+            5.3114879608154295,
+            5.493964767456054,
+            5.359411239624023
+          ]
+        }
+      },
+      "rounds": 9,
+      "speedup_miniworld": {
+        "esm_kd3": 1.1323043094299874,
+        "esm_kd3:lean": 1.3795138357372954,
+        "esm_t15_kd3": 1.309906970490652
+      },
+      "status": "ok"
+    },
+    {
+      "family": "transition_frozen_dx",
+      "length": 768,
+      "mode": "forward+input_gradient",
+      "dtype": "bf16",
+      "c": 256,
+      "hidden": 1024,
+      "eps": 1e-05,
+      "parameter_gradients": false,
+      "cudagraph": true,
+      "tf32": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63565",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-68616466-8d6f-cc15-f4eb-c7c1c076df49, 1395 MHz, 300.00 W, 34"
+      },
+      "accuracy": {
+        "miniworld": {
+          "forward_relative_frobenius": 0.002481456845998764,
+          "dx_relative_frobenius": 0.0025569221470505
+        },
+        "esm_kd3": {
+          "forward_relative_frobenius": 0.0029570104088634253,
+          "dx_relative_frobenius": 0.003478911006823182
+        },
+        "esm_kd3:lean": {
+          "forward_relative_frobenius": 0.0029570104088634253,
+          "dx_relative_frobenius": 0.003478911006823182
+        },
+        "esm_t15_kd3": {
+          "forward_relative_frobenius": 0.002240739995613694,
+          "dx_relative_frobenius": 0.003478911006823182
+        }
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 16.072704315185547,
+          "min": 15.955968221028646,
+          "max": 16.482645670572918,
+          "samples": [
+            16.232789357503254,
+            15.989419301350912,
+            16.072704315185547,
+            15.961770375569662,
+            16.26760482788086,
+            15.96347681681315,
+            16.169301350911457,
+            15.955968221028646,
+            16.482645670572918
+          ]
+        },
+        "esm_kd3": {
+          "median": 18.345984141031902,
+          "min": 17.741141001383465,
+          "max": 18.637823740641277,
+          "samples": [
+            18.345984141031902,
+            17.741141001383465,
+            18.578773498535156,
+            18.497535705566406,
+            18.20228322347005,
+            17.799850463867188,
+            18.637823740641277,
+            18.59276835123698,
+            18.329600016276043
+          ]
+        },
+        "esm_kd3:lean": {
+          "median": 22.197588602701824,
+          "min": 22.073343912760418,
+          "max": 22.89459228515625,
+          "samples": [
+            22.128982543945312,
+            22.073343912760418,
+            22.89459228515625,
+            22.32012685139974,
+            22.197588602701824,
+            22.13512420654297,
+            22.757718404134113,
+            22.457003275553387,
+            22.172330220540363
+          ]
+        },
+        "esm_t15_kd3": {
+          "median": 20.521642049153645,
+          "min": 20.421290079752605,
+          "max": 21.006336212158203,
+          "samples": [
+            20.421290079752605,
+            20.486143747965496,
+            20.992000579833984,
+            20.723370869954426,
+            20.485802968343098,
+            20.442452748616535,
+            21.006336212158203,
+            20.70630391438802,
+            20.521642049153645
+          ]
+        }
+      },
+      "rounds": 9,
+      "speedup_miniworld": {
+        "esm_kd3": 1.1301806323601353,
+        "esm_kd3:lean": 1.3866104771881322,
+        "esm_t15_kd3": 1.2812312543604798
+      },
+      "status": "ok"
+    }
+  ],
+  "composite_results": [
+    {
+      "family": "pairformer",
+      "length": 768,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          768,
+          768,
+          128
+        ],
+        [
+          1,
+          768
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63597",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-9f08bfb1-f4e4-2e88-d809-72b3ff487384, 1395 MHz, 300.00 W, 32"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.005605960264801979,
+          "finite": true,
+          "update_relative_frobenius": 0.00820367131382227
+        },
+        "anthropic": {
+          "relative_frobenius": 0.00571436295285821,
+          "finite": true,
+          "update_relative_frobenius": 0.008362306281924248
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          "tri_multi_outgoing.native_selection": "{'unit': 'sm_80 member built for sm_80', 'kernels': 'k1_bf16_c128_h128_bm128_bn32_wm32_s2_mb3 | torch.bmm TN | k3_bf16_c128_h128_bm128_bn32_wm32_s2_mb2'}",
+          "tri_multi_incoming.native_selection": "{'unit': 'sm_80 member built for sm_80', 'kernels': 'k1_bf16_c128_h128_bm128_bn32_wm32_s2_mb3 | torch.bmm TN | k3_bf16_c128_h128_bm128_bn32_wm32_s2_mb2'}",
+          "tri_atten_starting.anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}",
+          "tri_atten_ending.anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}",
+          "transition_pair.anthropic_selection": "Selection(transition:pf word=pf tier=None cell=None x_stock=None cls=None stack_measured=None)"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "a100::pack_kernel(a100::PackParams)",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+          "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+          "compact_mask_kernel(bool const*, int*, int*, int)",
+          "pack_kernel(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, float const*, float const*, int const*, int, unsigned short*, int const*, int, float*)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 48, 2, false, true> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+          "void a100::k1_kernel<a100::K1Cfg<128, 2, 4, 2> >(a100::K1Params)",
+          "void a100::k3_kernel<a100::K3Cfg<128, 3> >(a100::K3Params)",
+          "void a100::tr_fwd_kernel<a100::TrCfgT<128, 512>, true>(a100::TrParams)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_fused_transition_kernel",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "k1_bf16_c128_h128_bm128_bn32_wm32_s2_mb3",
+          "k3_bf16_c128_h128_bm128_bn32_wm32_s2_mb2",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > const&)::{lambda(int)#1})",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 11.219589233398438,
+          "min": 11.151605987548828,
+          "max": 11.248366546630859,
+          "samples": [
+            11.151605987548828,
+            11.164752197265624,
+            11.183116149902343,
+            11.205325317382812,
+            11.219589233398438,
+            11.222704315185547,
+            11.230475616455077,
+            11.22812728881836,
+            11.248366546630859
+          ]
+        },
+        "anthropic": {
+          "median": 12.145906829833985,
+          "min": 12.102206420898437,
+          "max": 12.206487274169922,
+          "samples": [
+            12.116682434082032,
+            12.102206420898437,
+            12.126690673828126,
+            12.13651123046875,
+            12.145906829833985,
+            12.173506164550782,
+            12.165289306640625,
+            12.188373565673828,
+            12.206487274169922
+          ]
+        }
+      },
+      "speedup_miniworld": 1.0843749194122447,
+      "paired_ratio_min_max": [
+        1.0825625232052247,
+        1.0865414764125227
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "pairformer_bidir",
+      "length": 768,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          768,
+          768,
+          128
+        ],
+        [
+          1,
+          768
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63597",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-9f08bfb1-f4e4-2e88-d809-72b3ff487384, 1335 MHz, 300.00 W, 42"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.00479494221508503,
+          "finite": true,
+          "update_relative_frobenius": 0.007711749989539385
+        },
+        "anthropic": {
+          "relative_frobenius": 0.005081659182906151,
+          "finite": true,
+          "update_relative_frobenius": 0.008172878995537758
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          "tri_multi.native_selection": "{'unit': 'sm_80 member built for sm_80', 'kernels': 'k1_bf16_c128_h256_bm128_bn32_wm32_s2_mb3 | torch.bmm NT | k3_bf16_c128_h256_bm64_bn16_wm32_s1_mb4'}",
+          "tri_atten_starting.anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}",
+          "tri_atten_ending.anthropic_selection": "{'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}",
+          "transition_pair.anthropic_selection": "Selection(transition:pf word=pf tier=None cell=None x_stock=None cls=None stack_measured=None)"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "a100::f1_pack_kernel(a100::F1PackParams)",
+          "a100::pack_kernel(a100::PackParams)",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+          "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+          "compact_mask_kernel(bool const*, int*, int*, int)",
+          "pack_kernel(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const*, float const*, float const*, int const*, int, unsigned short*, int const*, int, float*)",
+          "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 48, 2, false, true> >(a100::AttnParams)",
+          "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+          "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+          "void a100::k1_kernel<a100::K1Cfg<256, 2, 4, 2> >(a100::K1Params)",
+          "void a100::k3_kernel<a100::K3Cfg<256, 2> >(a100::K3Params)",
+          "void a100::tr_fwd_kernel<a100::TrCfgT<128, 512>, true>(a100::TrParams)"
+        ],
+        "anthropic": [
+          "Memset (Device)",
+          "_fused_transition_kernel",
+          "_gate_transpose_kernel",
+          "_triatt_prologue_kernel",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_nt",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "k1_bf16_c128_h256_bm128_bn32_wm32_s2_mb3",
+          "k3_bf16_c128_h256_bm64_bn16_wm32_s1_mb4",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool> > const&)::{lambda(int)#1})",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+          "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+          "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+          "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+          "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+          "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+          "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 10.887918853759766,
+          "min": 10.807034301757813,
+          "max": 10.927159118652344,
+          "samples": [
+            10.837789154052734,
+            10.848924255371093,
+            10.869241333007812,
+            10.887918853759766,
+            10.807034301757813,
+            10.900001525878906,
+            10.904214477539062,
+            10.927159118652344,
+            10.909344482421876
+          ]
+        },
+        "anthropic": {
+          "median": 12.087016296386718,
+          "min": 12.063185119628907,
+          "max": 12.10780029296875,
+          "samples": [
+            12.063185119628907,
+            12.083486938476563,
+            12.064373779296876,
+            12.087016296386718,
+            12.099987030029297,
+            12.089994049072265,
+            12.087327575683593,
+            12.084299468994141,
+            12.10780029296875
+          ]
+        }
+      },
+      "speedup_miniworld": 1.109955461441423,
+      "paired_ratio_min_max": [
+        1.1058958085790653,
+        1.1196399208301928
+      ],
+      "status": "ok"
+    },
+    {
+      "family": "triattn_bidir_sa",
+      "length": 768,
+      "mode": "inference",
+      "dtype": "bf16",
+      "tf32": false,
+      "compiled": false,
+      "cudagraph": true,
+      "seed": 191,
+      "input_shapes": [
+        [
+          1,
+          768,
+          768,
+          128
+        ],
+        [
+          1,
+          768
+        ]
+      ],
+      "mask": "every seventh key masked; SWA uses two fully valid sequences",
+      "graph_batch": 8,
+      "rounds": 9,
+      "miniworld_anthropic_override": false,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63597",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-9f08bfb1-f4e4-2e88-d809-72b3ff487384, 1380 MHz, 300.00 W, 46"
+      },
+      "accuracy": {
+        "miniworld": {
+          "relative_frobenius": 0.0017237975262105465,
+          "finite": true,
+          "update_relative_frobenius": 0.019714759662747383
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0017237935680896044,
+          "finite": true,
+          "update_relative_frobenius": 0.0197147149592638
+        }
+      },
+      "selection": {
+        "miniworld": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'apb_attn', 'batches': [{'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}, {'row': 'apb_attn', 'variant': None, 'word': 'apb_attn', 'cell': None, 'size_measured': False, 'stack': None, 'stack_measured': False, 'cls': 'fast', 'exact_vs': None, 'backward': False, 'capture_safe': True, 'x_stock': None, 'fallback': 'sdpa', 'reason': 'no cell family for this geometry', 'config': None}], 'zero_qk': False, 'bidirectional': True}",
+          "ln_pair.anthropic_selection": "Selection(row='fastln', variant='lp', word='fastln', cell='8.0|bf16o|pair_c128|N<=800|eager|fwd', size_measured=True, stack='A100:torch2.7.1+cu126/3.3.1/cueq0.10.0', stack_measured=True, cls='tol', exact_vs=None, backward=False, capture_safe=True, x_stock=0.816, fallback='aten_autocast', reason='row word', config=None)"
+        }
+      },
+      "gpu_kernel_names": {
+        "miniworld": [
+          "_attn_fwd",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void (anonymous namespace)::fwd_vec<__nv_bfloat16, 16, 1, 2, false>(__nv_bfloat16 const*, __nv_bfloat16*, void const*, void const*, bool, __nv_bfloat16 const*, float*, float*, long, int, float)",
+          "void a100::gp_fwd_kernel<128, 128>(a100::GpFwdParams)",
+          "void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1, 8>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16, bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16, bool)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::masked_fill_kernel(at::TensorIterator&, c10::Scalar const&)::{lambda()#1}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16, bool)#1} const&)::{lambda(int)#1})",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::Params)"
+        ],
+        "anthropic": [
+          "Memcpy DtoD (Device -> Device)",
+          "_apb_fwd",
+          "_gate_res_kernel",
+          "_ln_rows_lp_kernel",
+          "ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn",
+          "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+          "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned char)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+          "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+          "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align8::Params)"
+        ]
+      },
+      "times_ms": {
+        "miniworld": {
+          "median": 9.341053009033203,
+          "min": 9.327703094482422,
+          "max": 9.364510345458985,
+          "samples": [
+            9.339100646972657,
+            9.364510345458985,
+            9.338401794433594,
+            9.327703094482422,
+            9.351887512207032,
+            9.341053009033203,
+            9.338231658935547,
+            9.363140869140626,
+            9.348009490966797
+          ]
+        },
+        "anthropic": {
+          "median": 16.18074951171875,
+          "min": 16.065293884277345,
+          "max": 16.21138153076172,
+          "samples": [
+            16.09521484375,
+            16.065293884277345,
+            16.178041076660158,
+            16.162306213378905,
+            16.19104766845703,
+            16.18074951171875,
+            16.202902221679686,
+            16.181578063964842,
+            16.21138153076172
+          ]
+        }
+      },
+      "speedup_miniworld": 1.7322190010131904,
+      "paired_ratio_min_max": [
+        1.7155508714951324,
+        1.735114614143834
+      ],
+      "status": "ok"
+    }
+  ],
+  "same_process_dense_vs_compact": [
+    {
+      "family": "triattn",
+      "length": 768,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63607",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-9f08bfb1-f4e4-2e88-d809-72b3ff487384, 1365 MHz, 300.00 W, 39"
+      },
+      "relative_difference": 0.0004989902372471988,
+      "samples_ms": {
+        "dense": [
+          3.709811782836914,
+          3.7172096252441404,
+          3.725414276123047,
+          3.737843322753906,
+          3.7001598358154295,
+          3.791244888305664,
+          3.7262462615966796,
+          3.7309185028076173,
+          3.746380615234375
+        ],
+        "compact": [
+          3.4511489868164062,
+          3.4276737213134765,
+          3.4576000213623046,
+          3.476428985595703,
+          3.4582145690917967,
+          3.4580352783203123,
+          3.4507774353027343,
+          3.481587219238281,
+          3.464896011352539
+        ]
+      },
+      "times_ms": {
+        "dense": 3.7262462615966796,
+        "compact": 3.4580352783203123
+      },
+      "speedup": 1.0774566905096277
+    },
+    {
+      "family": "triattn_ending",
+      "length": 768,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu04",
+        "slurm_job": "63607",
+        "git_head": "75693b41422569e9d2a5e472adfd890493fffc3b",
+        "runner_sha256": "bffb483e429b8af3c83673981a9098114cdcc3f9d5d24c15eed5908e42af10e7",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-9f08bfb1-f4e4-2e88-d809-72b3ff487384, 1395 MHz, 300.00 W, 40"
+      },
+      "relative_difference": 0.0004978764336556196,
+      "samples_ms": {
+        "dense": [
+          3.7611404418945313,
+          3.7954689025878907,
+          3.7776641845703125,
+          3.7827713012695314,
+          3.7770622253417967,
+          3.7769214630126955,
+          3.810367965698242,
+          3.792998504638672,
+          3.812249755859375
+        ],
+        "compact": [
+          3.4857856750488283,
+          3.535065460205078,
+          3.4968448638916017,
+          3.5233280181884767,
+          3.5301761627197266,
+          3.500902557373047,
+          3.507686233520508,
+          3.4988670349121094,
+          3.500543975830078
+        ]
+      },
+      "times_ms": {
+        "dense": 3.7827713012695314,
+        "compact": 3.500902557373047
+      },
+      "speedup": 1.0789936021645525
+    }
+  ],
+  "same_process_benchmark_source": "import json, os, statistics\nfrom pathlib import Path\nimport torch\nfrom benchmarks.runners.compare_anthropic_a100 import fixture, capture, elapsed, metadata\n@torch.no_grad()\ndef run(family):\n torch.manual_seed(191)\n model,inputs=fixture(family,768,'miniworld');model=model.cuda().bfloat16().eval()\n for name,p in model.named_parameters():\n  if p.ndim>1:p.normal_(std=p.shape[-1]**-.5)\n  elif name.endswith('weight'):p.normal_(mean=1,std=.1)\n  else:p.normal_(std=.1)\n graphs={};outputs={}\n for label,flag in [('dense','0'),('compact','1')]:\n  os.environ['MINIWORLD_TRIATTN_SM80_COMPACT']=flag\n  graphs[label],outputs[label]=capture(model,inputs,'miniworld',8)\n error=((outputs['dense'].float()-outputs['compact'].float()).norm()/outputs['dense'].float().norm()).item()\n assert error<.004\n samples={k:[] for k in graphs}\n for i in range(9):\n  for key in (list(graphs) if i%2==0 else list(reversed(graphs))):samples[key].append(elapsed(graphs[key],10,8))\n result={'family':family,'length':768,'hardware':metadata(),'relative_difference':error,'samples_ms':samples,\n         'times_ms':{k:statistics.median(v) for k,v in samples.items()},\n         'speedup':statistics.median(a/b for a,b in zip(samples['dense'],samples['compact'],strict=True))}\n Path(f'/home/psk6950/miniworld-engine-scratch/codex_anthropic_opt/toggle_{family}.json').write_text(json.dumps(result,indent=2,default=str)+'\\n')\n print(family,result['times_ms'],result['speedup'],flush=True)\nfor family in ['triattn','triattn_ending']:run(family)\n",
+  "source_sha256": {
+    "src/miniworld_engine/integrations/conditioned_transition_sm80.py": "31a759bfe064cb042905151b1faab8680c02ed5119cecc53213559bdb81064a9",
+    "src/miniworld_engine/kernels/transition/cuda/fused_wide_sm80.py": "119d0ba6af0d4782d3a8a751c016e473134343bc20e042511ea9132428203438",
+    "src/miniworld_engine/integrations/triattn_sm80.py": "25dc98315ff3c7cdf0296f6b2a0a14f17d0f2458122e952eb456d188133818d0",
+    "src/miniworld_engine/kernels/triangle_attention/cuda/sm80.py": "a1497334731d0ec5019bece030f0866f967a8e1da1eda63d38c9ee10d6c73583",
+    "src/miniworld_engine/kernels/triangle_attention/cuda/sm80/ops.cu": "6d9be57e3d34f43780568122645172102195f123b3423383dbfd536404cb8df0",
+    "src/miniworld_engine/kernels/triangle_attention/cuda/sm80/attn_fwd_sm80.cuh": "cad0e5bab159879872fe32620c42e8dbb538c3517a39c3c8c430aa34b4afd487",
+    "tests/integrations/test_a100_transition_gpu.py": "73b869980b00caedb518b623d8edeb03e66f4237adbc0c9907179676fd15e348",
+    "tests/numerics/test_triattn_sm80_gpu.py": "ca53f33bb9ceb5138e9b79a33fdb38f27ec86b74044dc7dbef062c2f116e25f9"
+  }
+}

@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2598" height="405" viewBox="0 0 2598 405">
+<defs>
+<marker id="head-1f2328" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#1f2328"/></marker>
+<marker id="head-b3261e" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#b3261e"/></marker>
+<marker id="head-1a5fb4" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#1a5fb4"/></marker>
+</defs>
+<rect width="2598" height="405" fill="#ffffff"/>
+<text x="30.0" y="28.0" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="bold" fill="#1f2328" text-anchor="start">A100 · SWA atom DiT block (ESMFold2 style: sliding window |i − j| ≤ 64, 3D RoPE, per-head RMS norm, SwiGLU 256) · inference · d 128, cond 128, 4 heads × 32, bf16</text>
+<text x="2568.0" y="24.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#b3261e" text-anchor="end">red: written to HBM</text>
+<text x="2568.0" y="38.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a5fb4" text-anchor="end">blue, dashed: read from HBM</text>
+<text x="30.0" y="60.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#57606a" text-anchor="start">one block, A samples with a conditioning per atom (mod per row of c); with one conditioning for the A samples (forward_hoisted) I1 runs on S rows instead of A S</text>
+<rect x="30" y="70" width="600" height="124" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M36,70 h588 a6,6 0 0 1 6,6 v40 h-600 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="30" y1="116" x2="630" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="40.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">I1 · adaLN modulation</text>
+<text x="40.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · mod_fwd_kernel / mod_fwd_ws_kernel</text>
+<text x="40.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">a = rn(silu(c))                              # bf16</text>
+<text x="40.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">mod = a Wmodᵀ                                # fp32 [rows, 768], bf16 MMA, fp32 accumulate</text>
+<text x="40.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">shift_a | scale_a | gate_a | shift_f | scale_f | gate_f</text>
+<line x1="630.0" y1="93.0" x2="673.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="102.0" y1="293.0" x2="102.0" y2="196.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="108.0" y="212.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">c [rows,128]</text>
+<text x="108.0" y="225.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">Wmod [768,128]</text>
+<line x1="558.0" y1="194.0" x2="558.0" y2="291.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="552.0" y="238.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">mod [rows,768] fp32</text>
+<rect x="676" y="70" width="600" height="124" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M682,70 h588 a6,6 0 0 1 6,6 v40 h-600 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="676" y1="116" x2="1276" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="686.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">I2 · RMS-adaLN, q | k | v | g projections, head RMS norm, RoPE</text>
+<text x="686.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · qkvg_fwd_kernel</text>
+<text x="686.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">x = rn(rn(q · rstd) (1 + scale_a) + shift_a)</text>
+<text x="686.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">p = rn(x Wᵀ)      W = Wq | Wk | Wv | Wg</text>
+<text x="686.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">Q, K = rn(rope(rn(p · rstd<tspan baseline-shift="sub" font-size="75%">head</tspan>)));  V = p<tspan baseline-shift="sub" font-size="75%">v</tspan>;  G = p<tspan baseline-shift="sub" font-size="75%">g</tspan></text>
+<line x1="1276.0" y1="93.0" x2="1319.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="748.0" y1="293.0" x2="748.0" y2="196.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="754.0" y="212.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">q (the residual stream)</text>
+<text x="754.0" y="225.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">mod cols 0 .. 255, cos, sin</text>
+<text x="754.0" y="238.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">Wqkv, Wg</text>
+<line x1="1204.0" y1="194.0" x2="1204.0" y2="291.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="1198.0" y="251.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">Q, K, V head-major [N,4,S,32]</text>
+<text x="1198.0" y="264.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">G [M,128]</text>
+<rect x="1322" y="70" width="600" height="124" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1328,70 h588 a6,6 0 0 1 6,6 v40 h-600 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="1322" y1="116" x2="1922" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="1332.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">I3 · window attention</text>
+<text x="1332.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · attn_fwd_kernel</text>
+<text x="1332.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">s = q·kᵀ / √32  for |i − j| ≤ 64, i and j &lt; seqused</text>
+<text x="1332.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">o = softmax(s) v         # per sample and head, one pass over the window</text>
+<line x1="1922.0" y1="93.0" x2="1965.0" y2="93.0" stroke="#1f2328" stroke-width="1.6" marker-end="url(#head-1f2328)"/>
+<line x1="1394.0" y1="293.0" x2="1394.0" y2="196.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="1400.0" y="212.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">Q, K, V</text>
+<text x="1400.0" y="225.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">seqused</text>
+<line x1="1850.0" y1="194.0" x2="1850.0" y2="291.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="1844.0" y="238.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">O [M,128]</text>
+<text x="1844.0" y="251.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">lse [N,4,S]</text>
+<rect x="1968" y="70" width="600" height="124" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1.2"/>
+<path d="M1974,70 h588 a6,6 0 0 1 6,6 v40 h-600 v-40 a6,6 0 0 1 6,-6 z" fill="#d9f2e3"/>
+<line x1="1968" y1="116" x2="2568" y2="116" stroke="#1f2328" stroke-width="1"/>
+<text x="1978.0" y="89.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">I4 · gated out-projection, RMS-adaLN, SwiGLU FFN</text>
+<text x="1978.0" y="107.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#57606a" text-anchor="start">CUDA · ffn_fwd_kernel</text>
+<text x="1978.0" y="136.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">q1 = q + gate_a · rn(rn(sigmoid(G) · O) Woᵀ)</text>
+<text x="1978.0" y="151.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">y = rn(rn(q1 · rstd) (1 + scale_f) + shift_f)</text>
+<text x="1978.0" y="166.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">h = rn(a sigmoid(a) b),   a | b = y Wuᵀ        # hidden 256</text>
+<text x="1978.0" y="181.0" font-family="Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" fill="#1f2328" text-anchor="start" xml:space="preserve">out = q1 + gate_f · rn(h Wdᵀ)</text>
+<line x1="2040.0" y1="293.0" x2="2040.0" y2="196.0" stroke="#1a5fb4" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#head-1a5fb4)"/>
+<text x="2046.0" y="212.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">q, G, O</text>
+<text x="2046.0" y="225.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">mod cols 256 .. 767</text>
+<text x="2046.0" y="238.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#1a5fb4" text-anchor="start">Wo, Wu, Wd</text>
+<line x1="2496.0" y1="194.0" x2="2496.0" y2="291.0" stroke="#b3261e" stroke-width="1.6" marker-end="url(#head-b3261e)"/>
+<text x="2490.0" y="251.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#b3261e" text-anchor="end">out [M,128]</text>
+<rect x="30" y="293" width="2538" height="88" rx="8" fill="#f6f8fa" stroke="#1f2328" stroke-width="1.4"/>
+<text x="42.0" y="315.0" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="start">HBM (sizes at N = 3072 | 6144 atoms, A = 5)</text>
+<rect x="42" y="325" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="50.0" y="341.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">q, c, out, Q, K, V, G, O</text>
+<text x="50.0" y="357.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[A N,128] bf16  3.9 | 7.9 MB each</text>
+<rect x="302" y="325" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="310.0" y="341.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">mod (a conditioning per atom | one for the A samples)</text>
+<text x="310.0" y="357.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[A N,768] | [N,768] fp32  47 | 94 MB, 9.4 | 18.9 MB</text>
+<rect x="562" y="325" width="250" height="40" rx="4" fill="#ffffff" stroke="#57606a" stroke-width="0.8"/>
+<text x="570.0" y="341.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#1f2328" text-anchor="start">lse</text>
+<text x="570.0" y="357.0" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#57606a" text-anchor="start">[A,4,N] fp32  0.25 | 0.5 MB</text>
+</svg>

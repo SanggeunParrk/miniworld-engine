@@ -1,0 +1,837 @@
+{
+ "figures": {
+  "narrow_inference": {
+   "title": "A100 · TriangleAttention (starting node) · inference · fused path: d_pair 64 / 128, 2 or 4 heads of 16 / 32, bf16, L = 128k",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "weight pack",
+       "impl": "CUDA · fused_pack_kernel",
+       "code": [
+        "W' = bf16(cat(W_q, W_k, W_v, W_g, W_b) · γ)   # rows in the kernel's order",
+        "b  = cat(W_q, ..., W_b) @ β                   # fp32"
+       ],
+       "reads": [
+        "W_q, W_k, W_v, W_g, W_b",
+        "γ, β"
+       ],
+       "writes": [
+        "W', b"
+       ]
+      },
+      {
+       "id": "F1",
+       "name": "LN + q|k|v|g + bias",
+       "impl": "CUDA · fused_f1_kernel",
+       "code": [
+        "xh = (x - mean) · rstd              # statistics in registers",
+        "qkvg = xh @ W'.T + b                # one pass, weights resident in smem",
+        "bias = (xh @ W'_b.T + b_b).permute(0, 3, 1, 2)",
+        "bias = bias.masked_fill(~mask[:, None, None], min)"
+       ],
+       "reads": [
+        "x (the ending node: transposed read)",
+        "W', b",
+        "mask"
+       ],
+       "writes": [
+        "qkvg  [T, 4 H hd]",
+        "bias"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "attention",
+       "impl": "CUDA · attn_fwd_kernel (hd 32) / attn2_fwd_kernel (hd 16)",
+       "code": [
+        "s = q[h] @ k[h].T / sqrt(hd) + bias[h]",
+        "o[h] = softmax(s, -1) @ v[h]",
+        "# per pair row i, head h; online softmax, hd = 16 kept as it is (no padding)"
+       ],
+       "reads": [
+        "q, k, v (columns of qkvg)",
+        "bias"
+       ],
+       "writes": [
+        "o"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "gate + out proj + residual",
+       "impl": "CUDA · fused_f3_kernel",
+       "code": [
+        "a = sigmoid(g) · o",
+        "y = x + a @ W_o.T"
+       ],
+       "reads": [
+        "g (columns of qkvg), o",
+        "x (the ending node: transposed read)",
+        "W_o"
+       ],
+       "writes": [
+        "y (transposed write)"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, d_pair 64, 4 heads x 16)",
+     "hbm": [
+      {
+       "name": "x, y, o",
+       "shape": "[L,L,64] bf16",
+       "size": "75.5 MB each"
+      },
+      {
+       "name": "qkvg",
+       "shape": "[L,L,256] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "bias",
+       "shape": "[4,L,L] bf16",
+       "size": "4.7 MB"
+      },
+      {
+       "name": "mask, W_*, W', b",
+       "shape": "bf16 / fp32",
+       "size": "< 1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "narrow_training": {
+   "title": "A100 · TriangleAttention (starting node) · training · fused path: d_pair 64 / 128, 2 or 4 heads of 16 / 32, bf16, broadcast dropout, L = 128k",
+   "panels": [
+    {
+     "label": "forward (saves xh1, mean / rstd, qkvg, bias, o, lse, ds)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + q|k|v|g + bias (saving)",
+       "impl": "CUDA · fused_f1_kernel",
+       "code": [
+        "xh, (mean, rstd) = LN statistics in registers",
+        "qkvg = xh @ W'.T + b;  bias = ... masked",
+        "xh1 = [xh | 1 | 0]                 # the weight-gradient operand"
+       ],
+       "reads": [
+        "x",
+        "W', b",
+        "mask"
+       ],
+       "writes": [
+        "qkvg, bias",
+        "xh1, mean / rstd"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "attention + LSE",
+       "impl": "CUDA · attn_fwd_kernel / attn2_fwd_kernel",
+       "code": [
+        "s = q[h] @ k[h].T / sqrt(hd) + bias[h]",
+        "o[h] = softmax(s, -1) @ v[h]",
+        "lse = logsumexp(s)   # base 2, per (h, i, j)"
+       ],
+       "reads": [
+        "q, k, v",
+        "bias"
+       ],
+       "writes": [
+        "o",
+        "lse"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "gate + out proj + dropout + residual",
+       "impl": "CUDA · fused_f3_kernel",
+       "code": [
+        "a = sigmoid(g) · o",
+        "y = x + (a @ W_o.T) · ds"
+       ],
+       "reads": [
+        "g, o",
+        "x, ds",
+        "W_o"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, d_pair 64, 4 heads x 16)",
+     "hbm": [
+      {
+       "name": "x, y, o",
+       "shape": "[L,L,64] bf16",
+       "size": "75.5 MB each"
+      },
+      {
+       "name": "qkvg",
+       "shape": "[L,L,256] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "xh1",
+       "shape": "[L,L,72] bf16",
+       "size": "85 MB"
+      },
+      {
+       "name": "bias, lse, mean / rstd",
+       "shape": "[4,L,L] bf16 / fp32 / [L,L,2] fp32",
+       "size": "4.7 / 9.4 / 4.7 MB"
+      },
+      {
+       "name": "ds, mask, W_*",
+       "shape": "bf16",
+       "size": "< 1 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward; D = [dq | dk | dv | dg], one buffer, each slice written by its producer",
+     "kernels": [
+      {
+       "id": "P2",
+       "name": "backward weight pack",
+       "impl": "CUDA · fused_bwd_pack_kernel",
+       "code": [
+        "W_t = W_*ᵀ  (the dgrad operands), W_oᵀ, γ in fp32"
+       ],
+       "reads": [
+        "W_*, W_o, γ"
+       ],
+       "writes": [
+        "W_t, W_bᵀ, W_oᵀ"
+       ]
+      },
+      {
+       "id": "B1",
+       "name": "gate + out-proj backward",
+       "impl": "CUDA · fused_b3_kernel",
+       "code": [
+        "dy = dout · ds;   da = dy @ W_o",
+        "do = da · sigmoid(g);   dg = da · o · s · (1 - s)",
+        "a = sigmoid(g) · o;     Δ = Σ_d o · do   # per head"
+       ],
+       "reads": [
+        "dout, ds",
+        "g, o",
+        "W_oᵀ"
+       ],
+       "writes": [
+        "dg (D's gate slice), do, Δ",
+        "dy, a"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "bias transpose",
+       "impl": "CUDA · bias_transpose_kernel",
+       "code": [
+        "bias_t[h, k, j] = bias[h, j, k]"
+       ],
+       "reads": [
+        "bias"
+       ],
+       "writes": [
+        "bias_t"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "attention backward, key side",
+       "impl": "CUDA · attn_bwd_dkv_kernel / attn2_bwd_dkv_kernel",
+       "code": [
+        "P^T = exp2(scale · k q^T + bias_t - lse);  dS^T = P^T (v do^T - Δ)",
+        "dv = P^T do;   dk = sm_scale · dS^T q",
+        "# per pair row i, head h, 128-key tile"
+       ],
+       "reads": [
+        "q, k, v",
+        "do, lse, Δ",
+        "bias_t"
+       ],
+       "writes": [
+        "dk, dv (D's k, v slices)"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "attention backward, query side",
+       "impl": "CUDA · attn_bwd_dq_kernel / attn2_bwd_dq_kernel, db_reduce_kernel",
+       "code": [
+        "P = exp2(scale · q k^T + bias - lse);  dS = P (do v^T - Δ)",
+        "dq = sm_scale · dS @ k",
+        "db[h, j, k] = Σ_i dS_i   # R = 4 rows per CTA, then a fixed-order reduce"
+       ],
+       "reads": [
+        "q, k, v",
+        "do, lse, Δ",
+        "bias"
+       ],
+       "writes": [
+        "dq (D's q slice)",
+        "db partials, db"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "projection dgrad + LN backward + residual",
+       "impl": "CUDA · fused_b1_kernel",
+       "code": [
+        "dxn = D @ W_cat + db-term",
+        "dx = rstd (dxn γ - mean(dxn γ) - xh mean(dxn γ xh))",
+        "dx_pair = dout + dx"
+       ],
+       "reads": [
+        "D, db",
+        "x, mean / rstd, dout",
+        "W_t, γ"
+       ],
+       "writes": [
+        "dx_pair"
+       ]
+      },
+      {
+       "id": "B6",
+       "name": "weight and LN-parameter gradients",
+       "impl": "cuBLAS + CUDA · wgrad_w_kernel",
+       "code": [
+        "G = Dᵀ @ xh1;  G_b = dbᵀ @ xh1     # K = L²",
+        "dW = G γ + G[:, D] βᵀ;  dγ = Σ_o W ⊙ G;  dβ = Σ_o W s",
+        "dW_o = dyᵀ @ a"
+       ],
+       "reads": [
+        "D, db, xh1",
+        "dy, a"
+       ],
+       "writes": [
+        "dW_*, dW_o, dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, d_pair 64, 4 heads x 16)",
+     "hbm": [
+      {
+       "name": "D",
+       "shape": "[L,L,256] bf16",
+       "size": "302 MB"
+      },
+      {
+       "name": "dout, dx_pair, do, dy, a",
+       "shape": "[L,L,64] bf16",
+       "size": "75.5 MB each"
+      },
+      {
+       "name": "db partials",
+       "shape": "[L/4,4,L,L] bf16",
+       "size": "0.91 GB"
+      },
+      {
+       "name": "db, bias_t, lse, Δ",
+       "shape": "[4,L,L] bf16 / fp32",
+       "size": "4.7 / 9.4 MB"
+      },
+      {
+       "name": "G, W_*, dW_*",
+       "shape": "fp32 / bf16",
+       "size": "< 1 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "rows_inference": {
+   "title": "A100 · TriangleAttention (starting node) · inference · row-kernel path: d_pair 256 / 384 / 512, 8 / 12 / 16 heads x 32, bf16, L = 128k",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "R1",
+       "name": "weight pack",
+       "impl": "CUDA · w_pack_kernel",
+       "code": [
+        "W'_aug = [bf16(W · γ) | b_hi | b_lo | 0]    # b = W β split into two bf16",
+        "# rows: q | k | v | g (head h, channel c), then the bias heads (padded to 8)"
+       ],
+       "reads": [
+        "W_q, W_k, W_v, W_g, W_b",
+        "γ, β"
+       ],
+       "writes": [
+        "W'_aug  [4 H hd + Hpad, D + 8]"
+       ]
+      },
+      {
+       "id": "R2",
+       "name": "LayerNorm rows",
+       "impl": "CUDA · ln_rows_kernel",
+       "code": [
+        "xh = (x - mean) · rstd                       # fp32 statistics",
+        "xh_aug = [xh | 1 | 1 | 0 ...]               # the constant columns carry b_hi, b_lo"
+       ],
+       "reads": [
+        "x (the ending node: transposed read)"
+       ],
+       "writes": [
+        "xh_aug  [T, D + 8]"
+       ]
+      },
+      {
+       "id": "R3",
+       "name": "projections",
+       "impl": "cuBLAS",
+       "code": [
+        "y = xh_aug @ W'_aug.T      # q | k | v | g | bias heads, one GEMM"
+       ],
+       "reads": [
+        "xh_aug, W'_aug"
+       ],
+       "writes": [
+        "y  [T, 4 H hd + Hpad]"
+       ]
+      },
+      {
+       "id": "R4",
+       "name": "bias planes",
+       "impl": "CUDA · bias_planes_kernel",
+       "code": [
+        "bias[h, i, j] = y[(i, j), bias head h]  masked to min  # head planes [H, L, L]"
+       ],
+       "reads": [
+        "y (bias columns)",
+        "mask"
+       ],
+       "writes": [
+        "bias"
+       ]
+      },
+      {
+       "id": "R5",
+       "name": "attention + gate",
+       "impl": "CUDA · attn_fwd_kernel (gate epilogue)",
+       "code": [
+        "s = q[h] @ k[h].T / sqrt(hd) + bias[h]",
+        "o[h] = softmax(s, -1) @ v[h]",
+        "a = bf16(sigmoid(g) · o)         # the epilogue"
+       ],
+       "reads": [
+        "q, k, v, g (columns of y)",
+        "bias"
+       ],
+       "writes": [
+        "a"
+       ]
+      },
+      {
+       "id": "R6",
+       "name": "output projection",
+       "impl": "cuBLAS",
+       "code": [
+        "yo = a @ W_o.T"
+       ],
+       "reads": [
+        "a, W_o"
+       ],
+       "writes": [
+        "yo"
+       ]
+      },
+      {
+       "id": "R7",
+       "name": "dropout + residual",
+       "impl": "CUDA · out_rows_kernel",
+       "code": [
+        "out = x + yo · ds        # the ending node: transposed positions"
+       ],
+       "reads": [
+        "yo, x, ds"
+       ],
+       "writes": [
+        "out"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, d_pair 256, 8 heads x 32)",
+     "hbm": [
+      {
+       "name": "x, yo, a, out",
+       "shape": "[L,L,256] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "xh_aug",
+       "shape": "[L,L,264] bf16",
+       "size": "311 MB"
+      },
+      {
+       "name": "y",
+       "shape": "[L,L,1032] bf16",
+       "size": "1.22 GB"
+      },
+      {
+       "name": "bias",
+       "shape": "[8,L,L] bf16",
+       "size": "9.4 MB"
+      },
+      {
+       "name": "mask, ds, W_*, W'_aug",
+       "shape": "bf16 / fp32",
+       "size": "< 2 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "rows_training": {
+   "title": "A100 · TriangleAttention (starting node) · training · row-kernel path: d_pair 256 / 384 / 512, 8 / 12 / 16 heads x 32, bf16, broadcast dropout, L = 128k",
+   "panels": [
+    {
+     "label": "forward (saves xh_aug, mean / rstd, y, bias, o, lse)",
+     "kernels": [
+      {
+       "id": "R1",
+       "name": "pack, LayerNorm rows, projections, bias planes",
+       "impl": "CUDA · w_pack_kernel, ln_rows_kernel, bias_planes_kernel + cuBLAS",
+       "code": [
+        "xh_aug, (mean, rstd) = LN(x)           # + constant columns",
+        "y = xh_aug @ W'_aug.T                  # q | k | v | g | bias heads",
+        "bias = planes of y's bias columns, masked"
+       ],
+       "reads": [
+        "x, mask",
+        "W_*, γ, β"
+       ],
+       "writes": [
+        "xh_aug, mean / rstd",
+        "y, bias"
+       ]
+      },
+      {
+       "id": "R2",
+       "name": "attention + gate + LSE",
+       "impl": "CUDA · attn_fwd_kernel (gate epilogue)",
+       "code": [
+        "o[h] = softmax(q[h] @ k[h].T / sqrt(hd) + bias[h], -1) @ v[h];  lse (base 2)",
+        "a = bf16(sigmoid(g) · o)"
+       ],
+       "reads": [
+        "q, k, v, g (columns of y)",
+        "bias"
+       ],
+       "writes": [
+        "o, lse",
+        "a"
+       ]
+      },
+      {
+       "id": "R3",
+       "name": "output projection + dropout + residual",
+       "impl": "cuBLAS + CUDA · out_rows_kernel",
+       "code": [
+        "yo = a @ W_o.T;  out = x + yo · ds"
+       ],
+       "reads": [
+        "a, W_o",
+        "x, ds"
+       ],
+       "writes": [
+        "out"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, d_pair 256, 8 heads x 32)",
+     "hbm": [
+      {
+       "name": "x, yo, a, o, out",
+       "shape": "[L,L,256] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "xh_aug",
+       "shape": "[L,L,264] bf16",
+       "size": "311 MB"
+      },
+      {
+       "name": "y",
+       "shape": "[L,L,1032] bf16",
+       "size": "1.22 GB"
+      },
+      {
+       "name": "bias, lse, mean / rstd",
+       "shape": "[8,L,L] bf16 / fp32 / [L,L,2] fp32",
+       "size": "9.4 / 19 / 4.7 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward; D = [dq | dk | dv | dg], one buffer, each slice written by its producer",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "dy (dropout, transposed positions)",
+       "impl": "CUDA · dy_rows_kernel",
+       "code": [
+        "dy = dout · ds    # in the starting frame"
+       ],
+       "reads": [
+        "dout, ds"
+       ],
+       "writes": [
+        "dy"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "out-proj dgrad, gate backward",
+       "impl": "cuBLAS + CUDA · gate_bwd_rows_kernel",
+       "code": [
+        "da = dy @ W_o                          # cuBLAS",
+        "do = da · sigmoid(g);  dg = da · o · s · (1 - s)",
+        "a = sigmoid(g) · o;    Δ = Σ_d o · do   # per head"
+       ],
+       "reads": [
+        "dy, W_o",
+        "g, o"
+       ],
+       "writes": [
+        "dg (D's gate slice), do, Δ",
+        "a"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "attention backward (bias transpose, key side, query side + db reduce)",
+       "impl": "CUDA · bias_transpose_kernel, attn_bwd_dkv_kernel, attn_bwd_dq_kernel, db_reduce_kernel",
+       "code": [
+        "dS = P (do v^T - Δ);  dq = sm_scale · dS @ k;  dk = sm_scale · dS^T q;  dv = P^T do",
+        "db[h, j, k] = Σ_i dS_i   # bf16 partials of 4 rows, a fixed-order reduce"
+       ],
+       "reads": [
+        "q, k, v",
+        "do, lse, Δ",
+        "bias"
+       ],
+       "writes": [
+        "dq, dk, dv (D's slices)",
+        "db partials, db"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "projection dgrad + LayerNorm backward",
+       "impl": "cuBLAS + CUDA · ln_bwd_rows_kernel",
+       "code": [
+        "dxn = D @ W_cat                        # cuBLAS, K = 4 H hd",
+        "dx = rstd (dxn γ - mean(dxn γ) - xh mean(dxn γ xh)) + db-term + dout"
+       ],
+       "reads": [
+        "D, db, W_*",
+        "x, mean / rstd, dout, γ"
+       ],
+       "writes": [
+        "dx_pair"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "weight and LN-parameter gradients",
+       "impl": "cuBLAS + CUDA · wgrad_w_kernel",
+       "code": [
+        "G = Dᵀ @ xh_aug;  G_b = dbᵀ @ xh_aug     # K = L²",
+        "dW = G γ + G[:, D] βᵀ;  dγ, dβ;  dW_o = dyᵀ @ a"
+       ],
+       "reads": [
+        "D, db, xh_aug",
+        "dy, a"
+       ],
+       "writes": [
+        "dW_*, dW_o, dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, d_pair 256, 8 heads x 32)",
+     "hbm": [
+      {
+       "name": "D",
+       "shape": "[L,L,1024] bf16",
+       "size": "1.21 GB"
+      },
+      {
+       "name": "dout, dy, da, a, do, dx_pair",
+       "shape": "[L,L,256] bf16",
+       "size": "302 MB each"
+      },
+      {
+       "name": "db partials",
+       "shape": "[L/4,8,L,L] bf16",
+       "size": "1.81 GB"
+      },
+      {
+       "name": "db, bias_t, lse, Δ",
+       "shape": "[8,L,L] bf16 / fp32",
+       "size": "9.4 / 19 MB"
+      },
+      {
+       "name": "G, W_*, dW_*",
+       "shape": "fp32 / bf16",
+       "size": "< 4 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "leaf": {
+   "title": "A100 · projected_attention token_pair (ops.augmented_attention_pair_bias, A = L pair rows) · bf16 · head dim 16 / 32, 2 - 12 heads, L = 128k",
+   "panels": [
+    {
+     "label": "inference",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "attention",
+       "impl": "CUDA · attn2_fwd_kernel",
+       "code": [
+        "s = q[a, h] @ k[a, h].T / sqrt(hd) + bias[h]       # a = pair row, the bias is shared by the rows",
+        "s = -inf where ~mask[a, :]                         # a key tile without a masked key skips this",
+        "out[a, h] = softmax(s, -1) @ v[a, h]               # operands read in place through their strides"
+       ],
+       "reads": [
+        "q, k, v  [A, B, H, L, D]",
+        "bias  [B, H, L, L]",
+        "mask  [A, B, L]"
+       ],
+       "writes": [
+        "out  (the layout of q)"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, 12 heads x 32)",
+     "hbm": [
+      {
+       "name": "q, k, v, out",
+       "shape": "[L,1,12,L,32] bf16",
+       "size": "453 MB each"
+      },
+      {
+       "name": "bias",
+       "shape": "[1,12,L,L] bf16",
+       "size": "14 MB"
+      },
+      {
+       "name": "mask",
+       "shape": "[L,1,L] bool",
+       "size": "0.6 MB"
+      }
+     ]
+    },
+    {
+     "label": "training: forward (saves out, lse), then backward",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "attention + LSE",
+       "impl": "CUDA · attn2_fwd_kernel",
+       "code": [
+        "out = softmax(D^-1/2 q k^T + bias, -1) v;  lse = logsumexp(s)   # base 2"
+       ],
+       "reads": [
+        "q, k, v, bias, mask"
+       ],
+       "writes": [
+        "out",
+        "lse  [B, H, A, L] fp32"
+       ]
+      },
+      {
+       "id": "B1",
+       "name": "row term",
+       "impl": "CUDA · attn2_delta_kernel",
+       "code": [
+        "Δ[b, h, a, i] = Σ_d out · dout"
+       ],
+       "reads": [
+        "out, dout"
+       ],
+       "writes": [
+        "Δ"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "bias transpose",
+       "impl": "CUDA · bias_transpose_kernel",
+       "code": [
+        "bias_t[h, k, j] = bias[h, j, k]"
+       ],
+       "reads": [
+        "bias"
+       ],
+       "writes": [
+        "bias_t"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "attention backward, key side",
+       "impl": "CUDA · attn2_bwd_dkv_kernel",
+       "code": [
+        "P^T = exp2(scale · k q^T + bias_t - lse) (0 on masked keys);  dS^T = P^T (v do^T - Δ)",
+        "dv = P^T do;   dk = sm_scale · dS^T q"
+       ],
+       "reads": [
+        "q, k, v, dout",
+        "lse, Δ, bias_t, mask"
+       ],
+       "writes": [
+        "dk, dv"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "attention backward, query side",
+       "impl": "CUDA · attn2_bwd_dq_kernel, db_reduce_kernel",
+       "code": [
+        "dS = P (do v^T - Δ);  dq = sm_scale · dS @ k",
+        "db[h, j, k] = Σ_a dS_a   # bf16 partials of 4 rows, a fixed-order reduce"
+       ],
+       "reads": [
+        "q, k, v, dout",
+        "lse, Δ, bias, mask"
+       ],
+       "writes": [
+        "dq",
+        "db partials, db"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, 12 heads x 32)",
+     "hbm": [
+      {
+       "name": "q, k, v, out, dout, dq, dk, dv",
+       "shape": "[L,1,12,L,32] bf16",
+       "size": "453 MB each"
+      },
+      {
+       "name": "db partials",
+       "shape": "[L/4,12,L,L] bf16",
+       "size": "2.7 GB"
+      },
+      {
+       "name": "db, bias, bias_t, lse, Δ",
+       "shape": "[12,L,L] bf16 / fp32",
+       "size": "14 / 28 MB"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

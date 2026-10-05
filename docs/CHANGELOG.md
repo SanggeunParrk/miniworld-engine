@@ -30,6 +30,26 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - B200 atom DiT block (`integrations/atom_dit`) is now two opaque ops under an autograd Function: it is served under `torch.compile` and
   in CUDA graphs (it used to refuse inside a compiled graph and take the module path); the weight pack is reused per parameter version and
   rebuilt inside a graph capture. Tests: `tests/integrations/test_b200_atom_dit_gpu.py`.
+- Complete Anthropic provider loader (all 34 registered packages), JAX/Pallas serving
+  and original backward entry points; A100 module adapters for bias-only DiT,
+  bias-only/bidirectional triangle attention and OPM normalization after projection.
+  Pairformer blocks compose the connected children. Optional JAX and ESM dependencies
+  stay in isolated environments; original architecture and gradient contracts remain.
+  See `docs/kernels/anthropic-integration.md` for qualification and limitations.
+
+- A100 Anthropic inference module dispatch for norms, Transition, conditioned transition,
+  pair-bias attention, dense token/atom DiT, OPM/PWA and SWA/gather compositions, plus
+  locally built native sm80 TriMul in both directions. Explicit MSA requests enter the
+  upstream adapter before the engine's own kernels. Unsupported architectures, shapes and
+  training modes still refuse by name. See `docs/kernels/anthropic-integration.md`.
+
+- A100 Anthropic native TriangleAttention rebuild registration: verify the pinned source tree
+  and compiler record, then create an ABI-local checksum manifest without modifying the
+  upstream release manifest. The original sm80 output vectors pass bitwise; module/reference
+  and CUDA Graph checks cover both directions and absent, sparse, and fully masked keys.
+  Explicit block rows now propagate upstream refusal instead of silently benchmarking
+  `flash_triattn` as `triattn_native`. See `docs/kernels/anthropic-integration.md`.
+
 - B200 (sm_100a) token-pair initialisation `kernels/token_pair_init` (ops `token_pair_init_fwd` / `token_pair_init_bwd`): the input
   feature embedder's `left[i] + right[j] + Linear(relative-position one-hot) + Linear(bond one-hot)` as one kernel pair that never builds
   the 139-wide fp32 one-hot (84 MB at 384 tokens), in exact fp32, any B and ragged L, CUDA-graph capturable. 5.6-16.9x the dense
@@ -160,6 +180,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   B200. A strict `engine_backend="triton"` process still wins. The PyTorch `RMSNorm` that stands in for the kernel returns the
   input dtype like the kernel does (torch's `rms_norm` returns fp32 under autocast, which gave the attention's Triton kernels an
   fp32 q next to a bf16 k). Tests: `tests/compile/test_b200_norm_dispatch.py`.
+- The opaque ops of the fused token DiT paths lost their architecture in the name: `token_dit_h100_infer` -> `token_dit_infer`,
+  `token_dit_train_sm100_fwd` / `_bwd` -> `token_dit_train_fwd` / `_bwd` (they serve A100 too). The fused token DiT runner takes the CUDA row
+  kernels on A100 as well as B200 (`MINIWORLD_TOKEN_DIT_ROWS_CUDA=0` keeps the Triton rows), and `integrations/token_dit.py` serves sm_80
+  (L % 128 == 0, 16 x 48) like sm_90.
 
 ### Fixed
 
@@ -187,6 +211,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   capture instead of at every call. Updates that bypass the version counter (torch's fused optimizers) still need
   `torch.autograd.graph.increment_version(params)` after the step. Tests: `tests/integrations/test_b200_pack_cache_capture_gpu.py`
   (seven of its nine replay cases fail before the change).
+- A100 fused Transition (`kernels/transition/cuda/fused_sm80.py`) under `torch.compile`: `torch.compile` ignores `lru_cache`, so it
+  traced the 524288-element integer computation of the pack tables into the graph and Inductor refused it (a value-range
+  assertion) in inference and in training. The tables are built inside the opaque pack op now; regression test
+  `test_the_compiled_module_matches_eager` in `tests/numerics/test_transition_fused_sm80_gpu.py`.
 - B200 SWA atom DiT weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) keyed on (data_ptr, version, shape) served the old
   tensor's packed copy to a new weight placed at a freed one's address (a bf16 cast, the next test's weights). It is keyed on the tensor
   objects now (weak references plus version), and bypassed while a CUDA graph is captured (a hit would record no pack kernel, so every
@@ -266,6 +294,151 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - B200 (sm_100a) token DiT, inference and training with hand CUDA + cuBLAS only (`integrations/token_dit.py`,
   new `integrations/token_dit_train.py`, `kernels/augmented_attention/cuda/sm100/`,
   `kernels/conditioned_transition/cuda/`). Page: `docs/gpus/b200/token_dit/token_dit.md`.
+- A100 (sm_80) hand-CUDA TriMul, inference and training (`kernels/trimul_inproj/cuda/sm80.py`, wired through
+  `integrations/trimul_sm80.py`): D128, one direction or bidirectional, any B (planes run one by one), L % 16 == 0. Module-level on an
+  A100 80GB PCIe (CUDA graph, L384 / L768): inference 1.11–1.32× the best Anthropic A100 row (branch record, torch 2.10),
+  training 1.59–1.73× cuEquivariance 0.12 (`docs/gpus/a100/trimul/trimul.md`).
+  Ported from the `experiments/a100_trimul_fwd` research (tag `archive/a100-sm80-branch-20260928`) with a
+  one-launch weight pack (no weight cache: captured graphs repack after an optimizer step) and deterministic
+  LN_in dγ / dβ partials. `MINIWORLD_TRIMUL_SM80=0` keeps the Triton path. The pack reads the bidirectional
+  module's `[in, out]`-stored front matrices in place (no per-call copy), and the backward ends in one `finalize`
+  launch (B7's partial sums, the K1 row order undone, the casts) that writes every gradient in its parameter's
+  strides and dtype, so autograd takes it over instead of copying it. Tests: the residual contract, the pack
+  and finalize against their torch definitions, fp32 master parameters.
+- A100 (sm_80) hand-CUDA TriangleAttention, inference and training (`kernels/triangle_attention/cuda/sm80.py` and `sm80/`, wired
+  through `integrations/triattn_sm80.py`): d_pair 128, 4 heads x 32, bf16, L % 128 == 0, any B, starting and ending node (the
+  kernels read and write the transposed positions), the module's broadcast dropout. Forward: LayerNorm + q|k|v|g + bias in one
+  persistent kernel (the LayerNorm affine folded into the bf16 weights), the attention core (online softmax, the bias tile shared by
+  two pair rows), gate + output projection + dropout + residual. Backward: gate / output-projection gradients (and the attention
+  backward's row term), the key side (dK, dV) and the query side (dQ, the bias gradient as bf16 partials over groups of four rows plus a
+  fixed-order reduction) of the attention, the projection input gradient + LayerNorm backward + residual in one pass, and the
+  weight / LayerNorm-parameter gradients from one cuBLAS GEMM over the tokens (`G = Dᵀ[x̂ | 1]`, the rest algebraic). Official
+  bench (`bench.py`, CUDA graph, A100 80GB PCIe, L384 / L768, 10 % masked keys, dropout 0.25): inference 0.635 / 3.678 ms =
+  2.04x / 1.95x cuEquivariance (the Triton path 0.948 / 5.096), training step 2.572 / 14.915 ms = 2.17x / 2.21x cuEquivariance
+  (Triton 3.836 / 22.853), the attention kernels making their cp.async index arithmetic once per thread (3-7 % per kernel);
+  Anthropic's block with its Triton `k2b` core: 0.844 / 4.874 ms inference (its sm_80 CUDA member is not measured, see below; it ships no
+  backward). `MINIWORLD_TRIATTN_SM80=0` or
+  `module._sm80_cuda = False` keeps the Triton path; inference with dropout active and every shape outside the gate runs it
+  unchanged. Page: `docs/gpus/a100/triattn/triattn.md`; tests: `tests/numerics/test_triattn_sm80_gpu.py` (every kernel and the
+  module's output and nine gradients against the fp32 module, bit-identical replays, `torch.compile` in inference and training).
+- A100 (sm_80) token DiT block, inference and training (`kernels/augmented_attention/cuda/sm80.py` and `sm80/`: a hand-CUDA attention core with a
+  pair bias shared by the samples, head dim 48, forward with a gate epilogue or fp32 o + lse, backward dq + bias-gradient partials and dk / dv;
+  `integrations/token_dit.py` and `integrations/token_dit_train.py` now serve sm_80 with cuBLAS GEMMs and the CUDA row kernels, which already
+  build for sm_80). 16 heads x 48, d_single 768, bf16, L % 128 == 0; training needs an even A and no QK-norm. Official bench (`bench.py`, CUDA graph,
+  A100 80GB PCIe, L384 / L768): inference (A = 5) 0.286 / 0.561 ms = 1.21x / 1.15x Anthropic (the release's DiT composition with its `apb_attn` core,
+  0.345 / 0.644; its kits' recipe core `fpf_apb`: 0.465 / 1.004) and 1.84x / 2.55x PyTorch compiled (the module path it replaces: 0.464 / 0.994),
+  training (A = 48) 7.338 / 16.463 ms = 1.47x / 1.84x PyTorch compiled (module path 8.960 / 22.768; Anthropic ships no backward); cuEquivariance has no DiT block.
+  Page: `docs/gpus/a100/token_dit/token_dit.md`; tests: `tests/integrations/test_a100_token_dit_gpu.py`,
+  `tests/integrations/test_a100_token_dit_train_gpu.py`. `MINIWORLD_AUGATTN_SM80=0` takes the hand-CUDA attention out.
+- A100 (sm_80) atom DiT attention and pair bias, inference and training: `AugmentedAttentionPairBias.delta` asks `integrations/augattn_sm80.py` first and, on an A100 with bf16
+  operands, B = 1, no QK-norm, head dim 32 or 48 and a key mask `[1, L]` or none (any L: padded to a multiple of 128 inside), runs the hand-CUDA attention core of
+  `kernels/augmented_attention/cuda/sm80.py` (`plain_forward` / `plain_backward`: bf16 o and dq / dk / dv, the bias gradient summed from bf16 partials in a fixed order; head dim 32
+  next to the token DiT's 48) and, at the atom width (16 pair channels, 4 heads), the fused pair bias (`pair_bias_fwd_kernel` / `pair_bias_bwd_kernel`: `LN(z) Wb^T` head-major with the mask
+  and the padding folded in, and its backward) as autograd Functions over opaque ops (`torch.compile` keeps them). A `DiTBlock` at atom widths takes it through its attention part (the AdaLN,
+  the projections and the transition stay the module's Triton / cuBLAS composition). The module-level core keeps the pair bias in raw units (`bias · sqrt(head_dim)`) and adds it to the
+  score tile through the tensor core (an identity `mma`; a masked key is a very negative finite bias, never -inf), and the kernels make their cp.async index arithmetic once per thread.
+  `AugmentedAttentionPairBias.cache_pair_bias(pair, mask)` / `clear_pair_bias()` is an opt-in, explicit cache of the pair bias for no-grad calls with unchanged tensors (an inference
+  block 1.49x / 1.66x faster at N = 3072 / 6144, bit-identical output; a CUDA-graph replay reads the module's buffer, which every `cache_pair_bias` call refreshes in place).
+  `bench.py` (CUDA graph, A100 80GB PCIe, N = 3072 / 6144 atoms): `dit_atom` inference (A = 5)
+  0.785 / 2.626 ms = 4.44x / 5.13x PyTorch compiled (the module path it replaces: 2.328 / 8.975), training (A = 48) 16.784 / 59.402 ms = 3.89x / 4.27x (module path 30.542 / 115.842; PyTorch
+  compiled runs out of memory from N = 7168); `augmented_attention_atom` inference 0.685 / 2.386 ms = 4.87x / 5.47x, training 13.701 / 49.132 ms = 4.48x / 4.97x; cuEquivariance has no DiT
+  block, Anthropic is `unsupported` at this block (its DiT composition refuses d_pair 16, its atom attention is the windowed 32 x 128 op). `MINIWORLD_AUGATTN_SM80=0` takes it out.
+  Page: `docs/gpus/a100/atom_dit/atom_dit.md`; tests: `tests/integrations/test_a100_augattn_gpu.py`.
+- A100 (sm_80) SWA atom DiT block (ESMFold2 style: window 64, 4 heads x 32, hidden 256), inference and training, hand CUDA (`mma.sync` / `ldmatrix` / `cp.async`) in `kernels/swa_dit/cuda/sm80/`,
+  taken first by `kernels/swa_dit/dispatch.py` on an A100 with bf16 operands: the adaLN modulation (`swa_dit_hoist_modulation`: `mod_fwd` and its backward `mod_bwd` with the fp32 modulation gradient
+  fed to the tensor cores as hi + lo bf16 terms and fixed-order partial sums for dWmod), the three forward stages (RMS-adaLN + q | k | v | g + head norm + RoPE, the window attention, the gated
+  out-projection + FFN), the window-attention backward (dQ; dK, dV) and the backward row stages (FFN gate / input side, out-projection, qkvg: every stage writes its columns of the modulation
+  gradient once, no atomics; a conditioning per sample, or one shared by a multiple of 16 samples with in-warp reduction and partial buffers). Every stage reproduces the rounding points of its
+  Triton twin; the five weight-gradient GEMMs stay cuBLAS. A = 1 or a multiple of 16 for the backward row stages (other A: those four stages run the Triton kernels), any A otherwise; fp32 and other
+  widths keep the Triton path. The extension's build runs once at trace time under `torch.compile` (`assume_constant_result`), so `torch.compile(fullgraph=True)` of the module traces without a break
+  and matches eager bit for bit. `bench.py target=swa_dit` (CUDA graph, A100 80GB PCIe, atoms N = 3072 / 6144), a conditioning per sample: inference (A = 5) 0.207 / 0.349 ms = 6.13x / 11.83x
+  PyTorch compiled (the Triton path it replaces 0.237 / 0.399), training (A = 48) 4.777 / 9.334 ms = 6.48x / 12.52x (Triton path 6.219 / 12.356); one conditioning shared by the samples
+  (`+shared_cond=true`, `forward_hoisted`): inference 0.156 / 0.252 ms, training 3.156 / 6.134 ms (Triton path 0.191 / 0.299 and 3.855 / 7.603). At N = 1024 the block is as fast as the Triton
+  path (the forward kernels are latency-bound there). cuEquivariance has no DiT block; Anthropic's SWA atom block is not measured on A100. `bench.py`: `bench_module_swa_dit` takes
+  `+shared_cond=true`. `MINIWORLD_SWA_DIT_SM80=0` keeps the Triton stages. Page: `docs/gpus/a100/swa_atom_dit/swa_atom_dit.md`; tests: `tests/integrations/test_a100_swa_dit_gpu.py`.
+- A100 (sm_80) `modules.swa_atom_attention.SWA3DRoPEAttention`: the sliding-window attention runs on the hand-CUDA kernels of the SWA atom DiT block (`kernels/swa_dit/interface.py`:
+  `swa_dit_window_attention`, an `autograd.Function` over the opaque ops `swa_dit_window_attn_fwd_sm80` / `_bwd_sm80`) for implementation TRITON / MINIWORLD, 4 heads x 32, half window 64, floating-point q / k / v
+  (cast to bf16, as the flash path does), valid atoms front-packed (the FA4 path's precondition), `MINIWORLD_SWA_DIT_SM80=0` keeps flash. The module's `miniworld` arm did not run on this A100 before: its FA2
+  extension (`flash_attn_2_cuda`) fails to import against torch 2.13 and FA4 is sm90+. The window-attention kernels take q / k / v / dq / dk / dv with any element strides (sample, row, head) instead of
+  head-major planes only, so the module's tensors and the slice of its fused qkv projection go in without a copy (the fused block's head-major call keeps its code: a compile-time row stride), and a small
+  `attn_delta_kernel` makes the backward's row term D = rowsum(dO o) where the fused block gets it from its out-projection backward. `bench.py target=swa_atom_attention` (CUDA graph, A100 80GB PCIe, N = 3072 / 6144):
+  inference (A = 5) 0.093 / 0.168 ms, training (A = 48) 2.248 / 4.374 ms, 12.2x / 23.2x and 12.6x / 25.5x PyTorch compiled (dense band-masked SDPA). Tests: `tests/integrations/test_a100_swa_attention_gpu.py`
+  (kernels against a dense fp32 band attention, strided / contiguous / head-major bit-identical, the module's output and gradients against its PyTorch path, CUDA graph, `torch.compile(fullgraph=True)`).
+- A100 (sm_80) bias-only token DiT inference (`BiasOnlyDiTBlock`, `integrations/bias_only_dit.py`): the B200 runner (`kernels/bias_only_dit/cuda/runner.py`: cuBLAS GEMMs + the family's CUDA row kernels, which already built for
+  sm_80) now serves A100 with a new attention core, `kernels/bias_only_dit/cuda/sm80` (`mma.sync` / `ldmatrix` / `cp.async`: sigmoid(g) * (P v) per head and sample, P shared by a group of SG samples per CTA, head widths 32 / 48 / 64,
+  any L multiple of 128), `core_supported` takes an A100 (any such L) next to the B200 (L <= 768). bf16, B = 1, key mask [1, L] or none, a conditioning per sample or shared, 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64 heads;
+  `MINIWORLD_BIAS_ONLY_DIT=0` / `MINIWORLD_BIAS_ONLY_DIT_CORE=0` keep the PyTorch composition. `bench.py target=bias_only_dit` (CUDA graph, A100 80GB PCIe, A = 5, 16 x 48), L384 / L768: a conditioning per sample 0.245 / 0.460 ms
+  = 1.50x / 1.83x PyTorch compiled (0.368 / 0.843), one conditioning shared by the samples 0.204 / 0.377 ms = 1.82x / 2.22x; the other layouts 1.7-2.3x; training on A100 is still the PyTorch composition (the B200 training path
+  needs sm_100a kernels). Page: `docs/gpus/a100/bias_only_dit/bias_only_dit.md`; tests: `tests/integrations/test_a100_bias_only_dit_gpu.py`.
+- A100 (sm_80) AttentionPairBias (the Pairformer single track), inference and training, hand CUDA + cuBLAS: `AttentionPairBias.forward` takes `integrations/attention_pair_bias_sm80.py` after the B200 hooks for
+  implementation MINIWORLD, bf16, B = 1, no QK-norm, (heads, d_single) in 8 x 48 / 12 x 32 / 16 x 24 at 384 and 16 x 32 at 512, d_pair 128, key mask [1, L] or none, any L (padded to 128 inside:
+  the single with zero rows, the pair read in place); `MINIWORLD_APB_SM80=0` keeps the module path, a failed extension build warns once and keeps it. The step is the B200 one on sm_80 pieces:
+  `kernels/augmented_attention/cuda/apb/apb_rows.cu` is built a second time with `-DAPB_SM80` (its sm_90+ pair kernels are guarded out; the row passes are shared) and takes the pair -> bias pass and its backward
+  from the new `apb_pair_bias_sm80.cuh` (`cp.async` tile rings, the same `mma.sync` + tensor-core row statistics; 89-97 % of the pair read's byte floor at L768), plus bf16-input variants of the gate / qkv rows; the
+  attention is `kernels/augmented_attention/cuda/sm80` (the gated inference core now also at head dim 32; `plain_forward` / `plain_backward` take the softmax scale, so the padded 16 x 24 heads keep 1 / sqrt(24)).
+  `apb.ext(arch)` picks the build. `bench.py target=attention_pair_bias` (CUDA graph, A100 80GB PCIe, L384 / L768): inference 0.078 / 0.170 ms (8 x 48) = 2.19x / 2.54x cuEquivariance (0.170 / 0.431),
+  training 0.249 / 0.570 ms = 1.84x / 2.07x (0.459 / 1.180); 12 x 32 and 16 x 24 2.15-2.70x and 1.92-2.16x; outputs and every gradient as accurate as the bf16 PyTorch module. Page:
+  `docs/gpus/a100/attention_pair_bias/attention_pair_bias.md`; tests: `tests/integrations/test_a100_apb_gpu.py`.
+- A100 (sm_80) `AugmentedAttentionPairBias` runs hand CUDA + cuBLAS from the AdaLN output to the residual (`integrations/augattn_sm80.py`, `kernels/augmented_attention/cuda/sm80/`: the core, a TF32 core, glue kernels, a streaming pair-bias kernel
+  for other pair widths) in bf16 and fp32 (TF32), any A / B / L, shared or per-sample key masks, inference and training; with the AdaLN / ConditionedTransition paths below the atom and token DiT blocks launch no Triton kernel. Against PyTorch
+  compiled: atom module 3.4-5.6x inference / 3.3-5.1x training, token module 1.2-2.6x from L = 256, `dit_atom` block 4.6-5.3x inference / 4.2-4.6x training (N = 3072-8192, measured on the integrated tree: the atom DiT block launches no Triton kernel). Switches `MINIWORLD_AUGATTN_SM80=0`
+  (old path), `_FUSED`, `_PBGEN`, `_OPS`. The token DiT block's fp32 inference runs the TF32 hand-CUDA core. Pages `docs/gpus/a100/{atom_dit,token_dit}/`; tests `tests/integrations/test_a100_augattn_gpu.py`, `test_a100_augattn_cpu.py`.
+- A100 (sm_80) SWA atom attention output gate (`integrations/sigmoid_gate_sm80.py`, `MINIWORLD_SIGMOID_GATE_SM80=0` keeps Triton) and the SWA DiT backward for any sample count; bias-only token DiT training (`integrations/bias_only_dit_train.py`, the `dpb`
+  bias-gradient core; A = 48, L <= 768, B = 1) and the `kernels.bias_only_attention` CUDA door (`bias_only_attention(v, bias)`, `MINIWORLD_BIAS_ONLY_ATTN_SM80`; a training call at L = 128 keeps Triton); the `projected_attention` token_single rows have a CUDA
+  path that the default dispatch (`MINIWORLD_AUGATTN_SM80_OPS=auto`) uses for training calls with A·B·H·L² >= 2e6 or head dim 24. `bench.py` gains kernel rows `projected_attention` and `bias_only_attention` (training rows need `compile=false`).
+  Pages `docs/gpus/a100/{swa_atom_dit,bias_only_dit}/`; tests `tests/integrations/test_a100_{swa_attention,swa_dit,bias_only_dit_train,bias_only_attention,projected_attention}_gpu.py`.
+- A100 (sm_80) TriangleMultiplication at every registry width: `integrations/trimul_sm80.py` also routes D64 / D256 / D384 (bf16) and D64-D384 in fp32 (TF32 tensor cores), one direction and bidirectional, inference and training, to LayerNorm-folded wide
+  kernels (`kernels/trimul_inproj/cuda/sm80_wide.py`, extension `trimul_sm80_wide`; `MINIWORLD_TRIMUL_SM80_WIDE=0` turns them off). Against cuEquivariance (CUDA graph, L128-768): bf16 inference 1.31-2.89x, training 1.36-2.12x; fp32 against PyTorch compiled
+  1.4-3.9x. Page `docs/gpus/a100/trimul/trimul.md`; tests `tests/integrations/test_a100_trimul_gpu.py`.
+- A100 (sm_80) gated projections: `kernels/gated_projection/cuda/sm80.py` (extension `gated_sm80`) serves the registry's `gated_linear` rows (fused gate + GEMM below 384 output columns, one-pass gate + cuBLAS above), `sigmoid_gate_fused`, `gated_residual`,
+  tm1 / tm2 (`kernels.tm1.interface.cuda_tm1`, `kernels.tm2.interface.cuda_tm2`) and the TriMul output gate; `MINIWORLD_GATED_SM80=0` keeps Triton; 1.0-2.0x PyTorch compiled. Kernel benches gain the arms `cuda_tm1` / `cuda_tm2` / `cuda_gate_elem_bwd`.
+  Page `docs/gpus/a100/gated_projection/gated_projection.md`; tests `tests/integrations/test_a100_gated_gpu.py`.
+- A100 (sm_80) TriangleAttention at every registered width (d_pair 64 hidden 64 / 128 with 4 x 16, 2 x 32, 4 x 32 heads, 128, 256 8 x 32, 384 12 x 32; L a multiple of 128; starting / ending node; inference and training) in hand CUDA
+  (`kernels/triangle_attention/cuda/sm80_wide.py`, `sm80_core2.py`: a fused narrow engine, native 16-channel heads, a row-kernel + cuBLAS engine), the `projected_attention` token_pair leaf (`ops.augmented_attention_pair_bias` with A = L pair rows,
+  `sm80_projected.py`) and `ops.layer_norm_linear` (`kernels/layernorm_linear/cuda/sm80.py`, forward + backward). Module level against cuEquivariance 1.3-3.2x inference, 1.4-2.6x training; the leaf 1.5-3.0x / 1.9-2.6x the Triton path,
+  `layer_norm_linear` 1.5-4.0x / 1.8-3.3x PyTorch compiled. Pages `docs/gpus/a100/triattn/triattn.md`, `docs/gpus/a100/layernorm_linear/layernorm_linear.md`; tests `tests/integrations/test_a100_{triattn_widths,projected,lnlinear}_gpu.py`.
+  `MINIWORLD_TRIATTN_SM80=0` / `MINIWORLD_LNLINEAR_SM80=0` keep the Triton paths.
+- A100 (sm_80) OuterProductMean and MSAPairWeightedAveraging: hand-written CUDA around cuBLAS via `integrations/opm_sm80.py` / `pwa_sm80.py` (`kernels/outer_product_mean/cuda/sm80/`, `kernels/pair_weighted_averaging/cuda/sm80/`) for implementation MINIWORLD,
+  bf16, B = 1, every registry row (OPM d_msa 64 / 128, d_hidden 32, d_pair 128 / 256 / 384, any L and MSA depth; PWA 8 heads of 8 / 16 / 32, d_msa 64 / 128, d_pair 128 / 256 / 384, L a multiple of 16 up to 1024), inference and training (PWA with fused row
+  dropout); `MINIWORLD_OPM_SM80=0` / `MINIWORLD_PWA_SM80=0` keep the module path. `bench.py` (S = 1024, CUDA graph, L384 / L768) against PyTorch compiled: OPM 1.25-1.29x (inference) and 1.17-1.19x (training) at d_pair 128, PWA 1.96-2.07x and 1.46-1.51x;
+  `bench.py` gains a `triton` arm for the two targets and `+msa_d_msa` / `+msa_d_hidden`. Pages `docs/gpus/a100/outer_product/outer_product.md`, `docs/gpus/a100/msa_pair_weighted_averaging/msa_pair_weighted_averaging.md`;
+  tests `tests/integrations/test_a100_{opm,pwa}_gpu.py`, `test_a100_msa_gate_cpu.py`.
+- A100 (sm_80) AdaptiveLayerNorm and ConditionedTransition (atom 128 / 128, token 768 / 384 and 768 / 768; bf16 and fp32 on TF32 tensor cores; inference and training, per-sample and shared conditioning): the modules call hand-CUDA paths
+  (`kernels/adaln/cuda/sm80*`, `kernels/conditioned_transition/cuda/sm80*`; `integrations/adaln_sm80.py`, `conditioned_transition_sm80.py`): cuBLAS GEMMs + warp-per-row CUDA row kernels + a second-stream GEMM branch at every width, fused tensor-core
+  kernels at the atom width. `MINIWORLD_ADALN_SM80=0` / `MINIWORLD_CONDTRANS_SM80=0` keep the Triton path. Against PyTorch compiled: 1.3-2.2x at the atom width in bf16 (fp32 inference 1.0-1.9x), parity to 1.17x at the token widths (GEMM-bound); fp32 AdaLN
+  inference at N = 1024 stays on Triton (5 % rule). Pages `docs/gpus/a100/adaptive_layernorm/adaptive_layernorm.md`, `docs/gpus/a100/conditioned_transition/conditioned_transition.md`; tests `tests/integrations/test_a100_adaln_gpu.py`,
+  `test_a100_conditioned_transition_gpu.py`.
+- A100 (sm_80) fp32 master parameters (AMP `bf16-mixed`: fp32 parameters over bf16 activations) on the hand-CUDA training paths of TriMul, Transition, OuterProductMean, PWA, AdaLN, ConditionedTransition,
+  AttentionPairBias and AugmentedAttentionPairBias, as on the B200: the integrations pass the parameters themselves into their autograd functions, cast them for the bf16 kernels outside autograd (no copy in
+  the graph) and return the kernels' fp32 weight-gradient accumulators unrounded in each parameter's dtype; the same kernels as for bf16 parameters (the fp32-parameter AugmentedAttention is served instead of
+  falling back). The A100 weight-pack caches are scoped to CUDA-graph captures through `kernels/_capture.py`. Tests: `tests/integrations/test_a100_fp32_master_gpu.py`. The `DiTBlock` asks the dedicated
+  attention / transition paths before the general CUDA composition (`integrations/a100_families.py`, `kernels/cuda_native.py`), which now only takes what they decline (QK-norm, other head widths).
+- A100 (sm_80) Transition at every registry width (D64 / 128 / 256 / 384 / 768, n = 2 and 4, pair / single / MSA streams; bf16, inference and training) and the SwiGLU FFN (`ops.swiglu_ffn`, atom / pair / single rows) in hand CUDA:
+  a lean pipelined `mma.sync` dual-GEMM + SwiGLU, a residual-folded squeeze, gate and LayerNorm-backward kernels around cuBLAS GEMMs (`kernels/transition/cuda/fused_wide_sm80.py`), a one-kernel D64 / D128 forward and fused backward
+  (`fused_fwd_sm80.py`, `fused_bwd_sm80.py`) above row thresholds, the existing `fused_sm80` at D128 / n = 4 from 8192 rows. `MINIWORLD_TRANSITION_FUSED_SM80=0` keeps the Triton path. Against PyTorch compiled (CUDA graph, L384): inference
+  1.3-4.8x (D128 n4 3.54x), training 0.99-2.55x (D384 n4 at parity, GEMM-bound). `bench.py` gains `+transition_n`, `+transition_stream`, `+transition_ffn` and a `triton` row that pins the A100 switch off; kernel-level CUDA arms
+  `transition_cuda`, `layernorm_linear_cuda`, `dual_gemm_gate_cuda` (the `gemm_epilogue` / `dual_gemm_epilogue` targets keep their Triton default: the CUDA arms are slower at d_pair 128). Page: `docs/gpus/a100/transition/transition.md`;
+  tests: `tests/integrations/test_a100_transition_gpu.py`, `test_a100_gemm_epilogue_gpu.py`.
+- A100 (sm_80) row kernels: LayerNorm (every registry width incl. the odd 267 / 451 / 831 / 833 and 2560; vector, scalar, staged-`cp.async` and wide-row kernels, forward and backward with a fixed-order partial reduction), RMSNorm, the fused Q/K
+  RMSNorm + 3D RoPE and `rms_norm_modulation` run hand-written CUDA (`kernels/{layernorm,rmsnorm,rope}/cuda/sm80.py`; `layernorm_kernel`, `RMSNorm.forward`, the SWA atom attention and `ops.rms_norm_modulation` route to it on an A100);
+  `MINIWORLD_NORMS_SM80=0` keeps the Triton kernels, `=force` also serves the tiny training steps (20K-100K elements) that are routed to Triton by measurement. Against PyTorch compiled: LayerNorm backward 1.26-2.22x, forward 0.97-1.16x
+  (bandwidth-bound), training step 1.02-1.74x, `rms_norm_modulation` 1.8-2.2x / 1.5-1.8x. Page: `docs/gpus/a100/layernorm/layernorm.md`; tests: `tests/integrations/test_a100_norms_gpu.py`.
+- A100 (sm_80) ProteinMPNN edge side: the edge tail (the fused projection -> GELU -> projection -> GELU -> projection -> dropout -> residual -> LayerNorm chain, forward and backward), the edge MLP, the edge LayerNorm's
+  compressed-save backward and the edge dropout's bit-packed mask run hand-written CUDA (`kernels/mpnn_edge_tail/cuda/sm80/`, `integrations/mpnn_edge_sm80.py`) wherever the Triton policies `triton` / `triton_compute` /
+  `triton_memory` / `memory` / `bitpack` (and the MLP's `auto` from 98,304 rows) were used; new backend literal `cuda` on the four families; `MINIWORLD_MPNN_EDGE_SM80=0` keeps the Triton kernels. Against PyTorch compiled
+  at N = 2048 / 65,536 nodes: edge tail 2.7x / 2.8x in inference and 2.4x / 2.25x in training (CUDA graph; the Triton path 1.3x), the recompute policy 1.9x / 1.6x (Triton 0.5x), edge MLP 2.1-2.4x / 1.6-1.7x;
+  full ProteinMPNN step -11 % (N = 2048) and -9 % (N = 8192). The dropout draw is a counter hash (not Philox): same kept share and independence, a different stream. `benchmarks/runners/mpnn_compare.py`: `cuda` columns and
+  `--graph-training`. Page: `docs/gpus/a100/mpnn/mpnn_edge.md`; tests: `tests/integrations/test_a100_mpnn_edge_gpu.py`.
+- A100 (sm_80) ProteinMPNN message side: the hidden-message reduction (`message_hidden_reduce`, forward and backward, no edge-sized tensor written), the encoder node message (`node_message_reduce`) and the relative-position
+  embedding's backward run hand-written CUDA (`kernels/mpnn_{message,node_message,relative_position}/cuda/sm80/`, `integrations/mpnn_msg_sm80.py`, three extensions) for the policies `auto` / `triton` / `triton_compute` /
+  `triton_memory`; `MINIWORLD_MPNN_MSG_SM80=0` keeps the Triton kernels (the registry driver / checks of `mpnn_message` stay pinned to Triton). Against PyTorch compiled at N = 16,384 nodes: hidden message 2.93x inference /
+  2.01x training, encoder node message 2.52x / 1.66x, relative-position backward 24x (3.0-7.1x faster than the Triton reduction); every reduction deterministic (no atomics). Page: `docs/gpus/a100/mpnn/mpnn_msg.md`;
+  tests: `tests/integrations/test_a100_mpnn_msg_gpu.py`.
+- Anthropic on A100 measured through `bench.py`'s `anthropic` arms (`MINIWORLD_ANTHROPIC_ROOT` = a copy of the pinned release's `common/opt_core`, which is checked out on cssb at
+  `/home/psk6950/practice/refs/uplifting-biomolecular-modeling`: the A100 pages had said it was not on the cluster); two new bench options, `+triattn_anthropic_row=block:k2b | block:flash |
+  block:triattn_native` (TriangleAttention) and `+dit_anthropic_core=fpf_apb | apb_attn` (the DiT composition's attention core; the kits' recipe `fpf_apb` stays the default, `apb_attn` is the core the
+  release's own A100 cells name and is 1.35-1.56x faster on this card). The sm_80 member of `triattn_native` (the release's A100 CUDA TriangleAttention core) is NOT measured: its prebuilt
+  binaries match no torch +cu129 stack, a rebuild from the unmodified sources with the release's own builder is refused by the release's `SHA256SUMS` seal, and recording the hash was not done.
 - `miniworld_engine.viz.kernel_flow`: kernel-flow SVG figures (one box per kernel, HBM reads and
   writes) from a JSON spec.
 - H100 single-direction TriMul training in CUDA at D64 (`h100_uni_d64_training`, the

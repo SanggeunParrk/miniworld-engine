@@ -1,0 +1,11 @@
+{
+  "date": "2026-10-05",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "common_files_checked": 1296,
+  "source_mismatches": [],
+  "trimul_external_source_files_checked": 10,
+  "triattn_binary_hash_match": true,
+  "apb_profile_cases": 15,
+  "apb_fwd_observed_in_all": true,
+  "note": "Source integrity and recorded execution audit; does not establish exhaustive optimal variant selection or upstream full-module implementation."
+}

@@ -1,0 +1,137 @@
+{
+ "figures": {
+  "inference": {
+   "title": "A100 · OuterProductMean · inference · d_msa 64, d_hidden 32, d_pair 128, bf16, pair residual",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "F1", "name": "LN + projections + mask", "impl": "CUDA · opm_prologue",
+       "code": [
+        "y = F.layer_norm(m, (64,), γ, β)",
+        "a = (y @ W_l.T) * mask[..., None]",
+        "b = (y @ W_r.T) * mask[..., None]",
+        "# s-major operands A, B [S, (i,c)] / [S, (j,e)]"
+       ],
+       "reads": ["m", "mask", "γ, β, W_l, W_r"],
+       "writes": ["A, B"]
+      },
+      {
+       "id": "F2", "name": "outer product", "impl": "cuBLAS · mm (NT kernel)",
+       "code": [
+        "O = A.T @ B",
+        "# = einsum(\"sic,sje->ijce\", a, b)",
+        "#   as [(i,c), (j,e)]"
+       ],
+       "reads": ["A, B"],
+       "writes": ["O"]
+      },
+      {
+       "id": "F3", "name": "count + projection + residual", "impl": "CUDA · opm_epilogue",
+       "code": [
+        "n = (mask.T @ mask).clamp(min=1)   # bf16 GEMM, fp32 acc",
+        "z = pair + to_out(O_ij / n) + bias"
+       ],
+       "reads": ["O", "n", "W_o, b_o", "pair"],
+       "writes": ["z"]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 384, S = 1024)",
+     "hbm": [
+      {"name": "m", "shape": "[1,S,L,64] bf16", "size": "50 MB"},
+      {"name": "A, B", "shape": "[S, L·32] bf16", "size": "25 MB each"},
+      {"name": "O", "shape": "[L·32, L·32] bf16", "size": "302 MB"},
+      {"name": "pair, z", "shape": "[1,L,L,128] bf16", "size": "38 MB each"},
+      {"name": "mask, n", "shape": "[S,L] bool, [L,L] fp32", "size": "< 1 MB"}
+     ]
+    }
+   ]
+  },
+  "training": {
+   "title": "A100 · OuterProductMean · training · d_msa 64, d_hidden 32, d_pair 128, bf16, pair residual",
+   "panels": [
+    {
+     "label": "forward (saves the LN statistics, A, B, O, n)",
+     "kernels": [
+      {
+       "id": "F1", "name": "LN + projections + mask", "impl": "CUDA · opm_prologue",
+       "code": [
+        "y = F.layer_norm(m, (64,), γ, β)",
+        "a = (y @ W_l.T) * mask[..., None]",
+        "b = (y @ W_r.T) * mask[..., None]",
+        "# A, B [S, 32 L]; μ, σ [S, L]"
+       ],
+       "reads": ["m", "mask", "γ, β, W_l, W_r"],
+       "writes": ["A, B", "μ, σ"]
+      },
+      {
+       "id": "F2", "name": "outer product", "impl": "cuBLAS · mm",
+       "code": ["O = A.T @ B   # [(i,c), (j,e)]"],
+       "reads": ["A, B"],
+       "writes": ["O (kept)"]
+      },
+      {
+       "id": "F3", "name": "count + projection + residual", "impl": "CUDA · opm_epilogue",
+       "code": ["n = (mask.T @ mask).clamp(min=1)", "z = pair + to_out(O_ij / n) + bias"],
+       "reads": ["O", "n", "W_o, b_o", "pair"],
+       "writes": ["z"]
+      }
+     ],
+     "hbm_title": "HBM, forward (sizes at L = 384, S = 1024)",
+     "hbm": [
+      {"name": "m", "shape": "[1,S,L,64] bf16", "size": "50 MB"},
+      {"name": "A, B", "shape": "[S, L·32] bf16", "size": "25 MB each"},
+      {"name": "O", "shape": "[L·32, L·32] bf16", "size": "302 MB"},
+      {"name": "pair, z", "shape": "[1,L,L,128] bf16", "size": "38 MB each"},
+      {"name": "μ, σ", "shape": "[S,L,2] fp32", "size": "3 MB"}
+     ]
+    },
+    {
+     "label": "backward (dz; the pair residual's gradient is dz itself)",
+     "kernels": [
+      {
+       "id": "B1", "name": "projection dgrad", "impl": "CUDA · opm_dgrad",
+       "code": [
+        "dz_n = dz / n",
+        "dO = dz_n @ W_o   # grouped [(i,c), (j,e)]",
+        "db_o = dz.sum((0, 1, 2))"
+       ],
+       "reads": ["dz", "n", "W_o"],
+       "writes": ["dO", "dz_n", "db_o"]
+      },
+      {
+       "id": "B2", "name": "dA, dB", "impl": "cuBLAS · mm ×2",
+       "code": ["dA = B @ dO.T   # [s, (i,c)]", "dB = A @ dO     # [s, (j,e)]"],
+       "reads": ["dO", "A, B"],
+       "writes": ["dA, dB"]
+      },
+      {
+       "id": "B3", "name": "dW_o", "impl": "CUDA · opm_dwo",
+       "code": ["dW_o = einsum(\"ijz,ijk->zk\", dz_n, O)", "# split over rows of i, fixed-order sum"],
+       "reads": ["dz_n", "O"],
+       "writes": ["dW_o"]
+      },
+      {
+       "id": "B4", "name": "prologue backward", "impl": "CUDA · opm_prologue_bwd",
+       "code": [
+        "(dm, dW_l, dW_r, dγ, dβ) = autograd of F1",
+        "#   on (dA, dB): mask, both projections, LN",
+        "# per-CTA partials -> reduce_rows"
+       ],
+       "reads": ["dA, dB", "m", "μ, σ", "mask", "γ, β, W_l, W_r"],
+       "writes": ["dm", "dW_l, dW_r, dγ, dβ"]
+      }
+     ],
+     "hbm_title": "HBM, backward (sizes at L = 384, S = 1024)",
+     "hbm": [
+      {"name": "dz, dz_n", "shape": "[1,L,L,128] bf16", "size": "38 MB each"},
+      {"name": "dO", "shape": "[L·32, L·32] bf16", "size": "302 MB"},
+      {"name": "dA, dB", "shape": "[S, L·32] bf16", "size": "25 MB each"},
+      {"name": "dm", "shape": "[1,S,L,64] bf16", "size": "50 MB"}
+     ]
+    }
+   ]
+  }
+ }
+}

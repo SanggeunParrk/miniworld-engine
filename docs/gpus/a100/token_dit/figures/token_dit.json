@@ -1,0 +1,553 @@
+{
+ "figures": {
+  "inference": {
+   "title": "A100 · token DiT block (AF3 Alg. 23) · inference · d 768, cond 384, pair 128, 16 heads × 48, transition n = 2, bf16",
+   "panels": [
+    {
+     "label": "one step of a stack of blocks (A samples; each block's last residual pass fuses with the next block's AdaLN)",
+     "kernels": [
+      {
+       "id": "P1",
+       "name": "conditioning (once per step, every block)",
+       "impl": "CUDA · layernorm_rows + cuBLAS",
+       "code": [
+        "ĉ = LN(cond)                              # statistics shared by every block's LN",
+        "G1 = ĉ @ W1'ᵀ + b1     # per block: scale, shift of the attention and the transition AdaLN",
+        "G2 = cond @ W2ᵀ + b2   # per block: the two output gates"
+       ],
+       "reads": [
+        "cond",
+        "W1', W2 (packed once)"
+       ],
+       "writes": [
+        "G1, G2"
+       ]
+      },
+      {
+       "id": "P2",
+       "name": "pair bias (once per pair tensor)",
+       "impl": "CUDA · layernorm128_rows + cuBLAS",
+       "code": [
+        "p̂ = LN(pair)",
+        "bias = (Wf @ p̂ᵀ) · log2 e           # every block, head-major",
+        "bias[:, :, masked keys] = -inf"
+       ],
+       "reads": [
+        "pair",
+        "Wf (LN_pair weight folded)"
+       ],
+       "writes": [
+        "bias"
+       ]
+      },
+      {
+       "id": "R1",
+       "name": "input + AdaLN",
+       "impl": "CUDA · adaln_in_rows",
+       "code": [
+        "x = single                                  # the fp32 residual",
+        "xa = LN(x) · sigmoid(G1s) + G1b"
+       ],
+       "reads": [
+        "single",
+        "G1"
+       ],
+       "writes": [
+        "x (fp32)",
+        "xa"
+       ]
+      },
+      {
+       "id": "M1",
+       "name": "q | k | v | g projection",
+       "impl": "cuBLAS",
+       "code": [
+        "qkvg = xa @ Wqkvgᵀ + b     # Wq, bq pre-scaled by sm_scale · log2 e"
+       ],
+       "reads": [
+        "xa",
+        "Wqkvg"
+       ],
+       "writes": [
+        "qkvg"
+       ]
+      },
+      {
+       "id": "A1",
+       "name": "gated attention",
+       "impl": "CUDA · attn_fwd_kernel (MODE_GATE)",
+       "code": [
+        "s = q kᵀ + bias            # base 2, per sample and head",
+        "o = softmax(s) v",
+        "q ← sigmoid(g) · o         # written over q"
+       ],
+       "reads": [
+        "q, k, v, g",
+        "bias"
+       ],
+       "writes": [
+        "q ← sigmoid(g) o"
+       ]
+      },
+      {
+       "id": "M2",
+       "name": "output projection",
+       "impl": "cuBLAS",
+       "code": [
+        "y = (sigmoid(g) o) @ Woᵀ"
+       ],
+       "reads": [
+        "qkvg[:, :768]",
+        "Wo"
+       ],
+       "writes": [
+        "y"
+       ]
+      },
+      {
+       "id": "R2",
+       "name": "residual + AdaLN",
+       "impl": "CUDA · resgate_adaln_rows",
+       "code": [
+        "x += sigmoid(G2a) · y",
+        "xa = LN(x) · sigmoid(G1s') + G1b'            # the transition's AdaLN"
+       ],
+       "reads": [
+        "x, y",
+        "G1, G2"
+       ],
+       "writes": [
+        "x (fp32)",
+        "xa"
+       ]
+      },
+      {
+       "id": "M3",
+       "name": "expand",
+       "impl": "cuBLAS",
+       "code": [
+        "ab = xa @ [Wa; Wb]ᵀ"
+       ],
+       "reads": [
+        "xa",
+        "Wa, Wb"
+       ],
+       "writes": [
+        "ab"
+       ]
+      },
+      {
+       "id": "R3",
+       "name": "SwiGLU",
+       "impl": "CUDA · swiglu_rows",
+       "code": [
+        "h = silu(a) · b"
+       ],
+       "reads": [
+        "ab"
+       ],
+       "writes": [
+        "h"
+       ]
+      },
+      {
+       "id": "M4",
+       "name": "squeeze",
+       "impl": "cuBLAS",
+       "code": [
+        "z = h @ Wsᵀ"
+       ],
+       "reads": [
+        "h",
+        "Ws"
+       ],
+       "writes": [
+        "z"
+       ]
+      },
+      {
+       "id": "R4",
+       "name": "residual (+ next block's AdaLN)",
+       "impl": "CUDA · resgate_adaln_rows / resgate_out_rows",
+       "code": [
+        "x += sigmoid(G2b) · z",
+        "xa = AdaLN(x) of the next block       # or out = x, the last block"
+       ],
+       "reads": [
+        "x, z",
+        "G1, G2"
+       ],
+       "writes": [
+        "x (fp32), xa",
+        "out"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, A = 5, 24 blocks)",
+     "hbm": [
+      {
+       "name": "single, out",
+       "shape": "[A,L,768] bf16",
+       "size": "5.9 MB each"
+      },
+      {
+       "name": "x",
+       "shape": "[A L,768] fp32",
+       "size": "11.8 MB"
+      },
+      {
+       "name": "xa, y, z",
+       "shape": "[A L,768] bf16",
+       "size": "5.9 MB each"
+      },
+      {
+       "name": "qkvg",
+       "shape": "[A L,3072] bf16",
+       "size": "23.6 MB"
+      },
+      {
+       "name": "ab, h",
+       "shape": "[A L,3072 | 1536] bf16",
+       "size": "23.6 / 11.8 MB"
+      },
+      {
+       "name": "G1, G2 (shared cond)",
+       "shape": "[L,24,4 | 2,768] bf16",
+       "size": "113 / 57 MB"
+      },
+      {
+       "name": "bias, all blocks",
+       "shape": "[24 · 16,L,L] bf16",
+       "size": "453 MB"
+      },
+      {
+       "name": "pair",
+       "shape": "[L,L,128] bf16",
+       "size": "151 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training": {
+   "title": "A100 · token DiT block (AF3 Alg. 23) · training · d 768, cond 384, pair 128, 16 heads × 48, transition n = 2, bf16, A even",
+   "panels": [
+    {
+     "label": "forward (saves x, ĉ, G, Gg, xa, qkvg, o, lse, og, y, x1, xt, ab, z, p̂, bias)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "conditioning",
+       "impl": "CUDA · cond_prep + cuBLAS",
+       "code": [
+        "ĉ = LN(cond), c = bf16(cond)               # statistics saved",
+        "G = ĉ @ Wnᵀ        # s1 | sh1 | s2 | sh2, cond-LN weights folded into Wn",
+        "Gg = c @ Wgᵀ       # gate1 | gate2"
+       ],
+       "reads": [
+        "cond",
+        "Wn, Wg"
+       ],
+       "writes": [
+        "ĉ, c, G, Gg"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "AdaLN + projection",
+       "impl": "CUDA · adaln_a + cuBLAS",
+       "code": [
+        "x = single (fp32); xa = LN(x) · sigmoid(G[:, :768] + bs1) + G[:, 768:1536]",
+        "qkvg = xa @ Wqkvgᵀ + b"
+       ],
+       "reads": [
+        "single, G",
+        "Wqkvg"
+       ],
+       "writes": [
+        "x, xa, qkvg"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "pair bias",
+       "impl": "CUDA · pair_ln + cuBLAS",
+       "code": [
+        "p̂ = LN(pair)                                # statistics saved",
+        "bias = (Wf @ p̂ᵀ).view(16, L, L)            # natural units; masked keys = -inf"
+       ],
+       "reads": [
+        "pair",
+        "Wf"
+       ],
+       "writes": [
+        "p̂, bias"
+       ]
+      },
+      {
+       "id": "F4",
+       "name": "attention forward",
+       "impl": "CUDA · attn_fwd_kernel (MODE_TRAIN)",
+       "code": [
+        "s = sm_scale q kᵀ + bias; o = softmax(s) v   # fp32 o",
+        "lse = log2 Σ exp2(s · log2 e)               # per sample, head, query"
+       ],
+       "reads": [
+        "q, k, v",
+        "bias"
+       ],
+       "writes": [
+        "o (fp32)",
+        "lse"
+       ]
+      },
+      {
+       "id": "F5",
+       "name": "gate, output projection, residual, AdaLN",
+       "impl": "CUDA · gate_o + res_adaln_b + cuBLAS",
+       "code": [
+        "og = sigmoid(g) · o;  y = og @ Woᵀ",
+        "x1 = x + sigmoid(Gg[:, :768] + bg1) · y",
+        "xt = LN(x1) · sigmoid(G[:, 1536:2304] + bs2) + G[:, 2304:]"
+       ],
+       "reads": [
+        "o, qkvg",
+        "x, G, Gg",
+        "Wo"
+       ],
+       "writes": [
+        "og, y",
+        "x1, xt"
+       ]
+      },
+      {
+       "id": "F6",
+       "name": "transition + output",
+       "impl": "CUDA · swiglu_rows + res_c + cuBLAS",
+       "code": [
+        "ab = xt @ [Wa; Wb]ᵀ;  h = silu(a) · b;  z = h @ Wsᵀ",
+        "out = x1 + sigmoid(Gg[:, 768:] + bg2) · z"
+       ],
+       "reads": [
+        "xt, x1, Gg",
+        "Wa, Wb, Ws"
+       ],
+       "writes": [
+        "ab, h, z",
+        "out"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, A = 48)",
+     "hbm": [
+      {
+       "name": "single, out; x, x1, o",
+       "shape": "[A L,768] bf16 | fp32",
+       "size": "57 | 113 MB"
+      },
+      {
+       "name": "xa, xt, og, y, z",
+       "shape": "[A L,768] bf16",
+       "size": "57 MB each"
+      },
+      {
+       "name": "qkvg, ab, G",
+       "shape": "[A L,3072] bf16",
+       "size": "226 MB each"
+      },
+      {
+       "name": "h, Gg",
+       "shape": "[A L,1536] bf16",
+       "size": "113 MB each"
+      },
+      {
+       "name": "p̂",
+       "shape": "[L L,128] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "bias, lse",
+       "shape": "[16,L,L] bf16, [A,16,L] fp32",
+       "size": "19 MB, 2.4 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward; dqkvg = [dq | dk | dv | dg], one buffer; the attention kernels read the saved bias, lse and the row term D",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "output side",
+       "impl": "CUDA · res_c_bwd + cuBLAS",
+       "code": [
+        "dz = dout; dGg[:, 768:] and the bg2 sum from z",
+        "dh = dz @ Ws;  dWs = dzᵀ @ h"
+       ],
+       "reads": [
+        "dout, z, Gg",
+        "Ws, h"
+       ],
+       "writes": [
+        "dz, dh",
+        "dGg, dWs"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "SwiGLU backward + expand",
+       "impl": "CUDA · swiglu_bwd + cuBLAS",
+       "code": [
+        "dab = swiglu'(ab) · dh   (h recomputed for dWs)",
+        "dxt = dab @ [Wa; Wb];  d[Wa; Wb] = dabᵀ @ xt"
+       ],
+       "reads": [
+        "dh, ab, xt",
+        "Wa, Wb"
+       ],
+       "writes": [
+        "dab, dxt",
+        "dWa, dWb"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "residual + AdaLN backward",
+       "impl": "CUDA · res_adaln_b_bwd",
+       "code": [
+        "dx1 = dout + LN backward(dxt · sigmoid')",
+        "dy = dx1 · sigmoid(gate1);  dG, dGg, bs2 / bg1 sums"
+       ],
+       "reads": [
+        "dout, dxt, x1, y",
+        "G, Gg"
+       ],
+       "writes": [
+        "dx1, dy",
+        "dG, dGg"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "output projection + gate backward",
+       "impl": "CUDA · gate_o_bwd + cuBLAS",
+       "code": [
+        "dog = dy @ Wo;  dWo = dyᵀ @ og",
+        "dO = dog · sigmoid(g);  D = Σ_d dO o;  dg = dog · o · sigmoid'(g)"
+       ],
+       "reads": [
+        "dy, o, qkvg",
+        "Wo, og"
+       ],
+       "writes": [
+        "dO, D",
+        "dg (in dqkvg), dWo"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "attention backward, query side",
+       "impl": "CUDA · attn_bwd_dq_kernel, db_reduce_kernel",
+       "code": [
+        "P = exp2(scl q kᵀ + bias log2 e − lse);  dS = P (dO vᵀ − D)",
+        "dq = sm_scale dS k;  db[h, i, j] = Σ_a dS   # 4 samples per CTA, then a fixed-order reduce"
+       ],
+       "reads": [
+        "q, k, v, dO",
+        "bias, lse, D"
+       ],
+       "writes": [
+        "dq (fp32)",
+        "db partials, db"
+       ]
+      },
+      {
+       "id": "B6",
+       "name": "attention backward, key side",
+       "impl": "CUDA · bias_transpose_kernel, attn_bwd_dkv_kernel",
+       "code": [
+        "Pᵀ = exp2(scl k qᵀ + biasᵀ log2 e − lse);  dSᵀ = Pᵀ (v dOᵀ − D)",
+        "dv = Pᵀ dO;  dk = sm_scale dSᵀ q"
+       ],
+       "reads": [
+        "q, k, v, dO",
+        "bias, lse, D"
+       ],
+       "writes": [
+        "dk, dv (fp32)"
+       ]
+      },
+      {
+       "id": "B7",
+       "name": "q | k | v gradient, projection backward, AdaLN backward",
+       "impl": "CUDA · qknorm_bwd (copy), adaln_a_bwd + cuBLAS",
+       "code": [
+        "dqkvg[:, :2304] = bf16(dq | dk | dv);  bq sum",
+        "dxa = dqkvg @ Wqkvg;  dWqkvg = dqkvgᵀ @ xa",
+        "dx = dx1 + LN backward(dxa · sigmoid');  dG"
+       ],
+       "reads": [
+        "dq, dk, dv, dqkvg",
+        "xa, x, G",
+        "Wqkvg"
+       ],
+       "writes": [
+        "dsingle",
+        "dG, dWqkvg"
+       ]
+      },
+      {
+       "id": "B8",
+       "name": "conditioning + pair-bias backward",
+       "impl": "CUDA · cond_bwd, unfold_lnw, pair_ln_bwd + cuBLAS",
+       "code": [
+        "dĉ = dG @ Wn;  dWn = dGᵀ @ ĉ;  dcond, dW1 / dW2, d(LN_cond weight)",
+        "dWf = db @ p̂;  dp̂ = dbᵀ @ Wf;  dpair = LN backward(dp̂)"
+       ],
+       "reads": [
+        "dG, dGg, ĉ, c",
+        "db, p̂, pair"
+       ],
+       "writes": [
+        "dcond, dpair",
+        "parameter gradients"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 768, A = 48)",
+     "hbm": [
+      {
+       "name": "dout, dsingle, dx1, dy, dog, dO",
+       "shape": "[A L,768] bf16 | fp32",
+       "size": "57 | 113 MB"
+      },
+      {
+       "name": "dq, dk, dv",
+       "shape": "[A L,768] fp32",
+       "size": "113 MB each"
+      },
+      {
+       "name": "dqkvg, dab, dG",
+       "shape": "[A L,3072] bf16",
+       "size": "226 MB each"
+      },
+      {
+       "name": "db partials",
+       "shape": "[A / 4,16,L,L] bf16",
+       "size": "226 MB"
+      },
+      {
+       "name": "db, biasᵀ",
+       "shape": "[16,L,L] fp32 | bf16",
+       "size": "38 | 19 MB"
+      },
+      {
+       "name": "dp̂",
+       "shape": "[L L,128] fp32",
+       "size": "302 MB"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
