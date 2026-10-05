@@ -18,6 +18,7 @@
 #include <torch/extension.h>
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <cuda.h>
 #include <cuda_bf16.h>
@@ -44,8 +45,8 @@ void transition_fused_bwd_launch(const CUtensorMap&, const CUtensorMap&, const C
                                  const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
                                  const float*, const float*, const float*, __nv_bfloat16*, float*,
                                  float*, float*, float*, int, int, cudaStream_t);
-void transition_fused_reduce_launch(const float*, __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*,
-                                    const float*, float*, float*, cudaStream_t);
+void transition_fused_reduce_launch(const float*, void*, void*, void*,
+                                    const float*, float*, float*, bool, cudaStream_t);
 
 namespace {
 
@@ -142,11 +143,11 @@ std::vector<torch::Tensor> transition_fused_fwd(torch::Tensor x, torch::Tensor g
 
 // dy [M,128] bf16 (gradient of the module output), plus what the forward saved.
 // Returns (dx, dgamma, dbeta, dWa, dWb, dWs); dx already carries the residual branch.
-std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor x,
+std::vector<torch::Tensor> transition_fused_bwd_master(torch::Tensor dy, torch::Tensor x,
                                                 torch::Tensor xn, torch::Tensor rstd,
                                                 torch::Tensor c1, torch::Tensor gamma,
                                                 torch::Tensor wa, torch::Tensor wb,
-                                                torch::Tensor ws) {
+                                                torch::Tensor ws, bool fp32_dw) {
   const int64_t M = x.size(0), D = x.size(1), H = wa.size(0);
   expect(dy.is_cuda() && dy.is_contiguous() && dy.scalar_type() == torch::kBFloat16, "dy must be contiguous cuda bf16");
   expect(D == 128 && H == 512, "only d_hidden 128 with n 4 is built");
@@ -160,9 +161,9 @@ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor 
   auto dbeta = torch::zeros({D}, f32);
   auto partw = torch::empty({transition_fused_bwd_ndw() * 3 * 64 * D}, f32);
   auto dgbw = torch::empty({transition_fused_bwd_ndx() * 8 * 256}, f32);
-  auto dWa = torch::empty_like(wa);
-  auto dWb = torch::empty_like(wb);
-  auto dWs = torch::empty_like(ws);
+  auto dWa = torch::empty(wa.sizes(), fp32_dw ? f32 : wa.options());
+  auto dWb = torch::empty(wb.sizes(), fp32_dw ? f32 : wb.options());
+  auto dWs = torch::empty(ws.sizes(), fp32_dw ? f32 : ws.options());
 
   auto stream = at::cuda::getCurrentCUDAStream();
   transition_fused_bwd_launch(
@@ -172,16 +173,18 @@ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor 
       dgam.data_ptr<float>(), dbeta.data_ptr<float>(), partw.data_ptr<float>(),
       dgbw.data_ptr<float>(), static_cast<int>(M),
       static_cast<int>(M / transition_fused_bwd_rows()), stream);
-  transition_fused_reduce_launch(partw.data_ptr<float>(), bf16_ptr(dWa), bf16_ptr(dWb),
-                                 bf16_ptr(dWs), dgbw.data_ptr<float>(), dgam.data_ptr<float>(),
-                                 dbeta.data_ptr<float>(), stream);
+  transition_fused_reduce_launch(partw.data_ptr<float>(), dWa.data_ptr(), dWb.data_ptr(),
+                                 dWs.data_ptr(), dgbw.data_ptr<float>(), dgam.data_ptr<float>(),
+                                 dbeta.data_ptr<float>(), fp32_dw, stream);
   return {dx, dgam, dbeta, dWa, dWb, dWs};
 }
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("transition_fused_fwd", &transition_fused_fwd,
         "fused sm_90a Transition forward (LN + SwiGLU expand + squeeze + residual)");
-  m.def("transition_fused_bwd", &transition_fused_bwd,
+  m.def("transition_fused_bwd_master", &transition_fused_bwd_master);
+  m.def("transition_fused_bwd", [](torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rs, torch::Tensor c1, torch::Tensor g, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws) { return transition_fused_bwd_master(dy,x,xn,rs,c1,g,wa,wb,ws,false); },
         "fused sm_90a Transition backward (one kernel + a partial reduction)");
   m.def("rows_per_tile", &transition_fused_fwd_rows);
   m.def("fwd_ctas", &transition_fused_fwd_ctas);

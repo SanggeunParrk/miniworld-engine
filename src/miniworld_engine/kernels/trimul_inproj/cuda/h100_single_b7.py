@@ -33,6 +33,7 @@ class Plan:
         self.count = clusters * (8 + self.consumers)
         inc = T._upstream() / "csrc"
         flags = [
+            "-DMASTER_FP32=" + str(int(d.get("master_weights", False))),
             "-DB7_DEBUG_DXN=" + str(int(debug is not None)),
             "-DB7_HW_CLUSTER=" + str(self.hwcluster),
             "-DB7_MULTICAST=" + str(self.multicast),
@@ -82,7 +83,7 @@ class Plan:
         x = d["x"]
         m = d["n"] ** 2
         self.dx = torch.empty((m, 128), device=x.device, dtype=x.dtype)
-        self.dw = torch.empty((4, 128, 128), device=x.device, dtype=x.dtype)
+        self.dw = torch.empty((4, 128, 128), device=x.device, dtype=torch.float32 if d.get("master_weights", False) else x.dtype)
         self.dgam = torch.empty(128, device=x.device)
         self.dbeta = torch.empty_like(self.dgam)
         self.partw = torch.zeros((self.clusters * 2, 8, 64, 128), device=x.device)

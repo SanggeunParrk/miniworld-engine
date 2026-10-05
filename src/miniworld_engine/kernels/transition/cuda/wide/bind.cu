@@ -25,7 +25,7 @@ int wide_d64_bwd_ndw();
 int wide_d64_bwd_ndx();
 void wide_d64_bwd_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
                          const CUtensorMap&, const float*, const float*, const float*, __nv_bfloat16*, float*, float*, float*, float*,
-                         __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, int, int, cudaStream_t);
+                         void*, void*, void*, int, int, bool, cudaStream_t);
 #endif
 #if WIDE_D == 256
 void wide_d256_fwd_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
@@ -157,8 +157,8 @@ std::vector<torch::Tensor> fwd(torch::Tensor x, torch::Tensor gamma, torch::Tens
 
 #if WIDE_D == 64
 // Returns (dx, dgamma, dbeta, dWa, dWb, dWs); dx carries the residual branch.
-std::vector<torch::Tensor> bwd(torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rstd, torch::Tensor c1,
-                               torch::Tensor gamma, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws) {
+std::vector<torch::Tensor> bwd_master(torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rstd, torch::Tensor c1,
+                               torch::Tensor gamma, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws, bool fp32_dw) {
   const int64_t M = x.size(0);
   bf16_2d(dy, M, D, "dy must be contiguous bf16 [M, D]"); bf16_2d(x, M, D, "x"); bf16_2d(xn, M, D, "xn");
   f32_1d(rstd, M, "rstd"); f32_1d(c1, M, "c1"); f32_1d(gamma, D, "gamma must be fp32 [D]");
@@ -169,10 +169,11 @@ std::vector<torch::Tensor> bwd(torch::Tensor dy, torch::Tensor x, torch::Tensor 
   auto dgam = torch::empty({D}, f32), dbeta = torch::empty({D}, f32);
   auto partw = torch::empty({wide_d64_bwd_ndw() * 4 * 64 * D}, f32);
   auto dgbw = torch::empty({wide_d64_bwd_ndx() * 8 * 2 * D}, f32);
-  auto dWa = torch::empty_like(wa), dWb = torch::empty_like(wb), dWs = torch::empty_like(ws);
+  auto opt=fp32_dw?f32:wa.options();
+  auto dWa = torch::empty(wa.sizes(),opt), dWb = torch::empty(wb.sizes(),opt), dWs = torch::empty(ws.sizes(),opt);
   wide_d64_bwd_launch(rm(dy, 64, 64), rm(xn, 64, 64), rm(x, 64, 64), rm(ws, 64, D), rm(wa, 64, 64), rm(wb, 64, 64), fp(rstd), fp(c1),
-                      fp(gamma), bp(dx), fp(dgam), fp(dbeta), fp(partw), fp(dgbw), bp(dWa), bp(dWb), bp(dWs), (int)M,
-                      (int)(M / ROWS), at::cuda::getCurrentCUDAStream());
+                      fp(gamma), bp(dx), fp(dgam), fp(dbeta), fp(partw), fp(dgbw), dWa.data_ptr(), dWb.data_ptr(), dWs.data_ptr(), (int)M,
+                      (int)(M / ROWS), fp32_dw, at::cuda::getCurrentCUDAStream());
   return {dx, dgam, dbeta, dWa, dWb, dWs};
 }
 #endif
@@ -222,7 +223,8 @@ std::vector<torch::Tensor> dxln(torch::Tensor dab, torch::Tensor wabt, torch::Te
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &fwd, "wide-width fused Transition forward (+ residual)");
 #if WIDE_D == 64
-  m.def("bwd", &bwd, "D = 64 fused Transition backward");
+  m.def("bwd_master", &bwd_master);
+  m.def("bwd", [](torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rs, torch::Tensor c1, torch::Tensor g, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws) { return bwd_master(dy,x,xn,rs,c1,g,wa,wb,ws,false); }, "D = 64 fused Transition backward");
 #endif
 #if WIDE_D >= 256
   m.def("gate", &gate, "backward gate stage: h, [dA|dB]");

@@ -21,7 +21,7 @@ if not cutlass or not (Path(cutlass) / "include/cute/tensor.hpp").is_file():
 build = ROOT / "build_wgrad"
 build.mkdir(exist_ok=True)
 previous = json.loads((ROOT / "wgrad_manifest.json").read_text())
-module_name = previous["module_name"]
+module_name = "triattn_wgrad_shared_z_master"
 binary = module_name + ".so"
 module = load(name=module_name, sources=[str(ROOT / "wgrad.cu")],
               build_directory=str(build), extra_include_paths=[str(ROOT), str(Path(cutlass) / "include")],

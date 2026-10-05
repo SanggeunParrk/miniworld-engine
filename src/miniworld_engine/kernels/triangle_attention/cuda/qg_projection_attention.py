@@ -10,6 +10,7 @@ from miniworld_engine.autotune.shape_key import token_key
 from miniworld_engine.kernels.layernorm import compile_native as ln
 from miniworld_engine.kernels.triangle_attention.cuda import ln_backward,gate_backward,wgrad_backward
 from miniworld_engine.kernels.bias_only_attention.triton.gate_out import _fwd as gate_fwd
+from miniworld_engine.integrations.h100_master import pack as pack_master
 
 import functools,hashlib,importlib.util,json,os,sys
 from pathlib import Path
@@ -50,11 +51,11 @@ def can_use(model,pair,mask=None):
         return False
     weights=(model.to_query.weight,model.to_key.weight,model.to_value.weight,
              model.to_gate.weight,model.to_bias.weight)
-    if not ln_backward.can_use(pair,weights,model.ln_pair.weight,model.ln_pair.bias):return False
+    if not ln_backward.can_use(pair,weights,model.ln_pair.weight,model.ln_pair.bias,allow_master=True):return False
     if mask is not None and not (mask.dtype==torch.bool and mask.device==pair.device
             and mask.shape==(1,pair.shape[1])):return False
     from miniworld_engine.kernels.bias_only_attention import dispatch as gate_dispatch
-    return (_available(pair.device) and gate_backward.can_use(pair,model.to_out.weight)
+    return (_available(pair.device) and gate_backward.can_use(pair,model.to_out.weight,allow_master=True)
         and gate_dispatch.gate_use_fused(128,128,pair.shape[1]**2,pair.device,pair.dtype))
 
 
@@ -79,6 +80,9 @@ def projection_view(t):
 class FrontAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx,x,gamma,beta,wq,wk,wv,wg,wb,wo,mask,eps,ending):
+        raw_weights=(wq,wk,wv,wg,wb,wo)
+        ctx.master=wq.dtype==torch.float32
+        if ctx.master:wq,wk,wv,wg,wb,wo=pack_master(raw_weights)
         xx=x.transpose(1,2).contiguous() if ending else x
         z,mean,rstd=ln._dispatch_fwd(xx,gamma,beta,eps)
         b=F.linear(z,wb).permute(0,3,1,2)
@@ -88,17 +92,17 @@ class FrontAttention(torch.autograd.Function):
         gate=gate.reshape(-1,128)
         out2=projection_view(out)
         y=gate_fwd(gate,out2,wo,shape_key=token_key(x.shape[1]))
-        ctx.save_for_backward(xx,z,mean,rstd,gamma,wq,wk,wv,wg,wb,wo,q,k,v,b,m,gate,out2,mask)
+        ctx.save_for_backward(xx,z,mean,rstd,gamma,wq,wk,wv,wg,wb,wo,q,k,v,b,m,gate,out2,mask,*raw_weights)
         ctx.ending=ending
         return y.view_as(z),x.view_as(x)
 
     @staticmethod
     def backward(ctx,dy,residual):
-        x,z,mean,rstd,gamma,wq,wk,wv,wg,wb,wo,q,k,v,b,m,gate,out,mask=ctx.saved_tensors
+        x,z,mean,rstd,gamma,wq,wk,wv,wg,wb,wo,q,k,v,b,m,gate,out,mask,*_raw_weights=ctx.saved_tensors
         dy=dy.reshape(-1,128).contiguous()
         dr,dg,a,delta=gate_backward.gate_backward(dy,wo,gate,out)
         dq,dk,dv,db=gate_backward.attention_backward(q,k,v,b,m,delta,dr)
-        dwo=dy.T@a if ctx.needs_input_grad[8] else None
+        dwo=(torch.mm(dy.T,a,out_dtype=torch.float32) if ctx.master else dy.T@a) if ctx.needs_input_grad[8] else None
         del dr,a,delta
         if mask is not None:db=db.masked_fill(~mask[:,None,None,:],0)
         weights=(wq,wk,wv,wg,wb)
@@ -107,8 +111,9 @@ class FrontAttention(torch.autograd.Function):
         dx,dgamma,dbeta=ln_backward._backward(grads,list(weights),x,mean,rstd,gamma,residual.contiguous(),x.shape[1],ctx.ending)
         zz=z.reshape(-1,128);needed=ctx.needs_input_grad[3:8]
         if all(needed[:4]) and wgrad_backward.can_use(grads[:4],zz):
-            dw=[*wgrad_backward.backward(grads[:4],zz),grads[4].T@zz if needed[4] else None]
-        else:dw=[g.T@zz if n else None for g,n in zip(grads,needed)]
+            dbw=(torch.mm(grads[4].T,zz,out_dtype=torch.float32) if ctx.master else grads[4].T@zz) if needed[4] else None
+            dw=[*wgrad_backward.backward(grads[:4],zz,master=ctx.master),dbw]
+        else:dw=[(torch.mm(g.T,zz,out_dtype=torch.float32) if ctx.master else g.T@zz) if n else None for g,n in zip(grads,needed)]
         return dx,dgamma,dbeta,*dw,dwo,None,None,None
 
 def forward(model,pair,mask=None):
@@ -118,4 +123,3 @@ def forward(model,pair,mask=None):
     if not model.starting:out=out.transpose(1,2).contiguous()
     if model.p_drop>0 and model.training:out=out*model._make_drop_scale(pair,model.p_drop)
     return residual+out
-

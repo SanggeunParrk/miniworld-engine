@@ -25,8 +25,8 @@ def _artifact_ready():
 def _available(device):
     return _artifact_ready()
 
-def can_use(pair, weights, gamma, beta):
-    return (_projection_can_use(pair, weights) and _available(pair.device)
+def can_use(pair, weights, gamma, beta, allow_master=False):
+    return (_projection_can_use(pair, weights, allow_master=allow_master) and _available(pair.device)
             and all(t.dtype == torch.float32 and t.shape == (128,)
                     and t.is_contiguous() and t.device == pair.device for t in (gamma, beta)))
 

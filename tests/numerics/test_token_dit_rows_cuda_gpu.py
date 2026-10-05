@@ -122,6 +122,26 @@ def test_gemm_swiglu_sm100_matches_fp32(M, monkeypatch):
     assert e < 6e-3, f"gemm_swiglu: {e:.2e}"
 
 
+@pytest.mark.skipif(not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)), reason="H100")
+@pytest.mark.parametrize("M", [128, 1920])
+def test_gemm_swiglu_sm90_matches_fp32(M, monkeypatch):
+    """The restored H100 fused GEMM follows upstream's [Wa; Wb] pack and supports the minimum tile."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+
+    g = torch.Generator(device="cuda").manual_seed(M)
+    K, H = 768, 1536
+    x = torch.randn(M, K, device="cuda", generator=g).bfloat16()
+    wa, wb = ((torch.randn(H, K, device="cuda", generator=g) * K ** -0.5).bfloat16() for _ in range(2))
+    wab = torch.cat([wa, wb]).contiguous()
+    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_GEMM_SWIGLU", "1")
+    assert gemm_swiglu.supported_sm90(x, wab)
+    out = torch.full((M, H), float("nan"), device="cuda", dtype=torch.bfloat16)
+    gemm_swiglu.GemmSwigluSm90(torch.cuda.current_device())(x, wab, out)
+    ref = torch.nn.functional.silu(x.float() @ wa.float().t()) * (x.float() @ wb.float().t())
+    assert torch.isfinite(out).all()
+    assert _rel(out.float(), ref) < 6e-3
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("nb", [1, 2])
 def test_narrow_pair_bias_with_mask_matches_triton(dtype, nb):
@@ -142,3 +162,36 @@ def test_narrow_pair_bias_with_mask_matches_triton(dtype, nb):
     fin = torch.isfinite(want)
     e = _rel(got[fin], want[fin])
     assert e < (1.5e-2 if dtype is torch.bfloat16 else 2e-3), f"pair bias: {e:.2e}"
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_qknorm_rows_matches_rms_norm(dtype):
+    """In place on the q | k columns of a q|k|v|g row, v and g untouched; per 48-wide head against torch's rms_norm."""
+    from miniworld_engine.kernels.conditioned_transition import cuda as C
+    g = torch.Generator(device="cuda").manual_seed(3)
+    M, D = 1000, 768
+    qkvg = (torch.randn(M, 4 * D, device="cuda", generator=g) * 2 + 0.5).to(dtype)
+    wq = 1 + 0.1 * torch.randn(48, device="cuda", generator=g)
+    wk = 1 + 0.1 * torch.randn(48, device="cuda", generator=g)
+    eq, ek = 1e-6, 1.2e-7
+    want = qkvg.float().clone()
+    for i, (w, e) in enumerate(((wq, eq), (wk, ek))):
+        v = want[:, i * D:(i + 1) * D].unflatten(-1, (16, 48))
+        v.copy_(torch.nn.functional.rms_norm(v, (48,), w, e))
+    got = qkvg.clone()
+    C.qknorm_rows(got, wq, wk, eq, ek)
+    assert torch.equal(got[:, 2 * D:], qkvg[:, 2 * D:])
+    assert _rel(got[:, :2 * D].float(), want[:, :2 * D]) < (4e-3 if dtype is torch.bfloat16 else 1e-6)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_cond_rows_matches_layer_norm(dtype):
+    """cn = LayerNorm(c) without affine and cc = c, from one pass, against torch."""
+    from miniworld_engine.kernels.conditioned_transition import cuda as C
+    g = torch.Generator(device="cuda").manual_seed(4)
+    c = (torch.randn(384, 384, device="cuda", generator=g) * 3 + 1).to(dtype)
+    cn, cc = torch.empty_like(c), torch.empty_like(c)
+    C.cond_rows(c, cn, cc, 1e-5)
+    assert torch.equal(cc, c)
+    want = torch.nn.functional.layer_norm(c.float(), (384,), eps=1e-5)
+    assert _rel(cn.float(), want) < (4e-3 if dtype is torch.bfloat16 else 1e-6)

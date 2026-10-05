@@ -127,13 +127,14 @@ def test_trimul_compile_backward_and_saved_tensor_ownership(monkeypatch):
         assert relative(got, want) < 1e-6
 
 
+@pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
+def test_token_dit_inference_live_inputs_weights_and_mask(dtype, qk):
     torch.manual_seed(811)
     m = randomize(
-        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
     ).eval()
-    ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
+    ref = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
     ref.load_state_dict(m.state_dict())
     x = torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype).transpose(-1, -2).contiguous().transpose(-1, -2)
     c = torch.randn(1, 1, 384, 384, device="cuda", dtype=dtype)
@@ -159,8 +160,7 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
         before = m(x, c, p, mask)
         p.add_(0.3 * torch.randn_like(p))
         assert not torch.equal(before, m(x, c, p, mask))
-        # Inference-only contract (integrations/token_dit.py): a replay reads the weights' pack and the pair bias it was
-        # captured with, and the live single / cond.
+        # Capture-scoped pack / bias construction is recorded, and single / cond remain live on replay.
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = m(x, c, p, mask)
@@ -296,3 +296,55 @@ def test_trimul_training_graph_replay_live_weights(width, monkeypatch):
 @pytest.mark.parametrize(("width", "bidirectional"), [(64,False),(64,True),(256,False),(384,False)])
 def test_trimul_inference_width_coverage(width,bidirectional):
     test_trimul_inference_without_payload(bidirectional,384,width)
+
+
+@pytest.mark.parametrize("qk", [False, True])
+def test_token_dit_bf16_step_runs_the_sm90_core(qk, monkeypatch):
+    """The bf16 step on H100 launches the sm_90a gated core (attn_fwd.cu GATED) and matches the Triton gated core it
+    replaces, with QK-norm on and off."""
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
+    torch.manual_seed(812)
+    m = randomize(DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda().to(torch.bfloat16)).eval()
+    x = torch.randn(5, 1, 384, 768, device="cuda", dtype=torch.bfloat16)
+    c = torch.randn(1, 1, 384, 384, device="cuda", dtype=torch.bfloat16).expand(5, 1, 384, 384)
+    p = torch.randn(1, 384, 384, 128, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, 384, device="cuda") > 0.2
+    calls = []
+    orig = sm90.gated_inference
+    monkeypatch.setattr(sm90, "gated_inference", lambda *a: calls.append(1) or orig(*a))
+    token_dit._RUNNERS.clear()
+    with torch.no_grad():
+        got = m(x, c, p, mask)
+        assert calls, "the bf16 step did not take the sm_90a core"
+        monkeypatch.setenv("MINIWORLD_AUGATTN_BF16_SM90", "0")
+        token_dit._RUNNERS.clear()
+        tri = m(x, c, p, mask)
+    assert torch.isfinite(got).all()
+    assert relative(got, tri) < 5e-3
+
+
+@pytest.mark.parametrize("qk", [False, True])
+def test_token_dit_fp32_step_runs_the_tf32_core(qk, monkeypatch):
+    """The fp32 step on H100 launches the TF32 wgmma core (attn_tf32.cu; key-permuted bias, v^T GEMM) and matches the
+    Triton TF32 gated core it replaces, with QK-norm on and off and a key mask."""
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
+    torch.manual_seed(813)
+    m = randomize(DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda()).eval()
+    x = torch.randn(5, 1, 384, 768, device="cuda")
+    c = torch.randn(1, 1, 384, 384, device="cuda").expand(5, 1, 384, 384)
+    p = torch.randn(1, 384, 384, 128, device="cuda")
+    mask = torch.rand(1, 384, device="cuda") > 0.2
+    calls = []
+    orig = sm90.tf32_gated_inference
+    monkeypatch.setattr(sm90, "tf32_gated_inference", lambda *a: calls.append(1) or orig(*a))
+    token_dit._RUNNERS.clear()
+    with torch.no_grad():
+        got = m(x, c, p, mask)
+        assert calls, "the fp32 step did not take the TF32 core"
+        monkeypatch.setenv("MINIWORLD_AUGATTN_TF32_SM90", "0")
+        token_dit._RUNNERS.clear()
+        tri = m(x, c, p, mask)
+    assert torch.isfinite(got).all()
+    assert relative(got, tri) < 3e-3

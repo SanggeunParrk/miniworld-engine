@@ -721,11 +721,11 @@ def _source_d256(cell, xn, w1, dl, dr, gp, mask, partial):
     _launch(k, 32 * splits, 256, smem, _params(f"source_d256_{n}", fields))
 
 
-def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative):
+def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative, master=False):
     """Input-LN backward and residual into dx; reduce input (and gate) weight partials."""
     D, n = cell
     M = n * n
-    defines = _defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4)
+    defines = _defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, MASTER_FP32=int(master))
     smem = max(3 * 16 * D * 2 + 128, 2 * 4 * D * 4) + D * 4
     maps = [_map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
     fields = [*maps, gi, dgi, dbi, partial, *dw]
@@ -812,12 +812,12 @@ def _weight_reduce_d512(cell, partial, dwp):
     floats = [None] * 13
     floats[7] = partial
     k = _kernel("weight_reduce_d512_l768.cu", "mw_wide512_dwp_reduce", "upstream",
-                _defines(WIDTH=D, WEIGHT_SPLITS=32))
+                _defines(MASTER_FP32=int(dwp.dtype == torch.float32), WIDTH=D, WEIGHT_SPLITS=32))
     _launch(k, _sms() * 2, 256, 0, _params("weight_reduce", [
         *([empty] * 16), *tensors, *floats, n * n, n]))
 
 
-def backward(leaves, mask, ds, saved, dy):
+def backward(leaves, mask, ds, saved, dy, master=False):
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     n, D = x.shape[1], x.shape[-1]
@@ -838,8 +838,8 @@ def backward(leaves, mask, ds, saved, dy):
     partial = torch.empty((32, 11 * D * D), **f32)
     dgi, dbi = torch.empty(D, **f32), torch.empty(D, **f32)
     dgo, dbo = torch.empty(H, **f32), torch.empty(H, **f32)
-    dw = [torch.empty_like(w) for w in (wl, wlg, wr, wrg)]
-    dwg, dwp = torch.empty_like(wg), torch.empty_like(wp)
+    dw = [torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wl, wlg, wr, wrg)]
+    dwg, dwp = (torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wg,wp))
     wcat = x.new_empty((9 * D, D))
     workspace = _workspace(x)
     main = torch.cuda.current_stream()
@@ -884,7 +884,7 @@ def backward(leaves, mask, ds, saved, dy):
                 partial.as_strided((32, D, H), (11 * D * D, H, 1)), workspace)
             _weight_reduce_d512(cell, partial, dwp)
         else:
-            torch.mm(dp.t(), norm, out=dwp)
+            torch.mm(dp.t(), norm, out=dwp, **({"out_dtype": torch.float32} if master else {}))
         joint = cell in ((384, 384), (512, 768))
         if not joint:
             _lt(cell, "dwg", dxin[:D], xn.reshape(M, D), dwg, workspace)
@@ -905,7 +905,7 @@ def backward(leaves, mask, ds, saved, dy):
         main.wait_stream(side)  # the input reduction reads the side stream's partials
     joint = cell in ((384, 384), (512, 768))
     _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg if joint else None,
-              cooperative=n == 768)
+              cooperative=n == 768, master=master)
     if cell == (256, 384):
         main.wait_stream(side)  # dWproj/dWgate join at the end, as qualified
     del side_workspace

@@ -98,13 +98,13 @@ def _gate_out_fwd(
             outr_ptr + offs_m[:, None] * stride_om + kk[None, :] * stride_od,
             mask=m_ok[:, None] & k_ok[None, :], other=0.0,
         ).to(tl.float32)
-        a = (tl.sigmoid(g) * r).to(wo_ptr.dtype.element_ty)
+        a = (tl.sigmoid(g) * r).to(gate_ptr.dtype.element_ty)
         # Wo-tile [BLOCK_K, BLOCK_N]: wo[n, k] -> transpose for the dot
         wo = tl.load(
             wo_ptr + offs_n[None, :] * stride_wn + kk[:, None] * stride_wd,
             mask=n_ok[None, :] & k_ok[:, None], other=0.0,
         )
-        acc = tl.dot(a, wo, acc)
+        acc = tl.dot(a, wo.to(a.dtype), acc)
 
     tl.store(
         o_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
@@ -160,7 +160,7 @@ def _dgrad_epi(
                      mask=mm & nmask[None, :], other=0.0)                  # [BLOCK_M1, BLOCK_K]
         wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh,
                      mask=nmask[:, None] & hm, other=0.0)                  # [BLOCK_K, BLOCK_N]
-        da = tl.dot(do, wo, da)                                           # accumulate [BLOCK_M1, BLOCK_N]
+        da = tl.dot(do, wo.to(do.dtype), da)                              # BF16 compute, including FP32 master Wo
     s = tl.sigmoid(tl.load(g_ptr + rm[:, None] * s_gm + rh[None, :] * s_gh,
                            mask=em, other=0.0).to(tl.float32))
     r = tl.load(r_ptr + rm[:, None] * s_rm + rh[None, :] * s_rh, mask=em, other=0.0).to(tl.float32)
@@ -253,7 +253,10 @@ class _FusedGateOut(torch.autograd.Function):
         # with the gate-backward epilogue so d_a never materializes; only the wgrad
         # (d_wo = do^T @ a, needs the materialized gated `a`) stays on cuBLAS.
         d_r, d_g, a = _dgrad_epilogue(do2, wo, g2, r2, shape_key=_key_of(ctx.shape))
-        d_wo = do2.transpose(0, 1) @ a              # GEMM  [N, DH]
+        if wo.dtype == torch.float32 and do2.dtype == torch.bfloat16:
+            d_wo = torch.mm(do2.transpose(0, 1), a, out_dtype=torch.float32)
+        else:
+            d_wo = do2.transpose(0, 1) @ a          # GEMM  [N, DH]
         return (
             d_g.reshape(ctx.shape),
             d_r.reshape(ctx.shape),
@@ -273,5 +276,4 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 
 
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
-
 

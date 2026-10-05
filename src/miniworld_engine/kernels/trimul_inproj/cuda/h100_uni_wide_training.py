@@ -207,7 +207,7 @@ def _input_ln(x, dxn, dy, dx, gi, dgi, dbi):
     W._launch(k, W._sms() * {256: 6, 384: 5}[D], 128, smem, W._params(f"uni_{source}", fields))
 
 
-def _run_backward(leaves, mask, ds, saved, dy, outgoing):
+def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     n, D = x.shape[1], x.shape[-1]
     M = n * n
@@ -220,14 +220,14 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing):
     gp = list(dxin[D:].view(4, D, M).unbind())
     _gate(proj, gate, dy, ds.reshape(n, D), dp, dxin[:D])
     dn = torch.mm(dp, wp)
-    dwp = torch.mm(dp.t(), norm)
+    dwp = torch.mm(dp.t(), norm, **({"out_dtype": torch.float32} if master else {}))
     dt = torch.empty_like(tri)
     dgo, dbo = torch.zeros(D, **f32), torch.zeros(D, **f32)
     _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo)
     _contract_gp(dt, ab, pre, pmask, gp, outgoing)
     # One GEMM for [dW_g; dW_l; dW_lg; dW_r; dW_rg] (five D x D products over K = M: 2x faster than
     # separate GEMMs at D256); the autograd function splits it into views outside this op.
-    dws = torch.mm(dxin, xn2)
+    dws = torch.mm(dxin, xn2, **({"out_dtype": torch.float32} if master else {}))
     wcat = torch.cat((wg, wl, wlg, wr, wrg))
     dxn = torch.mm(dxin.t(), wcat)
     dx = torch.empty_like(x)
@@ -236,42 +236,56 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing):
     return [dx, dws, dwp, dgi, dbi, dgo, dbo]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy, outgoing):
+def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False):
     """dx, the stacked [5D, D] weight gradients (g, l, lg, r, rg), dW_p and the four LN affine gradients."""
     x, D = leaves[0], leaves[0].shape[-1]
-    return [torch.empty_like(x), x.new_empty((5 * D, D)), torch.empty_like(leaves[6]),
+    return [torch.empty_like(x), x.new_empty((5 * D, D), dtype=torch.float32 if master else x.dtype), torch.empty_like(leaves[6], dtype=torch.float32 if master else leaves[6].dtype),
             *(torch.empty_like(t) for t in leaves[7:])]
 
 
 @opaque(fake=_backward_fake, name="trimul_h100_uni_wide_train_bwd")
 def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
-             saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool) -> list[torch.Tensor]:
+             saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool, master: bool = False) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
     with T.native_context(leaves[0].device):
-        return _run_backward(leaves, mask, ds, saved, dy, outgoing)
+        return _run_backward(leaves, mask, ds, saved, dy, outgoing, master)
 
 
 class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, outgoing, *args):
         leaves = list(args[:11])
+        ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
+        weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
+        if ctx.master:
+            torch._foreach_copy_(weights, leaves[1:7])
+        leaves = [leaves[0], *weights, *leaves[7:]]
         mask, ds = args[11:]
         y, *saved = forward(leaves, mask, ds, outgoing)
         ctx.outgoing = outgoing
-        ctx.save_for_backward(*args, *saved)
+        ctx.saved_count = len(saved)
+        ctx.save_for_backward(*args, *saved, *weights)
         return y
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
         vals = ctx.saved_tensors
-        dx, dws, dwp, *affine = backward(list(vals[:11]), vals[11], vals[12], list(vals[13:]), dy, ctx.outgoing)
+        leaves = [vals[0], *vals[-6:], *vals[7:11]]
+        dx, dws, dwp, *affine = backward(leaves, vals[11], vals[12], list(vals[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master)
         dwg, dwl, dwlg, dwr, dwrg = dws.chunk(5)
-        return (None, dx, dwl, dwlg, dwr, dwrg, dwg, dwp, *affine, None, None)
+        grads = [dx, dwl, dwlg, dwr, dwrg, dwg, dwp, *affine]
+        grads = [g.to(t.dtype) for g,t in zip(grads, vals[:11],strict=True)]
+        return (None, *grads, None, None)
 
 
 def single_trimul(outgoing, *args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
     if not torch.is_grad_enabled():
-        return forward_nograd(list(args[:11]), *args[11:], outgoing)
+        leaves = list(args[:11])
+        if any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
+            weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
+            torch._foreach_copy_(weights, leaves[1:7])
+            leaves = [leaves[0], *weights, *leaves[7:]]
+        return forward_nograd(leaves, *args[11:], outgoing)
     return _Training.apply(outgoing, *args)

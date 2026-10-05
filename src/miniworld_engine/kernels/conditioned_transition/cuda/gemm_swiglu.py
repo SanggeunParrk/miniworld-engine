@@ -88,4 +88,56 @@ class GemmSwiglu:
         return out
 
 
-__all__ = ["GemmSwiglu", "interleave", "supported"]
+#: sm_90a (``gemm_swiglu_sm90.cu``) against cuBLAS + the SwiGLU row pass, H100, do_bench: M = 1920 24.1 vs 27.8 us, 3840 33.3
+#: vs 47.1, 36864 302 vs 383 -- it wins at every row count, so no threshold beyond its tile.
+MIN_ROWS_SM90 = 128
+
+
+def supported_sm90(x: torch.Tensor, w_ab: torch.Tensor) -> bool:
+    """bf16 or fp32 (TF32) on sm_90, M a multiple of 128 (>= MIN_ROWS_SM90 unless forced), K a multiple of 64 / 32, H of 128."""
+    mode = os.environ.get("MINIWORLD_TOKEN_DIT_GEMM_SWIGLU", "auto")
+    if mode == "0" or (mode == "auto" and x.shape[0] < MIN_ROWS_SM90):
+        return False
+    if not (x.is_cuda and x.dtype in (torch.bfloat16, torch.float32) and w_ab.dtype is x.dtype):
+        return False
+    # fp32 (TF32) is opt-in: its TMA-fed operands are truncated to TF32 where cuBLAS rounds them -- 1.6e-3 against 4.2e-4 for
+    # cuBLAS + the row pass -- and it wins only at M = 3840 (70.9 vs 85.5 us; 47.6 vs 45.9 at 1920, 759 vs 725 at 36864)
+    if x.dtype is torch.float32 and os.environ.get("MINIWORLD_TOKEN_DIT_GEMM_SWIGLU_FP32", "0") != "1":
+        return False
+    idx = x.device.index if x.device.index is not None else torch.cuda.current_device()
+    H = w_ab.shape[0] // 2
+    kq = 64 if x.dtype is torch.bfloat16 else 32
+    return (torch.cuda.get_device_capability(idx) == (9, 0) and x.shape[0] % 128 == 0 and x.shape[1] % kq == 0
+            and H % 128 == 0 and w_ab.shape[1] == x.shape[1])
+
+
+class GemmSwigluSm90:
+    """``gemm_swiglu_sm90.cu``: one sm_90a GEMM, 128 x 256 tiles whose B rows are 128 of Wa then the same 128 of Wb, the
+    SwiGLU in the epilogue. Takes W as ``[Wa; Wb]`` and packs it per tile once per weight tensor."""
+
+    def __init__(self, device_index: int):
+        from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+        ensure_cuda_home()
+        k = Path(_dir).parent.parent
+        self.ext = load_extension(
+            name="gemm_swiglu_sm90", sources=[str(Path(_dir) / "gemm_swiglu_sm90.cu")],
+            extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a"), "--expt-relaxed-constexpr",
+                               f"-I{k / 'transition' / 'cuda' / 'anthropic_v5'}", f"-I{k / 'transition' / 'cuda' / 'wide' / 'kernels'}",
+                               "-U__CUDA_NO_BFLOAT16_CONVERSIONS__"],
+            extra_cflags=["-std=c++17"], verbose=False)
+        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.packed: dict = {}
+
+    def __call__(self, x, w_ab, out):
+        key = (w_ab.data_ptr(), w_ab._version)
+        wp = self.packed.get(key)
+        if wp is None:
+            H, K = w_ab.shape[0] // 2, w_ab.shape[1]
+            wp = torch.stack([w_ab[:H].view(H // 128, 128, K), w_ab[H:].view(H // 128, 128, K)], 1).reshape(2 * H, K).contiguous()
+            if not torch.cuda.is_current_stream_capturing():
+                self.packed[key] = wp
+        self.ext.gemm_swiglu(x, wp, out, self.nsm)
+        return out
+
+
+__all__ = ["GemmSwiglu", "GemmSwigluSm90", "interleave", "supported", "supported_sm90"]

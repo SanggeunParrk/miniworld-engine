@@ -30,6 +30,7 @@ from jaxtyping import Float
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune.shape_key import length_of
+from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -158,8 +159,9 @@ class ConditionedTransition(nn.Module):
                              else self.expand_a.weight.dtype)
             x2 = x.reshape(-1, d).to(compute_dtype)
             cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
+            master = needs_backward(self, x2, cond2) and compute_dtype == torch.bfloat16 and is_h100(x.device)
             wa, wb, ws, wsc, bsc = (
-                p.to(compute_dtype) for p in (self.expand_a.weight, self.expand_b.weight,
+                p if master else p.to(compute_dtype) for p in (self.expand_a.weight, self.expand_b.weight,
                                              self.squeeze.weight, self.to_scale.weight,
                                              self.to_scale.bias)
             )

@@ -324,6 +324,8 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     } else {
       dk[0] += __int_as_float(*reinterpret_cast<const int*>(sm + sn * ST_BYTES + lane * 4));
     }
+    fence_proxy_async();                                          // generic (ldmatrix) reads of this TMA stage before its release
+    __syncwarp();
     if (lane == 0 && n + STAGES < nblocks) mbar_arrive(&empty[sn]);
   }
 #pragma unroll

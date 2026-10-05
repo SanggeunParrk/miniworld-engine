@@ -6,10 +6,17 @@
 using bf=__nv_bfloat16;
 constexpr int XN=0,TRI=16384,NORM=32768,DY=49152,DP=65536,DG=81920,DN=98304,WP=114688,WG=147456;
 constexpr int SMEM=181248;
+#if MASTER_FP32
+using MasterDW=float;
+TMN_DEVI float master_value(float v){return v;}
+#else
+using MasterDW=bf;
+TMN_DEVI bf master_value(float v){return __float2bfloat16_rn(v);}
+#endif
 struct Params {
  CUtensorMap xn,tri,dy,wp,wg,dg,dt;
  const bf* x;const bf* ds;const float* gamma;const float* beta;
- bf* y;bf* dwg;bf* dwp;float* dgamma;float* dbeta;float* partial;int M,L;
+ bf* y;MasterDW* dwg;MasterDW* dwp;float* dgamma;float* dbeta;float* partial;int M,L;
 };
 TMN_DEVI int pos(int r,int c){return (c/64)*8192+swz128(r,(c%64)*2);}
 TMN_DEVI float val(uint8_t* sm,int r,int c){return __bfloat162float(*reinterpret_cast<bf*>(sm+pos(r,c)));}
@@ -101,5 +108,5 @@ extern "C" __global__ __launch_bounds__(256,1) void single_output(__grid_constan
 extern "C" __global__ __launch_bounds__(256,1) void single_b1(__grid_constant__ const Params p){extern __shared__ __align__(1024) uint8_t sm[];__shared__ uint64_t bar[2];body<false>(p,sm,bar);}
 extern "C" __global__ void single_reduce(__grid_constant__ const Params p,int count){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=33024)return;float s=0;for(int c=0;c<count;++c)s+=p.partial[c*33024+i];
- if(i<16384)p.dwg[i]=__float2bfloat16_rn(s);else if(i<32768)p.dwp[i-16384]=__float2bfloat16_rn(s);else if(i<32896)p.dgamma[i-32768]=s;else p.dbeta[i-32896]=s;
+ if(i<16384)p.dwg[i]=master_value(s);else if(i<32768)p.dwp[i-16384]=master_value(s);else if(i<32896)p.dgamma[i-32768]=s;else p.dbeta[i-32896]=s;
 }
