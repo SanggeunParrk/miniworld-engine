@@ -36,6 +36,7 @@ def kernel_plan(n, clusters, mode):
         "-DB7_REUSE_DP=" + str(cfg_values.reuse_dp),
         "-DB7_WT_MN=" + str(bool(mode & 64) * 1),
         "-DB7_TOKEN_MASK=" + str(bool(mode & 128) * 1),
+        "-DMASTER_FP32=" + str(bool(mode & 256) * 1),
         "-DB7_N=" + str(n),
         "-std=c++17",
         "-O3",
@@ -84,6 +85,8 @@ class Plan:
             mode |= 128
         if front_row_major(d["leaves"]):
             mode |= 64
+        if d.get("master_weights"):
+            mode |= 256
         self.mode = mode
         static = kernel_plan(d["n"], clusters, mode)
         self.hwcluster, self.multicast, self.rings = static.hwcluster, static.multicast, static.rings
@@ -92,7 +95,7 @@ class Plan:
         x = d["x"]
         m = d["n"] ** 2
         self.dx = torch.empty((m, 128), device=x.device, dtype=x.dtype)
-        self.dw = torch.empty((4, 128, 256), device=x.device, dtype=x.dtype)
+        self.dw = torch.empty((4, 128, 256), device=x.device, dtype=torch.float32 if d.get("master_weights") else x.dtype)
         self.dgam = torch.empty(128, device=x.device)
         self.dbeta = torch.empty_like(self.dgam)
         self.partw = torch.zeros((self.clusters * 2, 16, 64, 128), device=x.device)

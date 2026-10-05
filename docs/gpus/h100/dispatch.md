@@ -7,12 +7,12 @@ policy before constructing/compiling models.
 
 | Module | Inference | Training | Native contract |
 |---|---|---|---|
-| Bidirectional TriMul | Anthropic-derived native K1 → two cuBLAS contractions → K3/residual | D128: selected CUDA forward + B1–B4 + four cuBLAS contractions + B7–B12. D256/384/512: flattened port of the qualified large-width research plans (below) | BF16, batch 1; training L384/768, direction hidden=D, D128/256/384/512 (D64 trains on Triton); D128 requires a full 132-SM H100 |
-| Single-direction TriMul | Packaged K1 → contraction → K3/residual | Native K1/K3, fused CUDA B1, two cuBLAS gradient contractions, streamed producer-consumer B7 | Training: BF16, batch 1, D=hidden=128, L384/768, full 132-SM H100; both outgoing and incoming. Inference: width/hidden pair in the native tile table |
+| Bidirectional TriMul | Anthropic-derived native K1 → two cuBLAS contractions → K3/residual | D128: selected CUDA forward + B1–B4 + four cuBLAS contractions + B7–B12. D256/384/512: flattened port of the qualified large-width research plans (below) | BF16, batch 1; training L384/768, direction hidden=D, D64/128/256/384/512; D128 requires a full 132-SM H100 |
+| Single-direction TriMul | Packaged K1 → contraction → K3/residual | Native K1/K3, fused CUDA B1, two cuBLAS gradient contractions, streamed producer-consumer B7 | Training: BF16 compute, batch 1, D=hidden=64/128/256/384, L384/768; D128 requires a full 132-SM H100; both outgoing and incoming. Inference: width/hidden pair in the native tile table |
 | Transition | Existing residual-fused hand-CUDA path | Same forward with native backward | BF16, n=4, D64/128/256/384/512 and each kernel's resource guards |
 | OuterProductMean | Packaged OPM with residual in the CUDA epilogue, no LN statistics saved | Residual-fused forward and native backward; residual gradient is passed through | BF16, batch 1, MSA64/hidden32/pair128, L multiple of 64, MSA depth multiple of 256; normalization before projection; no interchain masking |
 | MSAPairWeightedAveraging | Packaged forward without training saves | Packaged forward/backward, residual and row dropout | BF16, batch 1, MSA64/pair128, 8 heads × 32, L multiple of 128, even MSA depth |
-| Token DiT | Fused inference row kernels, attention/gate and GEMM path | Existing general autograd route | BF16/FP32, batch 1, single768/condition384/pair128, 16 heads, expansion1536, L multiple of 128, shared sample conditioning, no QK norm |
+| Token DiT | Fused step (`integrations/token_dit.py`): CUDA rows, CUDA gated core (bf16 `attn_fwd.cu` GATED, fp32 TF32 `attn_tf32.cu` with a v^T GEMM and a key-permuted pair bias), cuBLAS GEMMs; capture-scoped weight-pack and pair-bias caches | One opaque fwd / bwd per block (`integrations/token_dit_train.py`): CUDA rows (bf16 or fp32-operand build), cuBLAS GEMMs, bf16 `attn_fwd` + `attn_dqb`/`attn_dkv` or fp32 TF32 `attn_tf32` fwd + `dqb` + `dkv` | BF16/FP32, batch 1, single768/condition384/pair128, 16 heads, expansion1536, L multiple of 128, QK norm on or off, key mask [1, L]; inference: shared or per-sample conditioning ([token_dit/token_dit.md](token_dit/token_dit.md)) |
 
 Unsupported contracts retain the general implementation. `auto` selects the
 bidirectional CUDA training path at D64/128/256/384/512 (D64: its own fused path
@@ -20,7 +20,7 @@ bidirectional CUDA training path at D64/128/256/384/512 (D64: its own fused path
 CUDA-graph replay. Inference: the packaged K1/K3 table (D64/128, uni D256/384), the
 wide bidirectional K1/K3 `h100_wide_inference` (D256/384/512, 1.89-2.04x) and the
 single-direction D512 path `h100_uni_wide_inference` (1.80x). Single-direction training
-stays D128-only; other widths train on Triton. Per-shape status: `docs/gpus/h100/h100.md`.
+serves D64/128/256/384; D512 retains the general training path. Per-shape status: `docs/gpus/h100/h100.md`.
 
 ## Retained values and execution
 
@@ -219,3 +219,14 @@ graph replay after mutating input, every weight, LN affine, mask, dropout scale 
 upstream gradient (outputs and weight gradients bitwise; LN affine gradients within
 7e-7 because their sums use float atomics); `torch.compile(fullgraph=True)`;
 outstanding forwards with independent saves; FP32 caller masks.
+
+
+## H100 FP32 master parameters (2026-10-05)
+
+The qualified BF16-mixed paths keep FP32 master parameters and unrounded FP32
+matrix gradients with BF16 compute. Weight casts happen inside the autograd
+functions, run afresh on every CUDA graph replay, and original parameters remain
+in saved-tensor version checks. Native narrow reducers store FP32 directly; wide
+cuBLAS gradients avoid a BF16 round trip. See [master_weights.md](master_weights.md)
+for the per-shape full F+B latency table, dispatch and validation evidence, and
+scope of the less-than-2-percent mixed overhead requirement.

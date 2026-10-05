@@ -1,4 +1,4 @@
-"""Fused token DiT inference over a stack of engine ``modules.dit.DiTBlock`` (AF3 Alg. 23), no QK-norm, no mask.
+"""Fused token DiT inference over a stack of engine ``modules.dit.DiTBlock`` (AF3 Alg. 23), QK-norm on or off.
 
     runner = FusedTokenDiT(blocks)            # packs every weight once
     bias = runner.hoist(pair)                 # once per sample(): every block's pair bias, head-major
@@ -77,6 +77,13 @@ def _t(w):
     return w.detach().t().contiguous()
 
 
+def _norm_eps(norm):
+    """The eps an engine RMSNorm applies to bf16 / fp32 input (its float32 default when unset), or a plain ``eps``."""
+    if hasattr(norm, "effective_eps"):
+        return float(norm.effective_eps(torch.float32))
+    return float(norm.eps)
+
+
 def attention_in_place(q, k, v, bias, mask, m, key):
     """The engine's forward attention kernel, launched with the output written over q.
 
@@ -150,6 +157,7 @@ class FusedTokenDiT:
         # QK-norm (RMSNorm of every q / k head after the projection) runs as one in-place CUDA row pass; the
         # sm_scale log2 e fold then moves from Wq / bq, which the norm would cancel, into the q norm's weight
         self.qk = bool(a0.use_qk_norm)
+        assert all(bool(b.attention.use_qk_norm) == self.qk for b in blocks), "QK-norm must be on for every block or none"
         if self.qk:
             if not hasattr(self.K, "qknorm_rows"):
                 raise NotImplementedError(
@@ -310,8 +318,10 @@ class FusedTokenDiT:
         ):  # one CUDA pass: any dtype in, the path's dtype out
             cn = torch.empty(rows, self.dc, device=c.device, dtype=self.dtype)
             self.K.layernorm_rows(c, cn, self.eps)
+            cc = c.to(self.dtype)
         else:
             cn = F.layer_norm(c.float(), (self.dc,), eps=self.eps).to(self.dtype)
+            cc = c.to(self.dtype)
         g1 = torch.addmm(self.b1, cn, self.w1.t()).view(rows, self.nb, 4, D)
         g2 = torch.addmm(self.b2, c.to(self.dtype), self.w2.t()).view(
             rows, self.nb, 2, D
@@ -416,7 +426,7 @@ class FusedTokenDiT:
             )
         keep2 = buf["keep"].view(S, L)
         gsw = self._gemm_swiglu(single.device, xa)
-        if self.core == "gated2" and not sm100:
+        if self.core == "gated2" and not cuda_core and not tf32:
             assert self.prescale, "the v2 core expects pre-scaled logits"
             key_d = (bias.data_ptr(), tuple(bias.shape))
             if getattr(self, "_bdesc_key", None) != key_d:
@@ -518,7 +528,7 @@ class FusedTokenDiT:
 
             op = None
             wab = self.per[0]["wab"]
-            if gemm_swiglu.supported(xa, wab):
+            if gemm_swiglu.supported(xa, wab) or gemm_swiglu.supported_sm90(xa, wab):
                 try:
                     op = gemm_swiglu.GemmSwiglu(
                         idx, K=wab.shape[1], H=wab.shape[0] // 2
@@ -534,14 +544,13 @@ class FusedTokenDiT:
             cache[key] = op
         return cache[key]
 
-    def _sm100_core(self, device, L, D, H):
-        """The sm_100a gated core (``augmented_attention/cuda/sm100``: attn_inf.cu for bf16 at 16 x 48, 24 x 32, 12 x 64, 16 x 64;
-        attn_inf_tf32.cu for fp32 with TF32 MMA at 16 x 48) where it fits -- L a multiple of 8, B200 -- and builds; the Triton
-        gated2 core otherwise.
-        Same contract: pre-scaled logits in, sigmoid(g) * o written over q."""
+    def _cuda_core(self, device, L, D, H):
+        """The upstream B200 bf16 / TF32 cores and layouts, or the H100 bf16 16 x 48 core where each is supported.
+        Same contract: pre-scaled logits in, sigmoid(g) * o written over q. Unsupported calls keep Triton."""
         idx = device.index if device.index is not None else torch.cuda.current_device()
-        cores = self.__dict__.setdefault("_sm100_cores", {})
+        cores = self.__dict__.setdefault("_cuda_cores", {})
         if idx not in cores:
+            from miniworld_engine.kernels.augmented_attention import cuda as sm90
             from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
             core = None
@@ -550,7 +559,11 @@ class FusedTokenDiT:
                 and not torch.compiler.is_compiling()
             ):
                 try:
-                    core = sm100.GatedInferenceCore(idx, self.dtype, H, D // H)
+                    if sm100.inference_core_supported(self.dtype, L, D, H, idx):
+                        core = sm100.GatedInferenceCore(idx, self.dtype, H, D // H)
+                    elif sm90.inference_core_supported(self.dtype, L, D, H, idx):
+                        sm90._ext("attn_fwd")
+                        core = sm90.gated_inference
                 except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
                     import warnings
 
@@ -561,7 +574,30 @@ class FusedTokenDiT:
                     )
             cores[idx] = core
         core = cores[idx]
-        return core if core is not None and L % 8 == 0 else None
+        multiple = 128 if torch.cuda.get_device_capability(device) == (9, 0) else 8
+        return core if core is not None and L % multiple == 0 else None
+
+    def _tf32_core(self, device, L):
+        """The fp32 step's TF32 CUDA core (``augmented_attention/cuda``, attn_tf32.cu) where it fits and builds: fp32,
+        pre-scaled logits, H100, L a multiple of 128, the CUDA rows (they lay out its key-permuted bias). None otherwise
+        (the Triton gated2 core, TF32 too)."""
+        if (self.dtype is not torch.float32 or self.core != "gated2" or not self.prescale or not hasattr(self.K, "key_perm")
+                or L % 128 or torch.compiler.is_compiling()):
+            return None
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        cores = self.__dict__.setdefault("_tf32_cores", {})
+        if idx not in cores:
+            from miniworld_engine.kernels.augmented_attention import cuda as sm90
+            core = None
+            if sm90.tf32_inference_core_supported(self.dtype, L, self.d, self.h, idx):
+                try:
+                    sm90._ext("attn_tf32")                                  # build now: a failure keeps Triton
+                    core = sm90.tf32_gated_inference
+                except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
+                    import warnings
+                    warnings.warn(f"TF32 token DiT core unavailable, keeping the Triton core: {exc!r}", RuntimeWarning, stacklevel=2)
+            cores[idx] = core
+        return cores[idx]
 
     def _mm(self, A, W, out, bias=None):
         """out = A @ W^T (+ bias), cuBLAS."""

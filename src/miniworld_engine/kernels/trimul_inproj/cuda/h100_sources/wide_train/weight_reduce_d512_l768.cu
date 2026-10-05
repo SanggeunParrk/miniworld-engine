@@ -79,8 +79,15 @@ TMN_DEVI void weight(const Params& p,int amap,int bmap,int N,int K,int offset,ui
   for(int j=0;j<32;++j)p.f[7][size_t(s)*(5*H*D+D*D)+offset+size_t(row+rr(j))*K+col+cc(j)]=v[j];
  }
 }
-TMN_DEVI void reduce_w(const Params& p,int offset,int count,bf* out){
- for(int i=blockIdx.x*THREADS+threadIdx.x;i<count;i+=gridDim.x*THREADS){float v=0;for(int s=0;s<SPLITS;++s)v+=p.f[7][size_t(s)*(5*H*D+D*D)+offset+i];out[i]=cv(v);}
+#if MASTER_FP32
+using MasterDW=float;
+TMN_DEVI float master_value(float v){return v;}
+#else
+using MasterDW=bf;
+TMN_DEVI bf master_value(float v){return __float2bfloat16_rn(v);}
+#endif
+TMN_DEVI void reduce_w(const Params& p,int offset,int count,MasterDW* out){
+ for(int i=blockIdx.x*THREADS+threadIdx.x;i<count;i+=gridDim.x*THREADS){float v=0;for(int s=0;s<SPLITS;++s)v+=p.f[7][size_t(s)*(5*H*D+D*D)+offset+i];out[i]=master_value(v);}
 }
 
 extern "C" __global__ __launch_bounds__(THREADS,2)
@@ -92,4 +99,4 @@ void mw_wide512_dwp(__grid_constant__ const Params p){
  weight(p,4,3,D,H,0,sm,bar,phase);
 }
 extern "C" __global__ __launch_bounds__(THREADS,2)
-void mw_wide512_dwp_reduce(__grid_constant__ const Params p){reduce_w(p,0,D*H,p.t[21]);}
+void mw_wide512_dwp_reduce(__grid_constant__ const Params p){reduce_w(p,0,D*H,(MasterDW*)p.t[21]);}

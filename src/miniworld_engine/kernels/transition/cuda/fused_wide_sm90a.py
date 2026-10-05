@@ -171,11 +171,10 @@ def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return torch.mm(a, b).float()
 
 
-def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
+def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, wst=None):
     """Output structure only: (out, xn, rstd, c1, h); the saves are 1-element placeholders when ``save`` is false, and h is
     [M, 4D] at D >= 384 (the two-kernel forward materializes it) and a placeholder otherwise."""
     rows = x.shape[0] if save else 1
-    f32 = dict(dtype=torch.float32, device=x.device)
     d = x.shape[1]
     h = x.new_empty((x.shape[0], 4 * d)) if d >= 384 else x.new_empty((1, 1))
     return (
@@ -200,7 +199,7 @@ def _fwd_launch(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """x [M, D] bf16, gamma / beta fp32. Returns (out, xn, rstd, c1, h), out = transition(x) + x; h see the fake."""
     if _is_fake(x, wa):
-        return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save)
+        return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, wst)
     ext = _ext_for(x)
     if x.shape[-1] in (64, 256):
         return (
@@ -212,7 +211,7 @@ def _fwd_launch(
     return tuple(ext.fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), bool(save)))
 
 
-def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved):
+def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved, fp32_dw=False):
     """Output structure only: (dx, dgamma, dbeta, dWa, dWb, dWs); the weight gradients are fp32 at D >= 256."""
     wdt = torch.float32 if x.shape[-1] >= 256 else wa.dtype
     return (
@@ -243,11 +242,11 @@ def _bwd_launch(
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch. ``hsaved`` is the forward's
     h [M, 4D] when it was kept (save_h) and a placeholder otherwise."""
     if _is_fake(dy, x):
-        return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved)
+        return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved, fp32_dw)
     ext = _ext_for(x)
     d = x.shape[-1]
     if d == 64:
-        return tuple(ext.bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws))
+        return tuple(ext.bwd_master(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw))
     h = 4 * d
     have_h = hsaved.shape[0] == x.shape[0]
     hid, dab = ext.gate(xn, dy, _pack(wa, wb, 128), ws.t().contiguous(), not have_h)
@@ -267,28 +266,44 @@ def _bwd_launch(
     return dx, dgam, dbeta, dwab[:h], dwab[h:].clone(), dws
 
 
+
+def _cast_weights(weights, dtype):
+    if all(w.dtype == dtype for w in weights):
+        return tuple(w.contiguous() for w in weights)
+    outs = [torch.empty(w.shape, device=w.device, dtype=dtype) for w in weights]
+    torch._foreach_copy_(outs, list(weights))
+    return tuple(outs)
+
 class _WideTransitionSM90A(torch.autograd.Function):
     """``y = transition(x) + x`` at D in ``WIDTHS``; the forward saves xn and the LayerNorm statistics."""
 
     @staticmethod
     def forward(ctx, x, gamma, beta, wa, wb, ws, eps):
         shape = x.shape
+        raw = (wa, wb, ws)
+        param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
+        if shape[-1] == 64 and all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
+            from .fused_sm90a import _master_pack
+            wa, wb, ws, wst = _master_pack(*raw)
+        else:
+            wa, wb, ws = _cast_weights(raw, x.dtype)
+            wst = None
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         wa, wb, ws = wa.contiguous(), wb.contiguous(), ws.contiguous()
-        out, xn, rstd, c1, h = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True)
+        out, xn, rstd, c1, h = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True, wst)
         if not save_h_enabled(flat.shape[-1]):
             h = h.new_empty(
                 (1, 1)
             )  # not kept: the gate kernel recomputes and stores it
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws, h)
         ctx.shape = shape
-        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
+        ctx.param_dtypes = param_dtypes
         return out.reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):
-        flat, xn, rstd, c1, gf, wa, wb, ws, h = ctx.saved_tensors
+        flat, xn, rstd, c1, gf, wa, wb, ws, h, *_raw = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(),

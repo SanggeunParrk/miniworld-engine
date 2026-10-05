@@ -1,4 +1,4 @@
-"""The fused token DiT TRAINING block on B200 (integrations/token_dit_train.py) against the fp32 PyTorch DiTBlock (IEEE, TF32
+"""The fused token DiT TRAINING block on H100 / B200 (integrations/token_dit_train.py) against the fp32 PyTorch DiTBlock (IEEE, TF32
 off): output and every input / parameter gradient no worse than the engine's own module path in the same regime -- bf16, or
 fp32 (the fused path's TF32 kernels) -- (the switch is off in the second run), and the path actually taken."""
 
@@ -19,8 +19,8 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("Blackwell (sm_100) required")
+    if torch.cuda.get_device_capability() not in ((9, 0), (10, 0)):
+        pytest.skip("Hopper (sm_90) or Blackwell (sm_100) required")
     old = settings.configure(engine_backend="auto")
     try:
         yield
@@ -77,6 +77,7 @@ def _run(m, single, cond, pair, mask, w, tf32=None):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("A", [4, 6])
 @pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize(
@@ -120,7 +121,8 @@ def test_train_block_matches_the_module_path(dtype, qk, masked, A, L, monkeypatc
     print("worst ratios:", sorted(worst, reverse=True)[:4])
 
 
-def test_train_block_under_torch_compile(monkeypatch):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_train_block_under_torch_compile(dtype, monkeypatch):
     """torch.compile keeps the fused forward / backward as opaque ops: the compiled block takes the path and matches eager."""
     torch.manual_seed(9)
     A, L = 2, 256

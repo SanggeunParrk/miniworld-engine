@@ -135,10 +135,11 @@ __global__ void __launch_bounds__(512) swiglu_rows_kernel(const T* __restrict__ 
   }
 }
 
-// LayerNorm of C = 128 rows, no affine (the pair rows): one warp per row, 8 rows per block.
+// LayerNorm of C = 128 rows, no affine (the pair rows): one warp per row, 8 rows per block. PERM: row r lands at the
+// position of its key (r % 8 = 4 i + j -> 2 j + i within its group of 8), the key order of the H100 TF32 attention core.
 template <typename ZT, typename OutT>
 __global__ void __launch_bounds__(256) layernorm128_rows_kernel(const ZT* __restrict__ Z, OutT* __restrict__ OUT, long R,
-    long sz, float eps) {
+    long sz, float eps, bool perm) {
   const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   if (row >= R) return;
@@ -147,7 +148,7 @@ __global__ void __launch_bounds__(256) layernorm128_rows_kernel(const ZT* __rest
   z.x -= mean; z.y -= mean; z.z -= mean; z.w -= mean;
   const float rstd = rsqrtf(warp_sum(z.x * z.x + z.y * z.y + z.z * z.z + z.w * z.w) / 128.f + eps);
   z.x *= rstd; z.y *= rstd; z.z *= rstd; z.w *= rstd;
-  V4<OutT>::store(OUT + row * 128 + lane * 4, z);
+  V4<OutT>::store(OUT + (perm ? row - (row & 7) + 2 * (row & 3) + ((row >> 2) & 1) : row) * 128 + lane * 4, z);
 }
 
 // QK-norm in place: one block of D / 2 threads per row (D = the model width), the first half on q (columns 0 .. D - 1), the
@@ -198,6 +199,37 @@ template <typename C> auto ptr(const at::Tensor& t) { return reinterpret_cast<C*
     if ((D) == 768) { constexpr int NT = 192; return __VA_ARGS__(); }                                \
     constexpr int NT = 256; return __VA_ARGS__();                                                    \
   }()
+
+// The conditioning rows of a step (L of them, d_cond = 384): cn = LN(c) and cc = c in the GEMM dtype. One warp per row, a lane
+// owning 12 columns -- no block barriers: at L rows the kernel is latency-bound, not bandwidth-bound.
+template <typename CT, typename OT>
+__global__ void __launch_bounds__(256) cond_rows_kernel(const CT* __restrict__ C, long sc, OT* __restrict__ CN, OT* __restrict__ CC,
+    int L, float eps) {
+  const int row = blockIdx.x * 8 + threadIdx.x / 32, lane = threadIdx.x % 32;
+  if (row >= L) return;
+  float4 v[3];
+  float s = 0.f;
+#pragma unroll
+  for (int i = 0; i < 3; ++i) {
+    v[i] = V4<CT>::load(C + row * sc + (i * 32 + lane) * 4);
+    V4<OT>::store(CC + (long)row * 384 + (i * 32 + lane) * 4, v[i]);
+    s += v[i].x + v[i].y + v[i].z + v[i].w;
+  }
+  const float mean = warp_sum(s) / 384.f;
+  float q = 0.f;
+#pragma unroll
+  for (int i = 0; i < 3; ++i) {
+    v[i].x -= mean; v[i].y -= mean; v[i].z -= mean; v[i].w -= mean;
+    q += v[i].x * v[i].x + v[i].y * v[i].y + v[i].z * v[i].z + v[i].w * v[i].w;
+  }
+  const float rstd = rsqrtf(warp_sum(q) / 384.f + eps);
+#pragma unroll
+  for (int i = 0; i < 3; ++i) {
+    const int col = (i * 32 + lane) * 4;
+    V4<OT>::store(CN + (long)row * 384 + col, make_float4(v[i].x * rstd, v[i].y * rstd, v[i].z * rstd, v[i].w * rstd));
+  }
+}
+
 
 void adaln_rows(at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int64_t L, double eps) {
   const int64_t M = x.size(0), D = x.size(1);
@@ -322,7 +354,7 @@ void swiglu_rows(at::Tensor ab, at::Tensor out) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void layernorm128_rows(at::Tensor z, at::Tensor out, double eps) {
+void layernorm128_rows(at::Tensor z, at::Tensor out, double eps, bool perm) {
   const int64_t R = z.size(0);
   TORCH_CHECK(z.size(1) == 128 && out.is_contiguous() && out.size(1) == 128 && out.size(0) == R, "layernorm128_rows");
   check_rows(z, "z", 128);
@@ -330,13 +362,29 @@ void layernorm128_rows(at::Tensor z, at::Tensor out, double eps) {
   TDR_DISPATCH(z.scalar_type(), ZT, [&] {
     TDR_DISPATCH(out.scalar_type(), OT, [&] {
       layernorm128_rows_kernel<ZT, OT><<<(unsigned)((R + 7) / 8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-          ptr<const ZT>(z), ptr<OT>(out), R, z.stride(0), (float)eps);
+          ptr<const ZT>(z), ptr<OT>(out), R, z.stride(0), (float)eps, perm);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // d: the model width (q = columns 0 .. d - 1, k = d .. 2d - 1); the head dim is the weights' length (d / heads)
+void cond_rows(at::Tensor c, at::Tensor cn, at::Tensor cc, double eps) {
+  const int64_t L = c.size(0);
+  check_rows(c, "cond_rows c", 384);
+  TORCH_CHECK(c.size(1) == 384 && cn.is_contiguous() && cc.is_contiguous() && cn.sizes() == c.sizes() && cc.sizes() == c.sizes()
+              && cn.scalar_type() == cc.scalar_type(), "cond_rows: [L, 384]");
+  const at::cuda::CUDAGuard g(c.device());
+  TDR_DISPATCH(c.scalar_type(), CT, [&] {
+    TDR_DISPATCH(cn.scalar_type(), OT, [&] {
+      cond_rows_kernel<CT, OT><<<(unsigned)((L + 7) / 8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+          ptr<const CT>(c), c.stride(0), ptr<OT>(cn), ptr<OT>(cc), (int)L, (float)eps);
+    });
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+
 void qknorm_rows(at::Tensor qk, at::Tensor wq, at::Tensor wk, double eq, double ek, int64_t d) {
   check_rows(qk, "qk", 2 * d);
   const int64_t hd = wq.numel();
@@ -366,6 +414,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_rows_cuda", &gate_rows);
   m.def("swiglu_rows_cuda", &swiglu_rows);
   m.def("layernorm128_rows", &layernorm128_rows);
+  m.def("cond_rows_cuda", &cond_rows);
   m.def("qknorm_rows_cuda", &qknorm_rows);
   m.def("adaln_in_rows_cuda", &adaln_in_rows);
   m.def("resgate_out_rows_cuda", &resgate_out_rows);

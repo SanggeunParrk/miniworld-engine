@@ -470,6 +470,14 @@ def pair_bwd(z, w16, dw, ln_w, eps, wb, BJ=32, num_warps=4, BJO=None):
     return dz, colsum(pwb)[:H], colsum(pln)
 
 
+def _cast_h100_matrices(*weights):
+    """Batch master-to-BF16 copies without changing the B200 path."""
+    if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(w.dtype != torch.bfloat16 for w in weights):
+        from miniworld_engine.integrations.h100_master import pack
+        return tuple(pack(weights))
+    return tuple(w.to(torch.bfloat16).contiguous() for w in weights)
+
+
 class _PwaMath(torch.autograd.Function):
     """out = msa + PWA(msa, pair, key mask). Weights in their own dtype (fp32 or bf16); gradients returned in it."""
 

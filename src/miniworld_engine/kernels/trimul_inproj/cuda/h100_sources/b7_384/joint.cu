@@ -15,7 +15,12 @@ constexpr int THREADS=256,SMEM=114688;
 #endif
 constexpr int SOURCES=16,CONSUMERS=B7_CONSUMERS,GROUP=SOURCES+CONSUMERS,RINGS=B7_RING_DEPTH;
 #define allsync() named_bar_sync(1+threadIdx.x/128,128)
-struct Params{CUtensorMap xn,wp,dl,dr,dg,wgate,x,res,dx,wt[4],ringstore;const __nv_bfloat16* mask;const float *gamma,*beta;__nv_bfloat16 *dxptr,*dw;float *dgam,*dbeta,*partw,*partln;unsigned int* counts;int M,tiles;uint8_t *ring,*xring;unsigned* flags;};
+#if MASTER_FP32
+using MasterDW = float;
+#else
+using MasterDW = __nv_bfloat16;
+#endif
+struct Params{CUtensorMap xn,wp,dl,dr,dg,wgate,x,res,dx,wt[4],ringstore;const __nv_bfloat16* mask;const float *gamma,*beta;__nv_bfloat16 *dxptr; MasterDW *dw;float *dgam,*dbeta,*partw,*partln;unsigned int* counts;int M,tiles;uint8_t *ring,*xring;unsigned* flags;};
 
 #ifndef B7_TOKEN_MASK
 #define B7_TOKEN_MASK 0
@@ -161,7 +166,12 @@ TMN_DEVI void consumer_producer(const Params& p,uint8_t* sm,uint64_t* bar){
     __syncwarp();
     if(lane==0){mbar_arrive_expect_tx(bar+24+slot,RING_CHUNK);bulk_load(sm+slot*RING_CHUNK,p.ring+(cid*RINGS+rs)*131072+phase*RING_CHUNK,RING_CHUNK,bar+24+slot);}
    }
-   if(lane==0){mbar_wait(bar+24+RING_SLOTS-1,1);publish(flags+SOURCES+1,sequence+1);}
+   if(lane==0){
+    // Observe the final empty phase before the next tile reuses each barrier.
+    // bar+17 orders tile completion, but does not satisfy this mbarrier lifecycle.
+    for(int slot=0;slot<RING_SLOTS;++slot)mbar_wait(bar+32+slot,((RING_PHASES-1)/RING_SLOTS)&1);
+    mbar_wait(bar+24+RING_SLOTS-1,1);publish(flags+SOURCES+1,sequence+1);
+   }
    __syncwarp();
   }return;
  }
@@ -302,7 +312,12 @@ void b7_joint(__grid_constant__ const Params p){
    int j=((kind&1)?h%32:32+h%32)*128+c;
 #endif
 #endif
-   for(int a=0;a<groups;++a)v+=reinterpret_cast<volatile float*>(p.partw)[(a*SOURCES+rk)*8192+j];p.dw[out]=__float2bfloat16_rn(v);
+   for(int a=0;a<groups;++a)v+=reinterpret_cast<volatile float*>(p.partw)[(a*SOURCES+rk)*8192+j];
+#if MASTER_FP32
+   p.dw[out]=v;
+#else
+   p.dw[out]=__float2bfloat16_rn(v);
+#endif
   }else{int c=i-131072;for(int a=0;a<groups*CONSUMERS;++a)v+=reinterpret_cast<volatile float*>(p.partln)[a*256+c];(c<128?p.dgam:p.dbeta)[c%128]=v;}
  }
  for(int i=blockIdx.x*THREADS+threadIdx.x;i<groups*RINGS*(SOURCES+2);i+=gridDim.x*THREADS)p.flags[i]=0;

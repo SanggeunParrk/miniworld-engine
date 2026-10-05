@@ -46,13 +46,14 @@ def policy():
         settings.configure(**vars(old))
 
 
+@pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
+def test_token_dit_inference_live_inputs_weights_and_mask(dtype, qk):
     torch.manual_seed(811)
     m = randomize(
-        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
     ).eval()
-    ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
+    ref = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
     ref.load_state_dict(m.state_dict())
     x = (
         torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype)
@@ -83,7 +84,7 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
         before = m(x, c, p, mask)
         p.add_(0.3 * torch.randn_like(p))
         assert not torch.equal(before, m(x, c, p, mask))
-        # Inference-only contract: a replay reads the weights' pack and the pair bias it was captured with, and the
+        # Capture-scoped inference contract: replay rebuilds the weights' pack and pair bias, and the
         # live single / cond.
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):

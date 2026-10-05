@@ -3,11 +3,10 @@
 On B200 (sm_100) the step runs the sm_100a gated attention core (``kernels/augmented_attention/cuda/sm100``: bf16, or
 TF32 tensor cores for fp32) and the CUDA row kernels; the GEMMs are cuBLAS as on H100.
 
-Inference only: the weights are packed once and the pack reused while every weight's (pointer, version) is unchanged,
-and the pair bias likewise per pair tensor, CUDA-graph replays included (a replay reads the pack and pair bias it was
-captured with; single and cond stay live). The conditioning may be shared by the samples or per sample. QK-norm runs on
-B200 (one in-place CUDA row pass after the projection; the logit scale folds into the q norm's weight). Calls with
-autograd, different model dimensions, or QK-norm off B200 keep the general module path.
+Inference only: weight packs and pair bias are cached by tensor pointer / version within the current capture scope.
+A capture records their construction once, so each replay recomputes them from the current weights and pair.
+The conditioning may be shared by the samples or per sample. QK-norm runs on H100 and B200 with the CUDA row kernels
+(one in-place pass after the projection; the logit scale folds into the q norm's weight). Unsupported calls keep the module path.
 
 Precision: the runner's, i.e. single's dtype (bf16, or fp32 on TF32 tensor cores at every head layout of LAYOUTS on B200); the
 step runs with autocast off.
@@ -26,7 +25,7 @@ import torch
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._compile import device_constant, opaque
 
 WEIGHTS = (
     "attention.to_query.weight",
@@ -133,6 +132,12 @@ def _cuda_rows() -> bool:
 
     if not settings.current().token_dit_rows_cuda:
         return False
+    return _cuda_rows_available()
+
+
+@device_constant
+def _cuda_rows_available() -> bool:
+    """Resolve the CUDA extension once while tracing; compiler/file probes are not graph operations."""
     try:
         from miniworld_engine.kernels.conditioned_transition import cuda as cuda_rows
 
@@ -157,6 +162,7 @@ def _infer(
     ek: float,
     heads: int,
 ) -> torch.Tensor:
+    """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise)."""
     from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
         FusedTokenDiT,
     )

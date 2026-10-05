@@ -23,6 +23,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef DBX
 #define DBX 1                    // timing diagnostics: 0 skips the whole dbias exchange and reds
 #endif
+#ifndef DBTMA
+#define DBTMA 2                  // dbias, L768 A48: 0 = the G-sample exchange + L2 reds by the owner (1019 us); 1 = every
+#endif                           // warpgroup TMA-reduce-adds its own tile, no exchange (1185: 3x the reduce traffic); 2 = the
+                                 // exchange, then the owner stages the summed tile and ONE TMA reduce-add replaces its reds
 #ifndef SPLITRED
 #define SPLITRED 0               // 1: every warpgroup reduces a third of the dS tile; 0: one owner warpgroup a block
 #endif
@@ -69,6 +73,13 @@ TMN_DEVI float qsum(float v) {
   return v + __shfl_xor_sync(0xffffffffu, v, 2);
 }
 
+TMN_DEVI void bulk_reduce_add_2d(const CUtensorMap* map, uint32_t src, int c0, int c1) {
+  asm volatile("cp.reduce.async.bulk.tensor.2d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3}], [%1];"
+               :: "l"(map), "r"(src), "r"(c0), "r"(c1) : "memory");
+}
+TMN_DEVI void bulk_commit() { asm volatile("cp.async.bulk.commit_group;" ::: "memory"); }
+TMN_DEVI void bulk_wait_read0() { asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory"); }
+
 TMN_DEVI void red_v2(float* p, float a, float b) {
   if (!DBR) { if (a == 1234.5f && b == -1.f) *p = a; return; }  // keeps the sum alive
   asm volatile("red.global.add.v2.f32 [%0], {%1, %2};" :: "l"(p), "f"(a), "f"(b) : "memory");
@@ -85,7 +96,8 @@ __global__ void __launch_bounds__(128 * G + 32, 1)
 attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk,
                 const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mdo,
                 const __grid_constant__ CUtensorMap mbias, const float* __restrict__ KM, const float* __restrict__ LSE,
-                const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB, int L, int H, int mt) {
+                const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB, const __grid_constant__ CUtensorMap mdb,
+                int L, int H, int mt) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + OFF_BAR);
@@ -158,6 +170,8 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       ldsm_x4(dor[ks], sbase + (G + wg) * TILE + sw128(rr, bb));
       dep ^= qr[ks][0] ^ qr[ks][1] ^ qr[ks][2] ^ qr[ks][3] ^ dor[ks][0] ^ dor[ks][1] ^ dor[ks][2] ^ dor[ks][3];
     }
+    fence_proxy_async();                                            // the parked q / dO read generically: order before release
+    __syncwarp();
     if (lane == 0) mbar_arrive_dep(qdone, zero_dep(dep));
   }
   const float* kmr = HASM ? KM + (size_t)a * L : nullptr;
@@ -217,7 +231,31 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dM0 + ((s * SLOT + wg * TILE + ks * 2048) >> 4));
     wgmma_commit();
     // ---- dbias: the three samples' dS meet in shared memory; warpgroup n % G sums them and issues the reds
-    if (DBX) {
+    if (DBX && DBTMA == 1) {
+      // this sample's dS tile -> a 128-B-swizzled staging tile (two 32-column halves) -> TMA reduce-add into DB
+      uint8_t* xt = sm + OFF_X + wg * SX;
+      if (n > 0) {
+        if (wt == 0) bulk_wait_read0();                             // the previous tile has left the staging buffer
+        named_bar_sync(3 + wg, 128);
+      }
+#pragma unroll
+      for (int h = 0; h < 2; ++h)
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+          *reinterpret_cast<float2*>(xt + (j >> 2) * 8192 + sw128(r0 + 8 * h, ((j & 3) * 8 + cb) * 4)) =
+              make_float2(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]);
+      fence_proxy_async();
+      named_bar_sync(3 + wg, 128);
+      if (wt == 0) {
+        bulk_reduce_add_2d(&mdb, smem_u32(xt), n * BN, head * L + m0);
+        bulk_reduce_add_2d(&mdb, smem_u32(xt + 8192), n * BN + 32, head * L + m0);
+        bulk_commit();
+      }
+    } else if (DBX) {
+    if (DBTMA == 2 && n > 0 && (n - 1) % G == wg) {                  // the previous owner: its slot is the TMA source
+      if (wt == 0) bulk_wait_read0();
+      named_bar_sync(3 + wg, 128);
+    }
     if (n > 0) named_bar_sync(2, 128 * G);                          // the previous block's owner has read the exchange
 #pragma unroll
     for (int i = 0; i < 8; ++i) xs[(wg * 8 + i) * 128 + wt] = make_float4(sc[4 * i], sc[4 * i + 1], sc[4 * i + 2], sc[4 * i + 3]);
@@ -248,6 +286,22 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
           sc[4 * i] += f.x; sc[4 * i + 1] += f.y; sc[4 * i + 2] += f.z; sc[4 * i + 3] += f.w;
         }
       }
+      if (DBTMA == 2) {                                             // own slot (nobody reads it) -> swizzled tile -> TMA reduce
+        uint8_t* xt = sm + OFF_X + wg * SX;                         // (bar 1 above: every exchange write is done)
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+#pragma unroll
+          for (int j = 0; j < 8; ++j)
+            *reinterpret_cast<float2*>(xt + (j >> 2) * 8192 + sw128(r0 + 8 * h, ((j & 3) * 8 + cb) * 4)) =
+                make_float2(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]);
+        fence_proxy_async();
+        named_bar_sync(3 + wg, 128);
+        if (wt == 0) {
+          bulk_reduce_add_2d(&mdb, smem_u32(xt), n * BN, head * L + m0);
+          bulk_reduce_add_2d(&mdb, smem_u32(xt + 8192), n * BN + 32, head * L + m0);
+          bulk_commit();
+        }
+      } else
 #pragma unroll
       for (int h = 0; h < 2; ++h)
 #pragma unroll
@@ -257,8 +311,11 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 #endif
     }
     wgmma_wait<0>();
+    fence_proxy_async();                                          // generic (ldmatrix) reads of this TMA stage before its release
+    __syncwarp();
     if (lane == 0 && n + STAGES < nblocks) mbar_arrive(&empty[s]);
   }
+  if (DBTMA && wt == 0) bulk_wait_read0();                          // the last tile has been read before the CTA exits
 #pragma unroll
   for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 #pragma unroll
@@ -319,9 +376,17 @@ void attn_dqb(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
   auto mdo = tile_map(dO.data_ptr(), (uint64_t)A * L, DM, DM, QW, QB);
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QB);
+  CUtensorMap mdb{};                                                // DB [H L, L] fp32, 32-column 128-B-swizzled boxes
+  {
+    const cuuint64_t dims[2] = {(cuuint64_t)L, (cuuint64_t)H * L}, strides[1] = {(cuuint64_t)L * 4};
+    const cuuint32_t box[2] = {32, QB}, elem[2] = {1, 1};
+    TORCH_CHECK(encoder()(&mdb, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 2, DB.data_ptr(), dims, strides, box, elem,
+                          CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                          CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) == CUDA_SUCCESS, "encode failed");
+  }
   kern<<<(A / G) * H * mt, 128 * G + 32, smem, at::cuda::getCurrentCUDAStream()>>>(
       mq, mk, mv, mdo, mb, hasm ? kmask->data_ptr<float>() : nullptr, LSE.data_ptr<float>(), Dd.data_ptr<float>(),
-      DQ.data_ptr<float>(), DB.data_ptr<float>(), L, H, mt);
+      DQ.data_ptr<float>(), DB.data_ptr<float>(), mdb, L, H, mt);
   TORCH_CHECK(cudaGetLastError() == cudaSuccess, "launch failed");
 }
 

@@ -125,13 +125,14 @@ def test_trimul_compile_backward_and_saved_tensor_ownership(monkeypatch):
         assert relative(got, want) < 1e-6
 
 
+@pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
+def test_token_dit_inference_live_inputs_weights_and_mask(dtype, qk):
     torch.manual_seed(811)
     m = randomize(
-        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
     ).eval()
-    ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
+    ref = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
     ref.load_state_dict(m.state_dict())
     x = (
         torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype)
@@ -162,8 +163,7 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
         before = m(x, c, p, mask)
         p.add_(0.3 * torch.randn_like(p))
         assert not torch.equal(before, m(x, c, p, mask))
-        # Inference-only contract (integrations/token_dit.py): a replay reads the weights' pack and the pair bias it was
-        # captured with, and the live single / cond.
+        # Capture-scoped pack / bias construction is recorded, and single / cond remain live on replay.
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = m(x, c, p, mask)

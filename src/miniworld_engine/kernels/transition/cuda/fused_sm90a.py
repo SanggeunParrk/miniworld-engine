@@ -205,7 +205,7 @@ def _fwd_launch(
     )
 
 
-def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
+def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw=False):
     """Output structure only: the six gradients, each shaped like what it is a gradient of."""
     return (
         torch.empty_like(x),
@@ -232,7 +232,7 @@ def _bwd_launch(
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
-    args = (dy, x, xn, rstd, c1, gamma, wa, wb, ws)
+    args = (dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw)
     config = _select_schedule(args, backward=True, save=True)
     if _is_fake(dy, x):
         return _bwd_launch_fake(*args)
@@ -272,6 +272,28 @@ def _select_schedule(args, *, backward, save):
     )
 
 
+
+def _master_pack_fake(wa, wb, ws):
+    return tuple(torch.empty(w.shape, device=w.device, dtype=torch.bfloat16) for w in (wa, wb, ws)) + (torch.empty(ws.shape[1], ws.shape[0], device=ws.device, dtype=torch.bfloat16),)
+
+
+@opaque(fake=_master_pack_fake, name="transition_master_weight_pack_sm90a")
+def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    from miniworld_engine.integrations.h100_master import transition_pack_kernel
+    a, b, s, st = _master_pack_fake(wa, wb, ws)
+    d = wa.shape[1]
+    rows = 8 if d == 64 else 32
+    transition_pack_kernel[(wa.shape[0] // 32, d // rows)](wa, wb, ws, a, b, s, st, D=d, ROWS=rows, num_warps=4)
+    return a, b, s, st
+
+
+def _cast_weights(weights, dtype):
+    if all(w.dtype == dtype for w in weights):
+        return tuple(w.contiguous() for w in weights)
+    outs = [torch.empty(w.shape, device=w.device, dtype=dtype) for w in weights]
+    torch._foreach_copy_(outs, list(weights))
+    return tuple(outs)
+
 class _FusedTransitionSM90A(torch.autograd.Function):
     """``y = transition(x) + x`` with the residual folded into the squeeze epilogue.
 
@@ -283,6 +305,13 @@ class _FusedTransitionSM90A(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, gamma, beta, wa, wb, ws, eps):
         shape = x.shape
+        raw = (wa, wb, ws)
+        param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
+        if all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
+            wa, wb, ws, wst = _master_pack(*raw)
+        else:
+            wa, wb, ws = _cast_weights(raw, x.dtype)
+            wst = ws.t().contiguous()
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         save = any(ctx.needs_input_grad)
@@ -298,12 +327,12 @@ class _FusedTransitionSM90A(torch.autograd.Function):
         )
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws)
         ctx.shape = shape
-        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
+        ctx.param_dtypes = param_dtypes
         return out.reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):
-        flat, xn, rstd, c1, gf, wa, wb, ws = ctx.saved_tensors
+        flat, xn, rstd, c1, gf, wa, wb, ws, *_raw = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(),

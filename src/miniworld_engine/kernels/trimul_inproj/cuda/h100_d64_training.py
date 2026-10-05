@@ -79,8 +79,8 @@ FINW_OUT = B2W_SLOT + B1W_SLOT
 
 
 @T.device_cache
-def _bwd_wg(prof=False):
-    cubin = T.compile(R / "d64_bwd_wg.cu", _flags(R, [("D64_PROF", 1)] if prof else ()))
+def _bwd_wg(prof=False, master=False):
+    cubin = T.compile(R / "d64_bwd_wg.cu", _flags(R, [("D64_PROF", int(prof)), ("MASTER_FP32", int(master))]))
     unit = T.load_unit(str(cubin), "d64_bwd_wg")
     b1, b2, fin = (unit.kernel(n) for n in ("d64_b1w", "d64_b2w", "d64_finw"))
     b1.set_max_dynamic_smem(B1W_SMEM)
@@ -211,7 +211,7 @@ def _map2(t, box, dims, strides, swizzle="128B"):
                                          swizzle=swizzle, l2="128B")
 
 
-def _run_backward(leaves, mask, ds, saved, dy):
+def _run_backward(leaves, mask, ds, saved, dy, master=False):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     ab, tri, stats, w1, maskf = saved
     L = T._launch_module()
@@ -219,7 +219,7 @@ def _run_backward(leaves, mask, ds, saved, dy):
     m = n * n
     h = WIDTH
     dy = dy.contiguous()
-    b1, b2, fin = _bwd_wg(PROF is not None)
+    b1, b2, fin = _bwd_wg(PROF is not None, master)
     sms = _sms()
     ntiles = m // 64
     g1 = min(sms, (ntiles + 1) // 2)
@@ -250,7 +250,7 @@ def _run_backward(leaves, mask, ds, saved, dy):
         _map2(maskf, [64, 1], [m, 1], [m * 4], "none"), rows(dx),
         w1, gi, bi, p2, ntiles, None if PROF is None else PROF[1]])
     b2.launch((g2, 1, 1), (256, 1, 1), [params], B2W_SMEM)
-    grads = [torch.empty_like(w) for w in (wl, wlg, wr, wrg, wg, wp)]
+    grads = [torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wl, wlg, wr, wrg, wg, wp)]
     f32 = dict(device=x.device, dtype=torch.float32)
     dgi, dbi = torch.empty(h, **f32), torch.empty(h, **f32)
     dgo, dbo = torch.empty(2 * h, **f32), torch.empty(2 * h, **f32)
@@ -259,38 +259,52 @@ def _run_backward(leaves, mask, ds, saved, dy):
     return [dx, *grads, dgi, dbi, dgo, dbo]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy):
+def _backward_fake(leaves, mask, ds, saved, dy, master=False):
     """One gradient per differentiable leaf, same shape and dtype."""
-    return [torch.empty_like(t) for t in leaves]
+    return [torch.empty_like(t, dtype=torch.float32 if master and 1 <= i <= 6 else t.dtype) for i, t in enumerate(leaves)]
 
 
 @opaque(fake=_backward_fake, name="trimul_h100_d64_train_bwd")
 def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
-             saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
+             saved: list[torch.Tensor], dy: torch.Tensor, master: bool = False) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
     with T.native_context(leaves[0].device):
-        return _run_backward(leaves, mask, ds, saved, dy)
+        return _run_backward(leaves, mask, ds, saved, dy, master)
 
 
 class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args):
         leaves = list(args[:11])
+        ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
+        weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
+        if ctx.master:
+            torch._foreach_copy_(weights, leaves[1:7])
+        leaves = [leaves[0], *weights, *leaves[7:]]
         mask, ds = args[11:]
         y, *saved = forward(leaves, mask, ds)
-        ctx.save_for_backward(*args, *saved)
+        ctx.saved_count = len(saved)
+        ctx.save_for_backward(*args, *saved, *weights)
         return y
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
         vals = ctx.saved_tensors
-        grads = backward(list(vals[:11]), vals[11], vals[12], list(vals[13:]), dy)
+        leaves = [vals[0], *vals[-6:], *vals[7:11]]
+        saved = list(vals[13:13+ctx.saved_count])
+        grads = backward(leaves, vals[11], vals[12], saved, dy, ctx.master)
+        grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
         return (*grads, None, None)
 
 
 def bidirectional_trimul(*args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
     if not torch.is_grad_enabled():
-        return forward_nograd(list(args[:11]), *args[11:])
+        leaves = list(args[:11])
+        if any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
+            weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
+            torch._foreach_copy_(weights, leaves[1:7])
+            leaves = [leaves[0], *weights, *leaves[7:]]
+        return forward_nograd(leaves, *args[11:])
     return _Training.apply(*args)

@@ -1,4 +1,4 @@
-"""Fused token DiT TRAINING block on B200 (sm_100), wired to DiTBlock's parameter contract.
+"""Fused token DiT TRAINING block on H100 (sm_90) and B200 (sm_100), wired to DiTBlock's parameter contract.
 
 One autograd Function per ``DiTBlock`` call, forward and backward, with no Triton and no quack, in one of two precisions --
 bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute_dtype``; TF32 tensor cores):
@@ -189,6 +189,24 @@ def _mm32(a, b):
     return torch.bmm(
         a.t().reshape(s, m // s, n).transpose(1, 2), b.reshape(s, m // s, k)
     ).sum(0)
+
+
+LOG2E = 1.4426950408889634
+QS90 = LOG2E / DH ** 0.5           # the sm_90a core's q scale: its logits are in log2 units (16 x 48 only)
+
+
+def _sm90(dev) -> bool:
+    """H100: the sm_90a attention cores and their operand conventions; B200 otherwise (``serves`` admits only these two)."""
+    return torch.cuda.get_device_capability(dev) == (9, 0)
+
+
+def _key_mask(mask, A, L, perm=None):
+    """The sm_90a cores' additive key mask, [A, L] fp32 (0 = attend), or None; ``perm``: its keys in that order (the TF32
+    core's)."""
+    if mask is None:
+        return None
+    m = mask.reshape(L) if perm is None else mask.reshape(L)[perm]
+    return torch.where(m, 0.0, -1e30).to(torch.float32).expand(A, L).contiguous()
 
 
 _PACKS: dict = {}
@@ -385,6 +403,7 @@ def _fwd(
 
 
 def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
@@ -506,6 +525,27 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     ]
 
 
+def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
+    """The H100 fp32 block's attention backward on the TF32 CUDA core: dQ (for the unscaled q), dK, dV [A L, 768] fp32 and dbias
+    [16, L, L] fp32 in natural key order. qs: q in exp2 units; bias_p: the forward's key-permuted bias (log2 units). The
+    core takes q, k, dO transposed as well (tiled transposes, ``T.transpose``), and its bias / LSE / D in the permuted orders."""
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+    from miniworld_engine.kernels.conditioned_transition import cuda as rows
+    perm = rows.key_perm(L, qs.device)
+    inv = torch.argsort(perm)
+
+    def tr(t):
+        out = t.new_empty(t.shape[1], t.shape[0])
+        T.transpose(t, out)
+        return out
+
+    bias_tp = bias_p[:, perm][..., inv].transpose(1, 2).contiguous()           # [h, key, q position]
+    dq, dk, dv, db_p = sm90.tf32_backward(qs, k, v, dob, tr(qs), tr(k), tr(dob), bias_p, bias_tp, lse, dd,
+                                          lse[..., perm].contiguous(), dd[..., perm].contiguous(),
+                                          _key_mask(mask, A, L), _key_mask(mask, A, L, perm), A, L)
+    return dq, dk, dv, db_p[..., inv]
+
+
 def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads):
     return [
         torch.empty_like(single),
@@ -538,6 +578,7 @@ def _bwd(
 
 
 def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H):
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
 
