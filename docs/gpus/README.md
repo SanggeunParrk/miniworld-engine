@@ -17,6 +17,8 @@ SWA Atom DiT and Dense Atom DiT as the first completed review group. The `a100`
 branch preserves the implementation and measurements at this checkpoint.
 The next inference review covers TriMul, TriangleAttention and AttentionPairBias,
 starting with per-shape speed-of-light measurements under the same shape protocol.
+Results: [A100 TriMul, TriangleAttention and APB inference SOL](../records/a100-trimul-triattn-apb-inference-sol-20261005.md)
+records all 120 shapes, measured latency, implementation-aware modeled floors and separate NCU counters.
 
 | GPU | arch | cluster / partition | page | summary |
 |---|---|---|---|---|
