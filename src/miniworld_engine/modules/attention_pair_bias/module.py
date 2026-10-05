@@ -91,6 +91,10 @@ class AttentionPairBias(nn.Module):
             return _b200.update_inference(self, single, pair, mask)
         if _b200.serves_train(self, single, pair, mask):
             return _b200.update_train(self, single, pair, mask)
+        if (self.implementation == ImplementationType.MINIWORLD and single.is_cuda
+                and torch.cuda.get_device_capability(single.device) == (9, 0)
+                and not torch.is_grad_enabled()):
+            raise ValueError("H100 AttentionPairBias inference requires the native CUDA shape/dtype contract")
         master = (self._backend == KernelBackend.TRITON and single.dtype == torch.bfloat16 and self.to_query.weight.dtype == torch.float32
                   and _h100_master.is_h100(single.device))
         if master:
