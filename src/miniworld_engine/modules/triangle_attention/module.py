@@ -327,6 +327,11 @@ class TriangleAttention(nn.Module):
         if _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
+        if getattr(self, "_h100_b200style_cuda", False):
+            from miniworld_engine.integrations import triattn_h100
+            if triattn_h100.serves(self, pair, mask):
+                with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                    return triattn_h100.forward(self, pair, mask)
         if pair.dtype == torch.bfloat16 and self.to_value.weight.dtype == torch.float32 and self._backend == KernelBackend.TRITON:
             from miniworld_engine.kernels.triangle_attention.cuda import (
                 qg_projection_attention,
