@@ -20,7 +20,6 @@ The fp32 path (TF32 tensor cores: ``pv_gate_tf32.cu``, ``dpb32_sm100.cu``, ``gem
 from __future__ import annotations
 
 import functools
-import os
 import warnings
 from pathlib import Path
 
@@ -149,9 +148,10 @@ def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
 def core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
-    """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
-    up to 768 (the P tile and two accumulators in 512 TMEM columns), sm_100. settings.bias_only_dit_core=0 turns it off.
-    fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
+    """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128: on
+    sm_100 up to 768 (the P tile and two accumulators in 512 TMEM columns), on an A100 (sm_80, ``cuda/sm80``) any such L.
+    settings.bias_only_dit_core=0 turns it off.
+    fp32: the TF32 core (``tf32.py``; same layouts and lengths, sm_100), once the fp32 path's kernels load (``tf32_ready``)."""
     if not settings.current().bias_only_dit_core:
         return False
     if dtype is torch.float32:
@@ -166,14 +166,16 @@ def core_supported(
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import tf32_ready
 
         return tf32_ready(device_index, h, d // h, False)
-    return (
+    if not (
         dtype is torch.bfloat16
         and d % h == 0
         and (h, d // h) in LAYOUTS
         and L % 128 == 0
-        and 0 < L <= 768
-        and torch.cuda.get_device_capability(device_index) == (10, 0)
-    )
+        and L > 0
+    ):
+        return False
+    capability = torch.cuda.get_device_capability(device_index)
+    return (capability == (10, 0) and L <= 768) or capability == (8, 0)
 
 
 def _descriptors(*maps):

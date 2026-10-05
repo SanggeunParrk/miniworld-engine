@@ -99,6 +99,36 @@ NOT_A_NORMALISATION = {
     ("mpnn_edge_tail/triton/main.py",
      "grad_output_bias.to(torch.bfloat16).to(output_bias_dtype),"):
         "the second of that pair, for the output bias.",
+    ("trimul_inproj/cuda/sm80.py",
+     "w1 = (0.5 * w_rows).to(torch.bfloat16).view(nstep, 64, 16, 8).transpose(1, 2).contiguous()   # [block][16 B k-granule][64 rows][8]"):
+        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    ("trimul_inproj/cuda/sm80.py",
+     "wo_k3 = (0.5 * f(wo) * f(go)[None, :]).to(torch.bfloat16).contiguous()"):
+        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    ("trimul_inproj/cuda/sm80.py",
+     "wg_k3 = (0.5 * f(wg) * f(gi)[None, :]).to(torch.bfloat16).contiguous()"):
+        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    ("trimul_inproj/cuda/sm80.py",
+     "wo_b1 = (f(wo) * f(go)[None, :]).to(torch.bfloat16).contiguous()"):
+        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    ("trimul_inproj/cuda/sm80.py",
+     "wg_b1 = (f(wg) * f(gi)[None, :]).to(torch.bfloat16)"):
+        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    ("trimul_inproj/cuda/sm80.py",
+     "pk.update(wdx=torch.cat([w_rows.to(torch.bfloat16), wg.detach().to(torch.bfloat16)], 0).contiguous(),   # [K1 rows ; W_og]"):
+        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    ("trimul_inproj/cuda/sm80.py",
+     "wo_b1=wo_b1, wg_b1=wg.detach().to(torch.bfloat16).contiguous(),   # B1's gate runs on the saved x_n: raw W_og"):
+        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    ("trimul_inproj/cuda/sm80.py",
+     "dyf = dy.reshape(T, C).to(torch.bfloat16).contiguous()"):
+        "The incoming output gradient as the bf16 operand of the backward GEMMs; a gradient, not a normalisation's input.",
+    ("transition/cuda/fused_fwd_sm80.py",
+     "_ext().pack(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), g, b, idx16, idx32, out16, gb)"):
+        "The three GEMM weight operands of the sm_80 Transition pack (an fp32 master parameter cast for the bf16 kernel, outside autograd); the LayerNorm affine g / b stay fp32.",
+    ("transition/cuda/fused_sm80.py",
+     "_pack_launch(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), gf, bf, out16, gb)"):
+        "The three GEMM weight operands of the sm_80 Transition pack (an fp32 master parameter cast for the bf16 kernel, outside autograd); the LayerNorm affine gf / bf stay fp32.",
 }
 
 #: A driver naming a fixed precision. `BF16` is NOT one: it is the name

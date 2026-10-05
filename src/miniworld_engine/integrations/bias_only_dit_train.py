@@ -1,15 +1,17 @@
-"""Fused bias-only token DiT TRAINING block on B200 (sm_100), wired to ``BiasOnlyDiTBlock``'s parameter contract.
+"""Fused bias-only token DiT TRAINING block on B200 (sm_100) and A100 (sm_80), wired to ``BiasOnlyDiTBlock``'s parameter contract.
 
 One autograd Function per block call, its forward and backward each one opaque op, CUDA and cuBLAS only: cuBLAS GEMMs (bf16
 operands, fp32 accumulation, weight gradients in the parameter's dtype), the expand GEMM with the SwiGLU in its epilogue
-(``gemm_swiglu2_sm100`` keeping a | b), and the row kernels of ``kernels/bias_only_dit/cuda/bias_only_dit_train_rows.cu``
-(conditioning LN, AdaLN, residual + gate, their backwards, the pair bias on mma.sync). The attention is the bias-only one:
+(B200: ``gemm_swiglu2_sm100`` keeping a | b; A100: the cuBLAS GEMM and the SwiGLU row kernel), and the row kernels of
+``kernels/bias_only_dit/cuda/bias_only_dit_train_rows.cu`` (conditioning LN, AdaLN, residual + gate, their backwards, the pair bias on
+mma.sync). The attention is the bias-only one:
 
   forward   bias = LN(pair) Wf^T (pair_bias: LN(pair) stays on chip); P = softmax(bias) once per call for every sample
-            (softmax_t, the key mask folded in, P^T written beside it); a = sigmoid(g) (P v) per head and sample (pv_gate_inf)
+            (softmax_t, the key mask folded in, P^T written beside it); a = sigmoid(g) (P v) per head and sample (B200: pv_gate_inf,
+            A100: the mma.sync core of ``cuda/sm80``)
   backward  do = da sigmoid(g), dg = da a (1 - sigmoid(g)), D = sum da a per row and head (gate_bwd_rows: a = sigmoid(g) o, so
-            the pre-gate o is never stored); dv = P^T do (pv_gate_inf without the gate, on the transposed P);
-            dbias = P o (sum_a do v^T - D) (dpb_sm100; dpbx2_sm100 on CTA pairs at L768); d pair and dWf = dbias LN(pair) (pair_bias_bwd) -> to_bias / ln_pair
+            the pre-gate o is never stored); dv = P^T do (B200: pv_gate_inf without the gate; A100: the mma.sync core of ``cuda/sm80``; on the transposed P);
+            dbias = P o (sum_a do v^T - D) (B200: dpb_sm100, dpbx2_sm100 on CTA pairs at L768; A100: dpb_sm80); d pair and dWf = dbias LN(pair) (pair_bias_bwd) -> to_bias / ln_pair
 
 fp32 (the TF32 recipe): single, cond and pair fp32, the block's weights fp32, no CUDA autocast -> the same composition with every
 activation, saved tensor and gradient fp32: cuBLAS GEMMs forced to TF32 tensor cores (the dxt / dxa data gradients written straight
@@ -34,7 +36,8 @@ the dxa GEMM / adaln_a_bwd / dchat + dcg GEMMs / cond_bwd (``bo_bwd_mid`` x 3 wi
 weight gradients and the unfold, ``pair_bias_bwd_fin`` for pair_bias_bwd + finalize (_BWD_PBFIN). settings.bias_only_dit_bwd_fused=0,
 read per call, or a failed build: the per-step launches.
 
-``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32 inputs, the
+``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200 (bf16 or fp32 inputs) or A100 (bf16
+inputs; the fused B200 rows / backward kernels of the paragraphs above are B200-only, the A100 runs the per-step launches), the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. settings.bias_only_dit_train=0 turns it off.
 
@@ -107,7 +110,8 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     if settings.current().engine_backend == "triton":
         return False
     if not (
-        single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)
+        single.is_cuda
+        and torch.cuda.get_device_capability(single.device) in ((10, 0), (8, 0))
     ):
         return False
     dt = single.dtype
@@ -165,6 +169,8 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     )
     if not all(n.eps == EPS for n in norms):
         return False
+    if torch.cuda.get_device_capability(single.device) == (8, 0):
+        return dt is BF and _sm80_loads()  # A100: bf16 only
     if dt is F32:
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import tf32_ready
 
@@ -175,6 +181,40 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         )
         return tf32_ready(idx, at.n_head, da // at.n_head, True)
     return True
+
+
+@torch.compiler.assume_constant_result
+def _sm80_loads() -> bool:
+    """Builds (first call) or loads the A100 extensions of the block (the cores, the row kernels); False, with one warning, when
+    the toolchain fails (the module's composition then serves). A process-level constant for ``torch.compile``: the JIT build is
+    not traced."""
+    global _SM80_FAILED
+    if _SM80_FAILED:
+        return False
+    try:
+        from miniworld_engine.kernels.bias_only_dit import cuda as C
+        from miniworld_engine.kernels.bias_only_dit.cuda import sm80
+        from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
+
+        C._ext()
+        bo_ext()
+        sm80._ext()
+    except Exception as exc:  # a toolchain problem keeps the module's composition
+        _SM80_FAILED = True
+        warnings.warn(
+            f"sm_80 bias-only DiT training kernels unavailable, keeping the module composition: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
+    return True
+
+
+_SM80_FAILED = False
+
+
+def _is_sm80(dev) -> bool:
+    return torch.cuda.get_device_capability(dev) == (8, 0)
 
 
 def _f32(t):
@@ -202,7 +242,7 @@ def _bwd_fused(dev, H, DA):
     settings.bias_only_dit_bwd_fused=0, read per call: the per-step launches) and its kernels built, else None."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
-    if not BWF.bwd_fused_on():
+    if _is_sm80(dev) or not BWF.bwd_fused_on():  # the fused kernels are sm_100a only
         return None
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
     return BWF.ops(idx, H, DA // H) if BWF.bwd_fused_ready(idx, H, DA // H) else None
@@ -214,7 +254,8 @@ def _pack(P, dev):
     eager pack is never reused inside a capture, whose replays would otherwise run on the weights of capture time."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
-    one, mid = _pack1(), BWF.mid_on()
+    sm80 = _is_sm80(dev)  # A100: the torch pack, the five-launch middle (the fused ones are sm_100a only)
+    one, mid = _pack1() and not sm80, BWF.mid_on() and not sm80
     key = (tuple((t.data_ptr(), t._version) for t in P.values()), one, mid)
     slot = _capture.scoped(next(iter(P.values())).data_ptr())
     hit = None if slot is None else _PACKS.get(slot)
@@ -427,15 +468,25 @@ def _op(kind, dev, nh=16, dh=48):
     if (kind, idx, nh, dh) not in _OPS:
         from miniworld_engine.kernels.bias_only_dit import cuda as C
 
-        _OPS[(kind, idx, nh, dh)] = (
-            C.GemmSwigluAB(idx)
-            if kind == "swiglu"
-            else C.PvGateCore(idx, nh=nh, dh=dh, pdl=True)
-            if kind == "pvpdl"
-            else {"pv": C.PvGateCore, "dpb": C.DpbKernel, "pvdpb": C.PvDpb}[kind](
-                idx, nh=nh, dh=dh
+        if torch.cuda.get_device_capability(idx) == (
+            8,
+            0,
+        ):  # A100: the mma.sync cores of cuda/sm80
+            from miniworld_engine.kernels.bias_only_dit.cuda import sm80
+
+            _OPS[(kind, idx, nh, dh)] = {"pv": sm80.PvGate, "dpb": sm80.Dpb}[kind](
+                nh, dh
             )
-        )
+        else:
+            _OPS[(kind, idx, nh, dh)] = (
+                C.GemmSwigluAB(idx)
+                if kind == "swiglu"
+                else C.PvGateCore(idx, nh=nh, dh=dh, pdl=True)
+                if kind == "pvpdl"
+                else {"pv": C.PvGateCore, "dpb": C.DpbKernel, "pvdpb": C.PvDpb}[kind](
+                    idx, nh=nh, dh=dh
+                )
+            )
     return _OPS[(kind, idx, nh, dh)]
 
 
@@ -568,7 +619,11 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
     )  # x1 = x + sigmoid(g1) y is never stored
     ab = torch.empty(M, 4 * D, device=dev, dtype=BF)  # [M, 2 * 2D] a | b
     h = torch.empty(M, 2 * D, device=dev, dtype=BF)
-    _op("swiglu", dev)(xt, W["Wab"], ab, h)  # the SwiGLU in the expand GEMM's epilogue
+    if _is_sm80(dev):  # A100: the cuBLAS GEMM, then the SwiGLU row pass
+        torch.mm(xt, W["Wab"].t(), out=ab)
+        C.swiglu_rows(ab, h)
+    else:
+        _op("swiglu", dev)(xt, W["Wab"], ab, h)  # the SwiGLU in the expand GEMM's epilogue
     z = torch.mm(h, W["Wsq"].t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     BT.res_c_cuda(x, y, z, Gg, W["bg1"], W["bg2"], out)
@@ -1011,8 +1066,10 @@ def _bwd_fused_step(
         if dbias_out is None
         else dbias_out.view(H * L, L)
     )
+    sm80 = _is_sm80(dev)
     if not (
-        BWF.pvdpb_on()
+        not sm80
+        and BWF.pvdpb_on()
         and _pvdpb(
             dev,
             H,
@@ -1027,7 +1084,7 @@ def _bwd_fused_step(
             A,
         )
     ):
-        _op("pvpdl" if BWF.pv_pdl_on() else "pv", dev, H, DA // H)(
+        _op("pvpdl" if BWF.pv_pdl_on() and not sm80 else "pv", dev, H, DA // H)(
             do, Pt.view(H * L, L), dvg[:, :DA], A
         )
         _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)

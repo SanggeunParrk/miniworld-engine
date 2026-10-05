@@ -107,5 +107,8 @@ src/miniworld_engine/autotune/data/.merge.lock
 
 /.release-build/
 
+# Local validation snapshots and machine-specific runtime environments.
+/.validation/
+
 # Local H100 wiring validation build products (historical verdicts: tag archive/docs-20260928)
 /verdicts/

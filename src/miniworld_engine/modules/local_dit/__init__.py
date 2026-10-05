@@ -6,6 +6,7 @@ from miniworld_engine.modules.local_dit.module import (
     QUERIES,
     LocalDiTBlock,
     to_windows,
+    windows,
 )
 
-__all__ = ["KEYS", "KEY_OFFSET", "QUERIES", "LocalDiTBlock", "to_windows"]
+__all__ = ["KEYS", "KEY_OFFSET", "QUERIES", "LocalDiTBlock", "to_windows", "windows"]

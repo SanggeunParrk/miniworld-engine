@@ -10,7 +10,9 @@ from miniworld_engine.kernels.mpnn_edge_layernorm.reference import (
     edge_layer_norm_pytorch,
 )
 
-EdgeNormBackend = Literal["auto", "pytorch", "memory"]
+# ``cuda`` is the memory policy on the hand-written A100 (sm_80) backward (``integrations/mpnn_edge_sm80.py``); on an A100 ``memory`` runs it too, unless
+# ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton backward.
+EdgeNormBackend = Literal["auto", "pytorch", "memory", "cuda"]
 
 #: The one width this policy is measured for, asserted rather than assumed. It is not a kernel
 #: limit -- the LayerNorm underneath is width-generic and the launcher reads the width from its
@@ -71,7 +73,7 @@ def _select_backend(
         return "pytorch"
     # The explicit memory policy is portable across CUDA architectures. An
     # unsupported dtype/layout falls back instead of changing public behavior.
-    if backend == "memory":
+    if backend in {"memory", "cuda"}:
         return "memory" if supported else "pytorch"
     # ``auto`` is the compute-oriented default. The compressed-save path has a
     # measured whole-model latency cost and is selected only by an explicit
@@ -93,19 +95,26 @@ def edge_layer_norm(
     only a BF16 copy of its edge-sized input for backward. Unsupported inputs,
     CPU execution, and inference all retain :func:`torch.nn.functional.layer_norm`.
     """
-    if backend not in {"auto", "pytorch", "memory"}:
+    if backend not in {"auto", "pytorch", "memory", "cuda"}:
         raise ValueError(f"unknown MPNN edge LayerNorm backend: {backend!r}")
     (values.shape[-1],)
     supported = _memory_supported(values, weight, bias)
     selected = _select_backend(values, backend, supported=supported)
     if selected == "memory":
+        assert weight is not None and bias is not None
+        # The A100 hand-CUDA backward (lazy: never imported off sm_80, never built until used); the Triton one keeps every other card, the switch off and a failed build.
+        from miniworld_engine.integrations import mpnn_edge_sm80
+
+        if mpnn_edge_sm80.norm_serves(values, weight):
+            return mpnn_edge_sm80.edge_layer_norm_memory(values, weight, bias, eps)
+        if backend == "cuda":
+            raise ValueError("the sm_80 CUDA MPNN edge LayerNorm backward needs an A100 (capability 8.0) and a loadable extension")
         # Keep Triton and the standalone LayerNorm backend out of CPU/import-only
         # users. This branch is reached only by supported CUDA training tensors.
         from miniworld_engine.kernels.mpnn_edge_layernorm.triton import (
             edge_layer_norm_memory,
         )
 
-        assert weight is not None and bias is not None
         return edge_layer_norm_memory(values, weight, bias, eps)
     return edge_layer_norm_pytorch(values, weight, bias, eps)
 

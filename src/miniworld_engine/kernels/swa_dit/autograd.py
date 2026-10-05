@@ -14,8 +14,12 @@ import torch
 from miniworld_engine.kernels.swa_dit.dispatch import (
     swa_dit_block_bwd,
     swa_dit_block_fwd,
+    swa_dit_mod_bwd_sm80,
     swa_dit_mod_bwd_sm100,
+    swa_dit_mod_fwd_sm80,
     swa_dit_mod_fwd_sm100,
+    swa_dit_window_attn_bwd_sm80,
+    swa_dit_window_attn_fwd_sm80,
 )
 from miniworld_engine.kernels.swa_dit.interface import FP32_EPS
 
@@ -41,6 +45,39 @@ class SWADiTBlockFunction(torch.autograd.Function):
         dq, dmod, *dw = grads
         dwqkv, dwg, dwo, dwu, dwd = (g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True))
         return dq, dmod, None, None, None, dwqkv, dwg, dwo, dwu, dwd, None, None
+
+
+class SWADiTModulationSm80(torch.autograd.Function):
+    """``swa_dit_hoist_modulation`` on the sm_80 kernels: rn(silu(c)) Wmod^T (mod_fwd) and its backward (mod_bwd); c [R, C] bf16 contiguous, Wmod [6C, C] bf16."""
+
+    @staticmethod
+    def forward(ctx, c, wmod):
+        mod, a = swa_dit_mod_fwd_sm80(c, wmod, True)
+        ctx.save_for_backward(c, a, wmod)
+        return mod
+
+    @staticmethod
+    def backward(ctx, g):
+        c, a, wmod = ctx.saved_tensors
+        dc, dw = swa_dit_mod_bwd_sm80(g.contiguous(), c, a, wmod)
+        return dc, dw
+
+
+class SWADiTWindowAttentionSm80(torch.autograd.Function):
+    """``interface.swa_dit_window_attention`` on the sm_80 kernels: the window attention of ``modules/swa_atom_attention`` over [N, S, 4, 32] bf16 q / k / v, differentiable in all three. The forward keeps
+    the output and the lse for the backward, so nothing is recomputed there."""
+
+    @staticmethod
+    def forward(ctx, q, k, v, seqused):
+        out, lse = swa_dit_window_attn_fwd_sm80(q, k, v, seqused)
+        ctx.save_for_backward(q, k, v, out, lse, seqused)
+        return out
+
+    @staticmethod
+    def backward(ctx, d_out):
+        q, k, v, out, lse, seqused = ctx.saved_tensors
+        dq, dk, dv = swa_dit_window_attn_bwd_sm80(q, k, v, out, d_out.contiguous(), lse, seqused)
+        return dq, dk, dv, None
 
 
 class SWADiTModulationSm100(torch.autograd.Function):

@@ -70,6 +70,12 @@ class LocalDiTBlock(DiTBlock):
 
     def attention_delta(self, single, cond, pair, mask=None) -> torch.Tensor:
         """The attention's update (no residual), PyTorch: AdaLN, q / k / v / gate, softmax over each 32 x 128 window, gates."""
+        if self.attention.implementation == ImplementationType.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                local_atom_attention,
+            )
+
+            return local_atom_attention(self, single, cond, pair, mask)
         att = self.attention
         x = att.ada_ln_in(single, cond)
         a, b, n, _ = x.shape

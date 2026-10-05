@@ -196,6 +196,13 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     # transition_b2b
     "tritontransitionfused": ("triton-transition-fused", "Triton transition", "#2E6FDB"),
     "transitionb2bktiled": ("transition-b2b-ktiled", "Triton k-tiled (unver)", "#7FB0FF"),
+    # the A100 hand-CUDA rows of the Transition family's kernel targets (kernels/transition/cuda/{fused_sm80,fused_wide_sm80,gemm_epilogue_sm80}.py)
+    # windowed_atom_attention: the Anthropic release's fpf_atom row and the engine's A100 sliding-window core
+    "anthropic": ("anthropic", "Anthropic", "#7A4EAB"),
+    "swawindowcuda": ("swa-window-cuda", "CUDA SWA window", "#C9A227"),
+    "transitioncuda": ("transition-cuda", "CUDA transition", "#B8860B"),
+    "layernormlinearcuda": ("layernorm-linear-cuda", "CUDA LN+linear", "#C9A227"),
+    "dualgemmgatecuda": ("dual-gemm-gate-cuda", "CUDA dual gate", "#DAA520"),
     # layernorm (+ bwd)
     "tritonlayernorm": ("triton-layernorm", "Triton LN", "#2E6FDB"),
     "tritonlayernormlowreg": ("triton-layernorm-lowreg", "Triton LN low-reg (dep)", "#7A86A1"),
@@ -217,6 +224,10 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     "tritontriangleattentionperf":
         ("triton-triangle-attention-perf", "Triton tri-attn (perf)", "#9AA7BF"),
     "tritonbiasonlyattention": ("triton-bias-only-attention", "Triton bias-attn", "#2E6FDB"),
+    # the family's default dispatch (A100: hand CUDA, elsewhere Triton) and the registry's projected_attention rows (``ops.augmented_attention_pair_bias``): golds
+    "biasonlyattention": ("bias-only-attention", "bias-attn (dispatch)", "#D4AF37"),
+    "projectedattention": ("projected-attention", "Projected attn (dispatch)", "#F2C94C"),
+    "projectedattentionpytorch": ("projected-attention-pytorch", "PyTorch head-major", "#7A86A1"),
     "biasonlyfused": ("bias-only-fused", "Triton bias fused (dep)", "#C66A12"),
     "tritonaugmentedattention": ("triton-augmented-attention", "Triton aug-attn", "#2E6FDB"),
     "augmentedattentionmemoryefficient":
@@ -239,6 +250,10 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     "tritoncondtransition": ("triton-cond-transition", "Triton cond-transition", "#2E6FDB"),
     "gateelembwd": ("gate-elem-bwd", "Triton gate bwd", "#2E6FDB"),
     "frontbwdfused": ("front-bwd-fused", "Triton front bwd", "#2E6FDB"),
+    # A100 (sm_80) hand-CUDA arms of the kernel-level targets: the gold of this repo's kernels.
+    "cudatm1": ("cuda-tm1", "CUDA tm1", "#D4AF37"),
+    "cudatm2": ("cuda-tm2", "CUDA tm2", "#D4AF37"),
+    "cudagateelembwd": ("cuda-gate-elem-bwd", "CUDA gate bwd", "#D4AF37"),
 }
 for _k, (_ident, _disp, _col) in _KERNEL_VARIANTS.items():
     _ALIASES.setdefault(_k, _ident)

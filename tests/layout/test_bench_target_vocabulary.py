@@ -101,7 +101,7 @@ def test_no_bench_target_abbreviates_a_name_the_engine_spells_out() -> None:
     #: the shape because more than one family implements it, so no family name would be right.
     shape_named = {"dual_gemm_epilogue", "dual_gemm_epilogue_bwd", "gemm_epilogue",
                    "gemm_epilogue_bwd", "gemm_gate", "gemm_gate_bwd", "transition_b2b",
-                   "transition_b2b_bwd", "conditioned_transition_tail"}
+                   "transition_b2b_bwd", "conditioned_transition_tail", "windowed_atom_attention"}
     for target in BENCH_KERNEL:
         if target in shape_named:
             continue

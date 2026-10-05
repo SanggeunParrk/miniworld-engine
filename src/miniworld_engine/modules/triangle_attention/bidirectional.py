@@ -244,6 +244,15 @@ class BidirectionalTriangleAttention(nn.Module):
         """Forward pass. ALWAYS returns the residual output ``pair + bidir_attention(pair)``.
         Routes on the resolved internal backend, degrading to the pytorch reference (with a
         warning) on a dtype the fused kernels can't run."""
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                triangle_attention_composition,
+            )
+
+            return triangle_attention_composition(self, pair, mask, bidirectional=True)
+        from miniworld_engine.integrations import a100_families
+        if a100_families.serves(self, pair):
+            return a100_families.triangle_bidir(self, pair, mask)
         backend = _dispatch.guard_dtype(
             self._backend, pair.dtype, op="BidirectionalTriangleAttention"
         )

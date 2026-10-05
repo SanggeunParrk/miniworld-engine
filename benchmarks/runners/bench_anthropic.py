@@ -1,4 +1,4 @@
-"""H100 inference qualification: engine adapters, independent reference, CUDA graphs.
+"""GPU inference qualification: engine adapters, independent reference, CUDA graphs.
 
 One candidate per process isolates incompatible binary loaders. NCU mode brackets
 one warmed launch with cudaProfilerStart/Stop; setup is excluded from counters.
@@ -242,7 +242,9 @@ def fixture():
         cache={"CH": 32, "CZ": C, "wout_t": wt, "bias32": bias}
         outer=torch.einsum("sic,sjd->ijcd",aa.float(),bb.float()).to(dt)
         ref=(outer.float().reshape(L,L,1024) @ wt.float()+bias).to(dt).float()/64
-        return lambda:K.opm_core(aa,bb,cache,"scalar_norm",norm_scalar=64),ref,None
+        cfg = None if a.row == "default" else K.CFG_VARIANTS[a.row]
+        record["opm_config"] = K.cfg_for("scalar_norm", C, aa.device) if cfg is None else {"name": a.row, "cfg": cfg}
+        return lambda:K.opm_core(aa,bb,cache,"scalar_norm",norm_scalar=64,cfg=cfg),ref,None
     if a.family=="pwa":
         K=A.operation("msa_pwa2")
         from types import SimpleNamespace

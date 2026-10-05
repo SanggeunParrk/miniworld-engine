@@ -92,5 +92,5 @@ def test_the_modules_build_under_the_option_and_keep_their_own_primitives():
 
 def test_a_cpu_call_under_the_option_refuses_rather_than_run():
     opm = OuterProductMean(64, 128, 32, implementation=ImplementationType.ANTHROPIC)
-    with pytest.raises(msa.PayloadUnavailable), torch.inference_mode():
+    with pytest.raises(ValueError, match="require CUDA"), torch.inference_mode():
         opm(BF16, torch.ones(1, 8, 16, dtype=torch.bool))
