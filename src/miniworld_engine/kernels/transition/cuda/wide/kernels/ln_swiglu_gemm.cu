@@ -38,7 +38,11 @@ TMN_DEVI void stg128u(void* p, uint4 v) { asm volatile("st.global.v4.b32 [%0], {
 #ifndef SWP
 #define SWP 0                                             // 1: software-pipelined epilogue -- tile n's SwiGLU epilogue runs, a quarter
 #endif                                                    //    per slab, under tile n+1's MMAs (two 64-register accumulator sets)
-struct LCtx { uint32_t su; uint64_t* full; uint64_t* empty; int cw, wtid, warp, lane; uint32_t it; };
+struct LCtx { uint32_t su; uint64_t* full; uint64_t* empty; int cw, wtid, warp, lane; uint32_t it;
+#if MW_SAVE_AB
+  __nv_bfloat16* a; __nv_bfloat16* b; int h, row, n;
+#endif
+};
 template <int GP> TMN_DEVI void lepi_chunk(const float (&acc)[64], uint8_t* stg, const LCtx& c) {
   const int mi = c.lane >> 3, mrow = 16 * c.warp + 8 * (mi & 1) + (c.lane & 7);
   uint32_t hp[4];
@@ -47,6 +51,13 @@ template <int GP> TMN_DEVI void lepi_chunk(const float (&acc)[64], uint8_t* stg,
     const int g = 2 * GP + (q >> 1), rb = q & 1, ia = 4 * g + 2 * rb, ib = 4 * (g + 8) + 2 * rb;
     const float x0 = acc[ia], x1 = acc[ia + 1];
     hp[q] = pack_bf16(x0 * sigmoid_(x0) * acc[ib], x1 * sigmoid_(x1) * acc[ib + 1]);
+#if MW_SAVE_AB
+    if(c.a){
+      const size_t off=(size_t)(c.row+16*c.warp+(c.lane>>2)+8*rb)*c.h+c.n*64+8*g+2*(c.lane&3);
+      *reinterpret_cast<uint32_t*>(c.a+off)=pack_bf16(x0,x1);
+      *reinterpret_cast<uint32_t*>(c.b+off)=pack_bf16(acc[ib],acc[ib+1]);
+    }
+#endif
   }
   const int col = 8 * (2 * GP + (mi >> 1));
   stsm_x4(smem_u32(stg) + swz128((uint32_t)mrow, (uint32_t)(col * 2)), hp[0], hp[1], hp[2], hp[3]);
@@ -90,7 +101,11 @@ TMN_DEVI void lepi_end(const CUtensorMap* mH, uint8_t* stg, int col, int row, co
 extern "C" __global__ void __launch_bounds__(384, 1)
 ln_swiglu_gemm(const __grid_constant__ CUtensorMap mX, const __grid_constant__ CUtensorMap mB, const __grid_constant__ CUtensorMap mH,
                const float* __restrict__ gamma, const float* __restrict__ beta, __nv_bfloat16* __restrict__ xn_out,
-               float* __restrict__ rstd, float* __restrict__ c1, int M, int H, float eps, int save) {
+               float* __restrict__ rstd, float* __restrict__ c1, int M, int H, float eps, int save
+#if MW_SAVE_AB
+               , __nv_bfloat16* saved_a, __nv_bfloat16* saved_b
+#endif
+               ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
@@ -206,17 +221,26 @@ ln_swiglu_gemm(const __grid_constant__ CUtensorMap mX, const __grid_constant__ C
 #if SWP
     {
       LCtx c{su, full, empty, cw, wtid, warp, lane, it};
+#if MW_SAVE_AB
+      c.a=save?saved_a:nullptr;c.b=save?saved_b:nullptr;c.h=H;c.row=m0+64*cw;c.n=0;
+#endif
       float AX[64], AY[64];
       static_assert(NQ >= 4, "the epilogue is spread over >= 4 slabs");
       lmain<false>(AX, AY, nullptr, c);                   // tile 0 -> X
       for (int n = 0; n < NT; n += 2) {                   // NT = H / 64 is even at every width built here
         uint8_t* sx = sm + F_STG + (cw * 2 + (int)(stc & 1)) * F_STGW;
         lepi_begin(c);
+#if MW_SAVE_AB
+        c.n=n;
+#endif
         lmain<true>(AY, AX, sx, c);                       // tile n + 1 -> Y, epilogue of tile n (X) under it
         if (n + 1 == NT - 1 && wtid == 0) mbar_arrive(a_free);   // the last MMA of the block has read A
         lepi_end(&mH, sx, n * THB, m0 + 64 * cw, c); ++stc;
         uint8_t* sy = sm + F_STG + (cw * 2 + (int)(stc & 1)) * F_STGW;
         lepi_begin(c);
+#if MW_SAVE_AB
+        c.n=n+1;
+#endif
         if (n + 2 < NT) lmain<true>(AX, AY, sy, c); else lepi_all(AY, sy, c);
         lepi_end(&mH, sy, (n + 1) * THB, m0 + 64 * cw, c); ++stc;
       }
