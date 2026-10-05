@@ -1,5 +1,8 @@
 """The merged H100 token paths retain upstream's capture-scoped live-weight contract."""
 
+import json
+import os
+
 import pytest
 import torch
 from tests.integrations.test_b200_pack_cache_capture_gpu import _randomize
@@ -13,6 +16,71 @@ from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+
+
+@pytest.mark.parametrize("L", [128, 256, 384, 512, 640, 768])
+@pytest.mark.parametrize("master", [False, True])
+def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("H100 required")
+    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_H100_CANDIDATE", "1")
+    torch.manual_seed(425)
+    model = _randomize(DiTBlock(use_qk_norm=False, implementation=ImplementationType.MINIWORLD).cuda())
+    if not master:
+        model.bfloat16()
+    ref = DiTBlock(use_qk_norm=False, implementation=ImplementationType.PYTORCH).cuda()
+    ref.load_state_dict(model.state_dict())
+    args = [torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+            for shape in ((5, 1, L, 768), (1, 1, L, 384), (1, L, L, 128))]
+    args[1] = args[1].expand(5, -1, -1, -1)
+    mask = torch.rand(1, L, device="cuda") > 0.2
+    mask[:, 0] = True
+
+    def check(got):
+        expected = ref(*(a.float() for a in args), mask)
+        a, b = got.float().flatten(), expected.float().flatten()
+        cosine = float(a.dot(b) / (a.norm() * b.norm()))
+        assert torch.isfinite(got).all() and cosine >= 0.9999, cosine
+        return cosine
+
+    with torch.no_grad():
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                model(*args, mask)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            got = model(*args, mask)
+        graph.replay(); first = got.clone(); graph.replay()
+        assert torch.equal(first, got)
+        cos = check(got)
+        for a in (args[0], args[2]):
+            a.mul_(0.75).add_(0.125)
+        args[1][0].mul_(0.875).add_(0.01)
+        for p, pr in zip(model.parameters(), ref.parameters(), strict=True):
+            p.mul_(0.875).add_(0.01)
+            pr.copy_(p.float())
+        mask.copy_(torch.rand_like(mask, dtype=torch.float32) > 0.4)
+        mask[:, 0] = True
+        graph.replay()
+        changed = check(got)
+        assert not torch.equal(first, got)
+        graph.replay(); second = got.clone(); graph.replay()
+        assert torch.equal(second, got)
+        mask.zero_(); graph.replay(); check(got)
+        print(json.dumps({"audit": "token_native_graph", "job": os.environ.get("SLURM_JOB_ID"),
+                          "L": L, "master": master, "cos": cos, "changed_cos": changed, "deterministic": True}), flush=True)
+        if L == 768 and master:
+            from torch.profiler import profile, ProfilerActivity
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                graph.replay()
+                torch.cuda.synchronize()
+            events = [(e.name, e.device_time_total) for e in prof.events()
+                      if str(e.device_type).endswith("CUDA")]
+            assert all("at::native::" not in name and "triton" not in name.lower() for name, _ in events), events
+            print(json.dumps({"audit": "token_native_profile", "events": events}), flush=True)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
