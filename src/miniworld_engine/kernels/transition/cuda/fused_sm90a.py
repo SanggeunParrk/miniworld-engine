@@ -41,6 +41,28 @@ ROWS = 128
 DW_REPL = 8
 
 
+def native_aux_enabled() -> bool:
+    """Opt-in live CUDA weight preparation and deterministic wide LN backward."""
+    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "0") == "1"
+
+
+@functools.lru_cache(maxsize=1)
+def _native_ext():
+    ensure_cuda_home()
+    return load_extension(
+        name="transition_h100_native_aux_v1",
+        sources=[str(_dir / "transition_fused_sm90a.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"),
+                           "-DMW_TRANSITION_AUX_ONLY=1",
+                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__"],
+        extra_cflags=["-std=c++17"], verbose=False,
+    )
+
+
+def _cuda_prepare(wa, wb, ws, transpose=True):
+    return tuple(_native_ext().prepare(wa, wb, ws, transpose))
+
+
 def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
@@ -191,7 +213,8 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
     config = _select_schedule(args, backward=True, save=True)
     if _is_fake(dy, x):
         return _bwd_launch_fake(*args)
-    return tuple(_ext(config["ctas"], config["dw_repl"], True).transition_fused_bwd_master(*args))
+    symbol = "transition_fused_bwd_native" if native_aux_enabled() else "transition_fused_bwd_master"
+    return tuple(getattr(_ext(config["ctas"], config["dw_repl"], True), symbol)(*args))
 
 
 def _select_schedule(args, *, backward, save):
@@ -200,7 +223,8 @@ def _select_schedule(args, *, backward, save):
     x = args[1] if backward else args[0]
     sms = _sm_count(x.device)
     grid = transition_candidates(sms, backward=backward)
-    symbol = "transition_fused_bwd_master" if backward else "transition_fused_fwd"
+    symbol = (("transition_fused_bwd_native" if native_aux_enabled() else "transition_fused_bwd_master")
+              if backward else "transition_fused_fwd")
     def run(c):
         return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save), symbol)(*args))
     tensors = args[:-1] if backward else args[:6]
@@ -218,6 +242,8 @@ def _master_pack_fake(wa, wb, ws):
 
 @opaque(fake=_master_pack_fake, name="transition_master_weight_pack_sm90a")
 def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if native_aux_enabled():
+        return _cuda_prepare(wa, wb, ws)
     from miniworld_engine.integrations.h100_master import transition_pack_kernel
     a, b, s, st = _master_pack_fake(wa, wb, ws)
     d = wa.shape[1]
@@ -227,6 +253,8 @@ def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[
 
 
 def _cast_weights(weights, dtype):
+    if native_aux_enabled():
+        return _cuda_prepare(*weights, False)[:3]
     if all(w.dtype == dtype for w in weights):
         return tuple(w.contiguous() for w in weights)
     outs = [torch.empty(w.shape, device=w.device, dtype=dtype) for w in weights]
@@ -246,7 +274,9 @@ class _FusedTransitionSM90A(torch.autograd.Function):
         shape = x.shape
         raw = (wa, wb, ws)
         param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
-        if all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
+        if native_aux_enabled():
+            wa, wb, ws, wst = _cuda_prepare(*raw)
+        elif all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
             wa, wb, ws, wst = _master_pack(*raw)
         else:
             wa, wb, ws = _cast_weights(raw, x.dtype)
@@ -285,9 +315,13 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
     """
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
-        wa, wb, ws = _cast_weights((wa, wb, ws), x.dtype)
+        if native_aux_enabled():
+            wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
+        else:
+            wa, wb, ws = _cast_weights((wa, wb, ws), x.dtype)
+            wst = ws.t().contiguous()
         out, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma.float().contiguous(),
                                    beta.float().contiguous(), wa.contiguous(), wb.contiguous(),
-                                   ws.t().contiguous(), float(eps), False)
+                                   wst, float(eps), False)
         return out.reshape(shape)
     return _FusedTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
