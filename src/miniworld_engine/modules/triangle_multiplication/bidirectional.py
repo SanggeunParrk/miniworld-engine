@@ -142,6 +142,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         if _h100.serves_inference(self, pair, bidirectional=True, dropscale=_ds):
             return _h100.update_inference(self, pair, mask, bidirectional=True)
+        if _ds is None and _h100.requires_cuda_inference(self, pair):
+            raise ValueError("H100 bidirectional TriMul D64/D128 inference requires the native CUDA bucket/dtype contract")
 
         # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
         # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
