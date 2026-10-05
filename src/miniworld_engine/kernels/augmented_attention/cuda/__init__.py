@@ -81,6 +81,28 @@ def _ext(name: str, defs: tuple[str, ...] = ()):
     )
 
 
+class ApbInferenceCore:
+    """Hopper gated APB core: packed projections in, gated attention over Q out.
+
+    Weight packing supplies exp2-scaled Q and bias. This entry point launches only
+    hand-written TMA/WGMMA CUDA and keeps the B200 inference tensor lifetimes.
+    """
+
+    def __init__(self, device_index: int, heads: int, d: int = 384):
+        from .apb import GEOMETRY, width
+
+        _, dh = GEOMETRY[(heads, d)]
+        self.heads = heads
+        with torch.cuda.device(device_index):
+            self.extension = _ext("attn_fwd", (f"DHP={dh}", f"ROW_WIDTH={width(heads, d)}", "NWG=1"))
+
+    def __call__(self, qkvg: torch.Tensor, bias: torch.Tensor):
+        if bias.shape[0] != self.heads or qkvg.shape[0] != bias.shape[1]:
+            raise ValueError("Hopper APB inference requires one sample and head-major bias")
+        self.extension.attn_inf(qkvg, bias, 0, 1)
+        return qkvg
+
+
 # --------------------------------------------------------------------------------------------------- gate
 @functools.lru_cache(maxsize=8)
 def _is_hopper(index: int) -> bool:
