@@ -14,6 +14,7 @@ from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
 from miniworld_engine.integrations import trimul_b200 as _b200
 from miniworld_engine.integrations import trimul_h100 as _h100
+from miniworld_engine.integrations import trimul_sm80 as _sm80
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -170,6 +171,9 @@ class TriangleMultiplication(nn.Module):
                 return _h100.update_inference(self, pair, mask, bidirectional=False)
             if _h100.serves_single(self, pair):
                 return _h100.update(self, pair, mask, _ds, bidirectional=False)
+            # Hand-CUDA A100 kernels (integrations.trimul_sm80): inference and training, D128.
+            if _sm80.serves(self, pair, mask):
+                return _sm80.update(self, pair, mask, _ds, bidirectional=False)
             # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
             # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
             # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls
