@@ -1,7 +1,10 @@
 // D = 64 backward: one fused two-role kernel (64 weight CTAs = 4 hidden slices x DW_REPL 16, the rest input CTAs) and the
 // partial-sum reduction. See kernels/transition_bwd_d64.cu.
 #define NCTA WIDE_SMS
-#define DW_REPL 16
+#ifndef MW_D64_DW_REPL
+#define MW_D64_DW_REPL 16
+#endif
+#define DW_REPL MW_D64_DW_REPL
 #define transition_bwd_fused wide_d64_bwd_kernel
 #define reduce_partials wide_d64_reduce_kernel
 #include "kernels/transition_bwd_d64.cu"

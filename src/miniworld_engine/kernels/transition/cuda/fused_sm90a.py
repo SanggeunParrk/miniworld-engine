@@ -42,6 +42,28 @@ ROWS = 128
 DW_REPL = 8
 
 
+def native_aux_enabled() -> bool:
+    """Opt-in live CUDA weight preparation and deterministic wide LN backward."""
+    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "0") == "1"
+
+
+@functools.lru_cache(maxsize=1)
+def _native_ext():
+    ensure_cuda_home()
+    return load_extension(
+        name="transition_h100_native_aux_v1",
+        sources=[str(_dir / "transition_fused_sm90a.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"),
+                           "-DMW_TRANSITION_AUX_ONLY=1",
+                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__"],
+        extra_cflags=["-std=c++17"], verbose=False,
+    )
+
+
+def _cuda_prepare(wa, wb, ws, transpose=True):
+    return tuple(_native_ext().prepare(wa, wb, ws, transpose))
+
+
 def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
@@ -279,6 +301,8 @@ def _master_pack_fake(wa, wb, ws):
 
 @opaque(fake=_master_pack_fake, name="transition_master_weight_pack_sm90a")
 def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if native_aux_enabled():
+        return _cuda_prepare(wa, wb, ws)
     from miniworld_engine.integrations.h100_master import transition_pack_kernel
     a, b, s, st = _master_pack_fake(wa, wb, ws)
     d = wa.shape[1]
@@ -288,6 +312,8 @@ def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[
 
 
 def _cast_weights(weights, dtype):
+    if native_aux_enabled():
+        return _cuda_prepare(*weights, False)[:3]
     if all(w.dtype == dtype for w in weights):
         return tuple(w.contiguous() for w in weights)
     outs = [torch.empty(w.shape, device=w.device, dtype=dtype) for w in weights]
@@ -307,7 +333,9 @@ class _FusedTransitionSM90A(torch.autograd.Function):
         shape = x.shape
         raw = (wa, wb, ws)
         param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
-        if all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
+        if native_aux_enabled():
+            wa, wb, ws, wst = _cuda_prepare(*raw)
+        elif all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
             wa, wb, ws, wst = _master_pack(*raw)
         else:
             wa, wb, ws = _cast_weights(raw, x.dtype)

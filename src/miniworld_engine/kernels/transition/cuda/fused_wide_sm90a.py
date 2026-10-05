@@ -60,13 +60,15 @@ def _sm_count(device: torch.device | int | None = None) -> int:
 
 
 @functools.lru_cache(maxsize=8)
-def _ext(width: int, ctas: int):
+def _ext(width: int, ctas: int, d64_repl: int = 16):
     """Build the extension for one channel width and SM count (both in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid)."""
     ensure_cuda_home()
     # This change lives in an included header. Give the corrected D64 kernel
     # its own cache identity instead of accepting a prebuilt pre-barrier binary.
     revision = "_input_barrier_v1" if width == 64 else ""
+    if width == 64 and d64_repl != 16:
+        revision += f"_repl{d64_repl}"
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
@@ -91,7 +93,8 @@ def _ext(width: int, ctas: int):
 
 
 def _ext_for(x: torch.Tensor):
-    return _ext(x.shape[-1], _sm_count(x.device))
+    repl = int(os.environ.get("MINIWORLD_TRANSITION_D64_REPL", "16")) if native_aux_enabled() else 16
+    return _ext(x.shape[-1], _sm_count(x.device), repl)
 
 
 @functools.lru_cache(maxsize=8)
@@ -153,6 +156,8 @@ def _is_fake(*tensors) -> bool:
 def _pack(wa: torch.Tensor, wb: torch.Tensor, block: int) -> torch.Tensor:
     """[Wa; Wb] interleaved in ``block``-row blocks [Wa_0 | Wb_0 | Wa_1 | ...] -- one GEMM tile then holds a AND b of the
     same hidden units."""
+    if native_aux_enabled():
+        return _native_ext().pair_layout(wa, wb, block, False)
     h, d = wa.shape
     return (
         torch.stack(
@@ -249,25 +254,42 @@ def _bwd_launch(
         return tuple(ext.bwd_master(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw))
     h = 4 * d
     have_h = hsaved.shape[0] == x.shape[0]
-    hid, dab = ext.gate(xn, dy, _pack(wa, wb, 128), ws.t().contiguous(), not have_h)
+    wst = _cuda_prepare(wa, wb, ws)[3] if native_aux_enabled() else ws.t().contiguous()
+    hid, dab = ext.gate(xn, dy, _pack(wa, wb, 128), wst, not have_h)
     if have_h:
         hid = hsaved
     dws = _mm_f32(dy.t(), hid)  # [D, H]
     dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb (dab holds dA | dB, unpacked)
     del hid
-    w_ab = torch.cat((wa, wb), 0)
+    if native_aux_enabled():
+        w_ab = _native_ext().pair_layout(wa, wb, 0, d == 256)
+    else:
+        w_ab = torch.cat((wa, wb), 0)
     if d == 256:
-        dx, dgam, dbeta = ext.dxln(dab, w_ab.t().contiguous(), x, dy, gamma, rstd, c1)
+        if native_aux_enabled():
+            dx, pg, pb = ext.dxln_partials(dab, w_ab, x, dy, gamma, rstd, c1)
+            dgam, dbeta = _native_ext().reduce_affine(pg, pb)
+        else:
+            dx, dgam, dbeta = ext.dxln(dab, w_ab.t().contiguous(), x, dy, gamma, rstd, c1)
+    elif native_aux_enabled():
+        dx, dgam, dbeta = _native_ext().ln_bwd(dab @ w_ab, x, gamma, rstd, c1, dy, 4)
     else:
         from ..triton.fused import _transition_ln_bwd
 
         dx, dgam, dbeta = _transition_ln_bwd(dab @ w_ab, x, rstd, c1, gamma)
         dx = dx.add_(dy)
+    if native_aux_enabled():
+        # The opaque op forbids even disjoint output views of one storage. Copy/cast
+        # all three leaves together, producing the final parameter-gradient dtype.
+        dwa, dwb, dws = _native_ext().cast([dwab[:h], dwab[h:], dws], [fp32_dw] * 3, True)
+        return dx, dgam, dbeta, dwa, dwb, dws
     return dx, dgam, dbeta, dwab[:h], dwab[h:].clone(), dws
 
 
 
 def _cast_weights(weights, dtype):
+    if native_aux_enabled():
+        return _cuda_prepare(*weights, False)[:3]
     if all(w.dtype == dtype for w in weights):
         return tuple(w.contiguous() for w in weights)
     outs = [torch.empty(w.shape, device=w.device, dtype=dtype) for w in weights]
@@ -282,7 +304,9 @@ class _WideTransitionSM90A(torch.autograd.Function):
         shape = x.shape
         raw = (wa, wb, ws)
         param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
-        if shape[-1] == 64 and all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
+        if native_aux_enabled():
+            wa, wb, ws, wst = _cuda_prepare(*raw, shape[-1] in (64, 256))
+        elif shape[-1] == 64 and all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
             from .fused_sm90a import _master_pack
             wa, wb, ws, wst = _master_pack(*raw)
         else:

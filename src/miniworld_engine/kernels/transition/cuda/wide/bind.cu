@@ -218,6 +218,21 @@ std::vector<torch::Tensor> dxln(torch::Tensor dab, torch::Tensor wabt, torch::Te
                    WIDE_SMS, at::cuda::getCurrentCUDAStream());
   return {dx, pdg.sum(0), pdb.sum(0)};
 }
+
+// Native auxiliary route: expose the producer's partials to one fixed CUDA reduction.
+std::vector<torch::Tensor> dxln_partials(torch::Tensor dab, torch::Tensor wabt, torch::Tensor x, torch::Tensor dy,
+                                      torch::Tensor gamma, torch::Tensor rstd, torch::Tensor c1) {
+  const int64_t M = x.size(0);
+  bf16_2d(dab, M, 2 * H, "dab"); bf16_2d(wabt, D, 2 * H, "wabt must be [D, 2H]");
+  bf16_2d(x, M, D, "x"); bf16_2d(dy, M, D, "dy");
+  f32_1d(gamma, D, "gamma"); f32_1d(rstd, M, "rstd"); f32_1d(c1, M, "c1");
+  auto dx = torch::empty_like(x);
+  auto f32 = x.options().dtype(torch::kFloat32);
+  auto pdg = torch::empty({WIDE_SMS, D}, f32), pdb = torch::empty({WIDE_SMS, D}, f32);
+  wide_dxln_launch(rm(dab, 64, 64), rm(wabt, 64, D / 2), rm(x, 64, 64), rm(dx, 64, 64), bp(x), bp(dy), bp(dx),
+                   fp(gamma), fp(rstd), fp(c1), fp(pdg), fp(pdb), (int)M, WIDE_SMS, at::cuda::getCurrentCUDAStream());
+  return {dx, pdg, pdb};
+}
 #endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -231,6 +246,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
 #if WIDE_D == 256
   m.def("dxln", &dxln, "d_xn GEMM + LayerNorm backward + residual");
+  m.def("dxln_partials", &dxln_partials, "CUDA route with fixed-order affine reduction");
 #endif
   m.attr("width") = WIDE_D;
 }
