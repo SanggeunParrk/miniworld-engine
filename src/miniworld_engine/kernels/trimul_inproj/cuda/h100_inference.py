@@ -66,7 +66,7 @@ def _select_config(x, weights, mask, direction, eps):
     from miniworld_engine.autotune.fused_config import trimul_candidates, validator
     from miniworld_engine.autotune.native import choose_config, tensor_key
     grid = trimul_candidates(x.shape[-1], weights[0].shape[0], x.shape[1], direction)
-    if (T.cuda_aux_enabled() and x.shape[-1] == 128 and weights[0].shape[0] == 256
+    if (x.shape[-1] == 128 and weights[0].shape[0] == 256
             and x.shape[1] == 128 and direction == 0):
         # L128: 128-token CTAs cover 128 of the 132 SMs, versus 86 CTAs
         # with the wide default. The bounded paired Graph search selected
@@ -98,9 +98,10 @@ def _run_inference(x, weights, mask, direction, eps, config):
         quad = (wl, wlg, wr, wrg)
         if all(t.dtype == torch.bfloat16 and t.stride() == (cz, 1) for t in quad):
             wmap = {"wq": quad}
-        elif T.cuda_aux_enabled():
+        elif cz in (64, 128) or T.cuda_aux_enabled():
+            from ._h100_pack import pack_into_cuda
             packed = x.new_empty((4 * ch, cz))
-            T.pack_into(packed, *quad)
+            pack_into_cuda(packed, *quad)
             wmap = {"w1": packed}
         else:
             wmap = {"w1": torch.stack(

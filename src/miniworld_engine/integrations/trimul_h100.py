@@ -161,6 +161,13 @@ def serves_inference(
         return False
     if torch.cuda.get_device_capability(pair.device) != (9, 0):
         return False
+    if pair.shape[-1] in (64, 128):
+        if (pair.shape[1] not in (128, 256, 384, 512, 640, 768)
+                or module.d_hidden != pair.shape[-1] or module.ln_pair.eps != 1e-5
+                or any(p.dtype != torch.float32 for p in (
+                    module.ln_pair.weight, module.ln_pair.bias,
+                    module.ln_out.weight, module.ln_out.bias))):
+            return False
     if bidirectional and _wide_inference_ok(module, pair):
         return True
     if not bidirectional and _uni_wide_inference_ok(module, pair):
@@ -170,6 +177,15 @@ def serves_inference(
     hidden = module.d_hidden * (2 if bidirectional else 1)
     entry = table.TILE_TABLE.get(("sm_90a", pair.shape[-1], hidden, "b"))
     return bool(entry and entry.get("k1") and entry.get("k3"))
+
+
+def requires_cuda_inference(module, pair):
+    """Promoted D64/D128 inference must refuse instead of silently using Triton."""
+    return (module.implementation == ImplementationType.MINIWORLD
+            and settings.current().engine_backend != "triton"
+            and pair.is_cuda and pair.shape[-1] in (64, 128)
+            and torch.cuda.get_device_capability(pair.device) == (9, 0)
+            and not torch.is_grad_enabled())
 
 
 def update_inference(module, pair, mask, *, bidirectional):
@@ -188,10 +204,10 @@ def update_inference(module, pair, mask, *, bidirectional):
         module.to_gate.weight,
         module.to_out.weight,
     )
-    # K1 packs the first four matrices with stride-aware torch operations.
+    # K1 packs the first four matrices with live stride-aware CUDA operations.
     # Preserve native column-major parameters instead of copying them first.
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
-    if runtime.cuda_aux_enabled():
+    if pair.shape[-1] in (64, 128) or runtime.cuda_aux_enabled():
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
         matrices = cast_weights(weights)
     else:
