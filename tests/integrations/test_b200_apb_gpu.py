@@ -13,7 +13,11 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(),
 
 
 @pytest.fixture(autouse=True)
-def blackwell():
+def blackwell(request):
+    if request.node.name.startswith("test_apb_h100_"):
+        if torch.cuda.get_device_capability() != (9, 0):
+            pytest.skip("Hopper (sm_90) required")
+        return
     if torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("Blackwell (sm_100) required")
 
@@ -23,6 +27,62 @@ def _rel(a, b):
 
 
 SHAPES = [(8, 384), (12, 384), (16, 384), (24, 384), (16, 512)]          # (heads, d_single)
+
+
+@pytest.mark.parametrize("shape", [pytest.param(s, id=f"h{s[0]}d{s[1]}") for s in SHAPES])
+@pytest.mark.parametrize("L", [128, 256, 384, 512, 640, 768])
+@pytest.mark.parametrize("master", [False, True], ids=["bf16", "master"])
+def test_apb_h100_inference_graph(shape, L, master, monkeypatch):
+    """Strict PyTorch cosine, repeat equality and live graph inputs/parameters."""
+    from miniworld_engine.integrations import attention_pair_bias_b200 as native
+
+    monkeypatch.setenv("MINIWORLD_APB_H100_CANDIDATE", "1")
+    ref, ours, _ = _modules(seed=419, shape=shape)
+    if master:
+        ours = copy.deepcopy(ref)
+        ours.implementation = ImplementationType.MINIWORLD
+    single, pair, mask = _inputs(L, True, seed=420, d=shape[1])
+    single, pair = single.bfloat16(), pair.bfloat16()
+
+    def check(got):
+        want = ref(single.float(), pair.float(), mask)
+        a, b = got.float().flatten(), want.float().flatten()
+        cosine = float(a.dot(b) / (a.norm() * b.norm()))
+        assert torch.isfinite(got).all() and cosine >= 0.9999, cosine
+
+    with torch.no_grad():
+        assert native.serves_inference(ours, single, pair, mask)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                ours(single, pair, mask)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            got = ours(single, pair, mask)
+        graph.replay()
+        first = got.clone()
+        graph.replay()
+        assert torch.equal(first, got)
+        check(got)
+        single.copy_(torch.randn_like(single))
+        pair.copy_(torch.randn_like(pair))
+        mask.copy_(torch.rand_like(mask, dtype=torch.float32) > 0.4)
+        mask[:, 0] = True
+        ours.to_query.weight.add_(0.003)
+        ref.to_query.weight.add_(0.003)
+        graph.replay()
+        check(got)
+        assert not torch.equal(first, got)
+        graph.replay()
+        second = got.clone()
+        graph.replay()
+        assert torch.equal(second, got)
+        # AttentionPairBias's PyTorch reference returns only the residual here.
+        mask.zero_()
+        graph.replay()
+        check(got)
 
 
 def _modules(seed=0, shape=(8, 384)):

@@ -59,7 +59,9 @@ def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tens
         return False
     if mask is not None and tuple(mask.shape) != (1, L):
         return False
-    return torch.cuda.get_device_capability(single.device) == (10, 0)
+    capability = torch.cuda.get_device_capability(single.device)
+    return capability == (10, 0) or (capability == (9, 0) and not torch.is_grad_enabled()
+                                    and L % 128 == 0)
 
 
 def serves_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
@@ -80,6 +82,8 @@ def _leaves(module) -> list[torch.Tensor]:
 
 def _kernel_leaves(leaves) -> list[torch.Tensor]:
     """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are)."""
+    if torch.cuda.get_device_capability(leaves[0].device) == (9, 0):
+        return _rows().ext().cast_leaves(leaves)
     bf = torch.bfloat16
     lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = leaves
     return [lnw.float(), lnb.float(), wq.to(bf), bq.to(bf), wk.to(bf), wv.to(bf), wg.to(bf), wo.to(bf), lnpw.float(), lnpb.float(),
@@ -94,6 +98,13 @@ def _rows():
 def _sm100():
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     return sm100
+
+
+def _inference_core(device, heads: int, d: int):
+    if torch.cuda.get_device_capability(device) == (9, 0):
+        from miniworld_engine.kernels.augmented_attention import cuda as sm90
+        return sm90.ApbInferenceCore(device.index, heads, d)
+    return _sm100().ApbInferenceCore(device.index, heads, d)
 
 
 def _mask(mask: torch.Tensor | None, L: int) -> torch.Tensor | None:
@@ -150,10 +161,11 @@ def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | Non
         y = torch.empty_like(x)                   # residual seed, written by ln_rows; to_out accumulates onto it
         rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
-        bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, NEG)
+        neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
+        bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, neg)
         core = _cores.get((dev.index, H, D))
         if core is None:
-            core = _cores[(dev.index, H, D)] = _sm100().ApbInferenceCore(dev.index, H, D)
+            core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
         core(qkvg, bias)
         return y.addmm_(qkvg[:, :W], wo.t()).view(1, L, D)
 
