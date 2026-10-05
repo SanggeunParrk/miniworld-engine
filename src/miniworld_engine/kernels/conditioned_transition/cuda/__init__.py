@@ -18,17 +18,22 @@ _dir = Path(__file__).parent
 STAT_W = 128          # kept for the runner's buffer layout (the Triton module's statistics width)
 
 
-@functools.lru_cache(maxsize=None)
 def _ext():
+    arch = "90a" if torch.cuda.get_device_capability() == (9, 0) else "100"
+    return _arch_ext(arch)
+
+
+@functools.lru_cache(maxsize=None)
+def _arch_ext(arch):
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     return load_extension(
-        name="token_dit_rows_cuda",
+        name=f"token_dit_rows_cuda_sm{arch}",
         sources=[str(_dir / "token_dit_rows.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                            "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes("80", "90", "100", ptx=("100",))],
+                           *gencodes(arch, ptx=() if arch == "90a" else ("100",))],
         extra_cflags=["-std=c++17"], verbose=False)
 
 
@@ -36,6 +41,72 @@ def available() -> bool:
     """The extension builds (a failure is reported once by the caller, which keeps the Triton rows)."""
     _ext()
     return True
+
+
+def token_pack(weights, heads, qk, qs):
+    return _ext().token_pack(weights, int(heads), bool(qk), float(qs))
+
+
+_TOKEN_PACKS: dict = {}
+
+
+@functools.lru_cache(maxsize=8)
+def _token_swiglu(device_index):
+    from .gemm_swiglu import GemmSwigluSm90
+    return GemmSwigluSm90(device_index)
+
+
+def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
+    """Hopper port of the B200 token block's fusion and saved-buffer boundaries.
+
+    Live CUDA weight packing, fused pair normalization/bias, gated TMA/WGMMA
+    attention, fused residual/AdaLN rows and WGMMA SwiGLU. All other products
+    are cuBLAS. Unsupported calls raise and never enter a portable backend.
+    """
+    import math
+    from ... import _capture
+    from ...augmented_attention import cuda as attention
+    from ...augmented_attention.cuda import apb
+
+    A, B, L, D = single.shape
+    if (torch.is_grad_enabled() or single.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16
+        or B != 1 or D != 768 or heads != 16 or L % 128 or cond.shape[-1] != 384
+        or tuple(pair.shape) != (1, L, L, 128) or not pair.is_contiguous()
+        or torch.cuda.get_device_capability(single.device) != (9, 0)):
+        raise ValueError("Hopper token CUDA candidate requires inference BF16 bucketed 768/384/128, 16 heads")
+    qs = math.log2(math.e) / math.sqrt(48)
+    key = (qk, heads, *((w.data_ptr(), w._version) for w in weights))
+    packed = _capture.lookup(_TOKEN_PACKS, key, lambda: (token_pack(weights, heads, qk, qs), weights), limit=8)[0]
+    w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, _, ws, nq, nk, wab = packed
+    mask = None if mask is None else mask.reshape(L)
+    # The augmented-attention module fills fully masked rows with a finite
+    # negative value, so its reference softmax is uniform on that edge.
+    # AttentionPairBias has a separate zero-probability reference contract.
+    bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+    shared = cond.shape[0] == 1 or cond.stride(0) == 0
+    c = cond[0, 0] if shared else cond.reshape(-1, 384)
+    P = c.shape[0]
+    cn = single.new_empty((P, 384)); cc = torch.empty_like(cn)
+    cond_rows(c, cn, cc, 1e-5)
+    g1 = torch.addmm(b1, cn, w1.t()).view(P, 4, D)
+    g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
+    M = A * L
+    x = single.new_empty((M, D), dtype=torch.float32)
+    xa = single.new_empty((M, D))
+    adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, 1e-5)
+    qkvg = torch.addmm(bqkvg, xa, wqkvg.t())
+    if qk:
+        qknorm_rows(qkvg, nq, nk, eq, ek, D)
+    attention.gated_inference(qkvg, bias, 0, A)
+    y = torch.mm(qkvg[:, :D], wo.t())
+    resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5)
+    h = single.new_empty((M, ws.shape[1]))
+    op = _token_swiglu(single.device.index)
+    op.ext.gemm_swiglu(xa, wab, h, op.nsm)
+    y = torch.mm(h, ws.t())
+    out = torch.empty_like(xa)
+    resgate_out_rows(x, y, g2[:, 1], out, P)
+    return out.view(A, B, L, D)
 
 
 def adaln_rows(x, ms, mb, out, L, eps=1e-5):

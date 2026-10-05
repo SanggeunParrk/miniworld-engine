@@ -408,7 +408,86 @@ void qknorm_rows(at::Tensor qk, at::Tensor wq, at::Tensor wk, double eq, double 
 
 }  // namespace
 
+namespace {
+// One live-weight pack for a token DiT block. Folding norm affines and logit
+// scales here preserves the B200 compute boundaries without framework copies.
+struct TokenPack {
+  const void* src[25]; bool fp32[25];
+  void* dst[13]; int size[13]; int blocks[13];
+  int D, DC, H, HH; float qs; bool qk;
+};
+__device__ float pack_read(const TokenPack& p,int j,int i) {
+  return p.fp32[j] ? static_cast<const float*>(p.src[j])[i]
+                  : __bfloat162float(static_cast<const __nv_bfloat16*>(p.src[j])[i]);
+}
+__global__ void token_pack_kernel(TokenPack p) {
+  int block=blockIdx.x, out=0;
+  for(;out<13;++out) {if(block<p.blocks[out])break;block-=p.blocks[out];}
+  if(out==13)return;
+  const int first=(block*256+threadIdx.x)*4;
+  #pragma unroll
+  for(int lane=0;lane<4;++lane) {
+    const int i=first+lane;if(i>=p.size[out])continue;
+    // The host admits only these widths. Constant integer divisions keep
+    // live master-weight staging bandwidth-bound instead of divide-bound.
+    float v=0.f;constexpr int D=768,DC=384;
+    if(out==0) {
+      int segment=i/(D*DC),c=i%DC,j=i%(D*DC);
+      int wi=segment==0?7:segment==1?9:segment==2?15:17;
+      v=pack_read(p,wi,j)*pack_read(p,segment<2?6:14,c);
+    } else if(out==1) {int s=i/D;if(s==0 || s==2)v=pack_read(p,s==0?8:16,i%D);}
+    else if(out==2) {v=pack_read(p,i/(D*DC)==0?10:18,i%(D*DC));}
+    else if(out==3) {v=pack_read(p,i/D==0?11:19,i%D);}
+    else if(out==4) {v=pack_read(p,13,i)*pack_read(p,12,i%128)*1.4426950408889634f;}
+    else if(out==5) {
+      const int s=i/(D*D);const int wi=s==0?0:s==1?2:s==2?3:4;
+      v=pack_read(p,wi,i%(D*D));if(s==0 && !p.qk)v*=p.qs;
+    } else if(out==6) {if(i<D)v=pack_read(p,1,i)*(p.qk?1.f:p.qs);}
+    else if(out==7)v=pack_read(p,5,i);
+    else if(out==8)v=pack_read(p,i/(p.HH*D)==0?20:21,i%(p.HH*D));
+    else if(out==9)v=pack_read(p,22,i);
+    else if(out==10)v=pack_read(p,23,i)*p.qs;
+    else if(out==11)v=pack_read(p,24,i);
+    else {
+      const int row=i/D,col=i%D,g=row/256,r=row%256;
+      v=pack_read(p,r<128?20:21,(g*128+r%128)*D+col);
+    }
+    if(out==10 || out==11)static_cast<float*>(p.dst[out])[i]=v;
+    else static_cast<__nv_bfloat16*>(p.dst[out])[i]=__float2bfloat16_rn(v);
+  }
+}
+std::vector<at::Tensor> token_pack(std::vector<at::Tensor> weights,int64_t heads,bool qk,double qs) {
+  TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
+  const at::cuda::CUDAGuard guard(weights[0].device());
+  const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
+  TORCH_CHECK(D==768 && DC==384 && heads==16 && HH%128==0,"Hopper token pack requires 768/384, 16 heads, hidden multiple of 128");
+  TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;
+  for(int j=0;j<(int)weights.size();++j) {
+    const auto& t=weights[j];
+    TORCH_CHECK(t.device()==weights[0].device() && t.is_contiguous()
+      && (t.scalar_type()==at::kFloat || t.scalar_type()==at::kBFloat16),"token pack leaf dtype/device/layout");
+    p.src[j]=t.data_ptr();p.fp32[j]=t.scalar_type()==at::kFloat;
+  }
+  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},{0},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{2*HH,D}};
+  std::vector<at::Tensor> outputs;int blocks=0;
+  for(int j=0;j<13;++j) {
+    if((j==7 && !p.fp32[5]) || (j==9 && !p.fp32[22])) {
+      outputs.push_back(weights[j==7?5:22]);
+      continue;
+    }
+    outputs.push_back(at::empty(shapes[j],weights[0].options().dtype(j==10 || j==11?at::kFloat:at::kBFloat16)));
+    TORCH_CHECK(outputs.back().numel()<=2147483647,"token pack requires 32-bit buffer offsets");
+    p.dst[j]=outputs.back().data_ptr();p.size[j]=outputs.back().numel();p.blocks[j]=(p.size[j]+1023)/1024;blocks+=p.blocks[j];
+  }
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,token_pack_kernel));
+  void* args[]={&p};
+  C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
+}
+} // namespace
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("token_pack", &token_pack);
   m.def("adaln_rows_cuda", &adaln_rows);
   m.def("resgate_adaln_rows_cuda", &resgate_adaln_rows);
   m.def("gate_rows_cuda", &gate_rows);
