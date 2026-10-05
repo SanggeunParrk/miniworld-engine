@@ -1,3 +1,85 @@
+#if defined(MW_AUX_ONLY)
+// Live preparation for the Hopper K1 / contraction / K3 pipeline. No cached
+// weight values: every launch reads the original leaves on the current stream.
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+using bf = __nv_bfloat16;
+__device__ float aux_read(const void* p, int i, int fp32) {
+  return fp32 ? static_cast<const float*>(p)[i]
+              : __bfloat162float(static_cast<const bf*>(p)[i]);
+}
+__device__ float aux_sum(float v) {
+  __shared__ float sums[8];
+  for (int q=16;q;q>>=1) v=__fadd_rn(v,__shfl_down_sync(0xffffffff,v,q));
+  if (!(threadIdx.x&31)) sums[threadIdx.x>>5]=v;
+  __syncthreads();
+  v=threadIdx.x<8?sums[threadIdx.x]:0.f;
+  if (threadIdx.x<32) {
+    for (int q=16;q;q>>=1) v=__fadd_rn(v,__shfl_down_sync(0xffffffff,v,q));
+    if (!threadIdx.x) sums[0]=v;
+  }
+  __syncthreads();
+  v=sums[0];
+  __syncthreads();
+  return v;
+}
+struct AuxCast {
+  const void* src[6]; bf* dst[6];
+  int count[6], cols[6], s0[6], s1[6], fp32[6];
+};
+extern "C" __global__ void mw_aux_cast(AuxCast p) {
+  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
+  if (i<p.count[leaf]) {
+    int j=(i/p.cols[leaf])*p.s0[leaf]+(i%p.cols[leaf])*p.s1[leaf];
+    p.dst[leaf][i]=__float2bfloat16_rn(aux_read(p.src[leaf],j,p.fp32[leaf]));
+  }
+}
+struct AuxPack {
+  bf* dst; const void* w[4]; int rows,cols;
+  int s0[4],s1[4],fp32[4];
+};
+extern "C" __global__ void mw_aux_pack(AuxPack p) {
+  int i=blockIdx.x*256+threadIdx.x;
+  if(i>=4*p.rows*p.cols)return;
+  int row=i/p.cols,col=i%p.cols,source=(row/64)*32+row%32;
+  int leaf=2*(source>=p.rows)+(row%64<32),r=source%p.rows;
+  p.dst[i]=__float2bfloat16_rn(aux_read(p.w[leaf],r*p.s0[leaf]+col*p.s1[leaf],p.fp32[leaf]));
+}
+extern "C" __global__ void mw_aux_norm(const bf* x,const float* g,const float* b,
+                                        bf* y,float* stats,int width) {
+  int row=blockIdx.x; float sum=0.f;
+  for(int c=threadIdx.x;c<width;c+=256)sum=__fadd_rn(sum,__bfloat162float(x[row*width+c]));
+  float mean=aux_sum(sum)/width,var=0.f;
+  for(int c=threadIdx.x;c<width;c+=256){
+    float z=__bfloat162float(x[row*width+c])-mean;
+    var=__fadd_rn(var,__fmul_rn(z,z));
+  }
+  float rs=rsqrtf(aux_sum(var)/width+1e-5f);
+  if(!threadIdx.x&&stats){stats[2*row]=mean;stats[2*row+1]=rs;}
+  for(int c=threadIdx.x;c<width;c+=256)
+    y[row*width+c]=__float2bfloat16_rn(fmaf((__bfloat162float(x[row*width+c])-mean)*rs,g[c],b[c]));
+}
+extern "C" __global__ void mw_aux_fold(const bf* wp,const float* go,const float* bo,
+                                        bf* wpf,const bf* wg,const float* gi,const float* bi,
+                                        bf* wgf,float* uv,int width,int hidden) {
+  int c=blockIdx.x; bool gate=blockIdx.y!=0;
+  int kmax=gate?width:hidden; float u=0.f,v=0.f;
+  const bf* w=gate?wg:wp; const float* gamma=gate?gi:go; const float* beta=gate?bi:bo;
+  bf* folded=gate?wgf:wpf;
+  for(int k=threadIdx.x;k<kmax;k+=256){
+    float a=__bfloat162float(w[c*kmax+k]);
+    bf f=__float2bfloat16_rn(__fmul_rn(a,gamma[k]));
+    folded[c*kmax+k]=f;
+    u=__fadd_rn(u,__bfloat162float(f)); v=__fadd_rn(v,__fmul_rn(a,beta[k]));
+  }
+  float us=aux_sum(u),vs=aux_sum(v);
+  if(!threadIdx.x){uv[(gate?2:0)*width+c]=us;uv[(gate?3:1)*width+c]=vs;}
+}
+extern "C" __global__ void mw_aux_mask(const bool* token,bf* pair,int length) {
+  int i=blockIdx.x*256+threadIdx.x;
+  if(i<length*length)pair[i]=__float2bfloat16_rn(!token||(token[i/length]&&token[i%length])?1.f:0.f);
+}
+#else
 // SPDX-License-Identifier: Apache-2.0
 // MiniWorld wide training forward. Uses the engine's TMA/WGMMA primitives.
 // Keep the output-LN tile on chip; stream weight K64 chunks instead of
@@ -96,3 +178,4 @@ extern "C" __global__ __launch_bounds__(NT,1) void mw_wide_output(__grid_constan
   __syncthreads();
  }
 }
+#endif
