@@ -125,12 +125,14 @@ def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
 
 
 def core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
-    """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
-    up to 768 (the P tile and two accumulators in 512 TMEM columns), sm_100. MINIWORLD_BIAS_ONLY_DIT_CORE=0 turns it off."""
+    """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128: on sm_100 up to
+    768 (the P tile and two accumulators in 512 TMEM columns), on an A100 (sm_80, ``cuda/sm80``) any such L. MINIWORLD_BIAS_ONLY_DIT_CORE=0 turns it off."""
     if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_CORE", "1") == "0":
         return False
-    return (dtype is torch.bfloat16 and d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
-            and torch.cuda.get_device_capability(device_index) == (10, 0))
+    if not (dtype is torch.bfloat16 and d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and L > 0):
+        return False
+    capability = torch.cuda.get_device_capability(device_index)
+    return (capability == (10, 0) and L <= 768) or capability == (8, 0)
 
 
 def _descriptors(*maps):

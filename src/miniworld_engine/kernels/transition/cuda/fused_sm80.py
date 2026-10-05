@@ -141,6 +141,7 @@ def _layout_bwd(wa, wb, ws, dev):
 
 
 N_W, N_WDW, N_WX = (H // CH) * (2 * CH * D + CH * D), 8 * (128 * D + 64 * D), (H // CH) * 2 * CH * D
+N_GB = 256     # the LayerNorm affine as float4 slots (gamma, beta: 2 x 128)
 
 
 @functools.lru_cache(maxsize=8)
@@ -161,33 +162,36 @@ def _pack_tables(dev):
     s_, q_ = torch.arange(8, device=dev).view(-1, 1), torch.arange(4, device=dev).view(1, -1)
     c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(4, device=dev).view(1, -1)
     idx32 = torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)]).to(torch.int32).contiguous()
+    assert idx32.numel() == N_GB
     return idx16, idx32
 
 
 def _pack(gamma, beta, wa, wb, ws):
-    """All kernel weight layouts in one launch -> (w, gb, wdw, wx, gamma f32, beta f32)."""
+    """All kernel weight layouts in one launch -> (w, gb, wdw, wx, gamma f32, beta f32).  The gather tables are built (and cached) inside the
+    launch op, never in the traced region: ``torch.compile`` ignores ``lru_cache`` and would compile their 524288-element integer
+    computation into every graph (Inductor's value-range analysis asserts on it)."""
     dev = wa.device
-    idx16, idx32 = _pack_tables(dev)
     gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-    out16 = torch.empty(idx16.numel(), dtype=torch.bfloat16, device=dev)
-    gb = torch.empty(idx32.numel(), dtype=torch.float32, device=dev)
-    _pack_launch(wa.contiguous(), wb.contiguous(), ws.contiguous(), gf, bf, idx16, idx32, out16, gb)
+    out16 = torch.empty(N_W + N_WDW + N_WX, dtype=torch.bfloat16, device=dev)
+    gb = torch.empty(N_GB, dtype=torch.float32, device=dev)
+    _pack_launch(wa.contiguous(), wb.contiguous(), ws.contiguous(), gf, bf, out16, gb)
     return out16[:N_W], gb, out16[N_W:N_W + N_WDW], out16[N_W + N_WDW:], gf, bf
 
 
 # ------------------------------------------------------------------------------------------------------------------ launches
-def _pack_launch_fake(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, idx16: torch.Tensor,
-                      idx32: torch.Tensor, out16: torch.Tensor, gb: torch.Tensor) -> None:
+def _pack_launch_fake(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, out16: torch.Tensor,
+                      gb: torch.Tensor) -> None:
     """Nothing: the op writes out16 and gb in place."""
     return None
 
 
 @opaque(fake=_pack_launch_fake, name="transition_fused_pack_sm80", mutates_args=("out16", "gb"))
-def _pack_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, idx16: torch.Tensor,
-                 idx32: torch.Tensor, out16: torch.Tensor, gb: torch.Tensor) -> None:
+def _pack_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, out16: torch.Tensor,
+                 gb: torch.Tensor) -> None:
     """Packs the three weights (bf16 / fp16 tiles in out16) and the LayerNorm affine (gb) for the sm80 kernels, in place."""
     if _is_fake(wa, out16):
         return None
+    idx16, idx32 = _pack_tables(wa.device)
     _ext().pack(wa, wb, ws, gamma, beta, idx16, idx32, out16, gb)
 
 

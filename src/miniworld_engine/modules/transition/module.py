@@ -33,8 +33,9 @@ def _fused_sm100a_enabled() -> bool:
 
 
 def _fused_sm80_enabled() -> bool:
-    """Whether to route the d=128/n=4 bf16 residual path on sm_80 through the fused hand-CUDA forward and two-kernel backward
-    (training step ~1.44x the Triton residual path).  Default on; MINIWORLD_TRANSITION_FUSED_SM80=0 to A/B against Triton."""
+    """Whether to route the bf16 residual path on sm_80 (A100) through the hand-CUDA kernels: ``fused_sm80`` at d=128/n=4 (fused forward and
+    two-kernel backward, training step ~1.44x the Triton residual path) and ``fused_wide_sm80`` at every other width (D = 64 .. 768, any n).
+    Default on; MINIWORLD_TRANSITION_FUSED_SM80=0 (every A100 path) or MINIWORLD_TRANSITION_WIDE_SM80=0 (the wide ones) to A/B against Triton."""
     from miniworld_engine import settings
 
     return settings.current().engine_backend != "triton"
@@ -70,6 +71,8 @@ class Transition(nn.Module):
         d_hidden: int = 128,
         n: int = 4,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        *,
+        anthropic_row: str | None = None,
     ) -> None:
         super().__init__()
         self.d_hidden = d_hidden
@@ -83,6 +86,7 @@ class Transition(nn.Module):
         # (resolve() maps cueq->pytorch for non-trimul ops).
         # Resolution lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
+        self.anthropic_row = anthropic_row or getattr(self, "anthropic_row", "v2@bm32bh32w4s2il1" if d_hidden == 384 else "pf")
         self._backend = resolve_transition(self.implementation)
 
         self.ln_in = LayerNorm(
@@ -107,6 +111,9 @@ class Transition(nn.Module):
 
         The raw op without the residual is available through ``ops.transition``.
         """
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic import module_transition
+            return module_transition(self, x)
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
@@ -156,10 +163,18 @@ class Transition(nn.Module):
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
 
         if _fused_sm80_enabled():
-            from miniworld_engine.kernels.transition.cuda import fused_sm80
+            from miniworld_engine.kernels.transition.cuda import (
+                fused_sm80,
+                fused_wide_sm80,
+            )
 
-            if fused_sm80.available(x, wa, ws):
+            # fused_sm80: d=128 / n=4 with enough rows to fill the card; every other call the wide path (see fused_wide_sm80.route)
+            route = fused_wide_sm80.route(x, wa, ws)
+            if route == "fused":
                 return fused_sm80.transition_fused_sm80(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+            if route == "wide":
+                return fused_wide_sm80.transition_wide_sm80(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
 
         from miniworld_engine.kernels.transition.triton.residual import (

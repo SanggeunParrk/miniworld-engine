@@ -32,6 +32,10 @@ class SwiGLUFFN(nn.Module):
         self.w_down = Linear(hidden, d_model, bias=False, init="normal")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.implementation == ImplementationType.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import swiglu_ffn
+
+            return swiglu_ffn(self, x)
         if self.implementation != ImplementationType.PYTORCH:
             from miniworld_engine import ops
 
@@ -98,6 +102,8 @@ class SWADiTBlock(nn.Module):
 
         if self.implementation == ImplementationType.PYTORCH:
             return "implementation is pytorch"
+        if self.implementation == ImplementationType.ANTHROPIC:
+            return "implementation uses the Anthropic gather/DTK composition"
         if not settings.current().swa_dit_fused:
             return "settings.swa_dit_fused is off"
         if len(attention_params) != 6:
@@ -165,6 +171,10 @@ class SWADiTBlock(nn.Module):
         cond: Float[torch.Tensor, "N S d_cond"],
         attention_params: tuple,
     ) -> Float[torch.Tensor, "N S d_atom"]:
+        if self.implementation == ImplementationType.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import swa_dit
+
+            return swa_dit(self, x, cond, attention_params)
         if self.implementation != ImplementationType.PYTORCH:
             if self.fused_refusal(x, cond, attention_params) is None:
                 # One modulation row per sequence row (B = N): no augment structure is known here.

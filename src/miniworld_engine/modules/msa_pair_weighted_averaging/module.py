@@ -6,6 +6,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
+from miniworld_engine.integrations import pwa_sm80 as _pwa_sm80
 from miniworld_engine.integrations import pwa_train as _pwa_train
 from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -77,6 +78,11 @@ class MSAPairWeightedAveraging(nn.Module):
         """Forward pass. ALWAYS returns the residual output msa + drop_msa(pwa(msa, pair)) — the
         residual is UNCONDITIONAL (domain standard, explicit add) and drop_msa is optional (p_drop,
         training only). The residual is unconditional and has no flag."""
+        if self.implementation == ImplementationType.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                pair_weighted_averaging,
+            )
+            return pair_weighted_averaging(self, msa, pair, mask)
         # The packaged H100 forward/backward is automatic for supported module inputs;
         # its output already carries the residual and training dropout.
         # Inference takes the same forward kernels (no o kept, no dropout) -- faster than the upstream cell and payload-free.
@@ -87,6 +93,12 @@ class MSAPairWeightedAveraging(nn.Module):
                 if torch.is_grad_enabled() or (self.training and self.drop_msa.p_drop > 0):
                     return _pwa_train.pair_weighted_averaging(self, msa, pair, mask)
                 return _pwa_train.pair_weighted_averaging_inference(self, msa, pair, mask)
+        # Hand-CUDA A100 (integrations.pwa_sm80: pair softmax, value projection, cuBLAS contraction, gate / output / dropout / residual; inference and training);
+        # the H100 hook above declines on sm_80 and this one on every other card.
+        if _pwa_sm80.serves_inference(self, msa, pair, mask):
+            return _pwa_sm80.update_inference(self, msa, pair, mask)
+        if _pwa_sm80.serves_train(self, msa, pair, mask):         # grad-enabled, or the module's row dropout is live: one step, dropout and residual fused
+            return _pwa_sm80.update_train(self, msa, pair, mask)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused cell where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):

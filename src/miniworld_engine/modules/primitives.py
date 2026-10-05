@@ -164,6 +164,12 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
     def forward(self, input: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
         backend = self._backend
+        if backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic import layer_norm
+            output, self.anthropic_selection = layer_norm(
+                input, self.normalized_shape, self.weight, self.bias, self.eps,
+                out_dtype=input.dtype)
+            return output
         if backend == KernelBackend.PYTORCH:
             # Compute in fp32 so a fp32-pinned affine weight never dtype-mismatches a bf16
             # activation (and for stability); restore the activation dtype.
@@ -212,12 +218,21 @@ class RMSNorm(nn.RMSNorm):
             raise ValueError("Engine RMSNorm supports one normalized dimension")
 
     def forward(self, x):
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import rms_norm
+            return rms_norm(self, x)
         if self._backend == KernelBackend.PYTORCH or not x.is_cuda:
             out = super().forward(x)
             return out.to(x.dtype) if self._returns_input_dtype else out
         if self._backend != KernelBackend.TRITON:
             raise InvalidImplementationError(self.implementation)
         eps = self.effective_eps(x.dtype)
+        if self.implementation == ImplementationType.MINIWORLD:
+            # A100: the engine's own choice is the hand-CUDA row kernel (kernels/rmsnorm/cuda/sm80.py; MINIWORLD_NORMS_SM80=0 keeps Triton); an explicit TRITON request is Triton
+            from miniworld_engine.kernels.rmsnorm.cuda import sm80 as _sm80
+
+            if _sm80.supports(x, self.weight):
+                return _sm80.rmsnorm(x, self.weight, eps)
         return kernels.triton_rmsnorm(x, self.weight, eps)
 
     def effective_eps(self, dtype):

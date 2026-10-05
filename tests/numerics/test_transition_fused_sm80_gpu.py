@@ -71,7 +71,7 @@ def _rel(got, want):
 
 
 @needs_ampere
-@pytest.mark.parametrize("shape", [(1, 32, 32, 128), (2, 16, 16, 128)])
+@pytest.mark.parametrize("shape", [(1, 96, 96, 128), (2, 64, 64, 128)])
 def test_is_no_less_accurate_than_the_triton_path(shape, monkeypatch):
     module, x, dy = _build(shape)
     reference = _run(module, x, dy, fused=False, fp32=True, monkeypatch=monkeypatch)
@@ -83,7 +83,7 @@ def test_is_no_less_accurate_than_the_triton_path(shape, monkeypatch):
 
 
 @needs_ampere
-@pytest.mark.parametrize("shape", [(1, 32, 32, 128), (2, 16, 16, 128)])
+@pytest.mark.parametrize("shape", [(1, 96, 96, 128), (2, 64, 64, 128)])
 def test_agrees_with_the_triton_path_to_bf16(shape, monkeypatch):
     module, x, dy = _build(shape)
     fused = _run(module, x, dy, fused=True, monkeypatch=monkeypatch)
@@ -100,7 +100,7 @@ def test_the_module_actually_dispatches_to_it(monkeypatch):
     calls = []
     original = fused_sm80.transition_fused_sm80
     monkeypatch.setattr(fused_sm80, "transition_fused_sm80", lambda *a, **k: (calls.append(1), original(*a, **k))[1])
-    module, x, dy = _build((1, 32, 32, 128))
+    module, x, dy = _build((1, 96, 96, 128))
     _run(module, x, dy, fused=True, monkeypatch=monkeypatch)
     assert calls, "the fused path was never entered"
 
@@ -110,7 +110,7 @@ def test_inference_matches_training_forward():
     """No grad -> the forward skips the xn / stats stores (runtime guard); the output bits must not change."""
     from miniworld_engine.kernels.transition.cuda import fused_sm80
 
-    module, x, _ = _build((1, 32, 32, 128))
+    module, x, _ = _build((1, 96, 96, 128))
     args = (module.ln_in.weight, module.ln_in.bias, module.expand_a.weight, module.expand_b.weight, module.squeeze.weight, module.ln_in.eps)
     with torch.no_grad():
         inf = fused_sm80.transition_fused_sm80(x, *args)
@@ -146,3 +146,29 @@ def test_replay_is_bit_identical():
     first, second = once(), once()
     assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
 
+
+
+@needs_ampere
+@pytest.mark.parametrize("train", [False, True])
+def test_the_compiled_module_matches_eager(train, monkeypatch):
+    """The pack tables stay out of the traced region: ``torch.compile`` ignores ``lru_cache`` and used to compile their 524288-element
+    integer computation into the graph, which Inductor refused (a value-range assertion) in inference and in training."""
+    monkeypatch.setenv("MINIWORLD_TRANSITION_FUSED_SM80", "1")
+    module, x, dy = _build((1, 96, 96, 128))
+    eager, compiled = copy.deepcopy(module), torch.compile(copy.deepcopy(module))
+    try:
+        if not train:
+            with torch.no_grad():
+                want, got = eager(x), compiled(x)
+            assert _rel(got.float(), want.float()) < 2e-3
+            return
+        xe, xc = x.clone().requires_grad_(), x.clone().requires_grad_()
+        ye, yc = eager(xe), compiled(xc)
+        ye.backward(dy)
+        yc.backward(dy)
+        assert _rel(yc.detach().float(), ye.detach().float()) < 2e-3
+        assert _rel(xc.grad.float(), xe.grad.float()) < 2e-3
+        for (name, pe), pc in zip(eager.named_parameters(), compiled.parameters(), strict=True):
+            assert _rel(pc.grad.float(), pe.grad.float()) < 5e-3, name
+    finally:
+        torch._dynamo.reset()

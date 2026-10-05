@@ -8,7 +8,9 @@ import torch
 
 from miniworld_engine.kernels.mpnn_edge_dropout.reference import edge_dropout_pytorch
 
-EdgeDropoutBackend = Literal["auto", "pytorch", "bitpack"]
+# ``cuda`` is the bit-packed mask on the hand-written A100 (sm_80) kernels (``integrations/mpnn_edge_sm80.py``); on an A100 ``bitpack`` runs them too, unless
+# ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton kernels.
+EdgeDropoutBackend = Literal["auto", "pytorch", "bitpack", "cuda"]
 
 _INT32_MAX = 2**31 - 1
 _PACK_BLOCK_BYTES = 256
@@ -48,7 +50,7 @@ def _select_backend(
     *,
     supported: bool,
 ) -> EdgeDropoutBackend:
-    if backend == "bitpack":
+    if backend in {"bitpack", "cuda"}:
         return "bitpack" if supported else "pytorch"
     # ``auto`` deliberately remains the compute-oriented native policy. The
     # compressed mask has a small measured latency cost and is opt-in.
@@ -71,7 +73,7 @@ def edge_dropout(
     deterministic mode, and the default ``auto`` policy retain PyTorch.
     The explicit ``bitpack`` training path supports first-order gradients only.
     """
-    if backend not in {"auto", "pytorch", "bitpack"}:
+    if backend not in {"auto", "pytorch", "bitpack", "cuda"}:
         raise ValueError(f"unknown MPNN edge dropout backend: {backend!r}")
     supported = _bitpack_supported(
         values,
@@ -81,6 +83,13 @@ def edge_dropout(
     )
     selected = _select_backend(backend, supported=supported)
     if selected == "bitpack":
+        # The A100 hand-CUDA kernels (lazy: never imported off sm_80, never built until used); the Triton ones keep every other card, the switch off and a failed build.
+        from miniworld_engine.integrations import mpnn_edge_sm80
+
+        if mpnn_edge_sm80.dropout_serves(values):
+            return mpnn_edge_sm80.edge_dropout_bitpack(values, probability)
+        if backend == "cuda":
+            raise ValueError("the sm_80 CUDA MPNN edge dropout needs an A100 (capability 8.0) and a loadable extension")
         # Keep Triton out of imports and every native fallback path.
         from miniworld_engine.kernels.mpnn_edge_dropout.triton import (
             edge_dropout_bitpack,

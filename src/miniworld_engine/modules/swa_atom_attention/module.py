@@ -13,8 +13,10 @@ from the AF3 path:
   neighbours in atom-index order, via FlashAttention-4's native sliding-window
   support. Padding is handled by ``seqused_k`` over the full padded ``[N, S]``
   layout (fixed-stride varlen) — no unpad/gather, no ``torch.nonzero``, fully
-  static shape (CUDA-graph capturable). A dense SDPA band-mask fallback is used
-  when FlashAttention is unavailable (e.g. CPU unit tests).
+  static shape (CUDA-graph capturable). On an A100 (4 heads x 32, half window 64) the attention
+  runs on the hand-CUDA window kernels of ``kernels/swa_dit/cuda/sm80`` instead (no flash
+  install needed). A dense SDPA band-mask fallback is used when FlashAttention is
+  unavailable (e.g. CPU unit tests).
 
 The 3D RoPE is derived from the *reference conformer* coordinates
 (``reference.pos``) and per-atom space UIDs (``reference.space_uid``), both of
@@ -711,7 +713,7 @@ class SWA3DRoPEAttention(nn.Module):
             msg = f"d_model ({d_model}) must be divisible by n_heads ({n_heads})."
             raise ValueError(msg)
         self.implementation = ImplementationType(implementation)
-        if self.implementation not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD, ImplementationType.TRITON}:
+        if self.implementation not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD, ImplementationType.TRITON, ImplementationType.ANTHROPIC}:
             raise InvalidImplementationError(self.implementation)
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
@@ -731,6 +733,10 @@ class SWA3DRoPEAttention(nn.Module):
         attention_params: tuple,
     ) -> Float[torch.Tensor, "N S d"]:
         """Forward pass. ``attention_params`` = (cos, sin, seqused, cu_seqlens, max_seqlen, valid)."""
+        if self.implementation == ImplementationType.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import swa_attention
+
+            return swa_attention(self, x, attention_params)
         n, s = x.shape[:2]
         cos, sin, seqused, cu_seqlens, max_seqlen, valid = attention_params
 
@@ -738,8 +744,12 @@ class SWA3DRoPEAttention(nn.Module):
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
         engine_pointwise = self.implementation != ImplementationType.PYTORCH and not getattr(self, "torch_pointwise", False)
         if q.is_cuda and engine_pointwise:
+            from miniworld_engine.kernels.rope.cuda import sm80 as _rope_sm80
             from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
-            q, k = qk_norm_rope_3d(q, k, cos, sin)
+            if self.implementation == ImplementationType.MINIWORLD and _rope_sm80.supports_qk(q, k, cos, sin):
+                q, k = _rope_sm80.qk_norm_rope_3d(q, k, cos, sin)   # A100: the hand-CUDA fused norm + rotation (MINIWORLD_NORMS_SM80=0 keeps Triton)
+            else:
+                q, k = qk_norm_rope_3d(q, k, cos, sin)
         else:
             eps = torch.finfo(torch.float32).eps
             q = F.rms_norm(q.float(), (self.head_dim,), eps=eps).to(q.dtype)
@@ -747,12 +757,23 @@ class SWA3DRoPEAttention(nn.Module):
             q = apply_rotary_emb_3d(q, cos, sin)
             k = apply_rotary_emb_3d(k, cos, sin)
 
-        # FA4 (sm90+) or FA2 (sm80+) on CUDA -- see `_flash_backend`. There is NO silent CUDA fallback:
+        # A100 (4 heads x 32, half window 64): the hand-CUDA window attention of the SWA DiT kernels (`kernels/swa_dit/cuda/sm80`), which needs no flash install.
+        sm80_out = None
+        if self.implementation != ImplementationType.PYTORCH and q.is_cuda:
+            from miniworld_engine.kernels.swa_dit.interface import (
+                swa_dit_window_attention,
+            )
+
+            sm80_out = swa_dit_window_attention(q, k, v, seqused, self.n_heads, self.half_window)
+
+        # Otherwise FA4 (sm90+) or FA2 (sm80+) on CUDA -- see `_flash_backend`. There is NO silent CUDA fallback:
         # the dense `_sdpa_band` is an O(S^2) CPU/test reference with a different launch profile, and
         # quietly using it on the GPU measures the wrong kernel (that is exactly how a whole benchmark
         # sweep once ran on the band-mask path). Require flash on CUDA and fail loudly otherwise.
         if self.implementation == ImplementationType.PYTORCH:
             out = self._sdpa_band(q, k, v, valid)
+        elif sm80_out is not None:
+            out = sm80_out
         elif _flash_backend(x.device) is not None:
             out = self._flash_window(q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s)
         elif x.is_cuda:
@@ -768,6 +789,11 @@ class SWA3DRoPEAttention(nn.Module):
 
         out = out.reshape(n, s, -1)
         gate = self.gate_proj(x)
+        if engine_pointwise and out.is_cuda:
+            from miniworld_engine.integrations import sigmoid_gate_sm80
+
+            if sigmoid_gate_sm80.serves(gate, out):      # A100: the gate (and its backward) as one hand-CUDA pass, then cuBLAS out_proj
+                return self.out_proj(sigmoid_gate_sm80.sigmoid_gate(gate, out))
         if engine_pointwise and self._can_fuse_output_projection(gate, out):
             from miniworld_engine.kernels.gated_projection.triton.swa import (
                 swa_gate_out_inference,

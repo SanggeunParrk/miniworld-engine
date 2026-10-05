@@ -37,9 +37,21 @@ def augmented_attention_pair_bias(
     if kernel_type not in ("compute_efficient", "memory_efficient"):
         msg = f"unknown kernel_type {kernel_type!r}"
         raise ValueError(msg)
+    from miniworld_engine.integrations import augattn_sm80 as _sm80
     from miniworld_engine.kernels.augmented_attention.interface import (
         triton_augmented_attention_pair_bias as _fn,
     )
+    from miniworld_engine.kernels.triangle_attention.cuda import (
+        sm80_projected as _sm80_rows,
+    )
+
+    # A100 hand-CUDA core at the triangle-row geometry (A == L pair rows, head dim 16 / 32); asked FIRST: it is the specialised path of those rows
+    if kernel_type == "compute_efficient" and _sm80_rows.serves(query, key, value, bias, mask):
+        return _sm80_rows.attention(query, key, value, bias, mask)
+    # A100: the hand-CUDA core (bf16, head dim 24 / 32 / 48, any L, A, B, a key mask per sample or none) instead of the Triton kernel, for the calls it wins
+    # (MINIWORLD_AUGATTN_SM80_OPS); every other call falls through to the Triton path
+    if _sm80.serves_ops(query, key, value, bias, mask, kernel_type):
+        return _sm80.attention_ops(query, key, value, bias, mask)
 
     in_dtype = query.dtype
     # (A,B,H,L,D) -> (A,B,L,H,D); (B,H,L,L) -> (B,L,L,H)

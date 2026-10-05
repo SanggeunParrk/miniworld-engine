@@ -80,6 +80,9 @@ class DiTBlock(nn.Module):
             return _train.block(self, single, cond, pair, mask, compute_dtype)
         if _atom.serves(self, single, cond, pair, mask, compute_dtype):
             return _atom.block(self, single, cond, pair, mask)
+        from miniworld_engine.integrations import a100_families
+        if a100_families.serves(self.attention, single):
+            return a100_families.token(self, single, cond, pair, mask, compute_dtype)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = self.attention(single, cond, pair, mask, **kw)
         return self.transition(single, cond)

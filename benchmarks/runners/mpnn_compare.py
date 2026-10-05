@@ -1,7 +1,8 @@
 """Compare MPNN kernel families using the repository's measured execution path.
 
 Run on a GPU node: python -m benchmarks.runners.mpnn_compare --out results.json
-Inference uses manual CUDA graphs; training measures forward/backward without graphs.
+Inference uses manual CUDA graphs; training measures forward/backward without graphs
+(--graph-training replays the training step from a CUDA graph instead: GPU time, no host overhead).
 Native BF16 parameters/activations with FP32 norm affine, no autocast, width 128,
 48 neighbors. --precision bf16-mixed explicitly restores the historical autocast mode.
 Dropout-bearing training operations use p=0.25. Accuracy probes use p=0 so independent
@@ -14,6 +15,7 @@ import contextlib
 import gc
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -56,6 +58,12 @@ BACKENDS = {
     "relative_position": ("pytorch", "triton", "index_add"),
     "edge_dropout": ("pytorch", "bitpack"),
 }
+# A100 hand-CUDA columns of the edge families (mpnn_edge_sm80): "cuda" names the kernels explicitly (the saved-activation policy), "cuda_memory" / "cuda_recompute" are the edge MLP's / edge tail's
+# recompute policies (the Triton policy names run the same kernels on an A100); the Triton columns run with MINIWORLD_MPNN_EDGE_SM80=0, so they stay the Triton kernels there.
+BACKENDS["edge_mlp"] += ("cuda", "cuda_memory")
+BACKENDS["edge_tail"] += ("cuda", "cuda_recompute")
+BACKENDS["edge_layernorm"] += ("cuda",)
+BACKENDS["edge_dropout"] += ("cuda",)
 
 
 def make_case(family: str, nodes: int, backend: str, training: bool, precision="bf16"):
@@ -92,6 +100,7 @@ def make_case(family: str, nodes: int, backend: str, training: bool, precision="
     leaves = leaves_by_family[family] if training else []
 
     def forward(p=probability, impl=backend):
+        impl = {"cuda_memory": "triton_memory", "cuda_recompute": "triton"}.get(impl, impl)
         with torch.autocast("cuda", dtype=torch.bfloat16) if mixed else contextlib.nullcontext():
             if family == "message":
                 return message_hidden_reduce(x, weights[1], biases[0], mask, 48,
@@ -146,11 +155,43 @@ def relative_error(actual, reference):
     return float((actual.float() - reference.float()).norm() / reference.float().norm().clamp_min(1e-30))
 
 
-def evaluate(family, nodes, backend, training, repeats, compiled, source, metric, precision="bf16"):
+def graph_training_ms(forward, leaves, upstream, repeats, inner=20):
+    """Milliseconds per training step (the compiled forward and its backward through ``autograd.grad``) replayed from a CUDA graph: GPU time without host overhead or the harness' flush buffer."""
+    def step():
+        return torch.autograd.grad(forward(), leaves, upstream)
+
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(4):
+            step()
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        step()
+    for _ in range(5):
+        graph.replay()
+    torch.cuda.synchronize()
+    times = []
+    for _ in range(max(repeats, 3)):
+        begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        begin.record()
+        for _ in range(inner):
+            graph.replay()
+        end.record()
+        end.synchronize()
+        times.append(begin.elapsed_time(end) / inner)
+    return times
+
+
+def evaluate(family, nodes, backend, training, repeats, compiled, source, metric, precision="bf16", graph_training=False):
     if family == "edge_dropout" and not training:
         return {"status": "not_applicable", "reason": "evaluation dropout is the identity", "samples": []}
     if family == "edge_layernorm" and not training and backend != "pytorch":
         return {"status": "not_applicable", "reason": "compressed saves are training-only; inference uses PyTorch", "samples": []}
+    # the CUDA columns run the sm_80 kernels, every other column keeps the Triton / PyTorch kernels even on an A100 (the switch is read when the case is traced; Dynamo is reset between cases)
+    os.environ["MINIWORLD_MPNN_EDGE_SM80"] = "1" if backend.startswith("cuda") else "0"
     forward, leaves, probability, dtypes = make_case(family, nodes, backend, training, precision)
     guard = contextlib.nullcontext if training else torch.no_grad
     with guard():
@@ -180,7 +221,9 @@ def evaluate(family, nodes, backend, training, repeats, compiled, source, metric
                            mode="training" if training else "inference", metric=metric,
                            precision=precision, cudagraph="disabled" if training or metric == "memory" else "manual")
         samples = []
-        for _ in range(repeats):
+        if training and graph_training and metric == "time":
+            samples = [{"value": ms, "cudagraph": "manual", "compiled": compiled} for ms in graph_training_ms(measured_forward, leaves, upstream, repeats)]
+        for _ in range(0 if samples else repeats):
             require_source_identity(source)
             result = measured_result(conf=conf, func=step, grad_to_none=leaves, params=[],
                                      is_train=training,
@@ -189,7 +232,7 @@ def evaluate(family, nodes, backend, training, repeats, compiled, source, metric
                                      execution_path=backend, reference="pytorch")
             require_source_identity(source)
             samples.append(result._asdict())
-        if training and any(t.grad is None or not torch.isfinite(t.grad).all() for t in leaves):
+        if training and not graph_training and any(t.grad is None or not torch.isfinite(t.grad).all() for t in leaves):
             raise ValueError("missing or nonfinite gradient")
     limit = 1e-4 if family == "relative_position" and precision == "bf16-mixed" else 0.05
     return {"status": "ok", **dtypes, "precision": precision, "dropout": probability, "accuracy_dropout": 0.0,
@@ -209,6 +252,8 @@ def main():
     parser.add_argument("--precision", choices=["bf16", "bf16-mixed"], default="bf16",
                         help="bf16: native weights, FP32 norm, no autocast; bf16-mixed: historical FP32 weights with autocast")
     parser.add_argument("--eager", action="store_true", help="explicit uncompiled diagnostic")
+    parser.add_argument("--graph-training", action="store_true",
+                        help="time the training step replayed from a CUDA graph (GPU time; the default measures compiled, no graph, host overhead included)")
     args = parser.parse_args()
     if args.out.exists():
         parser.error("output already exists; choose a new result path")
@@ -238,7 +283,7 @@ def main():
                     row: dict[str, Any] = {"family": family, "nodes": nodes, "mode": mode, "backend": backend}
                     try:
                         row.update(evaluate(family, nodes, backend, mode == "training",
-                                            args.repeats, not args.eager, source, args.metric, args.precision))
+                                            args.repeats, not args.eager, source, args.metric, args.precision, args.graph_training))
                     except Exception as exc:
                         row.update(status="error", error=f"{type(exc).__name__}: {exc}"[:1800])
                     row["elapsed_seconds"] = time.monotonic() - started

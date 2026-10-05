@@ -22,10 +22,9 @@ the import):
     p_out_weight: (d_pair, d_hidden)     to_out.weight   (nn.Linear form)
     g_out_weight: (d_pair, d_pair)       to_gate.weight  (nn.Linear form)
 
-Backend: the TRITON pipeline (``trimul_triton``), which is a pure weights-as-args
-autograd Function on both sm90 and sm100 (grads to all weight args), with a
-forward-only no-grad inference path. ``d_hidden == d_pair`` is required (the
-standard AF3 configuration).
+On A100, BF16/FP32 calls use the CUDA/cuBLAS family implementation, including
+the tiled fast paths and a general-shape CUDA composition. Other devices retain
+the Triton pipeline. Gradients flow to all weight arguments.
 """
 
 from __future__ import annotations
@@ -69,10 +68,6 @@ def triangle_multiplicative_update(
     Autograd-transparent: back-prop produces gradients for ``x`` and every weight/bias
     argument, so the caller can hold them as ``nn.Parameter`` and train normally.
     """
-    from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import (
-        trimul_triton,
-    )
-
     if direction not in ("outgoing", "incoming"):
         msg = f"direction must be 'outgoing' or 'incoming', got {direction!r}"
         raise ValueError(msg)
@@ -106,8 +101,17 @@ def triangle_multiplicative_update(
     w_left, w_right = p_in_weight[:d_hidden], p_in_weight[d_hidden:]
     w_left_gate, w_right_gate = g_in_weight[:d_hidden], g_in_weight[d_hidden:]
 
+    from miniworld_engine.kernels import cuda_native
+    if cuda_native.enabled(x):
+        from miniworld_engine.integrations.a100_families import trimul
+        return trimul(x, w_left, w_left_gate, w_right, w_right_gate, g_out_weight, p_out_weight,
+                      norm_in_weight, norm_in_bias, norm_out_weight, norm_out_bias, eps, eps, outgoing, mask)
+
     # Grads flow to every weight arg because the unpacked weights above are differentiable
     # slice+transpose VIEWS of the packed inputs.
+    from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import (
+        trimul_triton,
+    )
     return trimul_triton(
         x,
         w_left,
@@ -151,17 +155,21 @@ def bidirectional_triangle_multiplicative_update(
     measurement). cuequivariance has no bidirectional equivalent to compare against; for the
     single-direction one, add the residual to cuequiv's output in plain torch (see
     ``triangle_multiplicative_update`` above).
-    Autograd-transparent: grads flow to ``x`` and every weight. Backed by the TRITON bidir pipeline
-    (weights-as-args autograd Function + no-grad inference path). ``d_hidden == d_pair``
-    required. Unlike single-direction trimul there is no cuequiv equivalent, so this
+    Autograd-transparent: grads flow to ``x`` and every weight. A100 uses CUDA/cuBLAS;
+    other architectures retain the Triton pipeline. Unlike single-direction trimul there is no cuequiv equivalent, so this
     takes the four (2·d_hidden, d_pair) projections directly.
     """
+    # Grads flow to every weight arg (differentiable .t() views) and x (autograd-transparent LN_in).
+    d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
+    from miniworld_engine.kernels import cuda_native
+    if cuda_native.enabled(x):
+        from miniworld_engine.integrations.a100_families import trimul
+        return trimul(x, to_left_weight, to_left_gate_weight, to_right_weight, to_right_gate_weight,
+                      to_gate_weight, to_out_weight, norm_in_weight, norm_in_bias, norm_out_weight,
+                      norm_out_bias, eps, eps, True, mask, bidirectional=True)
     from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
         bidirectional_trimul_triton,
     )
-
-    # Grads flow to every weight arg (differentiable .t() views) and x (autograd-transparent LN_in).
-    d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
     return bidirectional_trimul_triton(
         x,
         to_left_weight,
