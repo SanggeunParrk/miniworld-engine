@@ -24,9 +24,17 @@ constexpr int RB = TBK * 2, B64 = 64 * RB, SW_LAYOUT = TBK == 64 ? 1 : 2, SBO = 
 #if MW_GATE_SAVED
 constexpr int F_XN = 0, F_DY = 0, F_W1 = 0, F_WS = 2 * B64, F_STAGE = 4 * B64;
 #define GATE_FENCE_AB(x) ((void)0)
+#elif MW_EXPAND_ONLY
+constexpr int F_XN = 0, F_DY = 0, F_W1 = 2 * B64, F_WS = 0, F_STAGE = 6 * B64;
+#define GATE_FENCE_AB(x) fence_regs(x)
 #else
 constexpr int F_XN = 0, F_DY = 2 * B64, F_W1 = 4 * B64, F_WS = 8 * B64, F_STAGE = 10 * B64;   // xn, dy [128][TBK]; W1p [256][TBK]; Ws^T [128][TBK]
 #define GATE_FENCE_AB(x) fence_regs(x)
+#endif
+#if MW_EXPAND_ONLY
+#define GATE_FENCE_DH(x) ((void)0)
+#else
+#define GATE_FENCE_DH(x) fence_regs(x)
 #endif
 #ifndef STG_HALF
 #define STG_HALF 0                                        // 1: stage and store the epilogue in two 64-column passes (half the staging smem)
@@ -67,6 +75,9 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
 #if MW_GATE_SAVED
           ,const __nv_bfloat16* saved_a,const __nv_bfloat16* saved_b
 #endif
+#if MW_EXPAND_ONLY
+          ,const __grid_constant__ CUtensorMap mA,const __grid_constant__ CUtensorMap mB
+#endif
           ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
@@ -106,7 +117,9 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
 #if !MW_GATE_SAVED
             tma_load_2d(st + F_XN + h * B64, &mXN, full + s, kb * TBK, m0 + 64 * h);
 #endif
+#if !MW_EXPAND_ONLY
             tma_load_2d(st + F_DY + h * B64, &mDY, full + s, kb * TBK, m0 + 64 * h);
+#endif
           }
 #if MCW
           tma_load_2d_mc(st + F_W1 + rank * 2 * B64, &mW1, full + s, kb * TBK, n * 256 + 128 * (int)rank, (uint16_t)0x3);
@@ -116,7 +129,9 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
           tma_load_2d(st + F_W1, &mW1, full + s, kb * TBK, n * 256);
           tma_load_2d(st + F_W1 + 2 * B64, &mW1, full + s, kb * TBK, n * 256 + 128);
 #endif
+#if !MW_EXPAND_ONLY
           tma_load_2d(st + F_WS, &mWS, full + s, kb * TBK, n * THB);
+#endif
 #endif
         }
       }
@@ -128,36 +143,42 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
   uint32_t it = 0;
   for (int t = t0; t < tiles; t += tstep) {
     const int m0 = TILE_M0(t), n = t % NT;
+#if !MW_EXPAND_ONLY
     float DH[64];
+#endif
 #if !MW_GATE_SAVED
     float AB[128];
 #pragma unroll
     for (int e = 0; e < 128; ++e) AB[e] = 0.f;
 #endif
+#if !MW_EXPAND_ONLY
 #pragma unroll
     for (int e = 0; e < 64; ++e) DH[e] = 0.f;
+#endif
     int prev = -1;
     for (int kb = 0; kb < KB; ++kb, ++it) {
       const int s = (int)(it % NSTAGE);
       mbar_wait(full + s, (it / NSTAGE) & 1u);
       const uint32_t st = su + s * F_STAGE;
-      GATE_FENCE_AB(AB); fence_regs(DH); wgmma_fence();
+      GATE_FENCE_AB(AB); GATE_FENCE_DH(DH); wgmma_fence();
 #pragma unroll
       for (int ks = 0; ks < TBK / 16; ++ks) {
 #if !MW_GATE_SAVED
         mma_n256(AB, dsc_(st + F_XN + cw * B64 + ks * 32), dsc_(st + F_W1 + ks * 32));
 #endif
+#if !MW_EXPAND_ONLY
         mma_n128(DH, dsc_(st + F_DY + cw * B64 + ks * 32), dsc_(st + F_WS + ks * 32));
+#endif
       }
       wgmma_commit();
 #if WAIT0
-      wgmma_wait<0>(); GATE_FENCE_AB(AB); fence_regs(DH); if (wtid == 0) { mbar_arrive(empty + s); if (MCW) mbar_arrive_peer(empty + s, peer); }
+      wgmma_wait<0>(); GATE_FENCE_AB(AB); GATE_FENCE_DH(DH); if (wtid == 0) { mbar_arrive(empty + s); if (MCW) mbar_arrive_peer(empty + s, peer); }
     }
 #else
-      if (prev >= 0) { wgmma_wait<1>(); GATE_FENCE_AB(AB); fence_regs(DH); if (wtid == 0) { mbar_arrive(empty + prev); if (MCW) mbar_arrive_peer(empty + prev, peer); } }
+      if (prev >= 0) { wgmma_wait<1>(); GATE_FENCE_AB(AB); GATE_FENCE_DH(DH); if (wtid == 0) { mbar_arrive(empty + prev); if (MCW) mbar_arrive_peer(empty + prev, peer); } }
       prev = s;
     }
-    wgmma_wait<0>(); GATE_FENCE_AB(AB); fence_regs(DH);
+    wgmma_wait<0>(); GATE_FENCE_AB(AB); GATE_FENCE_DH(DH);
     if (wtid == 0) { mbar_arrive(empty + prev); if (MCW) mbar_arrive_peer(empty + prev, peer); }
 #endif
 #pragma unroll
@@ -173,8 +194,10 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           const int g = 2 * gp + (q >> 1), rb = q & 1, ia = 4 * g + 2 * rb, ib = 4 * (g + 16) + 2 * rb, id = 4 * g + 2 * rb;
+#if !MW_EXPAND_ONLY
           const uint32_t dhp = pack_bf16(DH[id], DH[id + 1]);
           const float g0 = bf16lo(dhp), g1 = bf16hi(dhp);
+#endif
 #if MW_GATE_SAVED
           const size_t off=(size_t)(m0+64*cw+16*warp+(lane>>2)+8*rb)*H+n*THB+8*g+2*(lane&3);
           const uint32_t ap=*reinterpret_cast<const uint32_t*>(saved_a+off),bp=*reinterpret_cast<const uint32_t*>(saved_b+off);
@@ -184,8 +207,12 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
 #endif
           const float s0 = sigmoid_(a0), s1 = sigmoid_(a1), l0 = a0 * s0, l1 = a1 * s1;
           hp[q] = pack_bf16(l0 * b0, l1 * b1);
+#if MW_EXPAND_ONLY
+          dap[q]=pack_bf16(a0,a1);dbp[q]=pack_bf16(b0,b1);
+#else
           dap[q] = pack_bf16((g0 * b0) * (s0 + l0 * (1.f - s0)), (g1 * b1) * (s1 + l1 * (1.f - s1)));
           dbp[q] = pack_bf16(g0 * l0, g1 * l1);
+#endif
         }
         const int col = 8 * (2 * gp + (mi >> 1)) - 64 * ps * (NPASS - 1);
         const uint32_t off = (uint32_t)(col >> 6) * 8192 + swz128((uint32_t)mrow, (uint32_t)((col & 63) * 2));
@@ -201,8 +228,13 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
       for (int cb = 0; cb < CPP; ++cb) {
         const int c = n * THB + 64 * (ps * CPP + cb);
         if (!NO_H) tma_store_2d(&mH, stg + cb * 8192, c, r);   // NO_H: h is the forward's saved activation
+#if MW_EXPAND_ONLY
+        tma_store_2d(&mA, stg + (CPP + cb) * 8192, c, r);
+        tma_store_2d(&mB, stg + (2 * CPP + cb) * 8192, c, r);
+#else
         tma_store_2d(&mDAB, stg + (CPP + cb) * 8192, c, r);
         tma_store_2d(&mDAB, stg + (2 * CPP + cb) * 8192, H + c, r);
+#endif
       }
       tma_store_commit();
     }

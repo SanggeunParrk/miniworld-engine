@@ -20,3 +20,29 @@ void wide_lnsg_launch(const CUtensorMap& mx, const CUtensorMap& mw1p, const CUte
 #endif
     );
 }
+
+#if MW_SPLIT_FWD
+// B200 D512 boundary: LN materializes xn; expand writes h/a/b with TMA stores.
+// Namespace isolates this second instance of the shared WGMMA pipeline.
+namespace mw_split {
+#undef WAIT0
+#define WAIT0 1
+#define TBK 32
+#define NSTAGE 4
+#define STG_HALF 1
+#define REG_C 200
+#define MW_EXPAND_ONLY 1
+#define gate_gemm wide_expand_saved_kernel
+#define tma_store_2d split_tma_store_2d
+#include "kernels/gate_gemm2.cu"
+#undef tma_store_2d
+}
+void wide_expand_saved_launch(const CUtensorMap& mxn,const CUtensorMap& mw1,
+                             const CUtensorMap& mh,const CUtensorMap& ma,const CUtensorMap& mb,
+                             int M,int D,int H,int ctas,cudaStream_t stream){
+  static const bool ready=(wide_smem_optin(reinterpret_cast<const void*>(mw_split::wide_expand_saved_kernel),
+                                          mw_split::SMEM_BYTES,"expand saved"),true);
+  (void)ready;
+  mw_split::wide_expand_saved_kernel<<<ctas,384,mw_split::SMEM_BYTES,stream>>>(mxn,mxn,mw1,mw1,mh,mh,M,D,H,ma,mb);
+}
+#endif

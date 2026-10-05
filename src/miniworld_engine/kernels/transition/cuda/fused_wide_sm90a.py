@@ -61,12 +61,17 @@ def save_ab_enabled(d: int) -> bool:
             and os.environ.get("MINIWORLD_TRANSITION_H100_SAVE_AB", "0") == "1")
 
 
+def split_fwd_enabled(d: int) -> bool:
+    return (d == 512 and save_ab_enabled(d)
+            and os.environ.get("MINIWORLD_TRANSITION_H100_SPLIT_FWD", "0") == "1")
+
+
 def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
 @functools.lru_cache(maxsize=8)
-def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False):
+def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split_fwd: bool = False):
     """Build the extension for one channel width and SM count (both in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid)."""
     ensure_cuda_home()
@@ -77,6 +82,8 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False):
         revision += f"_repl{d64_repl}"
     if save_ab:
         revision += "_saved_ab_v1"
+    if split_fwd:
+        revision += "_split_fwd_v1"
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
@@ -102,7 +109,7 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False):
 
 def _ext_for(x: torch.Tensor, save_ab: bool = False):
     repl = int(os.environ.get("MINIWORLD_TRANSITION_D64_REPL", "16")) if native_aux_enabled() else 16
-    return _ext(x.shape[-1], _sm_count(x.device), repl, save_ab)
+    return _ext(x.shape[-1], _sm_count(x.device), repl, save_ab, save_ab and split_fwd_enabled(x.shape[-1]))
 
 
 @functools.lru_cache(maxsize=8)
@@ -236,6 +243,10 @@ def _saved_fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
                                 torch.Tensor, torch.Tensor, torch.Tensor]:
     if _is_fake(x, wa):
         return _saved_fwd_fake(x, gamma, beta, wa, wb, ws, eps)
+    if split_fwd_enabled(x.shape[-1]):
+        xn, rstd, c1 = _native_ext().ln_fwd(x, gamma, beta, float(eps))
+        out, h, a, b = _ext_for(x, True).fwd_split(xn, x, _pack(wa, wb, 128), ws)
+        return out, xn, rstd, c1, h, a, b
     return tuple(_ext_for(x, True).fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), True))
 
 
@@ -288,11 +299,13 @@ def _bwd_launch(
     dws = _mm_f32(dy.t(), hid)  # [D, H]
     dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb (dab holds dA | dB, unpacked)
     del hid
+    split_dx = (d == 256 and native_aux_enabled()
+                and os.environ.get("MINIWORLD_TRANSITION_H100_SPLIT_DX", "0") == "1")
     if native_aux_enabled():
-        w_ab = _native_ext().pair_layout(wa, wb, 0, d == 256)
+        w_ab = _native_ext().pair_layout(wa, wb, 0, d == 256 and not split_dx)
     else:
         w_ab = torch.cat((wa, wb), 0)
-    if d == 256:
+    if d == 256 and not split_dx:
         if native_aux_enabled():
             dx, pg, pb = ext.dxln_partials(dab, w_ab, x, dy, gamma, rstd, c1)
             dgam, dbeta = _native_ext().reduce_affine(pg, pb)
