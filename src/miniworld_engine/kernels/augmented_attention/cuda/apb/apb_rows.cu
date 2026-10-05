@@ -949,9 +949,59 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Live master-weight conversion for the Hopper full-module path. One CUDA launch,
+// including the small LN vectors; matching-dtype leaves remain views of originals.
+struct LeafCasts {
+  const void* src[11];
+  void* dst[11];
+  int64_t sizes[11];
+  int blocks[11];
+  bool source_float[11], target_float[11];
+};
+__global__ void cast_leaves_k(LeafCasts args) {
+  int block = blockIdx.x;
+  for (int j = 0; j < 11; ++j) {
+    if (block < args.blocks[j]) {
+      const int64_t i = (int64_t)block * blockDim.x + threadIdx.x;
+      if (i < args.sizes[j]) {
+        const float value = args.source_float[j] ? static_cast<const float*>(args.src[j])[i]
+          : __bfloat162float(static_cast<const bf*>(args.src[j])[i]);
+        if (args.target_float[j]) static_cast<float*>(args.dst[j])[i] = value;
+        else static_cast<bf*>(args.dst[j])[i] = __float2bfloat16_rn(value);
+      }
+      return;
+    }
+    block -= args.blocks[j];
+  }
+}
+std::vector<at::Tensor> cast_leaves(std::vector<at::Tensor> leaves) {
+  TORCH_CHECK(leaves.size() == 11, "APB expects eleven parameter leaves");
+  const at::cuda::CUDAGuard gd(leaves[0].device());
+  LeafCasts args{};
+  int blocks = 0;
+  std::vector<at::Tensor> out;
+  for (int j = 0; j < 11; ++j) {
+    const auto& t = leaves[j];
+    TORCH_CHECK(t.is_cuda() && t.device() == leaves[0].device() && t.is_contiguous()
+      && (t.scalar_type() == at::kFloat || t.scalar_type() == at::kBFloat16), "unsupported APB parameter");
+    const auto dtype = j == 0 || j == 1 || j == 8 || j == 9 ? at::kFloat : at::kBFloat16;
+    out.push_back(t.scalar_type() == dtype ? t : at::empty(t.sizes(), t.options().dtype(dtype)));
+    if (t.scalar_type() == dtype) continue;
+    args.src[j] = t.data_ptr(); args.dst[j] = out.back().data_ptr();
+    args.sizes[j] = t.numel(); args.blocks[j] = (t.numel() + 255) / 256;
+    args.source_float[j] = t.scalar_type() == at::kFloat;
+    args.target_float[j] = dtype == at::kFloat;
+    blocks += args.blocks[j];
+  }
+  if (blocks) cast_leaves_k<<<blocks, 256, 0, S()>>>(args);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("cast_leaves", &cast_leaves);
   m.def("pair_bias_fwd", &pair_bias_fwd);
   m.def("pair_bias_bwd", &pair_bias_bwd);
   m.def("ln_rows", &ln_rows);

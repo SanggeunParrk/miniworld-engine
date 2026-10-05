@@ -43,13 +43,21 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef LAZY
 #define LAZY 8.0f                // running-max slack in log2 units (0: exact running max)
 #endif
+#ifndef DHP
+#define DHP 48
+#endif
+#ifndef ROW_WIDTH
+#define ROW_WIDTH 768
+#endif
 #ifndef QWID
-#define QWID 48                  // TMA box width for q / k / v / dO: 48 loads exactly the head (the 128-B swizzled smem
+#define QWID DHP                 // Load exactly one head; shared rows retain their 128-byte pitch.
 #endif                           // image keeps its 128-B row pitch), 64 also pulls 16 columns of the next head
 #ifndef FLOOR
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
-constexpr int BN = 64, DH = 48, QW = QWID, QM = 64 * NWG, DM = 768;
+constexpr int BN = 64, DH = DHP, QW = QWID, QM = 64 * NWG, DM = ROW_WIDTH;
+static_assert(DH == 16 || DH == 32 || DH == 48, "unsupported head width");
+static_assert(DM % DH == 0, "row width must contain complete heads");
 constexpr float LOG2E = 1.4426950408889634f;
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
@@ -67,10 +75,20 @@ TMN_DEVI void mma_s_rs(float* d, const uint32_t (&a)[4], uint64_t b, int accumul
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b), "r"(accumulate));
 }
-TMN_DEVI void mma_o(float (&d)[24], const uint32_t (&a)[4], uint64_t b) {
+TMN_DEVI void mma_o(float (&d)[DH / 2], const uint32_t (&a)[4], uint64_t b) {
+#if DHP == 48
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n48k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23}, {%24,%25,%26,%27}, %28, p, 1, 1, 1; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#elif DHP == 32
+  asm volatile("wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19}, %20, 1, 1, 1, 1;"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#else
+  asm volatile("wgmma.mma_async.sync.aligned.m64n16k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9,%10,%11}, %12, 1, 1, 1, 1;"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#endif
 }
 TMN_DEVI void tma_load_mc(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
@@ -185,9 +203,9 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   // ---- consumer warpgroups: 64 query rows each
   const int lane = tid & 31, warp = (tid >> 5) & 3;
   const int r0 = warp * 16 + (lane >> 2), cb = 2 * (lane & 3);
-  float acc[24];
+  float acc[DH / 2];
 #pragma unroll
-  for (int i = 0; i < 24; ++i) acc[i] = 0.f;
+  for (int i = 0; i < DH / 2; ++i) acc[i] = 0.f;
   float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
   mbar_wait(qbar, 0);
   const uint32_t sq = smem_u32(sm) + QSTAGE + wg * 8192;
@@ -256,7 +274,10 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         float mx = -INFINITY;
 #pragma unroll
         for (int j = 0; j < 8; ++j) mx = fmaxf(mx, fmaxf(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]));
-        mx = fmaxf(qmax(mx), -1e30f);                               // a block of -inf keys (a masked bias) sets a finite max
+        // A finite BF16 mask near -1e30 rounds below -1e30. Clamping
+        // above that value makes every exponent underflow for an all-masked
+        // sample. Preserve finite logits; only replace an all-infinity max.
+        mx = fmaxf(qmax(mx), -3.402823466e38f);
         m_new[h] = mx > m_i[h] + LAZY ? mx : m_i[h];
         moved |= m_new[h] != m_i[h];
       }
@@ -266,7 +287,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
           const float alpha = ex2(m_i[h] - m_new[h]);               // m_i = -inf on the first block: alpha = 0
           l_i[h] *= alpha;
 #pragma unroll
-          for (int j = 0; j < 6; ++j) { acc[4 * j + 2 * h] *= alpha; acc[4 * j + 2 * h + 1] *= alpha; }
+          for (int j = 0; j < DH / 8; ++j) { acc[4 * j + 2 * h] *= alpha; acc[4 * j + 2 * h + 1] *= alpha; }
           m_i[h] = m_new[h];
         }
       }
@@ -284,7 +305,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       }
       wgmma_fence();
 #pragma unroll
-      for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+      for (int i = 0; i < DH / 2; ++i) fence_reg(acc[i]);
 #pragma unroll
       for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dV0 + ((sn * ST_BYTES + ks * 2048) >> 4));
       wgmma_commit();
@@ -300,19 +321,19 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     }
   }
 #pragma unroll
-  for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+  for (int i = 0; i < DH / 2; ++i) fence_reg(acc[i]);
 
   // ---- epilogue: O = acc / l (fp32), LSE = m + log2 l; MODE 1: sigmoid(g) acc / l (bf16) over q; MODE 2: into OG, + LSE
   if constexpr (MODE != 0) mbar_wait(gbar, 0);
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const float l = qsum(l_i[h]);
-    const float inv = 1.f / l;
+    const float inv = l > 0.f ? 1.f / l : 0.f;
     const int row = m0 + wg * 64 + r0 + 8 * h;
     if constexpr (MODE == 1) {
       __nv_bfloat16* orow = QKVG + (size_t)(samp * L + row) * (4 * DM) + qcol;
 #pragma unroll
-      for (int j = 0; j < 6; ++j) {
+      for (int j = 0; j < DH / 8; ++j) {
         const float2 g = bf2f(*reinterpret_cast<const uint32_t*>(sg + ((wg * 64 + r0 + 8 * h) * DH + j * 8 + cb) * 2));
         *reinterpret_cast<__nv_bfloat162*>(orow + j * 8 + cb) =
             __floats2bfloat162_rn(acc[4 * j + 2 * h] * inv * sigmoid_t(g.x), acc[4 * j + 2 * h + 1] * inv * sigmoid_t(g.y));
@@ -322,7 +343,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     if constexpr (MODE == 2) {
       __nv_bfloat16* ogrow = OG + (size_t)(samp * L + row) * DM + qcol;
 #pragma unroll
-      for (int j = 0; j < 6; ++j) {
+      for (int j = 0; j < DH / 8; ++j) {
         const float2 g = bf2f(*reinterpret_cast<const uint32_t*>(sg + ((wg * 64 + r0 + 8 * h) * DH + j * 8 + cb) * 2));
         *reinterpret_cast<__nv_bfloat162*>(ogrow + j * 8 + cb) =
             __floats2bfloat162_rn(acc[4 * j + 2 * h] * inv * sigmoid_e(g.x), acc[4 * j + 2 * h + 1] * inv * sigmoid_e(g.y));
@@ -330,7 +351,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     } else {
       float* orow = O + (size_t)(samp * L + row) * DM + qcol;
 #pragma unroll
-      for (int j = 0; j < 6; ++j)
+      for (int j = 0; j < DH / 8; ++j)
         *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
     }
     if ((lane & 3) == 0) LSE[((size_t)samp * H + head) * L + row] = m_i[h] + __log2f(l);
