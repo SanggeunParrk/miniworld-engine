@@ -27,17 +27,22 @@ def acc_n(heads: int, d: int = 384) -> int:
     return 2 * d + width(heads, d) + heads * DP + heads
 
 
-@functools.lru_cache(maxsize=None)
 def ext():
+    arch = "90a" if torch.cuda.get_device_capability() == (9, 0) else "100"
+    return _ext(arch)
+
+
+@functools.lru_cache(maxsize=None)
+def _ext(arch: str):
     from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     return load_extension(
-        name="apb_rows_cuda",
+        name=f"apb_rows_cuda_sm{arch}",
         sources=[str(_dir / "apb_rows.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                            "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes("100", ptx=("100",))],
+                           *gencodes(arch, ptx=() if arch == "90a" else ("100",))],
         extra_cflags=["-std=c++17"], verbose=False)
 
 
