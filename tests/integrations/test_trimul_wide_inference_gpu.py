@@ -61,3 +61,79 @@ def test_wide_inference_compiles_to_one_graph():
         eager = m(x)
         compiled = torch.compile(m, fullgraph=True, dynamic=False)(x)
     torch.testing.assert_close(compiled, eager, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
+@pytest.mark.parametrize("master", [False, True])
+def test_cuda_live_pack_strides_and_graph(d, master, monkeypatch):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("Hopper required")
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_pack as P
+
+    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", "1")
+    dtype = torch.float32 if master else torch.bfloat16
+    weights = [torch.randn(d, d, device="cuda", dtype=dtype).t() for _ in range(4)]
+    packed = torch.empty(4 * d, d, device="cuda", dtype=torch.bfloat16)
+
+    def expected():
+        gate = torch.cat((weights[1], weights[3])).reshape(-1, 32, d)
+        value = torch.cat((weights[0], weights[2])).reshape(-1, 32, d)
+        return torch.stack((gate, value), 1).reshape_as(packed).bfloat16()
+
+    with torch.no_grad():
+        P.pack_into_cuda(packed, *weights)
+        assert torch.equal(packed, expected())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            P.pack_into_cuda(packed, *weights)
+        graph.replay()
+        first = packed.clone()
+        graph.replay()
+        assert torch.equal(first, packed)
+        weights[0].add_(0.125)
+        graph.replay()
+        assert torch.equal(packed, expected())
+        assert not torch.equal(first, packed)
+
+
+@pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
+@pytest.mark.parametrize("n", [128, 256, 384, 512, 640, 768])
+@pytest.mark.parametrize("master", [False, True])
+def test_cuda_inference_required_buckets_pytorch_and_live_graph(d, n, master, monkeypatch):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("Hopper required")
+    from miniworld_engine.integrations import trimul_h100 as H
+
+    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", "1")
+    m = _module(d)
+    if master:
+        m.float()
+    ref = BidirectionalTriangleMultiplication(d, implementation=I.PYTORCH, p_drop=0.0).cuda().float().eval()
+    ref.load_state_dict(m.state_dict())
+    x = torch.randn(1, n, n, d, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, n, device="cuda") > 0.2
+    with torch.no_grad():
+        assert H.serves_inference(m, x, bidirectional=True)
+        want = ref(x.float(), mask=mask)
+        for _ in range(2):
+            m(x, mask=mask)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = m(x, mask=mask)
+        graph.replay()
+        first = out.clone()
+        graph.replay()
+        assert torch.equal(first, out)
+        cos = torch.nn.functional.cosine_similarity(first.float().flatten(), want.flatten(), dim=0)
+        assert cos.item() >= 0.9999
+        x.add_(0.0625)
+        mask.logical_not_()
+        m.to_left.weight.add_(0.125)
+        graph.replay()
+        assert torch.equal(out, m(x, mask=mask))
+        assert not torch.equal(first, out)
+        mask.zero_()
+        graph.replay()
+        ref.load_state_dict(m.state_dict())
+        want = ref(x.float(), mask=mask)
+        assert torch.nn.functional.cosine_similarity(out.float().flatten(), want.flatten(), dim=0).item() >= 0.9999
