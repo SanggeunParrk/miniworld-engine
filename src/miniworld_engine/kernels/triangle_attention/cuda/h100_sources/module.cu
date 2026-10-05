@@ -22,6 +22,9 @@ template<int C,bool Tail> struct Stage {
   using GS=Shape<int32_t,int32_t>;
   using ST=Stride<int64_t,_1>;
   using TW=decltype(make_tma_copy(SM90_TMA_LOAD{},make_tensor(make_gmem_ptr((Element const*)nullptr),GS{},ST{}),WL{},Shape<Int<N>,_64>{},_1{}));
+  using OS=Shape<int32_t,int32_t,int32_t>;
+  using OStride=Stride<int64_t,_1,int64_t>;
+  using TO=decltype(make_tma_copy(SM90_TMA_STORE{},make_tensor(make_gmem_ptr((Element*)nullptr),OS{},OStride{}),TileLayout{},Shape<_64,_64>{},_1{}));
   struct Shared {
     array_aligned<Element,Tail || C>=384?1:64*C,1024> z;
     array_aligned<float,Tail?1:C,128> lw,lb;
@@ -33,6 +36,7 @@ template<int C,bool Tail> struct Stage {
 };
 template<int C, bool Tail> __global__ __launch_bounds__(128)
 void fused_stage(CUTE_GRID_CONSTANT typename Stage<C,Tail>::TW const tw,
+                 CUTE_GRID_CONSTANT typename Stage<C,Tail>::TO const to,
                  Element const* x,float const* lnw,float const* lnb,Element const* weights,
                  Element const* o,Element const* gate,Element const* drop,bool const* mask,
                  Element* proj,Element* bias,Element* result,float* stats,int rows,int L,int H,float eps,int gate_stride) {
@@ -113,20 +117,35 @@ void fused_stage(CUTE_GRID_CONSTANT typename Stage<C,Tail>::TW const tw,
     __syncthreads();
     if(tid==0 && kk+128<C)load(kk+128);
   }
+  // The last WGMMA has retired before either weight slot is reused. The
+  // fragments' row-strided global stores wasted most memory sectors. Stage
+  // 64-column output tiles in slot0 and let TMA write complete sectors.
+  warpgroup_wait<0>();warpgroup_fence_operand(acc);__syncthreads();
+  Element* staged=s.w[0].data();Element* seed=s.w[1].data();
+  if constexpr(Tail) {
+    for(int t=tid;t<64*N/8;t+=128) {
+      int r=t/(N/8),k=(t%(N/8))*8;
+      uint4 vec=base+r<rows?*reinterpret_cast<uint4 const*>(x+int64_t(base+r)*C+nb+k):make_uint4(0,0,0,0);
+      *reinterpret_cast<uint4*>(seed+(k/64)*4096+al(make_coord(r,k%64)))=vec;
+    }
+    __syncthreads();
+  }
   auto coord=thr.partition_C(make_identity_tensor(Shape<_64,Int<N>>{}));
   #pragma unroll
   for(int j=0;j<size(acc);j+=2) {
-    int row=base+get<0>(coord(j)),col=nb+get<1>(coord(j));
+    int rr=get<0>(coord(j)),cc=get<1>(coord(j));
+    int row=base+rr,col=nb+cc;
+    int stage_offset=(cc/64)*4096+al(make_coord(rr,cc%64));
     if(row<rows) {
       Element lo=Element(acc(j)),hi=Element(acc(j+1));
       if constexpr(Tail) {
         int64_t idx=int64_t(row)*C+col;
         if(drop){int off=((row/(L*L))*L+row%L)*C+col;lo=Element(float(lo)*float(drop[off]));hi=Element(float(hi)*float(drop[off+1]));}
-        lo=Element(float(x[idx])+float(lo));hi=Element(float(x[idx+1])+float(hi));
-        *reinterpret_cast<uint32_t*>(result+idx)=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);
+        lo=Element(float(seed[stage_offset])+float(lo));hi=Element(float(seed[stage_offset+1])+float(hi));
+        *reinterpret_cast<uint32_t*>(staged+stage_offset)=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);
       }else if(col<4*C){
         int p=col/C,c=col%C;int64_t idx=(int64_t(p)*rows+row)*C+c;
-        *reinterpret_cast<uint32_t*>(proj+idx)=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);
+        *reinterpret_cast<uint32_t*>(staged+stage_offset)=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);
       }else{
         int b=row/(L*L),q=(row/L)%L,key=row%L;
         if(col<4*C+H)bias[((b*H+col-4*C)*L+q)*L+key]=mask && !mask[b*L+key]?Element(-3.3895313892515355e38f):lo;
@@ -134,12 +153,34 @@ void fused_stage(CUTE_GRID_CONSTANT typename Stage<C,Tail>::TW const tw,
       }
     }
   }
+  cutlass::arch::fence_view_async_shared();__syncthreads();
+  if(tid==0) {
+    prefetch_tma_descriptor(to.get_tma_descriptor());
+    auto og=to.get_tma_tensor(make_shape(rows,C,Tail?1:4));
+    auto tile=to.get_slice(_0{});
+    #pragma unroll
+    for(int chunk=0;chunk<N/64;++chunk) {
+      int col=nb+chunk*64;
+      if(col<(Tail?C:4*C)) {
+        int track=Tail?0:col/C,channel=col%C;
+        auto dst=local_tile(og(_,_,track),Shape<_64,_64>{},make_coord(base/64,channel/64));
+        auto src=make_tensor(make_smem_ptr(staged+chunk*4096),TileLayout{});
+        copy(to,tile.partition_S(src),tile.partition_D(dst));
+      }
+    }
+    tma_store_arrive();tma_store_wait<0>();
+  }
 }
 
 template<int C,bool Tail> auto weight_tma(torch::Tensor w) {
   using T=Stage<C,Tail>;constexpr int cols=Tail?C:4*C+64;
   auto g=make_tensor(make_gmem_ptr((Element const*)w.data_ptr()),make_shape(cols,C),typename T::ST{C,_1{}});
   return make_tma_copy(SM90_TMA_LOAD{},g,typename T::WL{},Shape<Int<T::N>,_64>{},_1{});
+}
+template<int C,bool Tail> auto output_tma(torch::Tensor out,int rows) {
+  using T=Stage<C,Tail>;
+  auto g=make_tensor(make_gmem_ptr((Element*)out.data_ptr()),make_shape(rows,C,Tail?1:4),typename T::OStride{C,_1{},int64_t(rows)*C});
+  return make_tma_copy(SM90_TMA_STORE{},g,TileLayout{},Shape<_64,_64>{},_1{});
 }
 void metadata(torch::Tensor x) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type()==torch::kBFloat16 && x.is_contiguous() && x.dim()==2,"contiguous BF16 matrix required");
@@ -154,7 +195,7 @@ std::vector<torch::Tensor> h100_front(torch::Tensor x,torch::Tensor lnw,torch::T
   auto p=torch::empty({4,rows,C},x.options()),bias=torch::empty({B,H,L,L},x.options());
   auto stats=torch::empty({rows,2},x.options().dtype(torch::kFloat32));
   int N=C==64?128:256;dim3 grid(((rows+63)/64)*((4*C+64+N-1)/N));auto stream=at::cuda::getCurrentCUDAStream();
-#define F(C_) case C_: C10_CUDA_CHECK(cudaFuncSetAttribute(fused_stage<C_,false>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(typename Stage<C_,false>::Shared))); fused_stage<C_,false><<<grid,128,sizeof(typename Stage<C_,false>::Shared),stream>>>(weight_tma<C_,false>(weights),(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),(Element*)weights.data_ptr(),nullptr,nullptr,nullptr,mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)p.data_ptr(),(Element*)bias.data_ptr(),nullptr,stats.data_ptr<float>(),rows,L,H,float(eps),0);break;
+#define F(C_) case C_: C10_CUDA_CHECK(cudaFuncSetAttribute(fused_stage<C_,false>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(typename Stage<C_,false>::Shared))); fused_stage<C_,false><<<grid,128,sizeof(typename Stage<C_,false>::Shared),stream>>>(weight_tma<C_,false>(weights),output_tma<C_,false>(p,rows),(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),(Element*)weights.data_ptr(),nullptr,nullptr,nullptr,mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)p.data_ptr(),(Element*)bias.data_ptr(),nullptr,stats.data_ptr<float>(),rows,L,H,float(eps),0);break;
   switch(C){F(64) F(128) F(256) F(384) F(512)}
 #undef F
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {p,bias,stats};
@@ -166,7 +207,7 @@ torch::Tensor h100_tail(torch::Tensor x,torch::Tensor gate,torch::Tensor o,torch
   TORCH_CHECK(wo.device()==x.device() && wo.scalar_type()==x.scalar_type() && wo.is_contiguous() && wo.sizes()==torch::IntArrayRef({C,C}),"Wo mismatch");
   TORCH_CHECK(drop.device()==x.device() && drop.scalar_type()==x.scalar_type() && drop.is_contiguous() && (drop.numel()==0 || drop.numel()==rows/L*C),"dropout scale mismatch");
   auto y=torch::empty_like(x);int N=C==64?64:128;dim3 grid(((rows+63)/64)*(C/N));auto stream=at::cuda::getCurrentCUDAStream();
-#define T(C_) case C_: C10_CUDA_CHECK(cudaFuncSetAttribute(fused_stage<C_,true>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(typename Stage<C_,true>::Shared))); fused_stage<C_,true><<<grid,128,sizeof(typename Stage<C_,true>::Shared),stream>>>(weight_tma<C_,true>(wo),(Element*)x.data_ptr(),nullptr,nullptr,(Element*)wo.data_ptr(),(Element*)o.data_ptr(),(Element*)gate.data_ptr(),drop.numel()?(Element*)drop.data_ptr():nullptr,nullptr,nullptr,nullptr,(Element*)y.data_ptr(),nullptr,rows,L,C/32,0.f,gate.stride(0));break;
+#define T(C_) case C_: C10_CUDA_CHECK(cudaFuncSetAttribute(fused_stage<C_,true>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(typename Stage<C_,true>::Shared))); fused_stage<C_,true><<<grid,128,sizeof(typename Stage<C_,true>::Shared),stream>>>(weight_tma<C_,true>(wo),output_tma<C_,true>(y,rows),(Element*)x.data_ptr(),nullptr,nullptr,(Element*)wo.data_ptr(),(Element*)o.data_ptr(),(Element*)gate.data_ptr(),drop.numel()?(Element*)drop.data_ptr():nullptr,nullptr,nullptr,nullptr,(Element*)y.data_ptr(),nullptr,rows,L,C/32,0.f,gate.stride(0));break;
   switch(C){T(64) T(128) T(256) T(384) T(512)}
 #undef T
   C10_CUDA_KERNEL_LAUNCH_CHECK();return y;

@@ -155,6 +155,39 @@ def test_full_module_backward(width, length):
     qualify(width, length)
 
 
+@pytest.mark.parametrize("width", [64, 128, 256, 384, 512])
+@pytest.mark.parametrize("length", [128, 256, 384, 512, 640, 768])
+def test_native_dropout_matches_torch_philox(width, length):
+    m = make(width, dropout=0.25)
+    x = torch.empty(1, length, length, width, device="cuda", dtype=torch.bfloat16)
+    torch.manual_seed(987)
+    want = m._make_drop_scale(x, 0.25).reshape(1, length, width)
+    want_state = torch.cuda.get_rng_state()
+    torch.manual_seed(987)
+    got = native.extension("pack").drop_scale(x, 0.25)
+    assert torch.equal(got, want)
+    assert torch.equal(torch.cuda.get_rng_state(), want_state)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        native.extension("pack").drop_scale(x, 0.25)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = native.extension("pack").drop_scale(x, 0.25)
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.manual_seed(987)
+    graph.replay()
+    torch.testing.assert_close(replayed, want, atol=0, rtol=0)
+    first = replayed.clone()
+    torch.manual_seed(987)
+    graph.replay()
+    assert torch.equal(replayed, first)
+    torch.manual_seed(988)
+    graph.replay()
+    assert not torch.equal(replayed, first)
+
+
 @pytest.mark.parametrize("length", [128, 256, 384, 512, 640, 768])
 @pytest.mark.parametrize("width", [64, 128, 256, 384, 512])
 def test_bucket_forward(width, length):
