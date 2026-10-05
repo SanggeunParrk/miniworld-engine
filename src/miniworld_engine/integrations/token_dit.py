@@ -20,6 +20,7 @@ False -- and returns the first L rows.
 from __future__ import annotations
 
 from types import SimpleNamespace
+import os
 
 import torch
 
@@ -148,6 +149,10 @@ def _infer(
     heads: int,
 ) -> torch.Tensor:
     """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise)."""
+    if (os.environ.get("MINIWORLD_TOKEN_DIT_H100_CANDIDATE") == "1"
+            and torch.cuda.get_device_capability(single.device) == (9, 0)):
+        from miniworld_engine.kernels.conditioned_transition import cuda
+        return cuda.token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads)
     from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
         FusedTokenDiT,
     )
