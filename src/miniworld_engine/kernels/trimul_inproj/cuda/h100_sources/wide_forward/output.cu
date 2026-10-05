@@ -59,6 +59,37 @@ extern "C" __global__ void mw_aux_norm(const bf* x,const float* g,const float* b
   for(int c=threadIdx.x;c<width;c+=256)
     y[row*width+c]=__float2bfloat16_rn(fmaf((__bfloat162float(x[row*width+c])-mean)*rs,g[c],b[c]));
 }
+// Eight rows per CTA, with inputs retained through both warp reductions.
+// Keep mw_aux_norm above as the frozen CTA-per-row comparator.
+__device__ float aux_warp_sum(float v) {
+  for(int q=16;q;q>>=1)v=__fadd_rn(v,__shfl_xor_sync(0xffffffff,v,q));
+  return v;
+}
+extern "C" __global__ void mw_aux_norm_warp(const bf* x,const float* g,const float* b,
+                                             bf* y,float* stats,int width,int rows) {
+  const int row=blockIdx.x*8+(threadIdx.x>>5),lane=threadIdx.x&31;
+  if(row>=rows)return;
+  float values[16],sum=0.f;
+  #pragma unroll
+  for(int j=0;j<16;++j){
+    int c=lane+32*j;
+    values[j]=c<width?__bfloat162float(x[row*width+c]):0.f;
+    sum=__fadd_rn(sum,values[j]);
+  }
+  const float mean=aux_warp_sum(sum)/width;
+  float var=0.f;
+  #pragma unroll
+  for(int j=0;j<16;++j)if(lane+32*j<width){
+    float z=values[j]-mean;var=__fadd_rn(var,__fmul_rn(z,z));
+  }
+  const float rs=rsqrtf(aux_warp_sum(var)/width+1e-5f);
+  if(!lane&&stats){stats[2*row]=mean;stats[2*row+1]=rs;}
+  #pragma unroll
+  for(int j=0;j<16;++j){
+    int c=lane+32*j;
+    if(c<width)y[row*width+c]=__float2bfloat16_rn(fmaf((values[j]-mean)*rs,g[c],b[c]));
+  }
+}
 extern "C" __global__ void mw_aux_fold(const bf* wp,const float* go,const float* bo,
                                         bf* wpf,const bf* wg,const float* gi,const float* bi,
                                         bf* wgf,float* uv,int width,int hidden) {
