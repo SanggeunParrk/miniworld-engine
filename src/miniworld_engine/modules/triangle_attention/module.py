@@ -7,6 +7,8 @@ triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a k
 import math
 from contextlib import contextmanager
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -327,11 +329,15 @@ class TriangleAttention(nn.Module):
         if _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
-        if getattr(self, "_h100_b200style_cuda", False):
+        requested_h100 = (getattr(self, "_h100_b200style_cuda", False)
+                          or (self.implementation in {ImplementationType.MINIWORLD, ImplementationType.TRITON}
+                              and os.environ.get("MINIWORLD_TRIATTN_H100_CANDIDATE") == "1"))
+        if requested_h100:
             from miniworld_engine.integrations import triattn_h100
             if triattn_h100.serves(self, pair, mask):
                 with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                     return triattn_h100.forward(self, pair, mask)
+            raise ValueError("requested H100 CUDA TriangleAttention does not support this shape or dtype")
         if pair.dtype == torch.bfloat16 and self.to_value.weight.dtype == torch.float32 and self._backend == KernelBackend.TRITON:
             from miniworld_engine.kernels.triangle_attention.cuda import (
                 qg_projection_attention,

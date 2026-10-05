@@ -6,6 +6,8 @@ module API. Default dispatch is unchanged until qualification is complete.
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from miniworld_engine import settings
@@ -13,7 +15,11 @@ from miniworld_engine.modules.dispatch import KernelBackend
 
 
 def serves(module, pair, mask=None):
-    if not getattr(module, "_h100_b200style_cuda", False):
+    from miniworld_engine.modules.exceptions import ImplementationType
+
+    if not (getattr(module, "_h100_b200style_cuda", False)
+            or (module.implementation in {ImplementationType.MINIWORLD, ImplementationType.TRITON}
+                and os.environ.get("MINIWORLD_TRIATTN_H100_CANDIDATE") == "1")):
         return False
     if (
         module._backend != KernelBackend.TRITON

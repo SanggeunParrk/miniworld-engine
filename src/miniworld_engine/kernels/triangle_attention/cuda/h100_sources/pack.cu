@@ -1,8 +1,11 @@
 // One CUDA launch stages either BF16 weights or FP32 master weights.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/PhiloxUtils.cuh>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
+#include <curand_kernel.h>
 struct Pack {void const* ptr[6];bool fp32[6];};
 __global__ void pack_parameters(Pack p,__nv_bfloat16* wall,__nv_bfloat16* wo,int C,int H) {
   int64_t idx=int64_t(blockIdx.x)*256+threadIdx.x,n=int64_t(4*C+64)*C;
@@ -66,4 +69,63 @@ std::vector<torch::Tensor> finish(torch::Tensor g,torch::Tensor wo,torch::Tensor
   finish_parameters<<<(n+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(g.data_ptr<float>(),wo.data_ptr<float>(),norm.data_ptr<float>(),out,C,H);
   C10_CUDA_KERNEL_LAUNCH_CHECK();return result;
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("pack",&pack);m.def("finish",&finish);}
+// Fixed-order partial reduction for split-K weight and LN affine gradients.
+// Each output element has exactly one owner; no atomics or framework kernels.
+__global__ void reduce_partials_kernel(float const* input,float* output,int64_t width,int count) {
+  const int64_t i=int64_t(blockIdx.x)*256+threadIdx.x;
+  if(i>=width)return;
+  float value=0.f;
+  for(int p=0;p<count;++p)value+=input[int64_t(p)*width+i];
+  output[i]=value;
+}
+torch::Tensor reduce_partials(torch::Tensor input) {
+  TORCH_CHECK(input.is_cuda() && input.scalar_type()==torch::kFloat32 && input.is_contiguous()
+    && input.dim()>=2 && input.size(0)>0,"contiguous nonempty FP32 partials required");
+  c10::cuda::CUDAGuard guard(input.device());
+  auto output=torch::empty(input.sizes().slice(1),input.options());
+  const auto* src=input.data_ptr<float>();auto* dst=output.data_ptr<float>();
+  int64_t width=output.numel();int count=input.size(0);
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,reduce_partials_kernel));
+  void* args[]={&src,&dst,&width,&count};
+  C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3((width+255)/256),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return output;
+}
+// Same Philox subsequences, BF16 uniform rounding and counter advance as
+// torch.rand(B,1,L,C,dtype=BF16), with threshold and scale in this one launch.
+// PhiloxCudaState carries graph-owned seed/offset pointers during capture.
+__global__ void drop_scale_kernel(__nv_bfloat16* out,int64_t n,at::PhiloxCudaState rng,float p,float inverse) {
+  auto seeds=at::cuda::philox::unpack(rng);
+  int64_t idx=int64_t(blockIdx.x)*256+threadIdx.x,stride=int64_t(gridDim.x)*256;
+  curandStatePhilox4_32_10_t state;
+  curand_init(std::get<0>(seeds),idx,std::get<1>(seeds),&state);
+  for(int64_t base=idx;base<n;base+=4*stride) {
+    float4 values=curand_uniform4(&state);
+    #pragma unroll
+    for(int j=0;j<4;++j) {
+      int64_t pos=base+j*stride;
+      if(pos<n) {
+        float value=__bfloat162float(__float2bfloat16_rn((&values.x)[j]));
+        if(value==1.f)value=0.f;
+        out[pos]=__float2bfloat16_rn(value>p?inverse:0.f);
+      }
+    }
+  }
+}
+torch::Tensor drop_scale(torch::Tensor pair,double probability) {
+  TORCH_CHECK(pair.is_cuda() && pair.scalar_type()==torch::kBFloat16 && pair.dim()==4
+    && pair.size(1)==pair.size(2) && probability>0. && probability<1.,"BF16 square pair and 0<p<1 required");
+  c10::cuda::CUDAGuard guard(pair.device());
+  auto out=torch::empty({pair.size(0),pair.size(1),pair.size(3)},pair.options());
+  int64_t n=out.numel();auto* prop=at::cuda::getCurrentDeviceProperties();
+  int blocks=std::min<int64_t>((n+255)/256,prop->multiProcessorCount*(prop->maxThreadsPerMultiProcessor/256));
+  uint64_t increment=((n-1)/(int64_t(blocks)*256*4)+1)*4;
+  auto* gen=at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
+  at::PhiloxCudaState state;
+  {std::lock_guard<std::mutex> lock(gen->mutex_);state=gen->philox_cuda_state(increment);}
+  auto* dst=(__nv_bfloat16*)out.data_ptr();float p=probability,inverse=1.f/(1.f-p);
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,drop_scale_kernel));
+  void* args[]={&dst,&n,&state,&p,&inverse};
+  C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("pack",&pack);m.def("finish",&finish);m.def("reduce_partials",&reduce_partials);m.def("drop_scale",&drop_scale);}
