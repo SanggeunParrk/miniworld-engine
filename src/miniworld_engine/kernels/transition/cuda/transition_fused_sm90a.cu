@@ -171,7 +171,7 @@ std::vector<at::Tensor> ln_bwd(at::Tensor dy,at::Tensor x,at::Tensor gamma,at::T
   c10::cuda::CUDAGuard guard(x.device());
   for(auto* t:{&dy,&x,&residual})TORCH_CHECK(t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kBFloat16&&t->sizes()==x.sizes(),"LN BF16 rows");
   int d=x.size(-1),rows=x.numel()/d;
-  TORCH_CHECK((d==384||d==512)&&waves>0,"wide LN contract");
+  TORCH_CHECK((d==256||d==384||d==512)&&waves>0,"wide LN contract");
   for(auto* t:{&gamma,&rs,&c1})TORCH_CHECK(t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kFloat,"LN FP32 stats/affine");
   TORCH_CHECK(gamma.numel()==d&&rs.numel()==rows&&c1.numel()==rows,"LN stats shapes");
   int sms=0;C10_CUDA_CHECK(cudaDeviceGetAttribute(&sms,cudaDevAttrMultiProcessorCount,x.get_device()));
@@ -206,7 +206,42 @@ std::vector<at::Tensor> reduce_affine(at::Tensor pg,at::Tensor pb){
     pg.data_ptr<float>(),pb.data_ptr<float>(),dg.data_ptr<float>(),db.data_ptr<float>(),pg.size(0),pg.size(1));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {dg,db};
 }
+__global__ void ln_fwd_k(const bf* x,const float* gamma,const float* beta,bf* xn,float* rs,float* c1,int rows,int d,float eps){
+  int lane=threadIdx.x&31,row=blockIdx.x*8+(threadIdx.x>>5);
+  if(row>=rows)return;
+  float v[16],sum=0.f,var=0.f;
+  union Vec{uint2 u;bf v[4];};
+  #pragma unroll
+  for(int j=0;j<4;++j){
+    int c=(j*32+lane)*4;
+    Vec q;q.u=*reinterpret_cast<const uint2*>(x+row*d+c);
+    #pragma unroll
+    for(int k=0;k<4;++k){v[j*4+k]=__bfloat162float(q.v[k]);sum=__fadd_rn(sum,v[j*4+k]);}
+  }
+  float mean=wsum(sum)/d;
+  #pragma unroll
+  for(int k=0;k<16;++k){float q=v[k]-mean;var=__fadd_rn(var,q*q);}
+  float r=rsqrtf(wsum(var)/d+eps);
+  #pragma unroll
+  for(int j=0;j<4;++j){
+    int c=(j*32+lane)*4;Vec q;
+    #pragma unroll
+    for(int k=0;k<4;++k)q.v[k]=__float2bfloat16_rn((v[j*4+k]-mean)*r*gamma[c+k]+beta[c+k]);
+    *reinterpret_cast<uint2*>(xn+row*d+c)=q.u;
+  }
+  if(!lane){rs[row]=r;c1[row]=mean*r;}
+}
+std::vector<at::Tensor> ln_fwd(at::Tensor x,at::Tensor gamma,at::Tensor beta,double eps){
+  c10::cuda::CUDAGuard guard(x.device());
+  TORCH_CHECK(x.is_cuda()&&x.dim()==2&&x.size(1)==512&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16,"D512 BF16 rows required");
+  for(auto* t:{&gamma,&beta})TORCH_CHECK(t->device()==x.device()&&t->is_contiguous()&&t->scalar_type()==at::kFloat&&t->numel()==512,"FP32 affine required");
+  auto xn=at::empty_like(x),rs=at::empty({x.size(0)},gamma.options()),c1=at::empty_like(rs);
+  ln_fwd_k<<<(x.size(0)+7)/8,256,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const bf*>(x.data_ptr()),
+    gamma.data_ptr<float>(),beta.data_ptr<float>(),reinterpret_cast<bf*>(xn.data_ptr()),rs.data_ptr<float>(),c1.data_ptr<float>(),x.size(0),512,eps);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return {xn,rs,c1};
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){
+  m.def("ln_fwd",&ln_fwd);
   m.def("reduce_affine",&reduce_affine);
   m.def("prepare",&prepare);m.def("pair_layout",&pair_layout);m.def("cast",&cast);m.def("ln_bwd",&ln_bwd);
 }
