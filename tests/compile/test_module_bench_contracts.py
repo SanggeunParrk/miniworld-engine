@@ -48,7 +48,7 @@ def runner(monkeypatch):
     namespace: dict[str, Any] = {"torch": torch, "nn": torch.nn, "Literal": Literal, "NamedTuple": NamedTuple,
                  "TypedDict": TypedDict, "BaseModel": BaseModel, "model_validator": model_validator, "Any": Any, "DictConfig": DictConfig,
                  "FP32_PRECISION": 32, "DEVICE": torch.device("cpu"), "_NO_GRAPH_TARGETS": set(),
-                 "MINIWORLD_IMPL": "miniworld", "DTV1_IMPL": "dtv1",
+                 "MINIWORLD_IMPL": "miniworld", "DTV1_IMPL": "dtv1", "ANTHROPIC_IMPL": "anthropic",
                  "BIAS_ONLY_V_IMPL": "bias_only_v", "cast": cast, "FabricLike": Any,
                  "importlib": importlib, "contextlib": contextlib,
                  "SWA3DRoPEAttention": SWA3DRoPEAttention,
@@ -59,6 +59,7 @@ def runner(monkeypatch):
         "ImplementationType", "Transition", "TriangleAttention", "TriangleMultiplication")})
     namespace["parameter_dtype_of"] = parameter_dtype_of
     namespace["UnsupportedBenchmark"] = UnsupportedBenchmark
+    namespace["_anthropic_upstream_or_unsupported"] = lambda: SimpleNamespace()
     exec(compile(ast.Module(body=body, type_ignores=[]), str(BENCH), "exec"), namespace)
     namespace["BenchConfig"].model_rebuild(_types_namespace=namespace)
     seen = SimpleNamespace(models=[], compiled=[], compile_options=[], measured=[])
@@ -164,10 +165,10 @@ def test_measurement_oom_propagates_to_failed_row_handler(runner, target):
         namespace[f"bench_module_{target}"](config(namespace, target), 2, "pytorch", fabric)
 
 
-@pytest.mark.parametrize("implementation", ["triton", "cuda", "cuequivariance", "anthropic"])
+@pytest.mark.parametrize("implementation", ["triton", "cuda", "cuequivariance"])
 def test_swa_rejects_labels_with_no_separate_implementation(runner, implementation):
     namespace, seen, fabric = runner
-    with pytest.raises(UnsupportedBenchmark, match="implements pytorch and miniworld"):
+    with pytest.raises(UnsupportedBenchmark, match="implements pytorch, miniworld and anthropic"):
         namespace["bench_module_swa_atom_attention"](
             config(namespace, "swa_atom_attention"), 2, implementation, fabric)
     assert not seen.measured
@@ -210,7 +211,7 @@ def test_token_conditioning_uses_declared_condition_width(runner):
 
 @pytest.mark.parametrize(("target", "implementation"), [
     ("conditioned_transition", "cuda"),
-    ("adaptive_layernorm", "cuda"), ("dit", "cuequivariance"), ("swa_dit", "anthropic"),
+    ("adaptive_layernorm", "cuda"), ("dit", "cuequivariance"), ("swa_dit", "cuequivariance"),
 ])
 def test_unsupported_modules_raise_explicit_status_instead_of_nan(runner, target, implementation):
     namespace, seen, fabric = runner
@@ -343,6 +344,22 @@ def test_atom_dit_uses_full_pair_bias_block_and_atom_dimensions(runner):
     assert all(isinstance(layer, DiTBlock) for layer in seen.models[0].layers)
     measured["func"]()
     assert all(t.grad is not None and torch.isfinite(t.grad).all() for t in (single, cond, pair))
+
+
+def test_af3_atom_dit_uses_local_pairs_cross_adaln_and_pair_gradients(runner):
+    from miniworld_engine.modules.local_dit import LocalDiTBlock
+
+    namespace, seen, fabric = runner
+    namespace["bench_module_dit_atom_local"](
+        config(namespace, "dit_atom_local", mode="training", mask_prob=0.0), 5, "pytorch", fabric)
+    measured = seen.measured[0]
+    single, cond, pair = measured["grad_to_none"][:3]
+    assert single.shape == cond.shape == (1, 1, 40, 32)
+    assert pair.shape == (1, 2, 32, 128, 8)
+    assert all(isinstance(layer, LocalDiTBlock) and layer.cross_attention for layer in seen.models[0].layers)
+    measured["func"]()
+    assert all(t.grad is not None and torch.isfinite(t.grad).all() for t in (single, cond, pair))
+    assert "local 32x128" in measured["execution_path"]
 
 
 @pytest.mark.parametrize("target", ["dit", "dit_atom", "augmented_attention_token",

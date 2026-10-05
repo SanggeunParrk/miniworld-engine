@@ -157,6 +157,11 @@ def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
     pin = settings.current().pin_gate_backend
     if pin is not None:
         return pin == "fused"
+    # A100: the hand-CUDA fused kernels (gated_projection/cuda/sm80.py) take every width their gate serves, ahead of the Triton calibration below.
+    from miniworld_engine.kernels.gated_projection.cuda import sm80 as _gated_sm80
+
+    if _gated_sm80.serves(d_hidden, n_out, device, dtype):
+        return True
     mode = autotune_mode()
     # The fused tl.dot's tile is [BLOCK_M1, OUTPUT_N] (N = n_out = d_pair); the
     # contraction d_hidden is just looped over (BLOCK_K). So fused-vs-split is decided

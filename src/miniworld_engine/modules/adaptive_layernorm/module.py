@@ -4,6 +4,7 @@ import torch.nn as nn
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import adaln_sm80 as _sm80
 from miniworld_engine.kernels import adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -52,6 +53,11 @@ class AdaptiveLayerNorm(nn.Module):
         cond: Float[torch.Tensor, "* d_cond"],
     ) -> Float[torch.Tensor, "* d_hidden"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                adaptive_layer_norm,
+            )
+            return adaptive_layer_norm(self, x, cond)
         if self._backend == KernelBackend.PYTORCH:
             x_norm = self.ln_in(x)
             cond_norm = self.ln_cond(cond)
@@ -65,7 +71,8 @@ class AdaptiveLayerNorm(nn.Module):
             # `dispatch.needs_backward` owns the condition -- see its docstring. It was written
             # out here, and ConditionedTransition had its own shorter version, and the two
             # disagreed; neither asked whether gradients were being recorded at all.
-            fn = adaln_train if needs_backward(self, x, cond) else adaln_inference
+            backward = needs_backward(self, x, cond)
+            fn = adaln_train if backward else adaln_inference
             # AMP does not cast custom-op arguments. Keep the native GEMMs and
             # their saved backward operands in one dtype, with FP32 master params
             # connected through differentiable casts. Norm affine stays FP32.
@@ -73,6 +80,9 @@ class AdaptiveLayerNorm(nn.Module):
             compute_dtype = (torch.get_autocast_dtype(device_type)
                              if torch.is_autocast_enabled(device_type) else x.dtype)
             with torch.autocast(device_type=device_type, enabled=False):
+                # A100: hand-CUDA row passes + cuBLAS (integrations.adaln_sm80 states its contract; MINIWORLD_ADALN_SM80=0 keeps the Triton kernels below).
+                if _sm80.serves(self, x, cond, compute_dtype, backward):
+                    return _sm80.update(self, x, cond, compute_dtype, backward)
                 return fn(
                     x.to(compute_dtype),
                     cond.to(compute_dtype),

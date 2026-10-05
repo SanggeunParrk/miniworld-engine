@@ -1,4 +1,4 @@
-"""Fused bias-only token DiT inference over a stack of ``modules.bias_only_dit.BiasOnlyDiTBlock``: CUDA and cuBLAS only.
+"""Fused bias-only token DiT inference over a stack of ``modules.bias_only_dit.BiasOnlyDiTBlock``: CUDA and cuBLAS only (B200: the tcgen05 core, A100: the mma.sync core of ``cuda/sm80``).
 
     runner = FusedBiasOnlyDiT(blocks)          # packs every weight once
     P = runner.hoist(pair, mask)               # once per sample(): every block's attention weights, softmax(pair bias)
@@ -112,7 +112,11 @@ class FusedBiasOnlyDiT:
     def _core(self, device):
         idx = device.index if device.index is not None else torch.cuda.current_device()
         if ("core", idx) not in self._ops:
-            self._ops[("core", idx)] = C.PvGateCore(idx, nh=self.h, dh=self.da // self.h)
+            if torch.cuda.get_device_capability(idx) == (8, 0):          # A100: the mma.sync core of cuda/sm80
+                from miniworld_engine.kernels.bias_only_dit.cuda import sm80
+                self._ops[("core", idx)] = sm80.PvGate(self.h, self.da // self.h)
+            else:
+                self._ops[("core", idx)] = C.PvGateCore(idx, nh=self.h, dh=self.da // self.h)
         return self._ops[("core", idx)]
 
     def _cond(self, device):

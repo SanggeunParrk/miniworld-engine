@@ -51,10 +51,12 @@ struct TrParams {
 #ifndef TR_NWARP
 #define TR_NWARP 8
 #endif
-struct TrCfg {
+template <int D_ = 128, int H_ = 512>
+struct TrCfgT {
   // 8 warps: one CTA per SM, 4-slot ring; 4 warps: two independent CTAs per SM (the SM sub-partition's two warps belong to different
   // CTAs), 2-slot ring in lockstep
-  static constexpr int D = 128, H = 512, NWARP = TR_NWARP, NTHR = 32 * NWARP, MINB = 8 / NWARP, BM = 32 * NWARP;
+  static constexpr int D = D_, H = H_, NWARP = TR_NWARP, NTHR = 32 * NWARP, MINB = 8 / NWARP, BM = 32 * NWARP;
+  static constexpr int NS = D / 16, NJ = D / 8, NV = D / 32;   // GEMM1 k steps, GEMM2 n8 tiles, 16-byte vectors per row of a quad thread
 #ifndef TR_CH
 #define TR_CH 32
 #endif
@@ -83,7 +85,9 @@ struct TrCfg {
   static constexpr int MAX_ITEMS = 255, SMEM_SCHED = 4 * (MAX_ITEMS + 1);   // per-CTA work list, -1 terminated
   static constexpr int SMEM = SMEM_W + SMEM_X + BAR_BYTES + SMEM_GB + SMEM_SCHED;
   static_assert(MINB * (SMEM + 1024) <= 167936, "sm_80 shared memory");
+  static_assert(D % 32 == 0 && H % CH == 0, "widths");
 };
+using TrCfg = TrCfgT<128, 512>;
 
 // x staging row (256 B, 16 granules): granule G at G ^ ((r & 1) << 2).  A quarter-warp of the LN read is rows {r, r + 1} x quads
 // q = 0..3 at granule 4 i + q: bits (G2 ^ r0, q1, q0) pick 8 distinct 16 B bank groups.
@@ -157,8 +161,8 @@ DEVI void load_x(const TrParams& p, const TrWarp& w, int r0, int mt) {  // this 
 #if !TR_XSTAGE
   if (w.lane < 16 * mt && r0 + w.lane < p.T) {                // no staging: pull the rows into L2 (two 128 B lines per row)
     const char* a = reinterpret_cast<const char*>(p.x + (size_t)(r0 + w.lane) * G::D);
-    asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a));
-    asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a + 128));
+#pragma unroll
+    for (int l = 0; l < G::D / 64; ++l) asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a + 128 * l));
   }
   return;
 #endif
@@ -179,26 +183,26 @@ DEVI void load_x(const TrParams& p, const TrWarp& w, int r0, int mt) {  // this 
 #else
 #define STAMP(k) do { } while (0)
 #endif
-template <int MT, class G>
+template <int MT, class G, bool LN = true>
 DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt) {
-  constexpr int D = G::D, NCHUNK = G::NCHUNK, NST = G::NST;
+  constexpr int D = G::D, NCHUNK = G::NCHUNK, NST = G::NST, NS = G::NS, NJ = G::NJ, NV = G::NV;
   const int g8 = w.g8, q = w.q;
 
-  // ---- LayerNorm of rows (16 mt + 8 hr + g8) straight into the A fragments: word v = 2 s + e2 of the thread's 64 B -> fa[mt][s][hr + 2 e2].
-  //      The same 64 B (as f16) initialise the output accumulator: word J = accumulator tile J, so the residual costs nothing at the end.
-  uint32_t fa[MT][8][4];
-  uint32_t acc2[MT][16][2];                                    // f16x2 [mt][n8 tile J][row g8 | g8 + 8]
+  // ---- LayerNorm of rows (16 mt + 8 hr + g8) straight into the A fragments: word v = 2 s + e2 of the thread's 2 D / 4 bytes -> fa[mt][s][hr + 2 e2].
+  //      The same bytes (as f16) initialise the output accumulator: word J = accumulator tile J, so the residual costs nothing at the end.
+  uint32_t fa[MT][NS][4];
+  uint32_t acc2[MT][NJ][2];                                    // f16x2 [mt][n8 tile J][row g8 | g8 + 8]
   STAMP(0);
 #if TR_XSTAGE
   mbar_wait_bo(w.barX, xpar);
 #endif
   STAMP(1);
-  uint4 xin[MT][2][4];                                          // the thread's 4 x 16 B of each of its rows
+  uint4 xin[MT][2][NV];                                         // the thread's NV x 16 B of each of its rows
   auto ld_rows = [&](int mt) {
 #pragma unroll
     for (int hr = 0; hr < 2; ++hr)
 #pragma unroll
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < NV; ++i) {
         const int r = 16 * mt + 8 * hr + g8;
 #if TR_XSTAGE
         xin[mt][hr][i] = lds128(w.xw + swz_x(r, 4 * i + q));
@@ -220,29 +224,30 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
 #ifdef LN_PRE2
       if (hr == 0 && mt + 1 < MT) ld_rows(mt + 1);
 #endif
-      uint32_t wv[16];
+      uint32_t wv[4 * NV];
 #pragma unroll
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < NV; ++i) {
         const uint4 v = xin[mt][hr][i];
         wv[4 * i] = v.x; wv[4 * i + 1] = v.y; wv[4 * i + 2] = v.z; wv[4 * i + 3] = v.w;
       }
-      float xv[32];
+      float xv[8 * NV];
 #pragma unroll
-      for (int e = 0; e < 16; ++e) { xv[2 * e] = bf16lo(wv[e]); xv[2 * e + 1] = bf16hi(wv[e]); }
+      for (int e = 0; e < 4 * NV; ++e) { xv[2 * e] = bf16lo(wv[e]); xv[2 * e + 1] = bf16hi(wv[e]); }
 #pragma unroll
-      for (int e = 0; e < 16; ++e) acc2[mt][e][hr] = pack_f16(xv[2 * e], xv[2 * e + 1]);
+      for (int e = 0; e < 4 * NV; ++e) acc2[mt][e][hr] = LN ? pack_f16(xv[2 * e], xv[2 * e + 1]) : 0u;   // LN: the output accumulator starts at x (the residual)
+      if (LN) {                                                  // the LayerNorm: statistics, the normalised A fragments, xn / stats for the backward
       float sm = 0.f;
 #pragma unroll
-      for (int e = 0; e < 32; ++e) sm += xv[e];
+      for (int e = 0; e < 8 * NV; ++e) sm += xv[e];
       const float mean = quad_sum(sm) * (1.f / D);
       float sq = 0.f;
 #pragma unroll
-      for (int e = 0; e < 32; ++e) { xv[e] -= mean; sq = fmaf(xv[e], xv[e], sq); }
+      for (int e = 0; e < 8 * NV; ++e) { xv[e] -= mean; sq = fmaf(xv[e], xv[e], sq); }
       const float rstd = rsqrtf(quad_sum(sq) * (1.f / D) + p.eps);
       if (p.stats != nullptr && q == 0 && r0 + 16 * mt + 8 * hr + g8 < p.T) p.stats[r0 + 16 * mt + 8 * hr + g8] = make_float2(mean, rstd);
 #pragma unroll
-      for (int i = 0; i < 8; ++i) {
-        const uint4 gi = lds128(w.sGB + (i * 4 + q) * 16), bi = lds128(w.sGB + 512 + (i * 4 + q) * 16);
+      for (int i = 0; i < NS; ++i) {
+        const uint4 gi = lds128(w.sGB + (i * 4 + q) * 16), bi = lds128(w.sGB + 4 * D + (i * 4 + q) * 16);
         const float4 gv = *reinterpret_cast<const float4*>(&gi), bv = *reinterpret_cast<const float4*>(&bi);
         fa[mt][i][hr] = pack_bf16(fmaf(xv[4 * i] * rstd, gv.x, bv.x), fmaf(xv[4 * i + 1] * rstd, gv.y, bv.y));
         fa[mt][i][hr + 2] = pack_bf16(fmaf(xv[4 * i + 2] * rstd, gv.z, bv.z), fmaf(xv[4 * i + 3] * rstd, gv.w, bv.w));
@@ -255,7 +260,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
       if (p.xn != nullptr && r0 + 16 * mt + 8 * hr + g8 < p.T) {
         uint32_t* xr = reinterpret_cast<uint32_t*>(p.xn + (size_t)(r0 + 16 * mt + 8 * hr + g8) * D + 8 * q);
 #pragma unroll
-        for (int j = 0; j < 4; ++j) {                           // words: columns 32 j + 8 q + {0,1 | 2,3 | 4,5 | 6,7}
+        for (int j = 0; j < NV; ++j) {                          // words: columns 32 j + 8 q + {0,1 | 2,3 | 4,5 | 6,7}
 #if XN_STORE == 2
           asm volatile("st.global.cs.v4.u32 [%0], {%1,%2,%3,%4};\n" ::"l"(xr + 16 * j), "r"(xn_copy(fa[mt][2 * j][hr])), "r"(xn_copy(fa[mt][2 * j][hr + 2])),
                        "r"(xn_copy(fa[mt][2 * j + 1][hr])), "r"(xn_copy(fa[mt][2 * j + 1][hr + 2])) : "memory");
@@ -264,6 +269,10 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
           xr[16 * j + 2] = fa[mt][2 * j + 1][hr]; xr[16 * j + 3] = fa[mt][2 * j + 1][hr + 2];
 #endif
         }
+      }
+      } else {                                                   // the bare FFN: the rows themselves are the A fragments (word 2 i + 0 / 1 of the thread's bytes)
+#pragma unroll
+        for (int i = 0; i < NS; ++i) { fa[mt][i][hr] = wv[2 * i]; fa[mt][i][hr + 2] = wv[2 * i + 1]; }
       }
     }
   __syncwarp();
@@ -302,9 +311,9 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
       ldsm_x4(ba[0], wb + w.w1_off + ps * 512);
       ldsm_x4(bb[0], wb + w.w1_off + ps * 512 + 256);
 #pragma unroll
-      for (int s = 0; s < 8; ++s) {
+      for (int s = 0; s < NS; ++s) {
         const int cb = s & 1;
-        if (s < 7) {
+        if (s < NS - 1) {
           ldsm_x4(ba[cb ^ 1], wb + w.w1_off + ps * 512 + (s + 1) * 2 * G::GR1);
           ldsm_x4(bb[cb ^ 1], wb + w.w1_off + ps * 512 + 256 + (s + 1) * 2 * G::GR1);
         }
@@ -322,7 +331,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
       constexpr int NB = G2_AHEAD + 1;                         // GEMM2 B fragments G2_AHEAD j-blocks ahead of their MMAs
       uint32_t bs[NB][4];
 #pragma unroll
-      for (int j = 0; j < G2_AHEAD; ++j) ldsm_x4(bs[j], wb + w.w2_off + ps * 4096 + j * 256);   // under the epilogue
+      for (int j = 0; j < G2_AHEAD; ++j) ldsm_x4(bs[j], wb + w.w2_off + ps * (32 * D) + j * 256);   // under the epilogue
       // SwiGLU in the C fragments -> the GEMM2 A fragment (f16)
       uint32_t ha[MT][4];
 #pragma unroll
@@ -336,9 +345,9 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
       }
       // GEMM2: acc2 += h Ws^T over these 16 hidden units (f16 accumulation)
 #pragma unroll
-      for (int j = 0; j < 8; ++j) {
+      for (int j = 0; j < NS; ++j) {
         const int cb = j % NB;
-        if (j + G2_AHEAD < 8) ldsm_x4(bs[(j + G2_AHEAD) % NB], wb + w.w2_off + ps * 4096 + (j + G2_AHEAD) * 256);
+        if (j + G2_AHEAD < NS) ldsm_x4(bs[(j + G2_AHEAD) % NB], wb + w.w2_off + ps * (32 * D) + (j + G2_AHEAD) * 256);
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
           mma16816_h(acc2[mt][2 * j], ha[mt], bs[cb][0], bs[cb][1]);
@@ -367,7 +376,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
       if (r < p.T) {
         __nv_bfloat16* dst = p.out + (size_t)r * D + 8 * q;
 #pragma unroll
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < NV; ++i) {
           uint32_t o[4];
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
@@ -381,7 +390,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
   STAMP(20);
 }
 
-template <class G>
+template <class G, bool LN = true>
 __global__ void __launch_bounds__(G::NTHR, G::MINB) tr_fwd_kernel(const TrParams p) {
   constexpr int NCHUNK = G::NCHUNK, BM = G::BM;
   extern __shared__ __align__(128) uint8_t smem[];
@@ -418,14 +427,14 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) tr_fwd_kernel(const TrParams
   // ldmatrix lane addresses: matrix mi = lane / 8 -> (row half mi >> 1, granule half mi & 1)
   const int lrow = ((lane >> 4) << 3) + (lane & 7), lgr = (lane >> 3) & 1;
   w.w1_off = lgr * G::GR1 + lrow * 16;                          // + p * 512 (step rows) + 256 (b rows) + s * 2 GR1 (k-step)
-  w.w2_off = G::SLOT_W1 + lgr * 2048 + lrow * 16;               // + p * 4096 (step granules) + j * 256 (out rows)
+  w.w2_off = G::SLOT_W1 + lgr * (16 * G::D) + lrow * 16;               // + p * 32 D (step granules) + j * 256 (out rows)
 
   if (tid == 0) {
     for (int s = 0; s < G::NST; ++s) { mbar_init(bar_full<G>(w, s), G::NTHR); mbar_init(bar_empty<G>(w, s), G::NWARP); }
     for (int k = 0; k < G::NWARP; ++k) mbar_init(smem_u32(bars) + 8 * (2 * G::NST + k), 32);
     mbar_init(smem_u32(bars) + 8 * (G::NBAR - 1), G::NTHR);
   }
-  for (int k = tid; k < 64; k += G::NTHR) reinterpret_cast<float4*>(reinterpret_cast<uint8_t*>(bars) + G::BAR_BYTES)[k] = p.gb[k];
+  if (LN) for (int k = tid; k < G::D / 2; k += G::NTHR) reinterpret_cast<float4*>(reinterpret_cast<uint8_t*>(bars) + G::BAR_BYTES)[k] = p.gb[k];
   __syncthreads();
   if (n_items == 0) return;
   int e = sched[0];
@@ -451,8 +460,8 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) tr_fwd_kernel(const TrParams
 #ifdef TR_TRACE
     w.tr = p.trace + ((size_t)(b * G::NWARP + warp) * 32 + (it & 31)) * 40;
 #endif
-    if (mt == 2) tile<2, G>(p, w, r0, it & 1, nr0, nmt);
-    else tile<1, G>(p, w, r0, it & 1, nr0, nmt);
+    if (mt == 2) tile<2, G, LN>(p, w, r0, it & 1, nr0, nmt);
+    else tile<1, G, LN>(p, w, r0, it & 1, nr0, nmt);
     e = en;
   }
   cp_async_wait<0>();

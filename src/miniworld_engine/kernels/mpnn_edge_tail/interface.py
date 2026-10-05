@@ -13,7 +13,10 @@ import torch
 # right when the edge tensor is the binding constraint. ``triton_compute`` saves the GEMM
 # outputs instead. Both take the edge weight as a slice of the packed input projection,
 # so both read its row stride rather than assuming one.
-EdgeTailBackend = Literal["off", "triton", "triton_compute"]
+# ``cuda`` names the hand-written A100 (sm_80) kernels explicitly (``integrations/mpnn_edge_sm80.py``, saved activations): on an A100 the two Triton policies run them too, unless
+# ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton kernels; ``triton_compute`` (save) maps onto the saving kernels, ``triton`` (recompute) onto the same
+# kernels replayed in the backward.
+EdgeTailBackend = Literal["off", "triton", "triton_compute", "cuda"]
 
 _WIDTH = 128
 # Backward regenerates the dropout mask from a Philox counter keyed by the flat
@@ -138,6 +141,30 @@ def edge_tail_update(
             "autocast, matching BF16 or FP32 norm affine parameters, and an edge "
             "tensor addressable in signed 32-bit indexing"
         )
+    if backend in ("triton", "triton_compute", "cuda"):
+        # The A100 hand-CUDA kernels (lazy: never imported off sm_80, never built until used); the Triton kernels keep every other card, the switch off and a failed build.
+        from miniworld_engine.integrations import mpnn_edge_sm80
+
+        if mpnn_edge_sm80.tail_serves(edge_states, edge_weight, hidden_weight, output_weight):
+            return mpnn_edge_sm80.edge_tail_update(
+                edge_states,
+                query_projection,
+                neighbor_projection,
+                flat_neighbor_indices,
+                edge_weight,
+                hidden_weight,
+                hidden_bias,
+                output_weight,
+                output_bias,
+                norm_weight,
+                norm_bias,
+                seed,
+                eps,
+                dropout_probability,
+                recompute=backend == "triton",
+            )
+        if backend == "cuda":
+            raise ValueError("the sm_80 CUDA MPNN edge tail needs an A100 (capability 8.0), 16-byte aligned weight rows and a loadable extension")
     if backend == "triton_compute":
         # The compute path is written against a flat [rows, 128] view; the contract
         # checked above already guarantees the activations are contiguous, so these are

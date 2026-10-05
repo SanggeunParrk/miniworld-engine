@@ -23,11 +23,12 @@ def _no_payload(monkeypatch):
     monkeypatch.delenv(native.ENV, raising=False)
 
 
-def test_the_option_resolves_only_for_trimul():
-    assert dispatch.resolve("triangle_multiplication", ImplementationType.ANTHROPIC) is dispatch.KernelBackend.ANTHROPIC
-    for op in ("layernorm", "transition", "triangle_attention"):
-        with pytest.raises(ValueError, match="triangle_multiplication only"):
-            dispatch.resolve(op, ImplementationType.ANTHROPIC)
+def test_the_option_resolves_only_for_integrated_operations():
+    for op in ("triangle_multiplication", "layernorm", "rmsnorm", "transition", "triangle_attention",
+               "adaptive_layernorm", "conditioned_transition", "augmented_attention"):
+        assert dispatch.resolve(op, ImplementationType.ANTHROPIC) is dispatch.KernelBackend.ANTHROPIC
+    with pytest.raises(ValueError, match="no Anthropic adapter"):
+        dispatch.resolve("unknown_operation", ImplementationType.ANTHROPIC)
 
 
 def test_only_the_named_and_the_auto_option_ask_for_it(monkeypatch):

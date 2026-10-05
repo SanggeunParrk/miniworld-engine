@@ -9,6 +9,8 @@ forward passes it can serve and its own kernels for everything else; `implementa
 What it serves (anything else falls back to the engine's own backends):
 
   * bf16 pair, no autograd and no live dropout scale — the release calls are forward-only;
+  * sm_80 (A100): the release's sm80 K1/K3 units, built unchanged for sm_80; one direction D64-D384,
+    bidirectional D64/D128, assembled through :func:`_serve_sm100` (the shared sm80-member launcher);
   * sm_90: the payload's `sm_90a` units, one for the module's (c_z, c_hidden): `tmn90_z128_h128` for one direction,
     `tmn90_z128_h256` for the bidirectional module (outgoing + incoming share one input LayerNorm and one 2*c_hidden output
     LayerNorm, so it is ONE unit at twice the hidden width, not two unidirectional calls, which would normalise each half
@@ -42,6 +44,7 @@ SM100_ARCH = "sm_100a"
 SM100_UNITS = ("trimul_k1_sm80", "trimul_k3_sm80")      # the release's sm_80 member, compiled for sm_100a by build_sm100a
 _LOADED: dict[str, Any] = {}
 _CHECKED: set[int] = set()
+_BYTE_CHECKS: dict[int, dict] = {}
 
 
 class PayloadUnavailable(RuntimeError):
@@ -76,12 +79,12 @@ def _load() -> dict[str, Any]:
     return _LOADED
 
 
-def _sm100_refusal(c_z: int, c_hidden: int) -> str | None:
+def _sm100_refusal(c_z: int, c_hidden: int, arch: str = SM100_ARCH) -> str | None:
     build = Path(payload_dir() or "")
-    missing = [u for u in SM100_UNITS if not (build / SM100_ARCH / f"{u}.cubin").is_file()]
+    missing = [u for u in SM100_UNITS if not (build / arch / f"{u}.cubin").is_file()]
     if missing:
-        return (f"the payload has no sm_100a build of its sm_80 member ({', '.join(missing)} under {build / SM100_ARCH}); "
-                f"build it: miniworld-engine dev build-anthropic-sm100a {build}")
+        return (f"the payload has no {arch} build of its sm_80 member ({', '.join(missing)} under {build / arch}); "
+                + (f"build it: miniworld-engine dev build-anthropic-sm100a {build}" if arch == SM100_ARCH else "build it with the release's trimul_native.build for sm_80"))
     if _load()["sm80"].TILES.get((c_z, c_hidden, "bf16")) is None:
         return f"the payload's sm_80 member has no tile row for (c_z={c_z}, c_hidden={c_hidden})"
     return None
@@ -91,7 +94,20 @@ def _checked(device: torch.device) -> dict[str, Any]:
     p = _load()
     idx = 0 if device.index is None else device.index
     if idx not in _CHECKED:
-        p["face"].check(device=idx, gate=False)      # the release's manifest / test-vector gate
+        # Verify source/cubin manifests and loader ABI. Local rebuilds are not
+        # the release cubins named by its byte-vector manifest; this does not
+        # claim the release's bitwise gate (independent qualification is separate).
+        p["face"].check(device=idx, gate=False)
+        if torch.cuda.get_device_capability(idx)[0] == 8:
+            # The release explicitly supports --ignore-build for development
+            # rebuilds. It still checks unchanged input/output digests; only
+            # equality to the original compiler's cubin hash is waived.
+            vectors = importlib.import_module("trimul_native.vectors")
+            report = vectors.replay(device_index=idx, which="gate", ignore_build=True,
+                                    raise_on_fail=True, quiet=True)
+            if report["failed"] or not report["passed"]:
+                raise PayloadUnavailable("A100 rebuilt TriMul failed the unchanged upstream byte vectors")
+            _BYTE_CHECKS[idx] = report
         _CHECKED.add(idx)
     return p
 
@@ -126,8 +142,10 @@ def refusal(pair: torch.Tensor, c_z: int, c_hidden: int, *, grad: bool, dropout:
         cc = torch.cuda.get_device_capability(pair.device)
         if cc == (10, 0):
             return _sm100_refusal(c_z, c_hidden)
+        if cc[0] == 8:                                    # A100 (sm_80): the release's sm_80 member as built, assembled by `_serve_sm100`
+            return _sm100_refusal(c_z, c_hidden, "sm_80")
         if cc != (9, 0):
-            return "the payload serves sm_90 (its sm_90a units) and sm_100 (its sm_80 member rebuilt for sm_100a)"
+            return "the payload serves sm_90 (its sm_90a units), sm_100 (its sm_80 member rebuilt for sm_100a) and sm_80 (that member as built)"
         p = _load()
         if not p["ops"].kernels().has_unit(c_z, c_hidden):
             return f"the payload has no unit for (c_z={c_z}, c_hidden={c_hidden})"
@@ -190,10 +208,23 @@ def update_unidirectional(module: Any, pair: torch.Tensor, mask: torch.Tensor | 
     """`pair + trimul(pair)` for one direction, residual fused in K3, through the payload's served face."""
     if module.ln_pair.eps != module.ln_out.eps:
         raise PayloadUnavailable("the native TriMul normalises input and output with one epsilon")
-    if torch.cuda.get_device_capability(pair.device) == (10, 0):
+    cc = torch.cuda.get_device_capability(pair.device)
+    if cc == (10, 0):
         return _serve_sm100(module, pair, mask, "outgoing" if module.outgoing else "incoming")
     p = _checked(pair.device)
     weights, cache = _prepared(module)
+    if cc[0] == 8:
+        # Use the release face and its packaged size/tile lookup, instead of
+        # reconstructing sm80 launch structs in our bidirectional adapter.
+        out = p["face"].serve(pair, _pair_mask(pair, mask, p["ops"]),
+                              direction="outgoing" if module.outgoing else "incoming",
+                              weights=weights, residual=True, cache=cache, eps=module.ln_pair.eps,
+                              config={"gate": False})
+        module.native_selection = {"unit": "sm_80 member built for sm_80", "entry": "trimul_native.face.serve",
+                                   "local_rebuild": True, "release_byte_gate": False,
+                                   "validation": "manifest/loadcheck and unchanged upstream byte vectors (--ignore-build)",
+                                   "byte_vector_passed": _BYTE_CHECKS[pair.device.index or 0]["passed"]}
+        return out
     out = p["face"].serve(pair, _pair_mask(pair, mask, p["ops"]), direction="outgoing" if module.outgoing else "incoming",
                           weights=weights, residual=True, cache=cache, eps=module.ln_pair.eps)
     module.native_selection = {k: v for k, v in cache.items() if isinstance(k, tuple) and k and k[0] == "_sel"}
@@ -205,7 +236,7 @@ def update_bidirectional(module: Any, pair: torch.Tensor, mask: torch.Tensor | N
     contractions -> K3 over both halves with the residual fused."""
     if module.ln_pair.eps != module.ln_out.eps:
         raise PayloadUnavailable("the native TriMul normalises input and output with one epsilon")
-    if torch.cuda.get_device_capability(pair.device) == (10, 0):
+    if torch.cuda.get_device_capability(pair.device) == (10, 0) or torch.cuda.get_device_capability(pair.device)[0] == 8:
         return _serve_sm100(module, pair, mask, "bidirectional")
     p = _checked(pair.device)
     ops = p["ops"]
@@ -234,7 +265,7 @@ def _serve_sm100(module: Any, pair: torch.Tensor, mask: torch.Tensor | None, dir
     NT and the incoming half TN -- the composition `update_bidirectional` runs with the sm_90a unit."""
     if module.ln_pair.eps != module.ln_out.eps:
         raise PayloadUnavailable("the native TriMul normalises input and output with one epsilon")
-    p = _load()
+    p = _checked(pair.device) if torch.cuda.get_device_capability(pair.device)[0] == 8 else _load()
     s, launch = p["sm80"], p["launch"]
     launch.ARCH_OF_CC.setdefault((10, 0), SM100_ARCH)    # the release keys cubins by device arch and knows no cc 10.0
     weights, cache = _prepared(module)
@@ -301,7 +332,12 @@ def _serve_sm100(module: Any, pair: torch.Tensor, mask: torch.Tensor | None, dir
     else:
         torch.bmm(a, b.transpose(1, 2), out=x)                             # planes [i][k] (either direction)
     s._launch(k3, grid3, blk3, a3, smem3)
-    module.native_selection = {"unit": f"sm_80 member built for {SM100_ARCH}", "kernels": f"{k1n} | torch.bmm {form} | {k3n}"}
+    arch = launch.ARCH_OF_CC[torch.cuda.get_device_capability(pair.device)]
+    module.native_selection = {"unit": f"sm_80 member built for {arch}", "kernels": f"{k1n} | torch.bmm {form} | {k3n}"}
+    if arch == "sm_80":
+        module.native_selection.update(entry="composed native K1 + two contractions + K3",
+                                       byte_vector_passed=_BYTE_CHECKS[dev]["passed"],
+                                       validation="unchanged upstream byte vectors (--ignore-build)")
     return out
 
 

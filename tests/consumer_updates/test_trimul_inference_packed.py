@@ -35,6 +35,7 @@ def setup(length):
 @torch.no_grad()
 def test_inference_uses_packed_with_identical_output(monkeypatch, mask_kind):
     model, x, mask = setup(33)
+    model._sm80_cuda = False          # this test is about the Triton packed contraction; the A100 CUDA families would take the call first
     if mask_kind == "none":
         mask = None
     elif mask_kind == "empty":

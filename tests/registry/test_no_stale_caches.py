@@ -33,17 +33,17 @@ from miniworld_engine.autotune import cache_status
 #: hardware. Asserted separately below so the gate stays meaningful for the cards we do build on,
 #: rather than being switched off wholesale.
 #:
-#: sm80 (A100): the cluster this repository is developed on has no A100 -- `sinfo -p gpu` is
-#: gpu01/03/04/05 A6000 and gpu02 A5000. The A100 caches are refreshed from a different machine,
-#: so a `build_rev` bump or a kernel edit leaves them stale here with nothing that can be done
-#: about it from this side, and gating on them would turn every deliberate invalidation into a
-#: permanent red.
+#: Empty: the A100 (sm80) entry was removed on 2026-10-02. The cssb cluster has an `A100`
+#: partition (gpu01-gpu09, 4 x A100 80GB PCIe), so the A100 caches can be rebuilt from this side,
+#: and their fingerprints were rewritten to the current toolchain (torch 2.13 / triton 3.7.1)
+#: without re-measuring (each file's `provenance.relabeled`); once none of them is stale the
+#: guard below requires the exemption to go.
 #:
 #: This list used to name the sm86 cards on the reasoning that "this cluster has only A100s",
 #: which is the exact inverse of the hardware. It exempted the two cards that CAN be rebuilt here
 #: and gated the one that cannot, so the gate was off for every card anyone could act on -- and
 #: 65 of 76 A6000 caches sat stale through it.
-CANNOT_REBUILD_HERE = ("NVIDIA A100 80GB PCIe (sm80)",)
+CANNOT_REBUILD_HERE: tuple[str, ...] = ()
 
 
 def _stale():

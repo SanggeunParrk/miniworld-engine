@@ -8,11 +8,14 @@ import torch
 
 from miniworld_engine.kernels.mpnn_edge_mlp.reference import edge_mlp_update_pytorch
 
+# ``cuda`` names the hand-written A100 (sm_80) kernels (``integrations/mpnn_edge_sm80.py``): on an A100 ``auto`` (calibrated sizes), ``triton_compute`` (the saved projection) and
+# ``triton_memory`` (recompute) run them too, unless ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton kernels.
 EdgeMLPBackend = Literal[
     "auto",
     "pytorch",
     "triton_compute",
     "triton_memory",
+    "cuda",
 ]
 
 _INT32_MAX = 2**31 - 1
@@ -122,6 +125,7 @@ def edge_mlp_update(
         "pytorch",
         "triton_compute",
         "triton_memory",
+        "cuda",
     }:
         raise ValueError(f"unknown MPNN edge MLP backend: {backend!r}")
     supported = _triton_supported(
@@ -131,13 +135,31 @@ def edge_mlp_update(
         output_weight,
         output_bias,
     )
-    if backend in {"triton_compute", "triton_memory"} and not supported:
+    if backend in {"triton_compute", "triton_memory", "cuda"} and not supported:
         raise ValueError(
             "the Triton MPNN edge MLP requires contiguous CUDA BF16 input "
             "[..., 128] and contiguous [128, 128]/[128] projection parameters "
             "using CUDA BF16 autocast or native BF16 parameters, with offsets "
             "that fit in signed 32-bit indexing"
         )
+    if supported and backend != "pytorch":
+        # The A100 hand-CUDA kernels (lazy: never imported off sm_80, never built until used); ``auto`` keeps the Triton rule's size floor, and the Triton kernels / PyTorch keep every
+        # other card, the switch off and a failed build.
+        from miniworld_engine.integrations import mpnn_edge_sm80
+
+        if mpnn_edge_sm80.mlp_serves(preactivation, hidden_weight, output_weight) and (
+            backend != "auto" or preactivation.numel() // 128 >= _MIN_AUTO_ROWS
+        ):
+            return mpnn_edge_sm80.edge_mlp_update(
+                preactivation,
+                hidden_weight,
+                hidden_bias,
+                output_weight,
+                output_bias,
+                memory=backend == "triton_memory",
+            )
+    if backend == "cuda":
+        raise ValueError("the sm_80 CUDA MPNN edge MLP needs an A100 (capability 8.0), 16-byte aligned weights and a loadable extension")
     selected = _select_backend(preactivation, backend, supported=supported)
     if selected == "triton_memory":
         from miniworld_engine.kernels.mpnn_edge_mlp.triton import triton_edge_mlp_update

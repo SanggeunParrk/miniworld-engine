@@ -38,16 +38,18 @@ def _tf32(on: bool):
 
 
 def _row_kernels(device):
-    """The row passes between the GEMMs: CUDA on B200 (``kernels/conditioned_transition/cuda``), Triton elsewhere or
-    when the extension does not build. MINIWORLD_TOKEN_DIT_ROWS_CUDA=0 keeps Triton on B200 too."""
+    """The row passes between the GEMMs: CUDA on A100 and B200 (``kernels/conditioned_transition/cuda``), Triton elsewhere or
+    when the extension does not build. MINIWORLD_TOKEN_DIT_ROWS_CUDA=0 keeps Triton on A100 / B200 too."""
     import os
-    if (device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0)
+    if (device.type == "cuda" and torch.cuda.get_device_capability(device) in ((8, 0), (10, 0))
             and os.environ.get("MINIWORLD_TOKEN_DIT_ROWS_CUDA", "1") != "0"):
         try:
             from miniworld_engine.kernels.conditioned_transition import cuda as cuda_rows
             cuda_rows.available()
             return cuda_rows
         except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton rows
+            if torch.cuda.get_device_capability(device) == (8, 0):
+                raise RuntimeError("A100 Token DiT requires the CUDA row extension; refusing a silent Triton fallback") from exc
             import warnings
             warnings.warn(f"token DiT CUDA row kernels unavailable, keeping Triton: {exc!r}", RuntimeWarning, stacklevel=2)
     return K
@@ -106,7 +108,8 @@ class FusedTokenDiT:
         f32 = lambda t: t.detach().float()
         # column blocks of the projection GEMM output. fp32 packs q | k | g | v: its sm_100a core (TF32) takes q | k | g and
         # v^T from a second GEMM over the last quarter of the weight (see _run), with no copy of the pack
-        order = ("q", "k", "g", "v") if dtype is torch.float32 else ("q", "k", "v", "g")
+        ampere = dev.type == "cuda" and torch.cuda.get_device_capability(dev) == (8, 0)       # the A100 cores (bf16 and TF32) take q | k | v | g in one block
+        order = ("q", "k", "g", "v") if dtype is torch.float32 and not ampere else ("q", "k", "v", "g")
         self.col = {n: i for i, n in enumerate(order)}
         w1, b1, w2, b2, pw = [], [], [], [], []
         self.per = []
@@ -269,7 +272,7 @@ class FusedTokenDiT:
         key = atom_key(L)
         q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., c[n] * D:(c[n] + 1) * D].unflatten(-1, (H, D // H)) for n in "qkvg")
         sm100 = self.core == "gated2" and self.prescale and self._sm100_core(single.device, L, D, H)
-        tf32_core = sm100 and self.dtype is torch.float32
+        tf32_core = sm100 and self.dtype is torch.float32 and not getattr(sm100, "ampere", False)    # B200's TF32 core (v^T separate); the A100 cores take qkvg whole
         if tf32_core:
             # the TF32 core's operands in the same storage: q | k | g [M, 3D] (o lands over q) and v^T [D, M]
             qkg, vt = qkvg.view(-1)[:3 * M * D].view(M, 3 * D), qkvg.view(-1)[3 * M * D:].view(D, M)
@@ -349,11 +352,20 @@ class FusedTokenDiT:
 
     def _sm100_core(self, device, L, D, H):
         """The sm_100a gated core (``augmented_attention/cuda/sm100``: attn_inf.cu for bf16 at 16 x 48, 24 x 32, 12 x 64, 16 x 64;
-        attn_inf_tf32.cu for fp32 with TF32 MMA at 16 x 48) where it fits -- L a multiple of 8, B200 -- and builds; the Triton
-        gated2 core otherwise.
+        attn_inf_tf32.cu for fp32 with TF32 MMA at 16 x 48) where it fits -- L a multiple of 8, B200 -- and builds; on an A100 the
+        sm_80 gated core (``augmented_attention/cuda/sm80``: bf16 at 16 x 48, L a multiple of 128); the Triton gated2 core otherwise.
         Same contract: pre-scaled logits in, sigmoid(g) * o written over q."""
         idx = device.index if device.index is not None else torch.cuda.current_device()
         cores = self.__dict__.setdefault("_sm100_cores", {})
+        if idx not in cores and torch.cuda.get_device_capability(device) == (8, 0):
+            from miniworld_engine.kernels.augmented_attention.cuda import sm80
+            core = None
+            if sm80.supported(self.dtype, L, D, H, idx) and not torch.compiler.is_compiling():
+                try:
+                    core = sm80.GatedInferenceCore(idx, self.dtype, H, D // H)
+                except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
+                    raise RuntimeError("A100 Token DiT requires the CUDA attention extension; refusing a silent Triton fallback") from exc
+            cores[idx] = core
         if idx not in cores:
             from miniworld_engine.kernels.augmented_attention.cuda import sm100
             core = None

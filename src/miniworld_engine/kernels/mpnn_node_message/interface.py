@@ -112,6 +112,22 @@ def node_message_reduce(
             "BF16 or all FP32 under BF16 autocast, and an edge tensor addressable "
             "in signed 32-bit indexing"
         )
+    # An A100 runs the hand-CUDA kernels of ``cuda/sm80`` for both policies (one forward kernel; a backward that replays it, so nothing edge-sized is saved): the gate is
+    # ``integrations/mpnn_msg_sm80.py``'s (capability 8.0, engine backend not forced to Triton, ``MINIWORLD_MPNN_MSG_SM80=0`` keeps the Triton kernels).
+    from miniworld_engine.integrations import mpnn_msg_sm80
+
+    if mpnn_msg_sm80.serves_node(edge_states, backend):
+        return mpnn_msg_sm80.node_message_reduce(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+            neighbor_scale,
+        )
     from miniworld_engine.kernels.mpnn_node_message.triton.main import (
         triton_node_message_reduce,
         triton_node_message_reduce_compute,

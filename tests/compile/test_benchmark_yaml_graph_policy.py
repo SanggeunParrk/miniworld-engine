@@ -48,7 +48,7 @@ def test_native_default_comparisons_include_only_equivalent_paths():
     # here on purpose and a lost one says which.
     assert {path.parent.parent.name for path in CONFIGS} == {
         "adaptive_layernorm", "attention_pair_bias", "augmented_attention_atom", "augmented_attention_token",
-        "bias_only_dit", "conditioned_transition", "dit", "dit_atom", "msa_pair_weighted_averaging", "outer_product",
+        "bias_only_dit", "conditioned_transition", "dit", "dit_atom", "dit_atom_local", "msa_pair_weighted_averaging", "outer_product",
         "swa_atom_attention", "swa_dit", "transition", "triangle_attention", "triangle_multiplication",
         "triangle_multiplication_bidirectional"}
     configs = {path.parent.parent.name: yaml.safe_load(path.read_text()) for path in CONFIGS}

@@ -1,0 +1,65 @@
+{
+  "128|131072": {
+    "ms": {
+      "atomic": 0.152754,
+      "persistent": 0.174959
+    },
+    "path": "atomic"
+  },
+  "128|262144": {
+    "ms": {
+      "atomic": 0.219835,
+      "persistent": 0.260306
+    },
+    "path": "atomic"
+  },
+  "128|4096": {
+    "ms": {
+      "atomic": 0.016848,
+      "persistent": 0.030278
+    },
+    "path": "atomic"
+  },
+  "128|524288": {
+    "ms": {
+      "atomic": 0.305845,
+      "persistent": 0.35656
+    },
+    "path": "atomic"
+  },
+  "16|64": {
+    "ms": {
+      "atomic": 0.011037,
+      "persistent": 0.040249
+    },
+    "path": "atomic"
+  },
+  "256|131072": {
+    "ms": {
+      "atomic": 0.431104,
+      "persistent": 0.558324
+    },
+    "path": "atomic"
+  },
+  "256|4096": {
+    "ms": {
+      "atomic": 0.024739,
+      "persistent": 0.039898
+    },
+    "path": "atomic"
+  },
+  "384|128": {
+    "ms": {
+      "atomic": 0.024792,
+      "persistent": 0.063316
+    },
+    "path": "atomic"
+  },
+  "384|256": {
+    "ms": {
+      "atomic": 0.013423,
+      "persistent": 0.027009
+    },
+    "path": "atomic"
+  }
+}

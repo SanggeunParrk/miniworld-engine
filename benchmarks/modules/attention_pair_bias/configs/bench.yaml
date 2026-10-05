@@ -6,7 +6,8 @@
 # implementations:
 #   pytorch         the module's statements (SDPA + additive pair bias)
 #   triton          Triton LayerNorms + the augmented-attention QK+pair-bias kernel (one augmentation)
-#   miniworld       auto: the same attention kernel with the engine's auto LayerNorm
+#   miniworld       auto: the same attention kernel with the engine's auto LayerNorm; hand CUDA + cuBLAS on a B200 / an A100
+#                   (integrations/attention_pair_bias_b200.py / attention_pair_bias_sm80.py)
 #   cuequivariance  cuequivariance_torch.attention_pair_bias (0.12) called with the module's own
 #                   parameters + the module's residual: the same function for use_qk_norm=False
 #                   (accuracy columns compare it to the fp32 pytorch module). cueq routes per

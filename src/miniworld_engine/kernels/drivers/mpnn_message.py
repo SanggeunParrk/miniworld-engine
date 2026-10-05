@@ -29,15 +29,21 @@ def _inputs(*, grad: bool):
 
 
 def _message(*, backward: bool) -> None:
+    from miniworld_engine import settings
     from miniworld_engine.kernels.mpnn_message.interface import message_hidden_reduce
 
     preactivation, weight, bias, mask = _inputs(grad=backward)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        out = message_hidden_reduce(
-            preactivation, weight, bias, mask, _NEIGHBORS, backend="triton",
-        )
-    if backward:
-        out.sum().backward()
+    # The rows tune the TRITON kernels: pinned, because an A100 would serve this call from its hand-CUDA path (integrations/mpnn_msg_sm80.py), which has nothing to tune.
+    previous = settings.configure(engine_backend="triton")
+    try:
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            out = message_hidden_reduce(
+                preactivation, weight, bias, mask, _NEIGHBORS, backend="triton",
+            )
+        if backward:
+            out.sum().backward()
+    finally:
+        settings.configure(engine_backend=previous.engine_backend)
 
 
 def mpnn_message_fwd_gemm_triton() -> None:

@@ -74,8 +74,41 @@ def transition(
             return fused_wide_sm100a.transition_wide_sm100a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
 
+        from miniworld_engine.kernels.transition.cuda import fused_sm80, fused_wide_sm80
+
+        # the A100: ``fused_sm80`` at d=128 / n=4 with enough rows, ``fused_wide_sm80`` otherwise (each gate says no on any other card)
+        route = fused_wide_sm80.route(x, expand_a_weight, squeeze_weight)
+        if route == "fused":
+            return fused_sm80.transition_fused_sm80(
+                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+        if route == "wide":
+            return fused_wide_sm80.transition_wide_sm80(
+                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+
     from miniworld_engine.kernels.transition.triton.residual import transition_residual
 
     return transition_residual(
         x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps,
     )
+
+
+def swiglu_ffn(
+    x: torch.Tensor,                     # (..., d_hidden)
+    expand_a_weight: torch.Tensor,       # (d_expanded, d_hidden)
+    expand_b_weight: torch.Tensor,       # (d_expanded, d_hidden)
+    squeeze_weight: torch.Tensor,        # (d_hidden, d_expanded)
+) -> torch.Tensor:
+    """``squeeze(silu(x Wa^T) * (x Wb^T))`` -- a bare SwiGLU FFN (no LayerNorm, no residual), forward and backward; the dispatch behind
+    ``ops.swiglu_ffn``: the A100 hand-CUDA path (``cuda/fused_wide_sm80``) where it applies (bf16, sm_80, width 64 .. 768, hidden a multiple of 64,
+    ``MINIWORLD_TRANSITION_FUSED_SM80`` / ``MINIWORLD_TRANSITION_WIDE_SM80`` not 0, engine backend not forced to Triton), else the Triton path
+    (``kernels.triton_swiglu_ffn``)."""
+    from miniworld_engine import settings
+
+    if settings.current().engine_backend != "triton":
+        from miniworld_engine.kernels.transition.cuda import fused_wide_sm80
+
+        if fused_wide_sm80.available(x, expand_a_weight, squeeze_weight):
+            return fused_wide_sm80.swiglu_ffn_sm80(x, expand_a_weight, expand_b_weight, squeeze_weight)
+    from miniworld_engine.kernels.transition.triton.fused import triton_swiglu_ffn
+
+    return triton_swiglu_ffn(x, expand_a_weight, expand_b_weight, squeeze_weight)

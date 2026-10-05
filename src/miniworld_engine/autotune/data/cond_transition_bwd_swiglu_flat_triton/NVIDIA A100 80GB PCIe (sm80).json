@@ -1,4 +1,5 @@
 {
+  "build_rev": 2,
   "config_space_hash": "dfaedae12ac3",
   "driver_id_scheme": 2,
   "driver_identity": "0dbd7ce4243f",
@@ -1716,7 +1717,7 @@
       "dfaedae12ac3"
     ]
   },
-  "env_identity": "4cfb996f8c09",
+  "env_identity": "7efec5ac14d2",
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
   "grids": {
     "dfaedae12ac3": [
@@ -1839,6 +1840,14 @@
   "op_identity": "f6e09d3786fd",
   "provenance": {
     "built_utc": "2026-08-30T22:31:55+00:00",
+    "relabeled": {
+      "date": "2026-10-02",
+      "from": {
+        "build_rev": 1,
+        "env_identity": "4cfb996f8c09"
+      },
+      "note": "fingerprints rewritten, measurements kept"
+    },
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

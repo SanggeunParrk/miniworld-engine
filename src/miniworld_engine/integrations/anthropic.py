@@ -1,17 +1,61 @@
-"""Inference adapters for Anthropic's uplifting-biomolecular-modeling release.
+"""Adapters for Anthropic's uplifting-biomolecular-modeling release.
 
 Upstream algorithms live unchanged under third_party/anthropic. These adapters
 provide engine entry points; they do not implement or claim upstream kernels.
-Low-level release calls require no_grad(). TriMul modules also expose an explicit
-native_rebuilt training baseline in anthropic_training.py.
+Torch inference adapters require no_grad(). Separately named backward and JAX
+entry points preserve the release's differentiation contracts. TriMul modules
+also expose an explicit native_rebuilt training baseline in anthropic_training.py.
 """
 import os
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from importlib import import_module
 from pathlib import Path
 
 REVISION = "f4f62fa6592ae4938d49b1757bea0cfeff9f468e"
 _ROOT = None
+_TIMING = ContextVar("anthropic_timing", default="eager")
+
+
+@contextmanager
+def execution_policy(*, timing="eager"):
+    """Use the release's eager/graph selection column, including graph warm-up.
+
+    Wrap warm-up, reference calls and capture together with timing="graph" so
+    the provider selects the same row before and during capture. Explicitly
+    named primitive rows retain their original refusal semantics.
+    """
+    if timing not in ("eager", "graph"):
+        raise ValueError("Anthropic timing must be eager or graph")
+    token = _TIMING.set(timing)
+    try:
+        yield
+    finally:
+        _TIMING.reset(token)
+
+
+def module_pair_bias_attention(q, k, v, bias, key_mask=None, gate=None):
+    """Release fast-tier selection for registered geometries; named APB otherwise.
+
+    Generic engine geometries have no upstream module cell. Their APB composition
+    remains explicit and must not be described as a measured release winner.
+    """
+    import torch
+    _inference()
+    face = provider("apb")
+    heads, head_dim = q.shape[-2:]
+    cell = next((c for kind in ("dit", "pf", "msarow")
+                 if (c := face.cell_word(kind, heads=heads, head_dim=head_dim)) is not None), None)
+    word = "fast" if cell is not None else "apb_attn"
+    timing = _TIMING.get()
+    selection = face.select(torch.cuda.get_device_capability(q.device), q.dtype, cell, q.shape[1],
+                            word=word, samples=q.shape[0], heads=heads, head_dim=head_dim,
+                            capture=timing == "graph", timing=timing)
+    if torch.cuda.is_current_stream_capturing() and not selection.capture_safe:
+        raise RuntimeError("Anthropic row is not capture-safe; warm up with execution_policy(timing='graph')")
+    return face.pair_bias_attention(q, k, v, bias, key_mask, gate, word=word,
+                                   cell=cell, selection=selection)
 
 
 def configure(root=None):
@@ -48,7 +92,9 @@ def carried_kernel(name):
         configure()
     k = import_module("opt_core.kernels")
     k.route(name)
-    return import_module(name)
+    # Provider packages use relative imports of opt_core's census/loaders.
+    # Importing them as top-level modules loses that package context.
+    return import_module(f"opt_core.kernels.{name}")
 
 
 def operation(name):
@@ -59,6 +105,60 @@ def operation(name):
     if _ROOT is None:
         configure()
     return import_module(f"opt_core.ops.{name}")
+
+
+def catalog():
+    """Every carried kernel's upstream metadata, without importing optional runtimes."""
+    if _ROOT is None:
+        configure()
+    kernels = import_module("opt_core.kernels")
+    return {name: kernels.sums(name) for name in kernels.names()}
+
+
+def pallas_call(op, *args, **kwargs):
+    """Execute the upstream JAX/Pallas face, including its differentiable rows.
+
+    Arrays remain JAX arrays. ``word`` names the actual row; strict serving
+    propagates refusal instead of silently selecting a different algorithm.
+    """
+    if op not in {"attention", "triangle_attention_block", "triangle_multiplication",
+                  "glu_transposed_masked", "transition", "layer_norm", "outer_product_mean"}:
+        raise ValueError(f"Unknown Pallas operation: {op}")
+    if _ROOT is None:
+        configure()
+    kwargs.setdefault("strict", True)
+    return getattr(import_module("opt_core.kernels.pallas.serve"), op)(*args, **kwargs)
+
+
+def pallas_components():
+    """Explicit unfused/fused stage API, independent of the measured tier table.
+
+    Callers choose valid tile sizes themselves. This does not override a refusal
+    from ``pallas_call`` or claim the selected shape was measured upstream.
+    """
+    if _ROOT is None:
+        configure()
+    return import_module("opt_core.kernels.fpf_pallas_serve")
+
+
+def triangle_attention_xla(*args, **kwargs):
+    """Native JAX FFI forward or the release's explicitly selected VJP."""
+    return provider("triattn_xla").triangle_attention(*args, **kwargs)
+
+
+def triangle_multiplication_xla(*args, **kwargs):
+    """Native JAX FFI TriMul, retaining the release's architecture contract."""
+    return provider("trimul_xla").triangle_multiplication(*args, **kwargs)
+
+
+def transition_autograd(x, weights, *, row, **kwargs):
+    """The release's differentiable transition (frozen weights, input gradient)."""
+    return provider("transition").transition_autograd(x, weights, word=row, **kwargs)
+
+
+def layer_norm_backward_dx(grad_y, x, weight, mean, rstd, *, row="ef2_ln_bwd_dx", **kwargs):
+    """The release's LN input-gradient kernel; affine gradients are not implied."""
+    return provider("ln").layer_norm_backward_dx(grad_y, x, weight, mean, rstd, word=row, **kwargs)
 
 
 def module_triangle_attention(module, pair, mask):
@@ -85,10 +185,24 @@ def module_triangle_attention(module, pair, mask):
     # Engine masks are key-only, in either starting or ending attention frame.
     # A pairwise AND would incorrectly mask entire query rows.
     m5 = None if mask is None else mask[:, None, None, None, :].expand(-1, pair.shape[1], -1, -1, -1)
-    core = "tier:" + module.anthropic_row.removeprefix("block:")
-    kwargs = {"ending": not module.starting, "residual": False, "impl": "fpf", "core": core, "ln": "fused"}
+    row = module.anthropic_row.removeprefix("block:")
+    selected = {}
+
+    def _triattn_core(q, k, v, bias, mask, scale):
+        # pair_fused's tier:<row> catches Refusal and runs flash_triattn instead.
+        # An explicitly requested engine row must propagate that refusal, including
+        # load/byte-gate failures and refusals raised by the actual serving call.
+        triattn = provider("triattn")
+        form = "mask_bias" if mask is not None else "bias_only"
+        selection = pf.resolve_tier_core(row, *pf._call_class(q, k), form=form, direction=triattn.FWD)
+        result = triattn.triangle_attention(q, k, v, bias, mask, scale,
+                                           word=row, selection=selection, form=form)
+        selected.update(selection._asdict())
+        return result
+
+    kwargs = {"ending": not module.starting, "residual": False, "impl": "fpf", "core": _triattn_core, "ln": "fused"}
     plan = pf._plan_triattn(pair, module._anthropic_weights, m5, variant=None, engage_cells=False, **kwargs)
-    module.anthropic_selection = {"row": module.anthropic_row, "surround": plan,
+    module.anthropic_selection = {"row": module.anthropic_row, "core": selected, "surround": plan,
                                   "residual": "out-of-place engine add"}
     update = pf.tri_attn_block(pair, module._anthropic_weights, m5, **kwargs)
     return pair + update

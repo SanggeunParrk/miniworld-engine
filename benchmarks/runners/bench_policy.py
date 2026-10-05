@@ -71,6 +71,7 @@ MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
     "dit": "a BLOCK, not a family: augmented_attention + conditioned_transition. Both are "
            "bf16|fp32 end to end, so the block is -- but no single registry family names it",
     "dit_atom": "the same pair-bias DiT block at atom widths; both components support bf16|fp32",
+    "dit_atom_local": "AF3 32x128 local atom block; its dedicated B200 CUDA path is bf16-only",
     "swa_dit": "the SWA atom DiT block wraps swa_atom_attention, so it inherits its flash bf16-only "
                "core even though the adaLN and the transition around it are bf16|fp32",
     "outer_product": "no registry family of its own: the fused path (integrations/opm_train.py, "
@@ -100,6 +101,7 @@ MODULE_SUPPORTS_FP32: dict[str, bool] = {
     # end to end, so both token and ordinary atom blocks are too. SWA uses a flash core.
     "dit": True,
     "dit_atom": True,
+    "dit_atom_local": False,
     "swa_dit": False,
     "outer_product": False,
     "msa_pair_weighted_averaging": False,

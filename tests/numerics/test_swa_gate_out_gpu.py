@@ -55,6 +55,7 @@ def test_projection_contract_is_preserved(gpu_settings, variant, monkeypatch):
         build_attention_params,
     )
 
+    monkeypatch.setenv("MINIWORLD_SIGMOID_GATE_SM80", "0")  # this is the Triton fused kernel's contract; on an A100 the module takes the CUDA gate first
     dtype = torch.float32 if variant == "fp32" else torch.bfloat16
     model = (
         SWA3DRoPEAttention(

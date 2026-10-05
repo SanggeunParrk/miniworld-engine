@@ -1,7 +1,9 @@
-"""Fused token DiT inference (H100, B200) wired to DiTBlock's existing parameter contract.
+"""Fused token DiT inference (A100, H100, B200) wired to DiTBlock's existing parameter contract.
 
 On B200 (sm_100) the step runs the sm_100a gated attention core (``kernels/augmented_attention/cuda/sm100``: bf16, or
-TF32 tensor cores for fp32) and the CUDA row kernels; the GEMMs are cuBLAS as on H100.
+TF32 tensor cores for fp32) and the CUDA row kernels; the GEMMs are cuBLAS as on H100. On A100 (sm_80) it runs the sm_80 gated
+core (``kernels/augmented_attention/cuda/sm80``, bf16 and fp32/TF32) and the CUDA row kernels; on H100 the
+Triton gated core and row passes.
 
 Inference only: the weights are packed once and the pack reused while every weight's (pointer, version) is unchanged,
 and the pair bias likewise per pair tensor, CUDA-graph replays included (a replay reads the pack and pair bias it was
@@ -9,7 +11,7 @@ captured with; single and cond stay live). The conditioning may be shared by the
 B200 (one in-place CUDA row pass after the projection; the logit scale folds into the q norm's weight). Calls with
 autograd, different model dimensions, or QK-norm off B200 keep the general module path.
 
-Lengths: on H100 L must be a multiple of 128 (the Triton gated core's tiles). On B200 any L >= 8: the sm_100a core takes a
+Lengths: on A100 and H100 L must be a multiple of 128 (the gated cores' tiles). On B200 any L >= 8: the sm_100a core takes a
 multiple of 8 (its TMA maps are 3-D per sample, so tile tails load as zeros and stores clip), and ``update`` pads the other
 lengths to the next multiple of 8 -- single / cond with zero rows, the pair with zero rows and columns, the key mask with
 False -- and returns the first L rows.
@@ -102,7 +104,7 @@ def serves(module, single, cond, pair, compute_dtype=None):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
         idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
         return sm100.inference_core_supported(single.dtype, _pad8(single.shape[2]), d, a.n_head, idx)
-    return cap == (9, 0) and single.shape[2] % 128 == 0 and (a.n_head, d) == (16, 768)
+    return cap in ((8, 0), (9, 0)) and single.shape[2] % 128 == 0 and (a.n_head, d) == (16, 768)
 
 
 def _pad8(L: int) -> int:
@@ -126,7 +128,7 @@ def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads):
     return torch.empty_like(single)
 
 
-@opaque(fake=_fake, name="token_dit_h100_infer")
+@opaque(fake=_fake, name="token_dit_infer")
 def _infer(
     single: torch.Tensor,
     cond: torch.Tensor,

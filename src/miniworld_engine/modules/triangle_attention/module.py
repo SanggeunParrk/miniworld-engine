@@ -16,6 +16,7 @@ from jaxtyping import Bool, Float
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import triattn_b200 as _b200
+from miniworld_engine.integrations import triattn_sm80 as _sm80
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
 from miniworld_engine.modules import dispatch as _dispatch
@@ -76,7 +77,7 @@ class TriangleAttention(nn.Module):
         use_qk_norm: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
-        anthropic_row: str = "k2b",
+        anthropic_row: str = "auto",
     ) -> None:
         super().__init__()
         self.n_head = n_head
@@ -111,9 +112,7 @@ class TriangleAttention(nn.Module):
         # lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_triangle_attention(self.implementation)
-        self.anthropic_row = anthropic_row
-        if self._backend == KernelBackend.ANTHROPIC and not use_self_attention:
-            raise ValueError("Anthropic TriangleAttention adapter requires use_self_attention=True")
+        self.anthropic_row = ("fast" if use_qk_norm else "block:fast") if anthropic_row == "auto" else anthropic_row
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False
         self.nvtx_name = f"triangle_attention/{position}"
@@ -148,6 +147,8 @@ class TriangleAttention(nn.Module):
         self._fuse_gate_backward = True
         # B200 (sm_100a) whole-module CUDA path (integrations.triattn_b200); False keeps the Triton path there.
         self._b200_cuda = True
+        # A100 (sm_80) hand-CUDA front / attention core / back (integrations.triattn_sm80), inference; False keeps the Triton kernels there.
+        self._sm80_cuda = True
 
     def _kernel_triangle_attention(
         self,
@@ -165,6 +166,8 @@ class TriangleAttention(nn.Module):
             return torch.einsum("bhijk,bhikd->bhijd", attention, value)
 
         if backend == KernelBackend.TRITON:
+            if _sm80.serves(self, query, key, value, bias):
+                return _sm80.attention(query, key, value, bias)
             if (getattr(self, "_fuse_bias_backward", True) and torch.is_grad_enabled()
                     and not self.use_qk_norm):
                 from miniworld_engine.kernels.triangle_attention.cuda.bias_backward import (
@@ -311,6 +314,12 @@ class TriangleAttention(nn.Module):
         >>> The raw op without the residual is ``_attention()`` / ``ops.triangle_attention``,
         not a flag on this module."""
         if self._backend == KernelBackend.ANTHROPIC:
+            if not self.use_self_attention:
+                from miniworld_engine.integrations.anthropic_modules import (
+                    triangle_attention_composition,
+                )
+
+                return triangle_attention_composition(self, pair, mask)
             if self.anthropic_row.startswith("block:"):
                 from miniworld_engine.integrations.anthropic import (
                     module_triangle_attention,
@@ -326,6 +335,15 @@ class TriangleAttention(nn.Module):
         if _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
+        if _sm80.serves_module(self, pair, mask):
+            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                return _sm80.forward(self, pair, mask)
+        if _sm80.serves_train(self, pair, mask):
+            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                return _sm80.forward_train(self, pair, mask)
+        from miniworld_engine.integrations import a100_families
+        if a100_families.serves(self, pair):
+            return a100_families.triangle_module(self, pair, mask)
         if (
             getattr(self, "_fuse_front_backward", True)
             and getattr(self, "_fuse_projection_backward", True)

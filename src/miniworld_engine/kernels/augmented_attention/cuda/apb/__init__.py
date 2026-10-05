@@ -28,17 +28,26 @@ def acc_n(heads: int, d: int = 384) -> int:
 
 
 @functools.lru_cache(maxsize=None)
-def ext():
+def _build(arch: int):
+    """The extension for one architecture: sm_100a (B200, ``apb_rows.cu`` alone) or sm_80 (A100: the same file with ``-DAPB_SM80``, whose pair
+    passes come from ``apb_pair_bias_sm80.cuh``)."""
     from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    return load_extension(
-        name="apb_rows_cuda",
-        sources=[str(_dir / "apb_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes("100", ptx=("100",))],
-        extra_cflags=["-std=c++17"], verbose=False)
+    flags = [*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+             "-U__CUDA_NO_BFLOAT162_OPERATORS__"]
+    if arch == 80:
+        return load_extension(name="apb_rows_cuda_sm80", sources=[str(_dir / "apb_rows.cu")], extra_include_paths=[str(_dir)],
+                              extra_cuda_cflags=[*flags, "-DAPB_SM80", *gencodes("80")], extra_cflags=["-std=c++17"], verbose=False)
+    return load_extension(name="apb_rows_cuda", sources=[str(_dir / "apb_rows.cu")], extra_cuda_cflags=[*flags, *gencodes("100", ptx=("100",))],
+                          extra_cflags=["-std=c++17"], verbose=False)
+
+
+def ext(arch: int | None = None):
+    """The extension of ``arch`` (80 or 100); by default of the current device (an A100 gets the sm_80 build, everything else the B200 one)."""
+    if arch is None:
+        arch = 80 if torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0) else 100
+    return _build(arch)
 
 
 def available() -> bool:
@@ -46,10 +55,15 @@ def available() -> bool:
     return True
 
 
-def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float) -> torch.Tensor:
+def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float,
+              padded: int | None = None) -> torch.Tensor:
     """bias [H, L, L] bf16 = wf . LN(pair) (no LN affine: fold its weight into ``wf`` [H, 128] bf16, H = 8, 16 or 24), ``neg`` on the
-    keys where ``mask`` [L] is False. pair2d [L L, 128] bf16 contiguous, L a multiple of 16."""
-    out = torch.empty(wf.shape[0], L, L, device=pair2d.device, dtype=torch.bfloat16)
+    keys where ``mask`` [L] is False. pair2d [L L, 128] bf16 contiguous, L a multiple of 16.
+
+    On an A100 (H = 8, 12 or 16; any L): ``padded`` (default L) is the attention core's length, L rounded up to a multiple of 128; the bias is
+    [H, padded, padded] with ``neg`` on every key >= L and in every query row >= L."""
+    n = L if padded is None else padded
+    out = torch.empty(wf.shape[0], n, n, device=pair2d.device, dtype=torch.bfloat16)
     ext().pair_bias_fwd(pair2d, wf, mask, out, int(L), float(eps), float(neg))
     return out
 

@@ -93,6 +93,50 @@ def _cuda(which: str, wanted: bool, device: torch.device) -> Any:
     return extension(which)
 
 
+_SM80_FAILED = False
+
+
+@torch.compiler.assume_constant_result
+def _sm80_loads() -> bool:
+    """Builds (first call) or loads the sm_80 extension; False, with one warning, when the toolchain fails (the Triton path then serves).
+
+    A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
+    global _SM80_FAILED
+    if _SM80_FAILED:
+        return False
+    from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+    try:
+        sm80._ext()
+    except Exception as exc:  # a toolchain problem keeps the Triton path
+        _SM80_FAILED = True
+        warnings.warn(f"sm_80 SWA atom DiT kernels unavailable, keeping the Triton path: {exc!r}", RuntimeWarning, stacklevel=2)
+        return False
+    return True
+
+
+def _sm80(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
+    """The A100 kernels (``cuda/sm80``) when they serve this bf16 call, else None -> the Triton path (a build failure warns once and keeps it)."""
+    if _SM80_FAILED or settings.current().engine_backend == "triton":
+        return None
+    from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+    if not sm80.supported(q, nhid, half_window, eps) or not _sm80_loads():
+        return None
+    return sm80
+
+
+def _sm80_window(q: torch.Tensor, n_heads: int, half_window: int) -> Any:
+    """The A100 kernels (``cuda/sm80``) when they serve the window attention of a module-level call (q [N, S, H, D]), else None -> flash / the reference."""
+    if _SM80_FAILED or settings.current().engine_backend == "triton":
+        return None
+    from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+    if not sm80.window_supported(q, n_heads, half_window) or not _sm80_loads():
+        return None
+    return sm80
+
+
 _SM100_FAILED = False
 
 
@@ -169,6 +213,9 @@ def swa_dit_block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
     if sm100 is not None:
         return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
+    sm80 = _sm80(q, wd.shape[1], half_window, eps)
+    if sm80 is not None:
+        return sm80.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, eps, FP32_EPS, save)
     N, S, C = q.shape
     H = N_HEAD
     D = C // H
@@ -317,26 +364,37 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
     policy = settings.current()
     fused_dw = policy.swa_dit_ffn_dw == "fused"
     dq1_dtype = torch.float32 if policy.swa_dit_dq1 == "fp32" else torch.bfloat16
-    dmod = torch.zeros(B * S, 6 * C, device=dev, dtype=torch.float32)
+    # A100 (sm_80) stages of the backward (bf16, the dW operands materialised): they serve a call whose rows each have their own modulation row (A = N / B = 1, the conditioning per sample) or whose
+    # conditioning is shared by a multiple of 16 samples (``cuda.sm80.bwd_mode``).  Each writes its columns of the modulation gradient once (no atomics, no zeroing; MODE_HOIST: one partial buffer per
+    # block of 16 samples, added below); the Triton stages add atomically onto zeros.
+    sm80 = _sm80(q, NHID, half_window, eps) if dq1_dtype == torch.bfloat16 and not fused_dw else None
+    mode = sm80.bwd_mode(N, B) if sm80 is not None else None
+    # An A that is neither 1 nor a multiple of 16 (the batch carries the conditioning of B elements): the stages run MODE_SINGLE with one modulation row per SAMPLE (the rows of mod, cos and sin
+    # repeated A times, sample n = a B + b taking batch element n % B's) and the gradient of those rows is summed over the samples at the end.
+    Bm, mod_s, cos_s, sin_s = B, mod, cos, sin
+    if sm80 is not None and mode is None and N % B == 0:
+        mode, Bm = sm80.MODE_SINGLE, N
+        mod_s = mod.reshape(B, S, -1).repeat(A, 1, 1).reshape(N * S, -1)
+        cos_s, sin_s = (t.reshape(B, S, -1).repeat(A, 1, 1).reshape(N * S, -1) for t in (cos, sin))
+    if mode is None:
+        sm80 = None
+    dmod = sm80.dmod_buffer(mode, N, Bm, S, dev) if sm80 is not None else torch.zeros(B * S, 6 * C, device=dev, dtype=torch.float32)
     dq1 = torch.empty(M, C, device=dev, dtype=dq1_dtype)
-    dO = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
-    dG = torch.empty_like(dO)
-    Dv = torch.empty(N, H, S, device=dev, dtype=torch.float32)
     if fused_dw:
-        dab = hh = dffn = dO
+        dab = hh = dffn = dq1
     else:
         dab = torch.empty(M, 2 * NHID, device=dev, dtype=torch.bfloat16)
         hh = torch.empty(M, NHID, device=dev, dtype=torch.bfloat16)
-        dffn = torch.empty_like(dO)
-    datt = torch.empty_like(dO)
-    gated = torch.empty_like(dO)
+        dffn = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
     grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     dy2 = dy.reshape(M, C)
     dwu: torch.Tensor | None = None
     dwd: torch.Tensor | None = None
     wanted = policy.swa_dit_ffn_bwd_cuda and not fused_dw and C == D_ATOM and NHID == N_HIDDEN and q.dtype == torch.bfloat16
     ext = _cuda("bwd", wanted, dev)
-    if ext is not None:
+    if sm80 is not None:
+        dq1, dffn, hh, dab = sm80.ffn_bwd(dy2, q1, y, ffn, mod_s, wu, wd, dmod, Bm, S, eps, mode)
+    elif ext is not None:
         dq1, dffn, hh, dab = ext.ffn_bwd(dy2, q1, y, ffn, mod, dmod, *_pack_ffn(wu, wd), A, B, S, eps, 8 if A % 8 == 0 else 0)
     else:
         _swa_ffn_bwd_kernel[grid_t](
@@ -351,28 +409,47 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
                 dy2, mod, wu, wd, y, dwu32, dwd32, M, S, B,
                 shape_key=atom_key(S, A=Ak, C=C, NHID=NHID), NSPLIT=0, C=C, NHID=NHID, MODW=6 * C)
             dwu, dwd = dwu32, dwd32
-    _swa_oproj_bwd_kernel[grid_t](
-        dq1, o, g, mod, wo, att, dO, dG, Dv, datt, gated, dmod, S, A, B,
-        shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
-    dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
-    dKh = torch.empty_like(dQh)
-    dVh = torch.empty_like(dQh)
-    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-        qh, kh, vh, dO, lse, Dv, seqused, dQh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, HW=half_window)
-    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-        qh, kh, vh, dO, lse, Dv, seqused, dKh, dVh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D,
-        HW=half_window)
-    dq = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
-    dP = torch.empty(M, 4 * C, device=dev, dtype=torch.bfloat16)
-    _swa_qkvg_bwd_kernel[grid_t](
-        q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG, dq1, dq, dP, dmod, S, A, B, eps, FP32_EPS,
-        shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
+    if sm80 is not None:
+        dO, dG, datt, gated, Dv = sm80.oproj_bwd(dq1, o, g, att, mod_s, wo, dmod, Bm, S, mode)
+    else:
+        dO = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
+        dG = torch.empty_like(dO)
+        Dv = torch.empty(N, H, S, device=dev, dtype=torch.float32)
+        datt = torch.empty_like(dO)
+        gated = torch.empty_like(dO)
+        _swa_oproj_bwd_kernel[grid_t](
+            dq1, o, g, mod, wo, att, dO, dG, Dv, datt, gated, dmod, S, A, B,
+            shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
+    sm80_attn = sm80 if sm80 is not None else _sm80(q, NHID, half_window, eps)         # the window attention backward serves every tiling of the row stages
+    if sm80_attn is not None:
+        dQh, dKh, dVh = sm80_attn.attn_bwd(qh, kh, vh, dO, lse, Dv, seqused)
+    else:
+        dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
+        dKh = torch.empty_like(dQh)
+        dVh = torch.empty_like(dQh)
+        _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+            qh, kh, vh, dO, lse, Dv, seqused, dQh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, HW=half_window)
+        _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+            qh, kh, vh, dO, lse, Dv, seqused, dKh, dVh, S, D ** -0.5, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D,
+            HW=half_window)
+    if sm80 is not None:
+        dq, dP = sm80.qkvg_bwd(q.reshape(M, C), pq, pk, dQh, dKh, dVh, dG, dq1, mod_s, cos_s, sin_s, wqkv, wg, dmod, Bm, S, eps, FP32_EPS, mode)
+    else:
+        dq = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
+        dP = torch.empty(M, 4 * C, device=dev, dtype=torch.bfloat16)
+        _swa_qkvg_bwd_kernel[grid_t](
+            q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG, dq1, dq, dP, dmod, S, A, B, eps, FP32_EPS,
+            shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
     dwqkv = _mm32(dP[:, :3 * C].t(), x)
     dwg = _mm32(dP[:, 3 * C:].t(), x)
     dwo = _mm32(datt.t(), gated)
     if dwu is None or dwd is None:
         dwu = _mm32(dab.t(), y)
         dwd = _mm32(dffn.t(), hh)
+    if sm80 is not None and mode == sm80.MODE_HOIST:
+        dmod = dmod.sum(0)                                    # the A / 16 partial buffers, in a fixed order
+    elif sm80 is not None and Bm != B:
+        dmod = dmod.view(A, B * S, -1).sum(0)                 # one gradient row per sample (the expanded modulation): summed over the samples, in a fixed order
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
 
 
@@ -420,12 +497,69 @@ def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     _swa_qkvg_bwd_fp32_kernel[grid_t](
         q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG, dq1, dq, dP, dmod, S, A, B, eps, FP32_EPS,
         shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
-    dwqkv = dP[:, :3 * C].t() @ x
-    dwg = dP[:, 3 * C:].t() @ x
-    dwo = datt.t() @ gated
+    dwqkv = _mm32(dP[:, :3 * C].t(), x)
+    dwg = _mm32(dP[:, 3 * C:].t(), x)
+    dwo = _mm32(datt.t(), gated)
     dwu = dab.t() @ y
     dwd = dffn.t() @ hh
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
+
+
+def _swa_dit_mod_fwd_sm80_fake(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tensor]:
+    """Shapes of the outputs: [mod [R, 6C] fp32], with ``save`` also a = rn(silu(c)) like c."""
+    out = [c.new_empty((c.shape[0], wmod.shape[0]), dtype=torch.float32)]
+    return [*out, torch.empty_like(c)] if save else out
+
+
+@opaque(fake=_swa_dit_mod_fwd_sm80_fake, name="swa_dit_mod_fwd_sm80")
+def swa_dit_mod_fwd_sm80(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tensor]:
+    """[mod] = [rn(silu(c)) Wmod^T] ([R, 6C] fp32) on the sm_80 ``mod_fwd`` kernel, with ``save`` also a = rn(silu(c)) (the backward's operand); c [R, C] bf16 contiguous, Wmod [6C, C] bf16."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+    return sm80.mod_fwd(c, wmod, save)
+
+
+def _swa_dit_mod_bwd_sm80_fake(g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """Shapes of the outputs: dc like c, dWmod like Wmod."""
+    return [torch.empty_like(c), torch.empty_like(wmod)]
+
+
+@opaque(fake=_swa_dit_mod_bwd_sm80_fake, name="swa_dit_mod_bwd_sm80")
+def swa_dit_mod_bwd_sm80(g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """[dc, dWmod] (bf16) of :func:`swa_dit_mod_fwd_sm80` from g = d mod [R, 6C] fp32 (contiguous) and a = rn(silu(c))."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+    dc, dw = sm80.mod_bwd(g, c, a, wmod)
+    return [dc, dw]
+
+
+def _swa_dit_window_attn_fwd_sm80_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor) -> list[torch.Tensor]:
+    """Shapes of the outputs: [out [N, S, H, D] bf16, lse [N, H, S] fp32]."""
+    n, s, h, d = q.shape
+    return [torch.empty((n, s, h, d), dtype=torch.bfloat16, device=q.device), torch.empty((n, h, s), dtype=torch.float32, device=q.device)]
+
+
+@opaque(fake=_swa_dit_window_attn_fwd_sm80_fake, name="swa_dit_window_attn_fwd_sm80")
+def swa_dit_window_attn_fwd_sm80(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor) -> list[torch.Tensor]:
+    """[out, lse] of the sm_80 window attention on q, k, v [N, S, 4, 32] bf16 (any strides with unit channel stride: the module path of ``modules/swa_atom_attention``) and ``seqused`` [N] int32."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+    return list(sm80.window_fwd(q, k, v, seqused))
+
+
+def _swa_dit_window_attn_bwd_sm80_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, d_out: torch.Tensor, lse: torch.Tensor,
+                                       seqused: torch.Tensor) -> list[torch.Tensor]:
+    """Shapes of the outputs: dq, dk, dv, each [N, S, H, D] bf16 contiguous."""
+    return [torch.empty(q.shape, dtype=torch.bfloat16, device=q.device) for _ in range(3)]
+
+
+@opaque(fake=_swa_dit_window_attn_bwd_sm80_fake, name="swa_dit_window_attn_bwd_sm80")
+def swa_dit_window_attn_bwd_sm80(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, d_out: torch.Tensor, lse: torch.Tensor,
+                                 seqused: torch.Tensor) -> list[torch.Tensor]:
+    """[dq, dk, dv] of :func:`swa_dit_window_attn_fwd_sm80` from the forward's ``out`` and ``lse`` and the gradient ``d_out`` (all [N, S, 4, 32] bf16 contiguous, lse [N, 4, S] fp32)."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+    return list(sm80.window_bwd(q, k, v, out, d_out, lse, seqused))
 
 
 def _swa_dit_mod_fwd_sm100_fake(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:

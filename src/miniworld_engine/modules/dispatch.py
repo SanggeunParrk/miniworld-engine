@@ -301,11 +301,13 @@ def resolve(
     # _CUEQ_OPS) falls back to the PYTORCH reference, never the Triton fused path.
     if impl == ImplementationType.CUEQUIVARIANCE and op not in _CUEQ_OPS:
         return KernelBackend.PYTORCH
-    # The Anthropic TriMul payload carries TriMul units only; naming it for another op here is a mistake, not a
-    # fallback (integrations.anthropic_trimul states what it serves and refuses the rest at forward time). The MSA
-    # paths (integrations.anthropic_msa) route inside their own modules and never reach this resolver.
-    if impl == ImplementationType.ANTHROPIC and op != "triangle_multiplication":
-        raise ValueError(f"{op}: the anthropic payload serves triangle_multiplication only")
+    # Only explicitly integrated operations may claim the Anthropic backend.
+    # MSA modules enter their adapter before consulting this resolver.
+    if impl == ImplementationType.ANTHROPIC and op not in {
+        "triangle_multiplication", "triangle_attention", "transition", "layernorm", "rmsnorm",
+        "adaptive_layernorm", "conditioned_transition", "augmented_attention",
+    }:
+        raise ValueError(f"{op}: no Anthropic adapter for this operation")
     if impl != ImplementationType.MINIWORLD:
         return to_kernel_backend(impl)
     best = _MINIWORLD_KNOWN_BEST.get(op, _DEFAULT_BACKEND)

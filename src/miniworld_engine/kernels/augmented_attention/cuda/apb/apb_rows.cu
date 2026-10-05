@@ -2,6 +2,9 @@
 // (integrations/attention_pair_bias_b200.py). The attention core is sm_100a (kernels/augmented_attention/cuda/sm100), the
 // projections cuBLAS.
 //
+// Also built for the A100 (-DAPB_SM80, integrations/attention_pair_bias_sm80.py): the row passes below are plain CUDA and shared;
+// the two pair passes (bulk copies / TMA, sm_90+) are replaced by apb_pair_bias_sm80.cuh, which has the same entry points.
+//
 // Heads x head dim: 8 x 48, 12 x 32, 24 x 16, 16 x 24 (d_single 384) and 16 x 32 (d_single 512). The pair kernels run the heads in mma groups of 8 (12 heads as 16:
 // the 4 pad heads have zero Wf / dbias and are neither stored nor accumulated). For 16 x 24 every per-head row segment is 32 wide in memory (24 channels, 8 zeros):
 // q | k | v | g, O, og, dO and their gradients are W = heads x 32 = 512 wide; `prep` writes the padded weight packs, `finalize`
@@ -85,6 +88,7 @@ __device__ __forceinline__ void gram_stats(const float (&g0)[4], const float (&g
   rs1 = rsqrtf(fmaxf(s1 * (1.f / DP) - mu1 * mu1, 0.f) + eps);
 }
 
+#ifndef APB_SM80   // sm_90+ / sm_100a: bulk copies and TMA. The sm_80 build (-DAPB_SM80) takes the pair passes from apb_pair_bias_sm80.cuh (included below).
 // ------------------------------------------------------------------------------------------------ bulk copies (sm_90+)
 __device__ __forceinline__ uint32_t su32(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
 __device__ __forceinline__ void mbar_init(uint64_t* b, int n) { asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(su32(b)), "r"(n)); }
@@ -471,6 +475,7 @@ __global__ void __launch_bounds__(256, bwd_bps<NH>()) pair_bias_bwd_k(const __gr
     atomicAdd(c < NH * DP ? AWF + c : AHS + (c - NH * DP), v);
   }
 }
+#endif  // !APB_SM80
 
 // ------------------------------------------------------------------------------------------------ single track
 // Lane l's CPL contiguous columns of a row as CPL / 4 four-wide vectors.
@@ -769,6 +774,7 @@ int nsm_of(const at::Tensor& t) {
   return nsm;
 }
 
+#ifndef APB_SM80
 template <int NH>
 void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::optional<at::Tensor>& mask, at::Tensor& out, int64_t L, double eps,
                      double neg) {
@@ -843,6 +849,9 @@ void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, 
   else pair_bias_bwd_t<24>(z, dbias, w, dz, acc, L, eps, G);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+#else
+#include "apb_pair_bias_sm80.cuh"   // the same two entry points (pair_bias_fwd / pair_bias_bwd) on cp.async tiles
+#endif
 
 void ln_rows(at::Tensor x, at::Tensor lw, at::Tensor lb, at::Tensor xa, c10::optional<at::Tensor> st, double eps,
              c10::optional<at::Tensor> y) {
@@ -961,4 +970,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_bwd", &ln_bwd);
   m.def("prep", &prep);
   m.def("finalize", &finalize);
+#ifdef APB_SM80
+  m.def("gate_rows_bf", &gate_rows_bf);                          // the A100 attention core's bf16 outputs (apb_pair_bias_sm80.cuh)
+  m.def("gate_bwd_bf", &gate_bwd_bf);
+  m.def("qkv_bwd_bf", &qkv_bwd_bf);
+#endif
 }

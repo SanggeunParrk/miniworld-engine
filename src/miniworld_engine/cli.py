@@ -131,6 +131,7 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     "dit": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition"),
                         "precision=32"),
     "dit_atom": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition")),
+    "dit_atom_local": ModuleTarget(("adaptive_layernorm", "conditioned_transition")),
     "swa_dit": ModuleTarget(
         ("swa_atom_attention", "adaptive_layernorm", "conditioned_transition"), "precision=32"),
     # The bias-only token DiT block (no query / key). Its engine path is hand CUDA + cuBLAS (kernels/bias_only_dit):
@@ -153,7 +154,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom",
-                  "swa_atom_attention", "dit", "dit_atom", "swa_dit", "bias_only_dit"),
+                  "swa_atom_attention", "dit", "dit_atom", "dit_atom_local", "swa_dit", "bias_only_dit"),
     "attention": ("triangle_attention",
                   "augmented_attention_token", "augmented_attention_atom"),
 }
@@ -597,6 +598,7 @@ KERNEL_TARGETS: dict[str, tuple[str, ...]] = {
     "bias_only_attention": ("attention_pair_bias",),
     "augmented_attention": ("augmented_attention",),
     "conditioned_transition_tail": ("conditioned_transition",),
+    "windowed_atom_attention": ("swa_atom_attention",),   # Anthropic 32 x 128 windowed atom attention vs the engine's nearest window op: no autotuned kernel of its own
 }
 
 

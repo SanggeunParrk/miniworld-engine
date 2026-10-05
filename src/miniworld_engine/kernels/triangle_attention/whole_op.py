@@ -43,10 +43,6 @@ def triangle_attention(
     Matches the AF3 reference (query is scaled by ``d_head**-0.5`` inside the attention
     kernel; masked keys get ``finfo.min`` bias).
     """
-    from miniworld_engine.kernels.triangle_attention.triton.main import (
-        triton_triangle_attention_pair_bias,
-    )
-
     # Both weights, not just the query: the branch below uses to_key_weight too, so deriving the
     # flag from to_query_weight alone let `to_query_weight=W, to_key_weight=None` reach
     # F.linear(x, None). Testing the pair also narrows both to Tensor for a checker.
@@ -56,6 +52,17 @@ def triangle_attention(
         raise TypeError(msg)
     use_qk_norm = norm_query_weight is not None
 
+    from miniworld_engine.kernels import cuda_native
+    if cuda_native.enabled(pair):
+        from miniworld_engine.integrations.a100_families import triangle
+        return triangle(pair, mask, n_head=n_head, ln_pair_weight=ln_pair_weight, ln_pair_bias=ln_pair_bias,
+                        to_value_weight=to_value_weight, to_bias_weight=to_bias_weight, to_gate_weight=to_gate_weight,
+                        to_out_weight=to_out_weight, to_query_weight=to_query_weight, to_key_weight=to_key_weight,
+                        norm_query_weight=norm_query_weight, norm_key_weight=norm_key_weight, starting=starting, eps=eps)
+
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        triton_triangle_attention_pair_bias,
+    )
     if not starting:
         pair = rearrange(pair, "B I J D -> B J I D").contiguous()
 

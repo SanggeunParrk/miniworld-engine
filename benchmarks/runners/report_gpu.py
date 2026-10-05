@@ -58,7 +58,8 @@ UNITS: list[tuple[str, str, str]] = [
     ("augmented_attention_atom", "", "Atom attention"),
     ("swa_atom_attention", "", "SWA attention"),
     ("dit", "", "DiT"),
-    ("dit_atom", "", "Atom DiT"),
+    ("dit_atom", "", "Atom DiT (dense)"),
+    ("dit_atom_local", "", "Atom DiT (AF3-like 32x128)"),
     ("swa_dit", "", "SWA DiT"),
 ]
 TABLE_RE = re.compile(r"^(inference|training)_(seq_len|d_pair)(?:_(.+))?\.csv$")

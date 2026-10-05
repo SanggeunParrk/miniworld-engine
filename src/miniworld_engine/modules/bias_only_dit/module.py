@@ -45,15 +45,17 @@ class BiasOnlyAttention(nn.Module):
     largest negative finite logit (a fully masked row is uniform, not NaN).
     """
 
-    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, d_head: int | None = None) -> None:
+    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, d_head: int | None = None,
+                 *, implementation: ImplementationType = _REF) -> None:
         super().__init__()
+        self.implementation = ImplementationType(implementation)
         self.n_head = n_head
         d_hidden = d_head or d_single // n_head          # the head width; n_head x d_head may differ from d_single
-        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond, implementation=_REF)
+        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond, implementation=self.implementation)
         self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         # no offset, as in AugmentedAttentionPairBias: a per-head constant on every logit cancels in the softmax
-        self.ln_pair = LayerNorm(d_pair, bias=False, implementation=_REF)
+        self.ln_pair = LayerNorm(d_pair, bias=False, implementation=self.implementation)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
@@ -66,6 +68,12 @@ class BiasOnlyAttention(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
+        if self.implementation == ImplementationType.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                augmented_attention,
+            )
+
+            return single + augmented_attention(self, single, cond, pair, mask, bias_only=True)
         single_res = single  # residual == the ORIGINAL input (before ada_ln_in rebinds `single`)
         single = self.ada_ln_in(single, cond)
         value, gate = self.to_value(single), self.to_gate(single)
@@ -103,8 +111,10 @@ class BiasOnlyDiTBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.implementation = ImplementationType(implementation)
-        self.attention = BiasOnlyAttention(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head, d_head=d_head)
-        self.transition = ConditionedTransition(d_hidden=d_single, d_cond=d_cond, n=n, implementation=_REF)
+        child_impl = self.implementation if self.implementation == ImplementationType.ANTHROPIC else _REF
+        self.attention = BiasOnlyAttention(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head,
+                                           d_head=d_head, implementation=child_impl)
+        self.transition = ConditionedTransition(d_hidden=d_single, d_cond=d_cond, n=n, implementation=child_impl)
 
     def forward(
         self,
@@ -114,6 +124,8 @@ class BiasOnlyDiTBlock(nn.Module):
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
         """Each part returns its residual output (stream in, stream out); the fused paths fold both residuals in."""
+        if self.implementation == ImplementationType.ANTHROPIC:
+            return self.transition(self.attention(single, cond, pair, mask), cond)
         if _fused.serves(self, single, cond, pair, mask):
             return _fused.update(self, single, cond, pair, mask)
         if _train.serves(self, single, cond, pair, mask):

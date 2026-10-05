@@ -115,6 +115,12 @@ def message_hidden_reduce(
     # recomputes its projected activation. The compatibility name ``triton``
     # denotes the compute policy.
     if _should_use_triton(supported, backend):
+        # An A100 runs the hand-CUDA kernels of ``cuda/sm80`` for every one of these policies (one forward kernel, a backward that replays it):
+        # ``integrations/mpnn_msg_sm80.py`` owns the gate (capability 8.0, engine backend not forced to Triton, ``MINIWORLD_MPNN_MSG_SM80=0`` keeps Triton).
+        from miniworld_engine.integrations import mpnn_msg_sm80
+
+        if mpnn_msg_sm80.serves_message(preactivation, backend):
+            return mpnn_msg_sm80.message_hidden_reduce(preactivation, weight, bias, edge_mask, neighbor_scale)
         if not torch.is_grad_enabled():
             from miniworld_engine.kernels.mpnn_message.triton.inference import (
                 _int32_offsets_supported,

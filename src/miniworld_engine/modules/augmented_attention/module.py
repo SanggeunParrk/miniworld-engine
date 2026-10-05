@@ -9,6 +9,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import augattn_sm80 as _sm80
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -179,6 +180,17 @@ class AugmentedAttentionPairBias(nn.Module):
 
         raise InvalidImplementationError(self.implementation)
 
+    def cache_pair_bias(self, pair: Float[torch.Tensor, "B L L d_pair"], mask: Bool[torch.Tensor, "B L"] | None = None) -> bool:
+        """Keep the pair bias of ``pair`` / ``mask`` for the no-grad calls that follow with the same tensors (A100 hand-CUDA path, atom width: the bias is a third of
+        an inference call, and a sampling loop recomputes it every step). Opt-in and explicit: call it again whenever ``pair`` / ``mask`` / the weights change (a CUDA graph
+        that captured a call reads the module's buffer, which this call refreshes in place); an in-place change seen by PyTorch makes the next call recompute instead.
+        Returns False, caching nothing, where the path does not apply. See ``integrations/augattn_sm80.py``."""
+        return _sm80.cache_pair_bias(self, pair, mask)
+
+    def clear_pair_bias(self) -> None:
+        """Drop what ``cache_pair_bias`` kept."""
+        _sm80.clear_pair_bias(self)
+
     @typecheck
     def forward(
         self,
@@ -193,6 +205,10 @@ class AugmentedAttentionPairBias(nn.Module):
         (the residual is this module's own input), so a block just calls ``single = module(...)``.
         A caller that composes the update some other way (a magnitude-preserving sum, a released
         checkpoint's own residual) takes :meth:`delta`."""
+        if self._backend == KernelBackend.ANTHROPIC:
+            return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype)
+        if _sm80.serves(self, single, pair, mask, compute_dtype, cond=cond):         # A100: hand CUDA from the AdaLN output to the result, the residual inside the last pass
+            return _sm80.forward(self, single, cond, pair, mask)
         return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype)
 
     @typecheck
@@ -218,6 +234,13 @@ class AugmentedAttentionPairBias(nn.Module):
         whatever the module carries either way. Only the core is cast, and the result comes back
         in the input dtype, so this changes precision and not the module's interface.
         """
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                augmented_attention,
+            )
+            return augmented_attention(self, single, cond, pair, mask, compute_dtype)
+        if _sm80.serves(self, single, pair, mask, compute_dtype, cond=cond):          # A100: hand CUDA from the AdaLN output to the update
+            return _sm80.delta(self, single, cond, pair, mask)
         in_dtype = single.dtype
         single = self.ada_ln_in(single, cond)
         pair = self.ln_pair(pair)

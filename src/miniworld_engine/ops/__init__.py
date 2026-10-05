@@ -21,13 +21,13 @@ from importlib import import_module
 # op name -> (absolute module, attribute). The implementation lives next to its
 # primitives under kernels/<op>/; this namespace is only the public façade.
 _LAZY_OPS = {
-    "gated_residual": ("miniworld_engine.kernels.gated_projection.triton.residual", "gated_residual"),
-    "rms_norm_modulation": ("miniworld_engine.kernels.rmsnorm.interface", "triton_rmsnorm_adamod"),
+    "gated_residual": ("miniworld_engine.kernels.gated_projection.dispatch", "gated_residual"),
+    "rms_norm_modulation": ("miniworld_engine.kernels.rmsnorm.interface", "rms_norm_modulation"),
     "gated_linear": (
         "miniworld_engine.kernels.gated_projection.whole_op", "gated_linear",
     ),
     "swiglu_ffn": (
-        "miniworld_engine.kernels.transition.triton.fused", "triton_swiglu_ffn",
+        "miniworld_engine.kernels.transition.whole_op", "swiglu_ffn",
     ),
     "triangle_multiplicative_update": (
         "miniworld_engine.kernels.trimul_inproj.whole_op",
@@ -54,8 +54,8 @@ _LAZY_OPS = {
         "augmented_attention_pair_bias",
     ),
     "layer_norm_linear": (
-        "miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
-        "triton_layer_norm_linear",
+        "miniworld_engine.kernels.layernorm_linear.dispatch",
+        "layer_norm_linear",
     ),
     "layer_norm": (
         "miniworld_engine.kernels.layernorm.triton.main",

@@ -4,10 +4,24 @@ The inputs come from this family's DRIVER, so the reference answers the question
 """
 from __future__ import annotations
 
+import contextlib
+
 import torch
 
 from miniworld_engine.kernels.checks import _fixed, _grads
 from miniworld_engine.kernels.drivers.mpnn_message import _NEIGHBORS, _inputs
+
+
+@contextlib.contextmanager
+def _triton_engine():
+    """The rows check the TRITON kernels: an A100 would serve the call from its hand-CUDA path (integrations/mpnn_msg_sm80.py)."""
+    from miniworld_engine import settings
+
+    previous = settings.configure(engine_backend="triton")
+    try:
+        yield
+    finally:
+        settings.configure(engine_backend=previous.engine_backend)
 
 
 def _pair():
@@ -18,7 +32,7 @@ def _pair():
 
     _fixed()
     preactivation, weight, bias, mask = _inputs(grad=False)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    with _triton_engine(), torch.autocast("cuda", dtype=torch.bfloat16):
         out = message_hidden_reduce(
             preactivation, weight, bias, mask, _NEIGHBORS, backend="triton")
     ref = message_hidden_reduce_pytorch(
@@ -37,7 +51,7 @@ def _gradients():
     names = ("preactivation", "weight", "bias")
 
     def kernel(preactivation, weight, bias):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with _triton_engine(), torch.autocast("cuda", dtype=torch.bfloat16):
             return message_hidden_reduce(
                 preactivation, weight, bias, mask, _NEIGHBORS, backend="triton")
 

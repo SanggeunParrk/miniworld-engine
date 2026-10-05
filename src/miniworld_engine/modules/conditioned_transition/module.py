@@ -30,6 +30,7 @@ from jaxtyping import Float
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune.shape_key import length_of
+from miniworld_engine.integrations import conditioned_transition_sm80 as _sm80
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -122,7 +123,33 @@ class ConditionedTransition(nn.Module):
         """Forward pass. ALWAYS returns the residual output ``x + delta(x, cond)`` (the residual is
         this module's own input). A caller that composes the update some other way (a
         magnitude-preserving sum, a released checkpoint's own residual) takes :meth:`delta`."""
-        return x + self.delta(x, cond)
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                conditioned_transition,
+            )
+            return conditioned_transition(self, x, cond, residual=True)
+        updated = self._sm80_update(x, cond, residual=True)       # A100: the AdaLN, the tail and the residual in one op
+        return x + self.delta(x, cond) if updated is None else updated
+
+    def _sm80_update(self, x: torch.Tensor, cond: torch.Tensor, residual: bool) -> torch.Tensor | None:
+        """The A100 hand-CUDA path (``integrations.conditioned_transition_sm80`` states its contract; ``MINIWORLD_CONDTRANS_SM80=0`` keeps the Triton tail), or None when it does
+        not serve this call."""
+        if self._backend not in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
+            return None
+        device_type = x.device.type
+        compute_dtype = (torch.get_autocast_dtype(device_type)
+                         if torch.is_autocast_enabled(device_type) else self.expand_a.weight.dtype)
+        if compute_dtype is torch.float32 and x.dtype is torch.bfloat16:
+            compute_dtype = torch.bfloat16          # fp32 master parameters over bf16 activations (AMP): the bf16 kernels, the parameters cast inside the op
+        backward = needs_backward(self, x, cond)
+        if not _sm80.serves(self, x, cond, compute_dtype, backward):
+            from miniworld_engine.integrations import a100_families
+            if a100_families.serves(self, x):
+                with torch.autocast(device_type=device_type, enabled=False):
+                    return a100_families.conditioned(self, x.to(compute_dtype), cond.to(compute_dtype), residual)
+            return None
+        with torch.autocast(device_type=device_type, enabled=False):
+            return _sm80.update(self, x, cond, residual, compute_dtype, backward)
 
     @typecheck
     def delta(
@@ -138,6 +165,14 @@ class ConditionedTransition(nn.Module):
         kernels, which operate on the already-normalized activation (the kernel is the
         post-AdaLN tail; the AdaLN lives in this module).
         """
+        if self._backend == KernelBackend.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                conditioned_transition,
+            )
+            return conditioned_transition(self, x, cond, residual=False)
+        updated = self._sm80_update(x, cond, residual=False)
+        if updated is not None:
+            return updated
         x = self.ada_ln_in(x, cond)
         if self._backend == KernelBackend.PYTORCH:
             return self._reference(x, cond)

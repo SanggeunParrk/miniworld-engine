@@ -11,9 +11,13 @@ it, because its ``dispatch.py`` is what chooses between it and ``fused_gate_out`
 
 from __future__ import annotations
 
-from miniworld_engine.kernels.gated_projection.triton.main import (
+from miniworld_engine.kernels.gated_projection.dispatch import (
+    fused_gate_out,
+    gated_residual,
     sigmoid_gate_fused,
+)
+from miniworld_engine.kernels.gated_projection.triton.main import (
     triton_gated_projection,
 )
 
-__all__ = ["sigmoid_gate_fused", "triton_gated_projection"]
+__all__ = ["fused_gate_out", "gated_residual", "sigmoid_gate_fused", "triton_gated_projection"]

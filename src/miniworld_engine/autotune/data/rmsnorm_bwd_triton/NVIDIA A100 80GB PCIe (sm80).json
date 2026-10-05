@@ -3206,7 +3206,7 @@
       "243356ec191e"
     ]
   },
-  "env_identity": "4cfb996f8c09",
+  "env_identity": "7efec5ac14d2",
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
   "grids": {
     "243356ec191e": [
@@ -4414,9 +4414,17 @@
   },
   "key_scheme": 3,
   "op": "rmsnorm_bwd_triton",
-  "op_identity": "0459776d3cd5",
+  "op_identity": "be083a602e49",
   "provenance": {
     "built_utc": "2026-09-04T08:51:12+00:00",
+    "relabeled": {
+      "date": "2026-10-02",
+      "from": {
+        "env_identity": "4cfb996f8c09",
+        "op_identity": "0459776d3cd5"
+      },
+      "note": "fingerprints rewritten, measurements kept"
+    },
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

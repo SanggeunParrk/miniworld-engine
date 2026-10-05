@@ -5,6 +5,8 @@
 
 Token and ordinary atom DiT share this algorithm, with different widths and head counts.
 Attention covers the full sequence with a pair bias, and owns its AdaLN conditioning.
+The separate ``modules/local_dit`` block implements AF3-like 32-query by 128-key
+atom attention with a windowed pair bias (benchmark target ``dit_atom_local``).
 The separate ``modules/swa_dit`` block uses windowed 3D-RoPE attention without a pair term.
 
 WHY A BLOCK IS BENCHED AT ALL, when its parts already are: a per-part result does not compose.
@@ -80,6 +82,11 @@ class DiTBlock(nn.Module):
             return _train.block(self, single, cond, pair, mask, compute_dtype)
         if _atom.serves(self, single, cond, pair, mask, compute_dtype):
             return _atom.block(self, single, cond, pair, mask)
+        # A100: the dedicated hand-CUDA attention / transition paths of the two modules first (they are asked inside `self.attention` /
+        # `self.transition`); the general CUDA composition only for what they decline (QK-norm, other head widths).
+        from miniworld_engine.integrations import a100_families, augattn_sm80
+        if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond) and a100_families.serves(self.attention, single):
+            return a100_families.token(self, single, cond, pair, mask, compute_dtype)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = self.attention(single, cond, pair, mask, **kw)
         return self.transition(single, cond)

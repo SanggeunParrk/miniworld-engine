@@ -1,17 +1,19 @@
-"""Fused bias-only token DiT TRAINING block on B200 (sm_100), wired to ``BiasOnlyDiTBlock``'s parameter contract.
+"""Fused bias-only token DiT TRAINING block on B200 (sm_100) and A100 (sm_80), wired to ``BiasOnlyDiTBlock``'s parameter contract.
 
 One autograd Function per block call, its forward and backward each one opaque op, CUDA and cuBLAS only: cuBLAS GEMMs (bf16
 operands, fp32 accumulation, weight gradients in the parameter's dtype), the expand GEMM with the SwiGLU in its epilogue
-(``gemm_swiglu2_sm100`` keeping a | b), and the row kernels of ``kernels/bias_only_dit/cuda/bias_only_dit_train_rows.cu``
-(conditioning LN, AdaLN, residual + gate, their backwards, the pair bias on mma.sync). The attention is the bias-only one:
+(B200: ``gemm_swiglu2_sm100`` keeping a | b; A100: the cuBLAS GEMM and the SwiGLU row kernel), and the row kernels of
+``kernels/bias_only_dit/cuda/bias_only_dit_train_rows.cu`` (conditioning LN, AdaLN, residual + gate, their backwards, the pair bias on
+mma.sync). The attention is the bias-only one:
 
   forward   bias = LN(pair) Wf^T (pair_bias: LN(pair) stays on chip); P = softmax(bias) once per call for every sample
-            (softmax_t, the key mask folded in, P^T written beside it); a = sigmoid(g) (P v) per head and sample (pv_gate_inf)
+            (softmax_t, the key mask folded in, P^T written beside it); a = sigmoid(g) (P v) per head and sample (B200: pv_gate_inf,
+            A100: the mma.sync core of ``cuda/sm80``)
   backward  do = da sigmoid(g), dg = da a (1 - sigmoid(g)), D = sum da a per row and head (gate_bwd_rows: a = sigmoid(g) o, so
-            the pre-gate o is never stored); dv = P^T do (pv_gate_inf without the gate, on the transposed P);
-            dbias = P o (sum_a do v^T - D) (dpb_sm100); d pair and dWf = dbias LN(pair) (pair_bias_bwd) -> to_bias / ln_pair
+            the pre-gate o is never stored); dv = P^T do (the P v core without the gate, on the transposed P);
+            dbias = P o (sum_a do v^T - D) (dpb_sm100 / dpb_sm80); d pair and dWf = dbias LN(pair) (pair_bias_bwd) -> to_bias / ln_pair
 
-``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 inputs, the
+``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200 or A100, bf16 inputs, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. MINIWORLD_BIAS_ONLY_DIT_TRAIN=0 turns it off.
 """
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 
 import torch
 
@@ -51,7 +54,7 @@ def serves(module, single, cond, pair, mask=None) -> bool:
         return False
     if settings.current().engine_backend == "triton":
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) in ((10, 0), (8, 0))):
         return False
     if not all(t.dtype is BF for t in (single, cond, pair)):
         return False
@@ -69,7 +72,37 @@ def serves(module, single, cond, pair, mask=None) -> bool:
         return False
     norms = (at.ada_ln_in.ln_in, at.ada_ln_in.ln_cond, at.ln_pair, module.transition.ada_ln_in.ln_in,
              module.transition.ada_ln_in.ln_cond)
-    return all(n.eps == EPS for n in norms)
+    if not all(n.eps == EPS for n in norms):
+        return False
+    return _sm80_loads() if torch.cuda.get_device_capability(single.device) == (8, 0) else True
+
+
+@torch.compiler.assume_constant_result
+def _sm80_loads() -> bool:
+    """Builds (first call) or loads the A100 extensions of the block (the cores, the row kernels); False, with one warning, when the toolchain fails (the module's composition
+    then serves). A process-level constant for ``torch.compile``: the JIT build is not traced."""
+    global _SM80_FAILED
+    if _SM80_FAILED:
+        return False
+    try:
+        from miniworld_engine.kernels.bias_only_dit import cuda as C
+        from miniworld_engine.kernels.bias_only_dit.cuda import sm80
+        from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
+        C._ext()
+        bo_ext()
+        sm80._ext()
+    except Exception as exc:  # a toolchain problem keeps the module's composition
+        _SM80_FAILED = True
+        warnings.warn(f"sm_80 bias-only DiT training kernels unavailable, keeping the module composition: {exc!r}", RuntimeWarning, stacklevel=2)
+        return False
+    return True
+
+
+_SM80_FAILED = False
+
+
+def _is_sm80(dev) -> bool:
+    return torch.cuda.get_device_capability(dev) == (8, 0)
 
 
 def _f32(t):
@@ -118,8 +151,12 @@ def _op(kind, dev, nh=16, dh=48):
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
     if (kind, idx, nh, dh) not in _OPS:
         from miniworld_engine.kernels.bias_only_dit import cuda as C
-        _OPS[(kind, idx, nh, dh)] = (C.GemmSwigluAB(idx) if kind == "swiglu" else
-                                     {"pv": C.PvGateCore, "dpb": C.DpbKernel}[kind](idx, nh=nh, dh=dh))
+        if torch.cuda.get_device_capability(idx) == (8, 0):                      # A100: the mma.sync cores of cuda/sm80
+            from miniworld_engine.kernels.bias_only_dit.cuda import sm80
+            _OPS[(kind, idx, nh, dh)] = {"pv": sm80.PvGate, "dpb": sm80.Dpb}[kind](nh, dh)
+        else:
+            _OPS[(kind, idx, nh, dh)] = (C.GemmSwigluAB(idx) if kind == "swiglu" else
+                                         {"pv": C.PvGateCore, "dpb": C.DpbKernel}[kind](idx, nh=nh, dh=dh))
     return _OPS[(kind, idx, nh, dh)]
 
 
@@ -182,7 +219,11 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     BT.res_adaln_b_cuda(x, y, Gg, W["bg1"], G, W["bs2"], xt, x1st, EPS)            # x1 = x + sigmoid(g1) y is never stored
     ab = torch.empty(M, 4 * D, device=dev, dtype=BF)                         # [M, 2 * 2D] a | b
     h = torch.empty(M, 2 * D, device=dev, dtype=BF)
-    _op("swiglu", dev)(xt, W["Wab"], ab, h)                                  # the SwiGLU in the expand GEMM's epilogue
+    if _is_sm80(dev):                                                        # A100: the cuBLAS GEMM, then the SwiGLU row pass
+        torch.mm(xt, W["Wab"].t(), out=ab)
+        C.swiglu_rows(ab, h)
+    else:
+        _op("swiglu", dev)(xt, W["Wab"], ab, h)                              # the SwiGLU in the expand GEMM's epilogue
     z = torch.mm(h, W["Wsq"].t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     BT.res_c_cuda(x, y, z, Gg, W["bg1"], W["bg2"], out)

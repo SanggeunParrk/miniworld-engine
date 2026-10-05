@@ -6,6 +6,7 @@ from jaxtyping import Bool, Float, Int
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
+from miniworld_engine.integrations import opm_sm80 as _opm_sm80
 from miniworld_engine.integrations import opm_train as _opm_train
 from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -117,6 +118,11 @@ class OuterProductMean(nn.Module):
         explicitly by the block (``pair = opm(msa, ..., residual=pair)``) rather than being the
         module's own input; the add is unconditional when ``residual`` is provided (no dropout on
         the OPM branch). ``residual=None`` returns the raw OPM output (standalone / benchmarking)."""
+        if self.implementation == ImplementationType.ANTHROPIC:
+            from miniworld_engine.integrations.anthropic_modules import (
+                outer_product_mean,
+            )
+            return outer_product_mean(self, msa, mask, token_asym_id, residual)
         # The packaged H100 OPM forward/backward (integrations.opm_train) serves a
         # supported call automatically, including the optional pair residual.
         if _opm_train.wanted(self.implementation):
@@ -125,6 +131,12 @@ class OuterProductMean(nn.Module):
                                  normalize_before_proj=self.normalize_before_proj):
                 _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
                 return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
+        # Hand-CUDA A100 (integrations.opm_sm80: prologue + cuBLAS grouped outer product + epilogue, inference and training); the H100 hook above
+        # declines on sm_80 and this one on every other card.
+        if _opm_sm80.serves_inference(self, msa, mask, token_asym_id, residual):
+            return _opm_sm80.update_inference(self, msa, mask, residual)
+        if _opm_sm80.serves_train(self, msa, mask, token_asym_id, residual):
+            return _opm_sm80.update_train(self, msa, mask, residual)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused path where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):

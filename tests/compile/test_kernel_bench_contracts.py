@@ -170,8 +170,8 @@ def test_autograd_helper_detects_parameter_gradient_error_with_correct_dx(runner
 
 
 def test_audit_covers_every_registered_target_and_implementation():
-    assert len(TARGETS) == 16
-    assert sum(len(implementations(target)) for target in TARGETS) == 40
+    assert len(TARGETS) == 17
+    assert sum(len(implementations(target)) for target in TARGETS) == 55     # 40 + windowed_atom_attention pytorch, anthropic, swa_window_cuda (3) + the A100 hand-CUDA rows of transition_b2b[_bwd], dual_gemm_epilogue[_bwd], gemm_epilogue[_bwd] (6), cuda_tm1 / cuda_tm2 / cuda_gate_elem_bwd (3) and projected_attention, projected_attention_pytorch, bias_only_attention (3)
 
 
 def test_gate_backward_passes_required_row_scale_and_sequence_length(runner, monkeypatch):

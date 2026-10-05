@@ -71,6 +71,13 @@ def relative_position_embed(
             f"{_MAX_BUCKETS} rows and {_MAX_WIDTH} channels, and a contiguous bias "
             "of matching width and dtype"
         )
+    if backend == "triton":
+        # An A100 reduces the backward on tensor cores (``cuda/sm80``): a one-hot matmul, deterministic; the gate is ``integrations/mpnn_msg_sm80.py``'s
+        # (capability 8.0, engine backend not forced to Triton, ``MINIWORLD_MPNN_MSG_SM80=0`` keeps the Triton reduction).
+        from miniworld_engine.integrations import mpnn_msg_sm80
+
+        if mpnn_msg_sm80.serves_relpos(bucket, table, bias):
+            return mpnn_msg_sm80.relative_position_embed(bucket, table, bias)
     # Keep Triton out of CPU and import-only users; only supported CUDA tensors here.
     from miniworld_engine.kernels.mpnn_relative_position.triton import (
         relative_position_embed_op,

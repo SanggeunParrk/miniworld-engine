@@ -409,6 +409,8 @@ def test_mpnn_message_backend_matches_full_model_gradients(
 ) -> None:
     from miniworld_engine.kernels.mpnn_node_message.triton import main as node_main
 
+    # This test witnesses the Triton compute op: an A100 would run the hand-CUDA kernels instead (tests/integrations/test_a100_mpnn_msg_gpu.py covers that path at model level).
+    monkeypatch.setenv("MINIWORLD_MPNN_MSG_SM80", "0")
     calls = []
     original = node_main._compute_forward_op
 

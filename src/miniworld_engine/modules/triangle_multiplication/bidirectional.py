@@ -23,6 +23,7 @@ from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
 from miniworld_engine.integrations import trimul_b200 as _b200
 from miniworld_engine.integrations import trimul_h100 as _h100
+from miniworld_engine.integrations import trimul_sm80 as _sm80
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
 )
@@ -142,6 +143,13 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         if _h100.serves_inference(self, pair, bidirectional=True, dropscale=_ds):
             return _h100.update_inference(self, pair, mask, bidirectional=True)
+
+        # Hand-CUDA A100 kernels (integrations.trimul_sm80): inference and training, D128.
+        if _sm80.serves(self, pair, mask):
+            return _sm80.update(self, pair, mask, _ds, bidirectional=True)
+        from miniworld_engine.integrations import a100_families
+        if a100_families.serves(self, pair):
+            return a100_families.trimul_module(self, pair, mask, _ds, bidirectional=True)
 
         # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
         # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit

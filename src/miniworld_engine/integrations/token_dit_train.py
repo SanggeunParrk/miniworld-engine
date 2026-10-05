@@ -1,7 +1,9 @@
-"""Fused token DiT TRAINING block on B200 (sm_100), wired to DiTBlock's parameter contract.
+"""Fused token DiT TRAINING block on B200 (sm_100) and A100 (sm_80), wired to DiTBlock's parameter contract.
 
 One autograd Function per ``DiTBlock`` call, forward and backward, with no Triton and no quack, in one of two precisions --
-bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute_dtype``; TF32 tensor cores):
+bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute_dtype``; TF32 tensor cores).  On A100 the same
+block runs in bf16 only, at 16 x 48 without QK-norm: the attention core is ``kernels/augmented_attention/cuda/sm80`` (hand CUDA, the
+contract of the sm_100a core below), the expand GEMM is cuBLAS followed by the SwiGLU row pass, everything else is shared:
 
   * GEMMs: cuBLAS, operands in the path's dtype (bf16, or fp32 on TF32 tensor cores whatever the caller's allow_tf32), fp32
     accumulation, fp32 weight gradients;
@@ -14,10 +16,11 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
     carries the SwiGLU (``gemm_swiglu2_sm100.cu -DSAVE_AB``, which also writes [a | b] for the backward);
   * the residual stream fp32 inside the block, the output in the input's dtype.
 
-``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), B200, a bf16 or
-fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths
-(768 / 16 x 48 / cond 384 / pair 128 / transition n = 2), B == 1, an even A, L a multiple of 128, a key mask of [B, L]
-or none, LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off.
+``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), B200 or A100, a bf16 or
+fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32; A100: bf16 operands), the token widths
+(768 / 16 x 48 / cond 384 / pair 128 / transition n = 2), B == 1, an even A, L a multiple of 128, per-sample conditioning (or shared conditioning on A100), a key mask of [B, L]
+or none, LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off
+(MINIWORLD_AUGATTN_SM80=0 takes the A100 out: its attention core is the one thing the block does not share).
 
 The forward and the backward are each one opaque op (``kernels/_compile.opaque``) with a fake implementation, inside an
 autograd Function, so torch.compile keeps them as single nodes (as the H100 TriMul training path does).
@@ -61,7 +64,10 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
     from miniworld_engine.modules.dispatch import KernelBackend
     if a._backend != KernelBackend.TRITON:
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    if not single.is_cuda:
+        return False
+    cap = torch.cuda.get_device_capability(single.device)
+    if cap not in ((8, 0), (10, 0)):
         return False
     if single.dtype not in (BF, torch.float32) or compute_dtype not in (None, BF, torch.float32):
         return False
@@ -70,12 +76,20 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
     if single.ndim != 4 or single.shape[1] != 1 or single.shape[0] % 2 or single.shape[2] % 128:
         return False
     d = single.shape[-1]
-    if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP):
+    cond_ok = tuple(cond.shape) == (*single.shape[:3], DC)
+    cond_ok = cond_ok or (cap == (8, 0) and tuple(cond.shape) == (1, 1, single.shape[2], DC))
+    if not cond_ok or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP):
         return False
     if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
     if (a.n_head, d) != (H, D) and operand_dtype(single, compute_dtype) is not BF:
         return False                         # fp32 (TF32 kernels) at 16 x 48 only
+    if cap == (8, 0):                        # A100: bf16 operands, 16 x 48, no QK-norm (the sm_80 core and the rows of this block)
+        from miniworld_engine.kernels.augmented_attention.cuda import sm80
+        idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+        if (operand_dtype(single, compute_dtype) is not BF or a.use_qk_norm or (a.n_head, d) != (H, D)
+                or not sm80.supported(BF, single.shape[2], d, a.n_head, idx)):
+            return False
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
         return False
     norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, module.transition.ada_ln_in.ln_in,
@@ -154,6 +168,16 @@ def _pack(P, qk, dev, at):
     return W
 
 
+def _attention_backend(device):
+    """The attention core module (``forward`` / ``backward`` of ``kernels/augmented_attention/cuda/sm100``'s contract): ``sm80`` on an A100, the
+    sm_100a one on B200 (imported only there: it needs the Blackwell driver)."""
+    if torch.cuda.get_device_capability(device) == (8, 0):
+        from miniworld_engine.kernels.augmented_attention.cuda import sm80
+        return sm80
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    return sm100
+
+
 _GSW: dict = {}
 
 
@@ -194,7 +218,7 @@ def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads):
     return [torch.empty_like(single), *_saved_like(single, pair, fp32, qk, heads)]
 
 
-@opaque(fake=_fwd_fake, name="token_dit_train_sm100_fwd")
+@opaque(fake=_fwd_fake, name="token_dit_train_fwd")
 def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
          qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
     """The block's forward: [out, *saved activations] (every output freshly allocated); ``fp32``: fp32 GEMM operands (on TF32
@@ -204,7 +228,7 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    attn = _attention_backend(single.device)
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     A, _, L, D = single.shape
@@ -241,7 +265,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     bias = torch.mm(W["Wf_at"], ph.t()).view(H, L, L)                           # head-major, natural units; Wf = Wb diag(wp)
     if mask is not None:
         bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
-    O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
+    O, LSE = attn.forward_tf32(qn, kn, vc, bias, A, L) if fp32 else attn.forward(qn, kn, vc, bias, A, L, H, DH)
     og = torch.empty(M, D, device=dev, dtype=at)
     T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
@@ -271,7 +295,7 @@ def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, h
     return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
 
 
-@opaque(fake=_bwd_fake, name="token_dit_train_sm100_bwd")
+@opaque(fake=_bwd_fake, name="token_dit_train_bwd")
 def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
          saved: list[torch.Tensor], dout: torch.Tensor, qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
     """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes."""
@@ -280,7 +304,7 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    attn = _attention_backend(single.device)
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     D = single.shape[-1]
     DH = D // H
@@ -318,8 +342,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dob = torch.empty(M, D, device=dev, dtype=at); dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
     T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
-    DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L) if fp32
-                      else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
+    DQ, DK, DV, DB = (attn.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L) if fp32
+                      else attn.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
     dxa = torch.mm(dqkvg, Wqkvg)
     dWqkvg = _mm32(dqkvg.t(), xa)
@@ -389,6 +413,10 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     eq = float(a.norm_query.effective_eps(torch.float32)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
     fp32 = operand_dtype(single, compute_dtype) is torch.float32
+    # The fused rows consume per-sample conditioning. Keep the expansion in
+    # autograd so shared-conditioning gradients reduce across samples.
+    if cond.shape[0] == 1 and single.shape[0] != 1:
+        cond = cond.expand(single.shape[0], -1, -1, -1).contiguous()
     return _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
                         *[module.get_parameter(n) for n in _names_for(qk)])
 
