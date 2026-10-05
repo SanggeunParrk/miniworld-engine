@@ -1,6 +1,8 @@
 """Live weight packing without a nested torch.compile runtime invocation."""
 import triton
 import triton.language as tl
+import torch
+from . import _h100_runtime as T
 
 
 @triton.jit
@@ -24,7 +26,7 @@ def _pack(DST, WL, WLG, WR, WRG, R: tl.constexpr, D: tl.constexpr,
     tl.store(DST + i, tl.load(ptr, i < 4 * R * D, other=0), i < 4 * R * D)
 
 
-def pack_into(dst, wl, wlg, wr, wrg):
+def pack_into_triton(dst, wl, wlg, wr, wrg):
     r, d = wl.shape
     if r % 32 or dst.shape != (4 * r, d) or not dst.is_contiguous():
         raise ValueError("weight pack requires 32-row groups and contiguous output")
@@ -35,3 +37,66 @@ def pack_into(dst, wl, wlg, wr, wrg):
         dst, wl, wlg, wr, wrg, r, d,
         *wl.stride(), *wlg.stride(), *wr.stride(), *wrg.stride(),
         BLOCK=1024, num_warps=4)
+
+
+@T.device_cache
+def _aux_unit():
+    path = T.compile(T.SOURCES / "wide_forward/output.cu", [
+        "-std=c++17", "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-DMW_AUX_ONLY=1"])
+    return T.load_unit(str(path), "trimul_live_aux")
+
+
+def _launch(name, grid, args):
+    _aux_unit().kernel(name).launch(grid, (256, 1, 1), args)
+
+
+def pack_into_cuda(dst, wl, wlg, wr, wrg):
+    r, d = wl.shape
+    quad = (wl, wlg, wr, wrg)
+    if (r % 32 or dst.shape != (4 * r, d) or not dst.is_contiguous()
+            or dst.dtype != torch.bfloat16
+            or any(w.shape != wl.shape or w.device != dst.device
+                   or w.dtype not in (torch.bfloat16, torch.float32) for w in quad)):
+        raise ValueError("CUDA weight packing requires BF16 output and BF16/FP32 leaves")
+    p = T._launch_module().Struct([
+        dst, *quad, r, d, *(w.stride(0) for w in quad), *(w.stride(1) for w in quad),
+        *(int(w.dtype == torch.float32) for w in quad)])
+    _launch("mw_aux_pack", ((4*r*d+255)//256, 1, 1), [p])
+
+
+def pack_into(dst, wl, wlg, wr, wrg):
+    if T.cuda_aux_enabled():
+        return pack_into_cuda(dst, wl, wlg, wr, wrg)
+    return pack_into_triton(dst, wl, wlg, wr, wrg)
+
+
+def cast_weights(weights):
+    """One live CUDA launch for the six matrix leaves; BF16 layouts stay aliased."""
+    out = [w if w.dtype == torch.bfloat16 and (i < 4 or w.is_contiguous())
+           else torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
+           for i, w in enumerate(weights)]
+    counts = [0 if a is b else a.numel() for a, b in zip(weights, out)]
+    if max(counts):
+        p = T._launch_module().Struct([
+            *weights, *out, *counts, *(w.shape[1] for w in weights),
+            *(w.stride(0) for w in weights), *(w.stride(1) for w in weights),
+            *(int(w.dtype == torch.float32) for w in weights)])
+        _launch("mw_aux_cast", ((max(counts)+255)//256, 6, 1), [p])
+    return out
+
+
+def normalize_into(dst, x, g, b, stats=None):
+    if not x.is_contiguous() or x.dtype != torch.bfloat16 or g.dtype != torch.float32 or b.dtype != torch.float32:
+        raise ValueError("CUDA input LN requires contiguous BF16 input and FP32 affine")
+    _launch("mw_aux_norm", (x.numel()//x.shape[-1], 1, 1), [x, g, b, dst, stats, x.shape[-1]])
+
+
+def fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gate=False):
+    d, hidden = wp.shape
+    _launch("mw_aux_fold", (d, 2 if gate else 1, 1), [wp, go, bo, wpf, wg, gi, bi, wgf, uv, d, hidden])
+
+
+def pair_mask(token, length, device):
+    out = torch.empty((length, length), device=device, dtype=torch.bfloat16)
+    _launch("mw_aux_mask", ((length*length+255)//256, 1, 1), [token, out, length])
+    return out
