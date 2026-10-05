@@ -46,6 +46,10 @@ void wide_squeeze_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorM
 #if MW_SAVE_AB
 void wide_gate_saved_launch(const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,
                            const __nv_bfloat16*,const __nv_bfloat16*,int,int,int,int,cudaStream_t);
+#if MW_SPLIT_FWD
+void wide_expand_saved_launch(const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,
+                             int,int,int,int,cudaStream_t);
+#endif
 #else
 void wide_gate_noh_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
                           const CUtensorMap&, int, int, int, int, cudaStream_t);
@@ -183,6 +187,20 @@ torch::Tensor gate_saved(torch::Tensor dy,torch::Tensor wst,torch::Tensor a,torc
                         (int)M,(int)D,(int)H,2*WIDE_SMS,at::cuda::getCurrentCUDAStream());
   return dab;
 }
+#if MW_SPLIT_FWD
+std::vector<torch::Tensor> fwd_split(torch::Tensor xn,torch::Tensor x,torch::Tensor w1p,torch::Tensor ws){
+  const int64_t M=x.size(0);
+  bf16_2d(x,M,D,"x");bf16_2d(xn,M,D,"xn");bf16_2d(w1p,2*H,D,"w1p");bf16_2d(ws,D,H,"ws");
+  expect(M%ROWS==0,"whole 128-row tiles required");
+  auto out=torch::empty_like(x),h=torch::empty({M,H},x.options()),a=torch::empty_like(h),b=torch::empty_like(h);
+  auto stream=at::cuda::getCurrentCUDAStream();
+  wide_expand_saved_launch(rm(xn,32,64,64),rm(w1p,32,128,64),rm(h,64,64),rm(a,64,64),rm(b,64,64),
+                           (int)M,(int)D,(int)H,WIDE_SMS,stream);
+  const int bn=wide_squeeze_bn();
+  wide_squeeze_launch(rm(h,64,64),rm(ws,64,bn),rm(x,64,64),rm(out,64,64),(int)M,(int)H,(int)D,WIDE_SMS,stream);
+  return {out,h,a,b};
+}
+#endif
 #endif
 #endif
 
@@ -280,6 +298,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
 #if MW_SAVE_AB
   m.def("gate_saved",&gate_saved,"dh GEMM and SwiGLU backward from saved activations");
+#if MW_SPLIT_FWD
+  m.def("fwd_split",&fwd_split,"expand and squeeze after native normalization");
+#endif
 #endif
 #if WIDE_D == 256
   m.def("dxln", &dxln, "d_xn GEMM + LayerNorm backward + residual");
