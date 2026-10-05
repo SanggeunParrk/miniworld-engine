@@ -267,3 +267,78 @@ def test_saved_h_changes_nothing_but_the_kernel(d, monkeypatch):
             assert _rel(saved[name], recomputed[name]) < 2e-3, name
         else:
             assert torch.equal(saved[name], recomputed[name]), name
+
+
+@needs_hopper
+@pytest.mark.parametrize("d,save_ab", [(64, False), (128, False), (256, False),
+                                      (384, False), (512, False), (384, True), (512, True)],
+                         ids=["D64-save0", "D128-save0", "D256-save0", "D384-save0",
+                              "D512-save0", "D384-save1", "D512-save1"])
+@pytest.mark.parametrize("n", [384, 768])
+@pytest.mark.parametrize("master", [False, True])
+def test_native_required_buckets_pytorch_and_live_graph(d, save_ab, n, master, monkeypatch):
+    """Every gradient has an independent PyTorch oracle; graph replay uses live leaves."""
+    from miniworld_engine import settings
+    from miniworld_engine.modules import Transition
+
+    monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    settings.configure(engine_backend="auto", transition_fused_sm90a=True)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    monkeypatch.setenv("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1")
+    monkeypatch.setenv("MINIWORLD_TRANSITION_H100_SAVE_AB", str(int(save_ab)))
+    monkeypatch.setenv("MINIWORLD_TRANSITION_WIDE_SAVE_H", "1")
+    monkeypatch.delenv("MINIWORLD_TRANSITION_D64_REPL", raising=False)
+    module, x, dy = _build((1, n, n, d), seed=702 + d)
+    if master:
+        with torch.no_grad():
+            for p in module.parameters():
+                if p.ndim == 2:
+                    p.data = p.float()
+    reference = Transition(d, implementation=ImplementationType.PYTORCH).cuda().float()
+    reference.load_state_dict(module.state_dict())
+    xr = x.float().requires_grad_()
+    yr = reference(xr)
+    yr.backward(dy.float())
+    x.requires_grad_()
+    y = module(x)
+    y.backward(dy)
+    expected = [yr, xr.grad, *(p.grad for p in reference.parameters())]
+    actual = [y, x.grad, *(p.grad for p in module.parameters())]
+    for index, (got, want) in enumerate(zip(actual, expected, strict=True)):
+        cosine = torch.nn.functional.cosine_similarity(got.float().flatten(), want.float().flatten(), dim=0)
+        assert cosine >= (0.9999 if index == 0 else 0.999), (index, float(cosine))
+    del expected, actual, got, want, reference, yr, xr, y
+
+    def step():
+        x.grad = None
+        for p in module.parameters():
+            p.grad = None
+        out = module(x)
+        out.backward(dy)
+        return out
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(2):
+            step()
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        out = step()
+    graph.replay()
+    observed = [out, x.grad, *(p.grad for p in module.parameters())]
+    first = [v.clone() for v in observed]
+    graph.replay()
+    assert all(torch.equal(a, b) for a, b in zip(first, observed, strict=True))
+    with torch.no_grad():
+        x.normal_()
+        dy.normal_()
+        for p in module.parameters():
+            p.add_(0.001)
+    graph.replay()
+    changed = [v.clone() for v in observed]
+    fresh = step()
+    eager = [fresh, x.grad, *(p.grad for p in module.parameters())]
+    assert all(torch.equal(a, b) for a, b in zip(changed, eager, strict=True))
+    assert not torch.equal(first[0], changed[0])

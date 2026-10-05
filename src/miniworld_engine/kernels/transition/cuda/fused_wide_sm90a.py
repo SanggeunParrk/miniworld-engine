@@ -55,12 +55,18 @@ def save_h_enabled(d: int) -> bool:
     return d >= 384 and settings.current().transition_wide_save_h
 
 
+def save_ab_enabled(d: int) -> bool:
+    """B200 tensor lifetimes: retain h/a/b, then run only dh GEMM in the gate backward."""
+    return (d >= 384 and native_aux_enabled()
+            and os.environ.get("MINIWORLD_TRANSITION_H100_SAVE_AB", "0") == "1")
+
+
 def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
 @functools.lru_cache(maxsize=8)
-def _ext(width: int, ctas: int, d64_repl: int = 16):
+def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False):
     """Build the extension for one channel width and SM count (both in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid)."""
     ensure_cuda_home()
@@ -69,6 +75,8 @@ def _ext(width: int, ctas: int, d64_repl: int = 16):
     revision = "_input_barrier_v1" if width == 64 else ""
     if width == 64 and d64_repl != 16:
         revision += f"_repl{d64_repl}"
+    if save_ab:
+        revision += "_saved_ab_v1"
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
@@ -92,9 +100,9 @@ def _ext(width: int, ctas: int, d64_repl: int = 16):
     )
 
 
-def _ext_for(x: torch.Tensor):
+def _ext_for(x: torch.Tensor, save_ab: bool = False):
     repl = int(os.environ.get("MINIWORLD_TRANSITION_D64_REPL", "16")) if native_aux_enabled() else 16
-    return _ext(x.shape[-1], _sm_count(x.device), repl)
+    return _ext(x.shape[-1], _sm_count(x.device), repl, save_ab)
 
 
 @functools.lru_cache(maxsize=8)
@@ -216,7 +224,22 @@ def _fwd_launch(
     return tuple(ext.fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), bool(save)))
 
 
-def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved, fp32_dw=False):
+def _saved_fwd_fake(x, gamma, beta, wa, wb, ws, eps):
+    return (*_fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, True),
+            x.new_empty((x.shape[0], wa.shape[0])), x.new_empty((x.shape[0], wa.shape[0])))
+
+
+@opaque(fake=_saved_fwd_fake, name="transition_wide_saved_fwd_sm90a")
+def _saved_fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
+                     wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, eps: float,
+                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+                                torch.Tensor, torch.Tensor, torch.Tensor]:
+    if _is_fake(x, wa):
+        return _saved_fwd_fake(x, gamma, beta, wa, wb, ws, eps)
+    return tuple(_ext_for(x, True).fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), True))
+
+
+def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved, fp32_dw=False, asaved=None, bsaved=None):
     """Output structure only: (dx, dgamma, dbeta, dWa, dWb, dWs); the weight gradients are fp32 at D >= 256."""
     wdt = torch.float32 if x.shape[-1] >= 256 else wa.dtype
     return (
@@ -248,14 +271,18 @@ def _bwd_launch(
     h [M, 4D] when it was kept (save_h) and a placeholder otherwise."""
     if _is_fake(dy, x):
         return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved, fp32_dw)
-    ext = _ext_for(x)
+    ext = _ext_for(x, asaved is not None)
     d = x.shape[-1]
     if d == 64:
         return tuple(ext.bwd_master(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw))
     h = 4 * d
     have_h = hsaved.shape[0] == x.shape[0]
     wst = _cuda_prepare(wa, wb, ws)[3] if native_aux_enabled() else ws.t().contiguous()
-    hid, dab = ext.gate(xn, dy, _pack(wa, wb, 128), wst, not have_h)
+    if asaved is not None:
+        assert have_h and bsaved is not None
+        hid, dab = hsaved, ext.gate_saved(dy, wst, asaved, bsaved)
+    else:
+        hid, dab = ext.gate(xn, dy, _pack(wa, wb, 128), wst, not have_h)
     if have_h:
         hid = hsaved
     dws = _mm_f32(dy.t(), hid)  # [D, H]
@@ -327,7 +354,7 @@ class _WideTransitionSM90A(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        flat, xn, rstd, c1, gf, wa, wb, ws, h, *_raw = ctx.saved_tensors
+        flat, xn, rstd, c1, gf, wa, wb, ws, h, a, b, *_raw = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(),

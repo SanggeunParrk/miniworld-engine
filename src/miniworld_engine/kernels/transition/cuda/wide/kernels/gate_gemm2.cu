@@ -21,7 +21,13 @@ using namespace tmn; using namespace tmn::sm90;
 #endif
 constexpr int TBM = 128, THB = 128;
 constexpr int RB = TBK * 2, B64 = 64 * RB, SW_LAYOUT = TBK == 64 ? 1 : 2, SBO = 8 * RB;
+#if MW_GATE_SAVED
+constexpr int F_XN = 0, F_DY = 0, F_W1 = 0, F_WS = 2 * B64, F_STAGE = 4 * B64;
+#define GATE_FENCE_AB(x) ((void)0)
+#else
 constexpr int F_XN = 0, F_DY = 2 * B64, F_W1 = 4 * B64, F_WS = 8 * B64, F_STAGE = 10 * B64;   // xn, dy [128][TBK]; W1p [256][TBK]; Ws^T [128][TBK]
+#define GATE_FENCE_AB(x) fence_regs(x)
+#endif
 #ifndef STG_HALF
 #define STG_HALF 0                                        // 1: stage and store the epilogue in two 64-column passes (half the staging smem)
 #endif
@@ -57,7 +63,11 @@ TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int 
 extern "C" __global__ void __launch_bounds__(384, 1)
 gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUtensorMap mDY, const __grid_constant__ CUtensorMap mW1,
           const __grid_constant__ CUtensorMap mWS, const __grid_constant__ CUtensorMap mH, const __grid_constant__ CUtensorMap mDAB,
-          int M, int K, int H) {
+          int M, int K, int H
+#if MW_GATE_SAVED
+          ,const __nv_bfloat16* saved_a,const __nv_bfloat16* saved_b
+#endif
+          ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
@@ -93,15 +103,19 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
           uint8_t* st = sm + s * F_STAGE;
           mbar_arrive_expect_tx(full + s, F_STAGE);
           for (int h = 0; h < 2; ++h) {
+#if !MW_GATE_SAVED
             tma_load_2d(st + F_XN + h * B64, &mXN, full + s, kb * TBK, m0 + 64 * h);
+#endif
             tma_load_2d(st + F_DY + h * B64, &mDY, full + s, kb * TBK, m0 + 64 * h);
           }
 #if MCW
           tma_load_2d_mc(st + F_W1 + rank * 2 * B64, &mW1, full + s, kb * TBK, n * 256 + 128 * (int)rank, (uint16_t)0x3);
           tma_load_2d_mc(st + F_WS + rank * B64, &mWS, full + s, kb * TBK, n * THB + 64 * (int)rank, (uint16_t)0x3);
 #else
+#if !MW_GATE_SAVED
           tma_load_2d(st + F_W1, &mW1, full + s, kb * TBK, n * 256);
           tma_load_2d(st + F_W1 + 2 * B64, &mW1, full + s, kb * TBK, n * 256 + 128);
+#endif
           tma_load_2d(st + F_WS, &mWS, full + s, kb * TBK, n * THB);
 #endif
         }
@@ -114,9 +128,12 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
   uint32_t it = 0;
   for (int t = t0; t < tiles; t += tstep) {
     const int m0 = TILE_M0(t), n = t % NT;
-    float AB[128], DH[64];
+    float DH[64];
+#if !MW_GATE_SAVED
+    float AB[128];
 #pragma unroll
     for (int e = 0; e < 128; ++e) AB[e] = 0.f;
+#endif
 #pragma unroll
     for (int e = 0; e < 64; ++e) DH[e] = 0.f;
     int prev = -1;
@@ -124,21 +141,23 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
       const int s = (int)(it % NSTAGE);
       mbar_wait(full + s, (it / NSTAGE) & 1u);
       const uint32_t st = su + s * F_STAGE;
-      fence_regs(AB); fence_regs(DH); wgmma_fence();
+      GATE_FENCE_AB(AB); fence_regs(DH); wgmma_fence();
 #pragma unroll
       for (int ks = 0; ks < TBK / 16; ++ks) {
+#if !MW_GATE_SAVED
         mma_n256(AB, dsc_(st + F_XN + cw * B64 + ks * 32), dsc_(st + F_W1 + ks * 32));
+#endif
         mma_n128(DH, dsc_(st + F_DY + cw * B64 + ks * 32), dsc_(st + F_WS + ks * 32));
       }
       wgmma_commit();
 #if WAIT0
-      wgmma_wait<0>(); fence_regs(AB); fence_regs(DH); if (wtid == 0) { mbar_arrive(empty + s); if (MCW) mbar_arrive_peer(empty + s, peer); }
+      wgmma_wait<0>(); GATE_FENCE_AB(AB); fence_regs(DH); if (wtid == 0) { mbar_arrive(empty + s); if (MCW) mbar_arrive_peer(empty + s, peer); }
     }
 #else
-      if (prev >= 0) { wgmma_wait<1>(); fence_regs(AB); fence_regs(DH); if (wtid == 0) { mbar_arrive(empty + prev); if (MCW) mbar_arrive_peer(empty + prev, peer); } }
+      if (prev >= 0) { wgmma_wait<1>(); GATE_FENCE_AB(AB); fence_regs(DH); if (wtid == 0) { mbar_arrive(empty + prev); if (MCW) mbar_arrive_peer(empty + prev, peer); } }
       prev = s;
     }
-    wgmma_wait<0>(); fence_regs(AB); fence_regs(DH);
+    wgmma_wait<0>(); GATE_FENCE_AB(AB); fence_regs(DH);
     if (wtid == 0) { mbar_arrive(empty + prev); if (MCW) mbar_arrive_peer(empty + prev, peer); }
 #endif
 #pragma unroll
@@ -156,7 +175,13 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
           const int g = 2 * gp + (q >> 1), rb = q & 1, ia = 4 * g + 2 * rb, ib = 4 * (g + 16) + 2 * rb, id = 4 * g + 2 * rb;
           const uint32_t dhp = pack_bf16(DH[id], DH[id + 1]);
           const float g0 = bf16lo(dhp), g1 = bf16hi(dhp);
+#if MW_GATE_SAVED
+          const size_t off=(size_t)(m0+64*cw+16*warp+(lane>>2)+8*rb)*H+n*THB+8*g+2*(lane&3);
+          const uint32_t ap=*reinterpret_cast<const uint32_t*>(saved_a+off),bp=*reinterpret_cast<const uint32_t*>(saved_b+off);
+          const float a0=bf16lo(ap),a1=bf16hi(ap),b0=bf16lo(bp),b1=bf16hi(bp);
+#else
           const float a0 = AB[ia], a1 = AB[ia + 1], b0 = AB[ib], b1 = AB[ib + 1];
+#endif
           const float s0 = sigmoid_(a0), s1 = sigmoid_(a1), l0 = a0 * s0, l1 = a1 * s1;
           hp[q] = pack_bf16(l0 * b0, l1 * b1);
           dap[q] = pack_bf16((g0 * b0) * (s0 + l0 * (1.f - s0)), (g1 * b1) * (s1 + l1 * (1.f - s1)));
