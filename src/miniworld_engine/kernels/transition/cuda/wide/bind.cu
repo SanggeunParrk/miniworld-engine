@@ -36,11 +36,20 @@ void wide_dxln_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&
 #if WIDE_D == 384 || WIDE_D == 512
 int wide_squeeze_bn();
 void wide_lnsg_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const float*, const float*, __nv_bfloat16*,
-                      float*, float*, int, int, float, int, int, cudaStream_t);
+                      float*, float*, int, int, float, int, int, cudaStream_t
+#if MW_SAVE_AB
+                      ,__nv_bfloat16*,__nv_bfloat16*
+#endif
+                      );
 void wide_squeeze_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, int, int, int, int,
                          cudaStream_t);
+#if MW_SAVE_AB
+void wide_gate_saved_launch(const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,
+                           const __nv_bfloat16*,const __nv_bfloat16*,int,int,int,int,cudaStream_t);
+#else
 void wide_gate_noh_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
                           const CUtensorMap&, int, int, int, int, cudaStream_t);
+#endif
 #endif
 #if WIDE_D >= 256
 void wide_gate_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
@@ -147,12 +156,34 @@ std::vector<torch::Tensor> fwd(torch::Tensor x, torch::Tensor gamma, torch::Tens
   auto xn = save ? torch::empty_like(x) : torch::empty({1, D}, x.options());
   auto rstd = torch::empty({save ? M : 1}, f32), c1 = torch::empty({save ? M : 1}, f32);
   auto stream = at::cuda::getCurrentCUDAStream();
+#if MW_SAVE_AB
+  auto saved_a=torch::empty({save?M:1,save?H:1},x.options()),saved_b=torch::empty_like(saved_a);
+#endif
   wide_lnsg_launch(rm(x, 64, 64), rm(w1p, 64, 128), rm(h, 64, 64), fp(gamma), fp(beta), bp(xn), fp(rstd), fp(c1), (int)M, (int)H,
-                   (float)eps, save ? 1 : 0, WIDE_SMS, stream);
+                   (float)eps, save ? 1 : 0, WIDE_SMS, stream
+#if MW_SAVE_AB
+                   ,bp(saved_a),bp(saved_b)
+#endif
+                   );
   const int bn = wide_squeeze_bn();
   wide_squeeze_launch(rm(h, 64, 64), rm(ws, 64, bn), rm(x, 64, 64), rm(out, 64, 64), (int)M, (int)H, (int)D, WIDE_SMS, stream);
+#if MW_SAVE_AB
+  return {out,xn,rstd,c1,h,saved_a,saved_b};
+#else
   return {out, xn, rstd, c1, h};
+#endif
 }
+#if MW_SAVE_AB
+torch::Tensor gate_saved(torch::Tensor dy,torch::Tensor wst,torch::Tensor a,torch::Tensor b){
+  const int64_t M=dy.size(0);
+  bf16_2d(dy,M,D,"dy");bf16_2d(wst,H,D,"wst");bf16_2d(a,M,H,"saved a");bf16_2d(b,M,H,"saved b");
+  expect(M%ROWS==0,"whole 128-row tiles required");
+  auto dab=torch::empty({M,2*H},dy.options());
+  wide_gate_saved_launch(rm(dy,32,64,64),rm(wst,32,128,64),rm(dab,64,64),bp(a),bp(b),
+                        (int)M,(int)D,(int)H,2*WIDE_SMS,at::cuda::getCurrentCUDAStream());
+  return dab;
+}
+#endif
 #endif
 
 #if WIDE_D == 64
@@ -191,7 +222,10 @@ std::vector<torch::Tensor> gate(torch::Tensor xn, torch::Tensor dy, torch::Tenso
 #endif
   auto h = write_h ? torch::empty({M, H}, xn.options()) : torch::empty({ROWS, 64}, xn.options());   // placeholder: never written
   auto dab = torch::empty({M, 2 * H}, xn.options());
-#if WIDE_D != 256
+#if MW_SAVE_AB
+  expect(write_h,"use gate_saved with forward activations");
+#endif
+#if WIDE_D != 256 && !MW_SAVE_AB
   if (!write_h) {
     wide_gate_noh_launch(rm(xn, 32, 64, 64), rm(dy, 32, 64, 64), rm(w1p, 32, 128, 64), rm(wst, 32, 128, 64), rm(h, 64, 64), rm(dab, 64, 64),
                          (int)M, (int)D, (int)H, WIDE_SMS, at::cuda::getCurrentCUDAStream());
@@ -243,6 +277,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
 #if WIDE_D >= 256
   m.def("gate", &gate, "backward gate stage: h, [dA|dB]");
+#endif
+#if MW_SAVE_AB
+  m.def("gate_saved",&gate_saved,"dh GEMM and SwiGLU backward from saved activations");
 #endif
 #if WIDE_D == 256
   m.def("dxln", &dxln, "d_xn GEMM + LayerNorm backward + residual");
