@@ -1,3 +1,216 @@
+#if defined(MW_TRANSITION_AUX_ONLY)
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <algorithm>
+using bf = __nv_bfloat16;
+namespace {
+__device__ float rd(const void* p, int i, bool fp32) {
+  return fp32 ? static_cast<const float*>(p)[i] : __bfloat162float(static_cast<const bf*>(p)[i]);
+}
+struct Prep {
+  const void* src[3]; bf* dst[4];
+  int rows[3], cols[3], s0[3], s1[3], fp32[3], tasks[4];
+};
+__global__ void prepare_k(Prep p) {
+  __shared__ float tile[32][33];
+  int op=p.tasks[blockIdx.y],s=op==3?2:op;
+  int ntx=(p.cols[s]+31)/32,r0=(blockIdx.x/ntx)*32,c0=(blockIdx.x%ntx)*32;
+  int lane=threadIdx.x&31,rr=threadIdx.x>>5;
+  for(int j=rr;j<32;j+=8){
+    int r=r0+j,c=c0+lane;
+    float v=(r<p.rows[s]&&c<p.cols[s])?rd(p.src[s],r*p.s0[s]+c*p.s1[s],p.fp32[s]):0.f;
+    if(op==3)tile[j][lane]=v;
+    else if(r<p.rows[s]&&c<p.cols[s])p.dst[op][r*p.cols[s]+c]=__float2bfloat16_rn(v);
+  }
+  if(op==3){
+    __syncthreads();
+    for(int j=rr;j<32;j+=8){
+      int r=c0+j,c=r0+lane;
+      if(r<p.cols[s]&&c<p.rows[s])p.dst[3][r*p.rows[s]+c]=__float2bfloat16_rn(tile[lane][j]);
+    }
+  }
+}
+__global__ void pair_layout_k(const bf* a,const bf* b,bf* out,int h,int d,int block,bool transpose) {
+  __shared__ float tile[32][33];
+  int ntx=(d+31)/32,r0=(blockIdx.x/ntx)*32,c0=(blockIdx.x%ntx)*32;
+  int lane=threadIdx.x&31,rr=threadIdx.x>>5;
+  for(int j=rr;j<32;j+=8){
+    int r=r0+j,c=c0+lane;
+    int leaf=block?(r/block)%2:r/h;
+    int sr=block?(r/(2*block))*block+r%block:r%h;
+    float v=r<2*h&&c<d?__bfloat162float((leaf?b:a)[sr*d+c]):0.f;
+    if(transpose)tile[j][lane]=v;
+    else if(r<2*h&&c<d)out[r*d+c]=__float2bfloat16_rn(v);
+  }
+  if(transpose){
+    __syncthreads();
+    for(int j=rr;j<32;j+=8){
+      int r=c0+j,c=r0+lane;
+      if(r<d&&c<2*h)out[r*(2*h)+c]=__float2bfloat16_rn(tile[lane][j]);
+    }
+  }
+}
+struct Cast { const void* src[8];void* dst[8];int n[8],sf[8],df[8]; };
+__global__ void cast_k(Cast p){
+  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
+  if(i>=p.n[leaf])return;
+  float v=rd(p.src[leaf],i,p.sf[leaf]);
+  if(p.df[leaf])static_cast<float*>(p.dst[leaf])[i]=v;
+  else static_cast<bf*>(p.dst[leaf])[i]=__float2bfloat16_rn(v);
+}
+__device__ float wsum(float x){for(int q=16;q;q>>=1)x=__fadd_rn(x,__shfl_xor_sync(0xffffffff,x,q));return x;}
+// Each persistent warp owns rows and keeps its affine-gradient sums in registers.
+// A second fixed-order reduction replaces the old global floating-point atomics.
+__global__ __launch_bounds__(128,4)
+void ln_bwd_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const float* c1,
+              const bf* residual,bf* dx,float* partial,int rows,int d){
+  int lane=threadIdx.x&31,warp=threadIdx.x>>5,gw=blockIdx.x*4+warp,nw=gridDim.x*4;
+  float ag[16]={0},ab[16]={0};
+  union Vec{uint2 u;bf v[4];};
+  for(int row=gw;row<rows;row+=nw){
+    float xh[16],grad[16],wd[16],a=0.f,b=0.f;
+    float rstd=rs[row],offset=c1[row];
+    #pragma unroll
+    for(int v=0;v<4;++v){
+      int c=(v*32+lane)*4;
+      if(c<d){
+        Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+row*d+c);gv.u=*reinterpret_cast<const uint2*>(dy+row*d+c);
+        #pragma unroll
+        for(int e=0;e<4;++e){
+          int k=4*v+e;
+          xh[k]=fmaf(__bfloat162float(xv.v[e]),rstd,-offset);
+          grad[k]=__bfloat162float(gv.v[e]);wd[k]=gamma[c+e]*grad[k];
+          a=__fadd_rn(a,wd[k]*xh[k]);b=__fadd_rn(b,wd[k]);
+        }
+      }
+    }
+    a=wsum(a)/d;b=wsum(b)/d;
+    #pragma unroll
+    for(int v=0;v<4;++v){
+      int c=(v*32+lane)*4;
+      if(c<d){
+        Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+row*d+c);
+        #pragma unroll
+        for(int e=0;e<4;++e){
+          int k=4*v+e;
+          out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(res.v[e]));
+          ag[k]=__fadd_rn(ag[k],grad[k]*xh[k]);ab[k]=__fadd_rn(ab[k],grad[k]);
+        }
+        *reinterpret_cast<uint2*>(dx+row*d+c)=out.u;
+      }
+    }
+  }
+  #pragma unroll
+  for(int v=0;v<4;++v){
+    int c=(v*32+lane)*4;
+    if(c<d){
+      #pragma unroll
+      for(int e=0;e<4;++e){partial[gw*d+c+e]=ag[4*v+e];partial[(nw+gw)*d+c+e]=ab[4*v+e];}
+    }
+  }
+}
+__global__ void ln_reduce_k(const float* partial,float* dg,float* db,int nw,int d){
+  __shared__ float sg[256],sb[256];
+  int c=blockIdx.x,t=threadIdx.x;float g=0.f,b=0.f;
+  for(int r=t;r<nw;r+=256){g=__fadd_rn(g,partial[r*d+c]);b=__fadd_rn(b,partial[(nw+r)*d+c]);}
+  sg[t]=g;sb[t]=b;__syncthreads();
+  for(int s=128;s;s>>=1){if(t<s){sg[t]=__fadd_rn(sg[t],sg[t+s]);sb[t]=__fadd_rn(sb[t],sb[t+s]);}__syncthreads();}
+  if(!t){dg[c]=sg[0];db[c]=sb[0];}
+}
+void check(const at::Tensor& t){
+  TORCH_CHECK(t.is_cuda()&&(t.scalar_type()==at::kFloat||t.scalar_type()==at::kBFloat16),"CUDA BF16/FP32 tensor required");
+}
+}
+std::vector<at::Tensor> prepare(at::Tensor a,at::Tensor b,at::Tensor s,bool transpose){
+  c10::cuda::CUDAGuard guard(a.device());
+  std::vector<at::Tensor> in={a,b,s},out;Prep p{};int count=0;
+  TORCH_CHECK(a.dim()==2&&b.sizes()==a.sizes()&&s.dim()==2&&s.size(0)==a.size(1)&&s.size(1)==a.size(0),"transition weight shapes");
+  for(int j=0;j<3;++j){
+    check(in[j]);TORCH_CHECK(in[j].device()==a.device(),"weight device mismatch");
+    bool copy=in[j].scalar_type()!=at::kBFloat16||!in[j].is_contiguous();
+    out.push_back(copy?at::empty(in[j].sizes(),in[j].options().dtype(at::kBFloat16)):in[j]);
+    p.src[j]=in[j].data_ptr();p.dst[j]=reinterpret_cast<bf*>(out[j].data_ptr());
+    p.rows[j]=in[j].size(0);p.cols[j]=in[j].size(1);p.s0[j]=in[j].stride(0);p.s1[j]=in[j].stride(1);
+    p.fp32[j]=in[j].scalar_type()==at::kFloat;
+    if(copy)p.tasks[count++]=j;
+  }
+  out.push_back(at::empty(transpose?std::vector<int64_t>{s.size(1),s.size(0)}:std::vector<int64_t>{0},s.options().dtype(at::kBFloat16)));
+  p.dst[3]=reinterpret_cast<bf*>(out[3].data_ptr());if(transpose)p.tasks[count++]=3;
+  int tiles=((a.size(0)+31)/32)*((a.size(1)+31)/32);
+  if(count)prepare_k<<<dim3(tiles,count),256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+at::Tensor pair_layout(at::Tensor a,at::Tensor b,int block,bool transpose){
+  c10::cuda::CUDAGuard guard(a.device());check(a);check(b);
+  TORCH_CHECK(a.dim()==2&&a.sizes()==b.sizes()&&a.is_contiguous()&&b.is_contiguous()
+              &&a.scalar_type()==at::kBFloat16&&b.scalar_type()==at::kBFloat16,"packed BF16 projections required");
+  int h=a.size(0),d=a.size(1);TORCH_CHECK(block==0||(block>0&&h%block==0),"weight interleave block");
+  auto out=at::empty(transpose?std::vector<int64_t>{d,2*h}:std::vector<int64_t>{2*h,d},a.options());
+  pair_layout_k<<<((2*h+31)/32)*((d+31)/32),256,0,at::cuda::getCurrentCUDAStream()>>>(
+    reinterpret_cast<const bf*>(a.data_ptr()),reinterpret_cast<const bf*>(b.data_ptr()),reinterpret_cast<bf*>(out.data_ptr()),h,d,block,transpose);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+std::vector<at::Tensor> cast(std::vector<at::Tensor> in,std::vector<bool> fp32,bool force){
+  TORCH_CHECK(!in.empty()&&in.size()<=8&&in.size()==fp32.size(),"one to eight cast tensors required");
+  c10::cuda::CUDAGuard guard(in[0].device());Cast p{};std::vector<at::Tensor> out;int maxn=0;
+  for(int j=0;j<(int)in.size();++j){
+    check(in[j]);TORCH_CHECK(in[j].is_contiguous()&&in[j].device()==in[0].device(),"contiguous tensors on one device required");
+    auto dt=fp32[j]?at::kFloat:at::kBFloat16;bool copy=force||in[j].scalar_type()!=dt;
+    out.push_back(copy?at::empty(in[j].sizes(),in[j].options().dtype(dt)):in[j]);
+    p.src[j]=in[j].data_ptr();p.dst[j]=out[j].data_ptr();p.n[j]=copy?in[j].numel():0;
+    p.sf[j]=in[j].scalar_type()==at::kFloat;p.df[j]=fp32[j];maxn=std::max(maxn,p.n[j]);
+  }
+  if(maxn)cast_k<<<dim3((maxn+255)/256,in.size()),256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+std::vector<at::Tensor> ln_bwd(at::Tensor dy,at::Tensor x,at::Tensor gamma,at::Tensor rs,at::Tensor c1,at::Tensor residual,int waves){
+  c10::cuda::CUDAGuard guard(x.device());
+  for(auto* t:{&dy,&x,&residual})TORCH_CHECK(t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kBFloat16&&t->sizes()==x.sizes(),"LN BF16 rows");
+  int d=x.size(-1),rows=x.numel()/d;
+  TORCH_CHECK((d==384||d==512)&&waves>0,"wide LN contract");
+  for(auto* t:{&gamma,&rs,&c1})TORCH_CHECK(t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kFloat,"LN FP32 stats/affine");
+  TORCH_CHECK(gamma.numel()==d&&rs.numel()==rows&&c1.numel()==rows,"LN stats shapes");
+  int sms=0;C10_CUDA_CHECK(cudaDeviceGetAttribute(&sms,cudaDevAttrMultiProcessorCount,x.get_device()));
+  int grid=sms*waves,nw=grid*4;
+  auto dx=at::empty_like(x),dg=at::empty_like(gamma),db=at::empty_like(gamma),partial=at::empty({2,nw,d},gamma.options());
+  auto stream=at::cuda::getCurrentCUDAStream();
+  ln_bwd_k<<<grid,128,0,stream>>>(reinterpret_cast<const bf*>(dy.data_ptr()),reinterpret_cast<const bf*>(x.data_ptr()),
+    gamma.data_ptr<float>(),rs.data_ptr<float>(),c1.data_ptr<float>(),reinterpret_cast<const bf*>(residual.data_ptr()),
+    reinterpret_cast<bf*>(dx.data_ptr()),partial.data_ptr<float>(),rows,d);
+  ln_reduce_k<<<d,256,0,stream>>>(partial.data_ptr<float>(),dg.data_ptr<float>(),db.data_ptr<float>(),nw,d);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return {dx,dg,db};
+}
+__global__ void affine_reduce_k(const float* pg,const float* pb,float* dg,float* db,int rows,int d){
+  __shared__ float sg[256],sb[256];
+  int lane=threadIdx.x&31,warp=threadIdx.x>>5,c=blockIdx.x*32+lane;
+  float g=0.f,b=0.f;
+  if(c<d)for(int r=warp;r<rows;r+=8){g=__fadd_rn(g,pg[r*d+c]);b=__fadd_rn(b,pb[r*d+c]);}
+  sg[threadIdx.x]=g;sb[threadIdx.x]=b;__syncthreads();
+  if(warp==0&&c<d){
+    g=0.f;b=0.f;
+    #pragma unroll
+    for(int r=0;r<8;++r){g=__fadd_rn(g,sg[r*32+lane]);b=__fadd_rn(b,sb[r*32+lane]);}
+    dg[c]=g;db[c]=b;
+  }
+}
+std::vector<at::Tensor> reduce_affine(at::Tensor pg,at::Tensor pb){
+  c10::cuda::CUDAGuard guard(pg.device());
+  TORCH_CHECK(pg.is_cuda()&&pb.device()==pg.device()&&pg.dim()==2&&pb.sizes()==pg.sizes()
+    &&pg.is_contiguous()&&pb.is_contiguous()&&pg.scalar_type()==at::kFloat&&pb.scalar_type()==at::kFloat,"FP32 affine partials required");
+  auto dg=at::empty({pg.size(1)},pg.options()),db=at::empty_like(dg);
+  affine_reduce_k<<<(pg.size(1)+31)/32,256,0,at::cuda::getCurrentCUDAStream()>>>(
+    pg.data_ptr<float>(),pb.data_ptr<float>(),dg.data_ptr<float>(),db.data_ptr<float>(),pg.size(0),pg.size(1));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return {dg,db};
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){
+  m.def("reduce_affine",&reduce_affine);
+  m.def("prepare",&prepare);m.def("pair_layout",&pair_layout);m.def("cast",&cast);m.def("ln_bwd",&ln_bwd);
+}
+#else
 // Torch bindings for the fused sm_90a Transition forward and backward.
 //
 // The two kernels live in `transition_fused_fwd_sm90a_kernel.cu` and
@@ -180,7 +393,48 @@ std::vector<torch::Tensor> transition_fused_bwd_master(torch::Tensor dy, torch::
 }
 
 
+// Returns (dx, dgamma, dbeta, dWa, dWb, dWs); dx already carries the residual branch.
+std::vector<torch::Tensor> transition_fused_bwd_native(torch::Tensor dy, torch::Tensor x,
+                                                torch::Tensor xn, torch::Tensor rstd,
+                                                torch::Tensor c1, torch::Tensor gamma,
+                                                torch::Tensor wa, torch::Tensor wb,
+                                                torch::Tensor ws, bool fp32_dw) {
+  // Autograd can call us on a fresh worker thread. Empty allocations do not
+  // necessarily attach its primary context before the driver TMA encoder.
+  expect(cudaSetDevice(x.get_device()) == cudaSuccess, "CUDA context initialization failed");
+  const int64_t M = x.size(0), D = x.size(1), H = wa.size(0);
+  expect(dy.is_cuda() && dy.is_contiguous() && dy.scalar_type() == torch::kBFloat16, "dy must be contiguous cuda bf16");
+  expect(D == 128 && H == 512, "only d_hidden 128 with n 4 is built");
+  expect(M % transition_fused_bwd_rows() == 0, "row count must be a whole tile");
+  expect(gamma.scalar_type() == torch::kFloat32, "gamma must be fp32");
+  expect(ws.is_contiguous() && ws.size(0) == D && ws.size(1) == H, "ws must be contiguous [D, H]");
+
+  auto f32 = x.options().dtype(torch::kFloat32);
+  auto dx = torch::empty_like(x);
+  auto dgam = torch::empty({D}, f32);
+  auto dbeta = torch::empty({D}, f32);
+  auto partw = torch::empty({transition_fused_bwd_ndw() * 3 * 64 * D}, f32);
+  auto dgbw = torch::empty({transition_fused_bwd_ndx() * 8 * 256}, f32);
+  auto dWa = torch::empty(wa.sizes(), fp32_dw ? f32 : wa.options());
+  auto dWb = torch::empty(wb.sizes(), fp32_dw ? f32 : wb.options());
+  auto dWs = torch::empty(ws.sizes(), fp32_dw ? f32 : ws.options());
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  transition_fused_bwd_launch(
+      tile_map(dy, D, M, 64, 64), tile_map(xn, D, M, 64, 64), tile_map(x, D, M, 64, 64),
+      tile_map(ws, H, D, 64, 128), tile_map(wa, D, H, 64, 64), tile_map(wb, D, H, 64, 64),
+      rstd.data_ptr<float>(), c1.data_ptr<float>(), gamma.data_ptr<float>(), bf16_ptr(dx),
+      dgam.data_ptr<float>(), dbeta.data_ptr<float>(), partw.data_ptr<float>(),
+      dgbw.data_ptr<float>(), static_cast<int>(M),
+      static_cast<int>(M / transition_fused_bwd_rows()), stream);
+  transition_fused_reduce_launch(partw.data_ptr<float>(), dWa.data_ptr(), dWb.data_ptr(),
+                                 dWs.data_ptr(), dgbw.data_ptr<float>(), dgam.data_ptr<float>(),
+                                 dbeta.data_ptr<float>(), fp32_dw, stream);
+  return {dx, dgam, dbeta, dWa, dWb, dWs};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("transition_fused_bwd_native", &transition_fused_bwd_native);
   m.def("transition_fused_fwd", &transition_fused_fwd,
         "fused sm_90a Transition forward (LN + SwiGLU expand + squeeze + residual)");
   m.def("transition_fused_bwd_master", &transition_fused_bwd_master);
@@ -191,3 +445,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("bwd_ctas", &transition_fused_bwd_ctas);
   m.def("saves_xn", &transition_fused_fwd_saves_xn);
 }
+#endif  // MW_TRANSITION_AUX_ONLY
