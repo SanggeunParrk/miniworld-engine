@@ -181,9 +181,20 @@ def pack_into(dst, wl, wlg, wr, wrg):
     pack(dst, wl, wlg, wr, wrg)
 
 
+def cuda_aux_enabled():
+    return os.environ.get("MINIWORLD_TRIMUL_H100_CUDA_AUX") == "1"
+
+
 @torch.compile(fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
-def normalize_into(dst, x, g, b):
+def _normalize_into_compiled(dst, x, g, b):
     dst.copy_(F.layer_norm(x.float(), (x.shape[-1],), g, b, 1e-5).to(x.dtype))
+
+
+def normalize_into(dst, x, g, b):
+    if cuda_aux_enabled():
+        from ._h100_pack import normalize_into as native
+        return native(dst, x, g, b)
+    return _normalize_into_compiled(dst, x, g, b)
 
 
 @device_cache
