@@ -1,0 +1,352 @@
+{
+ "figures": {
+  "inference": {
+   "title": "A100 · SWA atom DiT block (ESMFold2 style: sliding window |i − j| ≤ 64, 3D RoPE, per-head RMS norm, SwiGLU 256) · inference · d 128, cond 128, 4 heads × 32, bf16",
+   "panels": [
+    {
+     "label": "one block, A samples with a conditioning per atom (mod per row of c); with one conditioning for the A samples (forward_hoisted) I1 runs on S rows instead of A S",
+     "kernels": [
+      {
+       "id": "I1",
+       "name": "adaLN modulation",
+       "impl": "CUDA · mod_fwd_kernel / mod_fwd_ws_kernel",
+       "code": [
+        "a = rn(silu(c))                              # bf16",
+        "mod = a Wmodᵀ                                # fp32 [rows, 768], bf16 MMA, fp32 accumulate",
+        "shift_a | scale_a | gate_a | shift_f | scale_f | gate_f"
+       ],
+       "reads": [
+        "c [rows,128]",
+        "Wmod [768,128]"
+       ],
+       "writes": [
+        "mod [rows,768] fp32"
+       ]
+      },
+      {
+       "id": "I2",
+       "name": "RMS-adaLN, q | k | v | g projections, head RMS norm, RoPE",
+       "impl": "CUDA · qkvg_fwd_kernel",
+       "code": [
+        "x = rn(rn(q · rstd) (1 + scale_a) + shift_a)",
+        "p = rn(x Wᵀ)      W = Wq | Wk | Wv | Wg",
+        "Q, K = rn(rope(rn(p · rstd_{head})));  V = p_{v};  G = p_{g}"
+       ],
+       "reads": [
+        "q (the residual stream)",
+        "mod cols 0 .. 255, cos, sin",
+        "Wqkv, Wg"
+       ],
+       "writes": [
+        "Q, K, V head-major [N,4,S,32]",
+        "G [M,128]"
+       ]
+      },
+      {
+       "id": "I3",
+       "name": "window attention",
+       "impl": "CUDA · attn_fwd_kernel",
+       "code": [
+        "s = q·kᵀ / √32  for |i − j| ≤ 64, i and j < seqused",
+        "o = softmax(s) v         # per sample and head, one pass over the window"
+       ],
+       "reads": [
+        "Q, K, V",
+        "seqused"
+       ],
+       "writes": [
+        "O [M,128]",
+        "lse [N,4,S]"
+       ]
+      },
+      {
+       "id": "I4",
+       "name": "gated out-projection, RMS-adaLN, SwiGLU FFN",
+       "impl": "CUDA · ffn_fwd_kernel",
+       "code": [
+        "q1 = q + gate_a · rn(rn(sigmoid(G) · O) Woᵀ)",
+        "y = rn(rn(q1 · rstd) (1 + scale_f) + shift_f)",
+        "h = rn(a sigmoid(a) b),   a | b = y Wuᵀ        # hidden 256",
+        "out = q1 + gate_f · rn(h Wdᵀ)"
+       ],
+       "reads": [
+        "q, G, O",
+        "mod cols 256 .. 767",
+        "Wo, Wu, Wd"
+       ],
+       "writes": [
+        "out [M,128]"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at N = 3072 | 6144 atoms, A = 5)",
+     "hbm": [
+      {
+       "name": "q, c, out, Q, K, V, G, O",
+       "shape": "[A N,128] bf16",
+       "size": "3.9 | 7.9 MB each"
+      },
+      {
+       "name": "mod (a conditioning per atom | one for the A samples)",
+       "shape": "[A N,768] | [N,768] fp32",
+       "size": "47 | 94 MB, 9.4 | 18.9 MB"
+      },
+      {
+       "name": "lse",
+       "shape": "[A,4,N] fp32",
+       "size": "0.25 | 0.5 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training": {
+   "title": "A100 · SWA atom DiT block · training · d 128, cond 128, 4 heads × 32, bf16",
+   "panels": [
+    {
+     "label": "forward (the inference stages, saving the backward's operands: a, X, PQ, PK, q1, att, y, ffn, lse)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "adaLN modulation",
+       "impl": "CUDA · mod_fwd_kernel / mod_fwd_ws_kernel",
+       "code": [
+        "a = rn(silu(c));   mod = a Wmodᵀ              # fp32 [rows, 768]"
+       ],
+       "reads": [
+        "c",
+        "Wmod"
+       ],
+       "writes": [
+        "mod",
+        "a (bf16)"
+       ]
+      },
+      {
+       "id": "F2",
+       "name": "RMS-adaLN, q | k | v | g, head RMS norm, RoPE",
+       "impl": "CUDA · qkvg_fwd_kernel (save)",
+       "code": [
+        "as I2;  also stores X = x and the pre-norm P_{q}, P_{k} (bf16)"
+       ],
+       "reads": [
+        "q, mod cols 0 .. 255",
+        "cos, sin, Wqkv, Wg"
+       ],
+       "writes": [
+        "Q, K, V, G",
+        "X, PQ, PK"
+       ]
+      },
+      {
+       "id": "F3",
+       "name": "window attention",
+       "impl": "CUDA · attn_fwd_kernel",
+       "code": [
+        "as I3;  lse = ln Σ exp(s) per sample, head, query"
+       ],
+       "reads": [
+        "Q, K, V"
+       ],
+       "writes": [
+        "O",
+        "lse"
+       ]
+      },
+      {
+       "id": "F4",
+       "name": "out-projection, RMS-adaLN, SwiGLU FFN",
+       "impl": "CUDA · ffn_fwd_kernel (save)",
+       "code": [
+        "as I4;  also stores q1, att = rn(gated Woᵀ), y, ffn = rn(h Wdᵀ)"
+       ],
+       "reads": [
+        "q, G, O",
+        "mod cols 256 .. 767",
+        "Wo, Wu, Wd"
+       ],
+       "writes": [
+        "out",
+        "q1, att, y, ffn"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at N = 3072 atoms, A = 48, a conditioning per atom)",
+     "hbm": [
+      {
+       "name": "q, c, out, a, Q, K, V, G, O, X, PQ, PK, q1, att, y, ffn",
+       "shape": "[A N,128] bf16",
+       "size": "37.7 MB each"
+      },
+      {
+       "name": "mod",
+       "shape": "[A N,768] fp32",
+       "size": "453 MB"
+      },
+      {
+       "name": "lse",
+       "shape": "[A,4,N] fp32",
+       "size": "2.4 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward (stage by stage in reverse; every row stage writes its columns of the modulation gradient once; the weight gradients are cuBLAS GEMMs)",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "FFN backward, gate",
+       "impl": "CUDA · ffn_bwd_gate_kernel",
+       "code": [
+        "dffn = rn(dy · rn(gate_f));   d gate_f = dy · ffn",
+        "a | b = y Wuᵀ (recomputed);  h = rn(a sigmoid(a) b)",
+        "dh = dffn Wd;  da | db = swiglu′(a, b) · dh"
+       ],
+       "reads": [
+        "dy, y, ffn",
+        "mod cols 640 .. 767",
+        "Wu, Wdᵀ"
+       ],
+       "writes": [
+        "dffn, h",
+        "dab = da | db [M,512]",
+        "dmod cols 640 .. 767"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "FFN backward, input side + adaLN",
+       "impl": "CUDA · ffn_bwd_dy_kernel",
+       "code": [
+        "dy′ = dab Wu;  x̂ = q1 · rstd",
+        "d scale_f = dy′ x̂;  d shift_f = dy′",
+        "dq1 = dy + rstd (dy′ (1 + scale_f) − x̂ mean(dy′ (1 + scale_f) x̂))"
+       ],
+       "reads": [
+        "dab, q1, dy",
+        "mod cols 384 .. 639, Wu"
+       ],
+       "writes": [
+        "dq1",
+        "dmod cols 384 .. 639"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "out-projection backward",
+       "impl": "CUDA · oproj_bwd_kernel",
+       "code": [
+        "datt = rn(dq1 rn(gate_a));  dgated = datt Wo;  d gate_a = dq1 att",
+        "dO = rn(dgated σ(G));  dG = rn(dgated O σ(G)(1 − σ(G)))",
+        "D = Σ_{head} dO · O                       # the attention backward's row term"
+       ],
+       "reads": [
+        "dq1, O, G, att",
+        "mod cols 256 .. 383, Wo"
+       ],
+       "writes": [
+        "dO, dG, datt, gated",
+        "D [N,4,S], dmod cols 256 .. 383"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "window attention backward",
+       "impl": "CUDA · attn_bwd_dq_kernel, attn_bwd_dkv_kernel",
+       "code": [
+        "p = exp(s − lse);  dp = dO·vᵀ;  ds = rn(p (dp − D))",
+        "dQ = scale · ds K;   dK = scale · dsᵀ Q;   dV = rn(p)ᵀ dO"
+       ],
+       "reads": [
+        "Q, K, V, dO",
+        "lse, D, seqused"
+       ],
+       "writes": [
+        "dQ, dK, dV head-major"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "q | k | v | g backward, RMS-adaLN backward",
+       "impl": "CUDA · qkvg_bwd_kernel",
+       "code": [
+        "dP_{q,k} = rn(head_rms_bwd(P, unrope(dQ, dK)));  dP_{v,g} = dV, dG",
+        "dx = dP W;  d scale_a = dx x̂;  d shift_a = dx",
+        "dq = rn(dq1 + rstd (dx(1 + scale_a) − x̂ mean(dx(1 + scale_a) x̂)))"
+       ],
+       "reads": [
+        "q, PQ, PK, dQ, dK, dV, dG, dq1",
+        "mod cols 0 .. 255, cos, sin, Wqkv | Wg"
+       ],
+       "writes": [
+        "dq (the block's input gradient)",
+        "dP [M,512], dmod cols 0 .. 255"
+       ]
+      },
+      {
+       "id": "B6",
+       "name": "weight gradients",
+       "impl": "cuBLAS · 5 GEMMs",
+       "code": [
+        "dWqkv = dP_{qkv}ᵀ X;  dWg = dP_{g}ᵀ X;  dWo = dattᵀ gated",
+        "dWu = dabᵀ y;  dWd = [dffn]ᵀ h"
+       ],
+       "reads": [
+        "dP, X, datt, gated",
+        "dab, y, dffn, h"
+       ],
+       "writes": [
+        "dWqkv, dWg, dWo, dWu, dWd"
+       ]
+      },
+      {
+       "id": "B7",
+       "name": "modulation backward",
+       "impl": "CUDA · mod_dc_kernel, mod_dw_kernel, mod_dw_reduce_kernel",
+       "code": [
+        "dc = silu′(c) · rn(dmod Wmod);  dWmod = dmodᵀ a      # dmod fp32 as hi + lo bf16 terms",
+        "per-sample conditioning: one dmod row per row of c;  shared: summed over 16 samples in-kernel"
+       ],
+       "reads": [
+        "dmod [rows,768] fp32",
+        "c, a, Wmod"
+       ],
+       "writes": [
+        "dc (bf16)",
+        "dWmod"
+       ]
+      }
+     ],
+     "hbm_title": "HBM (sizes at N = 3072 atoms, A = 48, a conditioning per atom)",
+     "hbm": [
+      {
+       "name": "dy, dq1, dO, dG, dQ, dK, dV, dq, datt, gated, dffn",
+       "shape": "[A N,128] bf16",
+       "size": "37.7 MB each"
+      },
+      {
+       "name": "h",
+       "shape": "[A N,256] bf16",
+       "size": "75.5 MB"
+      },
+      {
+       "name": "dab",
+       "shape": "[A N,512] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "dP",
+       "shape": "[A N,512] bf16",
+       "size": "151 MB"
+      },
+      {
+       "name": "dmod (shared conditioning: [A/16,N,768] partials)",
+       "shape": "[A N,768] fp32",
+       "size": "453 MB (28 MB)"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,238 @@
+{
+  "date": "2026-10-04",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "node": "gpu07",
+  "benchmark_job": 63486,
+  "test_job": 63482,
+  "measurement": "two sequential rounds, same GPU; warmed CUDA graph; native Anthropic eager, other arms compiled",
+  "local_build": {
+    "kind": "local rebuild, not an upstream-certified binary",
+    "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+    "upstream_manifest_sha256": "0ff0d3162c65f5979b0ea2908f94b651c21c1192c5aedae9aeeb840f2b00d9df",
+    "verified_upstream_files": 1296,
+    "build_record": {
+      "arch": [
+        "arch=compute_80,code=sm_80"
+      ],
+      "build_s": 45.4,
+      "built_by": "tools/build_prebuilt.py: the kernel directory's own _build() in the target stack",
+      "built_utc": "2026-10-02T23:54:29Z",
+      "cxx11abi": true,
+      "dir": "cuda_80",
+      "ext": "triattn_sm80_ext",
+      "loadcheck": "pending",
+      "module": "triattn_sm80",
+      "module_sha256": {
+        "triattn_sm80.py": "70afc4d4f3997ecd2a9c620b2f129de1abba25d74f9f3190c2333975ffa8cbaa"
+      },
+      "nvcc": "Build cuda_12.9.r12.9/compiler.36037853_0",
+      "ptxas": {
+        "path": "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/ptxas",
+        "version": "Build cuda_12.9.r12.9/compiler.36037853_0"
+      },
+      "python": "3.12.13",
+      "route": "cuda_80",
+      "so_bytes": 12257296,
+      "so_sha256": "b114247c466323631a267ceecc3bf387d101ed0f656e24413860f9262d7d861f",
+      "soabi": "cpython-312-x86_64-linux-gnu",
+      "source_sha256": {
+        "inst_d16.cu": "76539b983a51e623a3b8e492b0b3310dad6d4a05f995a890746514a94355327a",
+        "inst_d32.cu": "b26c55672bef4df47d50db2e59adde8d1d40e4720c996088c79f0cdde8db95d6",
+        "inst_d64.cu": "44aee8ff73ab7163286fcf0866ca678c15bf97dae25b69d1f9528f83b51b74df",
+        "inst_sm80.h": "11e0875f43676a211dbf5d78bf50202a4c51bf80d7cb5337602aa3c5811aae72",
+        "launch_sm80.cuh": "977ad52e011f71406bc6a3c1fb538e85f29c364d669858c33c2ec328cf59be28",
+        "sm80_binding.cu": "e57f83ca2f7b3e4017fc9c5330df1224f46581a47a933ce8a7164f427be0f181",
+        "triattn_sm80.cuh": "239ed0c6ee3e34402a46fc4269f926bff6d056ebab235907b672a2cdbd236def"
+      },
+      "stack_tag": "torch2.13.0+cu129-cpython-312-x86_64-linux-gnu",
+      "torch": "2.13.0+cu129",
+      "torch_cuda": "12.9"
+    },
+    "gpu_validation": "pending: triattn_native.install() must pass unchanged upstream vectors"
+  },
+  "validation": {
+    "original_byte_vectors": 3,
+    "bitwise": true,
+    "route": "cuda_80",
+    "module_graph_cases": 18,
+    "cpu_refusal_cases": 3
+  },
+  "rows": [
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-00588c96-src-fd4b95ad-run-c33669c42dc1_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "pytorch",
+      "seq_len": "384",
+      "value": "3.4017279148101807",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "module.reference.torch"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-00588c96-src-fd4b95ad-run-c33669c42dc1_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "cuequivariance",
+      "seq_len": "384",
+      "value": "1.3132799863815308",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "cuequivariance_torch.triangle_attention"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-00588c96-src-fd4b95ad-run-c33669c42dc1_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "miniworld",
+      "seq_len": "384",
+      "value": "0.6512640118598938",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "modules.triangle_attention.full.layernorm+qkv_bias_projection+triton_triangle_attention_pair_bias+gate_out"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-00588c96-src-fd4b95ad-run-c33669c42dc1_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "pytorch",
+      "seq_len": "768",
+      "value": "27.230207443237305",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "module.reference.torch"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-00588c96-src-fd4b95ad-run-c33669c42dc1_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "cuequivariance",
+      "seq_len": "768",
+      "value": "7.147520065307617",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "cuequivariance_torch.triangle_attention"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-00588c96-src-fd4b95ad-run-c33669c42dc1_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "miniworld",
+      "seq_len": "768",
+      "value": "3.729408025741577",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "modules.triangle_attention.full.layernorm+qkv_bias_projection+triton_triangle_attention_pair_bias+gate_out"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0940c3ab-src-fd4b95ad-run-333a12a0d202_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "pytorch",
+      "seq_len": "384",
+      "value": "3.3413119316101074",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "module.reference.torch"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0940c3ab-src-fd4b95ad-run-333a12a0d202_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "cuequivariance",
+      "seq_len": "384",
+      "value": "1.3004800081253052",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "cuequivariance_torch.triangle_attention"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0940c3ab-src-fd4b95ad-run-333a12a0d202_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "miniworld",
+      "seq_len": "384",
+      "value": "0.6430720090866089",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "modules.triangle_attention.full.layernorm+qkv_bias_projection+triton_triangle_attention_pair_bias+gate_out"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0940c3ab-src-fd4b95ad-run-333a12a0d202_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "pytorch",
+      "seq_len": "768",
+      "value": "27.18720054626465",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "module.reference.torch"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0940c3ab-src-fd4b95ad-run-333a12a0d202_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "cuequivariance",
+      "seq_len": "768",
+      "value": "7.152639865875244",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "cuequivariance_torch.triangle_attention"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_wrap-custom_op_seq_len_cfg-0940c3ab-src-fd4b95ad-run-333a12a0d202_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "miniworld",
+      "seq_len": "768",
+      "value": "3.768320083618164",
+      "status": "ok",
+      "output_rel_frob": "",
+      "output_cosine": "",
+      "execution_path": "modules.triangle_attention.full.layernorm+qkv_bias_projection+triton_triangle_attention_pair_bias+gate_out"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-0cf7ffdd-src-fd4b95ad-run-949c9f8a4e88_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "anthropic",
+      "seq_len": "384",
+      "value": "0.7342079877853394",
+      "status": "ok",
+      "output_rel_frob": "0.0017485168064013124",
+      "output_cosine": "0.9999984502792358",
+      "execution_path": "integrations.anthropic.module_triangle_attention[block:triattn_native] -> upstream opt_core.attn.pair_fused.pack_triattn_weights + tri_attn_block(impl=fpf, core=strict:triattn_native, ln=fused (upstream in-kernel LN), residual=False)+engine_residual selected={'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=400|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.61, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=400|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 's"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-0cf7ffdd-src-fd4b95ad-run-949c9f8a4e88_codex_anth_native_r1.csv",
+      "round": 1,
+      "implementation": "anthropic",
+      "seq_len": "768",
+      "value": "3.644416093826294",
+      "status": "ok",
+      "output_rel_frob": "0.0017172604566439986",
+      "output_cosine": "0.9999983906745911",
+      "execution_path": "integrations.anthropic.module_triangle_attention[block:triattn_native] -> upstream opt_core.attn.pair_fused.pack_triattn_weights + tri_attn_block(impl=fpf, core=strict:triattn_native, ln=fused (upstream in-kernel LN), residual=False)+engine_residual selected={'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 's"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-c7cd32c1-src-fd4b95ad-run-be7702f99adf_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "anthropic",
+      "seq_len": "384",
+      "value": "0.7352319955825806",
+      "status": "ok",
+      "output_rel_frob": "0.0017485168064013124",
+      "output_cosine": "0.9999984502792358",
+      "execution_path": "integrations.anthropic.module_triangle_attention[block:triattn_native] -> upstream opt_core.attn.pair_fused.pack_triattn_weights + tri_attn_block(impl=fpf, core=strict:triattn_native, ln=fused (upstream in-kernel LN), residual=False)+engine_residual selected={'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=400|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.61, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=400|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 's"
+    },
+    {
+      "csv": "benchmarks/modules/triangle_attention/artifacts/NVIDIA A100 80GB PCIe/triangle_attention_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-c7cd32c1-src-fd4b95ad-run-be7702f99adf_codex_anth_native_r2.csv",
+      "round": 2,
+      "implementation": "anthropic",
+      "seq_len": "768",
+      "value": "3.6464641094207764",
+      "status": "ok",
+      "output_rel_frob": "0.0017172604566439986",
+      "output_cosine": "0.9999983906745911",
+      "execution_path": "integrations.anthropic.module_triangle_attention[block:triattn_native] -> upstream opt_core.attn.pair_fused.pack_triattn_weights + tri_attn_block(impl=fpf, core=strict:triattn_native, ln=fused (upstream in-kernel LN), residual=False)+engine_residual selected={'row': 'block:triattn_native', 'core': {'row': 'triattn_native', 'word': 'triattn_native', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'named row; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 's"
+    }
+  ]
+}

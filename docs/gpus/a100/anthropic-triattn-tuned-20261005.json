@@ -1,0 +1,4964 @@
+{
+  "scope": "A100 BF16 TriangleAttention inference; paired original MiniWorld, revised MiniWorld, Anthropic original release fast graph policy",
+  "change": "compact attention K/V ring 4 -> 2 stages; 48 keys, 2 pair rows and two-CTA register bound unchanged; dense/training schedules unchanged",
+  "method": {
+    "seed": 191,
+    "graph_batch": 4,
+    "rounds": 15,
+    "replays_per_round": 15,
+    "order": "alternating forward/reverse",
+    "mask": "every seventh key excluded",
+    "tf32": false,
+    "reference": "FP32 PyTorch math attention, identical randomized nonzero weights",
+    "timing": "CUDA events, compilation and profiling excluded"
+  },
+  "excluded_measurement": {
+    "job": 63774,
+    "reason": "same extension module name reused the baseline kernel for both sides; rejected by executed-kernel inspection; replaced with uniquely named baseline build in job 63777"
+  },
+  "scratch": "/home/psk6950/miniworld-engine-scratch/codex_ta_opt_20261005",
+  "source_sha256": {
+    "src/miniworld_engine/kernels/triangle_attention/cuda/sm80/ops.cu": "1cfbba5596d1b06a3e22d197c2a00d0d91f8397e8cd0ff75e2537bd54036ecf3",
+    "src/miniworld_engine/kernels/triangle_attention/cuda/sm80.py": "5c4b06e33011c04b6f4e53e1b7455d2d804cbfa93f6b53ba617f28b94cc99668",
+    "tests/numerics/test_triattn_sm80_gpu.py": "afe01e73df307b77221de00d1c1d8124deb63e9063656dc25999dcc7cf6f07a7"
+  },
+  "baseline_ops_sha256": "6d9be57e3d34f43780568122645172102195f123b3423383dbfd536404cb8df0",
+  "benchmark_script_sha256": "9417a4915209d4e9ce5cc48d0869cc72a6d515012ece175940e5121bf1c0b3a2",
+  "resource_usage": {
+    "compact_shared_memory_bytes_before": 73728,
+    "compact_shared_memory_bytes_after": 61440,
+    "cuobjdump": "\nFatbin elf code:\n================\narch = sm_80\ncode version = [1,7]\nhost = linux\ncompile_size = 64bit\n\nResource usage:\n Common:\n  GLOBAL:28 CONSTANT[4]:224\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi4ELi4ELi64ELi1ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:255 STACK:48 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi4ELi4ELi48ELi1ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:203 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi4ELi4ELi32ELi1ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:214 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi4ELi3ELi32ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:128 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi4ELi64ELi1ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:186 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi3ELi64ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:64 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi2ELi64ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:56 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi4ELi48ELi1ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:165 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi2ELi48ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi3ELi48ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi4ELi32ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi3ELi32ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:127 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi2ELi32ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi1ELi3ELi64ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:121 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi1ELi2ELi64ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:106 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi1ELi4ELi32ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:104 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi1ELi3ELi32ELi3ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:80 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi1ELi2ELi32ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:99 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _ZN4a10015attn_fwd_kernelINS_7AttnCfgILi2ELi4ELi48ELi2ELb0ELb1EEEEEvNS_10AttnParamsE:\n  REG:128 STACK:8 SHARED:0 LOCAL:0 CONSTANT[0]:496 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _Z19compact_bias_kernelPK13__nv_bfloat16PS_PKiii:\n  REG:12 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:384 TEXTURE:0 SURFACE:0 SAMPLER:0\n Function _Z19compact_mask_kernelPKbPiS1_i:\n  REG:19 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:380 TEXTURE:0 SURFACE:0 SAMPLER:0\n"
+  },
+  "comparisons": [
+    {
+      "family": "triattn",
+      "length": 128,
+      "kind": "production",
+      "cfg": 10,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63777",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1410 MHz, 300.00 W, 30"
+      },
+      "seed": 191,
+      "graph_batch": 4,
+      "rounds": 15,
+      "accuracy": {
+        "before": {
+          "relative_frobenius": 0.0018771825125440955,
+          "update_relative_frobenius": 0.013576052151620388,
+          "finite": true
+        },
+        "after": {
+          "relative_frobenius": 0.0018771825125440955,
+          "update_relative_frobenius": 0.013576052151620388,
+          "finite": true,
+          "bit_exact_before": true
+        },
+        "anthropic": {
+          "relative_frobenius": 0.001903665717691183,
+          "update_relative_frobenius": 0.01376758236438036,
+          "finite": true
+        }
+      },
+      "selection": {
+        "before": {},
+        "after": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:fast', 'core': {'row': 'triattn_native', 'word': 'fast', 'cell': '8.0|bf16|D32|H4|N<=256|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.51, 'tested': True, 'reason': 'tier fast; cell 8.0|bf16|D32|H4|N<=256|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "kernels": {
+        "before": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.711999999999989
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 34.97600000000011
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 22.335999999999785
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 15.39200000000028
+          }
+        ],
+        "after": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.4880000000002838
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 33.983999999999924
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 22.304000000000087
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 15.135999999999967
+          }
+        ],
+        "anthropic": [
+          {
+            "name": "_triatt_prologue_kernel",
+            "us": 35.45499999999993
+          },
+          {
+            "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "us": 3.455999999999676
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+            "us": 1.7919999999999163
+          },
+          {
+            "name": "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+            "us": 2.94399999999996
+          },
+          {
+            "name": "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+            "us": 3.6480000000001382
+          },
+          {
+            "name": "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+            "us": 1.6320000000000618
+          },
+          {
+            "name": "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)",
+            "us": 3.6479999999996835
+          },
+          {
+            "name": "Memset (Device)",
+            "us": 1.024000000000342
+          },
+          {
+            "name": "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+            "us": 29.05600000000004
+          },
+          {
+            "name": "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+            "us": 2.8799999999996544
+          },
+          {
+            "name": "_gate_transpose_kernel",
+            "us": 7.519000000000233
+          },
+          {
+            "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "us": 11.519999999999982
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "us": 9.376000000000204
+          }
+        ]
+      },
+      "ms": {
+        "before": [
+          0.07049280007680257,
+          0.07043946584065755,
+          0.07040212949117025,
+          0.07044266859690348,
+          0.07038186391194662,
+          0.07039519945780436,
+          0.07038346926371257,
+          0.07045066356658936,
+          0.07047786712646484,
+          0.07042240301767985,
+          0.07043306827545166,
+          0.07037546634674072,
+          0.07037333647410075,
+          0.0704207976659139,
+          0.07043253580729167
+        ],
+        "after": [
+          0.070304536819458,
+          0.07040800253550211,
+          0.07038880189259847,
+          0.07032480239868164,
+          0.0702837308247884,
+          0.07038666407267252,
+          0.07034239768981934,
+          0.07031466960906982,
+          0.07025813261667888,
+          0.07029386361440022,
+          0.07029919624328614,
+          0.07031466960906982,
+          0.0703973372777303,
+          0.07030186653137208,
+          0.07036426862080893
+        ],
+        "anthropic": [
+          0.11561439832051595,
+          0.11572960217793783,
+          0.11524960199991861,
+          0.11544213294982911,
+          0.11543947060902914,
+          0.11555573145548502,
+          0.11570613384246826,
+          0.11545920372009277,
+          0.11551573276519775,
+          0.1152453343073527,
+          0.11524746417999268,
+          0.11530079841613769,
+          0.11545440355936686,
+          0.11578773657480876,
+          0.11551146507263184
+        ]
+      },
+      "baseline_so_sha256": "ff28b8b79100a36bfcfe50a3c4512760c1a26b34c2e20665cc66a38db924d11c",
+      "medians": {
+        "before": 0.07042240301767985,
+        "after": 0.07031466960906982,
+        "anthropic": 0.11545920372009277
+      },
+      "before_over_after": 1.001396241861475,
+      "anthropic_over_after": 1.6417276337485824,
+      "extension_files": {
+        "before": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80_baseline_20261005/triattn_sm80_baseline_20261005.so",
+        "after": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80/triattn_sm80.so"
+      },
+      "extension_sha256": {
+        "before": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+        "after": "c4b33c450c91da1c5e9c2fdcb9a369d7134235ef368ddc2bc1fef714444c1bbb"
+      }
+    },
+    {
+      "family": "triattn",
+      "length": 384,
+      "kind": "production",
+      "cfg": 10,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63777",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1410 MHz, 300.00 W, 32"
+      },
+      "seed": 191,
+      "graph_batch": 4,
+      "rounds": 15,
+      "accuracy": {
+        "before": {
+          "relative_frobenius": 0.0017943332204595208,
+          "update_relative_frobenius": 0.017100458964705467,
+          "finite": true
+        },
+        "after": {
+          "relative_frobenius": 0.0017943332204595208,
+          "update_relative_frobenius": 0.017100458964705467,
+          "finite": true,
+          "bit_exact_before": true
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0018155224388465285,
+          "update_relative_frobenius": 0.01730239763855934,
+          "finite": true
+        }
+      },
+      "selection": {
+        "before": {},
+        "after": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:fast', 'core': {'row': 'triattn_native', 'word': 'fast', 'cell': '8.0|bf16|D32|H4|N<=400|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.61, 'tested': True, 'reason': 'tier fast; cell 8.0|bf16|D32|H4|N<=400|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "kernels": {
+        "before": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.743999999999687
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 183.64799999999968
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 346.94399999999996
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 107.07200000000012
+          }
+        ],
+        "after": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.3600000000001273
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 179.00700000000006
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 345.27700000000004
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 96.67099999999982
+          }
+        ],
+        "anthropic": [
+          {
+            "name": "_triatt_prologue_kernel",
+            "us": 196.35000000000036
+          },
+          {
+            "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "us": 3.9039999999999964
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+            "us": 1.7919999999999163
+          },
+          {
+            "name": "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+            "us": 4.960000000000036
+          },
+          {
+            "name": "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+            "us": 6.463999999999942
+          },
+          {
+            "name": "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+            "us": 1.5039999999999054
+          },
+          {
+            "name": "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)",
+            "us": 11.422999999999774
+          },
+          {
+            "name": "Memset (Device)",
+            "us": 1.4719999999997526
+          },
+          {
+            "name": "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+            "us": 281.50199999999995
+          },
+          {
+            "name": "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+            "us": 3.2640000000001237
+          },
+          {
+            "name": "_gate_transpose_kernel",
+            "us": 66.01499999999987
+          },
+          {
+            "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "us": 68.03099999999995
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "us": 69.50300000000061
+          }
+        ]
+      },
+      "ms": {
+        "before": [
+          0.6554677327473958,
+          0.6625813166300456,
+          0.6690048217773438,
+          0.6585690816243489,
+          0.6650986353556315,
+          0.6655130386352539,
+          0.6758538564046224,
+          0.6673098882039388,
+          0.6668399810791016,
+          0.6696293512980144,
+          0.670799446105957,
+          0.6642245610555013,
+          0.6707093556722005,
+          0.6685471852620443,
+          0.6758538564046224
+        ],
+        "after": [
+          0.6651440302530924,
+          0.6542517344156901,
+          0.6649445215861003,
+          0.6506821314493815,
+          0.6702288309733073,
+          0.6474784215291342,
+          0.6712362925211589,
+          0.6561525344848633,
+          0.6669045130411784,
+          0.6530282974243165,
+          0.6687493642171224,
+          0.6569669087727864,
+          0.6709184010823568,
+          0.6582469304402669,
+          0.6716458638509114
+        ],
+        "anthropic": [
+          0.7591754913330078,
+          0.7490037282307943,
+          0.7582805633544922,
+          0.7480335871378581,
+          0.7585818608601888,
+          0.7472133636474609,
+          0.764305051167806,
+          0.7512613296508789,
+          0.7651583989461263,
+          0.7545642852783203,
+          0.7613194783528646,
+          0.7533119837443034,
+          0.7676186879475911,
+          0.7581696192423503,
+          0.76201171875
+        ]
+      },
+      "baseline_so_sha256": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+      "medians": {
+        "before": 0.6673098882039388,
+        "after": 0.6649445215861003,
+        "anthropic": 0.7582805633544922
+      },
+      "before_over_after": 1.0068791928191485,
+      "anthropic_over_after": 1.144824979179806,
+      "extension_files": {
+        "before": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80_baseline_20261005/triattn_sm80_baseline_20261005.so",
+        "after": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80/triattn_sm80.so"
+      },
+      "extension_sha256": {
+        "before": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+        "after": "c4b33c450c91da1c5e9c2fdcb9a369d7134235ef368ddc2bc1fef714444c1bbb"
+      }
+    },
+    {
+      "family": "triattn",
+      "length": 768,
+      "kind": "production",
+      "cfg": 10,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63777",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1410 MHz, 300.00 W, 38"
+      },
+      "seed": 191,
+      "graph_batch": 4,
+      "rounds": 15,
+      "accuracy": {
+        "before": {
+          "relative_frobenius": 0.0017345878295600414,
+          "update_relative_frobenius": 0.020035671070218086,
+          "finite": true
+        },
+        "after": {
+          "relative_frobenius": 0.0017345878295600414,
+          "update_relative_frobenius": 0.020035671070218086,
+          "finite": true,
+          "bit_exact_before": true
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0017495029605925083,
+          "update_relative_frobenius": 0.020207950845360756,
+          "finite": true
+        }
+      },
+      "selection": {
+        "before": {},
+        "after": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:fast', 'core': {'row': 'triattn_native', 'word': 'fast', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'tier fast; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "kernels": {
+        "before": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.8079999999999927
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 643.9950000000003
+          },
+          {
+            "name": "compact_mask_kernel(bool const*, int*, int*, int)",
+            "us": 6.942999999999756
+          },
+          {
+            "name": "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+            "us": 17.27900000000045
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 48, 2, false, true> >(a100::AttnParams)",
+            "us": 2248.1920000000005
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 394.72900000000027
+          }
+        ],
+        "after": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.775000000000091
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 680.0609999999997
+          },
+          {
+            "name": "compact_mask_kernel(bool const*, int*, int*, int)",
+            "us": 7.264000000000124
+          },
+          {
+            "name": "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+            "us": 17.024000000000342
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 2, 48, 2, false, true> >(a100::AttnParams)",
+            "us": 2160.281
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 396.35099999999966
+          }
+        ],
+        "anthropic": [
+          {
+            "name": "_triatt_prologue_kernel",
+            "us": 733.7929999999997
+          },
+          {
+            "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "us": 4.959999999999127
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+            "us": 1.88799999999992
+          },
+          {
+            "name": "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+            "us": 7.584000000000742
+          },
+          {
+            "name": "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+            "us": 11.136000000000422
+          },
+          {
+            "name": "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+            "us": 1.568000000000211
+          },
+          {
+            "name": "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)",
+            "us": 31.64800000000014
+          },
+          {
+            "name": "Memset (Device)",
+            "us": 1.727999999999156
+          },
+          {
+            "name": "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+            "us": 1863.0750000000007
+          },
+          {
+            "name": "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+            "us": 3.5200000000004366
+          },
+          {
+            "name": "_gate_transpose_kernel",
+            "us": 265.60099999999875
+          },
+          {
+            "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "us": 244.32000000000153
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "us": 273.02499999999964
+          }
+        ]
+      },
+      "ms": {
+        "before": [
+          3.51055425008138,
+          3.553197987874349,
+          3.5634053548177085,
+          3.5712132771809895,
+          3.5714566548665365,
+          3.5871007283528646,
+          3.60140380859375,
+          3.5968912760416667,
+          3.574690246582031,
+          3.60294672648112,
+          3.6211227416992187,
+          3.619520568847656,
+          3.6008260091145834,
+          3.615265655517578,
+          3.602808125813802
+        ],
+        "after": [
+          3.4787076314290366,
+          3.4526041666666667,
+          3.494401550292969,
+          3.4629926045735675,
+          3.5100011189778644,
+          3.4826863606770835,
+          3.4997904459635416,
+          3.505194600423177,
+          3.518170166015625,
+          3.488448079427083,
+          3.5077898661295572,
+          3.526070404052734,
+          3.4989972432454426,
+          3.5345499674479166,
+          3.5271759033203125
+        ],
+        "anthropic": [
+          3.6416890462239584,
+          3.602497100830078,
+          3.6555407206217447,
+          3.6449737548828125,
+          3.656573740641276,
+          3.649639892578125,
+          3.6750534057617186,
+          3.671966807047526,
+          3.6803929646809896,
+          3.6992111206054688,
+          3.691369120279948,
+          3.6821685791015626,
+          3.702927907307943,
+          3.7245051066080728,
+          3.7019610087076824
+        ]
+      },
+      "baseline_so_sha256": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+      "medians": {
+        "before": 3.5968912760416667,
+        "after": 3.4997904459635416,
+        "anthropic": 3.6750534057617186
+      },
+      "before_over_after": 1.0265026372381885,
+      "anthropic_over_after": 1.0479381473411185,
+      "extension_files": {
+        "before": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80_baseline_20261005/triattn_sm80_baseline_20261005.so",
+        "after": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80/triattn_sm80.so"
+      },
+      "extension_sha256": {
+        "before": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+        "after": "c4b33c450c91da1c5e9c2fdcb9a369d7134235ef368ddc2bc1fef714444c1bbb"
+      }
+    },
+    {
+      "family": "triattn_ending",
+      "length": 128,
+      "kind": "production",
+      "cfg": 10,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63777",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1410 MHz, 300.00 W, 31"
+      },
+      "seed": 191,
+      "graph_batch": 4,
+      "rounds": 15,
+      "accuracy": {
+        "before": {
+          "relative_frobenius": 0.001875554327853024,
+          "update_relative_frobenius": 0.013652258552610874,
+          "finite": true
+        },
+        "after": {
+          "relative_frobenius": 0.001875554327853024,
+          "update_relative_frobenius": 0.013652258552610874,
+          "finite": true,
+          "bit_exact_before": true
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0019027129746973515,
+          "update_relative_frobenius": 0.013849947601556778,
+          "finite": true
+        }
+      },
+      "selection": {
+        "before": {},
+        "after": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:fast', 'core': {'row': 'triattn_native', 'word': 'fast', 'cell': '8.0|bf16|D32|H4|N<=256|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.51, 'tested': True, 'reason': 'tier fast; cell 8.0|bf16|D32|H4|N<=256|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "kernels": {
+        "before": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.520999999999731
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 34.6880000000001
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 22.304000000000087
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 14.751999999999953
+          }
+        ],
+        "after": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.487999999999829
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 34.33600000000024
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 22.40000000000009
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 15.135999999999967
+          }
+        ],
+        "anthropic": [
+          {
+            "name": "_triatt_prologue_kernel",
+            "us": 35.327999999999975
+          },
+          {
+            "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "us": 3.455999999999676
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+            "us": 1.6320000000000618
+          },
+          {
+            "name": "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+            "us": 2.94399999999996
+          },
+          {
+            "name": "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+            "us": 3.680000000000291
+          },
+          {
+            "name": "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+            "us": 1.631999999999607
+          },
+          {
+            "name": "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)",
+            "us": 3.6479999999996835
+          },
+          {
+            "name": "Memset (Device)",
+            "us": 1.024000000000342
+          },
+          {
+            "name": "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+            "us": 29.44100000000026
+          },
+          {
+            "name": "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+            "us": 2.8489999999997053
+          },
+          {
+            "name": "_gate_transpose_kernel",
+            "us": 8.065000000000055
+          },
+          {
+            "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "us": 11.77599999999984
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "us": 9.184000000000196
+          }
+        ]
+      },
+      "ms": {
+        "before": [
+          0.07050560315450033,
+          0.07058506806691488,
+          0.07059306303660075,
+          0.07056960264841715,
+          0.07054080168406168,
+          0.07057600021362305,
+          0.07052746613820395,
+          0.07052373091379802,
+          0.07053226629892985,
+          0.07056319713592529,
+          0.07060053348541259,
+          0.0705941359202067,
+          0.07053279876708984,
+          0.07056427001953125,
+          0.07047253449757894
+        ],
+        "after": [
+          0.07058293024698893,
+          0.07057440280914307,
+          0.07047093709309896,
+          0.07063413461049398,
+          0.07050933043162028,
+          0.0705130656560262,
+          0.0705024003982544,
+          0.07053173383076985,
+          0.07050826549530029,
+          0.07063999970753988,
+          0.0705013354619344,
+          0.0705450693766276,
+          0.07051680088043213,
+          0.07052640120188396,
+          0.07054879665374755
+        ],
+        "anthropic": [
+          0.1162063995997111,
+          0.11654933293660481,
+          0.11622133255004882,
+          0.11605707009633383,
+          0.11633760134379069,
+          0.11609439849853516,
+          0.11621653238932292,
+          0.11622880299886068,
+          0.11608800093332926,
+          0.11575679779052735,
+          0.11654026508331299,
+          0.11600266297658285,
+          0.11627306938171386,
+          0.11608853340148925,
+          0.11620480219523112
+        ]
+      },
+      "baseline_so_sha256": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+      "medians": {
+        "before": 0.07056319713592529,
+        "after": 0.07052640120188396,
+        "anthropic": 0.1162063995997111
+      },
+      "before_over_after": 1.0003403970224052,
+      "anthropic_over_after": 1.6471549864353117,
+      "extension_files": {
+        "before": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80_baseline_20261005/triattn_sm80_baseline_20261005.so",
+        "after": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80/triattn_sm80.so"
+      },
+      "extension_sha256": {
+        "before": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+        "after": "c4b33c450c91da1c5e9c2fdcb9a369d7134235ef368ddc2bc1fef714444c1bbb"
+      }
+    },
+    {
+      "family": "triattn_ending",
+      "length": 384,
+      "kind": "production",
+      "cfg": 10,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63777",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1410 MHz, 300.00 W, 34"
+      },
+      "seed": 191,
+      "graph_batch": 4,
+      "rounds": 15,
+      "accuracy": {
+        "before": {
+          "relative_frobenius": 0.0017938376404345036,
+          "update_relative_frobenius": 0.01713234931230545,
+          "finite": true
+        },
+        "after": {
+          "relative_frobenius": 0.0017938376404345036,
+          "update_relative_frobenius": 0.01713234931230545,
+          "finite": true,
+          "bit_exact_before": true
+        },
+        "anthropic": {
+          "relative_frobenius": 0.001814827206544578,
+          "update_relative_frobenius": 0.017332814633846283,
+          "finite": true
+        }
+      },
+      "selection": {
+        "before": {},
+        "after": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:fast', 'core': {'row': 'triattn_native', 'word': 'fast', 'cell': '8.0|bf16|D32|H4|N<=400|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 1.61, 'tested': True, 'reason': 'tier fast; cell 8.0|bf16|D32|H4|N<=400|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "kernels": {
+        "before": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.9039999999999964
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 189.4079999999999
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 346.97500000000036
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 112.28700000000026
+          }
+        ],
+        "after": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.3279999999999745
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 189.82400000000007
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 32, 2, false, false> >(a100::AttnParams)",
+            "us": 345.2479999999996
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 104.22299999999996
+          }
+        ],
+        "anthropic": [
+          {
+            "name": "_triatt_prologue_kernel",
+            "us": 194.46299999999974
+          },
+          {
+            "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "us": 3.936000000000149
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+            "us": 1.7280000000000655
+          },
+          {
+            "name": "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+            "us": 4.959000000000287
+          },
+          {
+            "name": "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+            "us": 6.496999999999844
+          },
+          {
+            "name": "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+            "us": 1.5360000000000582
+          },
+          {
+            "name": "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)",
+            "us": 11.488000000000284
+          },
+          {
+            "name": "Memset (Device)",
+            "us": 1.4720000000002074
+          },
+          {
+            "name": "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+            "us": 281.88700000000017
+          },
+          {
+            "name": "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+            "us": 3.231999999999971
+          },
+          {
+            "name": "_gate_transpose_kernel",
+            "us": 68.92799999999988
+          },
+          {
+            "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "us": 67.9680000000003
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "us": 69.92099999999982
+          }
+        ]
+      },
+      "ms": {
+        "before": [
+          0.6628138860066731,
+          0.6744272232055664,
+          0.6821690877278646,
+          0.6763418833414714,
+          0.6792336146036784,
+          0.6765504201253255,
+          0.6843957265218099,
+          0.6753615697224935,
+          0.6760229110717774,
+          0.6748954772949218,
+          0.6785898844401042,
+          0.6826016108194987,
+          0.6854181289672852,
+          0.680734380086263,
+          0.6881674448649089
+        ],
+        "after": [
+          0.6701898574829102,
+          0.6668832143147786,
+          0.6789237340291341,
+          0.6648117065429687,
+          0.677127456665039,
+          0.6636453628540039,
+          0.6881317138671875,
+          0.664301872253418,
+          0.6755887985229492,
+          0.6722239812215169,
+          0.6783760070800782,
+          0.6736234664916992,
+          0.6834496180216472,
+          0.6680165608723958,
+          0.6857381184895833
+        ],
+        "anthropic": [
+          0.7556538899739583,
+          0.7491194407145182,
+          0.7562543869018554,
+          0.753166389465332,
+          0.7623850504557291,
+          0.7492362976074218,
+          0.7655440012613932,
+          0.7560821533203125,
+          0.7608906428019205,
+          0.7574223836263021,
+          0.7620602925618489,
+          0.7582127888997395,
+          0.7655557632446289,
+          0.7551104227701823,
+          0.7625024159749348
+        ]
+      },
+      "baseline_so_sha256": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+      "medians": {
+        "before": 0.6785898844401042,
+        "after": 0.6736234664916992,
+        "anthropic": 0.7574223836263021
+      },
+      "before_over_after": 1.0039741159911468,
+      "anthropic_over_after": 1.1259107025590092,
+      "extension_files": {
+        "before": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80_baseline_20261005/triattn_sm80_baseline_20261005.so",
+        "after": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80/triattn_sm80.so"
+      },
+      "extension_sha256": {
+        "before": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+        "after": "c4b33c450c91da1c5e9c2fdcb9a369d7134235ef368ddc2bc1fef714444c1bbb"
+      }
+    },
+    {
+      "family": "triattn_ending",
+      "length": 768,
+      "kind": "production",
+      "cfg": 10,
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63777",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1395 MHz, 300.00 W, 44"
+      },
+      "seed": 191,
+      "graph_batch": 4,
+      "rounds": 15,
+      "accuracy": {
+        "before": {
+          "relative_frobenius": 0.0017346491804346442,
+          "update_relative_frobenius": 0.02001568302512169,
+          "finite": true
+        },
+        "after": {
+          "relative_frobenius": 0.0017346491804346442,
+          "update_relative_frobenius": 0.02001568302512169,
+          "finite": true,
+          "bit_exact_before": true
+        },
+        "anthropic": {
+          "relative_frobenius": 0.0017495985375717282,
+          "update_relative_frobenius": 0.02018818072974682,
+          "finite": true
+        }
+      },
+      "selection": {
+        "before": {},
+        "after": {},
+        "anthropic": {
+          ".anthropic_selection": "{'row': 'block:fast', 'core': {'row': 'triattn_native', 'word': 'fast', 'cell': '8.0|bf16|D32|H4|N<=800|fwd', 'config': None, 'input_precision': None, 'cls': 'fast', 'exact_vs': None, 'capture_safe': True, 'backward': False, 'measured': True, 'x_stock': 2.05, 'tested': True, 'reason': 'tier fast; cell 8.0|bf16|D32|H4|N<=800|fwd: fast=triattn_native@v11 exact=triattn_exact'}, 'surround': {'impl': 'fpf', 'prologue': {'id': 'r55', 'impl': 'fpf', 'piece': 'prologue', 'key': [128, 4, 32], 'cc': '8.0', 'triton': '*', 'variant': 'v3', 'cfg': {'BI': 16, 'BJ': 8, 'num_warps': 4, 'num_stages': 2}, 'status': 'certified', 'evidence': 'A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0, smem opt-in 166,912 B), torch 2.10.0+cu128 / triton 3.6.0; tool drives PF.tri_attn_block with candidate rows under OPT_CORE_PF_ALLOW_CANDIDATE=1): 54-cfg grid, 51 pass; this cfg: fp64-error ratio fused/torch-bf16-statements 1.0977 (same class as the 9.0 rows of this kernel on the same synthetic inputs (H100 calibration run h100-cal-1: r07/r16 ratio 1.097, pieces q,k,v,bias bitwise == the torch statements, g (gate-bias bf16 add) and the epilogue tier-2)), 3-launch self-det, ln fused+stock, start+end, masked; prologue N=1024s 1.77 vs 5.05 ms and N=512s 0.47 vs 1.29 ms vs the torch statements (x2.9); sweep run tri-full-1 (2026-09-06)'}, 'epilogue': {'id': 'r70', 'impl': 'lnl', 'piece': 'gate_transpose', 'key': [128], 'cc': '8.0', 'triton': '*', 'variant': 'gate_transpose', 'cfg': {}, 'status': 'certified', 'evidence': \"A100 sweep 2026-09-06 (A100-SXM4-80GB (cc 8.0), torch 2.10.0+cu128 / triton 3.6.0; PF.tri_attn_block impl='lnl' with candidate rows, tri-attention 128x4x32): fp64-error ratio of the whole block (ln_linear + gate_transpose + flash_triattn core + epilogue statements) vs the torch statements 0.99994-1.00007 (N 200/256, start+end), 3-launch self-det; block N=512 2.52 vs 4.59 ms, N=1024 12.32 vs 19.65 ms vs the torch statements; tiles: the kernel's autotuner at warm-up (lnl_fused.tiles_by_arch.json carries no 8.0 key here; an 8.0 tile row, when carried, fixes them); sweep run lnl-pieces-1 (2026-09-06)\"}, 'epilogue_impl': 'lnl'}, 'residual': 'out-of-place engine add'}"
+        }
+      },
+      "kernels": {
+        "before": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.8399999999996908
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 764.6950000000002
+          },
+          {
+            "name": "compact_mask_kernel(bool const*, int*, int*, int)",
+            "us": 6.911999999999807
+          },
+          {
+            "name": "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+            "us": 17.08699999999999
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 4, 48, 2, false, true> >(a100::AttnParams)",
+            "us": 2236.8390000000004
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 398.3319999999994
+          }
+        ],
+        "after": [
+          {
+            "name": "a100::f1_pack_kernel(a100::F1PackParams)",
+            "us": 3.8719999999998436
+          },
+          {
+            "name": "void a100::f1_kernel<a100::F1Cfg<8> >(a100::F1Params)",
+            "us": 765.663
+          },
+          {
+            "name": "compact_mask_kernel(bool const*, int*, int*, int)",
+            "us": 7.423999999999978
+          },
+          {
+            "name": "compact_bias_kernel(__nv_bfloat16 const*, __nv_bfloat16*, int const*, int, int)",
+            "us": 17.823999999999614
+          },
+          {
+            "name": "void a100::attn_fwd_kernel<a100::AttnCfg<2, 2, 48, 2, false, true> >(a100::AttnParams)",
+            "us": 2252.026
+          },
+          {
+            "name": "void a100::f3_kernel<a100::F3Cfg<8> >(a100::F3Params)",
+            "us": 394.7510000000002
+          }
+        ],
+        "anthropic": [
+          {
+            "name": "_triatt_prologue_kernel",
+            "us": 725.5690000000004
+          },
+          {
+            "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#11}::operator()() const::{lambda(bool)#1} const&)::{lambda(int)#1})",
+            "us": 4.960999999999331
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+            "us": 1.7280000000000655
+          },
+          {
+            "name": "void triattn_sm80::mask_or_kernel<0>(unsigned char const*, long long, long long, unsigned char*, int, int, int)",
+            "us": 7.488000000000284
+          },
+          {
+            "name": "void triattn_sm80::mask_rows_kernel<0>(unsigned char const*, long long, long long, unsigned char const*, int4*, unsigned int*, int*, int*, int, int, int, int, int, int)",
+            "us": 10.8799999999992
+          },
+          {
+            "name": "void triattn_sm80::count_flags_kernel<0>(int const*, int, int*)",
+            "us": 1.568000000000211
+          },
+          {
+            "name": "void triattn_sm80::stage_bias_kernel<float>(float const*, long long, long long, long long, long long, unsigned char const*, float*, int, int, int, int, int, float)",
+            "us": 31.55199999999968
+          },
+          {
+            "name": "Memset (Device)",
+            "us": 1.6970000000001164
+          },
+          {
+            "name": "void triattn_sm80::fwd_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, false, true, false, 2> >(triattn_sm80::Args)",
+            "us": 1843.3289999999997
+          },
+          {
+            "name": "void triattn_sm80::fix_kernel<triattn_sm80::Traits<32, 2, 2, 2, 3, true, true, false, 1> >(triattn_sm80::Args)",
+            "us": 3.3919999999998254
+          },
+          {
+            "name": "_gate_transpose_kernel",
+            "us": 274.5590000000011
+          },
+          {
+            "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+            "us": 230.4969999999994
+          },
+          {
+            "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "us": 271.2639999999992
+          }
+        ]
+      },
+      "ms": {
+        "before": [
+          3.5895296732584634,
+          3.5997642517089843,
+          3.6344896952311196,
+          3.6374059041341145,
+          3.6147371927897134,
+          3.618377176920573,
+          3.6150601704915366,
+          3.6499951680501304,
+          3.6364517211914062,
+          3.6481295267740887,
+          3.6473920186360678,
+          3.648382822672526,
+          3.6577962239583335,
+          3.667838287353516,
+          3.6656112670898438
+        ],
+        "after": [
+          3.5430038452148436,
+          3.5126991271972656,
+          3.524517313639323,
+          3.5382926940917967,
+          3.530286407470703,
+          3.5554522196451823,
+          3.5597429911295575,
+          3.5500666300455728,
+          3.5573109944661456,
+          3.5564038594563803,
+          3.5688265482584636,
+          3.558024597167969,
+          3.5657023111979167,
+          3.562921651204427,
+          3.5635088602701823
+        ],
+        "anthropic": [
+          3.6565887451171877,
+          3.6359962463378905,
+          3.6700144449869794,
+          3.6703206380208333,
+          3.6928309122721354,
+          3.708851623535156,
+          3.7077728271484376,
+          3.7092575073242187,
+          3.7133471171061196,
+          3.7159215291341146,
+          3.708019765218099,
+          3.7479680379231772,
+          3.7251487731933595,
+          3.7135409037272136,
+          3.7259674072265625
+        ]
+      },
+      "baseline_so_sha256": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+      "medians": {
+        "before": 3.6374059041341145,
+        "after": 3.5564038594563803,
+        "anthropic": 3.708851623535156
+      },
+      "before_over_after": 1.0253956157516388,
+      "anthropic_over_after": 1.0431448362721303,
+      "extension_files": {
+        "before": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80_baseline_20261005/triattn_sm80_baseline_20261005.so",
+        "after": "/home/psk6950/.cache/torch_extensions_dev/triattn_sm80/triattn_sm80.so"
+      },
+      "extension_sha256": {
+        "before": "ec9d030ca8b3c8c9ce529b6c4c6836a31ad5f21a86c3a52db0cf9d7a8f8ae70b",
+        "after": "c4b33c450c91da1c5e9c2fdcb9a369d7134235ef368ddc2bc1fef714444c1bbb"
+      }
+    }
+  ],
+  "mask_and_length_matrix": {
+    "hardware": {
+      "gpu": "NVIDIA A100 80GB PCIe",
+      "capability": [
+        8,
+        0
+      ],
+      "torch": "2.13.0+cu129",
+      "cuda": "12.9",
+      "node": "gpu01",
+      "slurm_job": "63772",
+      "git_head": "135b796698080f39903706082e37aa06a830e888",
+      "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+      "settings": {
+        "autotune_kernels": "frozenset()",
+        "run_autotune": false,
+        "capture": false,
+        "fill_gaps": false,
+        "compile_jobs": null,
+        "predict_unusable": false,
+        "bench_clear_mb": 0,
+        "bench_rep_ms": 0,
+        "bench_lock": "",
+        "autotune_miss_cap": 24,
+        "autotune_on_miss_shards": "",
+        "compile_wrap": "custom_op",
+        "biasonly_dispatch": "auto",
+        "layernorm_dispatch": "auto",
+        "pin_gate_backend": null,
+        "pin_infer_concat": null,
+        "engine_backend": "auto",
+        "trimul_h100_training_widths": [
+          64,
+          128,
+          256,
+          384,
+          512
+        ],
+        "transition_cuda_b2b": true,
+        "transition_fused_sm90a": true,
+        "augmented_attention_bf16_sm90": true,
+        "augmented_attention_bf16_sm100": true,
+        "transition_gatebwd_wgmma": true,
+        "transition_fuse_stats": false,
+        "transition_lnbwd_cuda": true,
+        "transition_savedxn_split_bwd": false,
+        "transition_lnbwd_privatize": true,
+        "layernorm_bwd_path": null,
+        "layernorm_cuda_bwd": false,
+        "layernorm_out_bwd_path": null,
+        "trimul_impl": null,
+        "swa_dit_fused": true,
+        "b200_engine_triton": false,
+        "swa_dit_qkvg_fwd_cuda": true,
+        "swa_dit_ffn_fwd_cuda": true,
+        "swa_dit_ffn_bwd_cuda": true,
+        "swa_dit_ffn_dw": "mat",
+        "swa_dit_dq1": "bf16",
+        "typecheck": false,
+        "swa_check_front_packed": false,
+        "swa_flash_saves_lse": true
+      },
+      "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1410 MHz, 300.00 W, 70"
+    },
+    "records": [
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 768,
+        "mask": "all",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            2.5518991470336916,
+            2.761369514465332,
+            2.746112060546875,
+            2.761369514465332,
+            2.7396095275878904,
+            2.762393569946289,
+            2.7623424530029297,
+            2.7619327545166015,
+            2.7786239624023437
+          ],
+          "after": [
+            2.621388816833496,
+            2.6463232040405273,
+            2.615398406982422,
+            2.640025520324707,
+            2.6168832778930664,
+            2.6458623886108397,
+            2.644838333129883,
+            2.646169662475586,
+            2.7831296920776367
+          ]
+        },
+        "speedup": 1.0440427974776996
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 768,
+        "mask": "seventh",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            2.437550354003906,
+            2.4435199737548827,
+            2.4436223983764647,
+            2.468351936340332,
+            2.4609792709350584,
+            2.4936960220336912,
+            2.480793571472168,
+            2.4986623764038085,
+            2.4862207412719726
+          ],
+          "after": [
+            2.3327232360839845,
+            2.344857597351074,
+            2.344140815734863,
+            2.344499206542969,
+            2.348031997680664,
+            2.373478317260742,
+            2.3448064804077147,
+            2.372198486328125,
+            2.391910362243652
+          ]
+        },
+        "speedup": 1.0481029531820525
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 768,
+        "mask": "few",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            0.3899935960769653,
+            0.38497281074523926,
+            0.38446080684661865,
+            0.3800575971603394,
+            0.37934079170227053,
+            0.37918720245361326,
+            0.3794944047927856,
+            0.3803136110305786,
+            0.379750394821167
+          ],
+          "after": [
+            0.3719680070877075,
+            0.37212159633636477,
+            0.36863999366760253,
+            0.36715519428253174,
+            0.36725759506225586,
+            0.36761600971221925,
+            0.36807680130004883,
+            0.3673088073730469,
+            0.3675647974014282
+          ]
+        },
+        "speedup": 1.0345349867768978
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 768,
+        "mask": "none",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            0.3172032117843628,
+            0.3157504081726074,
+            0.31493120193481444,
+            0.3152384042739868,
+            0.31508479118347166,
+            0.3142656087875366,
+            0.3146239995956421,
+            0.31441919803619384,
+            0.31436800956726074
+          ],
+          "after": [
+            0.31549439430236814,
+            0.3132927894592285,
+            0.3127295970916748,
+            0.3129856109619141,
+            0.3121151924133301,
+            0.31185920238494874,
+            0.31247360706329347,
+            0.31201279163360596,
+            0.31196160316467286
+          ]
+        },
+        "speedup": 1.0077125248294747
+      },
+      {
+        "batch": 2,
+        "heads": 3,
+        "length": 768,
+        "mask": "all",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            3.4592735290527346,
+            3.555072021484375,
+            3.521535873413086,
+            3.569510269165039,
+            3.565670394897461,
+            3.5996158599853514,
+            3.609241485595703,
+            3.6011009216308594,
+            3.557120132446289
+          ],
+          "after": [
+            3.3906177520751952,
+            3.401881790161133,
+            3.4314239501953123,
+            3.458252716064453,
+            3.407001495361328,
+            3.4035713195800783,
+            3.46874885559082,
+            3.4468353271484373,
+            3.4269184112548827
+          ]
+        },
+        "speedup": 1.0405023931837676
+      },
+      {
+        "batch": 2,
+        "heads": 3,
+        "length": 768,
+        "mask": "seventh",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            3.1358047485351563,
+            3.2321537017822264,
+            3.208345413208008,
+            3.232563018798828,
+            3.2023551940917967,
+            3.2308223724365233,
+            3.1928319931030273,
+            3.231999969482422,
+            3.208243179321289
+          ],
+          "after": [
+            3.055308723449707,
+            3.096575927734375,
+            3.073638343811035,
+            3.0962175369262694,
+            3.104767990112305,
+            3.1115264892578125,
+            3.075071907043457,
+            3.0962688446044924,
+            3.0821887969970705
+          ]
+        },
+        "speedup": 1.040897683635419
+      },
+      {
+        "batch": 2,
+        "heads": 3,
+        "length": 768,
+        "mask": "few",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            0.5768464088439942,
+            0.5602816104888916,
+            0.5633024215698242,
+            0.5727231979370118,
+            0.572160005569458,
+            0.5757952213287354,
+            0.5765632152557373,
+            0.5799935817718506,
+            0.5827583789825439
+          ],
+          "after": [
+            0.5232128143310547,
+            0.5245952129364013,
+            0.5255167961120606,
+            0.5268991947174072,
+            0.5289472103118896,
+            0.5294079780578613,
+            0.5293568134307861,
+            0.5284351825714111,
+            0.5296639919281005
+          ]
+        },
+        "speedup": 1.0876209751145915
+      },
+      {
+        "batch": 2,
+        "heads": 3,
+        "length": 768,
+        "mask": "none",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            0.458846378326416,
+            0.45639681816101074,
+            0.4558847904205322,
+            0.45399041175842286,
+            0.4544511795043945,
+            0.45337600708007814,
+            0.4541952133178711,
+            0.45352959632873535,
+            0.4527616024017334
+          ],
+          "after": [
+            0.45537281036376953,
+            0.45393919944763184,
+            0.45311999320983887,
+            0.45281281471252444,
+            0.4511744022369385,
+            0.45168638229370117,
+            0.45137920379638674,
+            0.45148158073425293,
+            0.450867223739624
+          ]
+        },
+        "speedup": 1.0054139821288168
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1152,
+        "mask": "all",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            9.074864196777344,
+            9.177702331542969,
+            9.293772888183593,
+            9.179904174804687,
+            9.198694610595703,
+            9.274674987792968,
+            9.203199768066407,
+            9.207091522216796,
+            9.332736206054687
+          ],
+          "after": [
+            8.902092742919923,
+            8.873216247558593,
+            8.899584197998047,
+            8.88837127685547,
+            8.936908721923828,
+            8.941875457763672,
+            8.917504119873048,
+            8.96880645751953,
+            8.950937652587891
+          ]
+        },
+        "speedup": 1.0327993609704786
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1152,
+        "mask": "seventh",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            8.07383041381836,
+            8.203571319580078,
+            8.13096923828125,
+            8.137779235839844,
+            8.13148193359375,
+            8.220313262939452,
+            8.183757019042968,
+            8.163533020019532,
+            8.130508422851562
+          ],
+          "after": [
+            7.817318725585937,
+            7.8280189514160154,
+            7.973017883300781,
+            7.906559753417969,
+            7.881676483154297,
+            7.902105712890625,
+            7.898368072509766,
+            7.959961700439453,
+            7.956735992431641
+          ]
+        },
+        "speedup": 1.0316944562458723
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1152,
+        "mask": "few",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            1.1349583625793458,
+            1.1180543899536133,
+            1.1183103561401366,
+            1.1372544288635253,
+            1.1425791740417481,
+            1.1309568405151367,
+            1.1182592391967774,
+            1.1409407615661622,
+            1.14585599899292
+          ],
+          "after": [
+            1.1098112106323241,
+            1.1115008354187013,
+            1.1042304039001465,
+            1.113599967956543,
+            1.1291135787963866,
+            1.1268095970153809,
+            1.1043328285217284,
+            1.1131391525268555,
+            1.121894359588623
+          ]
+        },
+        "speedup": 1.0127509188211623
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1152,
+        "mask": "none",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            0.7080863952636719,
+            0.6924799919128418,
+            0.6920191764831543,
+            0.6907392024993897,
+            0.6905344009399415,
+            0.6906367778778076,
+            0.6905344009399415,
+            0.6912511825561524,
+            0.6899712085723877
+          ],
+          "after": [
+            0.6930431842803955,
+            0.6887936115264892,
+            0.6876671791076661,
+            0.6867968082427979,
+            0.6875648021697998,
+            0.6879744052886962,
+            0.6858751773834229,
+            0.6873600006103515,
+            0.6873087882995605
+          ]
+        },
+        "speedup": 1.0056610538034592
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1536,
+        "mask": "all",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            21.640151977539062,
+            21.818879699707033,
+            21.707008361816406,
+            21.800550842285155,
+            21.926860046386718,
+            21.857023620605467,
+            21.868185424804686,
+            21.882981872558595,
+            21.922047424316407
+          ],
+          "after": [
+            21.348915100097656,
+            20.946739196777344,
+            21.06383361816406,
+            21.140582275390624,
+            21.139302062988282,
+            21.108479309082032,
+            21.200128173828126,
+            21.178778076171874,
+            21.211187744140624
+          ]
+        },
+        "speedup": 1.033250445037668
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1536,
+        "mask": "seventh",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            19.231871032714842,
+            19.280487060546875,
+            19.25227508544922,
+            19.229798889160158,
+            19.206758117675783,
+            19.288525390625,
+            19.257958984375,
+            19.233126831054687,
+            19.268147277832032
+          ],
+          "after": [
+            18.623078918457033,
+            18.674636840820312,
+            18.70581817626953,
+            18.67729949951172,
+            18.75092468261719,
+            18.614834594726563,
+            18.655078125,
+            18.76249542236328,
+            18.771455383300783
+          ]
+        },
+        "speedup": 1.0295813315871967
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1536,
+        "mask": "few",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            2.0108320236206056,
+            2.051174354553223,
+            2.050918388366699,
+            2.0674047470092773,
+            2.056345558166504,
+            2.0510719299316404,
+            2.0510719299316404,
+            2.0850688934326174,
+            2.0714496612548827
+          ],
+          "after": [
+            2.0280832290649413,
+            2.035968017578125,
+            2.024192047119141,
+            2.053171157836914,
+            2.035660743713379,
+            2.0350976943969727,
+            2.0429311752319337,
+            2.0618240356445314,
+            2.052454376220703
+          ]
+        },
+        "speedup": 1.0078493703661735
+      },
+      {
+        "batch": 1,
+        "heads": 4,
+        "length": 1536,
+        "mask": "none",
+        "bit_exact": true,
+        "ms": {
+          "before": [
+            1.2478032112121582,
+            1.212723159790039,
+            1.2113920211791993,
+            1.2108287811279297,
+            1.2093440055847169,
+            1.2103167533874513,
+            1.2098048210144043,
+            1.2098048210144043,
+            1.2091391563415528
+          ],
+          "after": [
+            1.2104191780090332,
+            1.2071935653686523,
+            1.2059647560119628,
+            1.20447998046875,
+            1.2030464172363282,
+            1.2040191650390626,
+            1.202892780303955,
+            1.20381441116333,
+            1.2031999588012696
+          ]
+        },
+        "speedup": 1.0052304718489962
+      }
+    ]
+  },
+  "exploration": {
+    "tune": {
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63759",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1395 MHz, 300.00 W, 72"
+      },
+      "records": [
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.3531853357950845,
+              2.4109013875325522,
+              2.4119040171305337,
+              2.415104071299235,
+              2.474026679992676,
+              2.439295927683512,
+              2.4391892751057944
+            ],
+            "candidate": [
+              2.439530690511068,
+              2.4289706548055015,
+              2.435370604197184,
+              2.4211840629577637,
+              2.45032533009847,
+              2.4392107327779136,
+              2.4394240379333496
+            ]
+          },
+          "speedup": 0.997488835420839
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            32,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.418635368347168,
+              2.4401920636494956,
+              2.440000057220459,
+              2.4442453384399414,
+              2.469205379486084,
+              2.4498772621154785,
+              2.4905813535054526
+            ],
+            "candidate": [
+              2.8304001490275064,
+              2.8253866831461587,
+              2.824917475382487,
+              2.8250452677408853,
+              2.831509272257487,
+              2.8251307805379233,
+              2.8325332005818686
+            ]
+          },
+          "speedup": 0.8652057247898687
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.3810879389444985,
+              2.4788907368977866,
+              2.467583974202474,
+              2.5014400482177734,
+              2.4680533409118652,
+              2.490389347076416,
+              2.4688852628072104
+            ],
+            "candidate": [
+              2.682453473409017,
+              2.6849066416422525,
+              2.6693547566731772,
+              2.682239850362142,
+              2.667242685953776,
+              2.6827519734700522,
+              2.671018600463867
+            ]
+          },
+          "speedup": 0.9244121516758714
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            32,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.4737653732299805,
+              2.481536070505778,
+              2.497386614481608,
+              2.504063924153646,
+              2.502783934275309,
+              2.4693120320638022,
+              2.495189348856608
+            ],
+            "candidate": [
+              2.6088746388753257,
+              2.582826614379883,
+              2.6082560221354165,
+              2.6134613355000815,
+              2.612757364908854,
+              2.612544059753418,
+              2.613056023915609
+            ]
+          },
+          "speedup": 0.95749289689628
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            32,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.442037264506022,
+              2.4994346300760903,
+              2.48633607228597,
+              2.5134506225585938,
+              2.473749319712321,
+              2.495210647583008,
+              2.493290742238363
+            ],
+            "candidate": [
+              2.603498617808024,
+              2.59281063079834,
+              2.5737387339274087,
+              2.6118826866149902,
+              2.597653388977051,
+              2.612778663635254,
+              2.5811840693155923
+            ]
+          },
+          "speedup": 0.9623137499395255
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            32,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.461163361867269,
+              2.51035737991333,
+              2.5164586702982583,
+              2.500629266103109,
+              2.500821272532145,
+              2.5136426289876304,
+              2.52782932917277
+            ],
+            "candidate": [
+              2.5947306950887046,
+              2.5851732889811196,
+              2.6026879946390786,
+              2.5853439966837564,
+              2.5879467328389487,
+              2.5937280654907227,
+              2.6118186314900718
+            ]
+          },
+          "speedup": 0.967232704549448
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.469356060028076,
+              2.5006720225016275,
+              2.5005013147989907,
+              2.54423459370931,
+              2.5104427337646484,
+              2.513429323832194,
+              2.5011199315389
+            ],
+            "candidate": [
+              2.485098679860433,
+              2.475093364715576,
+              2.494592030843099,
+              2.501034736633301,
+              2.5010986328125,
+              2.486080010732015,
+              2.48964262008667
+            ]
+          },
+          "speedup": 1.0046100236875888
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.4951273600260415,
+              2.5530667304992676,
+              2.503722667694092,
+              2.532159964243571,
+              2.49727996190389,
+              2.522261301676432,
+              2.5017813046773276
+            ],
+            "candidate": [
+              2.468565305074056,
+              2.4255359967549643,
+              2.4221866925557456,
+              2.4469332695007324,
+              2.4769066174825034,
+              2.440000057220459,
+              2.434922695159912
+            ]
+          },
+          "speedup": 1.033662134875456
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            48,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.482292652130127,
+              2.4833067258199057,
+              2.5128533045450845,
+              2.487722714742025,
+              2.558634599049886,
+              2.493717352549235,
+              2.533781369527181
+            ],
+            "candidate": [
+              2.8875306447347007,
+              2.840127944946289,
+              2.8728319803873696,
+              2.8399785359700522,
+              2.887359937032064,
+              2.8397865295410156,
+              2.8760318756103516
+            ]
+          },
+          "speedup": 0.8759653227070228
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.4651060104370117,
+              2.5367466608683267,
+              2.533631960550944,
+              2.544170697530111,
+              2.5124053955078125,
+              2.534997304280599,
+              2.5474133491516113
+            ],
+            "candidate": [
+              2.554879983266195,
+              2.5544320742289224,
+              2.5620907147725425,
+              2.576192061106364,
+              2.555071989695231,
+              2.5551573435465493,
+              2.5550506909688315
+            ]
+          },
+          "speedup": 0.9888923705716154
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.5124913851420083,
+              2.5230933825174966,
+              2.5282133420308432,
+              2.546367963155111,
+              2.5434667269388833,
+              2.525717258453369,
+              2.5356799761454263
+            ],
+            "candidate": [
+              2.6594133377075195,
+              2.6350720723470054,
+              2.6798292795817056,
+              2.6769707997639975,
+              2.652565320332845,
+              2.6345814069112143,
+              2.696234703063965
+            ]
+          },
+          "speedup": 0.9512124537853006
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            64,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.4841787020365396,
+              2.492821375528971,
+              2.5218772888183594,
+              2.5267626444498696,
+              2.5873279571533203,
+              2.4929919242858887,
+              2.5272107124328613
+            ],
+            "candidate": [
+              2.9215574264526367,
+              2.8447999954223633,
+              2.908693313598633,
+              2.86077880859375,
+              2.9205118815104165,
+              2.863957405090332,
+              2.9085652033487954
+            ]
+          },
+          "speedup": 0.8704710202235907
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            4,
+            3,
+            32,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.488111972808838,
+              2.536085287729899,
+              2.5276586214701333,
+              2.550293286641439,
+              2.5438079833984375,
+              2.5308799743652344,
+              2.546090602874756
+            ],
+            "candidate": [
+              3.38103453318278,
+              3.360383987426758,
+              3.3620052337646484,
+              3.340544064839681,
+              3.3762133916219077,
+              3.349952061971029,
+              3.377706527709961
+            ]
+          },
+          "speedup": 0.7537927235498967
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            4,
+            4,
+            32,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.491999944051107,
+              2.5179519653320312,
+              2.5362133979797363,
+              2.5138346354166665,
+              2.5511892636617026,
+              2.5137279828389487,
+              2.5604052543640137
+            ],
+            "candidate": [
+              2.962688128153483,
+              2.897045453389486,
+              2.9511467615763345,
+              2.877888043721517,
+              2.9775571823120117,
+              2.880703926086426,
+              2.9541120529174805
+            ]
+          },
+          "speedup": 0.8667258413015708
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            4,
+            4,
+            48,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.495512008666992,
+              2.518826643625895,
+              2.5595946311950684,
+              2.5213653246561685,
+              2.56004269917806,
+              2.522666613260905,
+              2.559744040171305
+            ],
+            "candidate": [
+              2.7417173385620117,
+              2.7107413609822593,
+              2.7365334828694663,
+              2.6924158732096353,
+              2.7343358993530273,
+              2.69267209370931,
+              2.7481813430786133
+            ]
+          },
+          "speedup": 0.9353419745155598
+        },
+        {
+          "kind": "core",
+          "length": 768,
+          "cfg": [
+            4,
+            4,
+            64,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.507622718811035,
+              2.546367963155111,
+              2.5619200070699057,
+              2.52072540918986,
+              2.559274673461914,
+              2.524394671122233,
+              2.582634607950846
+            ],
+            "candidate": [
+              2.7104212443033853,
+              2.6681172053019204,
+              2.73085880279541,
+              2.6756906509399414,
+              2.720896085103353,
+              2.667840003967285,
+              2.7317546208699546
+            ]
+          },
+          "speedup": 0.9420840216728179
+        },
+        {
+          "kind": "frontback",
+          "length": 768,
+          "cfg": [
+            12,
+            8
+          ],
+          "ms": {
+            "base": [
+              3.5424959659576416,
+              3.632416009902954,
+              3.6330559253692627,
+              3.7629759311676025,
+              3.6676158905029297,
+              3.6317760944366455,
+              3.632352113723755
+            ],
+            "candidate": [
+              3.632767915725708,
+              3.6349120140075684,
+              3.6318399906158447,
+              3.6343679428100586,
+              3.651423931121826,
+              3.639967918395996,
+              3.6344640254974365
+            ]
+          },
+          "speedup": 0.9994189207104911
+        },
+        {
+          "kind": "frontback",
+          "length": 768,
+          "cfg": [
+            16,
+            8
+          ],
+          "ms": {
+            "base": [
+              3.573791980743408,
+              3.651808023452759,
+              3.632960081100464,
+              3.6313600540161133,
+              3.6321918964385986,
+              3.6425600051879883,
+              3.656320095062256
+            ],
+            "candidate": [
+              4.1056318283081055,
+              4.088031768798828,
+              4.039999961853027,
+              4.038847923278809,
+              4.089280128479004,
+              4.070112228393555,
+              4.039743900299072
+            ]
+          },
+          "speedup": 0.8949532103260164
+        },
+        {
+          "kind": "frontback",
+          "length": 768,
+          "cfg": [
+            8,
+            12
+          ],
+          "ms": {
+            "base": [
+              3.5959041118621826,
+              3.6679039001464844,
+              3.6679039001464844,
+              3.6561601161956787,
+              3.6609280109405518,
+              3.6668479442596436,
+              3.668800115585327
+            ],
+            "candidate": [
+              3.6204800605773926,
+              3.620352029800415,
+              3.6545920372009277,
+              3.654752016067505,
+              3.619296073913574,
+              3.6196799278259277,
+              3.653536081314087
+            ]
+          },
+          "speedup": 1.004177879712016
+        },
+        {
+          "kind": "frontback",
+          "length": 768,
+          "cfg": [
+            8,
+            16
+          ],
+          "ms": {
+            "base": [
+              3.6116480827331543,
+              3.634239912033081,
+              3.6334080696105957,
+              3.685920000076294,
+              3.6755199432373047,
+              3.6517438888549805,
+              3.6651198863983154
+            ],
+            "candidate": [
+              3.6870720386505127,
+              3.700511932373047,
+              3.6963839530944824,
+              3.7046399116516113,
+              3.676255941390991,
+              3.7053439617156982,
+              3.668639898300171
+            ]
+          },
+          "speedup": 0.9855343867088929
+        },
+        {
+          "kind": "frontback",
+          "length": 768,
+          "cfg": [
+            12,
+            12
+          ],
+          "ms": {
+            "base": [
+              3.6686079502105713,
+              3.6678080558776855,
+              3.649247884750366,
+              3.6503679752349854,
+              3.667776107788086,
+              3.6694719791412354,
+              3.6693758964538574
+            ],
+            "candidate": [
+              3.649440050125122,
+              3.6564159393310547,
+              3.6551361083984375,
+              3.654047966003418,
+              3.654655933380127,
+              3.65446400642395,
+              3.6535680294036865
+            ]
+          },
+          "speedup": 1.0035899889475572
+        },
+        {
+          "kind": "frontback",
+          "length": 768,
+          "cfg": [
+            16,
+            16
+          ],
+          "ms": {
+            "base": [
+              3.609247922897339,
+              3.6638400554656982,
+              3.6766719818115234,
+              3.685408115386963,
+              3.6532480716705322,
+              3.659168004989624,
+              3.6962881088256836
+            ],
+            "candidate": [
+              4.096928119659424,
+              4.122943878173828,
+              4.093023777008057,
+              4.118879795074463,
+              4.093664169311523,
+              4.100063800811768,
+              4.116608142852783
+            ]
+          },
+          "speedup": 0.8924661133968571
+        },
+        {
+          "kind": "frontback",
+          "length": 384,
+          "cfg": [
+            12,
+            8
+          ],
+          "ms": {
+            "base": [
+              0.6291519999504089,
+              0.6936960220336914,
+              0.6933760046958923,
+              0.6934400200843811,
+              0.693664014339447,
+              0.6973440051078796,
+              0.6971520185470581
+            ],
+            "candidate": [
+              0.6386240124702454,
+              0.6788480281829834,
+              0.6892799735069275,
+              0.6892160177230835,
+              0.6893119812011719,
+              0.6924160122871399,
+              0.6926400065422058
+            ]
+          },
+          "speedup": 1.0063135898649134
+        },
+        {
+          "kind": "frontback",
+          "length": 384,
+          "cfg": [
+            16,
+            8
+          ],
+          "ms": {
+            "base": [
+              0.6765760183334351,
+              0.6969280242919922,
+              0.6971840262413025,
+              0.6966080069541931,
+              0.6968640089035034,
+              0.696832001209259,
+              0.696832001209259
+            ],
+            "candidate": [
+              0.7630079984664917,
+              0.7787520289421082,
+              0.7818880081176758,
+              0.7818880081176758,
+              0.7803840041160583,
+              0.7820479869842529,
+              0.7825919985771179
+            ]
+          },
+          "speedup": 0.8910348377679415
+        },
+        {
+          "kind": "frontback",
+          "length": 384,
+          "cfg": [
+            8,
+            12
+          ],
+          "ms": {
+            "base": [
+              0.6772800087928772,
+              0.6967039704322815,
+              0.696832001209259,
+              0.697055995464325,
+              0.7054399847984314,
+              0.716159999370575,
+              0.7071999907493591
+            ],
+            "candidate": [
+              0.6737599968910217,
+              0.6923840045928955,
+              0.6992319822311401,
+              0.6991360187530518,
+              0.7238720059394836,
+              0.7277119755744934,
+              0.7029759883880615
+            ]
+          },
+          "speedup": 0.997024866073362
+        },
+        {
+          "kind": "frontback",
+          "length": 384,
+          "cfg": [
+            8,
+            16
+          ],
+          "ms": {
+            "base": [
+              0.6757439970970154,
+              0.6970239877700806,
+              0.6970239877700806,
+              0.6935359835624695,
+              0.6935359835624695,
+              0.6966400146484375,
+              0.6967359781265259
+            ],
+            "candidate": [
+              0.6866239905357361,
+              0.7058879733085632,
+              0.7117440104484558,
+              0.7097280025482178,
+              0.7086399793624878,
+              0.7087680101394653,
+              0.7118399739265442
+            ]
+          },
+          "speedup": 0.9793183750586106
+        },
+        {
+          "kind": "frontback",
+          "length": 384,
+          "cfg": [
+            12,
+            12
+          ],
+          "ms": {
+            "base": [
+              0.678879976272583,
+              0.7020800113677979,
+              0.7020480036735535,
+              0.696832001209259,
+              0.6966400146484375,
+              0.6971840262413025,
+              0.6968640089035034
+            ],
+            "candidate": [
+              0.6808000206947327,
+              0.6934720277786255,
+              0.696448028087616,
+              0.694208025932312,
+              0.6937919855117798,
+              0.6938880085945129,
+              0.6938880085945129
+            ]
+          },
+          "speedup": 1.004288876983216
+        },
+        {
+          "kind": "frontback",
+          "length": 384,
+          "cfg": [
+            16,
+            16
+          ],
+          "ms": {
+            "base": [
+              0.6758080124855042,
+              0.6970239877700806,
+              0.6948480010032654,
+              0.7000319957733154,
+              0.7032319903373718,
+              0.7130240201950073,
+              0.7118719816207886
+            ],
+            "candidate": [
+              0.7739520072937012,
+              0.7923840284347534,
+              0.7937600016593933,
+              0.7955520153045654,
+              0.811680018901825,
+              0.8144639730453491,
+              0.8087360262870789
+            ]
+          },
+          "speedup": 0.875451884665875
+        }
+      ]
+    },
+    "tune64": {
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63761",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1365 MHz, 300.00 W, 69"
+      },
+      "records": [
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            32,
+            4
+          ],
+          "ms": {
+            "base": [
+              2.360899289449056,
+              2.5190614064534507,
+              2.435157299041748,
+              2.5037439664204917,
+              2.441856066385905,
+              2.489194711049398,
+              2.450943946838379
+            ],
+            "candidate": [
+              2.726208051045736,
+              2.7665494283040366,
+              2.6961708068847656,
+              2.7511466344197593,
+              2.7363414764404297,
+              2.793898582458496,
+              2.7755091985066733
+            ]
+          },
+          "speedup": 0.8923798756149374
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            32,
+            4
+          ],
+          "ms": {
+            "base": [
+              2.3686672846476235,
+              2.499157269795736,
+              2.4457173347473145,
+              2.526357332865397,
+              2.4613547325134277,
+              2.4928000768025718,
+              2.467583974202474
+            ],
+            "candidate": [
+              2.5590826670328775,
+              2.58897066116333,
+              2.4963626861572266,
+              2.5881172815958657,
+              2.5678505897521973,
+              2.6038400332132974,
+              2.5613226890563965
+            ]
+          },
+          "speedup": 0.9634022236813683
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            32,
+            4
+          ],
+          "ms": {
+            "base": [
+              2.3965746561686196,
+              2.515648047129313,
+              2.453375975290934,
+              2.5191680590311685,
+              2.486677328745524,
+              2.518143971761068,
+              2.4693120320638022
+            ],
+            "candidate": [
+              2.5844267209370932,
+              2.5716479619344077,
+              2.5593813260396323,
+              2.583360036214193,
+              2.5691733360290527,
+              2.583573341369629,
+              2.5639039675394693
+            ]
+          },
+          "speedup": 0.9678900578148473
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            48,
+            3
+          ],
+          "ms": {
+            "base": [
+              2.3976806004842124,
+              2.4930346806844077,
+              2.4690772692362466,
+              2.568554719289144,
+              2.5016746520996094,
+              2.4999465942382812,
+              2.469546635945638
+            ],
+            "candidate": [
+              2.6484692891438804,
+              2.6533759435017905,
+              2.669439951578776,
+              2.69267209370931,
+              2.6626346906026206,
+              2.675327936808268,
+              2.6641066869099936
+            ]
+          },
+          "speedup": 0.9344449178894977
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            48,
+            3
+          ],
+          "ms": {
+            "base": [
+              2.429659366607666,
+              2.491349379221598,
+              2.4792532920837402,
+              2.551040013631185,
+              2.4914560317993164,
+              2.5014400482177734,
+              2.5015467007954917
+            ],
+            "candidate": [
+              2.7090988159179688,
+              2.7184425989786782,
+              2.7187627156575522,
+              2.7457707722981772,
+              2.7240959803263345,
+              2.7282559076944985,
+              2.718997319539388
+            ]
+          },
+          "speedup": 0.9164620140066966
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.42618735631307,
+              2.4910079638163247,
+              2.501311937967936,
+              2.528597354888916,
+              2.5186773935953775,
+              2.4917972882588706,
+              2.5002454121907554
+            ],
+            "candidate": [
+              2.770815849304199,
+              2.75325870513916,
+              2.7752745946248374,
+              2.782464027404785,
+              2.7742506663004556,
+              2.753045399983724,
+              2.8062718709309897
+            ]
+          },
+          "speedup": 0.9047489649870806
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.4351253509521484,
+              2.490368048350016,
+              2.5000106493631997,
+              2.5769813855489097,
+              2.508373260498047,
+              2.508394718170166,
+              2.5073067347208657
+            ],
+            "candidate": [
+              2.7806933720906577,
+              2.7804587682088218,
+              2.7755091985066733,
+              2.771221478780111,
+              2.779072125752767,
+              2.7543252309163413,
+              2.7793919245402017
+            ]
+          },
+          "speedup": 0.902106217040856
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            4,
+            4,
+            32,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.431013266245524,
+              2.4929280281066895,
+              2.500607967376709,
+              2.51528533299764,
+              2.5255467096964517,
+              2.5094399452209473,
+              2.5098026593526206
+            ],
+            "candidate": [
+              2.8087679545084634,
+              2.7767680486043296,
+              2.7967360814412436,
+              2.793450673421224,
+              2.811840057373047,
+              2.7770026524861655,
+              2.8156372706095376
+            ]
+          },
+          "speedup": 0.8977804355533747
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            4,
+            4,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.445049285888672,
+              2.5010132789611816,
+              2.519445260365804,
+              2.522496064503988,
+              2.5392640431722007,
+              2.4928852717081704,
+              2.528106689453125
+            ],
+            "candidate": [
+              2.909973462422689,
+              2.8630186716715493,
+              2.907840092976888,
+              2.871957461039225,
+              2.9189974466959634,
+              2.8727893829345703,
+              2.90611203511556
+            ]
+          },
+          "speedup": 0.869909648618026
+        },
+        {
+          "kind": "core64",
+          "length": 768,
+          "cfg": [
+            4,
+            4,
+            64,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.479819933573405,
+              2.5118932723999023,
+              2.5284053484598794,
+              2.5443414052327475,
+              2.560896078745524,
+              2.5032533009847007,
+              2.5289600690205893
+            ],
+            "candidate": [
+              2.748437245686849,
+              2.7007573445638022,
+              2.7218348185221353,
+              2.718101183573405,
+              2.746922810872396,
+              2.7009493509928384,
+              2.742293357849121
+            ]
+          },
+          "speedup": 0.928934162813274
+        }
+      ]
+    },
+    "layout": {
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63763",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-13b6ea6e-809b-82ca-4474-bfc4dc93494f, 1350 MHz, 300.00 W, 46"
+      },
+      "records": [
+        {
+          "kind": "layout",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            48,
+            2,
+            false,
+            true
+          ],
+          "ms": {
+            "base": [
+              2.346926689147949,
+              2.4164692560831704,
+              2.4416000048319497,
+              2.4095786412556968,
+              2.407317320505778,
+              2.3859200477600098,
+              2.412757396697998
+            ],
+            "candidate": [
+              2.7200425465901694,
+              2.686016082763672,
+              2.702421188354492,
+              2.685802777608236,
+              2.6932907104492188,
+              2.660437266031901,
+              2.7033812204996743
+            ]
+          },
+          "speedup": 0.8968150003847527
+        },
+        {
+          "kind": "layout",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            48,
+            2,
+            false,
+            true
+          ],
+          "ms": {
+            "base": [
+              2.3416366577148438,
+              2.4070612589518228,
+              2.407466729482015,
+              2.485695997873942,
+              2.460053284962972,
+              2.40721066792806,
+              2.4072532653808594
+            ],
+            "candidate": [
+              2.353834629058838,
+              2.349952061971029,
+              2.346773306528727,
+              2.346901257832845,
+              2.3681492805480957,
+              2.3541760444641113,
+              2.3467520078023276
+            ]
+          },
+          "speedup": 1.025780848328831
+        },
+        {
+          "kind": "layout",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            32,
+            2,
+            false,
+            true
+          ],
+          "ms": {
+            "base": [
+              2.3467893600463867,
+              2.4111146926879883,
+              2.407850742340088,
+              2.471872011820475,
+              2.437098662058512,
+              2.4153812726338706,
+              2.407551924387614
+            ],
+            "candidate": [
+              2.387114683787028,
+              2.4104533195495605,
+              2.4050559997558594,
+              2.410069306691488,
+              2.407637278238932,
+              2.406933307647705,
+              2.3908692995707193
+            ]
+          },
+          "speedup": 1.003509845893662
+        },
+        {
+          "kind": "layout",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            48,
+            2,
+            true,
+            false
+          ],
+          "ms": {
+            "base": [
+              2.3512473106384277,
+              2.3992746671040854,
+              2.4077653884887695,
+              2.437013308207194,
+              2.4246826171875,
+              2.4029653867085776,
+              2.4194560050964355
+            ],
+            "candidate": [
+              2.7104212443033853,
+              2.7015040715535483,
+              2.714773178100586,
+              2.712640126546224,
+              2.7226667404174805,
+              2.703253428141276,
+              2.725802739461263
+            ]
+          },
+          "speedup": 0.8881255047394171
+        },
+        {
+          "kind": "layout",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            48,
+            2,
+            true,
+            false
+          ],
+          "ms": {
+            "base": [
+              2.3506205876668296,
+              2.4050985972086587,
+              2.411776065826416,
+              2.4795947074890137,
+              2.4250240325927734,
+              2.4033493995666504,
+              2.4153599739074707
+            ],
+            "candidate": [
+              2.681088129679362,
+              2.6744960149129233,
+              2.6798292795817056,
+              2.666346708933512,
+              2.6895147959391275,
+              2.663424015045166,
+              2.694570541381836
+            ]
+          },
+          "speedup": 0.8999737722855502
+        },
+        {
+          "kind": "layout",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            32,
+            2,
+            true,
+            false
+          ],
+          "ms": {
+            "base": [
+              2.3476893107096353,
+              2.407573382059733,
+              2.4076587359110513,
+              2.4534826278686523,
+              2.4253652890523276,
+              2.4077226320902505,
+              2.4074880282084146
+            ],
+            "candidate": [
+              2.782421429951986,
+              2.774165471394857,
+              2.7742932637532554,
+              2.781440099080404,
+              2.795413335164388,
+              2.7799466451009116,
+              2.7742080688476562
+            ]
+          },
+          "speedup": 0.8678109098026058
+        },
+        {
+          "kind": "layout",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            48,
+            2,
+            true,
+            true
+          ],
+          "ms": {
+            "base": [
+              2.3635834058125815,
+              2.4048639933268228,
+              2.4082345962524414,
+              2.482090632120768,
+              2.4546772638956704,
+              2.4128640492757163,
+              2.421461264292399
+            ],
+            "candidate": [
+              2.7349119186401367,
+              2.713088035583496,
+              2.7329705556233725,
+              2.7166080474853516,
+              2.740074793497721,
+              2.713109334309896,
+              2.7414401372273765
+            ]
+          },
+          "speedup": 0.8863936450958605
+        }
+      ]
+    },
+    "bias": {
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63766",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1395 MHz, 300.00 W, 61"
+      },
+      "records": [
+        {
+          "kind": "bias",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.353895982106527,
+              2.4059093793233237,
+              2.4117120107014975,
+              2.4398934046427407,
+              2.4885546366373696,
+              2.4311680793762207,
+              2.465280055999756
+            ],
+            "candidate": [
+              2.513919989267985,
+              2.485845406850179,
+              2.49233071009318,
+              2.493845303853353,
+              2.510144074757894,
+              2.495423952738444,
+              2.5301334063212075
+            ]
+          },
+          "speedup": 0.974250518317054
+        },
+        {
+          "kind": "bias",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.371977965037028,
+              2.4697386423746743,
+              2.460223992665609,
+              2.483839988708496,
+              2.4788053830464682,
+              2.4696106910705566,
+              2.4814292589823403
+            ],
+            "candidate": [
+              2.323882738749186,
+              2.3223466873168945,
+              2.3349119822184243,
+              2.3298560778299966,
+              2.3296640714009604,
+              2.336362679799398,
+              2.3384960492451987
+            ]
+          },
+          "speedup": 1.0611218521336723
+        },
+        {
+          "kind": "bias",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.395433266957601,
+              2.4404266675313315,
+              2.4502827326456704,
+              2.5124266942342124,
+              2.506709257761637,
+              2.4631892840067544,
+              2.46941868464152
+            ],
+            "candidate": [
+              2.4823253949483237,
+              2.4779094060262046,
+              2.5003093083699546,
+              2.4781014124552407,
+              2.4968746503194175,
+              2.497941335042318,
+              2.502826690673828
+            ]
+          },
+          "speedup": 0.9860877232991644
+        },
+        {
+          "kind": "bias",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.4039053916931152,
+              2.4556800524393716,
+              2.46943998336792,
+              2.494229316711426,
+              2.4733227094014487,
+              2.4680533409118652,
+              2.4773972829182944
+            ],
+            "candidate": [
+              2.609322706858317,
+              2.6151893933614097,
+              2.6146346728006997,
+              2.594538688659668,
+              2.613269329071045,
+              2.611626625061035,
+              2.6526293754577637
+            ]
+          },
+          "speedup": 0.9444684601855858
+        },
+        {
+          "kind": "bias",
+          "length": 768,
+          "cfg": [
+            2,
+            3,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.4322800636291504,
+              2.4580480257670083,
+              2.469759941101074,
+              2.5155839920043945,
+              2.484586715698242,
+              2.481664021809896,
+              2.4785280227661133
+            ],
+            "candidate": [
+              2.778325398763021,
+              2.7623252868652344,
+              2.776063919067383,
+              2.7588478724161782,
+              2.8100481033325195,
+              2.77399476369222,
+              2.782698631286621
+            ]
+          },
+          "speedup": 0.8898474185697628
+        },
+        {
+          "kind": "bias",
+          "length": 768,
+          "cfg": [
+            2,
+            4,
+            32,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.425024668375651,
+              2.4929493268330893,
+              2.5099733670552573,
+              2.551253318786621,
+              2.502058664957682,
+              2.502079963684082,
+              2.5153279304504395
+            ],
+            "candidate": [
+              2.583189328511556,
+              2.583317279815674,
+              2.562496026357015,
+              2.5826773643493652,
+              2.5826560656229653,
+              2.5822720527648926,
+              2.582357406616211
+            ]
+          },
+          "speedup": 0.9689451430979369
+        },
+        {
+          "kind": "bias",
+          "length": 768,
+          "cfg": [
+            4,
+            4,
+            48,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.4165366490681968,
+              2.4584320386250815,
+              2.5012267430623374,
+              2.4760106404622397,
+              2.5278080304463706,
+              2.464831988016764,
+              2.5129812558492026
+            ],
+            "candidate": [
+              2.6801493962605796,
+              2.638144016265869,
+              2.6956373850504556,
+              2.633087952931722,
+              2.7022933959960938,
+              2.6258559226989746,
+              2.703338623046875
+            ]
+          },
+          "speedup": 0.9318793907638299
+        }
+      ]
+    },
+    "front": {
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63769",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-be424ad5-b443-2ea9-03a4-c4fa6beb9137, 1410 MHz, 300.00 W, 36"
+      },
+      "records": [
+        {
+          "family": "triattn",
+          "mode": 1,
+          "update_rel": 0.0016071925638243556,
+          "ms": {
+            "base": [
+              3.4298292795817056,
+              3.491093317667643,
+              3.4997119903564453,
+              3.5104640324910483,
+              3.502762794494629,
+              3.5221761067708335,
+              3.5151360829671225,
+              3.5213867823282876,
+              3.5245014826456704
+            ],
+            "candidate": [
+              4.358890533447266,
+              4.3677012125651045,
+              4.4192854563395185,
+              4.35861333211263,
+              4.363754590352376,
+              4.396544138590495,
+              4.378730773925781,
+              4.35810120900472,
+              4.378389358520508
+            ]
+          },
+          "speedup": 0.8026947258305327
+        },
+        {
+          "family": "triattn",
+          "mode": 2,
+          "update_rel": 0.001707831397652626,
+          "ms": {
+            "base": [
+              3.4569613138834634,
+              3.5155200958251953,
+              3.5830186208089194,
+              3.4883413314819336,
+              3.543381373087565,
+              3.50434144337972,
+              3.4959147771199546,
+              3.4951254526774087,
+              3.506261189778646
+            ],
+            "candidate": [
+              5.024256070454915,
+              4.98961067199707,
+              5.016256014506022,
+              5.020266532897949,
+              5.077055931091309,
+              5.00599479675293,
+              5.080341339111328,
+              5.025856018066406,
+              5.035605430603027
+            ]
+          },
+          "speedup": 0.6962938693468605
+        },
+        {
+          "family": "triattn_ending",
+          "mode": 1,
+          "update_rel": 0.0014763612998649478,
+          "ms": {
+            "base": [
+              3.512343406677246,
+              3.5335254669189453,
+              3.6231892903645835,
+              3.5197226206461587,
+              3.5204267501831055,
+              3.530837376912435,
+              3.537365277608236,
+              3.5355520248413086,
+              3.5406932830810547
+            ],
+            "candidate": [
+              4.367168108622233,
+              4.367871920267741,
+              4.365824063618978,
+              4.356479962666829,
+              4.3829545974731445,
+              4.3723093668619795,
+              4.354922612508138,
+              4.3530880610148115,
+              4.3670399983723955
+            ]
+          },
+          "speedup": 0.8089810167103865
+        },
+        {
+          "family": "triattn_ending",
+          "mode": 2,
+          "update_rel": 0.0016256422968581319,
+          "ms": {
+            "base": [
+              3.5043859481811523,
+              3.521450678507487,
+              3.55953057607015,
+              3.5153067906697593,
+              3.542485237121582,
+              3.51857058207194,
+              3.535125414530436,
+              3.529301325480143,
+              3.5362561543782554
+            ],
+            "candidate": [
+              5.330901463826497,
+              5.298432032267253,
+              5.329344113667806,
+              5.297813415527344,
+              5.3470503489176435,
+              5.297813415527344,
+              5.337941487630208,
+              5.311189333597819,
+              5.333845138549805
+            ]
+          },
+          "speedup": 0.6635391839899001
+        }
+      ]
+    },
+    "back": {
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63768",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-13b6ea6e-809b-82ca-4474-bfc4dc93494f, 1335 MHz, 300.00 W, 48"
+      },
+      "records": [
+        {
+          "cfg": [
+            8,
+            2
+          ],
+          "ms": {
+            "base": [
+              3.4385458628336587,
+              3.4612906773885093,
+              3.464789390563965,
+              3.4737494786580405,
+              3.4630187352498374,
+              3.5315628051757812,
+              3.4705918629964194,
+              3.4696534474690757,
+              3.489834785461426
+            ],
+            "candidate": [
+              3.47650146484375,
+              3.4613119761149087,
+              3.5661865870157876,
+              3.4589866002400718,
+              3.46018123626709,
+              3.4921385447184243,
+              3.4652160008748374,
+              3.467520078023275,
+              3.507456143697103
+            ]
+          },
+          "speedup": 1.0006152435740234
+        },
+        {
+          "cfg": [
+            8,
+            3
+          ],
+          "ms": {
+            "base": [
+              3.445214589436849,
+              3.469183921813965,
+              3.4693759282430015,
+              3.47652276357015,
+              3.47377077738444,
+              3.5057493845621743,
+              3.490965207417806,
+              3.478015899658203,
+              3.4861440658569336
+            ],
+            "candidate": [
+              3.4644266764322915,
+              3.4624640146891275,
+              3.520106633504232,
+              3.4900051752726235,
+              3.4664319356282554,
+              3.4929494857788086,
+              3.4813868204752603,
+              3.4880425135294595,
+              3.5011841456095376
+            ]
+          },
+          "speedup": 0.9971254324359967
+        },
+        {
+          "cfg": [
+            8,
+            4
+          ],
+          "ms": {
+            "base": [
+              3.455094655354818,
+              3.460778554280599,
+              3.491178512573242,
+              3.492565472920736,
+              3.488469441731771,
+              3.5241174697875977,
+              3.5036160151163735,
+              3.4922027587890625,
+              3.5111465454101562
+            ],
+            "candidate": [
+              3.4632746378580728,
+              3.4652798970540366,
+              3.5614293416341147,
+              3.4851840337117515,
+              3.47377077738444,
+              3.4846719106038413,
+              3.4818347295125327,
+              3.483541488647461,
+              3.506453196207682
+            ]
+          },
+          "speedup": 1.0021179481879823
+        },
+        {
+          "cfg": [
+            4,
+            2
+          ],
+          "ms": {
+            "base": [
+              3.457904815673828,
+              3.486570676167806,
+              3.4868478775024414,
+              3.482645352681478,
+              3.4860798517862954,
+              3.5284481048583984,
+              3.491946538289388,
+              3.484309196472168,
+              3.4990294774373374
+            ],
+            "candidate": [
+              3.4793173472086587,
+              3.4785280227661133,
+              3.5523198445638022,
+              3.479765256245931,
+              3.4843308130900064,
+              3.4951041539510093,
+              3.4897066752115884,
+              3.4925867716471353,
+              3.520000139872233
+            ]
+          },
+          "speedup": 1.0005019726283504
+        },
+        {
+          "cfg": [
+            4,
+            3
+          ],
+          "ms": {
+            "base": [
+              3.457599957784017,
+              3.492330551147461,
+              3.4941012064615884,
+              3.4939092000325522,
+              3.491413434346517,
+              3.527807871500651,
+              3.4985386530558267,
+              3.490624109903971,
+              3.539605458577474
+            ],
+            "candidate": [
+              3.4791892369588218,
+              3.4938879013061523,
+              3.570624033610026,
+              3.4941228230794272,
+              3.4951680501302085,
+              3.5260372161865234,
+              3.4934186935424805,
+              3.4832213719685874,
+              3.529621442159017
+            ]
+          },
+          "speedup": 0.9999388621815284
+        },
+        {
+          "cfg": [
+            4,
+            4
+          ],
+          "ms": {
+            "base": [
+              3.4555412928263345,
+              3.4685227076212564,
+              3.4695253372192383,
+              3.481343905131022,
+              3.468266805013021,
+              3.5507628122965493,
+              3.4995412826538086,
+              3.494079907735189,
+              3.5296853383382163
+            ],
+            "candidate": [
+              3.4856106440226235,
+              3.4625279108683267,
+              3.609962781270345,
+              3.484608014424642,
+              3.479914665222168,
+              3.520832061767578,
+              3.4875094095865884,
+              3.4644692738850913,
+              3.5291945139567056
+            ]
+          },
+          "speedup": 1.0001390754687989
+        },
+        {
+          "cfg": [
+            12,
+            2
+          ],
+          "ms": {
+            "base": [
+              3.4544553756713867,
+              3.477504094441732,
+              3.494357426961263,
+              3.4964478810628257,
+              3.4903039932250977,
+              3.5345706939697266,
+              3.4936745961507163,
+              3.497152010599772,
+              3.543018658955892
+            ],
+            "candidate": [
+              3.483754793802897,
+              3.4840319951375327,
+              3.571626663208008,
+              3.48906675974528,
+              3.479615847269694,
+              3.5186986923217773,
+              3.4822400410970054,
+              3.484224001566569,
+              3.50873597462972
+            ]
+          },
+          "speedup": 1.0030716453840127
+        }
+      ]
+    },
+    "wider": {
+      "hardware": {
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "capability": [
+          8,
+          0
+        ],
+        "torch": "2.13.0+cu129",
+        "cuda": "12.9",
+        "node": "gpu01",
+        "slurm_job": "63770",
+        "git_head": "135b796698080f39903706082e37aa06a830e888",
+        "runner_sha256": "dc54ccefd825d741c96c85e12a667197bdec6ad7a4916f809a7de629eef62133",
+        "settings": {
+          "autotune_kernels": "frozenset()",
+          "run_autotune": false,
+          "capture": false,
+          "fill_gaps": false,
+          "compile_jobs": null,
+          "predict_unusable": false,
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "bench_lock": "",
+          "autotune_miss_cap": 24,
+          "autotune_on_miss_shards": "",
+          "compile_wrap": "custom_op",
+          "biasonly_dispatch": "auto",
+          "layernorm_dispatch": "auto",
+          "pin_gate_backend": null,
+          "pin_infer_concat": null,
+          "engine_backend": "auto",
+          "trimul_h100_training_widths": [
+            64,
+            128,
+            256,
+            384,
+            512
+          ],
+          "transition_cuda_b2b": true,
+          "transition_fused_sm90a": true,
+          "augmented_attention_bf16_sm90": true,
+          "augmented_attention_bf16_sm100": true,
+          "transition_gatebwd_wgmma": true,
+          "transition_fuse_stats": false,
+          "transition_lnbwd_cuda": true,
+          "transition_savedxn_split_bwd": false,
+          "transition_lnbwd_privatize": true,
+          "layernorm_bwd_path": null,
+          "layernorm_cuda_bwd": false,
+          "layernorm_out_bwd_path": null,
+          "trimul_impl": null,
+          "swa_dit_fused": true,
+          "b200_engine_triton": false,
+          "swa_dit_qkvg_fwd_cuda": true,
+          "swa_dit_ffn_fwd_cuda": true,
+          "swa_dit_ffn_bwd_cuda": true,
+          "swa_dit_ffn_dw": "mat",
+          "swa_dit_dq1": "bf16",
+          "typecheck": false,
+          "swa_check_front_packed": false,
+          "swa_flash_saves_lse": true
+        },
+        "nvidia_smi": "NVIDIA A100 80GB PCIe, GPU-1d2d4c9e-58fa-7bf4-c9c3-a6dc91640b2f, 1365 MHz, 300.00 W, 69"
+      },
+      "records": [
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.353973388671875,
+              2.47434663772583,
+              2.453397274017334,
+              2.4894720713297525,
+              2.457045396169027,
+              2.496405283610026,
+              2.440959930419922
+            ],
+            "candidate": [
+              2.7640746434529624,
+              2.8128639856974282,
+              2.747882525126139,
+              2.7553278605143228,
+              2.7641814549764,
+              2.779498736063639,
+              2.770965258280436
+            ]
+          },
+          "speedup": 0.8888871574424208
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            48,
+            3
+          ],
+          "ms": {
+            "base": [
+              2.3734347025553384,
+              2.4810667037963867,
+              2.449087937672933,
+              2.5254185994466147,
+              2.4608640670776367,
+              2.479765256245931,
+              2.4501546223958335
+            ],
+            "candidate": [
+              2.7872212727864585,
+              2.7973546981811523,
+              2.7914454142252603,
+              2.807210604349772,
+              2.7981227238972983,
+              2.7908480962117515,
+              2.7918933232625327
+            ]
+          },
+          "speedup": 0.8794696694539834
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.404856046040853,
+              2.504533290863037,
+              2.4634879430135093,
+              2.517738660176595,
+              2.4869972864786782,
+              2.498965263366699,
+              2.470186710357666
+            ],
+            "candidate": [
+              2.690090815226237,
+              2.7536214192708335,
+              2.721045176188151,
+              2.7292585372924805,
+              2.7085866928100586,
+              2.728896141052246,
+              2.7096532185872397
+            ]
+          },
+          "speedup": 0.9116246659952941
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            64,
+            3
+          ],
+          "ms": {
+            "base": [
+              2.407419999440511,
+              2.5055786768595376,
+              2.466303984324137,
+              2.565589269002279,
+              2.4790827433268228,
+              2.523797353108724,
+              2.4869972864786782
+            ],
+            "candidate": [
+              2.7051092783610025,
+              2.7095254262288413,
+              2.6861867904663086,
+              2.7210667928059897,
+              2.6890878677368164,
+              2.7316694259643555,
+              2.701397260030111
+            ]
+          },
+          "speedup": 0.9219046997572684
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            48,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.425672690073649,
+              2.4958720207214355,
+              2.4703787167867026,
+              2.578645388285319,
+              2.503488063812256,
+              2.516479969024658,
+              2.5106773376464844
+            ],
+            "candidate": [
+              2.6540586153666177,
+              2.6670506795247397,
+              2.6629759470621743,
+              2.676117261250814,
+              2.6654720306396484,
+              2.6731093724568686,
+              2.6548266410827637
+            ]
+          },
+          "speedup": 0.9392287876348414
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            48,
+            3
+          ],
+          "ms": {
+            "base": [
+              2.4254074096679688,
+              2.515456040700277,
+              2.4942506154378257,
+              2.5683412551879883,
+              2.502079963684082,
+              2.5168426831563315,
+              2.520832061767578
+            ],
+            "candidate": [
+              2.659455935160319,
+              2.658602714538574,
+              2.655893325805664,
+              2.668544133504232,
+              2.64738130569458,
+              2.6827306747436523,
+              2.6446293195088706
+            ]
+          },
+          "speedup": 0.9451150683515248
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            64,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.434864044189453,
+              2.4982399940490723,
+              2.5151999791463218,
+              2.4922240575154624,
+              2.511552015940348,
+              2.496234734853109,
+              2.527637322743734
+            ],
+            "candidate": [
+              2.9324798583984375,
+              2.904575983683268,
+              2.9245227177937827,
+              2.9046398798624673,
+              2.9339733123779297,
+              2.9045333862304688,
+              2.9353812535603843
+            ]
+          },
+          "speedup": 0.8594271102845701
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            96,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.439746061960856,
+              2.5014613469441733,
+              2.501824061075846,
+              2.5476907094319663,
+              2.5266772905985513,
+              2.502101262410482,
+              2.524181365966797
+            ],
+            "candidate": [
+              2.863039970397949,
+              2.853994687398275,
+              2.853674570719401,
+              2.924480120340983,
+              2.8538452784220376,
+              2.853760083516439,
+              2.881429354349772
+            ]
+          },
+          "speedup": 0.8764772261102302
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            1,
+            2,
+            128,
+            2
+          ],
+          "ms": {
+            "base": [
+              2.4386140505472818,
+              2.514517307281494,
+              2.5100372632344565,
+              2.508672078450521,
+              2.5282986958821616,
+              2.513194719950358,
+              2.5290026664733887
+            ],
+            "candidate": [
+              3.205653190612793,
+              3.1686827341715493,
+              3.2330452601114907,
+              3.303189277648926,
+              3.1943467458089194,
+              3.2245972951253257,
+              3.281386693318685
+            ]
+          },
+          "speedup": 0.776369354986357
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            96,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.4513120651245117,
+              2.5287893613179526,
+              2.519807974497477,
+              2.5897812843322754,
+              2.5287893613179526,
+              2.528447945912679,
+              2.528831958770752
+            ],
+            "candidate": [
+              2.673386573791504,
+              2.679701487223307,
+              2.679253260294596,
+              2.6976000467936196,
+              2.6788479487101235,
+              2.679274559020996,
+              2.6799147923787436
+            ]
+          },
+          "speedup": 0.9436832323955126
+        },
+        {
+          "kind": "wider",
+          "length": 768,
+          "cfg": [
+            2,
+            2,
+            128,
+            1
+          ],
+          "ms": {
+            "base": [
+              2.4522293408711753,
+              2.5168213844299316,
+              2.528319994608561,
+              2.5334827105204263,
+              2.561002731323242,
+              2.5184426307678223,
+              2.5388800303141275
+            ],
+            "candidate": [
+              3.0122238794962564,
+              2.9678080876668296,
+              3.0036694208780923,
+              3.0252374013264975,
+              2.999530792236328,
+              2.96669864654541,
+              3.0135892232259116
+            ]
+          },
+          "speedup": 0.8424771401313849
+        }
+      ]
+    }
+  },
+  "verification": {
+    "native_test_job": 63773,
+    "expanded_compact_and_paired_job": 63777,
+    "logs": [
+      {
+        "path": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/ta_native_tests_63773.log",
+        "results": [
+          "130 passed, 31 warnings in 246.79s (0:04:06)"
+        ]
+      },
+      {
+        "path": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/ta_production_distinct_63777.log",
+        "results": [
+          "14 passed, 123 deselected in 11.53s"
+        ]
+      }
+    ],
+    "63777": "JobId=63777 JobName=live_ta_production_distinct\n   UserId=psk6950(1021) GroupId=cssb(1002) MCS_label=N/A\n   Priority=1 Nice=0 Account=default QOS=normal\n   JobState=COMPLETED Reason=None Dependency=(null)\n   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0\n   RunTime=00:03:28 TimeLimit=00:20:00 TimeMin=00:10:00\n   SubmitTime=2026-10-05T15:35:33 EligibleTime=2026-10-05T15:35:33\n   AccrueTime=2026-10-05T15:35:33\n   StartTime=2026-10-05T15:35:33 EndTime=2026-10-05T15:39:01 Deadline=N/A\n   PreemptEligibleTime=2026-10-05T15:35:33 PreemptTime=None\n   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-10-05T15:35:33 Scheduler=Main\n   Partition=A100 AllocNode:Sid=cssb-master3:3097697\n   ReqNodeList=(null) ExcNodeList=(null)\n   NodeList=gpu01\n   BatchHost=gpu01\n   NumNodes=1 NumCPUs=8 NumTasks=1 CPUs/Task=8 ReqB:S:C:T=0:0:*:*\n   ReqTRES=cpu=8,mem=64G,node=1,billing=8,gres/gpu=1\n   AllocTRES=cpu=8,mem=64G,node=1,billing=8,gres/gpu=1\n   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*\n   MinCPUsNode=8 MinMemoryNode=64G MinTmpDiskNode=0\n   Features=(null) DelayBoot=00:00:00\n   OverSubscribe=OK Contiguous=0 Licenses=(null) Network=(null)\n   Command=/home/psk6950/miniworld-engine-scratch/agents/live/logs/ta_production_distinct_3097697.cmd.sh\n   WorkDir=/home/psk6950/practice/miniworld-engine\n   StdErr=/home/psk6950/miniworld-engine-scratch/agents/live/logs/ta_production_distinct_63777.log\n   StdIn=/dev/null\n   StdOut=/home/psk6950/miniworld-engine-scratch/agents/live/logs/ta_production_distinct_63777.log\n   Power=\n   TresPerNode=gres/gpu:A100:1\n   TresPerTask=cpu:8\n   \n\n",
+    "63773": "Completed pytest log: 130 passed; controller record expired and accounting database unavailable."
+  }
+}

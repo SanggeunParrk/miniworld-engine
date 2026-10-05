@@ -1,0 +1,420 @@
+{
+ "figures": {
+  "inference_wide": {
+   "title": "A100 · Transition (pair, n = 4) · inference · wide path, any D, any rows, bf16",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "K1",
+       "name": "LayerNorm",
+       "impl": "CUDA · ln_fwd_kernel<D>",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)   # bf16"
+       ],
+       "reads": [
+        "x",
+        "γ, β"
+       ],
+       "writes": [
+        "x_n"
+       ]
+      },
+      {
+       "id": "K2",
+       "name": "expand + SwiGLU",
+       "impl": "CUDA · dual_swiglu_kernel (mma.sync m16n8k16, pipelined cp.async ring)",
+       "code": [
+        "a, b = x_n @ W_a.T, x_n @ W_b.T   # f32 accumulators",
+        "h = F.silu(a) * b                  # in the accumulators, rounded to bf16"
+       ],
+       "reads": [
+        "x_n",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "h"
+       ]
+      },
+      {
+       "id": "K3",
+       "name": "squeeze + residual",
+       "impl": "CUDA · gemm_res_kernel from 8192 rows, else cuBLAS + add_res_kernel",
+       "code": [
+        "y = x + F.linear(h, W_s)   # rn(rn(h W_s.T) + x)"
+       ],
+       "reads": [
+        "h, W_s",
+        "x"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, x_n, y",
+       "shape": "[M,D] bf16"
+      },
+      {
+       "name": "h",
+       "shape": "[M,H] bf16"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32"
+      }
+     ]
+    }
+   ]
+  },
+  "inference_fused": {
+   "title": "A100 · Transition (pair, n = 4 / 2) · inference · fused forward, D64 / D128",
+   "panels": [
+    {
+     "label": "forward (nothing saved)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · tr_fwd_kernel<D, H> (a warp owns 32 rows for the whole hidden dimension)",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)    # A fragments, in registers",
+        "for j in range(H // 16):             # 16 hidden units",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b                  # C fragment = GEMM2's A fragment",
+        "  acc += h @ W_s[:, j].T             # f16 accumulators, start at x",
+        "y = acc"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s",
+        "γ, β"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y",
+       "shape": "[M,D] bf16"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 0.1-0.4 MB"
+      }
+     ]
+    }
+   ]
+  },
+  "training_wide": {
+   "title": "A100 · Transition (pair, n = 4) · training · wide path, any D, any rows, bf16",
+   "panels": [
+    {
+     "label": "forward (saves x_n, mean, rstd)",
+     "kernels": [
+      {
+       "id": "K1",
+       "name": "LayerNorm",
+       "impl": "CUDA · ln_fwd_kernel<D>",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)   # bf16; mean, rstd in fp32"
+       ],
+       "reads": [
+        "x",
+        "γ, β"
+       ],
+       "writes": [
+        "x_n",
+        "mean, rstd"
+       ]
+      },
+      {
+       "id": "K2",
+       "name": "expand + SwiGLU",
+       "impl": "CUDA · dual_swiglu_kernel",
+       "code": [
+        "a, b = x_n @ W_a.T, x_n @ W_b.T",
+        "h = F.silu(a) * b"
+       ],
+       "reads": [
+        "x_n",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "h"
+       ]
+      },
+      {
+       "id": "K3",
+       "name": "squeeze + residual",
+       "impl": "CUDA · gemm_res_kernel from 8192 rows, else cuBLAS + add_res_kernel",
+       "code": [
+        "y = x + F.linear(h, W_s)"
+       ],
+       "reads": [
+        "h, W_s",
+        "x"
+       ],
+       "writes": [
+        "y"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, x_n, y",
+       "shape": "[M,D] bf16"
+      },
+      {
+       "name": "h",
+       "shape": "[M,H] bf16 (not kept: recomputed in the backward)"
+      },
+      {
+       "name": "mean, rstd",
+       "shape": "[M] fp32"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "dh GEMM",
+       "impl": "cuBLAS · torch.mm",
+       "code": [
+        "dh = dy @ W_s"
+       ],
+       "reads": [
+        "dy, W_s"
+       ],
+       "writes": [
+        "dh"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "gate (recomputes a, b)",
+       "impl": "CUDA · gate_bwd_kernel (the dual GEMM of K2, dh tile prefetched into shared memory)",
+       "code": [
+        "a, b = x_n @ W_a.T, x_n @ W_b.T",
+        "h, dA, dB = swiglu_bwd(dh, a, b)   # dB = dh silu(a); dA = dh b silu'(a)"
+       ],
+       "reads": [
+        "x_n, dh",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "h",
+        "dA | dB"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "dW GEMMs",
+       "impl": "cuBLAS · torch.mm",
+       "code": [
+        "dW_s = dy.T @ h",
+        "[dW_a; dW_b] = [dA | dB].T @ x_n"
+       ],
+       "reads": [
+        "dy, h",
+        "dA | dB, x_n"
+       ],
+       "writes": [
+        "dW_*"
+       ]
+      },
+      {
+       "id": "B4",
+       "name": "d_xn GEMM",
+       "impl": "cuBLAS · torch.mm(out_dtype=fp32)",
+       "code": [
+        "d_xn = [dA | dB] @ [W_a; W_b]   # fp32"
+       ],
+       "reads": [
+        "dA | dB",
+        "W_a, W_b"
+       ],
+       "writes": [
+        "d_xn"
+       ]
+      },
+      {
+       "id": "B5",
+       "name": "LayerNorm backward + residual",
+       "impl": "CUDA · ln_bwd_kernel<D> + ln_finalize_kernel",
+       "code": [
+        "dx = dy + layer_norm_bwd(d_xn, x, mean, rstd, γ)",
+        "dγ, dβ = partials.sum(0)   # per-CTA partials, fixed order"
+       ],
+       "reads": [
+        "d_xn, x, dy",
+        "mean, rstd, γ"
+       ],
+       "writes": [
+        "dx",
+        "dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "dy, dx, x, x_n",
+       "shape": "[M,D] bf16"
+      },
+      {
+       "name": "dh, h",
+       "shape": "[M,H] bf16"
+      },
+      {
+       "name": "dA | dB",
+       "shape": "[M,2H] bf16"
+      },
+      {
+       "name": "d_xn",
+       "shape": "[M,D] fp32"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "bf16 / fp32"
+      }
+     ]
+    }
+   ]
+  },
+  "training_fused": {
+   "title": "A100 · Transition (pair, n = 4 / 2) · training · fused forward and backward, D64 / D128",
+   "panels": [
+    {
+     "label": "forward (saves x_n, mean, rstd)",
+     "kernels": [
+      {
+       "id": "F1",
+       "name": "LN + expand + SwiGLU + squeeze + residual",
+       "impl": "CUDA · tr_fwd_kernel<D, H>",
+       "code": [
+        "x_n = F.layer_norm(x, (D,), γ, β)",
+        "for j in range(H // 16):",
+        "  a, b = x_n @ W_a[j].T, x_n @ W_b[j].T",
+        "  h = F.silu(a) * b",
+        "  acc += h @ W_s[:, j].T",
+        "y = acc   # started at x"
+       ],
+       "reads": [
+        "x",
+        "W_a, W_b, W_s, γ, β"
+       ],
+       "writes": [
+        "y",
+        "x_n",
+        "mean, rstd"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "x, y, x_n",
+       "shape": "[M,D] bf16"
+      },
+      {
+       "name": "mean, rstd",
+       "shape": "[M] fp32"
+      },
+      {
+       "name": "W_a, W_b, W_s, γ, β",
+       "shape": "bf16 / fp32, 0.1-0.4 MB"
+      }
+     ]
+    },
+    {
+     "label": "backward",
+     "kernels": [
+      {
+       "id": "B1",
+       "name": "PW role: per hidden slice × row replica",
+       "impl": "CUDA · tr_bwd_pwg_kernel<D, H>",
+       "code": [
+        "dh, a, b = dy @ W_s[:, s], x_n @ W_a[s].T, x_n @ W_b[s].T",
+        "h, dA, dB = swiglu_bwd(dh, a, b)",
+        "dW_s[:, s] += dy.T @ h",
+        "dW_a[s] += dA.T @ x_n;  dW_b[s] += dB.T @ x_n   # f32 partials"
+       ],
+       "reads": [
+        "dy, x_n",
+        "W_a, W_b, W_s"
+       ],
+       "writes": [
+        "dA | dB (fragment blocks)",
+        "dW partials"
+       ]
+      },
+      {
+       "id": "B2",
+       "name": "X role: d_xn + LayerNorm backward",
+       "impl": "CUDA · tr_bwd_xg_kernel<D, H>",
+       "code": [
+        "d_xn = Σ_j dA_j @ W_a[j] + dB_j @ W_b[j]",
+        "dx = dy + layer_norm_bwd(d_xn, x, mean, rstd, γ)"
+       ],
+       "reads": [
+        "dA | dB",
+        "dy, x, mean, rstd",
+        "W_a, W_b, γ"
+       ],
+       "writes": [
+        "dx",
+        "dγ, dβ partials"
+       ]
+      },
+      {
+       "id": "B3",
+       "name": "partial-sum reduction",
+       "impl": "CUDA · finalize_g_kernel",
+       "code": [
+        "dW_a, dW_b, dW_s = partials.sum(0)   # fixed order",
+        "dγ, dβ = partials_ln.sum(0)"
+       ],
+       "reads": [
+        "partials"
+       ],
+       "writes": [
+        "dW_a, dW_b, dW_s",
+        "dγ, dβ"
+       ]
+      }
+     ],
+     "hbm_title": "HBM",
+     "hbm": [
+      {
+       "name": "dy, dx, x, x_n",
+       "shape": "[M,D] bf16"
+      },
+      {
+       "name": "dA | dB",
+       "shape": "[M,2H] bf16"
+      },
+      {
+       "name": "partials",
+       "shape": "fp32, 1-8 MB"
+      },
+      {
+       "name": "dW_*, dγ, dβ",
+       "shape": "bf16 / fp32"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

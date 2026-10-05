@@ -1,0 +1,410 @@
+{
+  "date": "2026-10-04",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "scope": "All 34 META packages connected; qualified A100 module compositions, JAX faces and original backward APIs. Not arbitrary variants/shapes.",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "torch": "2.13.0+cu129",
+  "triton": "3.7.1",
+  "connection_audit": [
+    {
+      "kernel": "apb",
+      "connected": true
+    },
+    {
+      "kernel": "apb_attn",
+      "connected": true
+    },
+    {
+      "kernel": "atom_window",
+      "connected": true
+    },
+    {
+      "kernel": "dtk_kernels",
+      "connected": true
+    },
+    {
+      "kernel": "flash_triattn",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_glue_v2",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_mkpf",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_pallas",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_pallas_f32",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_transition",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_transition_v2",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_triatt_epi",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_triatt_k2b",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_triatt_pro",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_trimul",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_trimul_rows",
+      "connected": true
+    },
+    {
+      "kernel": "fpf_trimul_v4",
+      "connected": true
+    },
+    {
+      "kernel": "gather_attn",
+      "connected": true
+    },
+    {
+      "kernel": "ln",
+      "connected": true
+    },
+    {
+      "kernel": "ln_proj",
+      "connected": true
+    },
+    {
+      "kernel": "lnl_fused",
+      "connected": true
+    },
+    {
+      "kernel": "pallas",
+      "connected": true
+    },
+    {
+      "kernel": "pallas_attn",
+      "connected": true
+    },
+    {
+      "kernel": "pallas_glut",
+      "connected": true
+    },
+    {
+      "kernel": "pallas_triatt",
+      "connected": true
+    },
+    {
+      "kernel": "rfd_layernorm",
+      "connected": true
+    },
+    {
+      "kernel": "templ_embed",
+      "connected": true
+    },
+    {
+      "kernel": "transition",
+      "connected": true
+    },
+    {
+      "kernel": "triattn",
+      "connected": true
+    },
+    {
+      "kernel": "triattn_exact",
+      "connected": true
+    },
+    {
+      "kernel": "triattn_xla",
+      "connected": true
+    },
+    {
+      "kernel": "trimul",
+      "connected": true
+    },
+    {
+      "kernel": "trimul_esm_shapes",
+      "connected": true
+    },
+    {
+      "kernel": "trimul_xla",
+      "connected": true
+    }
+  ],
+  "source_integrity": {
+    "verified_common_files": 1296,
+    "aggregate_sha256": "448f3c10052cabd14b0c56c3eda5f3d0887effca5a9e6a691bbe0adb09c6f30d",
+    "source": "/home/psk6950/practice/refs/uplifting-biomolecular-modeling",
+    "runtime": "/home/psk6950/miniworld-engine-scratch/anthropic_a100/uplifting-biomolecular-modeling",
+    "original_files_modified": false
+  },
+  "previous_build_and_primitive_qualification": "anthropic-all-20261004.json",
+  "environments": {
+    "torch": ".validation/anthropic-a100.env",
+    "jax": {
+      "setup": ".validation/anthropic-jax.env",
+      "python": "/home/psk6950/miniworld-engine-scratch/codex_anthropic_all/jax-env/bin/python",
+      "versions": {
+        "jax": "0.10.2",
+        "jaxlib": "0.10.2",
+        "jax-cuda12-plugin": "0.10.2",
+        "dm-haiku": "0.0.17",
+        "tokamax": "0.0.12"
+      }
+    },
+    "esm": {
+      "setup": ".validation/anthropic-esm.env",
+      "python": "/home/psk6950/miniworld-engine-scratch/codex_anthropic_all/esm-env/bin/python",
+      "versions": {
+        "transformers": "4.57.6"
+      },
+      "transformers_commit": "ef32577f55da19a4989cd7b22e004dc43a4998cb"
+    }
+  },
+  "checks": {
+    "anthropic_complete_final_gpu_63539": {
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/anthropic_complete_final_gpu_63539.log",
+      "passed": 119,
+      "tail": "NVIDIA A100 80GB PCIe, 1410 MHz, 300.00 W\n WARN cache for Repodata at /home/psk6950/.cache/rattler/cache/repodata is on a network/parallel filesystem (NFS/SMB/FUSE/BeeGFS/Lustre/GPFS/CephFS), redirected to /tmp/pixi-cache-psk6950/repodata for this run. Set [cache.repodata] in config.toml or PIXI_CACHE_DIR to override, or [cache.netfs-redirect] = \"never\" to keep the original path.\n....................................................................ss.. [ 59%]\n.................................................                        [100%]\n=============================== warnings summary ===============================\ntests/integrations/test_anthropic_modules_a100_gpu.py::test_module_reference_and_graph[layernorm-128]\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1488: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n119 passed, 2 skipped, 1 warning in 32.27s\n"
+    },
+    "anthropic_jax_final_63534": {
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/anthropic_jax_final_63534.log",
+      "passed": 15,
+      "tail": "...............                                                          [100%]\n=============================== warnings summary ===============================\ntests/integrations/test_anthropic_jax_gpu.py::test_pallas_transition[cd_transition]\n  /home/psk6950/miniworld-engine-scratch/anthropic_a100/uplifting-biomolecular-modeling/common/opt_core/opt_core/kernels/pallas/cd_layers/layers_transition.py:122: DeprecationWarning: jax.experimental.pallas.dot was moved to jax.experimental.pallas.triton. Accessing it via jax.experimental.pallas is deprecated. You can use jax.numpy.dot, jax.numpy.einsum or the @ operator instead in a TPU or MGPU kernel.\n    h = pl.dot(xn16, w1).astype(jnp.float32)                                # f32 accumulation\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n15 passed, 1 warning in 104.85s (0:01:44)\n"
+    },
+    "anthropic_esm_backward_63538": {
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/anthropic_esm_backward_63538.log",
+      "passed": 3,
+      "tail": "...                                                                      [100%]\n=============================== warnings summary ===============================\n.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1488\ntests/integrations/test_anthropic_esm_backward_gpu.py::test_frozen_transition_input_gradient[esm_t15_kd3]\ntests/integrations/test_anthropic_esm_backward_gpu.py::test_frozen_transition_input_gradient[esm_t15_kd3]\n  /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1488: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n    warnings.warn(\n\ntests/integrations/test_anthropic_esm_backward_gpu.py::test_frozen_transition_input_gradient[esm_kd3]\n  /home/psk6950/miniworld-engine-scratch/anthropic_a100/uplifting-biomolecular-modeling/common/opt_core/opt_core/kernels/transition/esm/ef2_autograd_kernels.py:762: UserWarning: Attempting to run cuBLAS, but there was no current CUDA context! Attempting to set the primary context... (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/cuda/CublasHandlePool.cpp:408.)\n    d_hidden = torch.mm(g2d, w[\"W3\"])                    # [M, h]  (LinearBackward: grad_output @ weight)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n3 passed, 4 warnings in 34.31s\n"
+    },
+    "anthropic_complete_cpu_63533": {
+      "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/anthropic_complete_cpu_63533.log",
+      "passed": 246,
+      "tail": " WARN cache for Repodata at /home/psk6950/.cache/rattler/cache/repodata is on a network/parallel filesystem (NFS/SMB/FUSE/BeeGFS/Lustre/GPFS/CephFS), redirected to /tmp/pixi-cache-psk6950/repodata for this run. Set [cache.repodata] in config.toml or PIXI_CACHE_DIR to override, or [cache.netfs-redirect] = \"never\" to keep the original path.\n...................................s.................................... [ 29%]\n........................................................................ [ 58%]\n.....................................................................s.. [ 87%]\n................................                                         [100%]\n246 passed, 2 skipped in 18.14s\n"
+    }
+  },
+  "lint": {
+    "log": "/home/psk6950/miniworld-engine-scratch/agents/live/logs/anthropic_complete_final_lint_63540.log",
+    "result": "All checks passed!"
+  },
+  "added_module_benchmarks": [
+    {
+      "artifact": "benchmarks/modules/bias_only_dit/artifacts/NVIDIA A100 80GB PCIe/bias_only_dit_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-2311e420-src-472b723c-run-d4374303501d_anthropic_complete_20261004.csv",
+      "run_name": "bias_only_dit_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-2311e420-src-472b723c-run-d4374303501d_anthropic_complete_20261004",
+      "measurement_schema": "2",
+      "run_id": "d4374303501d41598cc96a157b81cfa3",
+      "config_hash": "2311e4207271b9e83346d7049e80a528d5ef1c412f827294da7966db12ca2185",
+      "source_hash": "472b723c05075432727a79322725424eed010a4728c526668ed34e6e38a9fe6d",
+      "target_kind": "module",
+      "target": "bias_only_dit",
+      "device": "NVIDIA A100 80GB PCIe",
+      "torch_version": "2.13.0+cu129",
+      "cuda_version": "12.9",
+      "metric": "time",
+      "unit": "ms",
+      "mode": "inference",
+      "compiled": "False",
+      "compile_requested": "False",
+      "cudagraph": "manual",
+      "cudagraph_requested": "manual",
+      "compile_scope": "",
+      "compiled_graphs": "0",
+      "measurement_scope": "forward",
+      "mode_requested": "inference",
+      "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [2, 1, 128, 384]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 128]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 128, 128, 128]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [2, 1, 128, 768]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}",
+      "compile_wrap": "custom_op",
+      "precision": "bf16-mixed",
+      "allow_tf32": "True",
+      "sweep_axis": "seq_len",
+      "implementation": "anthropic",
+      "implementation_type": "anthropic",
+      "ln_implementation": "",
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.bias_only_dit.BiasOnlyDiTBlock[Anthropic apb_attn with zero Q/K + DTK + cuBLAS]",
+      "reference": "module.reference.torch[fp32 IEEE]",
+      "output_max_abs": "0.028835058212280273",
+      "output_rel_frob": "0.0037561547942459583",
+      "output_cosine": "0.9999930262565613",
+      "grad_max_abs": "",
+      "grad_rel_frob": "",
+      "grad_cosine": "",
+      "n_layers": "1",
+      "n_layers_requested": "1",
+      "trimul_direction": "",
+      "n_augment": "2",
+      "mask_prob": "0.1",
+      "dropout": "0.0",
+      "seq_len": "128",
+      "tokens": "",
+      "batch_size": "",
+      "d_pair": "128",
+      "d_single": "384",
+      "d_single_token": "768",
+      "d_single_atom": "128",
+      "d_pair_atom": "16",
+      "status": "ok",
+      "error": "",
+      "value": "0.1525759994983673"
+    },
+    {
+      "artifact": "benchmarks/modules/bias_only_dit/artifacts/NVIDIA A100 80GB PCIe/bias_only_dit_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-2311e420-src-472b723c-run-fe07b6eea452_anthropic_complete_20261004.csv",
+      "run_name": "bias_only_dit_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-2311e420-src-472b723c-run-fe07b6eea452_anthropic_complete_20261004",
+      "measurement_schema": "2",
+      "run_id": "fe07b6eea4524826be563506480ffdae",
+      "config_hash": "2311e4207271b9e83346d7049e80a528d5ef1c412f827294da7966db12ca2185",
+      "source_hash": "472b723c05075432727a79322725424eed010a4728c526668ed34e6e38a9fe6d",
+      "target_kind": "module",
+      "target": "bias_only_dit",
+      "device": "NVIDIA A100 80GB PCIe",
+      "torch_version": "2.13.0+cu129",
+      "cuda_version": "12.9",
+      "metric": "time",
+      "unit": "ms",
+      "mode": "inference",
+      "compiled": "False",
+      "compile_requested": "False",
+      "cudagraph": "manual",
+      "cudagraph_requested": "manual",
+      "compile_scope": "",
+      "compiled_graphs": "0",
+      "measurement_scope": "forward",
+      "mode_requested": "inference",
+      "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [2, 1, 128, 384]}, \"mask\": {\"dtype\": \"bool\", \"shape\": [1, 128]}, \"pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 128, 128, 128]}, \"single\": {\"dtype\": \"bfloat16\", \"shape\": [2, 1, 128, 768]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}",
+      "compile_wrap": "custom_op",
+      "precision": "bf16-mixed",
+      "allow_tf32": "True",
+      "sweep_axis": "seq_len",
+      "implementation": "anthropic",
+      "implementation_type": "anthropic",
+      "ln_implementation": "",
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.bias_only_dit.BiasOnlyDiTBlock[Anthropic apb_attn with zero Q/K + DTK + cuBLAS]",
+      "reference": "module.reference.torch[fp32 IEEE]",
+      "output_max_abs": "0.028835058212280273",
+      "output_rel_frob": "0.0037561547942459583",
+      "output_cosine": "0.9999930262565613",
+      "grad_max_abs": "",
+      "grad_rel_frob": "",
+      "grad_cosine": "",
+      "n_layers": "1",
+      "n_layers_requested": "1",
+      "trimul_direction": "",
+      "n_augment": "2",
+      "mask_prob": "0.1",
+      "dropout": "0.0",
+      "seq_len": "128",
+      "tokens": "",
+      "batch_size": "",
+      "d_pair": "128",
+      "d_single": "384",
+      "d_single_token": "768",
+      "d_single_atom": "128",
+      "d_pair_atom": "16",
+      "status": "ok",
+      "error": "",
+      "value": "0.1525759994983673"
+    },
+    {
+      "artifact": "benchmarks/modules/transition/artifacts/NVIDIA A100 80GB PCIe/transition_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-d3c8b97c-src-472b723c-run-6e7ef4bce356_anthropic_complete_ffn_20261004.csv",
+      "run_name": "transition_n_layers=1_inference_time_bf16-mixed_cudagraph-manual_wrap-custom_op_seq_len_cfg-d3c8b97c-src-472b723c-run-6e7ef4bce356_anthropic_complete_ffn_20261004",
+      "measurement_schema": "2",
+      "run_id": "6e7ef4bce356471d854c27cee16c0e69",
+      "config_hash": "d3c8b97cca76a78712f7c8718e6b9f6655782446979a3e885dda01ae1f3a9ec6",
+      "source_hash": "472b723c05075432727a79322725424eed010a4728c526668ed34e6e38a9fe6d",
+      "target_kind": "module",
+      "target": "transition",
+      "device": "NVIDIA A100 80GB PCIe",
+      "torch_version": "2.13.0+cu129",
+      "cuda_version": "12.9",
+      "metric": "time",
+      "unit": "ms",
+      "mode": "inference",
+      "compiled": "False",
+      "compile_requested": "False",
+      "cudagraph": "manual",
+      "cudagraph_requested": "manual",
+      "compile_scope": "",
+      "compiled_graphs": "0",
+      "measurement_scope": "forward",
+      "mode_requested": "inference",
+      "input_shapes": "{\"x\": {\"dtype\": \"bfloat16\", \"shape\": [1, 128, 128, 128]}}",
+      "execution_validation": "{\"finite_tensors\": 1, \"graph_replay\": {\"output\": {\"limit\": 0.02, \"relative_frobenius\": 0.0}}}",
+      "compile_wrap": "custom_op",
+      "precision": "bf16-mixed",
+      "allow_tf32": "True",
+      "sweep_axis": "seq_len",
+      "implementation": "anthropic",
+      "implementation_type": "anthropic",
+      "ln_implementation": "",
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16",
+      "execution_path": "upstream dtk_kernels.swiglu + cuBLAS selected={'row': 'dtk_kernels.swiglu', 'gemm': 'cuBLAS'}",
+      "reference": "module.reference.torch",
+      "output_max_abs": "0.015625",
+      "output_rel_frob": "0.0036259216722100973",
+      "output_cosine": "0.9999935030937195",
+      "grad_max_abs": "",
+      "grad_rel_frob": "",
+      "grad_cosine": "",
+      "n_layers": "1",
+      "n_layers_requested": "1",
+      "trimul_direction": "",
+      "n_augment": "5",
+      "mask_prob": "0.0",
+      "dropout": "0.0",
+      "seq_len": "128",
+      "tokens": "",
+      "batch_size": "",
+      "d_pair": "128",
+      "d_single": "384",
+      "d_single_token": "768",
+      "d_single_atom": "128",
+      "d_pair_atom": "16",
+      "status": "ok",
+      "error": "",
+      "value": "0.16076800227165222"
+    }
+  ],
+  "qualified_backward_rows": {
+    "torch": {
+      "ef2_ln_bwd_dx": "input and optional residual gradient; no affine gradient",
+      "esm_kd3": "frozen weights, input gradient",
+      "esm_kd3:lean": "frozen weights, input gradient, original recomputation",
+      "esm_t15_kd3": "original A100 forward + frozen-weight input gradient"
+    },
+    "jax": {
+      "cd_ln": "input/scale/offset",
+      "cd_transition": "input/parameters",
+      "cd_triatt": "Q/K/V/bias",
+      "pallas_attn": "Q/K/V/bias",
+      "proj+pallas_attn": "full block input/parameters, starting/ending, no entirely masked rows",
+      "cd_trimul": "input/parameters",
+      "fpf_trimul_xlabwd": "input/parameters via explicitly named upstream XLA backward"
+    }
+  },
+  "limitations": [
+    "Architecture-specific sm90a/sm100a instructions cannot run on sm80; native XLA TriMul A100 refusal is tested.",
+    "Torch module compositions remain inference-only; named backward APIs have their own original contracts.",
+    "JAX ending proj+pallas_attn with entirely masked rows failed input-gradient accuracy (relative error 0.1518614); initial log anthropic_jax_faces_63528.log retained. Nonempty rows in both orientations pass.",
+    "Two Torch bidirectional empty-mask comparisons are skipped because the existing reference returns NaN with all -inf logits; absent and sparse masks pass.",
+    "fpf_core measured tier bucket retains N199 alignment refusal; explicitly named component stage at actual N128 is separately qualified.",
+    "Performance rows are smoke measurements, not interleaved backend comparisons.",
+    "No upstream source modifications; architecture refusals are never relabelled as a different successful kernel."
+  ]
+}
