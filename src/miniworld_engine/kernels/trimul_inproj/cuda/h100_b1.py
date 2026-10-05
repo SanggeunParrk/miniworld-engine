@@ -138,11 +138,11 @@ class Plan(T.CooperativePlan):
         bf = lambda shape: torch.empty(shape, device=x.device, dtype=x.dtype)
         self.outputs = (
             bf((m, 128)),
-            bf((128, 128)),
+            torch.empty((128, 128), device=x.device, dtype=torch.float32 if d.get("master_weights") else x.dtype),
             bf((256, d["n"], d["n"])),
             torch.empty(256, device=x.device),
             torch.empty(256, device=x.device),
-            bf((128, 256)),
+            torch.empty((128, 256), device=x.device, dtype=torch.float32 if d.get("master_weights") else x.dtype),
         )
         self.partw = torch.empty((count, 49152), device=x.device)
         self.partln = torch.empty((count, 512), device=x.device)

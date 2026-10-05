@@ -7,6 +7,7 @@ from jaxtyping import Bool, Float
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import attention_pair_bias_b200 as _b200
+from miniworld_engine.integrations import h100_master as _h100_master
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_augmented_attention
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
@@ -84,11 +85,19 @@ class AttentionPairBias(nn.Module):
             return _b200.update_inference(self, single, pair, mask)
         if _b200.serves_train(self, single, pair, mask):
             return _b200.update_train(self, single, pair, mask)
+        master = (self._backend == KernelBackend.TRITON and single.dtype == torch.bfloat16 and self.to_query.weight.dtype == torch.float32
+                  and _h100_master.is_h100(single.device))
+        if master:
+            wq, wk, wv, wb, wg, wo, bq = _h100_master.pack([
+                self.to_query.weight, self.to_key.weight, self.to_value.weight,
+                self.to_bias.weight, self.to_gate.weight, self.to_out.weight,
+                self.to_query.bias,
+            ])
         single_res = single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
         single = self.ln_single(single)
-        query = self.to_query(single)
-        key = self.to_key(single)
-        value = self.to_value(single)
+        query = _h100_master.linear(single, self.to_query, wq, bq) if master else self.to_query(single)
+        key = _h100_master.linear(single, self.to_key, wk) if master else self.to_key(single)
+        value = _h100_master.linear(single, self.to_value, wv) if master else self.to_value(single)
 
         query = rearrange(query, "B L (H D) -> B H L D", H=self.n_head)
         key = rearrange(key, "B L (H D) -> B H L D", H=self.n_head)
@@ -99,7 +108,7 @@ class AttentionPairBias(nn.Module):
             key = self.norm_key(key)
 
         pair = self.ln_pair(pair)
-        bias = self.to_bias(pair)
+        bias = _h100_master.linear(pair, self.to_bias, wb) if master else self.to_bias(pair)
         bias = rearrange(bias, "B L L2 H -> B H L L2")
         if mask is not None:
             bias = bias.masked_fill(
@@ -118,8 +127,8 @@ class AttentionPairBias(nn.Module):
         else:
             raise InvalidImplementationError(self.implementation)
 
-        gate = self.to_gate(single)
+        gate = _h100_master.linear(single, self.to_gate, wg) if master else self.to_gate(single)
         out = rearrange(out, "B H L D -> B L (H D)")
         out = sigmoid_gate(gate, out)
-        out = self.to_out(out)
+        out = _h100_master.linear(out, self.to_out, wo) if master else self.to_out(out)
         return single_res + out

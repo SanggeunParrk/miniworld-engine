@@ -1,4 +1,4 @@
-"""Fused token DiT TRAINING block on B200 (sm_100), wired to DiTBlock's parameter contract.
+"""Fused token DiT TRAINING block on H100 (sm_90) and B200 (sm_100), wired to DiTBlock's parameter contract.
 
 One autograd Function per ``DiTBlock`` call, forward and backward, with no Triton and no quack, in one of two precisions --
 bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute_dtype``; TF32 tensor cores):
@@ -14,9 +14,9 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
     carries the SwiGLU (``gemm_swiglu2_sm100.cu -DSAVE_AB``, which also writes [a | b] for the backward);
   * the residual stream fp32 inside the block, the output in the input's dtype.
 
-``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), B200, a bf16 or
+``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), H100 / B200, a bf16 or
 fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths
-(768 / 16 x 48 / cond 384 / pair 128 / transition n = 2), B == 1, an even A, L a multiple of 128, a key mask of [B, L]
+(768 / 16 x 48 / cond 384 / pair 128 / transition n = 2), B == 1, an even A on B200, L a multiple of 128, a key mask of [B, L]
 or none, LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off.
 
 The forward and the backward are each one opaque op (``kernels/_compile.opaque``) with a fake implementation, inside an
@@ -61,13 +61,16 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
     from miniworld_engine.modules.dispatch import KernelBackend
     if a._backend != KernelBackend.TRITON:
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
+    if cap not in ((9, 0), (10, 0)):
         return False
     if single.dtype not in (BF, torch.float32) or compute_dtype not in (None, BF, torch.float32):
         return False
     if not any(t.requires_grad for t in (single, cond, pair)) and not any(p.requires_grad for p in module.parameters()):
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[0] % 2 or single.shape[2] % 128:
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[2] % 128:
+        return False
+    if cap == (10, 0) and single.shape[0] % 2:          # the sm_100a forward pairs the samples
         return False
     d = single.shape[-1]
     if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP):
@@ -76,6 +79,10 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         return False
     if (a.n_head, d) != (H, D) and operand_dtype(single, compute_dtype) is not BF:
         return False                         # fp32 (TF32 kernels) at 16 x 48 only
+    if cap == (9, 0) and (a.n_head, d) != (H, D):
+        return False                         # H100: 16 x 48 only (the sm_90a cores; other layouts are B200-only)
+    if cap == (9, 0) and operand_dtype(single, compute_dtype) is not BF and os.environ.get("MINIWORLD_TOKEN_DIT_TRAIN_FP32", "1") == "0":
+        return False
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
         return False
     norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, module.transition.ada_ln_in.ln_in,
@@ -112,6 +119,24 @@ def _mm32(a, b):
     return torch.mm(a, b, out_dtype=torch.float32) if a.dtype is BF else torch.mm(a, b)
 
 
+LOG2E = 1.4426950408889634
+QS90 = LOG2E / DH ** 0.5           # the sm_90a core's q scale: its logits are in log2 units (16 x 48 only)
+
+
+def _sm90(dev) -> bool:
+    """H100: the sm_90a attention cores and their operand conventions; B200 otherwise (``serves`` admits only these two)."""
+    return torch.cuda.get_device_capability(dev) == (9, 0)
+
+
+def _key_mask(mask, A, L, perm=None):
+    """The sm_90a cores' additive key mask, [A, L] fp32 (0 = attend), or None; ``perm``: its keys in that order (the TF32
+    core's)."""
+    if mask is None:
+        return None
+    m = mask.reshape(L) if perm is None else mask.reshape(L)[perm]
+    return torch.where(m, 0.0, -1e30).to(torch.float32).expand(A, L).contiguous()
+
+
 _PACKS: dict = {}
 
 
@@ -143,7 +168,7 @@ def _pack(P, qk, dev, at):
         "bqkvg": torch.cat([g("attention.to_query.bias").detach().float(), torch.zeros(3 * D, device=dev)]).to(at),
         "nq": _f32(g("attention.norm_query.weight")) if qk else torch.ones(DH, device=dev),
         "nk": _f32(g("attention.norm_key.weight")) if qk else torch.ones(DH, device=dev),
-        "wp": wp, "Wb": Wb, "Wf": Wf, "Wf_at": Wf.to(at),
+        "wp": wp, "Wb": Wb, "Wf": Wf, "Wf_at": Wf.to(at), "Wf_l2": (Wf * LOG2E).to(at),    # natural / log2 units
         "Wo": g("attention.to_out.weight").detach().to(at).contiguous(),
         "Wab": torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).detach().to(at),
         "Wsq": g("transition.squeeze.weight").detach().to(at).contiguous(),
@@ -183,10 +208,12 @@ def _saved_like(single, pair, fp32, qk=True, H=H):
     A, _, L, D = single.shape
     M, R, e = A * L, L * L, single.new_empty
     f32, at = torch.float32, (torch.float32 if fp32 else BF)
+    h100 = _sm90(single.device)                                             # its cores write og: no O saved
+    copies = qk or h100                                                     # q / k / v copies (H100 scales q in that pass)
     return [e((M, D), dtype=f32), e((M, DC), dtype=at), e((M, DC), dtype=at), e((M, 2), dtype=f32), e((M, 4 * D), dtype=at),
             e((M, 2 * D), dtype=at), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at), e((M, 2 * H), dtype=f32),
-            *(e((M, D), dtype=at) for _ in range(3 if qk else 0)), e((H, L, L), dtype=at), e((M, D), dtype=f32),
-            e((A, H, L), dtype=f32), e((M, D), dtype=at), e((M, D), dtype=at), e((M, D), dtype=f32), e((M, 2), dtype=f32),
+            *(e((M, D), dtype=at) for _ in range(3 if copies else 0)), e((H, L, L), dtype=at),
+            *([] if h100 else [e((M, D), dtype=f32)]), e((A, H, L), dtype=f32), e((M, D), dtype=at), e((M, D), dtype=at), e((M, D), dtype=f32), e((M, 2), dtype=f32),
             e((M, D), dtype=at), e((M, 4 * D), dtype=at), e((M, D), dtype=at), e((R, DP), dtype=at), e((R, 2), dtype=f32)]
 
 
@@ -204,6 +231,7 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
@@ -214,6 +242,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     P = dict(zip(names, params, strict=False))
     M, R, dev = A * L, L * L, single.device
     at = torch.float32 if fp32 else BF
+    h100 = _sm90(dev)
     x = torch.empty(M, D, device=dev)                                          # the fp32 residual, written by adaln_a
     c2 = cond.reshape(M, DC).contiguous()
     chat = torch.empty(M, DC, device=dev, dtype=at); cbf = torch.empty_like(chat)
@@ -230,20 +259,34 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     qkvg = torch.addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
-    if qk:
+    copies = qk or h100                        # the sm_90a cores take q pre-scaled: the row pass applies it
+    if copies:
         qn = torch.empty(M, D, device=dev, dtype=at); kn = torch.empty_like(qn); vc = torch.empty_like(qn)
-        T.qknorm(qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk)
+        T.qknorm(qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk, QS90 if h100 else 1.0)
     else:                                      # the core reads q / k / v as column views of qkvg: no copies
         qn, kn, vc = (qkvg[:, i * D:(i + 1) * D] for i in range(3))
     p2 = pair.reshape(R, DP)
     ph = torch.empty(R, DP, device=dev, dtype=at); pst = torch.empty(R, 2, device=dev)
     T.pair_ln(p2, ph, pst, EPS)
-    bias = torch.mm(W["Wf_at"], ph.t()).view(H, L, L)                           # head-major, natural units; Wf = Wb diag(wp)
-    if mask is not None:
-        bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
-    O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
-    og = torch.empty(M, D, device=dev, dtype=at)
-    T.gate_o(O, qkvg, og)
+    # the pair bias, head-major (Wf = Wb diag(wp)): a CUDA LayerNorm of the pair rows and one GEMM -- natural units for sm_100a,
+    # log2 units for the sm_90a cores, key-permuted for the H100 TF32 core
+    bias = torch.mm(W["Wf_l2"] if h100 else W["Wf_at"], ph.t()).view(H, L, L)
+    O = None
+    if h100 and fp32:                                                           # TF32 core: v^T, key-permuted bias / mask
+        perm = rows.key_perm(L, dev)
+        bias = bias[..., perm].contiguous()
+        vt = torch.empty(D, M, device=dev)
+        T.transpose(vc, vt)                                                     # v^T [D, M]
+        og, LSE = sm90.tf32_forward(qn, kn, vt, bias, _key_mask(mask, A, L, perm), A, L, qkvg)   # sigmoid(g) o, no O
+        del vt
+    elif h100:
+        og, LSE = sm90.forward(qn, kn, vc, bias, _key_mask(mask, A, L), A, L, qkvg)             # sigmoid(g) o, no O
+    else:
+        if mask is not None:
+            bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
+        O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
+        og = torch.empty(M, D, device=dev, dtype=at)
+        T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
     y = torch.mm(og, Wo.t())
     x1 = torch.empty_like(x); xt = torch.empty(M, D, device=dev, dtype=at); x1st = torch.empty(M, 2, device=dev)
@@ -262,9 +305,31 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     T.res_c(x1, z, Gg, bg2, out)
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
-    qkv_out = [qn, kn, vc] if qk else []
-    return [out.view(single.shape), x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, *qkv_out, bias, O, LSE, og, y, x1, x1st, xt,
+    qkv_out = [qn, kn, vc] if copies else []
+    # the sm_90a cores write og, and the backward needs no O: H100 keeps none (not even a placeholder, which AOT mis-strides)
+    return [out.view(single.shape), x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, *qkv_out, bias, *([] if h100 else [O]), LSE, og, y, x1, x1st, xt,
             ab, z, ph, pst]
+
+
+def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
+    """The H100 fp32 block's attention backward on the TF32 CUDA core: dQ (for the unscaled q), dK, dV [A L, 768] fp32 and dbias
+    [16, L, L] fp32 in natural key order. qs: q in exp2 units; bias_p: the forward's key-permuted bias (log2 units). The
+    core takes q, k, dO transposed as well (tiled transposes, ``T.transpose``), and its bias / LSE / D in the permuted orders."""
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+    from miniworld_engine.kernels.conditioned_transition import cuda as rows
+    perm = rows.key_perm(L, qs.device)
+    inv = torch.argsort(perm)
+
+    def tr(t):
+        out = t.new_empty(t.shape[1], t.shape[0])
+        T.transpose(t, out)
+        return out
+
+    bias_tp = bias_p[:, perm][..., inv].transpose(1, 2).contiguous()           # [h, key, q position]
+    dq, dk, dv, db_p = sm90.tf32_backward(qs, k, v, dob, tr(qs), tr(k), tr(dob), bias_p, bias_tp, lse, dd,
+                                          lse[..., perm].contiguous(), dd[..., perm].contiguous(),
+                                          _key_mask(mask, A, L), _key_mask(mask, A, L, perm), A, L)
+    return dq, dk, dv, db_p[..., inv]
 
 
 def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads):
@@ -280,14 +345,18 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H):
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     D = single.shape[-1]
     DH = D // H
     T = ext(D, DH)
-    if not qk:                                 # the forward's q / k / v: column views of qkvg (see _fwd_body)
+    h100 = _sm90(single.device)
+    if not (qk or h100):                       # the forward's q / k / v: column views of qkvg (see _fwd_body)
         saved = [*saved[:10], *(saved[8][:, i * D:(i + 1) * D] for i in range(3)), *saved[10:]]   # after qkvg (8), rqk (9)
-    (x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, bias, O, LSE, og, y, x1, x1st, xt, ab, z, ph, pst) = saved
+    saved = list(saved)
+    O = None if h100 else saved.pop(14)        # H100 keeps og only
+    (x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, bias, LSE, og, y, x1, x1st, xt, ab, z, ph, pst) = saved
     names = _names_for(qk)
     at = torch.float32 if fp32 else BF
     W = _pack(dict(zip(names, params, strict=False)), qk, single.device, at)
@@ -317,9 +386,14 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dWo = _mm32(dy.t(), og)
     dob = torch.empty(M, D, device=dev, dtype=at); dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
-    T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
-    DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L) if fp32
-                      else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
+    T.gate_o_bwd(dog, og if h100 else O, qkvg, dob, dd, dqkvg, L, h100)       # H100: D and dg from og (dO o = dog og)
+    if h100 and fp32:
+        DQ, DK, DV, DB = _tf32_attn_bwd(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L)
+    elif h100:                                                                  # dq for the unscaled q, dbias natural units
+        DQ, DK, DV, DB = sm90.backward(qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L)
+    else:
+        DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L) if fp32
+                          else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
     dxa = torch.mm(dqkvg, Wqkvg)
     dWqkvg = _mm32(dqkvg.t(), xa)
@@ -337,7 +411,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dWu = torch.empty_like(dWn); dw12 = torch.zeros(2, DC, device=dev)
     Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D:(i + 1) * D] for i in range(4))
     T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
-    dbv = DB.view(H, R).to(at)                                                  # masked key columns are 0 (P = 0)
+    dbv = DB.reshape(H, R).to(at)                                               # H100 may return a transposed dbias view
     dWf = _mm32(dbv, ph)                                                        # [H, DP]
     dph = _mm32(dbv.t(), Wf.to(at))                                             # [R, DP]
     dpair = torch.empty(R, DP, device=dev, dtype=pdtype)

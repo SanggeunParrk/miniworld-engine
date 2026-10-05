@@ -190,7 +190,7 @@ this path (engine module path on B200, bf16): 2.502 / 2.289 and 6.036 / 5.806 ms
 - bf16: the expand GEMM carries the SwiGLU and saves [a | b] (`gemm_swiglu2_sm100 -DSAVE_AB`) instead of cuBLAS + `swiglu_rows`;
 - fp32: `attn_dkv_tf32` with one K / V slot and 3 stages (see T1'-T3').
 
-Accuracy (`tests/integrations/test_b200_token_dit_train_gpu.py`, against the fp32 IEEE PyTorch block; bf16 and fp32, QK-norm
+Accuracy (`tests/integrations/test_token_dit_train_gpu.py`, against the fp32 IEEE PyTorch block; bf16 and fp32, QK-norm
 on / off, key mask on / off): output and every input / parameter gradient (the q / k norm weights included) at most 1.09x
 the engine module path's own error in the same regime -- bf16 worst ~7e-3 (expand weights), fp32 worst 1.8e-3
 (`norm_key.weight`); the compiled block matches eager.

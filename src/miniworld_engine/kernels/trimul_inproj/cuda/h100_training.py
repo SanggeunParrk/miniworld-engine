@@ -115,14 +115,14 @@ def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
         return O.output(d, tri, ln=0, stats=0, method=-1)[0]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy):
+def _backward_fake(leaves, mask, ds, saved, dy, fp32_dw=False):
     """Match each differentiable input gradient shape and dtype."""
-    grads = [torch.empty_like(t) for t in leaves]
+    grads = [torch.empty_like(t, dtype=torch.float32 if fp32_dw and 1 <= i <= 6 else t.dtype) for i, t in enumerate(leaves)]
     if leaves[0].shape[-1] == 128:
         # Return the common four-weight allocation once: custom ops prohibit
         # aliasing between outputs, even for disjoint views. Unbind outside the
         # custom op so autograd sees the views without any copies.
-        front = leaves[0].new_empty((4, 128, 256))
+        front = leaves[0].new_empty((4, 128, 256), dtype=torch.float32 if fp32_dw else leaves[0].dtype)
         return [grads[0], front, *grads[5:]]
     return grads
 
@@ -133,7 +133,7 @@ def backward(
     mask: torch.Tensor,
     ds: torch.Tensor,
     saved: list[torch.Tensor],
-    dy: torch.Tensor,
+    dy: torch.Tensor, fp32_dw: bool = False,
 ) -> list[torch.Tensor]:
     """Run CUDA B1/B7 and contraction gradients using saved values."""
     x = leaves[0]
@@ -141,7 +141,7 @@ def backward(
     D = x.shape[-1]
     if WIDE.supports(D, n):
         with T.native_context(x.device):
-            return WIDE.backward(leaves, mask, ds, saved, dy)
+            return WIDE.backward(leaves, mask, ds, saved, dy, fp32_dw)
     ab, tri, xn, stats, packed, _ = saved
     dy = dy.contiguous()
     with T.native_context(x.device):
@@ -151,7 +151,10 @@ def backward(
         )
 
         d = _data(leaves, mask, ds, packed=packed, for_backward=True)
+        d["master_weights"] = fp32_dw
         cfg = T.read_config("b1/configs.json")[str(n)]
+        cfg = dict(cfg)
+        cfg["defines"] = dict(cfg.get("defines") or {}, MASTER_FP32=int(fp32_dw))
         b1 = B1.Plan(dict(d, x=xn), dy, tri, stats, **cfg)
         dg, dwg, dt, dgo, dbo, dwp = b1()
         dl = torch.empty_like(tri)
@@ -181,21 +184,36 @@ class _Training(torch.autograd.Function):
     def forward(ctx, *args):
         leaves = list(args[:11])
         mask, ds = args[11:]
+        weights = leaves[1:7]
+        ctx.master = any(w.dtype == torch.float32 for w in weights)
+        if ctx.master:
+            copies = [torch.empty_like(w, dtype=leaves[0].dtype) for w in weights]
+            torch._foreach_copy_(copies, weights)
+            leaves = [leaves[0], *copies, *leaves[7:]]
         y, *saved = forward(leaves, mask, ds)
-        ctx.save_for_backward(*args, *saved)
+        ctx.saved_count = len(saved)
+        ctx.save_for_backward(*args, *saved, *leaves[1:7])
         return y
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
         vals = ctx.saved_tensors
-        grads = backward(list(vals[:11]), vals[11], vals[12], list(vals[13:]), dy)
+        end = 13 + ctx.saved_count
+        leaves = [vals[0], *vals[end:], *vals[7:11]]
+        grads = backward(leaves, vals[11], vals[12], list(vals[13:end]), dy, ctx.master)
         if vals[0].shape[-1] == 128:
             grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
+        grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
         return (*grads, None, None)
 
 
 def bidirectional_trimul(*args):
     if not torch.is_grad_enabled():
-        return forward_nograd(list(args[:11]), *args[11:])
+        leaves = list(args[:11])
+        if any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
+            weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
+            torch._foreach_copy_(weights, leaves[1:7])
+            leaves = [leaves[0], *weights, *leaves[7:]]
+        return forward_nograd(leaves, *args[11:])
     return _Training.apply(*args)

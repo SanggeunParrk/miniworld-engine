@@ -68,7 +68,7 @@ def update(
     dropscale: torch.Tensor | None,
     *, bidirectional: bool = True,
 ) -> torch.Tensor:
-    """Keep casts in autograd so the module's original parameters receive gradients."""
+    """Use native FP32 master gradients where qualified; preserve cast-based fallbacks."""
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_training import (
         bidirectional_trimul,
     )
@@ -127,8 +127,8 @@ def update(
             return single_trimul(module.outgoing, *args)
     return apply(
         pair,
-        *(w.to(pair.dtype) if bidirectional and d == 128 and i < 4 else w.to(pair.dtype).contiguous()
-          for i, w in enumerate(weights)),
+        *(w if w.dtype in (torch.bfloat16, torch.float32) else w.to(pair.dtype).contiguous()
+          for w in weights),
         module.ln_pair.weight,
         module.ln_pair.bias,
         module.ln_out.weight,

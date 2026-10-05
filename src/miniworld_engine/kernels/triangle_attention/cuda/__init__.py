@@ -41,7 +41,7 @@ def _available(device: torch.device) -> bool:
     )
 
 
-def can_use(pair: torch.Tensor, weights: tuple[torch.Tensor, ...]) -> bool:
+def can_use(pair: torch.Tensor, weights: tuple[torch.Tensor, ...], allow_master: bool = False) -> bool:
     return (
         pair.is_cuda and pair.dtype == torch.bfloat16 and pair.is_contiguous()
         and (not torch.is_autocast_enabled("cuda") or torch.get_autocast_dtype("cuda") == torch.bfloat16)
@@ -49,7 +49,8 @@ def can_use(pair: torch.Tensor, weights: tuple[torch.Tensor, ...]) -> bool:
         and pair.shape[1] in (384, 768, 1024)
         and pair.shape[2] == pair.shape[1] and pair.shape[3] == 128
         and len(weights) == 5
-        and all(w.dtype == pair.dtype and w.device == pair.device and w.is_contiguous() for w in weights)
+        and all((w.dtype == pair.dtype or allow_master and w.dtype == torch.float32)
+                and w.device == pair.device and w.is_contiguous() for w in weights)
         and all(w.shape == (128, 128) for w in weights[:4])
         and weights[4].shape == (4, 128)
         and _available(pair.device)

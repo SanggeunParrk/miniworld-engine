@@ -324,7 +324,7 @@ template <int NST> struct SMX {
   static constexpr int SDGP = SDOUT + 4 * TILE;                     // [2 head parity][2 consumers][TILE] dgp staging (natural, 64B swizzle)
   static constexpr int SGO = SDGP + 4 * TILE;                       // [2 head parity][2 consumers][TILE] go tiles (natural, 64B swizzle): the dWo B operand
   static constexpr int SEND = SGO + 4 * TILE;
-  static constexpr int NBAR = 2 * NST + 2 + 1 + 2 + 2 + 2;          // full, empty, fullD[2], doneT, fullW[2], wfree[2], goready[2]
+  static constexpr int NBAR = 2 * NST + 2 + 2 + 2 + 2 + 2;          // full, empty, fullD[2], doneT[2], fullW[2], wfree[2], goready[2]
   static constexpr int BYTES = SEND * 2 + NBAR * 8 + 1024;
 };
 
@@ -361,8 +361,8 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
   uint64_t* full = bars;                 // [NST]
   uint64_t* empty = full + NST;          // [NST], count 8 (consumer warps)
   uint64_t* fullD = empty + NST;         // [2] tile parity: dout tiles landed
-  uint64_t* doneT = fullD + 2;           // [1], count 2: both consumers are done with a tile (dout tiles free)
-  uint64_t* fullW = doneT + 1;           // [2] head parity
+  uint64_t* doneT = fullD + 2;           // [2] tile parity, count 2: both consumers have released that dout buffer
+  uint64_t* fullW = doneT + 2;           // [2] head parity
   uint64_t* wfree = fullW + 2;           // [2], count 2
   uint64_t* goready = wfree + 2;         // [2] head parity, count 2: both consumers' go tiles of a head are in shared memory
   const int tid = threadIdx.x, lane = tid & 31;
@@ -373,7 +373,7 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
   if (tid == 0) {
     for (int i = 0; i < NST; ++i) { tma::bar_init(full + i, 1); tma::bar_init(empty + i, 8); }
     for (int i = 0; i < 2; ++i) { tma::bar_init(fullD + i, 1); tma::bar_init(fullW + i, 1); tma::bar_init(wfree + i, 2); }
-    tma::bar_init(doneT, 2); tma::bar_init(goready, 2); tma::bar_init(goready + 1, 2);
+    tma::bar_init(doneT, 2); tma::bar_init(doneT + 1, 2); tma::bar_init(goready, 2); tma::bar_init(goready + 1, 2);
     tma::bar_init_fence();
     wg::proxy_fence();
   }
@@ -389,7 +389,7 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
         const int t = blockIdx.x + T * gridDim.x;
         if (t >= ntile) return;
         const int b = T & 1, sp = tile_sp(t), ip = tile_ip(t);
-        if (T >= 2) tma::wait(doneT, (T - 2) & 1);                   // buffer b was used by tile T-2: wait for phase T-2 of the single doneT barrier
+        if (T >= 2) tma::wait(doneT + b, ((T >> 1) - 1) & 1);       // one empty barrier per dout parity buffer
         tma::expect_tx(fullD + b, 4 * TILE * 2);
         for (int c = 0; c < 2; ++c)
           for (int si = 0; si < BS; ++si)
@@ -416,6 +416,13 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
           for (int c = 0; c < 2; ++c) tma::load_3d(&omap, tma::sa(sOR + (st * 2 + c) * TILE), full + st, h * C, ip * 128 + c * 64, s0);
         }
         if (pw == 0) issue_dout(T + 2);
+      }
+      if (pw == 0) {
+        // Retire the final empty phase of each dout buffer. A single barrier
+        // cannot safely track two independently prefetched parity buffers.
+        const int tiles = (ntile - 1 - blockIdx.x) / gridDim.x + 1;
+        for (int b = 0; b < 2 && b < tiles; ++b)
+          tma::wait(doneT + b, ((tiles - 1 - b) / 2) & 1);
       }
     }
   } else {
@@ -552,7 +559,7 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
     tma::wait(goready + ((T * H + H - 1) & 1), ((T * H + H - 1) >> 1) & 1);
     dwo_issue(H - 1, (T * H + H - 1) & 1, sDOc, sDOo);
     wg::wait<0>();
-    if (wtid == 0) tma::arrive(doneT);                             // this tile's dout tiles are free (both consumers arrive)
+    if (wtid == 0) tma::arrive(doneT + b);                             // this tile's dout tiles are free (both consumers arrive)
     load_y(T + 1);
   }
   if (wtid == 0) tma::wait_all();

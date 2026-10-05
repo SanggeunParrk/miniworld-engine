@@ -43,10 +43,12 @@ class Plan:
         dy,
         saved=None,
         outgoing=True,
+        master=False,
     ):
         self.x = x
         self.n = x.shape[1]
         self.outgoing = outgoing
+        self.master = master
         self.dy = dy
         n = self.n
         if (
@@ -118,6 +120,7 @@ class Plan:
             self.ds,
             self.dy,
             **self.config["b1"],
+            master=self.master,
         )
         dg, dwg, dt, dgo, dbo, dwp = self.back.backward()
         dl = torch.empty_like(dt)
@@ -131,6 +134,7 @@ class Plan:
             torch.bmm(left, dt, out=dr)
         d = dict(
             n=self.n,
+            master_weights=self.master,
             x=self.x,
             mask=self.mask,
             ds=self.ds,
@@ -182,12 +186,12 @@ def forward(
         return [y, plan.ab, plan.tri, plan.xn.reshape_as(x), plan.w1]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy, outgoing):
+def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False):
     """dx like x, the packed front-weight gradient [4, 128, 128], then one gradient like each remaining leaf."""
     return [
         torch.empty_like(leaves[0]),
-        leaves[0].new_empty((4, 128, 128)),
-        *[torch.empty_like(v) for v in leaves[5:]],
+        leaves[0].new_empty((4, 128, 128), dtype=torch.float32 if master else leaves[0].dtype),
+        *[torch.empty_like(v, dtype=torch.float32 if master and i < 2 else v.dtype) for i,v in enumerate(leaves[5:])],
     ]
 
 
@@ -199,29 +203,39 @@ def backward(
     saved: list[torch.Tensor],
     dy: torch.Tensor,
     outgoing: bool,
+    master: bool = False,
 ) -> list[torch.Tensor]:
     """Backward of ``forward`` from its saved tensors: dx, the packed front-weight gradient, then the other leaves' gradients."""
     x = leaves[0]
     with torch.cuda.device(x.device):
         T._launch_module()._make_context_current(x.device.index)
-        plan = Plan(*leaves, mask, ds, dy.contiguous(), saved=saved, outgoing=outgoing)
+        plan = Plan(*leaves, mask, ds, dy.contiguous(), saved=saved, outgoing=outgoing, master=master)
         return list(plan.backward())
 
 
 class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, outgoing, *args):
-        y, *saved = forward(list(args[:11]), args[11], args[12], outgoing)
+        leaves = list(args[:11])
+        ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
+        weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
+        if ctx.master:
+            torch._foreach_copy_(weights, leaves[1:7])
+        leaves = [leaves[0], *weights, *leaves[7:]]
+        y, *saved = forward(leaves, args[11], args[12], outgoing)
         ctx.outgoing = outgoing
-        ctx.save_for_backward(*args, *saved)
+        ctx.saved_count = len(saved)
+        ctx.save_for_backward(*args, *saved, *weights)
         return y
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        grads = backward(list(v[:11]), v[11], v[12], list(v[13:]), dy, ctx.outgoing)
+        leaves = [v[0], *v[-6:], *v[7:11]]
+        grads = backward(leaves, v[11], v[12], list(v[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master)
         grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
+        grads = [g.to(t.dtype) for g,t in zip(grads,v[:11],strict=True)]
         return (None, *grads, None, None)
 
 

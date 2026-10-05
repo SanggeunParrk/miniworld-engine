@@ -11,11 +11,12 @@ int wide_d64_bwd_ndw() { return NDW; }
 int wide_d64_bwd_ndx() { return NDX; }
 void wide_d64_bwd_launch(const CUtensorMap& mdy, const CUtensorMap& mxn, const CUtensorMap& mx, const CUtensorMap& mws,
                          const CUtensorMap& mwa, const CUtensorMap& mwb, const float* rstd, const float* c1, const float* gamma,
-                         __nv_bfloat16* dx, float* dgam, float* dbeta, float* partw, float* dgbw, __nv_bfloat16* dWa,
-                         __nv_bfloat16* dWb, __nv_bfloat16* dWs, int M, int tiles, cudaStream_t stream) {
+                         __nv_bfloat16* dx, float* dgam, float* dbeta, float* partw, float* dgbw, void* dWa,
+                         void* dWb, void* dWs, int M, int tiles, bool fp32_dw, cudaStream_t stream) {
   static const bool ready = (wide_smem_optin(reinterpret_cast<const void*>(wide_d64_bwd_kernel), SMEM_BYTES, "d64 bwd"), true);
   (void)ready;
   wide_d64_bwd_kernel<<<NCTA, 256, SMEM_BYTES, stream>>>(mdy, mxn, mx, mws, mwa, mwb, rstd, c1, gamma, dx, dgam, dbeta, partw, dgbw, M, tiles);
   const int n = 3 * NSL * HS * D_ + 2 * D_;
-  wide_d64_reduce_kernel<<<(n + 255) / 256, 256, 0, stream>>>(partw, dWa, dWb, dWs, dgbw, dgam, dbeta);
+  if(fp32_dw) wide_d64_reduce_kernel<float><<<(n + 255) / 256, 256, 0, stream>>>(partw, (float*)dWa, (float*)dWb, (float*)dWs, dgbw, dgam, dbeta);
+  else wide_d64_reduce_kernel<__nv_bfloat16><<<(n + 255) / 256, 256, 0, stream>>>(partw, (__nv_bfloat16*)dWa, (__nv_bfloat16*)dWb, (__nv_bfloat16*)dWs, dgbw, dgam, dbeta);
 }

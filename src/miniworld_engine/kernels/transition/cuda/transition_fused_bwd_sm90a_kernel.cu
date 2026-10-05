@@ -391,7 +391,9 @@ transition_bwd_fused(const __grid_constant__ CUtensorMap mdy, const __grid_const
 }
 
 // partw [NDW][3][64 hs][128 d] fp32 -> bf16 dWa [512][128], dWb [512][128], dWs [128][512]
-extern "C" __global__ void reduce_partials(const float* __restrict__ ws, __nv_bfloat16* __restrict__ dWa, __nv_bfloat16* __restrict__ dWb, __nv_bfloat16* __restrict__ dWs,
+template <typename T> __device__ T dw_value(float v) { return v; }
+template <> __device__ __nv_bfloat16 dw_value(float v) { return __float2bfloat16_rn(v); }
+template <typename T> __global__ void reduce_partials(const float* __restrict__ ws, T* __restrict__ dWa, T* __restrict__ dWb, T* __restrict__ dWs,
                                      const float* __restrict__ dgbw, float* __restrict__ dgam, float* __restrict__ dbeta) {
   const int tid=threadIdx.x;
   const int idx = blockIdx.x * blockDim.x + tid;
@@ -414,13 +416,13 @@ extern "C" __global__ void reduce_partials(const float* __restrict__ ws, __nv_bf
     for(int r=0;r<DW_REPL;++r)v+=ws[((size_t)(r*8+slice)*3+2)*HS*D_+hs*D_+d];
     __shared__ float transpose[16][17];
     transpose[tid/16][tid%16]=v;__syncthreads();
-    dWs[(size_t)(d0+tid/16)*H_+h0+tid%16]=__float2bfloat16_rn(transpose[tid%16][tid/16]);
+    dWs[(size_t)(d0+tid/16)*H_+h0+tid%16]=dw_value<T>(transpose[tid%16][tid/16]);
     return;
   }
   const int which = idx / (8 * HS * D_), rem = idx % (8 * HS * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
   float v = 0.f;
   for (int r = 0; r < DW_REPL; ++r) v += ws[((size_t)(r * 8 + slice) * 3 + which) * HS * D_ + hs * D_ + d];
-  const __nv_bfloat16 o = __float2bfloat16_rn(v);
+  const T o = dw_value<T>(v);
   if (which == 0) dWa[(slice * HS + hs) * D_ + d] = o;
   else if (which == 1) dWb[(slice * HS + hs) * D_ + d] = o;
   else dWs[(size_t)d * H_ + slice * HS + hs] = o;
@@ -459,8 +461,11 @@ void transition_fused_bwd_launch(
 }
 
 void transition_fused_reduce_launch(
-    const float* partw, __nv_bfloat16* dWa, __nv_bfloat16* dWb, __nv_bfloat16* dWs,
-    const float* dgbw, float* dgam, float* dbeta, cudaStream_t stream) {
+    const float* partw, void* dWa, void* dWb, void* dWs,
+    const float* dgbw, float* dgam, float* dbeta, bool fp32_dw, cudaStream_t stream) {
   const int work = 3 * 8 * HS * D_ + 4 * 256;
-  reduce_partials<<<(work + 255) / 256, 256, 0, stream>>>(partw, dWa, dWb, dWs, dgbw, dgam, dbeta);
+  if (fp32_dw)
+    reduce_partials<float><<<(work + 255) / 256, 256, 0, stream>>>(partw, (float*)dWa, (float*)dWb, (float*)dWs, dgbw, dgam, dbeta);
+  else
+    reduce_partials<__nv_bfloat16><<<(work + 255) / 256, 256, 0, stream>>>(partw, (__nv_bfloat16*)dWa, (__nv_bfloat16*)dWb, (__nv_bfloat16*)dWs, dgbw, dgam, dbeta);
 }

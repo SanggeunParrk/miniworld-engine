@@ -7,7 +7,14 @@
 #include <cooperative_groups.h>
 using namespace tmn;using namespace tmn::sm90;using bf=__nv_bfloat16;
 constexpr int D=WIDTH,NT=INPUT_THREADS,ROWS=INPUT_ROWS,SB=ROWS*D*2;
-struct Params {CUtensorMap x,dn,res,dx;const float* gamma;float *dg,*db;const float* part;bf* dw[4];int M;};
+#if MASTER_FP32
+using MasterDW=float;
+TMN_DEVI float master_value(float v){return v;}
+#else
+using MasterDW=bf;
+TMN_DEVI bf master_value(float v){return __float2bfloat16_rn(v);}
+#endif
+struct Params {CUtensorMap x,dn,res,dx;const float* gamma;float *dg,*db;const float* part;MasterDW* dw[4];int M;};
 // SPDX-License-Identifier: Apache-2.0
 template<int C,int NT> TMN_DEVI void aggregate_ln(float (&gg)[C/32],float (&bb)[C/32],float* sm,float* dg,float* db){
  int tid=threadIdx.x,lane=tid%32,warp=tid/32;
@@ -72,6 +79,10 @@ void mw_independent_input_ln(__grid_constant__ const Params p){
   int which=i/(D*D),j=(i%(D*D))*2;float a=0,b=0;
   #pragma unroll
   for(int s=0;s<4;++s){float2 v=*reinterpret_cast<const float2*>(p.part+size_t(s)*11*D*D+(3+2*which)*D*D+j);a+=v.x;b+=v.y;}
+  #if MASTER_FP32
+  p.dw[which][j]=a;p.dw[which][j+1]=b;
+#else
   *reinterpret_cast<uint32_t*>(p.dw[which]+j)=pack_bf16(a,b);
+#endif
  }
 }

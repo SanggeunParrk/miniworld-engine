@@ -4,6 +4,7 @@ import torch.nn as nn
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.kernels import adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -72,14 +73,15 @@ class AdaptiveLayerNorm(nn.Module):
             device_type = x.device.type
             compute_dtype = (torch.get_autocast_dtype(device_type)
                              if torch.is_autocast_enabled(device_type) else x.dtype)
+            master = fn is adaln_train and compute_dtype == torch.bfloat16 and is_h100(x.device)
             with torch.autocast(device_type=device_type, enabled=False):
                 return fn(
                     x.to(compute_dtype),
                     cond.to(compute_dtype),
                     self.ln_cond.weight,
-                    self.to_scale.weight.to(compute_dtype),
-                    self.to_scale.bias.to(compute_dtype),
-                    self.to_bias.weight.to(compute_dtype),
+                    self.to_scale.weight if master else self.to_scale.weight.to(compute_dtype),
+                    self.to_scale.bias if master else self.to_scale.bias.to(compute_dtype),
+                    self.to_bias.weight if master else self.to_bias.weight.to(compute_dtype),
                     self.ln_in.eps,
                     self.ln_cond.eps,
                 )

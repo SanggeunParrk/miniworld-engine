@@ -19,6 +19,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from miniworld_engine.integrations import h100_master as _master
 from miniworld_engine.integrations import local_dit as _local
 from miniworld_engine.modules.adaptive_layernorm import AdaptiveLayerNorm
 from miniworld_engine.modules.dit import DiTBlock
@@ -72,30 +73,44 @@ class LocalDiTBlock(DiTBlock):
         """The attention's update (no residual), PyTorch: AdaLN, q / k / v / gate, softmax over each 32 x 128 window, gates."""
         att = self.attention
         x = att.ada_ln_in(single, cond)
+        master = (att.implementation != ImplementationType.PYTORCH and x.dtype == torch.bfloat16
+                  and att.to_query.weight.dtype == torch.float32 and _master.is_h100(x.device))
+        if master:
+            wq, wk, wv, wg, wo, ws, wb, bq, bs = _master.pack([
+                att.to_query.weight, att.to_key.weight, att.to_value.weight,
+                att.to_gate.weight, att.to_out.weight, att.to_scale.weight,
+                att.to_bias.weight, att.to_query.bias, att.to_scale.bias,
+            ])
         a, b, n, _ = x.shape
         h, d = att.n_head, x.shape[-1] // att.n_head
         nwin = windows(n)
         if tuple(pair.shape[:4]) != (b, nwin, QUERIES, KEYS):
             raise ValueError(f"pair must be the trunked atom pair [B, {nwin}, {QUERIES}, {KEYS}, d_pair], got {tuple(pair.shape)}")
-        z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
-        bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(0, 4, 1, 2, 3)           # [B, H, nwin, 32, 128]
-        q = att.to_query(x)
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
+        bias = (_master.linear(z, att.to_bias, wb) if master else F.linear(z, att.to_bias.weight.to(z.dtype))).permute(0, 4, 1, 2, 3)
+        q = _master.linear(x, att.to_query, wq, bq) if master else att.to_query(x)
         xkv = att.ada_ln_kv(x, cond) if self.cross_attention else x          # AF3 cross-attention mode: a second AdaLN for K / V
-        k, v = att.to_key(xkv), att.to_value(xkv)
-        gate = att.to_gate(x)
+        k = _master.linear(xkv, att.to_key, wk) if master else att.to_key(xkv)
+        v = _master.linear(xkv, att.to_value, wv) if master else att.to_value(xkv)
+        gate = _master.linear(x, att.to_gate, wg) if master else att.to_gate(x)
         qw = F.pad(q, (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
         kw = _key_windows(k, n).reshape(a, b, nwin, KEYS, h, d)
         vw = _key_windows(v, n).reshape(a, b, nwin, KEYS, h, d)
         wide = torch.float64 if x.dtype == torch.float64 else torch.float32
-        scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw.to(wide), kw.to(wide)) * d**-0.5 + bias.to(wide)[None]
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw.to(wide), kw.to(wide)) * d**-0.5 + bias.to(wide)[None]
         keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
         valid = _key_windows(keep[..., None], n)[..., 0] > 0                    # [B, nwin, 128]
         scores = scores.masked_fill(~valid[None, :, None, :, None, :], float("-inf"))
         probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
-        out = torch.einsum("abhwqk,abwkhd->abwqhd", probs, vw.to(wide)).to(x.dtype)
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            out = torch.einsum("abhwqk,abwkhd->abwqhd", probs, vw.to(wide)).to(x.dtype)
         out = out.reshape(a, b, nwin * QUERIES, h * d)[:, :, :n]
-        out = att.to_out(torch.sigmoid(gate) * out)
-        return torch.sigmoid(att.to_scale(cond)) * out
+        out = (_master.linear(torch.sigmoid(gate) * out, att.to_out, wo) if master
+               else att.to_out(torch.sigmoid(gate) * out))
+        scale = _master.linear(cond, att.to_scale, ws, bs) if master else att.to_scale(cond)
+        return torch.sigmoid(scale) * out
 
     def forward(self, single, cond, pair, mask=None):
         """``single`` [A, B, N, d_single], ``cond`` [A, B, N, d_cond], trunked ``pair`` [B, nwin, 32, 128, d_pair], key ``mask`` [B, N]

@@ -31,6 +31,7 @@ from miniworld_engine.autotune.configs import configs_for
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
 import triton
 import triton.language as tl
 
@@ -537,6 +538,10 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None):
+        raw_weights = (wa, wb, ws, wsc, bsc)
+        ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
+        if ctx.master:
+            wa, wb, ws, wsc, bsc = pack_master(raw_weights)
         # FORWARD backend (see _FWD_MODE): cuBLAS GEMMs + fused-triton elementwise (default,
         # measured-best e2e under CUDA graph) OR the fused-triton b2b/composed forward.
         # Both emit the SAME saved tensors (ab=[a|b], h, out, scale) + wcat for the backward.
@@ -608,13 +613,13 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             # registry.csv, so it keys on the ROW count while the atom-level kernels above key
             # on L. `out` is the flattened (M, D) matrix, and M is what a both-level bucket is.
             y = _gate(out, scale, shape_key=both_key(out.shape[0]))
-        ctx.save_for_backward(x, cond, ab, h, out, scale, wcat, ws, wsc)
+        ctx.save_for_backward(x, cond, ab, h, out, scale, wcat, ws, wsc, *raw_weights)
         ctx.ND = ND
         return y
 
     @staticmethod
     def backward(ctx, dy):
-        x, cond, ab, h, out, scale, wcat, ws, wsc = ctx.saved_tensors
+        x, cond, ab, h, out, scale, wcat, ws, wsc, _wa, _wb, _ws, _wsc, _bsc = ctx.saved_tensors
         ND = ctx.ND
         a, b = ab[:, :ND], ab[:, ND:]
         dy = dy.contiguous()
@@ -631,11 +636,11 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         dout, dscale = _gate_bwd(out, scale, dy, shape_key=both_key(out.shape[0]))
         # conditioning grads
         dcond = dscale @ wsc                            # (M, DC)
-        dWsc = dscale.t() @ cond                        # (D, DC)
-        db_sc = dscale.sum(0)                           # (D,) — cheap cuBLAS-adjacent reduction
+        dWsc = torch.mm(dscale.t(), cond, out_dtype=torch.float32) if ctx.master else dscale.t() @ cond
+        db_sc = dscale.sum(0, dtype=torch.float32 if ctx.master else dscale.dtype)
         del dscale                                      # last use; see the `del` note below
         # squeeze bwd
-        dWs = dout.t() @ h                              # (D, ND)
+        dWs = torch.mm(dout.t(), h, out_dtype=torch.float32) if ctx.master else dout.t() @ h
         # dh = dout @ ws, then the SwiGLU backward off it -- in ONE kernel, so dh never reaches
         # HBM. Measured on an A5000, bf16, M=36864, against cuBLAS dh + the shipped flat pass:
         #
@@ -694,11 +699,11 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # The two forms are not bitwise equal (different cuBLAS kernels accumulate in a different
         # order), which is a reduction-order difference and not a correctness one.
         if x.shape[1] <= _ATOM_D_MAX:
-            dWcat = dab.t() @ x                         # (2*ND, K)
+            dWcat = torch.mm(dab.t(), x, out_dtype=torch.float32) if ctx.master else dab.t() @ x
             dWa, dWb = dWcat[:ND], dWcat[ND:]
         else:
-            dWa = dab[:, :ND].t() @ x                   # (ND, K) each, straight from the views
-            dWb = dab[:, ND:].t() @ x
+            dWa = torch.mm(dab[:, :ND].t(), x, out_dtype=torch.float32) if ctx.master else dab[:, :ND].t() @ x
+            dWb = torch.mm(dab[:, ND:].t(), x, out_dtype=torch.float32) if ctx.master else dab[:, ND:].t() @ x
         del dab                                         # (M, 2*ND) -- the largest block here
         # 8 returns for 8 forward inputs: the trailing None is `length` (an int shape key, not a
         # differentiable tensor). A missing one is an arity error, which is the point.

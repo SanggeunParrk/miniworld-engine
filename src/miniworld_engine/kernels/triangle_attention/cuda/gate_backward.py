@@ -20,8 +20,8 @@ def _artifact_ready():
 @device_constant
 def _available(device):return _artifact_ready() and bias_backward._artifact_ready() and dq_backward.available()
 
-def can_use(q,w):
-    return (q.dtype==torch.bfloat16 and w.dtype==q.dtype and w.device==q.device
+def can_use(q,w,allow_master=False):
+    return (q.dtype==torch.bfloat16 and (w.dtype==q.dtype or allow_master and w.dtype==torch.float32) and w.device==q.device
             and w.is_contiguous() and w.shape==(128,128) and _available(q.device))
 
 def extension():

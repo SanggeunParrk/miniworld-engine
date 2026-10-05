@@ -22,6 +22,7 @@ mirror of the forward's single fused GEMM.
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
@@ -655,6 +656,13 @@ class AdaLNTrainFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                 eps_x, eps_cond):
+        raw_weights = (scale_weight, scale_bias, bias_weight)
+        ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
+                      scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)
+        ctx.master = x.dtype == torch.bfloat16 and scale_weight.dtype == torch.float32 and is_h100(x.device)
+        if ctx.master:
+            scale_weight, scale_bias, bias_weight = pack_master(raw_weights)
+        saved_wcat = None
         orig_x_shape = x.shape
         orig_cond_shape = cond.shape
         nx = orig_x_shape[-1]
@@ -689,22 +697,22 @@ class AdaLNTrainFn(torch.autograd.Function):
             mean_x = c1 / rstd_x   # for the backward; c1 = mean*rstd. (M,) elementwise.
         else:
             w_cat = torch.cat([scale_weight, bias_weight], dim=0)     # (2NX, NC)
+            if ctx.master:
+                saved_wcat = w_cat
             sb = _mm(cond_aff, w_cat.t())                            # (M, 2NX) raw [scale|bias]
             y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias, shape_key=ak)
 
         ctx.save_for_backward(x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
-                              cond_ln_weight, scale_weight, bias_weight)
+                              cond_ln_weight, scale_weight, bias_weight, *raw_weights, saved_wcat)
         ctx.orig_x_shape = orig_x_shape
         ctx.orig_cond_shape = orig_cond_shape
         ctx.nx = nx
-        ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
-                      scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)
         return y.reshape(orig_x_shape)
 
     @staticmethod
     def backward(ctx, dy):
         (x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
-         lnw, scale_weight, bias_weight) = ctx.saved_tensors
+         lnw, scale_weight, bias_weight, _raw_sw, _raw_sb, _raw_bw, saved_wcat) = ctx.saved_tensors
         nx = ctx.nx
         dy2d = dy.reshape(-1, dy.shape[-1])
         if dy2d.stride(-1) != 1:
@@ -715,10 +723,10 @@ class AdaLNTrainFn(torch.autograd.Function):
         shape_key = atom_key(length_of(ctx.orig_x_shape))
         D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate,
                        shape_key=shape_key)                          # D=(2NX,M), dx=(M,NX)
-        w_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
+        w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)
 
-        dW_cat = _mm(D, cond_aff)                                     # (2NX,NC) = [dWs;dWb]  (cuBLAS wgrad — ONLY cuBLAS matmul)
-        dsb = D[:nx].sum(dim=1)                                       # Σ_m dscale → (NX,)
+        dW_cat = torch.mm(D, cond_aff, out_dtype=torch.float32) if ctx.master else _mm(D, cond_aff)
+        dsb = D[:nx].sum(dim=1, dtype=torch.float32 if ctx.master else D.dtype)
 
         use_triton = (cond2d.shape[1] <= _DGRAD_TRITON_NC_MAX) if _DGRAD_TRITON is None else _DGRAD_TRITON
         if use_triton:

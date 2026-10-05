@@ -161,7 +161,7 @@ __device__ __forceinline__ float2 unpack2(const __nv_bfloat16* p) { return __bfl
 constexpr int FRED = 0, FSTAT = FRED + 2 * 64 * 2, FEND = FSTAT + 64 * 2;          // floats after SEND
 template <int NST> struct SMX {
   static constexpr int SDG = 0, SW = SDG + NST * TILE, SY = SW + KB * TILE, SX = SY + 2 * TILE, SDO = SX + 2 * TILE, SDM = SDO + 2 * TILE, SEND = SDM + TILE;
-  static constexpr int NBAR = 2 * NST + 4;
+  static constexpr int NBAR = 2 * NST + 5;
   static constexpr int BYTES = SEND * 2 + FEND * 4 + NBAR * 8 + 1024;
 };
 
@@ -186,8 +186,8 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + L::SEND * 2 + FEND * 4);
   uint64_t* empty = full + NST;
   uint64_t* fullT = empty + NST;                                      // [2]
-  uint64_t* doneT = fullT + 2;                                        // consumers finished a tile's epilogue (its y/x/dout buffer is free)
-  uint64_t* wbar = doneT + 1;
+  uint64_t* doneT = fullT + 2;                                        // [2] y/x/dout parity buffers, one completion phase each
+  uint64_t* wbar = doneT + 2;
   const int tid = threadIdx.x, wgi = tid >> 7, lane = tid & 31, warp = tid >> 5;
   auto csync = [&]() { asm volatile("bar.sync 1, 256;\n" ::: "memory"); };   // the two consumer warpgroups only
 
@@ -205,7 +205,7 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
     const int t = tile_of(T);
     if (t >= ntile) return;
     const int b = T & 1;
-    if (T >= 2) tma::wait(doneT, T & 1);           // buffer b was used by tile T-2: wait for that epilogue (phase T-2 -> parity (T-2)&1 = T&1)
+    if (T >= 2) tma::wait(doneT + b, ((T >> 1) - 1) & 1); // retire this parity buffer before refilling it
     tma::expect_tx(fullT + b, 3 * TILE * 2);
     tma::load_2d(&ymap, tma::sa(sY + b * TILE), fullT + b, 0, t * BM);
     tma::load_2d(&xmap, tma::sa(sX + b * TILE), fullT + b, 0, t * BM);
@@ -213,7 +213,7 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
   };
   if (tid == 0) {
     for (int i = 0; i < NST; ++i) { tma::bar_init(full + i, 1); tma::bar_init(empty + i, 8); }
-    tma::bar_init(fullT, 1); tma::bar_init(fullT + 1, 1); tma::bar_init(doneT, 1); tma::bar_init(wbar, 1);
+    tma::bar_init(fullT, 1); tma::bar_init(fullT + 1, 1); tma::bar_init(doneT, 1); tma::bar_init(doneT + 1, 1); tma::bar_init(wbar, 1);
     tma::bar_init_fence();
     wg::proxy_fence();
   }
@@ -230,6 +230,10 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
         for (int kb = 0; kb < KB; ++kb) issueK(T * KB + kb + LA);
         issueT(T + 2);
       }
+      // Drain the last completion of each independently prefetched buffer.
+      const int tiles = (ntile - 1 - (int)blockIdx.x) / (int)gridDim.x + 1;
+      for (int b = 0; b < 2 && b < tiles; ++b)
+        tma::wait(doneT + b, ((tiles - 1 - b) / 2) & 1);
     }
     return;
   }
@@ -347,7 +351,7 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
     }
     wg::proxy_fence();
     csync();
-    if (tid == 0) { tma::store_2d(&dmmap, tma::sa(sDM), 0, t * BM); tma::commit(); tma::arrive(doneT); }
+    if (tid == 0) { tma::store_2d(&dmmap, tma::sa(sDM), 0, t * BM); tma::commit(); tma::arrive(doneT + b); }
   }
   if (tid == 0) tma::wait_all();
   // ---- block reductions out: dWgv m-tiles (rows mt*64.., cols i*8 + cq + j) and the LayerNorm parameter gradients ----

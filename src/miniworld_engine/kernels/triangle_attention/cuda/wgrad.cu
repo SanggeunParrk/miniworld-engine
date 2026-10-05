@@ -87,7 +87,7 @@ __global__ __launch_bounds__(640,1) void grouped_wgrad(CUTE_GRID_CONSTANT Config
   }
 }
 
-__global__ void reduce_wgrad(float const* partial,Element* out,int splits) {
+template<class Out> __global__ void reduce_wgrad(float const* partial,Out* out,int splits) {
   int proj=blockIdx.y,idx=blockIdx.x*128+threadIdx.x;
   float4 sum=make_float4(0,0,0,0);
   for(int s=0;s<splits;++s) {
@@ -95,13 +95,17 @@ __global__ void reduce_wgrad(float const* partial,Element* out,int splits) {
     sum.x+=v.x;sum.y+=v.y;sum.z+=v.z;sum.w+=v.w;
   }
   int off=proj*16384+idx*4;
-  uint32_t lo,hi;
-  asm("cvt.rn.bf16x2.f32 %0,%1,%2;":"=r"(lo):"f"(sum.y),"f"(sum.x));
-  asm("cvt.rn.bf16x2.f32 %0,%1,%2;":"=r"(hi):"f"(sum.w),"f"(sum.z));
-  reinterpret_cast<uint2*>(out+off)[0]=make_uint2(lo,hi);
+  if constexpr (std::is_same_v<Out,float>) {
+    reinterpret_cast<float4*>(out+off)[0]=sum;
+  } else {
+    uint32_t lo,hi;
+    asm("cvt.rn.bf16x2.f32 %0,%1,%2;":"=r"(lo):"f"(sum.y),"f"(sum.x));
+    asm("cvt.rn.bf16x2.f32 %0,%1,%2;":"=r"(hi):"f"(sum.w),"f"(sum.z));
+    reinterpret_cast<uint2*>(out+off)[0]=make_uint2(lo,hi);
+  }
 }
 
-torch::Tensor backward(std::vector<torch::Tensor> dy,torch::Tensor z,int split) {
+torch::Tensor backward_typed(std::vector<torch::Tensor> dy,torch::Tensor z,int split,bool master) {
   TORCH_CHECK(dy.size()==4,"four wide projection gradients required");
   TORCH_CHECK(z.is_cuda() && z.scalar_type()==torch::kBFloat16 && z.is_contiguous() && z.dim()==2 && z.size(1)==128,"contiguous CUDA BF16 [tokens,128] Z required");
   int rows=z.size(0);TORCH_CHECK(rows>0 && rows%64==0 && split>=64 && split%64==0,"token/split multiples of64 required");
@@ -109,7 +113,7 @@ torch::Tensor backward(std::vector<torch::Tensor> dy,torch::Tensor z,int split) 
   for(auto const& d:dy)TORCH_CHECK(d.device()==z.device() && d.scalar_type()==z.scalar_type() && d.sizes()==z.sizes() && d.is_contiguous(),"gradient metadata mismatch");
   int splits=(rows+split-1)/split;
   auto partial=torch::empty({4,splits,128,128},z.options().dtype(torch::kFloat32));
-  auto out=torch::empty({4,128,128},z.options());
+  auto out=torch::empty({4,128,128},z.options().dtype(master?torch::kFloat32:torch::kBFloat16));
   Config::Params p;p.rows=rows;p.split=split;p.nsplit=splits;p.partial=partial.data_ptr<float>();
   for(int i=0;i<4;++i) {
     auto ag=make_tensor(make_gmem_ptr((Element const*)dy[i].data_ptr()),make_shape(_128{},rows),Config::ST{});
@@ -120,7 +124,13 @@ torch::Tensor backward(std::vector<torch::Tensor> dy,torch::Tensor z,int split) 
   C10_CUDA_CHECK(cudaFuncSetAttribute(grouped_wgrad,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Config::Shared)));
   auto stream=at::cuda::getCurrentCUDAStream();
   grouped_wgrad<<<dim3(2,splits),640,sizeof(Config::Shared),stream>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
-  reduce_wgrad<<<dim3(32,4),128,0,stream>>>(partial.data_ptr<float>(),(Element*)out.data_ptr(),splits);C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if(master) reduce_wgrad<float><<<dim3(32,4),128,0,stream>>>(partial.data_ptr<float>(),out.data_ptr<float>(),splits);
+  else reduce_wgrad<Element><<<dim3(32,4),128,0,stream>>>(partial.data_ptr<float>(),(Element*)out.data_ptr(),splits);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("backward",&backward);m.def("smem",[](){return sizeof(Config::Shared);});}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
+  m.def("backward",[](std::vector<torch::Tensor> dy,torch::Tensor z,int split){return backward_typed(dy,z,split,false);});
+  m.def("backward_master",[](std::vector<torch::Tensor> dy,torch::Tensor z,int split){return backward_typed(dy,z,split,true);});
+  m.def("smem",[](){return sizeof(Config::Shared);});
+}

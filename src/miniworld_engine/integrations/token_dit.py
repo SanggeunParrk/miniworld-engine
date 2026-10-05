@@ -3,13 +3,12 @@
 On B200 (sm_100) the step runs the sm_100a gated attention core (``kernels/augmented_attention/cuda/sm100``: bf16, or
 TF32 tensor cores for fp32) and the CUDA row kernels; the GEMMs are cuBLAS as on H100.
 
-Inference only: the weights are packed once and the pack reused while every weight's (pointer, version) is unchanged,
-and the pair bias likewise per pair tensor, CUDA-graph replays included (a replay reads the pack and pair bias it was
-captured with; single and cond stay live). The conditioning may be shared by the samples or per sample. QK-norm runs on
-B200 (one in-place CUDA row pass after the projection; the logit scale folds into the q norm's weight). Calls with
-autograd, different model dimensions, or QK-norm off B200 keep the general module path.
+Inference only: weight packs and pair bias are cached by tensor pointer / version within the current capture scope.
+A capture records their construction once, so each replay recomputes them from the current weights and pair.
+The conditioning may be shared by the samples or per sample. QK-norm runs on H100 and B200 with the CUDA row kernels
+(one in-place pass after the projection; the logit scale folds into the q norm's weight). Unsupported calls keep the module path.
 
-Lengths: on H100 L must be a multiple of 128 (the Triton gated core's tiles). On B200 any L >= 8: the sm_100a core takes a
+Lengths: on H100 L must be a multiple of 128 (the sm_90a core's tiles). On B200 any L >= 8: the sm_100a core takes a
 multiple of 8 (its TMA maps are 3-D per sample, so tile tails load as zeros and stores clip), and ``update`` pads the other
 lengths to the next multiple of 8 -- single / cond with zero rows, the pair with zero rows and columns, the key mask with
 False -- and returns the first L rows.
@@ -23,7 +22,7 @@ import torch
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._compile import device_constant, opaque
 
 WEIGHTS = (
     "attention.to_query.weight",
@@ -91,8 +90,8 @@ def serves(module, single, cond, pair, compute_dtype=None):
     if any(norm.eps != 1e-5 for norm in norms):
         return False
     cap = torch.cuda.get_device_capability(single.device)
-    if a.use_qk_norm and not (cap == (10, 0) and _cuda_rows()):
-        return False                         # the QK-norm pass is a CUDA row kernel (B200)
+    if a.use_qk_norm and not (cap in ((9, 0), (10, 0)) and _cuda_rows()):
+        return False                         # QK-norm needs the CUDA rows on either architecture
     if (a.n_head, d) != (16, 768) and not (cap == (10, 0) and _cuda_rows()):
         return False                         # the other head layouts: B200's CUDA rows and sm_100a core only
     if cap == (10, 0):
@@ -110,11 +109,17 @@ def _pad8(L: int) -> int:
 
 
 def _cuda_rows() -> bool:
-    """The fused step's CUDA row kernels are on (and build): the runner takes them on B200."""
+    """The fused step's CUDA row kernels are on (and build): the runner takes them on H100 and B200."""
     import os
 
     if os.environ.get("MINIWORLD_TOKEN_DIT_ROWS_CUDA", "1") == "0":
         return False
+    return _cuda_rows_available()
+
+
+@device_constant
+def _cuda_rows_available() -> bool:
+    """Resolve the CUDA extension once while tracing; compiler/file probes are not graph operations."""
     try:
         from miniworld_engine.kernels.conditioned_transition import cuda as cuda_rows
         return cuda_rows.available()
@@ -138,6 +143,7 @@ def _infer(
     ek: float,
     heads: int,
 ) -> torch.Tensor:
+    """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise)."""
     from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
         FusedTokenDiT,
     )

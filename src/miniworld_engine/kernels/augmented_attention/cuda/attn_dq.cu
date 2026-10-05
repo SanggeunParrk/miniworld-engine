@@ -179,6 +179,8 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
 #pragma unroll
     for (int ks = 0; ks < DH / 16; ++ks)
       dep ^= qr[ks][0] ^ qr[ks][1] ^ qr[ks][2] ^ qr[ks][3] ^ dor[ks][0] ^ dor[ks][1] ^ dor[ks][2] ^ dor[ks][3];
+    fence_proxy_async();                                            // the parked q / dO read generically: order before release
+    __syncwarp();
     if ((tid & 31) == 0) {
       if (FCLS == 1) mbar_arrive_dep(qdone, zero_dep(dep));
       else for (int r = 0; r < FCLS; ++r) mbar_arrive_remote(reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(qdone) + zero_dep(dep)), r);
@@ -243,6 +245,8 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
     } else {
       acc[0] += __int_as_float(*reinterpret_cast<const int*>(sm + sn * ST_BYTES + (tid & 31) * 4));
     }
+    fence_proxy_async();                                          // generic (ldmatrix) reads of this TMA stage before its release
+    __syncwarp();
     if ((tid & 31) == 0 && n + STAGES < nblocks) {
       if (FCLS == 1) mbar_arrive(&empty[sn]);
       else for (int r = 0; r < FCLS; ++r) mbar_arrive_remote(&empty[sn], r);

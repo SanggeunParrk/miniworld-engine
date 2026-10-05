@@ -111,7 +111,7 @@ __device__ __forceinline__ float head_sum(float v, float* part) {
 template <typename AT>
 __global__ void __launch_bounds__(NT) qknorm_k(const AT* __restrict__ QKVG, const float* __restrict__ WQ,
     const float* __restrict__ WK, AT* __restrict__ QN, AT* __restrict__ KN, AT* __restrict__ VC, float* __restrict__ RQK,
-    int M, float eq, float ek, int qk) {
+    int M, float eq, float ek, int qk, float qs) {
   __shared__ float part[NT];
   const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   const float4 wq = qk ? V4<float>::load(WQ + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
@@ -128,7 +128,7 @@ __global__ void __launch_bounds__(NT) qknorm_k(const AT* __restrict__ QKVG, cons
       k = mul4(make_float4(k.x * rk, k.y * rk, k.z * rk, k.w * rk), wk);
       if (threadIdx.x % HT == 0) { RQK[r * 2 * NHH + h] = rq; RQK[r * 2 * NHH + NHH + h] = rk; }
     }
-    V4<AT>::store(QN + r * D + col, q);
+    V4<AT>::store(QN + r * D + col, make_float4(q.x * qs, q.y * qs, q.z * qs, q.w * qs));   // qs: the core's q scale (sm_90)
     V4<AT>::store(KN + r * D + col, k);
     V4<AT>::store(VC + r * D + col, V4<AT>::load(row + 2 * D + col));
   }
@@ -270,21 +270,26 @@ __global__ void __launch_bounds__(NT) res_adaln_b_bwd_k(const OT* __restrict__ D
 }
 
 // og = sigmoid(g) o: dO = dog s (bf16, the core's input), D = rowsum_head(dO o) (the core backward's prep), dg = dog o s (1 - s)
-template <typename AT>
-__global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, const float* __restrict__ O, const AT* __restrict__ QKVG,
+// GATED (the H100 cores): O is og = sigmoid(g) o itself (the attention forward wrote it, no O kept) and of the operand type OT:
+// dO o = dog og, do o s (1 - s) = dog og (1 - s).
+template <typename AT, typename OT, bool GATED>
+__global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, const OT* __restrict__ O, const AT* __restrict__ QKVG,
     AT* __restrict__ DOB, float* __restrict__ DD, AT* __restrict__ DQKVG, int M, int L) {
   __shared__ float part[NT];
   const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   for (int i = 0; i < RPB; ++i) {
     const long r = (long)blockIdx.x * RPB + i;
     if (r >= M) break;
-    const float4 dog = V4<AT>::load(DOG + r * D + col), o = V4<float>::load(O + r * D + col);
+    const float4 dog = V4<AT>::load(DOG + r * D + col), o = V4<OT>::load(O + r * D + col);
     const float4 s = sig4(V4<AT>::load(QKVG + r * 4 * D + 3 * D + col));
     const float4 d_o = mul4(dog, s);
     V4<AT>::store(DOB + r * D + col, d_o);
-    const float dsum = head_sum(sum4(mul4(d_o, o)), part);
+    const float dsum = head_sum(sum4(mul4(GATED ? dog : d_o, o)), part);
     if (threadIdx.x % HT == 0) DD[((r / L) * NHH + h) * L + r % L] = dsum;
-    V4<AT>::store(DQKVG + r * 4 * D + 3 * D + col, dsig4(mul4(dog, o), s));
+    const float4 dg = GATED ? make_float4(dog.x * o.x * (1.f - s.x), dog.y * o.y * (1.f - s.y), dog.z * o.z * (1.f - s.z),
+                                          dog.w * o.w * (1.f - s.w))
+                            : dsig4(mul4(dog, o), s);
+    V4<AT>::store(DQKVG + r * 4 * D + 3 * D + col, dg);
   }
 }
 
@@ -452,14 +457,14 @@ void adaln_a(at::Tensor x, at::Tensor G, at::Tensor bs, at::Tensor xa, at::Tenso
 }
 
 void qknorm(at::Tensor qkvg, at::Tensor wq, at::Tensor wk, at::Tensor qn, at::Tensor kn, at::Tensor vc, at::Tensor rqk,
-            double eq, double ek, bool qk) {
+            double eq, double ek, bool qk, double qs) {
   const int64_t M = qkvg.size(0);
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.size(1) == 4 * D, "qknorm: qkvg [M, 3072]");
   actc(qn, qkvg, "qn"); actc(kn, qkvg, "kn"); actc(vc, qkvg, "vc");
   const at::cuda::CUDAGuard g(qkvg.device());
   TDT_DISPATCH(qkvg.scalar_type(), AT, [&] {
     qknorm_k<AT><<<blocks(M), NT, 0, S()>>>(CP<AT>(qkvg), CP<float>(wq), CP<float>(wk), P<AT>(qn), P<AT>(kn), P<AT>(vc), P<float>(rqk),
-                                            (int)M, (float)eq, (float)ek, qk ? 1 : 0);
+                                            (int)M, (float)eq, (float)ek, qk ? 1 : 0, (float)qs);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -550,13 +555,20 @@ void res_adaln_b_bwd(at::Tensor dout, at::Tensor dxt, at::Tensor x1, at::Tensor 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void gate_o_bwd(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, at::Tensor dd, at::Tensor dqkvg, int64_t L) {
+// gated: o is og (operand dtype, the H100 cores), else the core's O (fp32)
+void gate_o_bwd(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, at::Tensor dd, at::Tensor dqkvg, int64_t L, bool gated) {
   const int64_t M = o.size(0);
   actc(qkvg, dog, "qkvg"); actc(dob, dog, "dob"); actc(dqkvg, dog, "dqkvg");
   const at::cuda::CUDAGuard g(o.device());
   TDT_DISPATCH(dog.scalar_type(), AT, [&] {
-    gate_o_bwd_k<AT><<<blocks(M), NT, 0, S()>>>(CP<AT>(dog), CP<float>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd), P<AT>(dqkvg), (int)M,
-                                                (int)L);
+    if (gated) {
+      actc(o, dog, "og");
+      gate_o_bwd_k<AT, AT, true><<<blocks(M), NT, 0, S()>>>(CP<AT>(dog), CP<AT>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd), P<AT>(dqkvg),
+                                                            (int)M, (int)L);
+    } else {
+      gate_o_bwd_k<AT, float, false><<<blocks(M), NT, 0, S()>>>(CP<AT>(dog), CP<float>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd),
+                                                                P<AT>(dqkvg), (int)M, (int)L);
+    }
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -620,9 +632,35 @@ void pair_ln_bwd(at::Tensor dxh, at::Tensor z, at::Tensor pst, at::Tensor dz) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// dst [N, M] = src [M, N]^T (either operand dtype): 32 x 32 tiles through shared memory, both sides coalesced. The fp32 block's
+// TF32 attention core takes q, k, dO (backward) and v (forward) with the tokens contiguous.
+template <typename T>
+__global__ void __launch_bounds__(256) transpose_k(const T* __restrict__ S_, T* __restrict__ Dst, long M, long N) {
+  __shared__ T tile[32][33];
+  const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
+  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) tile[ty + i][tx] = S_[(r0 + ty + i) * N + c0 + tx];
+  __syncthreads();
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) Dst[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i];
+}
+
+void transpose(at::Tensor src, at::Tensor dst) {
+  const int64_t M = src.size(0), N = src.size(1);
+  TORCH_CHECK(src.is_contiguous() && dst.is_contiguous() && dst.size(0) == N && dst.size(1) == M && M % 32 == 0 && N % 32 == 0
+              && src.scalar_type() == dst.scalar_type(), "transpose: contiguous [M, N] -> [N, M], multiples of 32");
+  const at::cuda::CUDAGuard g(src.device());
+  TDT_DISPATCH(src.scalar_type(), T, [&] {
+    transpose_k<T><<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, S()>>>(CP<T>(src), P<T>(dst), M, N);
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("transpose", &transpose);
   m.def("cond_prep", &cond_prep);
   m.def("adaln_a", &adaln_a);
   m.def("qknorm", &qknorm);

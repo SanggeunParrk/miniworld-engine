@@ -7,7 +7,7 @@ SMEM = 181248
 
 
 @T.device_cache
-def build(debug=False):
+def build(debug=False, master=False):
     flags = [
         "-std=c++17",
         "-O3",
@@ -16,6 +16,7 @@ def build(debug=False):
         "-lineinfo",
         "-Xptxas=-v",
         "-DSINGLE_DEBUG=" + str(int(debug)),
+        "-DMASTER_FP32=" + str(int(master)),
         "-I" + str(T._upstream() / "csrc"),
         "-I" + str(T.SOURCES / "common"),
         "-I" + str(T.SOURCES / "b1"),
@@ -29,16 +30,16 @@ def build(debug=False):
 
 
 class Plan:
-    def __init__(self, x, xn, tri, wp, wg, gamma, beta, ds, dy, count=132, debug=False):
-        self.ks, self.path = build(debug)
+    def __init__(self, x, xn, tri, wp, wg, gamma, beta, ds, dy, count=132, debug=False, master=False):
+        self.ks, self.path = build(debug, master)
         self.count = count
         n = x.shape[1]
         m = n * n
         self.y = torch.empty_like(x)
         self.dg = x.new_empty((m, 128))
         self.dt = torch.empty_like(tri)
-        self.dwg = torch.empty_like(wg)
-        self.dwp = torch.empty_like(wp)
+        self.dwg = torch.empty_like(wg, dtype=torch.float32 if master else wg.dtype)
+        self.dwp = torch.empty_like(wp, dtype=torch.float32 if master else wp.dtype)
         self.dgamma = torch.empty_like(gamma)
         self.dbeta = torch.empty_like(beta)
         self.partial = torch.empty((count, 33024), device=x.device, dtype=torch.float32)

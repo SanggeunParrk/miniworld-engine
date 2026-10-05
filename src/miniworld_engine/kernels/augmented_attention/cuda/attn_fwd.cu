@@ -10,6 +10,11 @@
 //
 // Units: the caller hands q pre-multiplied by log2(e) / sqrt(48), and the bias is seeded times log2(e), so the score
 // accumulator holds log2-unit logits and every exponential is one ex2.
+//
+// The same kernel, GATED, is the fused token DiT's INFERENCE core (``attn_inf``): q | k | v | g are column views of the
+// q|k|v|g GEMM output [S L, 3072] (only the TMA descriptors differ), the bias is one block's slice of the hoisted
+// [nb H, L, L] bias (key mask folded in as -inf), and the epilogue writes sigmoid(g) o as bf16 over q -- no O, no LSE.
+// A CTA reads only its own q tile, and before its epilogue writes that tile.
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
@@ -51,6 +56,11 @@ TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }   
 TMN_DEVI uint64_t dmn(uint32_t base, int ks) { return smem_desc(base + ks * 2048, 16, 1024, 1); }   // MN-major, k-step = 16 rows
 TMN_DEVI uint32_t sw128(int row, int byte) { return row * 128 + ((((byte >> 4) ^ (row & 7))) << 4) + (byte & 15); }
 TMN_DEVI float ex2(float a) { float r; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(a)); return r; }
+TMN_DEVI float sigmoid_t(float a) {
+  float t; asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(0.5f * a));
+  return fmaf(0.5f, t, 0.5f);
+}
+TMN_DEVI float sigmoid_e(float a) { return 1.f / (1.f + __expf(-a)); }   // the training block's gate: as its backward recomputes it
 
 TMN_DEVI void mma_s_rs(float* d, const uint32_t (&a)[4], uint64_t b, int accumulate) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, %37, 0; wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, {%32,%33,%34,%35}, %36, p, 1, 1, 0; }"
@@ -91,17 +101,25 @@ constexpr int ST_BYTES = 2 * SKV + SB;
 constexpr int QSTAGE = 2 * SKV;                                     // q is parked in slot 0's bias area
 
 // grid: A * H * (L / QM) CTAs, the sample fastest so the A CTAs sharing a bias tile run together and read it from L2
-template <bool HASM>
+// MODE 0: O fp32 + LSE (the bf16 attention op). MODE 1 (inference): QKVG is the [A L, 3072] q|k|v|g buffer the maps view,
+// sigmoid(g) o goes over q, no O / LSE. MODE 2 (the token DiT training block): og = sigmoid(g) o into OG [A L, 768] bf16, g
+// read from QKVG, + LSE -- the block's backward needs no O (D = rowsum(dO O) = rowsum(d og * og)).
+template <bool HASM, int MODE>
 __global__ void __launch_bounds__(128 * NWG + 32, BLKSM)
 attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk,
                 const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mbias,
-                const float* __restrict__ KM, float* __restrict__ O, float* __restrict__ LSE, int L, int H, int A, int mt) {
+                const __grid_constant__ CUtensorMap mg,
+                const float* __restrict__ KM, float* __restrict__ O, float* __restrict__ LSE, __nv_bfloat16* __restrict__ QKVG,
+                __nv_bfloat16* __restrict__ OG,
+                int L, int H, int A, int mt) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + STAGES * ST_BYTES);
   uint64_t* empty = full + STAGES;
   uint64_t* qbar = empty + STAGES;
   uint64_t* qdone = qbar + 1;
+  uint64_t* gbar = qdone + 1;
+  uint8_t* sg = sm + STAGES * ST_BYTES + 256;                       // MODE 1, 2: the g tile [QM][48] bf16, TMA-loaded up front
 
   const int tid = threadIdx.x;
   constexpr int PTHR = 32, NTHR = 128 * NWG + PTHR;
@@ -120,6 +138,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NISS); mbar_init(&empty[s], FCLS * 4 * NWG); }
     mbar_init(qbar, 1);
     mbar_init(qdone, FCLS * 4 * NWG);                           // cluster-wide: a multicast lands in every rank's slot 0
+    mbar_init(gbar, 1);
     fence_barrier_init();
   }
   __syncthreads();
@@ -132,6 +151,10 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mv); tma_prefetch_desc(&mbias);
       mbar_arrive_expect_tx(qbar, QM * QW * 2);
       tma_load_2d(sm + QSTAGE, &mq, qbar, qcol, row0);
+      if (MODE != 0) {                                              // the epilogue's g rows, off its critical path
+        mbar_arrive_expect_tx(gbar, QM * DH * 2);
+        tma_load_2d(sg, &mg, gbar, qcol, row0);
+      }
     }
     if (iss < NISS) mbar_wait(qdone, 0);
     if (iss < NISS) {
@@ -176,6 +199,8 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     uint32_t dep = 0;                                               // the release depends on every q register (QDEP=2)
 #pragma unroll
     for (int ks = 0; ks < DH / 16; ++ks) dep ^= qr[ks][0] ^ qr[ks][1] ^ qr[ks][2] ^ qr[ks][3];
+    fence_proxy_async();                                            // the parked q (TMA-written) read generically: order before release
+    __syncwarp();
     if ((tid & 31) == 0) {
       if (FCLS == 1) mbar_arrive_dep(qdone, zero_dep(dep));
       else for (int r = 0; r < FCLS; ++r) mbar_arrive_remote(reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(qdone) + zero_dep(dep)), r);
@@ -231,7 +256,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         float mx = -INFINITY;
 #pragma unroll
         for (int j = 0; j < 8; ++j) mx = fmaxf(mx, fmaxf(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]));
-        mx = qmax(mx);
+        mx = fmaxf(qmax(mx), -1e30f);                               // a block of -inf keys (a masked bias) sets a finite max
         m_new[h] = mx > m_i[h] + LAZY ? mx : m_i[h];
         moved |= m_new[h] != m_i[h];
       }
@@ -267,6 +292,8 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     } else {
       acc[0] += __int_as_float(*reinterpret_cast<const int*>(sm + sn * ST_BYTES + (tid & 31) * 4));
     }
+    fence_proxy_async();                                          // generic (ldmatrix) reads of this TMA stage before its release
+    __syncwarp();
     if ((tid & 31) == 0 && n + STAGES < nblocks) {
       if (FCLS == 1) mbar_arrive(&empty[sn]);
       else for (int r = 0; r < FCLS; ++r) mbar_arrive_remote(&empty[sn], r);   // the slot is free in every rank's view
@@ -275,16 +302,37 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 #pragma unroll
   for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
 
-  // ---- epilogue: O = acc / l (fp32), LSE = m + log2 l
+  // ---- epilogue: O = acc / l (fp32), LSE = m + log2 l; MODE 1: sigmoid(g) acc / l (bf16) over q; MODE 2: into OG, + LSE
+  if constexpr (MODE != 0) mbar_wait(gbar, 0);
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const float l = qsum(l_i[h]);
     const float inv = 1.f / l;
     const int row = m0 + wg * 64 + r0 + 8 * h;
-    float* orow = O + (size_t)(samp * L + row) * DM + qcol;
+    if constexpr (MODE == 1) {
+      __nv_bfloat16* orow = QKVG + (size_t)(samp * L + row) * (4 * DM) + qcol;
 #pragma unroll
-    for (int j = 0; j < 6; ++j)
-      *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
+      for (int j = 0; j < 6; ++j) {
+        const float2 g = bf2f(*reinterpret_cast<const uint32_t*>(sg + ((wg * 64 + r0 + 8 * h) * DH + j * 8 + cb) * 2));
+        *reinterpret_cast<__nv_bfloat162*>(orow + j * 8 + cb) =
+            __floats2bfloat162_rn(acc[4 * j + 2 * h] * inv * sigmoid_t(g.x), acc[4 * j + 2 * h + 1] * inv * sigmoid_t(g.y));
+      }
+      continue;
+    }
+    if constexpr (MODE == 2) {
+      __nv_bfloat16* ogrow = OG + (size_t)(samp * L + row) * DM + qcol;
+#pragma unroll
+      for (int j = 0; j < 6; ++j) {
+        const float2 g = bf2f(*reinterpret_cast<const uint32_t*>(sg + ((wg * 64 + r0 + 8 * h) * DH + j * 8 + cb) * 2));
+        *reinterpret_cast<__nv_bfloat162*>(ogrow + j * 8 + cb) =
+            __floats2bfloat162_rn(acc[4 * j + 2 * h] * inv * sigmoid_e(g.x), acc[4 * j + 2 * h + 1] * inv * sigmoid_e(g.y));
+      }
+    } else {
+      float* orow = O + (size_t)(samp * L + row) * DM + qcol;
+#pragma unroll
+      for (int j = 0; j < 6; ++j)
+        *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
+    }
     if ((lane & 3) == 0) LSE[((size_t)samp * H + head) * L + row] = m_i[h] + __log2f(l);
   }
   if (FCLS > 1) { __syncwarp(); cluster_sync_all(); }
@@ -310,15 +358,35 @@ EncodeTiled encoder() {
   }();
   return fn;
 }
-CUtensorMap tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t stride, uint32_t bi, uint32_t bo) {
+CUtensorMap tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t stride, uint32_t bi, uint32_t bo,
+                     CUtensorMapSwizzle swz = CU_TENSOR_MAP_SWIZZLE_128B) {
   CUtensorMap map{};
   const cuuint64_t dims[2] = {cols, rows};
   const cuuint64_t strides[1] = {stride * 2};
   const cuuint32_t box[2] = {bi, bo}, elem[2] = {1, 1};
   TORCH_CHECK(encoder()(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, ptr, dims, strides, box, elem,
-                        CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                        CU_TENSOR_MAP_INTERLEAVE_NONE, swz, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
                         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) == CUDA_SUCCESS, "encode failed");
   return map;
+}
+
+template <typename K>
+void launch(K kern, int grid, const CUtensorMap& mq, const CUtensorMap& mk, const CUtensorMap& mv, const CUtensorMap& mb,
+            const CUtensorMap& mg,
+            const float* km, float* O, float* LSE, __nv_bfloat16* qkvg, int L, int H, int A, int mt,
+            __nv_bfloat16* og = nullptr) {
+  const size_t smem = 1024 + STAGES * ST_BYTES + 256 + QM * DH * 2;   // + the g tile
+  cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3(grid);
+  cfg.blockDim = dim3(128 * NWG + 32);
+  cfg.dynamicSmemBytes = smem;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = FCLS; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mb, mg, km, O, LSE, qkvg, og, L, H, A, mt) == cudaSuccess, "launch failed");
 }
 }  // namespace
 
@@ -333,27 +401,65 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kFloat32 && LSE.is_contiguous(), "out layout");
   TORCH_CHECK(L % QM == 0, "L must be a multiple of the query tile");
-  const size_t smem = 1024 + STAGES * ST_BYTES + 256;
   const bool hasm = kmask.has_value() && kmask->defined();
-  auto kern = hasm ? attn_fwd_kernel<true> : attn_fwd_kernel<false>;
-  cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   const int mt = L / QM;
   auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, DM, QW, QM);
   auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
   auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
   TORCH_CHECK(A % FCLS == 0, "A must be a multiple of the cluster size");
-  cudaLaunchConfig_t cfg{};
-  cfg.gridDim = dim3(A * H * mt);
-  cfg.blockDim = dim3(128 * NWG + 32);
-  cfg.dynamicSmemBytes = smem;
-  cfg.stream = at::cuda::getCurrentCUDAStream();
-  cudaLaunchAttribute at[1];
-  at[0].id = cudaLaunchAttributeClusterDimension;
-  at[0].val.clusterDim.x = FCLS; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
-  cfg.attrs = at; cfg.numAttrs = 1;
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mb, hasm ? kmask->data_ptr<float>() : nullptr, O.data_ptr<float>(),
-                                 LSE.data_ptr<float>(), L, H, A, mt) == cudaSuccess, "launch failed");
+  launch(hasm ? attn_fwd_kernel<true, 0> : attn_fwd_kernel<false, 0>, A * H * mt, mq, mk, mv, mb, mq,   // (no g tile)
+         hasm ? kmask->data_ptr<float>() : nullptr, O.data_ptr<float>(), LSE.data_ptr<float>(), nullptr, L, H, A, mt);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("attn_fwd", &attn_fwd); }
+// The token DiT training forward (MODE 2): as attn_fwd, but og = sigmoid(g) O [A L, 768] bf16 (g from qkvg [A L, 3072]) in place
+// of O.
+void attn_fwd_og(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, c10::optional<torch::Tensor> kmask,
+                 torch::Tensor qkvg, torch::Tensor OG, torch::Tensor LSE) {
+  const int H = bias.size(0), L = bias.size(1);
+  const int A = q.size(0) / L;
+  for (auto* t : {&q, &k, &v, &OG})
+    TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv / og layout");
+  TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * DM && qkvg.size(0) == A * L,
+              "qkvg layout");
+  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
+  TORCH_CHECK(LSE.is_contiguous() && L % QM == 0 && A % FCLS == 0, "LSE / shape");
+  const bool hasm = kmask.has_value() && kmask->defined();
+  const int mt = L / QM;
+  auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, DM, QW, QM);
+  auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
+  auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
+  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
+  auto mg = tile_map(reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()) + 3 * DM, (uint64_t)A * L, DM, 4 * DM, DH, QM,
+                     CU_TENSOR_MAP_SWIZZLE_NONE);
+  launch(hasm ? attn_fwd_kernel<true, 2> : attn_fwd_kernel<false, 2>, A * H * mt, mq, mk, mv, mb, mg,
+         hasm ? kmask->data_ptr<float>() : nullptr, nullptr, LSE.data_ptr<float>(),
+         reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()), L, H, A, mt, reinterpret_cast<__nv_bfloat16*>(OG.data_ptr()));
+}
+
+// The inference core: qkvg [S*L, 3072] bf16 (q | k | v | g, q in exp2 units: sm_scale log2 e folded into Wq, bq or the
+// qk-norm weight), bias_all [nb*H, L, L] bf16 (log2 units, masked keys -inf), block = which H-row slice of it. Writes
+// sigmoid(g) softmax(q k^T + bias) v over q.
+void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t S) {
+  const int L = bias_all.size(1), H = DM / DH;
+  TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * DM
+              && qkvg.size(0) == S * L, "qkvg layout");
+  TORCH_CHECK(bias_all.is_contiguous() && bias_all.scalar_type() == torch::kBFloat16 && bias_all.size(2) == L
+              && bias_all.size(0) >= (block + 1) * H, "bias layout");
+  TORCH_CHECK(L % QM == 0 && FCLS == 1, "L must be a multiple of the query tile");
+  const int mt = L / QM;
+  auto* base = reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr());
+  const uint64_t rows = (uint64_t)S * L;
+  auto mq = tile_map(base, rows, DM, 4 * DM, QW, QM);
+  auto mk = tile_map(base + DM, rows, DM, 4 * DM, QW, BN);
+  auto mv = tile_map(base + 2 * DM, rows, DM, 4 * DM, QW, BN);
+  auto mb = tile_map(reinterpret_cast<__nv_bfloat16*>(bias_all.data_ptr()) + (size_t)block * H * L * L, (uint64_t)H * L, L, L, BN, QM);
+  auto mg = tile_map(base + 3 * DM, rows, DM, 4 * DM, DH, QM, CU_TENSOR_MAP_SWIZZLE_NONE);
+  launch(attn_fwd_kernel<false, 1>, (int)S * H * mt, mq, mk, mv, mb, mg, nullptr, nullptr, nullptr, base, L, H, (int)S, mt);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("attn_fwd", &attn_fwd);
+  m.def("attn_inf", &attn_inf);
+  m.def("attn_fwd_og", &attn_fwd_og);
+}

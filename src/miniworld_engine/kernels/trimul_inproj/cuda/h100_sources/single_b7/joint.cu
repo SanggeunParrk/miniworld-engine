@@ -15,7 +15,14 @@ constexpr int THREADS=256,SMEM=114688;
 #endif
 constexpr int SOURCES=8,CONSUMERS=B7_CONSUMERS,GROUP=SOURCES+CONSUMERS,RINGS=B7_RING_DEPTH;
 #define allsync() named_bar_sync(1+threadIdx.x/128,128)
-struct Params{CUtensorMap xn,wp,dl,dr,dg,wgate,x,res,dx,wt[4],ringstore;const __nv_bfloat16* mask;const float *gamma,*beta;__nv_bfloat16 *dxptr,*dw;float *dgam,*dbeta,*partw,*partln;unsigned int* counts;int M,tiles;uint8_t *ring,*xring;unsigned* flags;};
+#if MASTER_FP32
+using MasterDW=float;
+TMN_DEVI float master_value(float v){return v;}
+#else
+using MasterDW=__nv_bfloat16;
+TMN_DEVI __nv_bfloat16 master_value(float v){return __float2bfloat16_rn(v);}
+#endif
+struct Params{CUtensorMap xn,wp,dl,dr,dg,wgate,x,res,dx,wt[4],ringstore;const __nv_bfloat16* mask;const float *gamma,*beta;__nv_bfloat16 *dxptr;MasterDW *dw;float *dgam,*dbeta,*partw,*partln;unsigned int* counts;int M,tiles;uint8_t *ring,*xring;unsigned* flags;};
 #include "single_wg.inc"
 TMN_DEVI void store2d(const CUtensorMap* map,const void* src,int c,int r){asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0,{%2,%3}],[%1];"::"l"(map),"r"(smem_u32(src)),"r"(c),"r"(r):"memory");}
 TMN_DEVI void multicast_xn(void* dst,const CUtensorMap* map,uint64_t* bar,int c,int row){asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0],[%1,{%3,%4}],[%2],%5;"::"r"(smem_u32(dst)),"l"(map),"r"(smem_u32(bar)),"r"(c),"r"(row),"h"(uint16_t((1<<B7_HW_CLUSTER)-1)):"memory");}
@@ -143,7 +150,12 @@ TMN_DEVI void consumer_producer(const Params& p,uint8_t* sm,uint64_t* bar){
     __syncwarp();
     if(lane==0){mbar_arrive_expect_tx(bar+24+slot,RING_CHUNK);bulk_load(sm+slot*RING_CHUNK,p.ring+(cid*RINGS+rs)*65536+phase*RING_CHUNK,RING_CHUNK,bar+24+slot);}
    }
-   if(lane==0){mbar_wait(bar+24+RING_SLOTS-1,1);publish(flags+SOURCES+1,sequence+1);}
+   if(lane==0){
+    // Complete every final empty phase before reusing the ring in the next tile.
+    for(int slot=0;slot<RING_SLOTS;++slot)
+     mbar_wait(bar+32+slot,((RING_PHASES-1)/RING_SLOTS)&1);
+    mbar_wait(bar+24+RING_SLOTS-1,1);publish(flags+SOURCES+1,sequence+1);
+   }
    __syncwarp();
   }return;
  }
@@ -281,7 +293,7 @@ void b7_joint(__grid_constant__ const Params p){
    int j=((kind&1)?h%32:32+h%32)*128+c;
 #endif
 #endif
-   for(int a=0;a<groups;++a)v+=reinterpret_cast<volatile float*>(p.partw)[(a*SOURCES+rk)*8192+j];p.dw[out]=__float2bfloat16_rn(v);
+   for(int a=0;a<groups;++a)v+=reinterpret_cast<volatile float*>(p.partw)[(a*SOURCES+rk)*8192+j];p.dw[out]=master_value(v);
   }else{int c=i-65536;for(int a=0;a<groups*CONSUMERS;++a)v+=reinterpret_cast<volatile float*>(p.partln)[a*256+c];(c<128?p.dgam:p.dbeta)[c%128]=v;}
  }
  for(int i=blockIdx.x*THREADS+threadIdx.x;i<groups*RINGS*(SOURCES+2);i+=gridDim.x*THREADS)p.flags[i]=0;

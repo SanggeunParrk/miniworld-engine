@@ -164,8 +164,19 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
         if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
             return SWADiTModulationSm100.apply(c2, w)
         return swa_dit_mod_fwd_sm100(c2, w.to(c2.dtype))
-    a = F.silu(c_base).float()
-    return (a.reshape(-1, a.shape[-1]) @ wmod.float().t()).contiguous()
+    # This fallback's contract is FP32 modulation, including under BF16 AMP.
+    # A surrounding autocast must not downcast the explicitly FP32 product.
+    with torch.autocast(device_type=c_base.device.type, enabled=False):
+        a = F.silu(c_base).float()
+        a = a.reshape(-1, a.shape[-1])
+        if c_base.dtype == torch.bfloat16 and wmod.dtype == torch.float32:
+            from miniworld_engine.integrations.h100_master import is_h100
+            if is_h100(c_base.device):
+                from miniworld_engine.kernels.swa_dit.autograd import (
+                    H100ModulationLinear,
+                )
+                return H100ModulationLinear.apply(a, wmod)
+        return (a @ wmod.float().t()).contiguous()
 
 
 def swa_dit_block(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torch.Tensor,

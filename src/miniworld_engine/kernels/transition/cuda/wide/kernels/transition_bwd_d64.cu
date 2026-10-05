@@ -384,7 +384,9 @@ transition_bwd_fused(const __grid_constant__ CUtensorMap mdy, const __grid_const
 }
 
 // partw [NDW][4][64 hs][64 d] fp32 -> bf16 dWa [256][64], dWb [256][64], dWs [64][256]; dgbw [NDX * 8][2][64] -> dgamma, dbeta
-extern "C" __global__ void reduce_partials(const float* __restrict__ ws, __nv_bfloat16* __restrict__ dWa, __nv_bfloat16* __restrict__ dWb, __nv_bfloat16* __restrict__ dWs,
+template<typename T> __device__ T master_value(float v) { return v; }
+template<> __device__ __nv_bfloat16 master_value(float v) { return __float2bfloat16_rn(v); }
+template<typename T> __global__ void reduce_partials(const float* __restrict__ ws, T* __restrict__ dWa, T* __restrict__ dWb, T* __restrict__ dWs,
                                      const float* __restrict__ dgbw, float* __restrict__ dgam, float* __restrict__ dbeta) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= 3 * NSL * HS * D_) {
@@ -403,7 +405,7 @@ extern "C" __global__ void reduce_partials(const float* __restrict__ ws, __nv_bf
     if (which < 2) v += part[(size_t)which * HS * D_ + hs * D_ + d];
     else v += part[(size_t)2 * HS * D_ + hs * D_ + d] + part[(size_t)3 * HS * D_ + hs * D_ + d];
   }
-  const __nv_bfloat16 o = __float2bfloat16_rn(v);
+  const T o = master_value<T>(v);
   if (which == 0) dWa[(slice * HS + hs) * D_ + d] = o;
   else if (which == 1) dWb[(slice * HS + hs) * D_ + d] = o;
   else dWs[(size_t)d * H_ + slice * HS + hs] = o;

@@ -662,10 +662,17 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w(const __grid_cons
 // dgi, dbi (B2 slots); [16512, 20608) dWp; [20608, 20736) dgo, dbo; [20736, 24832) dWg (B1 slots).
 // =====================================================================================================================
 constexpr int FIN_OUT = b2::SLOT + b1::SLOT;
+#if MASTER_FP32
+using MasterDW = float;
+__device__ float master_value(float v) { return v; }
+#else
+using MasterDW = bf16;
+__device__ bf16 master_value(float v) { return __float2bfloat16_rn(v); }
+#endif
 extern "C" __global__ void __launch_bounds__(256)
 uni64_finw(const float* __restrict__ p1, int g1, const float* __restrict__ p2, int g2,
-           bf16* __restrict__ dwl, bf16* __restrict__ dwlg, bf16* __restrict__ dwr, bf16* __restrict__ dwrg,
-           bf16* __restrict__ dwg, bf16* __restrict__ dwp, float* __restrict__ dgi, float* __restrict__ dbi,
+           MasterDW* __restrict__ dwl, MasterDW* __restrict__ dwlg, MasterDW* __restrict__ dwr, MasterDW* __restrict__ dwrg,
+           MasterDW* __restrict__ dwg, MasterDW* __restrict__ dwp, float* __restrict__ dgi, float* __restrict__ dbi,
            float* __restrict__ dgo, float* __restrict__ dbo) {
   const int e = blockIdx.x * 256 + threadIdx.x;
   if (e < b2::SLOT) {
@@ -675,8 +682,8 @@ uni64_finw(const float* __restrict__ p1, int g1, const float* __restrict__ p2, i
       // packed row pr: block pr / 64 = 32 channels of cat(left, right); rows 0-31 gate, 32-63 projection
       const int pr = e >> 6, col = e & 63, blk = pr >> 6, within = pr & 63;
       const int c = 32 * blk + (within & 31), h = c & 63;
-      bf16* dst = c < 64 ? (within < 32 ? dwlg : dwl) : (within < 32 ? dwrg : dwr);
-      dst[h * 64 + col] = __float2bfloat16_rn(s);
+      MasterDW* dst = c < 64 ? (within < 32 ? dwlg : dwl) : (within < 32 ? dwrg : dwr);
+      dst[h * 64 + col] = master_value(s);
     } else if (e < 16448) {
       dgi[e - 16384] = s;
     } else {
@@ -686,10 +693,10 @@ uni64_finw(const float* __restrict__ p1, int g1, const float* __restrict__ p2, i
     const int f = e - b2::SLOT;
     float s = 0.f;
     for (int g = 0; g < g1; ++g) s += p1[(size_t)g * b1::SLOT + f];
-    if (f < 4096) dwp[f] = __float2bfloat16_rn(s);
+    if (f < 4096) dwp[f] = master_value(s);
     else if (f < 4160) dgo[f - 4096] = s;
     else if (f < 4224) dbo[f - 4160] = s;
-    else dwg[f - 4224] = __float2bfloat16_rn(s);
+    else dwg[f - 4224] = master_value(s);
   }
 }
 

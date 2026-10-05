@@ -285,6 +285,14 @@ def pair_bwd(z, w16, dw, ln_w, ln_b, eps, wb, BJ=32, num_warps=4, BJO=None):
     return dz, colsum(pwb)[:H], ps[:DZ], ps[DZ:]
 
 
+def _cast_h100_matrices(*weights):
+    """Batch master-to-BF16 copies without changing the B200 path."""
+    if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(w.dtype != torch.bfloat16 for w in weights):
+        from miniworld_engine.integrations.h100_master import pack
+        return tuple(pack(weights))
+    return tuple(w.to(torch.bfloat16).contiguous() for w in weights)
+
+
 class _PwaMath(torch.autograd.Function):
     """out = msa + PWA(msa, pair, key mask). Weights in their own dtype (fp32 or bf16); gradients returned in it."""
 
@@ -294,7 +302,7 @@ class _PwaMath(torch.autograd.Function):
         m = msa[0].contiguous(); z = pair[0].contiguous()
         N = m.shape[1]
         bf = torch.bfloat16
-        wv16 = wv.detach().to(bf).contiguous(); wg16 = wg.detach().to(bf).contiguous(); wo16 = wo.detach().to(bf).contiguous()
+        wv16, wg16, wo16 = _cast_h100_matrices(wv.detach(), wg.detach(), wo.detach())
         sm100 = torch.cuda.get_device_capability(m.device) == (10, 0)
         k = _k100() if sm100 else _k()
         if sm100:                                                                   # pm: the [N] bool key mask (pair_weighted_averaging)
@@ -335,7 +343,7 @@ class _PwaMath(torch.autograd.Function):
         bf = torch.bfloat16
         dres0 = dres[0].contiguous()
         # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
-        wv16 = wv.to(bf).contiguous(); wg16 = wg.to(bf).contiguous(); wo16 = wo.to(bf).contiguous()
+        wv16, wg16, wo16 = _cast_h100_matrices(wv, wg, wo)
         if torch.cuda.get_device_capability(m.device) == (10, 0):
             k = _k100()["pwa"]
             # the parameter gradients come out of the kernels in the parameters' dtype (.to below is then a no-op): no cast launches

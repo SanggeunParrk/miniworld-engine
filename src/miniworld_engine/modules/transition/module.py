@@ -139,6 +139,17 @@ class Transition(nn.Module):
                 if kern.available(x, pa, ps):
                     return entry(x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
 
+        if _fused_sm90a_enabled():
+            from miniworld_engine.kernels.transition.cuda import (
+                fused_sm90a,
+                fused_wide_sm90a,
+            )
+            pa, pb, ps = self.expand_a.weight, self.expand_b.weight, self.squeeze.weight
+            for kern, entry in ((fused_sm90a, fused_sm90a.transition_fused_sm90a),
+                                (fused_wide_sm90a, fused_wide_sm90a.transition_wide_sm90a)):
+                if kern.available(x, pa, ps):
+                    return entry(x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
+
         wa = self.expand_a.weight.to(x.dtype)
         wb = self.expand_b.weight.to(x.dtype)
         ws = self.squeeze.weight.to(x.dtype)

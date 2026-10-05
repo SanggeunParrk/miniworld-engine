@@ -15,6 +15,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.integrations import h100_master as _master
 from miniworld_engine.integrations import triattn_b200 as _b200
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
@@ -326,6 +327,12 @@ class TriangleAttention(nn.Module):
         if _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
+        if pair.dtype == torch.bfloat16 and self.to_value.weight.dtype == torch.float32 and self._backend == KernelBackend.TRITON:
+            from miniworld_engine.kernels.triangle_attention.cuda import (
+                qg_projection_attention,
+            )
+            if qg_projection_attention.can_use(self, pair, mask):
+                return qg_projection_attention.forward(self, pair, mask)
         if (
             getattr(self, "_fuse_front_backward", True)
             and getattr(self, "_fuse_projection_backward", True)
@@ -377,6 +384,15 @@ class TriangleAttention(nn.Module):
                 return out
 
             pair = self._layernorm(pair, backend)
+            master = (backend == KernelBackend.TRITON and pair.dtype == torch.bfloat16
+                      and self.to_value.weight.dtype == torch.float32
+                      and _master.is_h100(pair.device))
+            if master:
+                wv, wb, wg, wo = _master.pack([
+                    self.to_value.weight, self.to_bias.weight, self.to_gate.weight, self.to_out.weight,
+                ])
+                if self.use_self_attention:
+                    wq, wk = _master.pack([self.to_query.weight, self.to_key.weight])
             fused_projection = False
             if (
                 getattr(self, "_fuse_projection_backward", True) and torch.is_grad_enabled()
@@ -393,8 +409,8 @@ class TriangleAttention(nn.Module):
             if fused_projection:
                 query, key, value, gate, bias = projections(pair, *weights)
             else:
-                value = self.to_value(pair)
-                bias = self.to_bias(pair)
+                value = _master.linear(pair, self.to_value, wv) if master else self.to_value(pair)
+                bias = _master.linear(pair, self.to_bias, wb) if master else self.to_bias(pair)
 
             # No .contiguous(): the bias-only einsum and the self-attention kernels
             # consume these strided views directly (the triton kernel re-packs
@@ -406,8 +422,8 @@ class TriangleAttention(nn.Module):
 
             if self.use_self_attention:
                 if not fused_projection:
-                    query = self.to_query(pair)
-                    key = self.to_key(pair)
+                    query = _master.linear(pair, self.to_query, wq) if master else self.to_query(pair)
+                    key = _master.linear(pair, self.to_key, wk) if master else self.to_key(pair)
 
                 # No .contiguous(): the triton attention kernel consumes these strided
                 # (B,H,L,L2,D) views directly via explicit strides (head_dim D is stride-1,
@@ -432,10 +448,15 @@ class TriangleAttention(nn.Module):
                 # Fuse sigmoid(to_gate(pair)) * out + the to_out projection (gated
                 # tensor never hits HBM). Backend chosen per-GPU in _gate_out: fused
                 # GEMM at small DH, split (sigmoid*mul + cuBLAS to_out) at large DH.
-                out = self._gate_out(gate if fused_projection else self.to_gate(pair), out)
+                gate = gate if fused_projection else (_master.linear(pair, self.to_gate, wg) if master else self.to_gate(pair))
+                if master and not _bo_dispatch.gate_use_fused(gate.shape[-1], self.to_out.weight.shape[0], math.prod(gate.shape[:-1]), gate.device, gate.dtype):
+                    out = _master.linear(kernels.sigmoid_gate_fused(gate, out), self.to_out, wo)
+                else:
+                    out = self._gate_out(gate, out)
             else:
-                out = sigmoid_gate(self.to_gate(pair), out)
-                out = self.to_out(out)
+                gate = _master.linear(pair, self.to_gate, wg) if master else self.to_gate(pair)
+                out = sigmoid_gate(gate, out)
+                out = _master.linear(out, self.to_out, wo) if master else self.to_out(out)
 
             if not self.starting:
                 out = rearrange(out, "B J I D -> B I J D").contiguous()

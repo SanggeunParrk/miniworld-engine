@@ -104,10 +104,15 @@ static_assert(!PRODUCER || 256*B1_CONS_REGS+128*B1_PROD_REGS <= 384*168, "regist
 #define TRAIN_L p.L
 #endif
 
+#if MASTER_FP32
+using MasterDW = float;
+#else
+using MasterDW = __nv_bfloat16;
+#endif
 struct Params {
  CUtensorMap dy,x,xhat,statsmap,wp,wg,dtri,dgmap;
  const __nv_bfloat16* ds;const float *gi,*bi,*gamma,*bo,*saved_rs;
- __nv_bfloat16 *dg,*dwg,*dwp;float *dgam,*dbeta,*partw,*partln;
+ __nv_bfloat16 *dg; MasterDW *dwg,*dwp;float *dgam,*dbeta,*partw,*partln;
  unsigned int* counts;int M,L,tiles;
 };
 #include "b1_pipeline_math.inc"
@@ -416,7 +421,11 @@ TMN_DEVI void gate_phase(const Params& p,uint8_t* sm,uint64_t* bars){
 #endif
 TMN_DEVI void reduce_at(const Params& p,int i){
  if(i<49152){float v=0;for(int b=0;b<UCOUNT;++b)v+=reinterpret_cast<volatile float*>(p.partw)[b*49152+i];
+  #if MASTER_FP32
+  (i<16384?p.dwg:p.dwp-16384)[i]=v;
+#else
   (i<16384?p.dwg:p.dwp-16384)[i]=__float2bfloat16_rn(v);
+#endif
  }else if(i<49664){int j=i-49152;float v=0;for(int b=0;b<UCOUNT;++b)v+=reinterpret_cast<volatile float*>(p.partln)[b*512+j];(j<256?p.dgam:p.dbeta)[j%256]=v;}
 }
 

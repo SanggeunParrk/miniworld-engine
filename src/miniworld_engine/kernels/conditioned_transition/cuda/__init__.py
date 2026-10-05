@@ -2,7 +2,7 @@
 
 Same entry points and semantics as the Triton module ``kernels/conditioned_transition/triton/token_dit_kernels.py``
 (``adaln_rows``, ``resgate_adaln_rows``, ``gate_rows``, ``swiglu_rows``, ``pair_bias_all``; ``qknorm_rows`` has no
-Triton twin: QK-norm on the fused step is B200-only), so the runner can take
+Triton twin: QK-norm on the fused step needs CUDA rows on H100 or B200), so the runner can take
 either. ``pair_bias_all`` is a CUDA LayerNorm of the pair rows and one cuBLAS GEMM that writes every block's bias
 head-major (a fused WMMA LayerNorm + projection kernel measured 3.4-3.6x slower on B200 and was dropped). Built on first use (``load_extension``), never at import.
 """
@@ -74,6 +74,11 @@ def layernorm_rows(z, out, eps=1e-5):
     _ext().layernorm_rows_cuda(z, out, float(eps))
 
 
+def cond_rows(c, cn, cc, eps=1e-5):
+    """cn = LN(c), cc = c, both in the GEMM dtype, in one warp-per-row pass over 384 conditioning columns."""
+    _ext().cond_rows_cuda(c, cn, cc, float(eps))
+
+
 def qknorm_rows(qk, wq, wk, eq, ek, d=768):
     """QK-norm in place: q = qk[:, 0:d], k = qk[:, d:2d] of every row, RMSNorm per head (head dim = len(wq): 48, 32 or 64 at
     d 768, 64 at d 1024) times wq / wk (fp32, any logit scale folded in), eps eq / ek."""
@@ -84,18 +89,30 @@ def qknorm_rows(qk, wq, wk, eq, ek, d=768):
 PAIR_BIAS_MASK = True
 
 
-def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None):
+def key_perm(L, device):
+    """Position p of each group of 8 keys holds key 4 i + j for p = 2 j + i: the key order of the H100 TF32 attention core
+    (``augmented_attention/cuda/attn_tf32.cu``), in which its bias and key mask are laid out."""
+    p = torch.arange(L, device=device)
+    r = p % 8
+    return p - r + 4 * (r % 2) + r // 2
+
+
+def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
     """Every block's pair bias, head-major: out [NB, L, L] = (LN(z) @ wt)^T with wt [C, NB] (the LayerNorm weights and
     any log2 e scale already folded in), -inf on the columns of masked keys (``mask`` [L] bool). z2d [L L, 128].
     A CUDA LayerNorm and one cuBLAS GEMM (a fused one-pass LayerNorm + projection kernel, one thread per pair row, measured
-    slower -- 450 against 266 us for a whole L = 768 block call -- and was dropped)."""
+    slower -- 450 against 266 us for a whole L = 768 block call -- and was dropped). ``perm``: the key columns in
+    ``key_perm`` order (the TF32 core's; the LayerNorm writes the pair rows there, so it costs nothing)."""
     nb = wt.shape[1]
-    m = None if mask is None else mask.reshape(-1).to(torch.bool).contiguous()
+    m = None if mask is None else mask.reshape(-1).to(torch.bool)
+    if m is not None and perm:
+        m = m[key_perm(L, m.device)]
+    m = None if m is None else m.contiguous()
     zh = torch.empty(z2d.shape[0], 128, device=z2d.device, dtype=wt.dtype)
-    _ext().layernorm128_rows(z2d, zh, float(eps))
+    _ext().layernorm128_rows(z2d, zh, float(eps), bool(perm))
     torch.mm(wt.t(), zh.t(), out=out.view(nb, -1))
     if m is not None:
         out.view(nb, L, L)[:, :, ~m] = float("-inf")
 
 
-__all__ = ["STAT_W", "adaln_rows", "available", "gate_rows", "pair_bias_all", "resgate_adaln_rows", "swiglu_rows"]
+__all__ = ["STAT_W", "adaln_in_rows", "adaln_rows", "available", "cond_rows", "gate_rows", "key_perm", "layernorm_rows", "pair_bias_all", "qknorm_rows", "resgate_adaln_rows", "resgate_out_rows", "swiglu_rows"]
