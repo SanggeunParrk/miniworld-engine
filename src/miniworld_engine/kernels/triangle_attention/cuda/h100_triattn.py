@@ -133,7 +133,7 @@ def _weight_gradient(dy, x):
         x.view(splits, rows, -1),
         out_dtype=torch.float32,
     )
-    return partial.sum(0)
+    return extension("pack").reduce_partials(partial)
 
 
 class H100Triangle(torch.autograd.Function):
@@ -226,7 +226,7 @@ class H100Triangle(torch.autograd.Function):
         else:
             dz = torch.mm(dall, wall, out_dtype=torch.float32)
             dx, z, parts = m.ln_backward(x, dz, dy, stats, lw, lb)
-        dnorm = parts.sum(0)
+        dnorm = extension("pack").reduce_partials(parts)
         grad = _weight_gradient(dall, z)
         dwo = _weight_gradient(dys, u)
         params = extension("pack").finish(
@@ -269,7 +269,7 @@ def forward(module, pair, mask=None):
         )
     B, L, _, C = pair.shape
     drop = (
-        module._make_drop_scale(pair, module.p_drop).reshape(B, L, C)
+        extension("pack").drop_scale(pair, module.p_drop)
         if module.training and module.p_drop
         else None
     )
