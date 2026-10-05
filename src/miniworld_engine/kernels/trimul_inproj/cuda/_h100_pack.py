@@ -1,4 +1,5 @@
 """Live weight packing without a nested torch.compile runtime invocation."""
+import os
 import triton
 import triton.language as tl
 import torch
@@ -88,7 +89,13 @@ def cast_weights(weights):
 def normalize_into(dst, x, g, b, stats=None):
     if not x.is_contiguous() or x.dtype != torch.bfloat16 or g.dtype != torch.float32 or b.dtype != torch.float32:
         raise ValueError("CUDA input LN requires contiguous BF16 input and FP32 affine")
-    _launch("mw_aux_norm", (x.numel()//x.shape[-1], 1, 1), [x, g, b, dst, stats, x.shape[-1]])
+    width, rows = x.shape[-1], x.numel()//x.shape[-1]
+    if width not in (64, 128, 256, 384, 512):
+        raise ValueError("Hopper CUDA normalization requires a supported pair width")
+    if os.environ.get("MINIWORLD_TRIMUL_H100_WARP_LN") == "1":
+        _launch("mw_aux_norm_warp", ((rows+7)//8, 1, 1), [x, g, b, dst, stats, width, rows])
+    else:
+        _launch("mw_aux_norm", (rows, 1, 1), [x, g, b, dst, stats, width])
 
 
 def fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gate=False):
