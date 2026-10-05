@@ -31,7 +31,8 @@ LENGTHS = (384, 768)
 
 
 def supports(width: int, length: int) -> bool:
-    return width in WIDTHS and length in LENGTHS
+    lengths = (128, 256, 384, 512, 640, 768) if T.cuda_aux_enabled() else LENGTHS
+    return width in WIDTHS and length in lengths
 
 
 def _k1_smem(D, cfg):
@@ -143,7 +144,10 @@ def _normalize_stats_into(dst, stats, x, g, b):
 
 
 def _selection(D, N):
-    sel = dict(T.read_config("wide_forward/selection.json")[f"{D}-{N}"])
+    # Tile geometry is independent of length; the candidate extends the same
+    # pipeline to the other 128-aligned required buckets before retuning it.
+    key_length = N if N in LENGTHS else (384 if N < 384 else 768)
+    sel = dict(T.read_config("wide_forward/selection.json")[f"{D}-{key_length}"])
     if os.environ.get("MW_WIDE_INFER_CFG"):
         sel.update(json.loads(os.environ["MW_WIDE_INFER_CFG"]))
     return sel
@@ -185,7 +189,11 @@ def _run(x, weights, mask):
     xn = torch.empty_like(x) if not (gfold and normalize) else None
     if not normalize:
         if gfold:
-            _normalize_stats_into(xn, xs, x, gi, bi)
+            if T.cuda_aux_enabled():
+                from ._h100_pack import normalize_into
+                normalize_into(xn, x, gi, bi, xs)
+            else:
+                _normalize_stats_into(xn, xs, x, gi, bi)
         else:
             T.normalize_into(xn, x, gi, bi)
     k1, smem1 = _compile("k1", D, cfg, normalize, gfold and normalize, mask is not None)
@@ -211,8 +219,12 @@ def _run(x, weights, mask):
     uv = torch.empty((4, D), device=x.device, dtype=torch.float32)
     wpf = x.new_empty((D, H))
     wgf = x.new_empty((D, D)) if gfold else wg
-    _fold[(D, 2 if gfold else 1)](wp, go, bo, wpf, wg, gi, bi, wgf, uv, D,
-                                  BLOCK=triton.next_power_of_2(H), GATE=gfold, num_warps=4)
+    if T.cuda_aux_enabled():
+        from ._h100_pack import fold_into
+        fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gfold)
+    else:
+        _fold[(D, 2 if gfold else 1)](wp, go, bo, wpf, wg, gi, bi, wgf, uv, D,
+                                      BLOCK=triton.next_power_of_2(H), GATE=gfold, num_warps=4)
     k3, smem3 = _compile("k3", D, (bn, stages, gfold))
     p3 = launch.Struct([
         _map(tri, [64, 64], [M, H], [M * 2]),
