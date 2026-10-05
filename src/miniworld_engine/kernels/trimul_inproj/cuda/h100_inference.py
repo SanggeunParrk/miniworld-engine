@@ -66,6 +66,13 @@ def _select_config(x, weights, mask, direction, eps):
     from miniworld_engine.autotune.fused_config import trimul_candidates, validator
     from miniworld_engine.autotune.native import choose_config, tensor_key
     grid = trimul_candidates(x.shape[-1], weights[0].shape[0], x.shape[1], direction)
+    if (T.cuda_aux_enabled() and x.shape[-1] == 128 and weights[0].shape[0] == 256
+            and x.shape[1] == 128 and direction == 0):
+        # L128: 128-token CTAs cover 128 of the 132 SMs, versus 86 CTAs
+        # with the wide default. The bounded paired Graph search selected
+        # four weight slots; retain the existing output tile and live packing.
+        short = dict(grid[0], k1_0=2, k1_1=64, k1_2=4, k1_3=2)
+        grid = [short, *[c for c in grid if c != short]]
     run = lambda c: _run_inference(x, weights, mask, direction, eps, c)
     return choose_config("trimul_fwd_sm90_cuda", grid, dtype=str(x.dtype),
                          bucket=tensor_key(x, *weights, mask, extra=(direction, eps)),
