@@ -91,6 +91,10 @@ def _run_inference(x, weights, mask, direction, eps, config):
         quad = (wl, wlg, wr, wrg)
         if all(t.dtype == torch.bfloat16 and t.stride() == (cz, 1) for t in quad):
             wmap = {"wq": quad}
+        elif T.cuda_aux_enabled():
+            packed = x.new_empty((4 * ch, cz))
+            T.pack_into(packed, *quad)
+            wmap = {"w1": packed}
         else:
             wmap = {"w1": torch.stack(
                 (

@@ -30,7 +30,8 @@ LENGTHS = (384, 768)
 
 
 def supports(width: int, length: int) -> bool:
-    return width in WIDTHS and length in LENGTHS
+    lengths = (128, 256, 384, 512, 640, 768) if T.cuda_aux_enabled() else LENGTHS
+    return width in WIDTHS and length in lengths
 
 
 def serves(module, pair: torch.Tensor) -> bool:
@@ -119,7 +120,8 @@ def _run(x, weights, mask, outgoing, sel=None):
     wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = weights
     _, N, _, D = x.shape
     H = wl.shape[0]
-    sel = sel or T.read_config("uni_wide/selection.json")[f"{D}-{N}"]
+    key_length = N if N in LENGTHS else (384 if N < 384 else 768)
+    sel = sel or T.read_config("uni_wide/selection.json")[f"{D}-{key_length}"]
     cfg, normalize = tuple(sel["k1"]), sel["normalize"]
     launch = T._launch_module()
     sms = _sms(x.device.index)
@@ -153,10 +155,17 @@ def _run(x, weights, mask, outgoing, sel=None):
 
     # Gate GEMM (bf16 out) and the LN_out fold of the output projection.
     g = torch.mm(xn.view(N * N, D), wg.t())
-    wpf = wp.float()
-    wpp = (wpf * go).to(x.dtype)
-    u = wpp.float().sum(1)
-    v = wpf @ bo
+    if T.cuda_aux_enabled():
+        from ._h100_pack import fold_into
+        wpp = torch.empty_like(wp)
+        uv = torch.empty((2, D), device=x.device, dtype=torch.float32)
+        fold_into(wp, go, bo, wpp, wg, gi, bi, wg, uv)
+        u, v = uv[0], uv[1]
+    else:
+        wpf = wp.float()
+        wpp = (wpf * go).to(x.dtype)
+        u = wpp.float().sum(1)
+        v = wpf @ bo
 
     # K3: folded output projection + gate + residual.
     y = torch.empty_like(x)

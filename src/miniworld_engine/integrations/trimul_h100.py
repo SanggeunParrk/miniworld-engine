@@ -190,8 +190,14 @@ def update_inference(module, pair, mask, *, bidirectional):
     )
     # K1 packs the first four matrices with stride-aware torch operations.
     # Preserve native column-major parameters instead of copying them first.
-    weights = [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous()
-               for i, w in enumerate(weights)] + [
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
+    if runtime.cuda_aux_enabled():
+        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
+        matrices = cast_weights(weights)
+    else:
+        matrices = [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous()
+                    for i, w in enumerate(weights)]
+    weights = matrices + [
         module.ln_pair.weight.float().contiguous(),
         module.ln_pair.bias.float().contiguous(),
         module.ln_out.weight.float().contiguous(),
@@ -207,11 +213,12 @@ def update_inference(module, pair, mask, *, bidirectional):
             uni_wide_inference,
         )
 
-        pm = (
-            pair.new_ones((n, n))
-            if mask is None
-            else (mask.unsqueeze(-1) & mask.unsqueeze(-2)).float().contiguous()
-        )
+        if runtime.cuda_aux_enabled():
+            from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import pair_mask
+            pm = pair_mask(token, n, pair.device)
+        else:
+            pm = (pair.new_ones((n, n)) if mask is None
+                  else (mask.unsqueeze(-1) & mask.unsqueeze(-2)).float().contiguous())
         return uni_wide_inference(pair, weights, pm, module.outgoing)
     direction = 0 if bidirectional else 1 if module.outgoing else 2
     return inference(pair, weights, token, direction, module.ln_pair.eps)
