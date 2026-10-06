@@ -145,15 +145,15 @@ def _native_rpb():
 
 
 def _native90(dev):
-    return os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "0") == "1" and _sm90(dev)
+    return os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "1") == "1" and _sm90(dev)
 
 
 _NATIVE_CALLER_TASKS: set[int] = set()
 
 
-def _activate_native_caller():
+def _activate_native_caller(*, force: bool = False):
     """Limit installed hooks to backward tasks that actually execute our block."""
-    if (os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") != "1"
+    if (not (force or os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") == "1")
             or torch.compiler.is_compiling()):
         return
     task = torch._C._current_graph_task_id()
@@ -162,14 +162,32 @@ def _activate_native_caller():
         torch.autograd.Variable._execution_engine.queue_callback(lambda: _NATIVE_CALLER_TASKS.discard(task))
 
 
-def _native_caller_hooks(*tensors):
+def _native_caller_output(output, *tensors, force: bool = False):
+    """Bind accumulation after the native output node finishes backward."""
+    if (torch.compiler.is_compiling() or not torch.is_grad_enabled()
+            or not output.requires_grad or output.grad_fn is None):
+        return output
+    _native_caller_hooks(*tensors, force=force)
+
+    def activate(grad_inputs, grad_outputs):
+        # A tensor hook runs before the native backward. Activating there
+        # would leave a task tag when that backward raises, since engine
+        # completion callbacks do not run on errors. This node hook runs
+        # only after a successful backward, before its leaf consumers.
+        _activate_native_caller(force=force)
+
+    output.grad_fn.register_hook(activate)
+    return output
+
+
+def _native_caller_hooks(*tensors, force: bool = False):
     """Keep caller autograd edges while replacing their CUDA sum/add operations.
 
     Hooks bracket individual existing nodes; no mode escapes to other nodes or
     the caller, and gradients remain ordinary Tensors. This experimental option
     is for the manual CUDA-graph path, not a torch.compile transformation.
     """
-    if (os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") != "1"
+    if (not (force or os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") == "1")
             or torch.compiler.is_compiling()):
         return
     import threading
@@ -204,10 +222,22 @@ def _native_caller_hooks(*tensors):
                 dst, src = args[:2]
                 if (dst.is_cuda and src.device == dst.device and src.dtype == dst.dtype
                         and dst.dtype in (BF, torch.float32) and dst.shape == src.shape
-                        and dst.is_contiguous() and src.is_contiguous()
                         and kwargs.get("alpha", 1) == 1):
-                    kernels.caller_add90(dst, src)
-                    return dst
+                    # Keep ATen's overlap checks for partially aliased views.
+                    # Exact self-add is safe; disjoint allocations are usual
+                    # for AccumulateGrad's destination and incoming gradient.
+                    overlap = torch._C._overlaps(dst, src)
+                    if not overlap or (dst.data_ptr() == src.data_ptr()
+                                       and dst.stride() == src.stride()):
+                        if dst.is_contiguous() and src.is_contiguous():
+                            kernels.caller_add90(dst, src)
+                            return dst
+                        if (dst.ndim == 2 and src.ndim == 2
+                                and dst.t().is_contiguous() and src.t().is_contiguous()):
+                            # Column-major matrix gradients need only metadata
+                            # views; both operands retain identical element order.
+                            kernels.caller_add90(dst.t(), src.t())
+                            return dst
             elif func in (torch.ops.aten.zeros.default, torch.ops.aten.new_zeros.default):
                 if func is torch.ops.aten.zeros.default:
                     out = torch.empty(args[0], **kwargs)
@@ -522,7 +552,7 @@ def _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab,
     if qk:
         src.extend([allp, allp])
     out = T.train_final90([P[n] for n in canonical], src, dWn, W["Wraw"], W["w1"], W["w2"], allp, dWf, W["Wb"], W["wp"],
-                          os.environ.get("MINIWORLD_TOKEN_DIT_H100_GRAD_REDUCE", "0") == "1")
+                          os.environ.get("MINIWORLD_TOKEN_DIT_H100_GRAD_REDUCE", "1") == "1")
     result = dict(zip(canonical, out, strict=True))
     return [result[n] for n in names]
 
@@ -663,7 +693,7 @@ class _Block(torch.autograd.Function):
         params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
         dx, dc, dpair, *pg = _bwd(single, cond, pair, mask, params, saved, dout.contiguous(), qk, eq, ek, fp32, heads)
         if _native90(single.device):
-            _activate_native_caller()
+            _activate_native_caller(force=True)
         return (dx, dc, dpair, None, None, None, None, None, None, *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)))
 
 
@@ -675,10 +705,13 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     eq = float(a.norm_query.effective_eps(torch.float32)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
     fp32 = operand_dtype(single, compute_dtype) is torch.float32
+    out = _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
+                       *[module.get_parameter(n) for n in _names_for(qk)])
     if _native90(single.device):
-        _native_caller_hooks(single, cond, pair, *module.parameters())
-    return _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
-                        *[module.get_parameter(n) for n in _names_for(qk)])
+        # The result's edges now strongly own leaf AccumulateGrad nodes.
+        # Installing before apply can attach hooks to a temporary weak owner.
+        _native_caller_hooks(single, cond, pair, *module.parameters(), force=True)
+    return out
 
 
 __all__ = ["block", "serves"]

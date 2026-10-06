@@ -45,7 +45,8 @@ def available() -> bool:
 
 
 def token_pack(weights, heads, qk, qs, dtype=torch.bfloat16):
-    if dtype is torch.float32 or os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", "0") == "1":
+    vector_default = "1" if torch.cuda.get_device_capability(weights[0].device) == (9, 0) else "0"
+    if dtype is torch.float32 or os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", vector_default) == "1":
         return _ext().token_pack_vector(weights, int(heads), bool(qk), float(qs), dtype is torch.float32)
     return _ext().token_pack(weights, int(heads), bool(qk), float(qs))
 
@@ -83,7 +84,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     asynchronous = int(os.environ.get("MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC", "0"))
     if asynchronous not in (0, 1, 2):
         raise ValueError("Hopper token inference pack schedule must be 0, 1 or 2")
-    key = (asynchronous, qk, heads, single.dtype, os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", "0"), *((w.data_ptr(), w._version) for w in weights))
+    key = (asynchronous, qk, heads, single.dtype, os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", "1"), *((w.data_ptr(), w._version) for w in weights))
     def prepare():
         if not asynchronous:
             return token_pack(weights, heads, qk, qs, single.dtype), weights, None, None, None

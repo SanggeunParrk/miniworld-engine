@@ -74,12 +74,15 @@ class DiTBlock(nn.Module):
         compute_dtype: torch.dtype | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
         """AF3 Alg. 23; each part returns its residual output (stream in, stream out)."""
+        native_required = _h100.require_hopper_native(self, single, cond, pair, mask, compute_dtype)
         if _h100.serves(self, single, cond, pair, compute_dtype):
             return _h100.update(self, single, cond, pair, mask)
         if _train.serves(self, single, cond, pair, mask, compute_dtype):
             return _train.block(self, single, cond, pair, mask, compute_dtype)
         if _atom.serves(self, single, cond, pair, mask, compute_dtype):
             return _atom.block(self, single, cond, pair, mask)
+        if native_required:
+            raise NotImplementedError("Unsupported H100 token DiT geometry or mode; no Triton fallback")
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = self.attention(single, cond, pair, mask, **kw)
         return self.transition(single, cond)

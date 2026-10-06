@@ -6,7 +6,8 @@ TF32 tensor cores for fp32) and the CUDA row kernels; the GEMMs are cuBLAS as on
 Inference only: weight packs and pair bias are cached by tensor pointer / version within the current capture scope.
 A capture records their construction once, so each replay recomputes them from the current weights and pair.
 The conditioning may be shared by the samples or per sample. QK-norm runs on H100 and B200 with the CUDA row kernels
-(one in-place pass after the projection; the logit scale folds into the q norm's weight). Hopper FP32 inference rejects unsupported calls; the other modes retain their existing dispatch.
+(one in-place pass after the projection; the logit scale folds into the q norm's weight). Hopper BF16 and FP32 token inference
+use the native CUDA block by default; unsupported engine calls raise. Per-shape performance qualification is recorded separately.
 
 Lengths: on H100 L must be a multiple of 128 (the sm_90a core's tiles). On B200 any L >= 8: the sm_100a core takes a
 multiple of 8 (its TMA maps are 3-D per sample, so tile tails load as zeros and stores clip), and ``update`` pads the other
@@ -64,9 +65,50 @@ def _native_fp32_inference(module, single) -> bool:
     """The qualified Hopper FP32 inference family, independent of BF16 experiments."""
     from miniworld_engine.modules.dispatch import KernelBackend
     return (not torch.is_grad_enabled() and module.attention._backend == KernelBackend.TRITON
+            and getattr(getattr(module.attention, "to_bias", None), "weight", None) is not None
             and module.attention.to_bias.weight.shape[1] == 128
             and single.is_cuda and single.dtype is torch.float32
             and torch.cuda.get_device_capability(single.device) == (9, 0))
+
+
+def require_hopper_native(module, single, cond, pair, mask, compute_dtype=None) -> bool:
+    """The engine's Hopper token family has no portable fallback.
+
+    An explicit training-composition comparison remains available for existing
+    reference diagnostics. It is outside the native production dispatch.
+    """
+    from miniworld_engine.modules.dispatch import KernelBackend
+    if (module.attention._backend != KernelBackend.TRITON or not single.is_cuda
+            or module.attention.to_bias.weight.shape[1] != 128
+            or torch.cuda.get_device_capability(single.device) != (9, 0)):
+        return False
+    if torch.is_grad_enabled() and os.environ.get("MINIWORLD_TOKEN_DIT_TRAIN", "1") == "0":
+        return False
+    def require(ok, detail):
+        if not ok:
+            raise NotImplementedError(f"H100 token DiT requires {detail}; no Triton fallback")
+    require(settings.current().engine_backend != "triton", "the CUDA backend")
+    require(single.dtype in (torch.bfloat16, torch.float32) and compute_dtype in (None, single.dtype),
+            "matching BF16 or FP32 compute operands")
+    require(single.ndim == 4 and single.shape[0] > 0 and single.shape[1] == 1
+            and single.shape[2] in (128, 256, 384, 512, 640, 768) and single.shape[3] == 768,
+            "[A,1,L,768] at the six token buckets")
+    A, _, L, _ = single.shape
+    require(cond.ndim == 4 and cond.shape[0] in (1, A) and tuple(cond.shape[1:]) == (1, L, 384)
+            and tuple(pair.shape) == (1, L, L, 128), "canonical conditioning and pair shapes")
+    require(all(t.dtype == single.dtype and t.device == single.device for t in (cond, pair)),
+            "operands with one dtype on one CUDA device")
+    require(single.is_contiguous() and pair.is_contiguous()
+            and (cond.is_contiguous() or (cond.stride(0) == 0 and cond[:1].is_contiguous())),
+            "contiguous single/pair and contiguous or sample-expanded conditioning")
+    require(mask is None or (mask.dtype == torch.bool and mask.device == single.device
+            and tuple(mask.shape) == (1, L) and mask.is_contiguous()), "a contiguous boolean [1,L] mask or None")
+    allowed = (torch.float32,) if single.dtype == torch.float32 else (torch.bfloat16, torch.float32)
+    require(all(p.dtype in allowed and p.device == single.device and p.is_contiguous() for p in module.parameters()),
+            "contiguous matching-dtype parameters (FP32 masters are supported for BF16)")
+    if torch.is_grad_enabled():
+        require(os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "1") != "0", "native training enabled")
+    return True
 
 
 def _check_native_fp32(module, single, cond, pair, compute_dtype):
@@ -163,7 +205,9 @@ def _cuda_rows_available() -> bool:
     try:
         from miniworld_engine.kernels.conditioned_transition import cuda as cuda_rows
         return cuda_rows.available()
-    except Exception:                    # a failed build keeps the module path for QK-norm blocks
+    except Exception:
+        if torch.cuda.get_device_capability() == (9, 0):
+            raise
         return False
 
 
@@ -176,7 +220,7 @@ def _infer(
     single: torch.Tensor,
     cond: torch.Tensor,
     pair: torch.Tensor,
-    mask: torch.Tensor,
+    mask: torch.Tensor | None,
     weights: list[torch.Tensor],
     qk: bool,
     eq: float,
@@ -184,8 +228,7 @@ def _infer(
     heads: int,
 ) -> torch.Tensor:
     """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise)."""
-    if ((single.dtype is torch.float32 or os.environ.get("MINIWORLD_TOKEN_DIT_H100_CANDIDATE") == "1")
-            and torch.cuda.get_device_capability(single.device) == (9, 0)):
+    if torch.cuda.get_device_capability(single.device) == (9, 0):
         from miniworld_engine.kernels.conditioned_transition import cuda
         from miniworld_engine.integrations.token_dit_train import _tf32
         with _tf32(single.dtype is torch.float32):
@@ -253,7 +296,8 @@ def update(module, single, cond, pair, mask):
     if _native_fp32_inference(module, single) and mask is not None:
         if mask.dtype is not torch.bool or mask.device != single.device or tuple(mask.shape) != (1, single.shape[2]):
             raise ValueError("Hopper FP32 token inference requires a boolean [1,L] key mask")
-    if mask is None:                     # one all-true mask per (L, device), so the pair-bias cache key stays stable
+    if mask is None and torch.cuda.get_device_capability(single.device) != (9, 0):
+        # The native Hopper path accepts None without an ATen mask fill.
         k = (single.shape[2], single.device)
         mask = _ALL_TRUE.get(k)
         if mask is None:
