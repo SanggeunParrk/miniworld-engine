@@ -1,3 +1,94 @@
+#if defined(ATOM_HOPPER)
+#include "../sm100_atom/sm100.cuh"
+using namespace atom90;
+// Query-centric Hopper lowering: two 32-query windows retain the union of
+// their keys in three TMA stages. Scores/dP/dS remain register fragments.
+extern "C" __global__ __launch_bounds__(160, 1)
+void local_attn_dq_sm90(const __grid_constant__ CUtensorMap mq,
+ const __grid_constant__ CUtensorMap mk,const __grid_constant__ CUtensorMap mv,
+ const __grid_constant__ CUtensorMap mdo,const float* __restrict__ bias,
+ const uint8_t* __restrict__ mask,const float* __restrict__ lse,
+ const float* __restrict__ dd,__nv_bfloat16* __restrict__ out,int ldd,int N,int A) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int TB=8192,QB=0,DOB=TB,KB=2*TB,VB=5*TB,BAR=8*TB;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ const int t=threadIdx.x,lane=t&31,warp=t>>5;
+ const int h=blockIdx.y%4,a=blockIdx.y/4,q0=64*blockIdx.x,key0=q0-48;
+ if(t==0){for(int j=0;j<4;++j)init(bars+j);init_fence();}
+ __syncthreads();
+ if(t>=128){
+  if(t==128){
+   expect(bars,2*TB);load3(sm+QB,&mq,bars,h*32,q0,a);load3(sm+DOB,&mdo,bars,h*32,q0,a);
+   #pragma unroll
+   for(int j=0;j<3;++j){
+    expect(bars+j+1,2*TB);
+    load3(sm+KB+j*TB,&mk,bars+j+1,h*32,key0+64*j,a);
+    load3(sm+VB+j*TB,&mv,bars+j+1,h*32,key0+64*j,a);
+   }
+  }
+  return;
+ }
+ const int r0=warp*16+lane/4,c0=(lane&3)*2;
+ uint32_t qa[8],doa[8];bwait(bars,0);
+ #pragma unroll
+ for(int k=0;k<2;++k)
+  #pragma unroll
+  for(int hi=0;hi<2;++hi)
+   #pragma unroll
+   for(int rr=0;rr<2;++rr){
+    const int ix=k*4+2*hi+rr,offx=off(r0+8*rr,16*k+8*hi+c0);
+    qa[ix]=*reinterpret_cast<uint32_t*>(sm+QB+offx);
+    doa[ix]=*reinterpret_cast<uint32_t*>(sm+DOB+offx);
+   }
+ float dq[16]={0.f};
+ #pragma unroll
+ for(int j=0;j<3;++j){
+  bwait(bars+j+1,0);
+  const uint8_t* sk=sm+KB+j*TB;const uint8_t* sv=sm+VB+j*TB;
+  float ss[32],dp[32];fence();
+  mma_rs_n64_first(qa[0],qa[1],qa[2],qa[3],desc(sk),ss);
+  mma_rs_n64(qa[4],qa[5],qa[6],qa[7],desc(sk+32),ss,1);
+  mma_rs_n64_first(doa[0],doa[1],doa[2],doa[3],desc(sv),dp);
+  mma_rs_n64(doa[4],doa[5],doa[6],doa[7],desc(sv+32),dp,1);
+  commit();wait();
+  uint32_t ds[16];
+  #pragma unroll
+  for(int i=0;i<8;++i)
+   #pragma unroll
+   for(int rr=0;rr<2;++rr){
+    const int q=q0+r0+8*rr,w=q/32,lo=32*w-48;
+    float values[2];
+    #pragma unroll
+    for(int e=0;e<2;++e){
+     const int k=key0+64*j+8*i+c0+e;
+     const bool ok=q<N&&k>=0&&k<N&&k>=lo&&k<lo+128&&(!mask||mask[k]);
+     float value=0.f;
+     if(ok){
+      const size_t row=(size_t(a)*4+h)*N+q;
+      const float score=fmaf(ss[4*i+2*rr+e],0.17677669529663687f,
+        bias[((size_t(h)*(N/32)+w)*32+(q&31))*128+(k-lo)]);
+      value=s100::ex2f(score*1.4426950408889634f-lse[row])*(dp[4*i+2*rr+e]-dd[row]);
+     }
+     values[e]=value;
+    }
+    ds[4*(i>>1)+2*(i&1)+rr]=pack(values[0],values[1]);
+   }
+  fence();
+  #pragma unroll
+  for(int k=0;k<4;++k)pv(dq,ds+4*k,desc(sk+k*2048));
+  commit();wait();
+ }
+ #pragma unroll
+ for(int rr=0;rr<2;++rr){
+  const int q=q0+r0+8*rr;
+  if(q<N)
+   #pragma unroll
+   for(int i=0;i<4;++i)
+    *reinterpret_cast<uint32_t*>(out+(size_t(a)*N+q)*ldd+h*32+8*i+c0)=
+      pack(dq[4*i+2*rr]*0.17677669529663687f,dq[4*i+2*rr+1]*0.17677669529663687f);
+ }
+}
+#else
 // lattn_dq.cu — dQ of the AF3 windowed atom attention on tcgen05 (sm_100a), the query-centric mirror of lattn_dkv.cu.
 //
 //   P = exp2(S - LSE)    dP = dO V^T    dS = P (dP - D)    dQ = dS K / sqrt(32)     (bf16 into dq[row, h * 32 + d], row stride ldd)
@@ -190,3 +281,4 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
   tc_fence_before(); __syncthreads(); tc_fence_after();
   if (warp == 0) tmem_dealloc(tm, 512);
 }
+#endif

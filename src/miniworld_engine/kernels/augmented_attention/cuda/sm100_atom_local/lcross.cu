@@ -117,8 +117,10 @@ local_adaln1_extra(const __nv_bfloat16* __restrict__ a, const __nv_bfloat16* __r
     st4(dmod + (size_t)row * 6 * DM + lane * 4, u);
     st4(dmod + (size_t)row * 6 * DM + DM + lane * 4, v);
   }
+#if !defined(ATOM_HOPPER)
 #pragma unroll
   for (int i = 0; i < 4; ++i) atomicAdd(dbias + lane * 4 + i, acc[i]);
+#endif
 }
 
 // dc = LN backward of (dcn * gamma); dgamma += sum over rows of dcn * LN(c)
@@ -143,11 +145,56 @@ local_cond_ln_bwd(const __nv_bfloat16* __restrict__ c, const __nv_bfloat16* __re
     for (int i = 0; i < 4; ++i) o[i] = rstd * (dl[i] - m1 - x[i] * m2);
     st4(dc + (size_t)row * DM + lane * 4, o);
   }
+#if defined(ATOM_HOPPER)
+  __shared__ float partial[8][128];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) partial[threadIdx.x >> 5][lane * 4 + i] = acc[i];
+  __syncthreads();
+  if (threadIdx.x < 128) {
+    float value = 0.f;
+#pragma unroll
+    for (int w = 0; w < 8; ++w) value += partial[w][threadIdx.x];
+    dgamma[size_t(blockIdx.x) * 128 + threadIdx.x] = value;
+  }
+#else
 #pragma unroll
   for (int i = 0; i < 4; ++i) atomicAdd(dgamma + lane * 4 + i, acc[i]);
+#endif
 }
 
 #if defined(ATOM_HOPPER)
+// Fixed-order partial reductions preserve the cross-KV parameter gradients.
+extern "C" __global__ void local_kv_bias_part_sm90(const __nv_bfloat16* src,float* part,int M) {
+ int c=threadIdx.x;
+ float value=0.f;
+ for(int r=blockIdx.x;r<M;r+=gridDim.x)value+=__bfloat162float(src[size_t(r)*256+c]);
+ part[size_t(blockIdx.x)*128+c]=value;
+}
+extern "C" __global__ void local_reduce_columns_sm90(const float* part,float* out,int count) {
+ int c=threadIdx.x;
+ float value=0.f;
+ for(int r=0;r<count;++r)value+=part[size_t(r)*128+c];
+ out[c]=value;
+}
+extern "C" __global__ void local_zero_kv_sm90(__nv_bfloat16* dp,int M) {
+ for(size_t i=size_t(blockIdx.x)*blockDim.x+threadIdx.x;i<size_t(M)*256;i+=size_t(gridDim.x)*blockDim.x)
+  dp[(i/256)*512+128+i%256]=__float2bfloat16_rn(0.f);
+}
+extern "C" __global__ void local_add_cond_sm90(__nv_bfloat16* dc,const __nv_bfloat16* extra,int M) {
+ for(size_t i=size_t(blockIdx.x)*blockDim.x+threadIdx.x;i<size_t(M)*128;i+=size_t(gridDim.x)*blockDim.x)
+  dc[i]=__float2bfloat16_rn(__bfloat162float(dc[i])+__bfloat162float(extra[i]));
+}
+extern "C" __global__ void local_cross_grad_pack_sm90(const float* g0,const float* g1,const float* g2,const float* g3,
+ void* o0,void* o1,void* o2,void* o3,int bfmask) {
+ for(int i=blockIdx.x*blockDim.x+threadIdx.x;i<33024;i+=gridDim.x*blockDim.x){
+  const int j=i<128?0:i<16512?1:i<16640?2:3;
+  const int offset=i-(j==0?0:j==1?128:j==2?16512:16640);
+  const float* src=j==0?g0:j==1?g1:j==2?g2:g3;
+  void* dst=j==0?o0:j==1?o1:j==2?o2:o3;
+  if(bfmask&(1<<j))reinterpret_cast<__nv_bfloat16*>(dst)[offset]=__float2bfloat16_rn(src[offset]);
+  else reinterpret_cast<float*>(dst)[offset]=src[offset];
+ }
+}
 extern "C" __global__ void local_kv_pack_sm90(const void* gamma,const void* ws,const void* bias,const void* wb,
  __nv_bfloat16* wm,float* bs,float* gg,int bfmask) {
  int i=blockIdx.x*blockDim.x+threadIdx.x;

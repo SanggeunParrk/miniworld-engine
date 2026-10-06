@@ -86,10 +86,14 @@ def _load(name: str, device_index: int):
 
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
     hopper = _hopper(device_index)
-    if hopper and name in ("dq", "dkv"):
-        raise NotImplementedError("Local Hopper backward has not been implemented")
     if hopper and name == "fwd":
         stem, func, smem = "lattn_fwd", "local_attn_fwd_sm90", 57376
+    elif hopper and name in ("dq", "dkv"):
+        stem, func, smem = f"lattn_{name}", f"local_attn_{name}_sm90", 65568
+    elif hopper and name == "db_samples":
+        stem, func, smem = "lattn_dkv", "local_bias_samples_sm90", 0
+    elif hopper and name in ("kv_bias_part", "reduce_columns", "zero_kv", "add_cond", "cross_grad_pack"):
+        stem, func, smem = "lcross", f"local_{name}_sm90", 0
     elif name == "kv_pack":
         stem, func, smem = "lcross", "local_kv_pack_sm90", 0
     else:
@@ -176,6 +180,18 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     nwin = nwindows(N)
     d = _dev(q)
     ldd = dkv.stride(0)
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    if _hopper(d):
+        if N % 64 or any(t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (q, k, v, do)):
+            raise ValueError("Local Hopper backward requires contiguous bf16 operands and padded N divisible by 64")
+        km = None if kmask is None else kmask.contiguous()
+        dbias = torch.empty(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
+        partial = torch.empty(A, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
+        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v, do))
+        _load("dq", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, lse, dd, dkv, int(ldd), int(N), int(A))
+        _load("dkv", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, lse, dd, dkv, partial, int(ldd), int(N), int(A))
+        _load("db_samples", d)((min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1), (256, 1, 1), partial, dbias, int(N), int(A))
+        return dbias
     km = None if kmask is None else kmask.to(torch.uint8).contiguous()
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
@@ -266,8 +282,39 @@ def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5):
     M = c.shape[0]
     dc = torch.empty_like(c)
     d = _dev(c)
-    _load("cln_b", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), c, dcn, gamma.float().contiguous(), dc, dgamma, int(M), float(eps))
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    nb = min(nsm(d) * 4, (M + 7) // 8)
+    partial = torch.empty(nb, DM, device=c.device, dtype=torch.float32) if _hopper(d) else dgamma
+    _load("cln_b", d)((nb, 1, 1), (256, 1, 1), c, dcn, gamma.float().contiguous(), dc, partial, int(M), float(eps))
+    if _hopper(d):
+        _load("reduce_columns", d)((1, 1, 1), (128, 1, 1), partial, dgamma, int(nb))
     return dc
+
+
+def kv_bias_hopper(dmkv):
+    d = _dev(dmkv)
+    partial = torch.empty(64, DM, device=dmkv.device, dtype=torch.float32)
+    out = torch.empty(DM, device=dmkv.device, dtype=torch.float32)
+    _load("kv_bias_part", d)((64, 1, 1), (128, 1, 1), dmkv, partial, int(dmkv.shape[0]))
+    _load("reduce_columns", d)((1, 1, 1), (128, 1, 1), partial, out, 64)
+    return out
+
+
+def zero_kv_hopper(dp):
+    _load("zero_kv", _dev(dp))((256, 1, 1), (256, 1, 1), dp, int(dp.shape[0]))
+
+
+def add_cond_hopper(dc, extra):
+    _load("add_cond", _dev(dc))((256, 1, 1), (256, 1, 1), dc, extra, int(dc.shape[0]))
+
+
+def cross_grad_pack_hopper(grads, weights):
+    if len(grads) != 4 or any(g.dtype != torch.float32 or not g.is_contiguous() for g in grads):
+        raise ValueError("Local Hopper cross gradient pack requires four contiguous FP32 gradients")
+    out = [torch.empty_like(w) for w in weights]
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    _load("cross_grad_pack", _dev(weights[0]))((128, 1, 1), (256, 1, 1), *grads, *out, int(bfmask))
+    return out
 
 
 def kv_pack_hopper(weights, packed_pre):
