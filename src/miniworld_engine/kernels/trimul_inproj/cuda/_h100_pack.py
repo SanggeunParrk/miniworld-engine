@@ -107,3 +107,24 @@ def pair_mask(token, length, device):
     out = torch.empty((length, length), device=device, dtype=torch.bfloat16)
     _launch("mw_aux_mask", ((length*length+255)//256, 1, 1), [token, out, length])
     return out
+
+
+def training_pair_mask(mask, length, device):
+    """Owned FP32 pair mask, built directly from token/pair/absent masks."""
+    out = torch.empty((length, length), device=device, dtype=torch.float32)
+    absent = mask is None or mask.numel() == 0
+    if not absent and (not mask.is_contiguous() or mask.dtype not in
+                       (torch.bool, torch.bfloat16, torch.float32)
+                       or mask.numel() not in (length, length * length)):
+        raise ValueError("native TriMul mask requires contiguous token or square pair data")
+    kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
+    token = int(not absent and mask.numel() == length)
+    _launch("mw_aux_train_mask", ((length*length+255)//256, 1, 1),
+            [None if absent else mask, out, length, kind, token])
+    return out
+
+
+def training_unit_scale(pair):
+    out = torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
+    _launch("mw_aux_unit_scale", ((out.numel()+255)//256, 1, 1), [out, out.numel()])
+    return out
