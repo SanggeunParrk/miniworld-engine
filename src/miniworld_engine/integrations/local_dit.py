@@ -285,7 +285,8 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     a, _, n0, _ = single.shape
     n = _padded_length(n0)
     m = a * n
-    owned = _owned_blas_enabled(single, save)
+    owned = (_owned_blas_enabled(single, save)
+             and (a, n0) in ((5, 8192), (48, 4096), (48, 8192)))
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
         packed_infer = (not save and cross and a == 5 and n0 in (2048, 4096)
@@ -314,8 +315,9 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
 
 def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
     """Opt-in graph workspace ownership; defaults require paired qualification."""
-    return (training and single.shape[2] in (4096, 8192)
-            and torch.cuda.get_device_capability(single.device) == (9, 0)
+    scope = (training and single.shape[2] in (4096, 8192)) or (
+        not training and (single.shape[0], single.shape[2]) == (48, 4096))
+    return (scope and torch.cuda.get_device_capability(single.device) == (9, 0)
             and os.environ.get("MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS", "0") == "1")
 
 
