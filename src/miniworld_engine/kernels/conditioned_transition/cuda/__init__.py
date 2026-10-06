@@ -10,6 +10,7 @@ head-major (a fused WMMA LayerNorm + projection kernel measured 3.4-3.6x slower 
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 
 import torch
@@ -43,11 +44,14 @@ def available() -> bool:
     return True
 
 
-def token_pack(weights, heads, qk, qs):
+def token_pack(weights, heads, qk, qs, dtype=torch.bfloat16):
+    if dtype is torch.float32 or os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", "0") == "1":
+        return _ext().token_pack_vector(weights, int(heads), bool(qk), float(qs), dtype is torch.float32)
     return _ext().token_pack(weights, int(heads), bool(qk), float(qs))
 
 
 _TOKEN_PACKS: dict = {}
+_TOKEN_STREAMS: dict = {}
 
 
 @functools.lru_cache(maxsize=8)
@@ -69,40 +73,79 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     from ...augmented_attention.cuda import apb
 
     A, B, L, D = single.shape
-    if (torch.is_grad_enabled() or single.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16
+    if (torch.is_grad_enabled() or single.dtype not in (torch.bfloat16, torch.float32) or pair.dtype != single.dtype
         or B != 1 or D != 768 or heads != 16 or L % 128 or cond.shape[-1] != 384
         or tuple(pair.shape) != (1, L, L, 128) or not pair.is_contiguous()
         or torch.cuda.get_device_capability(single.device) != (9, 0)):
-        raise ValueError("Hopper token CUDA candidate requires inference BF16 bucketed 768/384/128, 16 heads")
+        raise ValueError("Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768/384/128, 16 heads")
     qs = math.log2(math.e) / math.sqrt(48)
-    key = (qk, heads, *((w.data_ptr(), w._version) for w in weights))
-    packed = _capture.lookup(_TOKEN_PACKS, key, lambda: (token_pack(weights, heads, qk, qs), weights), limit=8)[0]
-    w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, _, ws, nq, nk, wab = packed
+    fp32 = single.dtype is torch.float32
+    asynchronous = os.environ.get("MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC", "0") == "1"
+    key = (asynchronous, qk, heads, single.dtype, os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", "0"), *((w.data_ptr(), w._version) for w in weights))
+    def prepare():
+        if not asynchronous:
+            return token_pack(weights, heads, qk, qs, single.dtype), weights, None, None
+        idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+        if idx not in _TOKEN_STREAMS:
+            _TOKEN_STREAMS[idx] = torch.cuda.Stream(device=single.device)
+        stream = _TOKEN_STREAMS[idx]
+        out = _ext().token_alloc90(weights, heads, qk, fp32)
+        stream.wait_stream(torch.cuda.current_stream(single.device))
+        cond_ready, matrix_ready = torch.cuda.Event(), torch.cuda.Event()
+        with torch.cuda.stream(stream):
+            _ext().token_stage90(weights, out, heads, qk, qs, fp32, 0, 4)
+            cond_ready.record(stream)
+            _ext().token_stage90(weights, out, heads, qk, qs, fp32, 5, 13)
+            matrix_ready.record(stream)
+        _ext().token_stage90(weights, out, heads, qk, qs, fp32, 4, 5)
+        return out, weights, cond_ready, matrix_ready
+    packed, _, cond_ready, matrix_ready = _capture.lookup(_TOKEN_PACKS, key, prepare, limit=8)
+    w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
     mask = None if mask is None else mask.reshape(L)
     # The augmented-attention module fills fully masked rows with a finite
     # negative value, so its reference softmax is uniform on that edge.
     # AttentionPairBias has a separate zero-probability reference contract.
-    bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+    if fp32:
+        zh = single.new_empty((L * L, 128))
+        _ext().layernorm128_rows(pair.view(L * L, 128), zh, 1e-5, True)
+        bias = torch.mm(wf, zh.t()).view(heads, L, L)
+        if mask is not None:
+            _ext().token_mask90(bias, mask)
+    else:
+        bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0, 0] if shared else cond.reshape(-1, 384)
     P = c.shape[0]
     cn = single.new_empty((P, 384)); cc = torch.empty_like(cn)
     cond_rows(c, cn, cc, 1e-5)
+    if cond_ready is not None:
+        torch.cuda.current_stream(single.device).wait_event(cond_ready)
     g1 = torch.addmm(b1, cn, w1.t()).view(P, 4, D)
     g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
     M = A * L
     x = single.new_empty((M, D), dtype=torch.float32)
     xa = single.new_empty((M, D))
     adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, 1e-5)
-    qkvg = torch.addmm(bqkvg, xa, wqkvg.t())
+    if matrix_ready is not None:
+        torch.cuda.current_stream(single.device).wait_event(matrix_ready)
+    qkvg = (torch.addmm(bqkvg[:3 * D], xa, wqkvg[:3 * D].t()) if fp32
+            else torch.addmm(bqkvg, xa, wqkvg.t()))
     if qk:
         qknorm_rows(qkvg, nq, nk, eq, ek, D)
-    attention.gated_inference(qkvg, bias, 0, A)
+    if fp32:
+        vt = torch.mm(wqkvg[3 * D:], xa.t())
+        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D)
+    else:
+        attention.gated_inference(qkvg, bias, 0, A)
     y = torch.mm(qkvg[:, :D], wo.t())
     resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5)
     h = single.new_empty((M, ws.shape[1]))
-    op = _token_swiglu(single.device.index)
-    op.ext.gemm_swiglu(xa, wab, h, op.nsm)
+    if fp32:
+        ab = torch.mm(xa, wab_fp32.t())
+        swiglu_rows(ab, h)
+    else:
+        op = _token_swiglu(single.device.index)
+        op.ext.gemm_swiglu(xa, wab, h, op.nsm)
     y = torch.mm(h, ws.t())
     out = torch.empty_like(xa)
     resgate_out_rows(x, y, g2[:, 1], out, P)

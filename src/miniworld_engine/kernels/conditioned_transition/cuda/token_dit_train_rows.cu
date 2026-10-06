@@ -32,7 +32,11 @@ using bf = __nv_bfloat16;
 #ifndef TD_HD
 #define TD_HD 48
 #endif
-constexpr int D = TD_D, NT = D / 4, DC = 384, NTC = DC / 4, RPB = 8, HD = TD_HD;
+#ifndef TD_RPB
+#define TD_RPB 8
+#endif
+constexpr int D = TD_D, NT = D / 4, DC = 384, NTC = DC / 4, RPB = TD_RPB, HD = TD_HD;
+static_assert(RPB == 1 || RPB == 2 || RPB == 4 || RPB == 8, "rows per block");
 constexpr int HT = HD / 4, NHH = D / HD;                                   // threads per head, heads
 static_assert(D % HD == 0 && NT % 32 == 0, "token DiT train rows: layout");
 
@@ -57,13 +61,13 @@ __device__ __forceinline__ void part_store(float* part, long stride, float4 v) {
 // ------------------------------------------------------------------------------------------------------------- forward
 template <typename CT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT* __restrict__ CHAT, AT* __restrict__ CBF,
-    float2* __restrict__ CST, int M, float eps) {
+    float2* __restrict__ CST, int M, float eps, int Crows = 0) {
   __shared__ float red[NTC / 32];
   const int col = threadIdx.x * 4;
   for (int i = 0; i < RPB; ++i) {
     const long r = (long)blockIdx.x * RPB + i;
     if (r >= M) break;
-    const float4 c = V4<CT>::load(C + r * DC + col);
+    const float4 c = V4<CT>::load(C + (Crows ? r % Crows : r) * DC + col);
     const float mean = block_sum<NTC>(sum4(c), red) / DC;
     const float4 d = make_float4(c.x - mean, c.y - mean, c.z - mean, c.w - mean);
     const float rstd = rsqrtf(block_sum<NTC>(sum4(mul4(d, d)), red) / DC + eps);
@@ -360,13 +364,13 @@ __global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* __restrict__ DXA, 
 
 template <typename CT, typename OT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_bwd_k(const AT* __restrict__ DCHAT, const AT* __restrict__ DCG, const CT* __restrict__ C,
-    const float2* __restrict__ CST, OT* __restrict__ DCO, int M) {
+    const float2* __restrict__ CST, OT* __restrict__ DCO, int M, int Crows = 0) {
   __shared__ float red[NTC / 32];
   const int col = threadIdx.x * 4;
   for (int i = 0; i < RPB; ++i) {
     const long r = (long)blockIdx.x * RPB + i;
     if (r >= M) break;
-    const float4 dch = V4<AT>::load(DCHAT + r * DC + col), c = V4<CT>::load(C + r * DC + col);
+    const float4 dch = V4<AT>::load(DCHAT + r * DC + col), c = V4<CT>::load(C + (Crows ? r % Crows : r) * DC + col);
     const float2 st = CST[r];
     const float4 ch = make_float4((c.x - st.x) * st.y, (c.y - st.x) * st.y, (c.z - st.x) * st.y, (c.w - st.x) * st.y);
     const float m1 = block_sum<NTC>(sum4(dch), red) / DC, m2 = block_sum<NTC>(sum4(mul4(dch, ch)), red) / DC;
@@ -657,9 +661,242 @@ void transpose(at::Tensor src, at::Tensor dst) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+
+struct TrainPack90 {
+  const void* src[25]; bool sf[25];
+  void* dst[21]; bool df[21]; int size[21], blocks[21];
+  bool qk;
+};
+__device__ __forceinline__ float4 train_read4(const TrainPack90& p,int j,int i) {
+ return p.sf[j]?V4<float>::load((const float*)p.src[j]+i):V4<bf>::load((const bf*)p.src[j]+i);
+}
+__global__ void train_pack90_k(TrainPack90 p) {
+ int block=blockIdx.x,o=0;
+ for(;o<21;++o){if(block<p.blocks[o])break;block-=p.blocks[o];}
+ if(o==21)return;
+ int i=(block*256+threadIdx.x)*4;
+ if(i>=p.size[o])return;
+ float4 v=make_float4(0,0,0,0);
+ if(o==0||o==1)v=train_read4(p,o==0?6:14,i);
+ else if(o==2||o==3) {
+  int grp=i/(D*DC),j=i%(D*DC),c=i%DC;
+  v=train_read4(p,grp==0?7:grp==1?9:grp==2?15:17,j);
+  if(o==3)v=mul4(v,train_read4(p,grp<2?6:14,c));
+ }else if(o==4)v=train_read4(p,i/(D*DC)==0?10:18,i%(D*DC));
+ else if(o>=5&&o<=8)v=train_read4(p,o==5?8:o==6?16:o==7?11:19,i);
+ else if(o==9){int grp=i/(D*D);v=train_read4(p,grp==0?0:grp==1?2:grp==2?3:4,i%(D*D));}
+ else if(o==10){if(i<D)v=train_read4(p,1,i);}
+ else if(o==11||o==12)v=p.qk?train_read4(p,o==11?23:24,i):make_float4(1,1,1,1);
+ else if(o==13)v=train_read4(p,12,i);
+ else if(o==14)v=train_read4(p,13,i);
+ else if(o>=15&&o<=17){
+  v=mul4(train_read4(p,13,i),train_read4(p,12,i%128));
+  if(o==17)v=mul4(v,make_float4(1.4426950408889634f,1.4426950408889634f,1.4426950408889634f,1.4426950408889634f));
+ }else if(o==18)v=train_read4(p,5,i);
+ else if(o==19)v=train_read4(p,i/(2*D*D)==0?20:21,i%(2*D*D));
+ else v=train_read4(p,22,i);
+ if(p.df[o])V4<float>::store((float*)p.dst[o]+i,v);
+ else V4<bf>::store((bf*)p.dst[o]+i,v);
+}
+std::vector<at::Tensor> train_pack90(std::vector<at::Tensor> weights,bool qk,bool fp32) {
+ TORCH_CHECK(D==768&&HD==48&&weights.size()==(qk?25:23),"native H100 token pack: 768/48 weights");
+ const at::cuda::CUDAGuard guard(weights[0].device());
+ TrainPack90 p{};p.qk=qk;
+ for(int j=0;j<(int)weights.size();++j){
+  TORCH_CHECK(weights[j].is_cuda()&&weights[j].is_contiguous()&&weights[j].device()==weights[0].device()&&(weights[j].scalar_type()==at::kFloat||weights[j].scalar_type()==at::kBFloat16),"native token weight layout/dtype");
+  p.src[j]=weights[j].data_ptr();p.sf[j]=weights[j].scalar_type()==at::kFloat;
+ }
+ std::vector<std::vector<int64_t>> shapes={{DC},{DC},{4*D,DC},{4*D,DC},{2*D,DC},{D},{D},{D},{D},
+ {4*D,D},{4*D},{HD},{HD},{128},{NHH,128},{NHH,128},{NHH,128},{NHH,128},{D,D},{4*D,D},{D,2*D}};
+ const int aliases[21]={6,14,-1,-1,-1,8,16,11,19,-1,-1,qk?23:-1,qk?24:-1,12,13,-1,-1,-1,5,-1,22};
+ std::vector<at::Tensor> out;int total=0;
+ for(int o=0;o<21;++o){
+  bool isact=(o==3||o==4||o==9||o==10||o==16||o==17||o>=18);
+  auto dt=isact&&!fp32?at::kBFloat16:at::kFloat;p.df[o]=dt==at::kFloat;
+  const int a=aliases[o];
+  if(a>=0&&weights[a].scalar_type()==dt){out.push_back(weights[a]);continue;}
+  out.push_back(at::empty(shapes[o],weights[0].options().dtype(dt)));
+  p.dst[o]=out.back().data_ptr();p.size[o]=out.back().numel();p.blocks[o]=(p.size[o]+1023)/1024;total+=p.blocks[o];
+ }
+ train_pack90_k<<<total,256,0,S()>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+
+
+struct TrainGrad90 {
+ const float* src[25]; void* dst[25]; bool fp32[25]; int size[25],blocks[25];
+ const float* dwn; const float* w1; const float* w2; const float* allp; const float* lnp;
+ const float* dwf; const float* wb; const float* wp;
+ int n,parts,lnparts;
+};
+__global__ void train_lnw_parts90_k(const float* __restrict__ dwn,const float* __restrict__ raw,float* __restrict__ part) {
+ int c=threadIdx.x*4,r0=blockIdx.x*16;float4 v=make_float4(0,0,0,0);
+ #pragma unroll
+ for(int r=0;r<16;++r)v=add4(v,mul4(V4<float>::load(dwn+(r0+r)*DC+c),V4<float>::load(raw+(r0+r)*DC+c)));
+ V4<float>::store(part+blockIdx.x*DC+c,v);
+}
+
+__global__ void train_reduce_parts90_k(const float* allp,const float* lnp,float* out,float* lout,int rows,int width) {
+  const int c=(blockIdx.x*256+threadIdx.x)*4;
+  if(c>=width)return;
+  const int g=blockIdx.y,r0=g*16;float4 v=make_float4(0,0,0,0);
+  if(r0<rows){
+    #pragma unroll
+    for(int r=0;r<16;++r)if(r0+r<rows)v=add4(v,V4<float>::load(allp+(r0+r)*7*D+c));
+    V4<float>::store(out+g*7*D+c,v);
+  }
+  // LayerNorm-affine partials: 96 rows per conditioning branch.
+  if(blockIdx.x==0&&c<DC&&g<12){
+    float4 z=make_float4(0,0,0,0);
+    #pragma unroll
+    for(int r=0;r<16;++r)z=add4(z,V4<float>::load(lnp+(g*16+r)*DC+c));
+    V4<float>::store(lout+g*DC+c,z);
+  }
+}
+
+__global__ void train_final90_k(TrainGrad90 p) {
+ int block=blockIdx.x,o=0;
+ for(;o<p.n;++o){if(block<p.blocks[o])break;block-=p.blocks[o];}
+ if(o==p.n)return;
+ int i=(block*256+threadIdx.x)*4;if(i>=p.size[o])return;
+ float4 v=make_float4(0,0,0,0);
+ if(o==6||o==14){
+  int off=o==6?0:p.lnparts;
+  for(int r=0;r<p.lnparts;++r)v=add4(v,V4<float>::load(p.lnp+(r+off)*DC+i));
+ }else if(o==7||o==9||o==15||o==17) {
+  int group=o==7?0:o==9?1:o==15?2:3;
+  v=mul4(V4<float>::load(p.dwn+group*D*DC+i),V4<float>::load((group<2?p.w1:p.w2)+i%DC));
+ }else if(o==1||o==8||o==11||o==16||o==19) {
+  int group=o==1?4:o==8?3:o==11?2:o==16?1:0;
+  for(int r=0;r<p.parts;++r)v=add4(v,V4<float>::load(p.allp+r*7*D+group*D+i));
+ }else if(o==12){
+  for(int h=0;h<NHH;++h)v=add4(v,mul4(V4<float>::load(p.dwf+h*128+i),V4<float>::load(p.wb+h*128+i)));
+ }else if(o==13)v=mul4(V4<float>::load(p.dwf+i),V4<float>::load(p.wp+i%128));
+ else if(o==23||o==24){
+  for(int h=0;h<NHH;++h)for(int r=0;r<p.parts;++r)
+    v=add4(v,V4<float>::load(p.allp+r*7*D+(o==23?5:6)*D+h*HD+i));
+ }else v=V4<float>::load(p.src[o]+i);
+ if(p.fp32[o])V4<float>::store((float*)p.dst[o]+i,v);
+ else V4<bf>::store((bf*)p.dst[o]+i,v);
+}
+std::vector<at::Tensor> train_final90(std::vector<at::Tensor> params,std::vector<at::Tensor> grads,
+ at::Tensor dwn,at::Tensor raw,at::Tensor w1,at::Tensor w2,at::Tensor allp,at::Tensor dwf,at::Tensor wb,at::Tensor wp,bool hierarchical=false) {
+ TORCH_CHECK(D==768&&HD==48&&(params.size()==23||params.size()==25)&&grads.size()==params.size(),"native token grad layout");
+ const at::cuda::CUDAGuard guard(dwn.device());
+ auto parts=at::empty({4*D/16,DC},dwn.options());
+ train_lnw_parts90_k<<<4*D/16,NTC,0,S()>>>(CP<float>(dwn),CP<float>(raw),P<float>(parts));
+ auto rp=allp,lp=parts;
+ if(hierarchical){
+   const int groups=(allp.size(0)+15)/16;
+   rp=at::empty({groups,7*D},allp.options());lp=at::empty({12,DC},parts.options());
+   train_reduce_parts90_k<<<dim3(((params.size()==25?7:5)*D+1023)/1024,std::max(groups,12)),256,0,S()>>>(
+       CP<float>(allp),CP<float>(parts),P<float>(rp),P<float>(lp),allp.size(0),(params.size()==25?7:5)*D);
+ }
+ TrainGrad90 p{};p.n=params.size();p.parts=rp.size(0);p.lnparts=hierarchical?6:2*D/16;
+ p.dwn=CP<float>(dwn);p.w1=CP<float>(w1);p.w2=CP<float>(w2);p.allp=CP<float>(rp);
+ p.lnp=CP<float>(lp);p.dwf=CP<float>(dwf);p.wb=CP<float>(wb);p.wp=CP<float>(wp);
+ std::vector<at::Tensor> out;int total=0;
+ for(int o=0;o<p.n;++o){
+  out.push_back(at::empty(params[o].sizes(),params[o].options()));
+  TORCH_CHECK(grads[o].scalar_type()==at::kFloat&&grads[o].is_contiguous(),"native gradient source");
+  p.src[o]=CP<float>(grads[o]);p.dst[o]=out.back().data_ptr();p.fp32[o]=out.back().scalar_type()==at::kFloat;
+  p.size[o]=out.back().numel();p.blocks[o]=(p.size[o]+1023)/1024;total+=p.blocks[o];
+ }
+ train_final90_k<<<total,256,0,S()>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+
+
+__device__ __forceinline__ int perm90(int x){return (x&~7)+4*(x&1)+((x&7)>>1);}
+__device__ __forceinline__ int inv90(int x){return (x&~7)+2*(x&3)+((x&7)>>2);}
+template<typename AT> __global__ void train_bias90_k(const AT* in,AT* out,const bool* mask,float* km,float* kmp,int A,int L,bool perm) {
+ long i=(long)blockIdx.x*256+threadIdx.x,n=(long)NHH*L*L;
+ if(i<n&&perm){int k=i%L;out[i]=in[i-k+perm90(k)];}
+ if(i<A*L){int k=i%L;km[i]=(!mask||mask[k])?0.f:-1e30f;if(kmp)kmp[i]=(!mask||mask[perm90(k)])?0.f:-1e30f;}
+}
+std::vector<at::Tensor> train_bias90(at::Tensor bias,c10::optional<at::Tensor> mask,int64_t A,bool perm) {
+ const at::cuda::CUDAGuard guard(bias.device());const int L=bias.size(1);
+ TORCH_CHECK(bias.is_contiguous()&&bias.dim()==3&&bias.size(0)==NHH&&bias.size(2)==L,"native bias90 layout");
+ auto out=perm?at::empty_like(bias):bias;
+ auto km=at::empty({A,L},bias.options().dtype(at::kFloat));
+ auto kmp=perm?at::empty_like(km):km;
+ const bool* mp=mask&&mask->defined()?CP<bool>(*mask):nullptr;
+ const int64_t count=perm?std::max(bias.numel(),A*L):A*L;
+ TDT_DISPATCH(bias.scalar_type(),AT,[&]{
+  train_bias90_k<AT><<<(count+255)/256,256,0,S()>>>(CP<AT>(bias),P<AT>(out),mp,P<float>(km),perm?P<float>(kmp):nullptr,A,L,perm);
+ });C10_CUDA_KERNEL_LAUNCH_CHECK();return {out,km,kmp};
+}
+__global__ void train_tf32_bwd_layout90_k(const float* bp,const float* lse,const float* dd,float* bt,float* lp,float* dp,int A,int L) {
+ long i=(long)blockIdx.x*256+threadIdx.x;
+ if(i<(long)NHH*L*L){int h=i/(L*L),k=(i/L)%L,q=i%L;bt[i]=bp[((long)h*L+perm90(q))*L+inv90(k)];}
+ if(i<A*NHH*L){int q=i%L;lp[i]=lse[i-q+perm90(q)];dp[i]=dd[i-q+perm90(q)];}
+}
+std::vector<at::Tensor> train_tf32_bwd_layout90(at::Tensor bp,at::Tensor lse,at::Tensor dd) {
+ const at::cuda::CUDAGuard guard(bp.device());const int A=lse.size(0),L=bp.size(1);
+ auto bt=at::empty_like(bp),lp=at::empty_like(lse),dp=at::empty_like(dd);
+ train_tf32_bwd_layout90_k<<<(std::max(bp.numel(),lse.numel())+255)/256,256,0,S()>>>(CP<float>(bp),CP<float>(lse),CP<float>(dd),P<float>(bt),P<float>(lp),P<float>(dp),A,L);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return {bt,lp,dp};
+}
+template<typename AT> __global__ void train_db_reduce90_k(const float* in,AT* out,int A,int L) {
+ __shared__ float tile[32][33];
+ const int x=threadIdx.x%32,y=threadIdx.x/32;
+ const int q0=blockIdx.x*32,k0=blockIdx.y*32,h=blockIdx.z;
+ for(int j=y;j<32;j+=8){
+  float v=0.f;
+  for(int a=0;a<A;++a)v+=in[(((long)a*NHH+h)*L+k0+j)*L+q0+x];
+  tile[j][x]=v;
+ }
+ __syncthreads();
+ for(int j=y;j<32;j+=8)out[((long)h*L+q0+j)*L+k0+x]=(AT)tile[x][j];
+}
+__global__ void train_db_tf32_reduce90_k(const float* in,float* out,int A,int L) {
+ long i=(long)blockIdx.x*256+threadIdx.x,n=(long)NHH*L*L;
+ if(i>=n)return;
+ int k=i%L;long j=i-k+inv90(k);float v=0.f;
+ for(int a=0;a<A;++a)v+=in[a*n+j];
+ out[i]=v;
+}
+at::Tensor train_db_reduce90(at::Tensor db,bool fp32) {
+ const at::cuda::CUDAGuard guard(db.device());int A=db.size(0),L=db.size(2);
+ TORCH_CHECK(db.dim()==4&&db.is_contiguous()&&db.scalar_type()==at::kFloat&&db.size(1)==NHH&&db.size(3)==L&&L%32==0,"native dBias partial layout");
+ auto out=at::empty({NHH,L,L},db.options().dtype(fp32?at::kFloat:at::kBFloat16));
+ if(fp32)train_db_tf32_reduce90_k<<<(out.numel()+255)/256,256,0,S()>>>(CP<float>(db),P<float>(out),A,L);
+ else train_db_reduce90_k<bf><<<dim3(L/32,L/32,NHH),256,0,S()>>>(CP<float>(db),P<bf>(out),A,L);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+void cond_prep90(at::Tensor c,at::Tensor chat,at::Tensor cbf,at::Tensor cst,double eps) {
+ const int M=chat.size(0),Crows=c.stride(0)==0?c.size(2):M;
+ TORCH_CHECK(c.dim()==4&&c.size(1)==1&&c.size(3)==DC&&c.stride(2)==DC&&c.stride(3)==1,"native cond stride");
+ const at::cuda::CUDAGuard g(c.device());
+ TDT_DISPATCH(chat.scalar_type(),AT,[&]{TDT_DISPATCH(c.scalar_type(),CT,[&]{
+ cond_prep_k<CT,AT><<<blocks(M),NTC,0,S()>>>(CP<CT>(c),P<AT>(chat),P<AT>(cbf),P<float2>(cst),M,(float)eps,Crows);
+ });});C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+void cond_bwd90(at::Tensor dchat,at::Tensor dcg,at::Tensor c,at::Tensor cst,at::Tensor dc) {
+ const int M=dc.size(0),Crows=c.stride(0)==0?c.size(2):M;
+ const at::cuda::CUDAGuard g(c.device());
+ TDT_DISPATCH(dchat.scalar_type(),AT,[&]{TDT_DISPATCH(c.scalar_type(),CT,[&]{TDT_DISPATCH(dc.scalar_type(),OT,[&]{
+ cond_bwd_k<CT,OT,AT><<<blocks(M),NTC,0,S()>>>(CP<AT>(dchat),CP<AT>(dcg),CP<CT>(c),CP<float2>(cst),P<OT>(dc),M,Crows);
+ });});});C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+std::vector<at::Tensor> train_keymask90(c10::optional<at::Tensor> mask,at::Tensor ref,int64_t A,int64_t L,bool perm){
+ const at::cuda::CUDAGuard guard(ref.device());
+ auto km=at::empty({A,L},ref.options().dtype(at::kFloat));auto kmp=perm?at::empty_like(km):km;
+ const bool* mp=mask&&mask->defined()?CP<bool>(*mask):nullptr;
+ train_bias90_k<float><<<(A*L+255)/256,256,0,S()>>>(nullptr,nullptr,mp,P<float>(km),perm?P<float>(kmp):nullptr,A,L,false);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return {km,kmp};
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("train_pack90", &train_pack90);
+  m.def("train_final90", &train_final90);
+  m.def("train_bias90", &train_bias90);
+  m.def("train_keymask90", &train_keymask90);
+  m.def("train_tf32_bwd_layout90", &train_tf32_bwd_layout90);
+  m.def("train_db_reduce90", &train_db_reduce90);
+  m.def("cond_prep90", &cond_prep90);
+  m.def("cond_bwd90", &cond_bwd90);
   m.def("transpose", &transpose);
   m.def("cond_prep", &cond_prep);
   m.def("adaln_a", &adaln_a);

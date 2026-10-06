@@ -16,27 +16,32 @@ _dir = Path(__file__).parent
 
 
 @functools.lru_cache(maxsize=None)
-def ext(d: int = 768, hd: int = 48):
+def ext(d: int = 768, hd: int = 48, rpb: int = 8):
     """The row kernels for model width ``d`` and head dim ``hd`` (one build per layout: 768 x 48 / 32 / 64, 1024 x 64)."""
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     assert (d, hd) in ((768, 48), (768, 32), (768, 64), (1024, 64)), (d, hd)
+    assert rpb in (1, 2, 4, 8), rpb
     ensure_cuda_home()
+    hopper = torch.cuda.get_device_capability() == (9, 0)
+    name = "token_dit_train_rows_cuda" if (d, hd) == (768, 48) else f"token_dit_train_rows_cuda_{d}_{hd}"
+    if rpb != 8:
+        name += f"_rpb{rpb}"
     return load_extension(
-        name="token_dit_train_rows_cuda" if (d, hd) == (768, 48) else f"token_dit_train_rows_cuda_{d}_{hd}",
+        name=name,
         sources=[str(_dir / "token_dit_train_rows.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__", f"-DTD_D={d}", f"-DTD_HD={hd}",
-                           *gencodes("80", "90", "100", ptx=("100",))],
+                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__", f"-DTD_D={d}", f"-DTD_HD={hd}", f"-DTD_RPB={rpb}",
+                           *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",)))],
         extra_cflags=["-std=c++17"], verbose=False)
 
 
 RPB = 8          # rows per block of the D-wide kernels (token_dit_train_rows.cu)
 
 
-def partials(M: int, width: int, device) -> torch.Tensor:
+def partials(M: int, width: int, device, rpb: int = RPB) -> torch.Tensor:
     """[blocks, width] buffer for the per-block column sums of a kernel over M rows (every row of it is written)."""
-    return torch.empty((M + RPB - 1) // RPB, width, device=device)
+    return torch.empty((M + rpb - 1) // rpb, width, device=device)
 
 
 __all__ = ["RPB", "ext", "partials"]
