@@ -81,10 +81,17 @@ from miniworld_engine.kernels.swa_dit.triton.forward_fp32 import (
 #: ``pack`` keys an axis only below 4096; an augment count at or above it shares the top key.
 _A_KEY_MAX = 4095
 
-# Accuracy-first native H100 path. Explicit zero retains the legacy diagnostic path.
+# The required shapes retain the accurate faster legacy composition. The native
+# implementation remains available explicitly while its attention regression is open.
 def native_h100_enabled(q):
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
-    return os.environ.get("MINIWORLD_SWA_H100_CUDA_ONLY", "1") == "1" and is_sm90(q.device)
+    override = os.environ.get("MINIWORLD_SWA_H100_CUDA_ONLY")
+    if override is not None:
+        return override == "1" and is_sm90(q.device)
+    if (q.ndim == 3 and q.shape[0] in (1, 5)
+            and q.shape[1] in (1024, 2048, 4096, 8192) and q.shape[2] == 128):
+        return False
+    return is_sm90(q.device)
 
 
 def _native_h100_extension():
