@@ -86,17 +86,19 @@ class Plan:
         self.dw = torch.empty((4, 128, 128), device=x.device, dtype=torch.float32 if d.get("master_weights", False) else x.dtype)
         self.dgam = torch.empty(128, device=x.device)
         self.dbeta = torch.empty_like(self.dgam)
-        self.partw = torch.zeros((self.clusters * 2, 8, 64, 128), device=x.device)
+        from ._h100_pack import zeros_native
+        zeros = zeros_native if T.preserve_d128_training() else torch.zeros
+        self.partw = zeros((self.clusters * 2, 8, 64, 128), device=x.device)
         self.partln = torch.empty(
             (self.clusters * self.consumers, 256), device=x.device
         )
-        self.counts = torch.zeros(2, device=x.device, dtype=torch.int32)
+        self.counts = zeros(2, device=x.device, dtype=torch.int32)
         self.mask = d["mask"].bfloat16().reshape(-1)
         self.ring = torch.empty(
             (self.clusters, self.rings, 65536), device=x.device, dtype=torch.uint8
         )
         self.xring = debug
-        self.flags = torch.zeros(
+        self.flags = zeros(
             (self.clusters, self.rings, 10), device=x.device, dtype=torch.int32
         )
         self.outputs = (self.dx, *self.dw.unbind(), self.dgam, self.dbeta)

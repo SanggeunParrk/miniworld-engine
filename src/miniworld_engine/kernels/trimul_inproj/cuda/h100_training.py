@@ -18,8 +18,10 @@ def _backward_transposes(leaves):
     the column-major storage makes these transposes views."""
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_b7 import front_row_major
 
-    front = [None] * 4 if front_row_major(leaves) else [w.t().contiguous() for w in leaves[1:5]]
-    return front + [leaves[5].t().contiguous()]
+    from ._h100_pack import dense_native
+    copy = dense_native if T.preserve_d128_training() else lambda w:w.contiguous()
+    front = [None] * 4 if front_row_major(leaves) else [copy(w.t()) for w in leaves[1:5]]
+    return front + [copy(leaves[5].t())]
 
 
 def _data(leaves, mask, ds, *, packed=None, for_backward=False):
@@ -32,6 +34,9 @@ def _data(leaves, mask, ds, *, packed=None, for_backward=False):
     if w1 is None:
         w1 = x.new_empty((1024, 128))
         T.pack_into(w1, wl, wlg, wr, wrg)
+    if T.preserve_d128_training() and mask.ndim != 1 and not for_backward:
+        from ._h100_pack import dense_native
+        mask = dense_native(mask.reshape(n,n),torch.float32)
     return dict(
         n=n,
         x=x,
@@ -165,12 +170,13 @@ def backward(
         torch.bmm(ab[128:256], dt[128:], out=dr[128:])
         b7 = B7.Plan(d, dy, dl, dr, dg, xn=xn)
         dx, dwl, dwlg, dwr, dwrg, dgi, dbi = b7()
+        from ._h100_pack import dense_native
         return [
             dx.reshape_as(x),
             b7.dw,
             # Output gate stays row-major for K3. Match its parameter layout
             # here rather than moving the copy into AccumulateGrad/optimizer.
-            dwg.t().contiguous(),
+            dense_native(dwg.t()) if T.preserve_d128_training() else dwg.t().contiguous(),
             dwp,
             dgi,
             dbi,
@@ -186,7 +192,10 @@ class _Training(torch.autograd.Function):
         mask, ds = args[11:]
         weights = leaves[1:7]
         ctx.master = any(w.dtype == torch.float32 for w in weights)
-        if ctx.master:
+        if T.preserve_d128_training():
+            from ._h100_pack import cast_training_weights
+            leaves = [leaves[0],*cast_training_weights(weights),*leaves[7:]]
+        elif ctx.master:
             copies = [torch.empty_like(w, dtype=leaves[0].dtype) for w in weights]
             torch._foreach_copy_(copies, weights)
             leaves = [leaves[0], *copies, *leaves[7:]]
@@ -204,7 +213,11 @@ class _Training(torch.autograd.Function):
         grads = backward(leaves, vals[11], vals[12], list(vals[13:end]), dy, ctx.master)
         if vals[0].shape[-1] == 128:
             grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
-        grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
+        if T.preserve_d128_training():
+            from ._h100_pack import native_training_grads
+            grads = native_training_grads(grads,list(vals[:11]))
+        else:
+            grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
         return (*grads, None, None)
 
 
