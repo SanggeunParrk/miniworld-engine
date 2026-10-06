@@ -297,9 +297,12 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
     """
     E = _rows().ext()
     with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
-        shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "0") == "1"
+        shape = (leaves[-1].shape[0], single.shape[-1])
+        qualified = single.shape[1] in (384, 768) and shape in (
+            (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
+        shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "1" if qualified else "0") == "1"
         convert = E.exact_fp32_inputs_grouped if shadow_io else E.exact_fp32_inputs
-        pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "0"))
+        pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "2" if qualified else "0"))
         if pair_ln not in (0, 1, 2):
             raise ValueError("H100 shadow pair LN mode must be 0, 1, or 2")
         if pair_ln:
