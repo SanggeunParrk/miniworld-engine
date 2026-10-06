@@ -521,6 +521,7 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     a, _, n0, _ = single.shape
     n = _padded_length(n0)
     m = a * n
+    owned = _owned_blas_enabled(single, save)
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
         packed_infer = (not save and cross and a == 5 and n0 in (2048, 4096)
@@ -566,7 +567,8 @@ def _fused_wgrads(spec, weights, names, f32, dev, rows_r):
 
 def _wgrad(dout, x):
     """dout^T x, fp32: the weight gradients stay unrounded for fp32 parameters (an fp32 master); bf16 ones round once, as before."""
-    return torch.mm(dout.t(), x, out_dtype=torch.float32)
+    return (_owned_mm(dout.t(), x, True) if owned else
+            torch.mm(dout.t(), x, out_dtype=torch.float32))
 
 
 def _bwd_fake(dy, single, cond, pair, mask, weights, saved):
@@ -588,6 +590,7 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
     n = _padded_length(n0)
     m = a * n
     dev = single.device
+    owned = _owned_blas_enabled(single, True)
     with torch.cuda.device(dev):
         hopper = rows._hopper(dev.index)
         if hopper and (dy.dtype != BF or dy.device != dev or dy.shape != single.shape or not dy.is_contiguous()):
