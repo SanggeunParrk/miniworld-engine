@@ -134,10 +134,20 @@ def finish_affine_partials(pg, pb, dg, db):
         ((width+columns-1)//columns,1,1), (128,1,1), [pg,pb,dg,db,width,blocks])
 
 
+def fused_wide_glue(width, length, bidirectional=False):
+    """Opt-in live layouts and affine finishing for the six wide D2 cells."""
+    return (length in (384, 768) and (width == 384 or (width == 512 and bidirectional))
+            and T.preserve_wide_training(width)
+            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_FUSED_GLUE") == "1")
+
+
 def fused_d256_glue(width, length, selected=False):
-    return (width == 256 and length == 384
-            and (selected or T.preserve_d256_training())
-            and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FUSED_GLUE", selected))
+    return ((width == 256 and length == 384
+             and (selected or T.preserve_d256_training())
+             and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FUSED_GLUE", selected))
+            or (width == 256 and length == 768 and T.preserve_d256_training()
+                and os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE") == "1")
+            or fused_wide_glue(width, length))
 
 
 def pack_training_pair(dst, stack, weights):
@@ -206,13 +216,13 @@ def owned_training_mask(pair: torch.Tensor,mask: torch.Tensor | None) -> torch.T
         return owned_bf16_mask(mask,pair.shape[1],pair.device)
 
 
-def normalize_into(dst, x, g, b, stats=None):
+def normalize_into(dst, x, g, b, stats=None, *, warp=False):
     if not x.is_contiguous() or x.dtype != torch.bfloat16 or g.dtype != torch.float32 or b.dtype != torch.float32:
         raise ValueError("CUDA input LN requires contiguous BF16 input and FP32 affine")
     width, rows = x.shape[-1], x.numel()//x.shape[-1]
     if width not in (64, 128, 256, 384, 512):
         raise ValueError("Hopper CUDA normalization requires a supported pair width")
-    if os.environ.get("MINIWORLD_TRIMUL_H100_WARP_LN") == "1":
+    if warp or os.environ.get("MINIWORLD_TRIMUL_H100_WARP_LN") == "1":
         _launch("mw_aux_norm_warp", ((rows+7)//8, 1, 1), [x, g, b, dst, stats, width, rows])
     else:
         _launch("mw_aux_norm", (rows, 1, 1), [x, g, b, dst, stats, width])

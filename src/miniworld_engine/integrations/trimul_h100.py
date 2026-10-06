@@ -20,9 +20,9 @@ def _native_buckets_enabled():
 
 
 def _selected_uni_d256(module, pair):
-    """Only the measured outgoing D256/L384 training cell is a new default."""
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import uni_d256_training
-    return (getattr(module, "outgoing", False) and uni_d256_training(pair, True))
+    """Qualified outgoing D256/L384 and D512/L384,768 native defaults."""
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import uni_training
+    return (getattr(module, "outgoing", False) and uni_training(pair, True))
 
 
 def _selected_native_training(module, pair):
@@ -344,7 +344,8 @@ def _wide_inference_ok(module, pair: torch.Tensor) -> bool:
 def serves_single(module, pair: torch.Tensor) -> bool:
     """Qualified single-direction native training contract; inference is separate."""
     return (pair.shape[-1] in SINGLE_TRAINING_WIDTHS
-            and (pair.shape[-1] != 512 or _native_buckets_enabled()) and serves(module, pair))
+            and (pair.shape[-1] != 512 or _native_buckets_enabled()
+                 or _selected_native_training(module, pair)) and serves(module, pair))
 
 
 def _uni_wide_inference_ok(module, pair: torch.Tensor) -> bool:
