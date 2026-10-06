@@ -160,8 +160,8 @@ def _serves_hopper(module, single, cond, pair, mask, compute_dtype):
     require((a.n_head, a.to_query.weight.shape[0], a.ada_ln_in.to_scale.weight.shape[1],
              tr.expand_a.weight.shape[0]) == (NH_, DS_, DC_, 2 * DS_), "128/128/16 widths, four heads, transition n=2")
     lengths = (1024, 2048, 4096)
-    if module.training and torch.is_grad_enabled() and os.environ.get("MINIWORLD_ATOM_DIT_H100_TRAIN_N8192") == "1":
-        # Shape-extension candidate; inference retains its measured contract.
+    if module.training and torch.is_grad_enabled() and os.environ.get("MINIWORLD_ATOM_DIT_H100_TRAIN_N8192", "1") == "1":
+        # Qualified training extension; inference retains its measured contract.
         lengths = (*lengths, 8192)
     require(single.ndim == 4 and single.shape[0] in (1, 5) and single.shape[1] == 1
             and single.shape[2] in lengths and single.shape[3] == DS_,
@@ -298,9 +298,13 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         c2 = _padded(cond, n).reshape(rows, DC_).contiguous()
         mod = sm100.cond_fwd(c2, *wc)
         q, k, v, sg, x1 = sm100.pre_fwd(s2, mod, *wp, save=save)
-        bias, bias_t = sm100.pair_bias_fwd(pair, weights[_GAMMA], weights[_WBIAS], trans=save, n=n, kv=keys)
+        uniform = (sm100._hopper(single.device.index)
+                   and os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM",
+                                      "1" if save and n0 in (4096, 8192) else "0") == "1")
+        bias, bias_t = sm100.pair_bias_fwd(pair, weights[_GAMMA], weights[_WBIAS], trans=save, n=n, kv=keys,
+                                         true_mask=uniform)
         o, lse = sm100.attn_fwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias)
-        sm100.empty_uniform_hopper(keys, v, o, n)
+        sm100.empty_uniform_hopper(keys, v, o, n, force=uniform)
         out, u, a2, x2, t = sm100.post_fwd(s2, o, sg, mod, *wo, save=save)
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
@@ -343,7 +347,9 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         da, du, gated, do = sm100.post_bwd(dab, dy, a2, mod, u, sg, o, wb["WuT"], wb["WoT"], dmod, dp, dd, dbias_cols, n)
         db = sm100.attn_bwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias, bias_t, lse, dd, dp,
                             native_hopper=hopper)
-        sm100.empty_uniform_hopper(_keys(mask), do, dp, n, value_gradient=True)
+        uniform = (hopper and os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM",
+                                             "1" if n0 in (4096, 8192) else "0") == "1")
+        sm100.empty_uniform_hopper(_keys(mask), do, dp, n, value_gradient=True, force=uniform)
         dz, dgamma, dwb = sm100.pair_bias_bwd(pair, weights[_GAMMA], weights[_WBIAS], db, kv=_keys(mask), native_hopper=hopper)
         ds = sm100.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
         dc, cn1, cn2 = sm100.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgparts)
@@ -351,7 +357,8 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         if hopper:
             sm100.finish_columns_hopper(dmod, dp, dgparts, dbias_cols, dbq, dgamma_cond)
             def wgrad(g, x):
-                if os.environ.get("MINIWORLD_ATOM_DIT_H100_OWNED_WGRAD", "0") == "1":
+                if os.environ.get("MINIWORLD_ATOM_DIT_H100_OWNED_WGRAD",
+                                  "1" if n0 in (4096, 8192) else "0") == "1":
                     return sm100.owned_wgrad_hopper(g, x)
                 return torch.mm(g.t(), x, out_dtype=torch.float32)
             dws, dwu, dwo, dwp = wgrad(dt, hh), wgrad(dab, x2), wgrad(du, gated), wgrad(dp, x1)

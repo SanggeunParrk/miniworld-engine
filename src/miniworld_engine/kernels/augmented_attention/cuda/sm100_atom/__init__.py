@@ -49,7 +49,7 @@ SOURCES = ("attn_fwd", "attn_dkv", "attn_dq", "attn_dbias", "attn_dd", "pair_bia
 
 # --------------------------------------------------------------------------------------------------- build
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str, hopper: bool = False) -> str:
+def cubin(stem: str, hopper: bool = False, true_mask: bool = False) -> str:
     """Path of ``<stem>.cu`` built for sm_100a with the sources' default options; rebuilt only when a source or a flag changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
@@ -64,7 +64,7 @@ def cubin(stem: str, hopper: bool = False) -> str:
     flags = (*host, "-std=c++17", "-O3", "-arch=sm_90a" if hopper else "-arch=sm_100a",
              *(("-DATOM_HOPPER=1",) if hopper else ()),
              *(("-DATOM_HOPPER_TRUE_MASK=1",) if hopper and stem == "pair_bias"
-               and (os.environ.get("MINIWORLD_ATOM_DIT_H100_TRUE_MASK", "0") == "1"
+                and (true_mask or os.environ.get("MINIWORLD_ATOM_DIT_H100_TRUE_MASK", "0") == "1"
                     or os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM", "0") == "1") else ()),
              "-cubin", "-lineinfo", f"-I{_dir}")
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
@@ -87,11 +87,12 @@ def cubin(stem: str, hopper: bool = False) -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM, pdl: bool = False):
+def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM, pdl: bool = False,
+                      true_mask: bool = False):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem, _hopper(device_index)), func, smem, pdl=pdl)
+        return driver.Kernel(cubin(stem, _hopper(device_index), true_mask), func, smem, pdl=pdl)
 
 
 #: (stem, function, dynamic smem, PDL) of every kernel the block launches
@@ -148,11 +149,11 @@ _HOPPER_KERNELS = {
 }
 
 
-def atom_kernel(name: str, device_index: int):
+def atom_kernel(name: str, device_index: int, *, true_mask: bool = False):
     if _hopper(device_index) and name not in _HOPPER_KERNELS:
         raise NotImplementedError(f"Atom Hopper kernel {name} is not implemented")
     stem, func, smem, pdl = (_HOPPER_KERNELS if _hopper(device_index) else KERNELS)[name]
-    return _load_atom_kernel(stem, func, device_index, smem, pdl)
+    return _load_atom_kernel(stem, func, device_index, smem, pdl, true_mask)
 
 
 def load_all(device_index: int) -> None:
@@ -174,9 +175,9 @@ def empty_uniform_enabled(device_index: int) -> bool:
     return _hopper(device_index) and os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM", "0") == "1"
 
 
-def empty_uniform_hopper(keys, src, dst, n, *, value_gradient=False):
+def empty_uniform_hopper(keys, src, dst, n, *, value_gradient=False, force=False):
     """Live-mask uniform-mean epilogue; src is dense [A*N,128] BF16."""
-    if keys is None or not empty_uniform_enabled(_dev(src)):
+    if keys is None or not (force or empty_uniform_enabled(_dev(src))):
         return
     if (src.dtype != torch.bfloat16 or dst.dtype != torch.bfloat16
             or not src.is_contiguous() or not dst.is_contiguous()):
@@ -237,7 +238,7 @@ def post_params(blk):
 
 
 # --------------------------------------------------------------------------------------------------- launches
-def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True, n=None, kv=None):
+def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True, n=None, kv=None, *, true_mask=False):
     """z [1, NZ, NZ, 16] bf16 -> bias [4, n, n] bf16 (head-major) and, for the backward, bias^T [4, n(key), n(query)].
     n (default NZ) is the attention's length, a multiple of 128 >= NZ; kv [NZ] bool marks the valid keys (None: all of them).
     Masked and padded keys get -1e4 (bf16 -9984), padded query rows 0."""
@@ -247,7 +248,7 @@ def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True, n=None, kv=None):
     w = pair_weight_hopper(wb, gamma) if _hopper(_dev(z)) else (wb.float() * gamma.float()[None]).contiguous()
     bo = torch.empty(NH, N, N, device=z.device, dtype=torch.bfloat16)
     bt = torch.empty_like(bo) if trans else None
-    atom_kernel("pb_f" if N == NZ else "pb_fp", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, bo, bt, int(N), int(NZ), kv,
+    atom_kernel("pb_f" if N == NZ else "pb_fp", _dev(z), true_mask=true_mask)((N // 64, N // 32, 1), (256, 1, 1), z, w, bo, bt, int(N), int(NZ), kv,
                                                         float(eps))
     return bo, bt
 
