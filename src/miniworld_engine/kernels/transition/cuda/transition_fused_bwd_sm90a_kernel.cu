@@ -359,6 +359,24 @@ TMN_DEVI void input_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg,
 #pragma unroll
       for (int e = 0; e < 32; ++e) { dgp[e] += __shfl_xor_sync(0xffffffffu, dgp[e], sh); dbp[e] += __shfl_xor_sync(0xffffffffu, dbp[e], sh); }
     }
+#if MW_AFFINE_WARP_STORE
+    {                                                       // all lanes own disjoint channels after the warp reduction
+      float* row = dgw + (wg * 4 + warp) * 256;
+      float g0=0.f,g1=0.f,g2=0.f,g3=0.f,b0=0.f,b1=0.f,b2=0.f,b3=0.f;
+      // Static register indices avoid spilling the entire partial vector for
+      // a dynamically indexed register-array load.
+#pragma unroll
+      for (int g = 0; g < 8; ++g) {
+        if ((lane >> 2) == g) {
+          g0=dgp[2*g];g1=dgp[2*g+1];g2=dgp[2*g+16];g3=dgp[2*g+17];
+          b0=dbp[2*g];b1=dbp[2*g+1];b2=dbp[2*g+16];b3=dbp[2*g+17];
+        }
+      }
+      const int col=2*lane;
+      row[col]+=g0;row[col+1]+=g1;row[col+64]+=g2;row[col+65]+=g3;
+      row[128+col]+=b0;row[129+col]+=b1;row[192+col]+=b2;row[193+col]+=b3;
+    }
+#else
     if (lane < 4) {                                          // a private global row per (CTA, warp): a plain read-modify-write
       float* row = dgw + (wg * 4 + warp) * 256;
 #pragma unroll
@@ -368,6 +386,7 @@ TMN_DEVI void input_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg,
         row[128 + col] += dbp[2 * g]; row[128 + col + 1] += dbp[2 * g + 1];
       }
     }
+#endif
     // All four warps must finish the scalar x/dy reads before the leader
     // releases this slot for TMA refill. WGMMA retirement above does not
     // synchronize these later scalar epilogue reads across the warpgroup.

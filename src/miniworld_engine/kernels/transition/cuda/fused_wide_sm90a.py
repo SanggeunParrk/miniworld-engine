@@ -79,7 +79,8 @@ def fused_d384_enabled(d: int) -> bool:
 
 @functools.lru_cache(maxsize=8)
 def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split_fwd: bool = False,
-         fused_d384: bool = False, multicast: bool = False):
+         fused_d384: bool = False, multicast: bool = False, affine_parallel: bool = False,
+         gate_multicast: bool = False, gate_k64: int = 0):
     """Build the extension for one channel width and SM count (both in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid)."""
     ensure_cuda_home()
@@ -96,6 +97,12 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
         revision += "_fused_d384_v3_converged"
     if multicast:
         revision += "_multicast_v1"
+    if affine_parallel:
+        revision += "_affine_parallel_v1"
+    if gate_multicast:
+        revision += "_gate_multicast_v1"
+    if gate_k64:
+        revision += f"_gate_k64_v1_{gate_k64}"
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
@@ -103,6 +110,9 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
                            f"-I{_dir.parent / 'anthropic_v5'}", f"-I{_dir}", f"-I{_dir / 'kernels'}",
                            f"-DWIDE_D={width}", f"-DWIDE_SMS={ctas}",
                            f"-DMW_D64_DW_REPL={d64_repl}",
+                           *(["-DMW_D64_AFFINE_PARALLEL=1"] if affine_parallel else []),
+                           *(["-DMW_GATE_MULTICAST=1"] if gate_multicast else []),
+                           *([f"-DMW_GATE_K64={gate_k64}"] if gate_k64 else []),
                            *([ "-DMW_SAVE_AB=1" ] if save_ab else []),
                            *([ "-DMW_SPLIT_FWD=1" ] if split_fwd else []),
                            *([ "-DMW_FUSED_D384=1" ] if fused_d384 else []),
@@ -116,10 +126,18 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
 
 def _ext_for(x: torch.Tensor, save_ab: bool = False):
     repl = int(os.environ.get("MINIWORLD_TRANSITION_D64_REPL", "16")) if native_aux_enabled(x.shape[-1]) else 16
+    gate_k64 = (int(os.environ.get("MINIWORLD_TRANSITION_H100_GATE_K64", "0"))
+                if x.shape[-1] in (256, 512) and not save_ab else 0)
+    if gate_k64 not in (0, 1, 2):
+        raise ValueError("MINIWORLD_TRANSITION_H100_GATE_K64 must be 0, 1 or 2")
     return _ext(x.shape[-1], _sm_count(x.device), repl, save_ab, save_ab and split_fwd_enabled(x.shape[-1]),
                 fused_d384_enabled(x.shape[-1]),
                 fused_d384_enabled(x.shape[-1])
-                and os.environ.get("MINIWORLD_TRANSITION_H100_FUSED_D384_MC", "0") == "1")
+                and os.environ.get("MINIWORLD_TRANSITION_H100_FUSED_D384_MC", "0") == "1",
+                x.shape[-1] == 64 and native_aux_enabled(64)
+                and os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_PARALLEL", "0") == "1",
+                x.shape[-1] in (256, 512) and not save_ab and not gate_k64
+                and os.environ.get("MINIWORLD_TRANSITION_H100_GATE_MULTICAST", "0") == "1", gate_k64)
 
 
 @functools.lru_cache(maxsize=8)
