@@ -100,8 +100,13 @@ def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-@functools.lru_cache(maxsize=8)
 def _ext(ctas: int, dw_repl: int, save: bool):
+    warp_store = os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE", "0") == "1"
+    return _build_ext(ctas, dw_repl, save, warp_store)
+
+
+@functools.lru_cache(maxsize=16)
+def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool):
     """Build for a given SM count. ``ctas`` is in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid.
 
@@ -116,13 +121,15 @@ def _ext(ctas: int, dw_repl: int, save: bool):
     # The input-slot release now waits for all epilogue readers. Keep a distinct
     # identity so an older prebuilt kernel cannot satisfy the corrected build.
     return load_extension(
-        name=f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1",
+        name=(f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1"
+              + ("_affine_warp_store_v1" if warp_store else "")),
         sources=[str(_dir / "transition_fused_sm90a.cu"),
                  str(_dir / "transition_fused_fwd_sm90a_kernel.cu"),
                  str(_dir / "transition_fused_bwd_sm90a_kernel.cu")],
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"),
                            f"-I{_dir / 'anthropic_v5'}", f"-DNCTA={ctas}", f"-DDW_REPL={dw_repl}",
                            f"-DFWD_SAVE={int(save)}",
+                           *(["-DMW_AFFINE_WARP_STORE=1"] if warp_store else []),
                            "--expt-relaxed-constexpr",
                            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
                            "-U__CUDA_NO_BFLOAT162_OPERATORS__"],

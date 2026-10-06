@@ -251,6 +251,11 @@ std::vector<torch::Tensor> bwd_master(torch::Tensor dy, torch::Tensor x, torch::
 // Returns (h [M,H], dab [M,2H]) -- dA in columns 0..H-1, dB in H..2H-1. write_h = false (D >= 384): h is a placeholder.
 std::vector<torch::Tensor> gate(torch::Tensor xn, torch::Tensor dy, torch::Tensor w1p, torch::Tensor wst, bool write_h) {
   const int64_t M = xn.size(0);
+#if MW_GATE_K64
+  constexpr int GK = 64, GSW = 128;
+#else
+  constexpr int GK = 32, GSW = 64;
+#endif
   bf16_2d(xn, M, D, "xn"); bf16_2d(dy, M, D, "dy must be contiguous bf16 [M, D]");
   bf16_2d(w1p, 2 * H, D, "w1p must be [2H, D]"); bf16_2d(wst, H, D, "wst must be ws^T [H, D]");
   expect(M % ROWS == 0, "row count must be a whole number of 128-row tiles");
@@ -264,12 +269,24 @@ std::vector<torch::Tensor> gate(torch::Tensor xn, torch::Tensor dy, torch::Tenso
 #endif
 #if WIDE_D != 256 && !MW_SAVE_AB
   if (!write_h) {
-    wide_gate_noh_launch(rm(xn, 32, 64, 64), rm(dy, 32, 64, 64), rm(w1p, 32, 128, 64), rm(wst, 32, 128, 64), rm(h, 64, 64), rm(dab, 64, 64),
+    wide_gate_noh_launch(rm(xn, GK, 64, GSW), rm(dy, GK, 64, GSW), rm(w1p, GK, 128, GSW), rm(wst, GK,
+#if MW_GATE_MULTICAST
+                         64,
+#else
+                         128,
+#endif
+                         GSW), rm(h, 64, 64), rm(dab, 64, 64),
                          (int)M, (int)D, (int)H, WIDE_SMS, at::cuda::getCurrentCUDAStream());
     return {h, dab};
   }
 #endif
-  wide_gate_launch(rm(xn, 32, 64, 64), rm(dy, 32, 64, 64), rm(w1p, 32, 128, 64), rm(wst, 32, 128, 64), rm(h, 64, 64), rm(dab, 64, 64),
+  wide_gate_launch(rm(xn, GK, 64, GSW), rm(dy, GK, 64, GSW), rm(w1p, GK, 128, GSW), rm(wst, GK,
+#if MW_GATE_MULTICAST
+                   64,
+#else
+                   128,
+#endif
+                   GSW), rm(h, 64, 64), rm(dab, 64, 64),
                    (int)M, (int)D, (int)H, WIDE_SMS, at::cuda::getCurrentCUDAStream());
   return {h, dab};
 }
