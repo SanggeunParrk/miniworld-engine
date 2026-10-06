@@ -297,13 +297,28 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
     """
     E = _rows().ext()
     with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
-        values = E.exact_fp32_inputs([single, pair, dy, *leaves])
-        x, z, dy32 = values[:3]
-        lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = values[3:]
+        shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "0") == "1"
+        convert = E.exact_fp32_inputs_grouped if shadow_io else E.exact_fp32_inputs
+        pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "0"))
+        if pair_ln not in (0, 1, 2):
+            raise ValueError("H100 shadow pair LN mode must be 0, 1, or 2")
+        if pair_ln:
+            values = convert([single, dy, *leaves])
+            x, dy32 = values[:2]
+            affine = values[2:]
+        else:
+            values = convert([single, pair, dy, *leaves])
+            x, z, dy32 = values[:3]
+            affine = values[3:]
+        lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = affine
         L, D = single.shape[1:]
         H, dh = wb.shape[0], D // wb.shape[0]
         xa = E.exact_ln(x, lnw, lnb, eps_s).view(L, D)
-        za = E.exact_ln(z, lnpw, lnpb, eps_p).view(L * L, DP)
+        # This experiment removes only the FP32 pair-input copy. The normalized
+        # pair and later projection/dBias/dLN still materialize; B200's fused
+        # pair producer/consumer lifetimes are not yet restored.
+        za = (E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2) if pair_ln
+              else E.exact_ln(z, lnpw, lnpb, eps_p)).view(L * L, DP)
         q = E.exact_mm(xa, wq.t(), bq)
         k = E.exact_mm(xa, wk.t())
         v = E.exact_mm(xa, wv.t())
@@ -317,11 +332,13 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
             # project CUDA launches of the installed C++ templates, including
             # the FP32 rounded product/reduction used for its delta tensor.
             qh, kh, vh = (t.view(L, H, dh) for t in (q, k, v))
-            bm = E.exact_mask_bias(bias, mask, L)
+            bm = (E.exact_transpose_tiled(bias, mask, L, False) if shadow_io
+                  else E.exact_mask_bias(bias, mask, L))
             out32, lse32 = E.exact_attention_fwd(qh, kh, vh, bm)
             delta32 = E.exact_delta(do_rows, out32)
             ds = E.exact_attention_db(qh, kh, vh, bm, out32, lse32, do_rows, delta32)
-            db = E.exact_db_transpose(ds, mask)
+            db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
+                  else E.exact_db_transpose(ds, mask))
             return E.exact_beta(E.exact_mm(db, wb))
         scale = math.sqrt(1.0 / math.sqrt(dh))
         qs = E.exact_point(q, q, scale, 0).view(1, L, H, dh).transpose(1, 2)
@@ -333,7 +350,8 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         vh = v.view(1, L, H, dh).transpose(1, 2)
         dp = E.exact_mm(do, vh.transpose(-2, -1))
         ds = E.exact_soft(dp, probs, True)
-        db = E.exact_db_transpose(ds, mask)
+        db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
+                  else E.exact_db_transpose(ds, mask))
         dln = E.exact_mm(db, wb)
         return E.exact_beta(dln)
 
