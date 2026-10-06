@@ -33,7 +33,7 @@ class SWADiTBlockFunction(torch.autograd.Function):
         # weights get the backward's fp32 gradients in their own dtype (fp32 ones unrounded).
         ctx.param_dtypes = [w.dtype for w in (wqkv, wg, wo, wu, wd)]
         raw_weights = (wqkv, wg, wo, wu, wd)
-        ctx.native_h100 = native_h100_enabled(q)
+        ctx.native_h100 = native_h100_enabled(q, True)
         if ctx.native_h100:
             wqkv, wg, wo, wu, wd = native_h100_cast(list(raw_weights), [torch.empty_like(w, dtype=q.dtype) for w in raw_weights])
         elif q.dtype == torch.bfloat16 and any(w.dtype == torch.float32 for w in raw_weights) and is_h100(q.device):

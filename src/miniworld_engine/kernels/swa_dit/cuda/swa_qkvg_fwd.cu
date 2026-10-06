@@ -651,7 +651,7 @@ void tiled_attention(std::vector<torch::Tensor>x,std::vector<torch::Tensor>y,int
   p.dq=(__nv_bfloat16*)y[0].data_ptr();p.dk=(__nv_bfloat16*)y[1].data_ptr();p.dv=(__nv_bfloat16*)y[2].data_ptr();md=swa_tiled::do_map(x[4],qr);
   const char* slots=std::getenv("MINIWORLD_SWA_H100_ATTN_STAGES");
   const char* fusion=std::getenv("MINIWORLD_SWA_H100_B200_FUSION");
-  if(slots?std::atoi(slots)==1:(fusion&&std::atoi(fusion)==1)){
+  if(slots?std::atoi(slots)==1:(!fusion||std::atoi(fusion)==1)){
    if(stage==1)swa_tiled::launch<1,1>(p,mq,mk,mv,md,x[0].get_device());else swa_tiled::launch<2,1>(p,mq,mk,mv,md,x[0].get_device());
   }else{
    if(stage==1)swa_tiled::launch<1>(p,mq,mk,mv,md,x[0].get_device());else swa_tiled::launch<2>(p,mq,mk,mv,md,x[0].get_device());
