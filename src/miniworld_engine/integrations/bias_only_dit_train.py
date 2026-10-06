@@ -361,13 +361,23 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
 
 
+def _repeat_shared_fake(cond, samples):
+    return cond.new_empty((samples, *cond.shape[1:]))
+
+
+@opaque(fake=_repeat_shared_fake, name="bias_only_dit_repeat_shared")
+def _repeat_shared(cond: torch.Tensor, samples: int) -> torch.Tensor:
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    return ext().repeat90(cond[:1], samples)
+
+
 class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, *params):
         ctx.shared_cond = cond.shape[0] == 1 and single.shape[0] != 1
-        if ctx.shared_cond:
-            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
-            cond = ext().repeat90(cond, single.shape[0])
+        from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+        if ctx.shared_cond or (h100_enabled(single.device) and cond.stride(0) == 0):
+            cond = _repeat_shared(cond, single.shape[0])
         out, *saved = _fwd(single, cond, pair, mask, list(params))
         ctx.save_for_backward(single, cond, pair, *params, *saved)
         ctx.meta = (mask, len(params))
@@ -384,18 +394,23 @@ class _Block(torch.autograd.Function):
             from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
             dc = ext().shared_grad90(dc)
         pg = _split_grads(bufs, params)
+        from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+        if h100_enabled(single.device):
+            from .token_dit_train import _activate_native_caller
+            _activate_native_caller()
         return (dx, dc, dpair, None, *(g if ctx.needs_input_grad[4 + i] else None for i, g in enumerate(pg)))
 
 
 def block(module, single, cond, pair, mask=None):
     """One BiasOnlyDiTBlock (attention + transition, both residuals) through the fused training path. Call ``serves`` first."""
+    # Preserve the caller's edge, including a nonleaf expanded view. Substituting
+    # cond._base makes autograd.grad(output, cond) incorrectly report an unused
+    # input. The Function materializes shared rows and returns a gradient with
+    # the original input shape; the caller's ExpandBackward retains its contract.
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
-    if h100_enabled(single.device) and cond.stride(0) == 0:
-        base = cond._base
-        if base is None or base.ndim != 4 or tuple(base.shape) != (1, *cond.shape[1:]) or not base.is_leaf:
-            raise ValueError("Hopper shared conditioning requires a direct expand of a [1,1,L,384] leaf")
-        # Pass the leaf to the custom Function so its native reduction owns the full backward.
-        cond = base
+    if h100_enabled(single.device):
+        from .token_dit_train import _native_caller_hooks
+        _native_caller_hooks(single, cond, pair, *module.parameters())
     return _Block.apply(single, cond, pair.contiguous(), mask, *[module.get_parameter(n) for n in NAMES])
 
 
