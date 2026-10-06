@@ -1,7 +1,8 @@
 """OuterProductMean with measured H100 dispatch for BF16 inputs and BF16/FP32 master weights.
 
 H100 uses a WGMMA prologue, deterministic CUDA mask/parameter passes, cuBLAS contractions and CUDA epilogues.
-The five qualified inference cells and S1024/L384 training use the persistent TMA prologue.
+The six qualified inference cells and S1024/L384 training use the persistent TMA prologue.
+S2048/L384 inference also uses the gathered-TMA, overlapping-WGMMA epilogue.
 Other required inference cells retain the faster accurate historical composition;
 training retains zero-gamma-safe CUDA backward. The all-shape CUDA-only goal remains open.
 MINIWORLD_OPM_H100_TMA_PROLOGUE=1 explicitly tests the TMA prologue on other shapes.
@@ -67,7 +68,7 @@ def _h100_path(s: int, n: int, *, training: bool) -> str:
         return "tma" if tma_prologue_enabled() else "native"
     if training:
         return "tma" if (s, n) == (1024, 384) else "native"
-    if (s, n) in ((1024, 128), (1024, 256), (2048, 128), (2048, 256), (4096, 128)):
+    if (s, n) in ((1024, 128), (1024, 256), (2048, 128), (2048, 256), (2048, 384), (4096, 128)):
         return "tma"
     if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
         return "legacy"
@@ -155,16 +156,28 @@ def serves(*a, **kw) -> bool:
 _SM100_TRAIN = True  # the sm_100a backward kernels (csrc/sm100/opm_sm100.cu) serve grad-enabled calls
 
 
-def _ext(device=None, *, native=None, tma=None):
+def _epilogue_tma_enabled(s: int, n: int, *, training: bool) -> bool:
+    """The only measured default; explicit zero/one keeps diagnostic comparisons exact."""
+    default = not training and (s, n) == (2048, 384)
+    return os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_TMA", "1" if default else "0") == "1"
+
+
+def _ext(device=None, *, native=None, tma=None, epi_tma=None):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM)."""
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
     native = native_aux_enabled() if native is None else native
     tma = tma_prologue_enabled() if tma is None else tma
     count = native and tma and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "1") == "1"
+    # Diagnostic candidate: gathered O/W TMA stages with overlapping WGMMA groups.
+    if epi_tma is None:
+        epi_tma = os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_TMA", "0") == "1"
+    epi_tma = not sm100 and native and tma and epi_tma
     key = "sm100" if sm100 else ("mod_native_tma_cublas_count" if count
                                else "mod_native_tma_static" if native and tma
                                else "mod_native" if native else "mod")
+    if epi_tma:
+        key += "_epi_tma_overlap"
     if key in _EXT:
         return _EXT[key]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -186,6 +199,8 @@ def _ext(device=None, *, native=None, tma=None):
         suffix = ("_native_tma_cublas_count" if count
                   else "_native_tma_static" if native and tma
                   else "_native" if native else "")
+        if epi_tma:
+            suffix += "_epi_tma_overlap"
         build = root / ("opm_epilogue" + suffix)
         build.mkdir(parents=True, exist_ok=True)
         _EXT[key] = load(
@@ -509,7 +524,8 @@ class _OpmMath(torch.autograd.Function):
         o = saved[12] if ctx.save_o else None
         s, n = m.shape[0], m.shape[1]
         path = _h100_path(s, n, training=True)
-        ext = _ext(dz.device, native=path != "legacy", tma=path == "tma")
+        ext = _ext(dz.device, native=path != "legacy", tma=path == "tma",
+                   epi_tma=_epilogue_tma_enabled(s, n, training=True))
         if torch.cuda.get_device_capability(dz.device) == (10, 0):
             # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
             dO, dzp, dbo = ext.opm_dgrad(
