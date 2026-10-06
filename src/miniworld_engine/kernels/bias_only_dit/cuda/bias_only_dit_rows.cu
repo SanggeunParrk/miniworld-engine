@@ -497,9 +497,144 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Hopper inference packs only live inference operands. The training pack also
+// materializes FP32 unfolded matrices and launches once per small operand.
+// Here every required cast/fold/concatenation shares one launch; the saved-AB
+// GEMM layout is replaced by the save-free SwiGLU kernel's 128-row interleave.
+struct InferPack90 {
+  const void* src[20]; bool fp32[20];
+  __nv_bfloat16* dst[9]; int size[9], blocks[9];
+};
+__device__ __forceinline__ float infer_read90(const InferPack90& p, int w, int i) {
+  return p.fp32[w] ? static_cast<const float*>(p.src[w])[i]
+                  : __bfloat162float(static_cast<const __nv_bfloat16*>(p.src[w])[i]);
+}
+__global__ void __launch_bounds__(256) infer_pack90_kernel(InferPack90 p) {
+  int b = blockIdx.x, o = 0;
+  for (; o < 9; ++o) { if (b < p.blocks[o]) break; b -= p.blocks[o]; }
+  if (o == 9) return;
+  const int i0 = (b * 256 + threadIdx.x) * 4;
+  if (i0 >= p.size[o]) return;
+  float v[4];
+  #pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const int i = i0 + j;
+    float x = 0.f;
+    if (o == 0) {
+      const int seg = i / (768 * 384), k = i % (768 * 384);
+      const int w = seg == 0 ? 4 : seg == 1 ? 6 : seg == 2 ? 12 : 14;
+      x = infer_read90(p, w, k) * infer_read90(p, seg < 2 ? 3 : 11, i % 384);
+    } else if (o == 1) {
+      const int seg = i / 768;
+      if (seg == 0 || seg == 2) x = infer_read90(p, seg == 0 ? 5 : 13, i % 768);
+    } else if (o == 2) x = infer_read90(p, i / (768 * 384) == 0 ? 7 : 15, i % (768 * 384));
+    else if (o == 3) x = infer_read90(p, i / 768 == 0 ? 8 : 16, i % 768);
+    else if (o == 4) x = infer_read90(p, 10, i) * infer_read90(p, 9, i % 128);
+    else if (o == 5) x = infer_read90(p, i / (768 * 768), i % (768 * 768));
+    else if (o == 6) x = infer_read90(p, 2, i);
+    else if (o == 7) x = infer_read90(p, 19, i);
+    else {
+      const int row = i / 768, r = row % 256;
+      x = infer_read90(p, r < 128 ? 17 : 18, (row / 256 * 128 + r % 128) * 768 + i % 768);
+    }
+    v[j] = x;
+  }
+  auto* out = reinterpret_cast<__nv_bfloat162*>(p.dst[o] + i0);
+  out[0] = __floats2bfloat162_rn(v[0], v[1]);
+  out[1] = __floats2bfloat162_rn(v[2], v[3]);
+}
+__device__ __forceinline__ float4 infer_read4_90(const InferPack90& p,int w,int i){
+ return p.fp32[w]?V4<float>::load((const float*)p.src[w]+i):V4<__nv_bfloat16>::load((const __nv_bfloat16*)p.src[w]+i);
+}
+__device__ __forceinline__ float4 infer_mul4_90(float4 a,float4 b){
+ return make_float4(a.x*b.x,a.y*b.y,a.z*b.z,a.w*b.w);
+}
+__global__ void __launch_bounds__(256) infer_pack90_vector_kernel(InferPack90 p){
+ int b=blockIdx.x,o=0;
+ for(;o<9;++o){if(b<p.blocks[o])break;b-=p.blocks[o];}
+ if(o==9)return;
+ int i=(b*256+threadIdx.x)*4;if(i>=p.size[o])return;
+ float4 v=make_float4(0,0,0,0);
+ if(o==0){
+  int seg=i/(768*384),w=seg==0?4:seg==1?6:seg==2?12:14;
+  v=infer_mul4_90(infer_read4_90(p,w,i%(768*384)),infer_read4_90(p,seg<2?3:11,i%384));
+ }else if(o==1){int seg=i/768;if(seg==0||seg==2)v=infer_read4_90(p,seg==0?5:13,i%768);}
+ else if(o==2)v=infer_read4_90(p,i/(768*384)==0?7:15,i%(768*384));
+ else if(o==3)v=infer_read4_90(p,i/768==0?8:16,i%768);
+ else if(o==4)v=infer_mul4_90(infer_read4_90(p,10,i),infer_read4_90(p,9,i%128));
+ else if(o==5)v=infer_read4_90(p,i/(768*768),i%(768*768));
+ else if(o==6)v=infer_read4_90(p,2,i);
+ else if(o==7)v=infer_read4_90(p,19,i);
+ else {int row=i/768,r=row%256;v=infer_read4_90(p,r<128?17:18,(row/256*128+r%128)*768+i%768);}
+ V4<__nv_bfloat16>::store(p.dst[o]+i,v);
+}
+std::vector<at::Tensor> infer_pack90(std::vector<at::Tensor> weights) {
+  TORCH_CHECK(weights.size() == 20, "bias-only inference pack requires 20 leaves");
+  const at::cuda::CUDAGuard guard(weights[0].device());
+  TORCH_CHECK(weights[0].sizes() == at::IntArrayRef({768, 768})
+              && weights[10].sizes() == at::IntArrayRef({16, 128})
+              && weights[17].sizes() == at::IntArrayRef({1536, 768}),
+              "Hopper bias-only inference pack requires 768/384/128, 16x48, expansion2");
+  InferPack90 p{};
+  for (int j = 0; j < 20; ++j) {
+    const auto& t = weights[j];
+    TORCH_CHECK(t.device() == weights[0].device() && t.is_contiguous()
+      && (t.scalar_type() == at::kFloat || t.scalar_type() == at::kBFloat16), "bias-only pack leaf dtype/device/layout");
+    p.src[j] = t.data_ptr(); p.fp32[j] = t.scalar_type() == at::kFloat;
+  }
+  const std::vector<std::vector<int64_t>> shapes = {{3072,384},{3072},{1536,384},{1536},
+                                                 {16,128},{1536,768},{768,768},{768,1536},{3072,768}};
+  std::vector<at::Tensor> result;
+  int blocks = 0;
+  for (int j = 0; j < 9; ++j) {
+    const int alias = j == 6 ? 2 : j == 7 ? 19 : -1;
+    if (alias >= 0 && !p.fp32[alias]) { result.push_back(weights[alias]); continue; }
+    result.push_back(at::empty(shapes[j], weights[0].options().dtype(at::kBFloat16)));
+    p.dst[j] = reinterpret_cast<__nv_bfloat16*>(result.back().data_ptr());
+    p.size[j] = result.back().numel(); p.blocks[j] = (p.size[j] + 1023) / 1024; blocks += p.blocks[j];
+  }
+  infer_pack90_vector_kernel<<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return result;
+}
+
+std::vector<at::Tensor> infer_alloc90(std::vector<at::Tensor> weights) {
+  TORCH_CHECK(weights.size()==20,"bias-only inference pack requires 20 leaves");
+  const at::cuda::CUDAGuard guard(weights[0].device());
+  const std::vector<std::vector<int64_t>> shapes={{3072,384},{3072},{1536,384},{1536},{16,128},{1536,768},{768,768},{768,1536},{3072,768}};
+  std::vector<at::Tensor> out;
+  for(int o=0;o<9;++o){
+    const int alias=o==6?2:o==7?19:-1;
+    if(alias>=0&&weights[alias].scalar_type()==at::kBFloat16)out.push_back(weights[alias]);
+    else out.push_back(at::empty(shapes[o],weights[0].options().dtype(at::kBFloat16)));
+  }
+  return out;
+}
+void infer_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,int begin,int end) {
+  TORCH_CHECK(weights.size()==20&&out.size()==9&&0<=begin&&begin<end&&end<=9,"inference pack stage");
+  const at::cuda::CUDAGuard guard(weights[0].device());InferPack90 p{};int blocks=0;
+  for(int j=0;j<20;++j){
+    TORCH_CHECK(weights[j].device()==weights[0].device()&&weights[j].is_contiguous()
+      &&(weights[j].scalar_type()==at::kFloat||weights[j].scalar_type()==at::kBFloat16),"inference pack leaf");
+    p.src[j]=weights[j].data_ptr();p.fp32[j]=weights[j].scalar_type()==at::kFloat;
+  }
+  for(int o=begin;o<end;++o){
+    const int alias=o==6?2:o==7?19:-1;
+    if(alias>=0&&!p.fp32[alias])continue;
+    TORCH_CHECK(out[o].scalar_type()==at::kBFloat16&&out[o].is_contiguous(),"inference stage output");
+    p.dst[o]=reinterpret_cast<__nv_bfloat16*>(out[o].data_ptr());p.size[o]=out[o].numel();
+    p.blocks[o]=(p.size[o]+1023)/1024;blocks+=p.blocks[o];
+  }
+  infer_pack90_vector_kernel<<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("infer_alloc90", &infer_alloc90);
+  m.def("infer_stage90", &infer_stage90);
+  m.def("infer_pack90", &infer_pack90);
   m.def("softmax_t_cuda", &softmax_t);
   m.def("ln_rows_cuda", &ln_rows);
   m.def("adaln_in_rows_cuda", &adaln_in_rows);
