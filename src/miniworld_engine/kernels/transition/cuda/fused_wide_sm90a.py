@@ -55,15 +55,17 @@ def save_h_enabled(d: int) -> bool:
     return d >= 384 and settings.current().transition_wide_save_h
 
 
-def save_ab_enabled(d: int) -> bool:
+def save_ab_enabled(d: int, rows: int = 0) -> bool:
     """B200 tensor lifetimes: retain h/a/b, then run only dh GEMM in the gate backward."""
     return (d >= 384 and native_aux_enabled(d)
-            and os.environ.get("MINIWORLD_TRANSITION_H100_SAVE_AB", "0") == "1")
+            and os.environ.get("MINIWORLD_TRANSITION_H100_SAVE_AB",
+                               "1" if d == 512 and rows == 768 * 768 else "0") == "1")
 
 
-def split_fwd_enabled(d: int) -> bool:
-    return (d == 512 and save_ab_enabled(d)
-            and os.environ.get("MINIWORLD_TRANSITION_H100_SPLIT_FWD", "0") == "1")
+def split_fwd_enabled(d: int, rows: int = 0) -> bool:
+    return (d == 512 and save_ab_enabled(d, rows)
+            and os.environ.get("MINIWORLD_TRANSITION_H100_SPLIT_FWD",
+                               "1" if rows == 768 * 768 else "0") == "1")
 
 
 def _sm_count(device: torch.device | int | None = None) -> int:
@@ -135,6 +137,8 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
 
 
 def _ext_for(x: torch.Tensor, save_ab: bool = False):
+    # The selected L768/D512 training path retains a/b; inference passes save_ab=False.
+    saved_default = "1" if x.shape[-1] == 512 and x.shape[0] == 768 * 768 else "0"
     repl = int(os.environ.get("MINIWORLD_TRANSITION_D64_REPL", "16")) if native_aux_enabled(x.shape[-1]) else 16
     gate_k64 = (int(os.environ.get("MINIWORLD_TRANSITION_H100_GATE_K64", "0"))
                 if x.shape[-1] in (256, 512) and not save_ab else 0)
@@ -144,7 +148,7 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False):
                        and os.environ.get("MINIWORLD_TRANSITION_H100_GATE_FULL_STAGE", "0") == "1")
     if gate_full_stage:
         gate_k64 = 0
-    return _ext(x.shape[-1], _sm_count(x.device), repl, save_ab, save_ab and split_fwd_enabled(x.shape[-1]),
+    return _ext(x.shape[-1], _sm_count(x.device), repl, save_ab, save_ab and split_fwd_enabled(x.shape[-1], x.shape[0]),
                 fused_d384_enabled(x.shape[-1]),
                 fused_d384_enabled(x.shape[-1])
                 and os.environ.get("MINIWORLD_TRANSITION_H100_FUSED_D384_MC", "0") == "1",
@@ -156,10 +160,10 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False):
                 x.shape[-1] == 256 and native_aux_enabled(256)
                 and os.environ.get("MINIWORLD_TRANSITION_H100_DXLN_FULL_ROW", "0") == "1",
                 x.shape[-1] == 512 and save_ab
-                and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_TMA", "0") == "1",
+                and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_TMA", saved_default) == "1",
                 x.shape[-1] == 512 and save_ab
-                and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_TMA", "0") == "1"
-                and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_NO_H_STAGE", "0") == "1")
+                and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_TMA", saved_default) == "1"
+                and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_NO_H_STAGE", saved_default) == "1")
 
 
 @functools.lru_cache(maxsize=8)
@@ -299,7 +303,7 @@ def _saved_fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
     if fused_d384_enabled(x.shape[-1]):
         wst = _cuda_prepare(wa, wb, ws)[3]
         return tuple(_ext_for(x, True).fwd_fused_d384(x, gamma, beta, wa, wb, wst, float(eps), True))
-    if split_fwd_enabled(x.shape[-1]):
+    if split_fwd_enabled(x.shape[-1], x.shape[0]):
         xn, rstd, c1 = _native_ext().ln_fwd(x, gamma, beta, float(eps))
         out, h, a, b = _ext_for(x, True).fwd_split(xn, x, _pack(wa, wb, 128), ws)
         return out, xn, rstd, c1, h, a, b
@@ -370,7 +374,8 @@ def _bwd_launch(
     elif native_aux_enabled(d):
         aux = _native_ext()
         compact = (d == 512
-                   and os.environ.get("MINIWORLD_TRANSITION_H100_COMPACT_LN", "0") == "1")
+                   and os.environ.get("MINIWORLD_TRANSITION_H100_COMPACT_LN",
+                                      "1" if asaved is not None and x.shape[0] == 768 * 768 else "0") == "1")
         compact384 = (d == 384 and x.shape[0] == 768 * 768
                       and os.environ.get("MINIWORLD_TRANSITION_H100_COMPACT_LN_D384", "0") == "1")
         ln = aux.ln_bwd_compact if compact or compact384 else aux.ln_bwd
