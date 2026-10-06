@@ -208,20 +208,22 @@ Status (2026-10-06): written, **not yet built or measured on B200** -- the kerne
 **Gate.** `serves()` takes fp32 when single, cond and pair are fp32, the block's weights are fp32 (`to_value.weight`) and CUDA
 autocast is off (under autocast the module path keeps its casts, as before), and `tf32_ready` (a `device_constant`) has built the
 fp32 kernels: the fp32 row extension, the bf16 row extensions whose dtype-generic passes the fp32 path shares, the attention core
-(and for training the ungated core). A failed build warns once and keeps the module path for the process.
+(and for training the ungated core and `dpb32_sm100`). A failed build warns once and keeps the module path for the process.
 `MINIWORLD_BIAS_ONLY_DIT_TF32=0` turns the fp32 path off.
 
 **Recipe.** Every activation, saved tensor, table and gradient fp32; the residual stream fp32. General GEMMs are cuBLAS on TF32
 tensor cores (`tf32_gemms`: forced whatever the caller's `allow_tf32`, restored after -- the token DiT fp32 path's rule). The
-products of the attention are tcgen05 `kind::tf32` (fp32 operands rounded to tf32 by the MMA, fp32 accumulation). The pair
-bias and its backward are exact fp32 on the FMA pipe. Weight gradients fp32 (cuBLAS), the small ones through the bf16
+products of the attention are tcgen05 `kind::tf32` (fp32 operands rounded to tf32 by the MMA, fp32 accumulation). The training
+pair bias and its backward are TF32 `mma.sync` (operands rounded to nearest, as cuBLAS rounds the module's `to_bias` GEMM and its
+gradients; `MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT=1`: split fp32, three products, ~exact); the inference hoist keeps the exact fp32
+FMA kernel (once per pair). Weight gradients fp32 (cuBLAS), the small ones through the bf16
 extension's dtype-generic `unfold` / `finalize`.
 
 | step | inference | training forward | training backward |
 |---|---|---|---|
 | pair bias `LN(pair) Wf^T` | `pair_bias` (f32 rows) per block | `pair_bias` + row stats | `pair_bias_bwd`: d pair, dWf partials |
 | softmax | `softmax_rows` (f32) | `softmax_t` (P and P^T, f32) | -- |
-| attention | **`pv_gate_tf32`** (gated) | **`pv_gate_tf32`** (gated) | `gate_bwd` rows, **`pv_gate_tf32`** ungated on P^T (dV), `_dbias32` (TF32 bmm, see F2) |
+| attention | **`pv_gate_tf32`** (gated) | **`pv_gate_tf32`** (gated) | `gate_bwd` rows, **`pv_gate_tf32`** ungated on P^T (dV), **`dpb32_sm100`** |
 | conditioning | `ln_rows` (fp32 in / out) + 2 cuBLAS TF32 GEMMs | `cond_ln` + 2 GEMMs | `cond_bwd`, `unfold`, `finalize` |
 | rows | `adaln_in_rows`, `resgate_*_rows` (dtype-generic), `swiglu` (f32) | `adaln_a`, `res_adaln_b`, `swiglu`, `res_c` | `res_c_bwd`, `swiglu_bwd`, `res_adaln_b_bwd`, `adaln_a_bwd` |
 | v\|g, out, expand, squeeze | cuBLAS TF32 | cuBLAS TF32 | cuBLAS TF32 (data and weight gradients) |
@@ -248,12 +250,18 @@ Warps: 0 TMA producer, 1 MMA (whole warp waits, `elect_one()` issues), 2 TMEM al
 `__launch_bounds__(256, 2)` caps the registers at 128 (shared memory keeps one CTA per SM). SG per call: the fewest bytes into the
 busiest SM (`pick_group_tf32`: rounds x (P once + SG v tiles + their g / a)); `MINIWORLD_BIAS_ONLY_DIT_SG` forces one.
 
-### F2 · bias gradient (dbias = P o (sum_a dO v^T - D))
+### F2 · `dpb32_sm100.cu` (dbias = P o (sum_a dO v^T - D))
 
-`dpb_tf32.cu` was removed on 2026-10-06: identical reruns gave different dbias at L 640 / 768 for every head layout (L 384 was
-bit-identical), and 16 x 64 at L 640 missed the fp64 bound (8.4e-3 > 3e-3). Until a new kernel replaces it, `_dbias32` in
-`integrations/bias_only_dit_train.py` computes dbias as one TF32 batched GEMM per head over the samples' channels, then the
-elementwise P o (. - D).
+`dpb_tf32.cu` was removed on 2026-10-06: identical reruns gave different dbias at L 640 / 768 for every head layout (a CTA with more
+than one work item; L <= 384 had one per CTA and was bit-identical), and 16 x 64 at L 640 missed the fp64 bound (8.4e-3 > 3e-3).
+Its replacement is a port of the bf16 `dpb_sm100.cu` -- correct in bf16 -- with its structure kept: work item (head group, 128-query
+tile, NJ-key tile), K loop over the samples, warps 0 TMA / 1 MMA / 2 TMEM / 3 P producer / 4-7 epilogue, ONE accumulator released
+after the item, the two-slot P ring, three per-warp dbias staging tiles. What fp32 forces: a head row is DH / 32 (rounded up) boxes
+of 32 channels in 128-byte swizzle rows (48-wide heads 32 + 16, the 16-channel box in the first 64 bytes of its rows, as the bf16
+kernel's 96-byte rows), 4 / 2 `kind::tf32` K steps each; P pieces of 16 KB and dbias staging tiles of 4 KB (SW128); and the key tile
+NJ = 128 so that two 64 KB stages fit (bf16: NJ up to 384), loaded as one box and multiplied as ONE N = 128 product per K step (bf16
+splits its larger tile into two halves; with fp32's NJ = 128 the halves only re-read the do tile: 38 % of the MMA floor, L768 159 us,
+as first ported). Tests: reruns bit-identical at L 128..768 for every layout, within 3e-3 of fp64, no spills.
 
 ### F3 · fp32 rows (`bias_only_dit_f32_rows.cu`)
 
@@ -261,8 +269,112 @@ The training rows keep the bf16 kernels' layout (768-wide rows on two warps, per
 the shared `finalize` sums); every kernel at most 128 registers. `pair_bias`: a block takes 128 pair rows into shared memory (pitch
 129), a thread one row: two-pass statistics, then the H dot products with Wf^T read as float4 broadcasts -- exact fp32, no
 LN(pair) in memory. `pair_bias_bwd`: 32 rows per step, a thread one channel (Wf's column and its dWf column in registers,
-dbias^T as broadcasts), then a warp per row for the LayerNorm backward. `softmax_t` keeps 32 rows in shared memory (pitch L + 1)
-and writes P^T with 16-byte stores.
+dbias^T as broadcasts), then a warp per row for the LayerNorm backward. `softmax_t` keeps 16 rows in shared memory (pitch L + 4;
+two rows per warp, both rows' loads first: 32 rows a block, one per warp at a time, was latency-bound, 58 us at L768) and writes
+P^T with 16-byte stores.
+
+Training pair bias on TF32 tensor cores (`pair_bias_tc`, `pair_bias_bwd_tc`; the FMA kernels above were issue-bound, L768 185 + 299 us
+against memory floors of ~60 + ~105): the bf16 kernels' scheme on `mma.sync m16n8k8 .tf32`. Forward: a warp takes 16 pair rows
+(8 float4 per lane and row, 64 contiguous bytes per row across a lane quad), the LayerNorm statistics over the quad, LN(pair) Wf^T
+with the K slots mapped onto the loaded columns, the bias stored head-major from the accumulators. Backward: 128 rows per block item
+through a cp.async double buffer (rows at pitch 136 floats, dbias at 132: conflict-free fragment reads), d LN = dbias^T Wf (K = the
+heads), the LayerNorm backward over the quad (d LN kept in registers between its two passes), d pair out, LN(pair) written back in
+place, then dWf^T += LN(pair)^T dbias^T per warp's 16 channels; one dWf partial per block.
+
+**Weight pack** (`pack`): the fp32 step repacks its weights inside every captured step (the cache is scoped to the capture); the
+eight torch cats / products (31 us cold) are one launch of up to 16 copy segments, the LayerNorm weights folded in as a column scale
+(a grid row per segment, the table in parameter space; a per-element search with a 64-bit modulo ran 42 us).
+`dxt` and `dxa` (the d shift halves of dG) leave cuBLAS straight in their dG columns, so the two LayerNorm backward rows read them
+there and do not copy them (2 x [M, 768] fp32 writes less).
+
+### F4 · `gemm_glu_tf32.cu` (the transition's GEMMs with the SwiGLU in their epilogue, training)
+
+The fp32 step's expand GEMM and its SwiGLU were cuBLAS + a row pass that read `a | b` back (L768: 264 + 104 us), and the backward's
+`dh = dZ Wsq` was cuBLAS + `swiglu_bwd` reading `dh` back (144 + 168 us). Both are one kernel now, the fp32 twin of
+`gemm_swiglu2_sm100.cu`'s MMA side: 2-CTA clusters, M = 256, N = 256 `kind::tf32` products with B split by N across the pair (forward:
+`Wa_j` / `Wb_j`; backward: `Wsq^T` rows, `Wsq^T` packed once per step), 32-fp32 K-blocks (16 KB per 128-row operand tile, 4 MMAs of
+K = 8), accumulators double-buffered in TMEM. Epilogue: two warpgroups, each with an IO thread owning a ring of 16-column x 128-row
+staging tiles (64-B swizzle, 8 KB per tensor). Forward: `h = silu(a) b`, `h`, `a`, `b` stored by TMA (the fp32 rows' sigmoid, same
+formula). Backward: the IO thread loads `a`, `b` of tile u + NB as tile u's stores drain; the warps write `da = dh b s (1 + a (1 - s))`,
+`db = dh a s` in place, the IO thread stores them; `dh` never reaches memory. Measured (L768, per launch): forward 329 us against
+cuBLAS 254 + the SwiGLU pass 99 (its GEMM runs ~530 TF/s against cuBLAS's ~680; the whole step was not better), so the forward is
+opt-in (`MINIWORLD_BIAS_ONLY_DIT_TF32_GLU=1`); backward 253 against 138 + 165, on by default (`MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD=0`:
+cuBLAS + the rows; a failed build warns once and does the same).
+
+**Attention core, batched N** (`pv_gate_tf32.cu -DBATCHN`, default; `MINIWORLD_BIAS_ONLY_DIT_PV_BATCH=0`: one MMA per sample): the
+group's v chunks sit NA 4-KB atoms apart, so all SG samples are ONE MN-major B operand of N = SG x NA x 32 (LBO = 4 KB): one MMA per
+K step reads the P chunk once instead of SG times (the per-sample loop issued SG small N = DH products, ~320 TF/s at L768). 48-wide
+heads compute 16 unused columns per sample (the next head's channels), so SG <= 4 there (two accumulator sets in 512 columns).
+
+**`res_adaln_b`** (forward, 4.7 TB/s where `adaln_a` runs 6.1): built for three blocks per SM (<= 80 registers) with its loads in two
+waves (residual inputs, then the AdaLN tables before the row statistics): L768 141 -> 107 us, L384 73 -> 57
+(`MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB=2`: the two-block build; read per call). `res_adaln_b_bwd` loads `dout` in a second wave
+before the row sums' barrier (all six streams at once spilled 24 B at 128 registers; a three-block build was slower, +99 us per L768
+step). Weight gradients: `MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT=S` runs each of the six as a bmm over S row chunks plus a sum of the
+partials (cuBLAS takes these long-K, small-output TF32 GEMMs at 360-500 TF/s, the data gradients at 600-670); off by default until
+measured (`bo32_train_breakdown.py --wgrad-probe`).
+`bench_scripts/bo32_train_breakdown.py --ab VAR=VAL ...` times the whole step against each switch in alternation in one process
+(single whole-step runs differ by ~50 us at L768 on this power-capped card). The row extension reports every kernel's registers and local memory (`func_attrs`); the tests hold the new ones to
+<= 128 registers without spills, as the cubins' (`Kernel.regs`, `.lmem`).
+
+### fp32 training: speed of light per launch (16 x 48, A = 48)
+
+Minimum time = max(FLOPs / 720 TF/s, unavoidable HBM bytes / 7 TB/s): the measured ceilings of this power-capped card (the best cuBLAS
+TF32 GEMM of the step; a streaming copy). Bytes are every activation read or written once at 4 bytes (weights, row statistics and
+partials neglected), not the launch arguments' sizes (L2 hits make those over-count). `bench_scripts/bo32_train_breakdown.py` prints
+it for EVERY node of the step's CUDA graph (each kernel node timed alone from its own launch parameters; a launch's floor on its first
+node, so split-K / batch reductions and copies show as pure gap), with the step's floor / whole step and the time between the node
+sum and the whole step (`sol_model`, `node_times`). Measured: the round-5 breakdown (L384) and round 6 (L768), hot, us, before
+the weight-gradient split (`_wgrad32`, S = 4: the six weight gradients 985 -> 809 us at L768) and `dpb32_sm100`; sorted by the
+L768 gap.
+
+| launch | L384 meas | L384 SoL | L384 gap | L768 meas | L768 SoL | L768 gap | SoL % (L768) | bound |
+|---|---|---|---|---|---|---|---|---|
+| dh + SwiGLU bwd (`gemm_glu_tf32` BWD) | 130.1 | 72.8 | 57.3 | 255.6 | 145.6 | 110.0 | 57% | HBM |
+| `pv_gate` | 46.2 | 25.6 | 20.6 | 137.2 | 60.4 | 76.8 | 44% | MMA |
+| mm dWn = dG^T chat | 106.7 | 60.4 | 46.3 | 190.6 | 120.8 | 69.8 | 63% | MMA |
+| `pv_dv` | 43.3 | 17.5 | 25.8 | 126.5 | 60.4 | 66.1 | 48% | MMA |
+| `pair_bias_bwd` | 47.3 | 22.9 | 24.4 | 154.5 | 91.7 | 62.8 | 59% | HBM |
+| mm dWgg = dGg^T c | 62.5 | 30.2 | 32.3 | 122.6 | 60.4 | 62.2 | 49% | MMA |
+| mm dWsq = dz^T h | 92.2 | 60.4 | 31.8 | 176.8 | 120.8 | 56.0 | 68% | MMA |
+| mm dWvg = dvg^T xa | 107.3 | 60.4 | 46.9 | 173.5 | 120.8 | 52.7 | 70% | MMA |
+| `dpb` (the removed `dpb_tf32`) | 34.8 | 18.9 | 15.9 | 112.5 | 60.4 | 52.1 | 54% | MMA |
+| mm dchat = dG Wn | 73.7 | 60.4 | 13.3 | 172.4 | 120.8 | 51.6 | 70% | MMA |
+| mm dWab = dab^T xt | 145.4 | 120.8 | 24.6 | 290.1 | 241.6 | 48.5 | 83% | MMA |
+| mm dWo = dy^T og | 53.0 | 30.2 | 22.8 | 105.1 | 60.4 | 44.7 | 57% | MMA |
+| `res_adaln_b_bwd` | 97.0 | 80.9 | 16.1 | 200.5 | 161.8 | 38.7 | 81% | HBM |
+| mm ab = xt Wab^T | 119.1 | 120.8 | -1.7 | 276.8 | 241.6 | 35.2 | 87% | MMA |
+| mm G = chat Wn^T | 72.4 | 60.4 | 12.0 | 156.0 | 120.8 | 35.2 | 77% | MMA |
+| `pair_bias` | 19.2 | 12.1 | 7.1 | 73.4 | 48.5 | 24.9 | 66% | HBM |
+| mm Gg = c Wg^T | 44.3 | 30.2 | 14.1 | 80.8 | 60.4 | 20.4 | 75% | MMA |
+| `res_adaln_b` | 55.9 | 48.5 | 7.4 | 116.0 | 97.1 | 18.9 | 84% | HBM |
+| mm dxt = dab Wab | 127.7 | 120.8 | 6.9 | 260.2 | 241.6 | 18.6 | 93% | MMA |
+| mm dcg = dGg Wg | 40.6 | 30.2 | 10.4 | 77.3 | 60.4 | 16.9 | 78% | MMA |
+| `gate_bwd` | 48.8 | 40.4 | 8.4 | 96.5 | 80.9 | 15.6 | 84% | HBM |
+| `res_c_bwd` | 47.2 | 40.4 | 6.8 | 95.7 | 80.9 | 14.8 | 85% | HBM |
+| mm y = og Wo^T | 35.1 | 30.2 | 4.9 | 73.0 | 60.4 | 12.6 | 83% | MMA |
+| `swiglu` | 55.8 | 48.5 | 7.3 | 108.0 | 97.1 | 10.9 | 90% | HBM |
+| `adaln_a_bwd` | 55.2 | 48.5 | 6.7 | 106.6 | 97.1 | 9.5 | 91% | HBM |
+| `softmax_t` | 7.6 | 4.0 | 3.6 | 25.1 | 16.2 | 8.9 | 64% | HBM |
+| `adaln_a` | 40.0 | 32.4 | 7.6 | 73.6 | 64.7 | 8.9 | 88% | HBM |
+| mm dog = dy Wo | 37.9 | 30.2 | 7.7 | 68.1 | 60.4 | 7.7 | 89% | MMA |
+| `res_c` | 56.4 | 48.5 | 7.9 | 103.8 | 97.1 | 6.7 | 94% | HBM |
+| mm z = h Wsq^T | 62.8 | 60.4 | 2.4 | 127.0 | 120.8 | 6.2 | 95% | MMA |
+| weight pack, `finalize`, `unfold` | 14.6 | 0 | 14.6 | 15.1 | 0 | 15.1 | -- | -- |
+| `cond_bwd` | 17.2 | 16.2 | 1.0 | 37.6 | 32.4 | 5.2 | 86% | HBM |
+| mm dxa = dvg Wvg | 61.6 | 60.4 | 1.2 | 120.8 | 120.8 | 0.0 | 100% | MMA |
+| mm vg = xa Wvg^T | 62.4 | 60.4 | 2.0 | 120.6 | 120.8 | -0.2 | 100% | MMA |
+| `cond_ln` | 6.2 | 8.1 | -1.9 | 15.9 | 16.2 | -0.3 | 102% | HBM |
+| **sum** | 2128 | 1613 | 514 | 4446 | 3362 | 1084 | 76% | |
+
+What the gaps say, and what was done about them (2026-10-06): the weight-gradient GEMMs (six rows, ~330 us of gap at L768) are
+cuBLAS's single long-K launches -- split into batches of row chunks (`_wgrad32`), whole step -168 us (L768) / -82 (L384). The
+dh + SwiGLU-backward kernel (110 us) waited for every tile's store to finish reading before refilling its ring -- one store now
+stays in flight. Left, without a profile: the attention core (`pv_gate`, `pv_dv`: 44-48 %, MMA-bound by the model, ~320 TF/s), the
+pair-bias backward (59 %), dchat / G / Gg (70-77 %, cuBLAS with N = 384-4608 over K = 384-3072).
+
+`res_adaln_b_bwd` takes three warps per 768-row (8 columns per thread): the bf16 twin's two-warp layout holds its bf16 operands
+packed until used; in fp32 the same layout needs 72 registers of row data per thread and spilled (24-64 bytes at 128).
 
 **Not ported:** `gemm_resln_sm100` and `cond_tables_sm100` (opt-in, measured slower than the default composition in bf16; the
 cond-table kernel's resident [128 x 384] A tile is 192 KB in fp32 and does not fit beside its B stages). The fp32 step runs the

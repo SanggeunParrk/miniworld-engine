@@ -14,10 +14,16 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   `attn_dkv_tf32.cu`, `bwd_prep_tf32.cu`, `mod_bwd_tf32.cu`): identical training steps gave different gradients (a 2-row x 32-column
   dP fragment of `qkvg_bwd_tf32`, ~2e-2 on dq / dWqkv), and it faulted on poisoned memory. fp32 training takes the Triton fp32 path
   until a new backward lands; inference keeps the TF32 forward.
-- B200 fp32 bias-only DiT `dpb_tf32.cu`: identical reruns gave different dbias at L 640 / 768. The fp32 training op computes dbias as
-  a TF32 batched GEMM until a new kernel lands.
+- B200 fp32 bias-only DiT `dpb_tf32.cu`: identical reruns gave different dbias at L 640 / 768. Replaced by `dpb32_sm100.cu` (below).
 
 ### Added
+
+- B200 fp32 bias-only DiT training, faster: `dpb32_sm100.cu` (the fp32 port of the bf16 `dpb_sm100.cu`) for the bias gradient; the
+  pair bias and its backward on TF32 `mma.sync`; the dh GEMM with the SwiGLU backward in its epilogue (`gemm_glu_tf32.cu`); the six
+  weight gradients as batched row chunks; one-launch weight pack; `res_adaln_b` at three blocks per SM; `softmax_t` 16 rows per block;
+  dxt / dxa written into dG. Switches: `MINIWORLD_BIAS_ONLY_DIT_TF32_GLU(_BWD)`, `_PV_BATCH`, `_PAIR_EXACT`, `_WGRAD_SPLIT`,
+  `_F32_RESB_MINB`. One block, A = 48, 16 x 48 heads, whole step (CUDA graph): 2161 -> 2023 us at L384, 4403 -> 4224 at L768,
+  80% of the speed-of-light floor (every graph node: max(FLOP / 720 TF/s, bytes / 7 TB/s)); 1.23-1.25x PyTorch compiled fp32.
 
 - B200 fp32 token DiT training, faster: the pair-bias projection and its gradients on TF32 tensor cores, narrow weight
   gradients split over rows. One block, A = 48, whole fused step: 1161 -> 1008 us at L128, 2898 -> 2675 at L384, 6599 -> 6369 at L768.

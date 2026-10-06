@@ -12,11 +12,14 @@ operands, fp32 accumulation, weight gradients in the parameter's dtype), the exp
             dbias = P o (sum_a do v^T - D) (dpb_sm100); d pair and dWf = dbias LN(pair) (pair_bias_bwd) -> to_bias / ln_pair
 
 fp32 (the TF32 recipe): single, cond and pair fp32, the block's weights fp32, no CUDA autocast -> the same composition with every
-activation, saved tensor and gradient fp32: cuBLAS GEMMs forced to TF32 tensor cores; the fp32 rows and the pair bias / its
-backward in exact fp32 (``bias_only_dit_f32_rows.cu``); the attention core ``pv_gate_tf32`` (forward and dV) on kind::tf32 MMAs
-(``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those warns once and keeps the module path. The bias gradient runs as a
-TF32 batched GEMM (``_dbias32``) until a new kernel replaces ``dpb_tf32.cu``, removed for giving different results on identical
-reruns at L >= 640.
+activation, saved tensor and gradient fp32: cuBLAS GEMMs forced to TF32 tensor cores (the dxt / dxa data gradients written straight
+into their d shift columns of dG; the six weight gradients as batches of row chunks, ``_wgrad32``); the dh GEMM with the SwiGLU
+backward in its epilogue (``gemm_glu_tf32.cu``; MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD=0: cuBLAS + the rows; the expand GEMM with the
+SwiGLU in its epilogue is opt-in, MINIWORLD_BIAS_ONLY_DIT_TF32_GLU=1); the fp32 rows (``bias_only_dit_f32_rows.cu``); the pair bias
+and its backward on TF32 mma.sync (``pair_bias_tc`` / ``pair_bias_bwd_tc``; MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT=1: split fp32,
+~exact); the weight pack in one launch; the attention core ``pv_gate_tf32`` (forward and dV) and the bias gradient ``dpb32_sm100``
+(the fp32 port of the bf16 ``dpb_sm100``; it replaces ``dpb_tf32.cu``, removed for non-repeatable results) on kind::tf32 MMAs
+(``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those warns once and keeps the module path.
 
 ``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32 inputs, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
@@ -366,21 +369,31 @@ def _pack32(P, dev):
     hit = None if slot is None else _PACKS32.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
-    g = lambda n: _f32(P[n])
+    g = lambda n: _f32(P[n])                            # the parameters themselves (fp32 contiguous: no copy)
     w1, w2 = g("attention.ada_ln_in.ln_cond.weight"), g("transition.ada_ln_in.ln_cond.weight")
-    Wraw = torch.cat([g("attention.ada_ln_in.to_scale.weight"), g("attention.ada_ln_in.to_bias.weight"),
-                      g("transition.ada_ln_in.to_scale.weight"), g("transition.ada_ln_in.to_bias.weight")])
     wp, Wb = g("attention.ln_pair.weight"), g("attention.to_bias.weight")
+    proj = [g(n) for n in ("attention.ada_ln_in.to_scale.weight", "attention.ada_ln_in.to_bias.weight",
+                           "transition.ada_ln_in.to_scale.weight", "transition.ada_ln_in.to_bias.weight")]
+    gates = [g("attention.to_scale.weight"), g("transition.to_scale.weight")]
+    vg = [g("attention.to_value.weight"), g("attention.to_gate.weight")]
+    ab = [g("transition.expand_a.weight"), g("transition.expand_b.weight")]
+    DA, H = vg[0].shape[0], Wb.shape[0]
+    e = lambda *shape: torch.empty(*shape, device=dev, dtype=F32)
+    Wraw, Wn, Wg, Wvg, Wf, Wab = e(4 * D, DC), e(4 * D, DC), e(2 * D, DC), e(2 * DA, D), e(H, DP), e(4 * D, D)
+    # one launch (bias_only_dit_f32_rows.cu pack): Wraw = [the four AdaLN projections], Wn = Wraw with the cond-LN weights folded
+    # in, Wg, Wvg, Wab the concatenations, Wf = Wb diag(wp)
+    no = torch.empty(0, device=dev, dtype=F32)
+    rows = lambda t, k: [t[i * t.shape[0] // k:(i + 1) * t.shape[0] // k] for i in range(k)]
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+    tf32.rows32().pack_cuda([*proj, *proj, *gates, *vg, Wb, *ab],
+                            [*rows(Wraw, 4), *rows(Wn, 4), *rows(Wg, 2), *rows(Wvg, 2), Wf, *rows(Wab, 2)],
+                            [no] * 4 + [w1, w1, w2, w2] + [no] * 4 + [wp] + [no] * 2)
     W = {
-        "w1": w1, "w2": w2, "Wraw": Wraw, "Wn": torch.cat([Wraw[:2 * D] * w1, Wraw[2 * D:] * w2]).contiguous(),
-        "Wg": torch.cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]).contiguous(),
+        "w1": w1, "w2": w2, "Wraw": Wraw, "Wn": Wn, "Wg": Wg,
         "bs1": g("attention.ada_ln_in.to_scale.bias"), "bs2": g("transition.ada_ln_in.to_scale.bias"),
         "bg1": g("attention.to_scale.bias"), "bg2": g("transition.to_scale.bias"),
-        "Wvg": torch.cat([g("attention.to_value.weight"), g("attention.to_gate.weight")]).contiguous(),
-        "wp": wp, "Wb": Wb, "Wf": (Wb * wp).contiguous(),
-        "Wo": g("attention.to_out.weight"),
-        "Wab": torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).contiguous(),
-        "Wsq": g("transition.squeeze.weight"),
+        "Wvg": Wvg, "wp": wp, "Wb": Wb, "Wf": Wf,
+        "Wo": g("attention.to_out.weight"), "Wab": Wab, "Wsq": g("transition.squeeze.weight"),
     }
     if slot is not None:
         _capture.prune(_PACKS32)
@@ -391,22 +404,40 @@ def _pack32(P, dev):
 _OPS32: dict = {}
 
 
+def _pair_terms() -> int:
+    """Products of the training pair bias / its backward on TF32 tensor cores: 1 (TF32, the recipe's rounding of every product) or
+    3 (split fp32, ~exact: MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT=1)."""
+    return 3 if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT", "0") == "1" else 1
+
+
+def _wgrad32(a, b):
+    """a^T b over the M rows (a [M, N], b [M, K] row-major, any row stride): a weight gradient of the fp32 step, as one bmm over S
+    row chunks (strided views, no copies) whose [S, N, K] partials are summed in fp32. cuBLAS runs these long-K, small-output TF32
+    GEMMs as one launch at 360-500 TF/s (the data gradients at 600-670); a batch of chunks fills every SM with full tiles. Measured
+    (A = 48, us, one GEMM -> S = 4): L768 dWsq 163 -> 126, dWo 102 -> 75, dWvg 163 -> 131, dWn 171 -> 145, dWgg 119 -> 82, dWab 267
+    -> 250, whole step -168; L384 the same except dWab (2.4 M outputs: 120 -> 131), whole step -82. Default S = 4, the large dWab
+    output only from M = 32768 rows. MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT=S forces S for all six (0 / 1: one GEMM each)."""
+    M, N, K = a.shape[0], a.shape[1], b.shape[1]
+    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT", "")
+    S = int(forced) if forced else (4 if N * K < 2_000_000 or M >= 32768 else 1)
+    if S <= 1 or M % S:
+        return torch.mm(a.t(), b)
+    return torch.bmm(a.unflatten(0, (S, M // S)).transpose(1, 2), b.unflatten(0, (S, M // S))).sum(0)
+
+
+def _glu(dev, bwd):
+    """The fp32 SwiGLU GEMM (``tf32.GemmGluTF32``): forward expand + SwiGLU, or (``bwd``) dh + the SwiGLU backward; None keeps
+    cuBLAS + the fp32 rows (switched off, or the build failed)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+    return tf32.glu_op(dev.index if dev.index is not None else torch.cuda.current_device(), bwd)
+
+
 def _op32(kind, dev, nh, dh):
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
     if (kind, idx, nh, dh) not in _OPS32:
         from miniworld_engine.kernels.bias_only_dit.cuda import tf32
-        _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32}[kind](idx, nh=nh, dh=dh)
+        _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32, "dpb": tf32.Dpb32}[kind](idx, nh=nh, dh=dh)
     return _OPS32[(kind, idx, nh, dh)]
-
-
-def _dbias32(do: torch.Tensor, v: torch.Tensor, P: torch.Tensor, dd: torch.Tensor, out: torch.Tensor, A: int) -> torch.Tensor:
-    """dbias [H, L, L] = P o (sum_a do v^T - D), D[h, i] = sum_a dd[a, h, i] (masked keys have P = 0): one TF32 batched GEMM per head
-    over the A samples' channels, fixed order. Stands in for the removed ``dpb_tf32.cu`` until its replacement lands."""
-    H, L, _ = P.shape
-    dh = do.shape[1] // H
-    a = do.reshape(A, L, H, dh).permute(2, 1, 0, 3).reshape(H, L, A * dh)
-    b = v.reshape(A, L, H, dh).permute(2, 0, 3, 1).reshape(H, A * dh, L)
-    return torch.mul(P, torch.bmm(a, b).sub_(dd.sum(0).unsqueeze(-1)), out=out)
 
 
 def _fwd32_fake(single, cond, pair, mask, params):
@@ -435,7 +466,7 @@ def _fwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         F.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
         vg = torch.mm(xa, W["Wvg"].t())                                      # [M, 2 DA] v | g
         P, pst = e(H, L, L), e(R, 2)
-        F.pair_bias_cuda(pair.reshape(R, DP).contiguous(), W["Wf"], P, pst, EPS)   # the bias, head-major, exact fp32
+        F.pair_bias_tc_cuda(pair.reshape(R, DP).contiguous(), W["Wf"], P, pst, EPS, _pair_terms())   # the bias, head-major (mma.sync)
         Pt = e(H, L, L)
         F.softmax_t_cuda(P.view(H * L, L), P.view(H * L, L), Pt.view(H * L, L),
                          None if mask is None else mask.reshape(L).to(torch.bool).contiguous())
@@ -444,9 +475,14 @@ def _fwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         y = torch.mm(og, W["Wo"].t())
         xt, x1st = e(M, D), e(M, 2)
         F.res_adaln_b_cuda(x, y, Gg, W["bg1"], G, W["bs2"], xt, x1st, EPS)
-        ab = torch.mm(xt, W["Wab"].t())                                      # [M, 2 * 2D] a | b
-        h = e(M, 2 * D)
-        F.swiglu_cuda(ab, h)
+        glu = _glu(dev, False)
+        if glu is not None:                                                  # [M, 2 * 2D] a | b and h = silu(a) b, one kernel
+            ab, h = e(M, 4 * D), e(M, 2 * D)
+            glu(xt, W["Wab"], ab, h)
+        else:
+            ab = torch.mm(xt, W["Wab"].t())                                  # [M, 2 * 2D] a | b
+            h = e(M, 2 * D)
+            F.swiglu_cuda(ab, h)
         z = torch.mm(h, W["Wsq"].t())
         out = e(M, D)
         F.res_c_cuda(x, y, z, Gg, W["bg1"], W["bg2"], out)
@@ -478,37 +514,44 @@ def _bwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         norms = torch.empty(_NORMS, device=dev, dtype=pdt["attention.ada_ln_in.ln_cond.weight"])
         dG, dGg, dz = e(M, 4 * D), e(M, 2 * D), e(M, D)
         n0 = F.res_c_bwd_cuda(dout, z, Gg, bg2, dz, dGg, part[0])
-        dh = torch.mm(dz, Wsq)                                               # [M, 2D]
         dab = torch.empty_like(ab)
-        F.swiglu_bwd_cuda(dh, ab, dab)
-        dWsq = torch.mm(dz.t(), h)
-        dxt = torch.mm(dab, Wab)
-        dWab = torch.mm(dab.t(), xt)
+        glu = _glu(dev, True)
+        if glu is not None:                                                  # dh = dz Wsq in the GEMM, dab from its epilogue
+            WsqT = W.get("WsqT")
+            if WsqT is None:                                                 # K-major B: Wsq^T [2D, D], once per pack
+                WsqT = W["WsqT"] = Wsq.t().contiguous()
+            glu(dz, WsqT, ab, dab)
+        else:
+            dh = torch.mm(dz, Wsq)                                           # [M, 2D]
+            F.swiglu_bwd_cuda(dh, ab, dab)
+        dWsq = _wgrad32(dz, h)
+        dxt = torch.mm(dab, Wab, out=dG[:, 3 * D:])                         # d shift2 = dxt: straight into its dG columns
+        dWab = _wgrad32(dab, xt)
         dx1, dy = e(M, D), e(M, D)
         n12 = F.res_adaln_b_bwd_cuda(dout, dxt, x, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2])
         dog = torch.mm(dy, Wo)
-        dWo = torch.mm(dy.t(), og)
+        dWo = _wgrad32(dy, og)
         # the bias-only attention's backward
         dvg, do, dd = e(M, 2 * DA), e(M, DA), e(A, H, L)
         F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
         _op32("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)            # dv = P^T do
         dbias = e(H * L, L)
-        _dbias32(do, vg[:, :DA], P, dd, dbias.view(H, L, L), A)                         # P o (dP - D); masked keys get P = 0
-        dxa = torch.mm(dvg, Wvg)
-        dWvg = torch.mm(dvg.t(), xa)
+        _op32("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)   # P o (dP - D); masked keys get P = 0
+        dxa = torch.mm(dvg, Wvg, out=dG[:, D:2 * D])                        # d shift1 = dxa: straight into its dG columns
+        dWvg = _wgrad32(dvg, xa)
         dx = e(M, D)
         n3 = F.adaln_a_bwd_cuda(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
         dchat = torch.mm(dG, Wn)
-        dWn = torch.mm(dG.t(), chat)
+        dWn = _wgrad32(dG, chat)
         dcg = torch.mm(dGg, Wg)
-        dWgg = torch.mm(dGg.t(), c2)
+        dWgg = _wgrad32(dGg, c2)
         dc = e(M, DC)
         F.cond_bwd_cuda(dchat, dcg, c2, cst, dc)
         pw = e(192, DC)                                                      # cond-LN weight partials, one row per block
         BT.unfold_cuda(dWn, Wraw, w1, w2, flat[:_U].view(4 * D, DC), pw)
         dpair = e(R, DP)
         pwf = e(F.partial_rows(M), H, DP)                                    # dWf partials, one per block
-        nwf = F.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf"], dpair, pwf)
+        nwf = F.pair_bias_bwd_tc_cuda(dbias, p2, pst, W["Wf"], dpair, pwf, _pair_terms())
         BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pwf, nwf, Wb, wp, flat[_U:], norms)
     big = [dWvg, dWab, dWgg, dWsq, dWo]
     big = [b if b.dtype == params[NAMES.index(g[0])].dtype else b.to(params[NAMES.index(g[0])].dtype) for b, g in zip(big, _BIG)]

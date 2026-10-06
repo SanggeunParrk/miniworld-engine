@@ -63,10 +63,24 @@ constexpr int NST = (232448 - 1024 - NX * XG) / STB;
 constexpr int O_ST = 0, O_X = NST * STB, O_BAR = O_X + NX * XG, SMEM_BYTES = O_BAR + 512;
 static_assert(NST >= 2 && SMEM_BYTES <= 232448, "shared memory");
 static_assert(STB % 1024 == 0 && XG % 1024 == 0 && TV % 1024 == 0, "1 KB alignment of the swizzled tiles");
-constexpr int TNEED = 2 * SG * DH;
-static_assert(TNEED <= 512, "two accumulator sets of SG x DH columns");
+// -DBATCHN: one MMA per K step for ALL the group's samples -- B = their v chunks, which sit NA 4-KB atoms apart (TV = NA TVA), as ONE
+// MN-major operand of N = SG NA 32 (LBO = TVA) -- instead of one MMA per sample: the P chunk (A) is read from shared memory once per
+// K step, not SG times, and SG x fewer MMAs are issued (the kernel was bound by them: ~320 TF/s at L768). A 48-wide head computes 16
+// columns of the next head's (or zero-filled) channels it never reads; a partial last group computes unused columns from stale
+// shared memory. Accumulator of sample k: columns (buffer SG + k) NW.
+#ifdef BATCHN
+constexpr int NW = NA * 32;
+static_assert(SG * NW <= 256 && (SG * NW) % 16 == 0, "N of the batched product");
+#else
+constexpr int NW = DH;
+#endif
+constexpr int TNEED = 2 * SG * NW;
+static_assert(TNEED <= 512, "two accumulator sets of SG x NW columns");
 constexpr uint32_t TCOLS = TNEED <= 32 ? 32 : TNEED <= 64 ? 64 : TNEED <= 128 ? 128 : TNEED <= 256 ? 256 : 512;
 constexpr uint32_t I_PV = idesc_tf32(QM, DH, 0, 1);                          // A = P K-major, B = v MN-major
+#ifdef BATCHN
+constexpr uint32_t I_PVB = idesc_tf32(QM, SG * NW, 0, 1);                    // the group's samples side by side in N
+#endif
 
 DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); }
 // byte address of 16-byte chunk q (4 fp32 channels) of staging row r
@@ -149,6 +163,15 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
         const uint32_t st = su + O_ST + s * STB;
         const uint64_t dp = desc_k128(st);
         if (elect_one()) {
+#ifdef BATCHN
+          {
+            const uint64_t dv = desc_mn32b(st + TP, TVA);         // every sample's atoms, TVA apart: N = SG NW
+            const uint32_t d = tmem + (uint32_t)(b * SG * NW);
+#pragma unroll
+            for (int ks = 0; ks < KC / 8; ++ks)
+              umma_ss_tf32(d, dp + (uint64_t)(ks * 2), dv + (uint64_t)((ks * 1024) >> 4), I_PVB, (c > 0 || ks > 0) ? 1u : 0u);
+          }
+#else
           for (int k = 0; k < ns; ++k) {
             // v of sample k: MN-major, two 32-channel atoms TVA apart (LBO); 8 keys = 1 KB per K step
             const uint64_t dv = desc_mn32b(st + TP + k * TV, TVA);
@@ -157,6 +180,7 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
             for (int ks = 0; ks < KC / 8; ++ks)
               umma_ss_tf32(d, dp + (uint64_t)(ks * 2), dv + (uint64_t)((ks * 1024) >> 4), I_PV, (c > 0 || ks > 0) ? 1u : 0u);
           }
+#endif
           tc_commit(&B.empty[s]);
           if (c == nk - 1) tc_commit(&B.acc_full[b]);
         }
@@ -195,7 +219,7 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
         uint32_t ov[DH];
 #pragma unroll
         for (int cc = 0; cc < DH / 16; ++cc)
-          tmem_ld16(trow + (uint32_t)((b * SG + k) * DH + cc * 16), *reinterpret_cast<uint32_t(*)[16]>(ov + 16 * cc));
+          tmem_ld16(trow + (uint32_t)((b * SG + k) * NW + cc * 16), *reinterpret_cast<uint32_t(*)[16]>(ov + 16 * cc));
         tmem_wait_ld();
         if (k == ns - 1) {                                        // every accumulator of the item read: the MMAs may reuse them
           tc_fence_before();

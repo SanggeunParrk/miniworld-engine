@@ -10,7 +10,8 @@ The core is a cubin built on first use into ``MINIWORLD_ENGINE_JIT_ROOT`` and la
 ``kernels/augmented_attention/cuda/sm100`` (TMA descriptors, current stream, CUDA-graph capturable); the rows are a
 torch extension. Neither is built at import.
 
-The fp32 path (TF32 tensor cores: ``pv_gate_tf32.cu``, ``bias_only_dit_f32_rows.cu``) is ``tf32.py``.
+The fp32 path (TF32 tensor cores: ``pv_gate_tf32.cu``, ``dpb32_sm100.cu``, ``gemm_glu_tf32.cu``, ``bias_only_dit_f32_rows.cu``) is
+``tf32.py``.
 """
 
 from __future__ import annotations
