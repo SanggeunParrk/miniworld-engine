@@ -648,7 +648,8 @@ def _block_fwd(
     a, _, n0, _ = single.shape
     n = _padded_length(n0)
     m = a * n
-    owned = _owned_blas_enabled(single, save)
+    owned = (_owned_blas_enabled(single, save)
+             and (a, n0) in ((5, 8192), (48, 4096), (48, 8192)))
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
         packed_infer = (not save and cross and a == 5 and n0 in (2048, 4096)
