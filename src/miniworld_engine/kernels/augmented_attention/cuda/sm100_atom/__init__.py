@@ -226,7 +226,7 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
         maps = (_map(c, [DM, M], DM * 2, [64, 64]),
                 _map(W, [DM, 6 * DM], DM * 2, [64, 128]))
         wide = M > 64 * nsm(d)
-        waves = float(os.environ.get("MINIWORLD_ATOM_H100_COND_WAVES", "2")) if wide else 1.
+        waves = float(os.environ.get("MINIWORLD_ATOM_H100_COND_WAVES", str(hopper_waves))) if wide else 1.
         if waves not in (.5, 1., 2., 4.):
             raise ValueError("Hopper conditioning waves must be 0.5, 1, 2 or 4")
         atom_kernel("cond1" if wide else "cond", d)((min(int(waves * nsm(d)), (M + 63) // 64), 2, 1), (160, 1, 1),
@@ -288,7 +288,7 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5):
                 _map(Wu, [DM, 4 * DM], DM * 2, [64, 128]),
                 _map(Wd, [2 * DM, DM], DM * 4, [64, 128]))
         wide = M > 64 * nsm(d)
-        packed = wide and os.environ.get("MINIWORLD_ATOM_H100_POST_PACKED", "0") == "1"
+        packed = wide and os.environ.get("MINIWORLD_ATOM_H100_POST_PACKED", "1" if packed_hopper else "0") == "1"
         name = "post2_packed" if packed else "post2" if wide else "post"
         atom_kernel(name, d)((min((2 if wide else 1) * nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
                               a, o, g, mod, *maps, out, *sv, int(M), float(eps), int(save))

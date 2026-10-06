@@ -3,9 +3,9 @@
 H100 cross-attention training at A=1/5/48, N=4096/8192 and inference at
 (A,N)=(1,4096),(5,2048),(5,4096),(48,4096) use the CUDA block by default.
 These paths require contiguous bf16 activations and bf16 or fp32 weights;
-unsupported contracts raise. Accuracy and native execution are qualified
-separately from performance; the three smaller inference cells remain slower
-than their recorded compiled PyTorch baseline.
+unsupported contracts raise. The A=5, N=2048/4096 inference cells use a packed
+bf16 post-attention epilogue and persistent conditioning schedule, qualified
+against the previous CUDA path and the recorded compiled PyTorch baseline.
 
 One ``LocalDiTBlock`` call runs, in place of the module path,
 
@@ -523,6 +523,8 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     m = a * n
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
+        packed_infer = (not save and cross and a == 5 and n0 in (2048, 4096)
+                        and rows._hopper(single.device.index))
         wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)], backward=save)
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         mod, cn, mkv = _cond_tables(cond, lambda: _padded(cond, n).reshape(m, DC_).contiguous(), n, weights, wc, cross, save)
@@ -533,7 +535,8 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
             q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save)
         bias = _pair_bias(pair, n, weights, save)
         o, lse = local.attn_fwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n))
-        out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save)
+        out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save,
+                                        packed_hopper=packed_infer)
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
         return [out]
