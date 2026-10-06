@@ -1,4 +1,9 @@
-"""The OuterProductMean TRAINING path: one autograd.Function over the fused OPM kernels developed in MiniWorld's
+"""OuterProductMean with a default CUDA-only H100 path for BF16 inputs and BF16/FP32 master weights.
+
+H100 uses a TMA/WGMMA prologue, deterministic CUDA mask/parameter passes, cuBLAS contractions and CUDA epilogues.
+Explicit MINIWORLD_OPM_H100_CUDA_ONLY=0 retains the historical diagnostic composition described below.
+
+The historical TRAINING path: one autograd.Function over the fused OPM kernels developed in MiniWorld's
 `runs/msa_bench_20260921` (2026-09-22): the upstream-style fused Triton PROLOGUE (LayerNorm + both projections + mask
 straight into the GEMM layouts, vendored below with the LayerNorm statistics kept for the backward), cuBLAS for the
 grouped outer product, and this repo's `csrc/opm_epilogue.cu` for everything else:
@@ -586,6 +591,10 @@ def outer_product_mean(
     if torch.is_grad_enabled():
         save_o = settings.current().opm_train_save_o
         out = OpmTrainFn.apply(*tensors, eps, save_o)
+        if native_aux_enabled() and torch.cuda.get_device_capability(msa.device) == (9, 0):
+            from miniworld_engine.integrations.token_dit_train import _native_caller_output
+            leaves = (msa, *module.parameters(), *((residual,) if fuse else ()))
+            out = _native_caller_output(out, *leaves, force=True)
     else:
         out = _inference_op(tensors, eps)
     return out + residual if residual is not None and not fuse else out
