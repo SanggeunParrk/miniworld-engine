@@ -40,6 +40,25 @@ HC = H * C
 _EXT: dict[str, Any] = {}
 
 
+def native_aux_enabled() -> bool:
+    """Experimental H100 CUDA preparation and deterministic reduction path."""
+    return os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "0") == "1"
+
+
+def native_inference_enabled(device: torch.device) -> bool:
+    """Validated H100 inference default; AUX=0 retains the original path."""
+    return (os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "1") == "1"
+            and device.type == "cuda" and torch.cuda.get_device_capability(device) == (9, 0))
+
+
+def _h100_cluster(native: bool | None = None) -> int:
+    native = native_aux_enabled() if native is None else native
+    size = int(os.environ.get("MINIWORLD_PWA_H100_CLUSTER", "1")) if native else 1
+    if size not in (1, 2):
+        raise ValueError("H100 PWA cluster size must be 1 or 2")
+    return size
+
+
 def payload_dir():  # kept for symmetry with anthropic_msa: this path needs no payload
     return None
 
@@ -96,6 +115,9 @@ def refusal(
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         n, s = msa.shape[2], msa.shape[1]
+        native = native_aux_enabled() or (not torch.is_grad_enabled() and native_inference_enabled(msa.device))
+        if cap == (9, 0) and native and (n == 0 or s == 0 or n > 1024):
+            return f"the CUDA-only H100 path needs positive S and N <= 1024, got N={n}, S={s}"
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
         if cap == (10, 0) and (
@@ -133,7 +155,12 @@ def serves(*a, **kw) -> bool:
     return False
 
 
-def _build(name: str, src_name: str):
+def _build(name: str, src_name: str, native: bool | None = None, fp32_logits: bool = True):
+    native = (native_aux_enabled() if native is None else native) and src_name in ("pair3.cu", "dgv_bwd.cu", "pwa_glue3.cu")
+    if native:
+        name += "_native_v1"
+        if src_name == "pair3.cu" and not fp32_logits:
+            name += "_rounded_logits"
     if name in _EXT:
         return _EXT[name]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -216,8 +243,8 @@ def _k():
             )
         else:
             k["forward"] = fwd2
-        _EXT["all"] = k
-    return _EXT["all"]
+        _EXT[key] = k
+    return _EXT[key]
 
 
 def colsum(x):
@@ -472,10 +499,18 @@ def pair_bwd(z, w16, dw, ln_w, eps, wb, BJ=32, num_warps=4, BJO=None):
 
 def _cast_h100_matrices(*weights):
     """Batch master-to-BF16 copies without changing the B200 path."""
+    if native_aux_enabled() and torch.cuda.get_device_capability(weights[0].device) == (9, 0):
+        return tuple(_k()["pair3"].cast(list(weights), [0] * len(weights), False))
     if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(w.dtype != torch.bfloat16 for w in weights):
         from miniworld_engine.integrations.h100_master import pack
         return tuple(pack(weights))
     return tuple(w.to(torch.bfloat16).contiguous() for w in weights)
+
+
+def _h100_float(*weights):
+    if native_aux_enabled():
+        return tuple(_k()["pair3"].cast(list(weights), [1] * len(weights), False))
+    return tuple(w.float().contiguous() for w in weights)
 
 
 class _PwaMath(torch.autograd.Function):
