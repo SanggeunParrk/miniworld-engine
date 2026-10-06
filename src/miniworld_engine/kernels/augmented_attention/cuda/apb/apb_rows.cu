@@ -1223,6 +1223,65 @@ torch::Tensor ln_bf16(torch::Tensor x,torch::Tensor g,torch::Tensor b,double eps
  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
 }
 
+// Fuse the exact pair LayerNorm, FP32 projection and optional mask/layout
+// producer. Preserve Welford merges, affine order and sequential K128 FMA;
+// normalized pair and (for masked attention) row-major bias never reach HBM.
+template<int H,int ROWS,int THREADS,bool HEAD_MAJOR>
+__global__ void ln_pair_project_k(const __nv_bfloat16* x,const float* g,const float* b,const float* w,float* y,const bool* mask,int M,int L,float eps){
+ __shared__ float norm[ROWS][129],weight[H][129],projected[H][ROWS+1];
+ int lane=threadIdx.x&31,warp=threadIdx.x/32;
+ for(int i=threadIdx.x;i<H*128;i+=THREADS)weight[i/128][i%128]=w[i];
+ for(int rr=warp;rr<ROWS;rr+=THREADS/32){
+  int row=blockIdx.x*ROWS+rr;Stats a{0.f,0.f,0.f};
+  #pragma unroll
+  for(int j=0;j<4;j++){
+   float v=__bfloat162float(x[(long)row*128+4*lane+j]),d=v-a.mean,n=a.count+1.f;
+   float m=a.mean+d*(1.f/n);a={m,a.m2+d*(v-m),n};
+  }
+  for(int o=16;o;o>>=1){
+   Stats z{__shfl_down_sync(0xffffffff,a.mean,o),__shfl_down_sync(0xffffffff,a.m2,o),__shfl_down_sync(0xffffffff,a.count,o)};a=merge(a,z);
+  }
+  if(lane==0){a=merge(a,{0.f,0.f,0.f});a=merge(a,{0.f,0.f,0.f});}
+  float mean=__shfl_sync(0xffffffff,a.mean,0);
+  float rstd=lane==0?rsqrtf(a.m2/128.f+eps):0.f;rstd=__shfl_sync(0xffffffff,rstd,0);
+  #pragma unroll
+  for(int c=lane;c<128;c+=32)norm[rr][c]=g[c]*(rstd*(__bfloat162float(x[(long)row*128+c])-mean))+b[c];
+ }
+ __syncthreads();
+ constexpr int PER=ROWS*H/THREADS;float acc[PER]={};
+ const int head=threadIdx.x%H,base=threadIdx.x/H,step=THREADS/H;
+ #pragma unroll
+ for(int k=0;k<128;k++){
+  float wk=weight[head][k];
+  #pragma unroll
+  for(int p=0;p<PER;p++)acc[p]=__fmaf_rn(norm[base+p*step][k],wk,acc[p]);
+ }
+ #pragma unroll
+ for(int p=0;p<PER;p++){
+  if constexpr(HEAD_MAJOR)projected[head][base+p*step]=acc[p];
+  else y[((long)blockIdx.x*ROWS+base+p*step)*H+head]=acc[p];
+ }
+ if constexpr(HEAD_MAJOR){
+  __syncthreads();
+  for(int i=threadIdx.x;i<H*ROWS;i+=THREADS){int h=i/ROWS,r=i%ROWS,row=blockIdx.x*ROWS+r;
+   y[(long)h*M+row]=mask[row%L]?projected[h][r]:-3.4028234663852886e38f;
+  }
+ }
+}
+torch::Tensor ln_pair_project(torch::Tensor x,torch::Tensor g,torch::Tensor b,torch::Tensor w,c10::optional<torch::Tensor> mask,double eps){
+ TORCH_CHECK(x.is_cuda()&&g.device()==x.device()&&b.device()==x.device()&&w.device()==x.device()&&w.dim()==2,"APB exact LN pair projection CUDA/device/matrix layout");
+ c10::cuda::CUDAGuard guard(x.device());int M=x.numel()/128,H=w.size(0),L=mask?mask->numel():0;
+ TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16&&x.size(-1)==128&&(M==384*384||M==768*768)
+ &&g.is_contiguous()&&b.is_contiguous()&&w.is_contiguous()&&g.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat&&w.scalar_type()==at::kFloat
+ &&g.numel()==128&&b.numel()==128&&w.size(1)==128,"LN pair projection layout");
+ TORCH_CHECK(!mask||(mask->is_cuda()&&mask->device()==x.device()&&mask->scalar_type()==at::kBool&&mask->is_contiguous()&&L*L==M),"mask");
+ auto y=torch::empty(mask?std::vector<int64_t>{H,L,L}:std::vector<int64_t>{M,H},x.options().dtype(at::kFloat));auto st=at::cuda::getCurrentCUDAStream();
+ #define LC(HH,R,T) case HH:if(mask)ln_pair_project_k<HH,R,T,true><<<M/R,T,0,st>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),w.data_ptr<float>(),y.data_ptr<float>(),mask->data_ptr<bool>(),M,L,eps);else ln_pair_project_k<HH,R,T,false><<<M/R,T,0,st>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),w.data_ptr<float>(),y.data_ptr<float>(),nullptr,M,0,eps);break;
+ switch(H){LC(8,32,128) LC(12,32,192) LC(16,16,128) default:TORCH_CHECK(false,"H");}
+ #undef LC
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
 template<int LOG,bool BACK> __global__ void soft_k(const float* x,const float* p,float* y,int L,int M) {
  constexpr int I=(1<<LOG)/32;int r=blockIdx.x*4+threadIdx.x/32,l=threadIdx.x&31;
  if(r>=M)return;
@@ -1752,6 +1811,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("exact_mask_bias", &apb_shadow_cutlass::mask_bias);
 #endif
   m.def("exact_ln", &apb_exact::ln);
+  m.def("exact_ln_pair_project", &apb_exact::ln_pair_project);
   m.def("exact_ln_bf16", &apb_exact::ln_bf16, py::arg("x"), py::arg("g"), py::arg("b"), py::arg("eps"), py::arg("warp_rows") = false);
   m.def("exact_mm", &apb_exact::exact_mm, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
   m.def("exact_soft", &apb_exact::soft);
