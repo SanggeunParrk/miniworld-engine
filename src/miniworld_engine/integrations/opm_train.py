@@ -1,7 +1,8 @@
 """OuterProductMean with measured H100 dispatch for BF16 inputs and BF16/FP32 master weights.
 
 H100 uses a WGMMA prologue, deterministic CUDA mask/parameter passes, cuBLAS contractions and CUDA epilogues.
-The seven qualified inference cells and S1024/L384 training use the persistent TMA prologue.
+The seven inference cells and S1024/L384 or L768 training use the persistent TMA prologue.
+S1024/L768 training owns cuBLAS workspaces for safe independent CUDA-graph lifetimes.
 S1024/L384 and S2048/L384 inference also use the gathered-TMA, overlapping-WGMMA epilogue.
 Other required inference cells retain the faster accurate historical composition;
 training retains zero-gamma-safe CUDA backward. The all-shape CUDA-only goal remains open.
@@ -63,7 +64,7 @@ def _h100_path(s: int, n: int, *, training: bool) -> str:
             or "MINIWORLD_OPM_H100_TMA_PROLOGUE" in os.environ):
         return "tma" if tma_prologue_enabled() else "native"
     if training:
-        return "tma" if (s, n) == (1024, 384) else "native"
+        return "tma" if (s, n) in ((1024, 384), (1024, 768)) else "native"
     if (s, n) in ((1024, 128), (1024, 256), (1024, 384), (2048, 128), (2048, 256), (2048, 384), (4096, 128)):
         return "tma"
     if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
@@ -140,13 +141,28 @@ def _epilogue_half_enabled(s: int, n: int, *, training: bool) -> bool:
     return os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_HALF", "1" if default else "0") == "1"
 
 
-def _ext(device=None, *, native=None, tma=None, epi_tma=None, epi_half=None):
+
+def _owned_blas_for(s: int, n: int, *, training: bool) -> bool:
+    """Graph-owned cuBLAS only for qualified training cells, or an explicit override."""
+    default = training and (s, n) == (1024, 768)
+    return os.environ.get("MINIWORLD_OPM_H100_OWNED_BLAS", "1" if default else "0") == "1"
+
+
+def _owned_mm(a, b, enabled: bool):
+    if not enabled:
+        return torch.mm(a, b)
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+
+    return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, False)
+
+def _ext(device=None, *, native=None, tma=None, epi_tma=None, epi_half=None, owned=None):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM)."""
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
     native = native_aux_enabled() if native is None else native
     tma = tma_prologue_enabled() if tma is None else tma
     count = native and tma and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "1") == "1"
+    owned = (not sm100 and native and (os.environ.get("MINIWORLD_OPM_H100_OWNED_BLAS", "0") == "1" if owned is None else owned))
     # Diagnostic candidate: gathered O/W TMA stages with overlapping WGMMA groups.
     if epi_tma is None:
         epi_tma = os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_TMA", "0") == "1"
@@ -166,6 +182,8 @@ def _ext(device=None, *, native=None, tma=None, epi_tma=None, epi_half=None):
         key += "_half"
     if epi_wide:
         key += "_wide"
+    if owned:
+        key += "_owned_blas"
     if key in _EXT:
         return _EXT[key]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -187,15 +205,18 @@ def _ext(device=None, *, native=None, tma=None, epi_tma=None, epi_half=None):
             suffix += "_half"
         if epi_wide:
             suffix += "_wide"
+        if owned:
+            suffix += "_owned_blas"
         build = root / ("opm_epilogue" + suffix)
         build.mkdir(parents=True, exist_ok=True)
         _EXT[key] = load(name="miniworld_opm_epilogue" + suffix, sources=[str(csrc / "opm_epilogue.cu")], build_directory=str(build),
                          extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"]
                          + (["-DMINIWORLD_OPM_CUBLAS_COUNT=1"] if count else [])
+                         + (["-DMINIWORLD_OPM_OWNED_BLAS=1"] if owned else [])
                          + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
                          + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
                          + (["-DMINIWORLD_OPM_EPILOGUE_TMA_WIDE=1"] if epi_wide else []),
-                         extra_cflags=["-O3"])
+                         extra_cflags=["-O3"], extra_ldflags=["-lcublas"] if owned else [])
     return _EXT[key]
 
 
@@ -299,9 +320,10 @@ class _OpmMath(torch.autograd.Function):
     @torch.autocast("cuda", enabled=False)
     def forward(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual=None, save_stats=True):
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
+        owned = _owned_blas_for(msa.shape[1], msa.shape[2], training=save_stats)
         ext = _ext(msa.device, native=path != "legacy", tma=path == "tma",
                    epi_tma=_epilogue_tma_enabled(msa.shape[1], msa.shape[2], training=save_stats),
-                   epi_half=_epilogue_half_enabled(msa.shape[1], msa.shape[2], training=save_stats))
+                   epi_half=_epilogue_half_enabled(msa.shape[1], msa.shape[2], training=save_stats), owned=owned)
         if torch.cuda.get_device_capability(msa.device) == (10, 0):
             z, m, mk, bits, a2, bt, stats, o = _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats)
             ctx.save_o = bool(save_o)
@@ -314,7 +336,7 @@ class _OpmMath(torch.autograd.Function):
             packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
             prologue = ext.opm_native_prologue_tma if path == "tma" else ext.opm_native_prologue
             a2, bt, stats, mask16, norm = prologue(m, mask[0], packed, float(eps), save_stats)
-            o = torch.mm(a2, bt.t())
+            o = _owned_mm(a2, bt.t(), owned)
             n = m.shape[1]
             z = ext.opm_epilogue(o, norm, packed[4], packed[5], n, n, residual)
             ctx.save_o = bool(save_o)
@@ -343,9 +365,10 @@ class _OpmMath(torch.autograd.Function):
         o = saved[12] if ctx.save_o else None
         s, n = m.shape[0], m.shape[1]
         path = _h100_path(s, n, training=True)
+        owned = _owned_blas_for(s, n, training=True)
         ext = _ext(dz.device, native=path != "legacy", tma=path == "tma",
                    epi_tma=_epilogue_tma_enabled(s, n, training=True),
-                   epi_half=_epilogue_half_enabled(s, n, training=True))
+                   epi_half=_epilogue_half_enabled(s, n, training=True), owned=owned)
         if torch.cuda.get_device_capability(dz.device) == (10, 0):
             # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
             dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, wo.detach().to(bf).contiguous(), n, n, int(bo.dtype == bf))
@@ -365,10 +388,10 @@ class _OpmMath(torch.autograd.Function):
                 raise ValueError("native OPM requires contiguous BF16 upstream gradients")
             packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
             dO, dzp, dbo = ext.opm_dgrad(dz[0], norm, packed[6], n, n)
-            dA = torch.mm(bt.t(), dO.t())
-            dB = torch.mm(a2.t(), dO)
+            dA = _owned_mm(bt.t(), dO.t(), owned)
+            dB = _owned_mm(a2.t(), dO, owned)
             if o is None:
-                o = torch.mm(a2, bt.t())
+                o = _owned_mm(a2, bt.t(), owned)
             dWo = ext.opm_dwo(dzp, o, n, n)
             dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(
                 dA, dB, m, stats, mask16, packed[0], packed[1], float(ctx.eps), packed[7], n, s, True, packed[2:4])
