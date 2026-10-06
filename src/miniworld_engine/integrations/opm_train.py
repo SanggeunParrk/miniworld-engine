@@ -1,6 +1,10 @@
-"""OuterProductMean with a default CUDA-only H100 path for BF16 inputs and BF16/FP32 master weights.
+"""OuterProductMean with measured H100 dispatch for BF16 inputs and BF16/FP32 master weights.
 
-H100 uses a TMA/WGMMA prologue, deterministic CUDA mask/parameter passes, cuBLAS contractions and CUDA epilogues.
+H100 uses a WGMMA prologue, deterministic CUDA mask/parameter passes, cuBLAS contractions and CUDA epilogues.
+The five qualified inference cells and S1024/L384 training use the persistent TMA prologue.
+Other required inference cells retain the faster accurate historical composition;
+training retains zero-gamma-safe CUDA backward. The all-shape CUDA-only goal remains open.
+MINIWORLD_OPM_H100_TMA_PROLOGUE=1 explicitly tests the TMA prologue on other shapes.
 Explicit MINIWORLD_OPM_H100_CUDA_ONLY=0 retains the historical diagnostic composition described below.
 
 The historical TRAINING path: one autograd.Function over the fused OPM kernels developed in MiniWorld's
@@ -42,6 +46,32 @@ def _enabled() -> bool:
 
     value = settings.current().opm_train
     return True if value is None else value
+
+
+def tma_prologue_enabled() -> bool:
+    """Experimental B200 fusion/lifetimes, implemented with Hopper TMA/WGMMA."""
+    return os.environ.get("MINIWORLD_OPM_H100_TMA_PROLOGUE", "0") == "1"
+
+
+def tma_cublas_count_enabled() -> bool:
+    """Retain the original exact FP32 cuBLAS mask count in the experimental TMA path."""
+    return tma_prologue_enabled() and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "1") == "1"
+
+
+def _h100_path(s: int, n: int, *, training: bool) -> str:
+    """Only stable paired wins below the eligible historical timing are promoted."""
+    if not native_aux_enabled():
+        return "legacy"
+    if ("MINIWORLD_OPM_H100_CUDA_ONLY" in os.environ
+            or "MINIWORLD_OPM_H100_TMA_PROLOGUE" in os.environ):
+        return "tma" if tma_prologue_enabled() else "native"
+    if training:
+        return "tma" if (s, n) == (1024, 384) else "native"
+    if (s, n) in ((1024, 128), (1024, 256), (2048, 128), (2048, 256), (4096, 128)):
+        return "tma"
+    if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
+        return "legacy"
+    return "native"
 
 
 def wanted(implementation) -> bool:
@@ -125,11 +155,16 @@ def serves(*a, **kw) -> bool:
 _SM100_TRAIN = True  # the sm_100a backward kernels (csrc/sm100/opm_sm100.cu) serve grad-enabled calls
 
 
-def _ext(device=None):
+def _ext(device=None, *, native=None, tma=None):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM)."""
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
-    key = "sm100" if sm100 else ("mod_native" if native_aux_enabled() else "mod")
+    native = native_aux_enabled() if native is None else native
+    tma = tma_prologue_enabled() if tma is None else tma
+    count = native and tma and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "1") == "1"
+    key = "sm100" if sm100 else ("mod_native_tma_cublas_count" if count
+                               else "mod_native_tma_static" if native and tma
+                               else "mod_native" if native else "mod")
     if key in _EXT:
         return _EXT[key]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -148,7 +183,9 @@ def _ext(device=None):
             extra_cflags=["-O3"],
         )
     else:
-        suffix = "_native" if native_aux_enabled() else ""
+        suffix = ("_native_tma_cublas_count" if count
+                  else "_native_tma_static" if native and tma
+                  else "_native" if native else "")
         build = root / ("opm_epilogue" + suffix)
         build.mkdir(parents=True, exist_ok=True)
         _EXT[key] = load(
@@ -466,12 +503,13 @@ class _OpmMath(torch.autograd.Function):
     @staticmethod
     @torch.autocast("cuda", enabled=False)
     def backward(ctx, dz):
-        ext = _ext(dz.device)
         bf = torch.bfloat16
         saved = ctx.saved_tensors
         m, mask16, norm, a2, bt, stats, lnw, lnb, wa, wb, wo, bo = saved[:12]
         o = saved[12] if ctx.save_o else None
         s, n = m.shape[0], m.shape[1]
+        path = _h100_path(s, n, training=True)
+        ext = _ext(dz.device, native=path != "legacy", tma=path == "tma")
         if torch.cuda.get_device_capability(dz.device) == (10, 0):
             # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
             dO, dzp, dbo = ext.opm_dgrad(

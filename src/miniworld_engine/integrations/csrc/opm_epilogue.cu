@@ -123,6 +123,14 @@ __global__ void opm_mask_bits_native(const bool* mask, unsigned* bits, int S, in
   unsigned v=__ballot_sync(0xffffffff,mask[(long)s*N+n]);
   if(lane==0)bits[word]=v;
 }
+__global__ void opm_mask_fp32_selective(const bool* mask, float* output, int count) {
+  int i=blockIdx.x*blockDim.x+threadIdx.x;
+  if(i<count)output[i]=mask[i]?1.f:0.f;
+}
+__global__ void opm_norm_clamp_selective(float* norm, int count) {
+  int i=blockIdx.x*blockDim.x+threadIdx.x;
+  if(i<count)norm[i]=fmaxf(norm[i],1.f);
+}
 __global__ void opm_count_native(const unsigned* bits, float* norm, int S, int N) {
   int p=blockIdx.x*blockDim.x+threadIdx.x;
   if(p>=N*N)return;
@@ -630,6 +638,138 @@ __global__ __launch_bounds__(128) void opm_prologue_wgmma_native(
 }
 
 // ----------------------------------------------------------------------------------------------
+namespace opm_pro_tma {
+constexpr int BS=128, NST=3, NT=512, XT=8192, TT=8192, MT=2048;
+constexpr int SMEM=(NST*XT+2*TT+4096)*2+NST*MT+512+128+1024;
+__device__ __forceinline__ uint32_t sa(const void* p){return uint32_t(__cvta_generic_to_shared(p));}
+__device__ __forceinline__ void init(uint64_t* p,int n){asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;"::"r"(sa(p)),"r"(n):"memory");}
+__device__ __forceinline__ void expect(uint64_t* p,int n){asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"::"r"(sa(p)),"r"(n):"memory");}
+__device__ __forceinline__ void arrive(uint64_t* p){asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(p)):"memory");}
+__device__ __forceinline__ void wait(uint64_t* p,int phase){asm volatile("{.reg .pred p; W_%=: mbarrier.try_wait.parity.shared::cta.b64 p,[%0],%1; @!p bra W_%=;}"::"r"(sa(p)),"r"(phase):"memory");}
+__device__ __forceinline__ void ld2(const void* map,void* dst,uint64_t* b,int x,int y){asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1,{%3,%4}],[%2];"::"r"(sa(dst)),"l"(map),"r"(sa(b)),"r"(x),"r"(y):"memory");}
+__device__ __forceinline__ void ld3(const void* map,void* dst,uint64_t* b,int x,int y,int z){asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1,{%3,%4,%5}],[%2];"::"r"(sa(dst)),"l"(map),"r"(sa(b)),"r"(x),"r"(y),"r"(z):"memory");}
+__device__ __forceinline__ void st2(const void* map,void* src,int x,int y){asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group [%0,{%2,%3}],[%1];"::"l"(map),"r"(sa(src)),"r"(x),"r"(y):"memory");}
+__device__ __forceinline__ void sync(){asm volatile("bar.sync 1,128;":::"memory");}
+template<int N> __device__ __forceinline__ void wait_read(){asm volatile("cp.async.bulk.wait_group.read %0;"::"n"(N):"memory");}
+}
+__global__ __launch_bounds__(512,1) void opm_prologue_tma_hopper(
+ const __grid_constant__ CUtensorMap xm,const __grid_constant__ CUtensorMap mm,
+ const __grid_constant__ CUtensorMap wam,const __grid_constant__ CUtensorMap wbm,
+ const __grid_constant__ CUtensorMap am,const __grid_constant__ CUtensorMap bm,
+ const float* gamma,const float* beta,__nv_bfloat16* mask16,float* stats,unsigned* bits,
+ int S,int N,int tiles,float eps){
+ using namespace opm_pro_tma;
+ extern __shared__ __align__(1024) unsigned char raw[];
+ __nv_bfloat16* sx=reinterpret_cast<__nv_bfloat16*>(raw);
+ __nv_bfloat16* st=sx+NST*XT;__nv_bfloat16* sw=st+2*TT;
+ unsigned char* sm=reinterpret_cast<unsigned char*>(sw+4096);
+ float* sl=reinterpret_cast<float*>(sm+NST*MT);
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sl+128);
+ uint64_t* xf=bars;uint64_t* yf=xf+NST;uint64_t* xe=yf+NST;uint64_t* wf=xe+NST;
+ const int tid=threadIdx.x,warp=tid/32,lane=tid%32,nsb=S/BS;
+ if(tid==0){
+  for(int k=0;k<NST;++k){init(xf+k,1);init(yf+k,8);init(xe+k,1);}
+  init(wf,1);asm volatile("fence.mbarrier_init.release.cluster;":::"memory");
+ }
+ if(tid<64){sl[tid]=gamma[tid];sl[64+tid]=beta[tid];}
+ __syncthreads();
+ if(warp<4){
+#if defined(MINIWORLD_OPM_TMA_DYNAMIC_REGS)
+  asm volatile("setmaxnreg.dec.sync.aligned.u32 24;":::"memory");
+#endif
+  if(tid==0){
+   expect(wf,8192);ld2(&wam,sw,wf,0,0);ld2(&wbm,sw+2048,wf,0,0);
+   int g=0;
+   for(int t=blockIdx.x;t<tiles;t+=gridDim.x,++g){
+    int slot=g%NST,i=t/nsb,s0=(t%nsb)*BS;
+    if(g>=NST)wait(xe+slot,(g/NST-1)&1);
+    expect(xf+slot,XT*2+MT);
+    ld3(&xm,sx+slot*XT,xf+slot,0,i,s0);
+    ld2(&mm,sm+slot*MT,xf+slot,i&~15,s0);
+   }
+  }
+ }else if(warp<12){
+  // The first prototype's inc-to-80 trapped when the compiler's initial
+  // allotment was already larger. Keep the compiler's static allocation.
+#if defined(MINIWORLD_OPM_TMA_DYNAMIC_REGS)
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 80;":::"memory");
+#endif
+  const int r=(warp-4)*16+(lane&15),hf=lane>>4;int g=0;
+  for(int t=blockIdx.x;t<tiles;t+=gridDim.x,++g){
+   int slot=g%NST,i=t/nsb,s0=(t%nsb)*BS;
+   wait(xf+slot,(g/NST)&1);
+   __nv_bfloat16* row=sx+slot*XT+r*64;
+   float vals[32];float sum0=0.f,sum1=0.f;
+   #pragma unroll
+   for(int k=0;k<4;++k){
+    uint4 v=*reinterpret_cast<uint4*>(row+(((hf*4+k)^(r&7))*8));
+    uint32_t q[4]={v.x,v.y,v.z,v.w};
+    #pragma unroll
+    for(int j=0;j<4;++j){
+     float2 f=__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&q[j]));
+     vals[k*8+j*2]=f.x;vals[k*8+j*2+1]=f.y;
+     sum0+=f.x;sum1+=f.y;
+    }
+   }
+   float sum=sum0+sum1;sum+=__shfl_xor_sync(0xffffffff,sum,16);
+   float mean=sum*(1.f/64),v0=0.f,v1=0.f;
+   #pragma unroll
+   for(int k=0;k<16;++k){vals[k*2]-=mean;vals[k*2+1]-=mean;v0=fmaf(vals[k*2],vals[k*2],v0);v1=fmaf(vals[k*2+1],vals[k*2+1],v1);}
+   float var=v0+v1;var+=__shfl_xor_sync(0xffffffff,var,16);
+   float rs=1.f/sqrtf(var*(1.f/64)+eps);
+   bool keep=sm[slot*MT+r*16+(i&15)]!=0;uint32_t keep32=keep?0xffffffffu:0u;
+   #pragma unroll
+   for(int k=0;k<4;++k){
+    uint32_t q[4];
+    #pragma unroll
+    for(int j=0;j<4;++j){
+     int c=hf*32+k*8+j*2;
+     float y0=__fadd_rn(__fmul_rn(vals[k*8+j*2]*rs,sl[c]),sl[64+c]);
+     float y1=__fadd_rn(__fmul_rn(vals[k*8+j*2+1]*rs,sl[c+1]),sl[65+c]);
+     __nv_bfloat162 z=__floats2bfloat162_rn(y0,y1);q[j]=*reinterpret_cast<uint32_t*>(&z)&keep32;
+    }
+    *reinterpret_cast<uint4*>(row+(((hf*4+k)^(r&7))*8))=make_uint4(q[0],q[1],q[2],q[3]);
+   }
+   if(hf==0){
+    long ix=(long)(s0+r)*N+i;mask16[ix]=__float2bfloat16_rn(keep?1.f:0.f);
+    if(stats){stats[ix*2]=mean;stats[ix*2+1]=rs;}
+   }
+   unsigned ballot=__ballot_sync(0xffffffff,keep);
+   if(lane==0)reinterpret_cast<uint16_t*>(bits)[((long)i*S+s0+r)/16]=uint16_t(ballot);
+   wg::proxy_fence();__syncwarp();if(lane==0)arrive(yf+slot);
+  }
+ }else{
+#if defined(MINIWORLD_OPM_TMA_DYNAMIC_REGS)
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 112;":::"memory");
+#endif
+  wait(wf,0);const int cw=warp-12;int g=0;
+  for(int t=blockIdx.x;t<tiles;t+=gridDim.x,++g){
+   int slot=g%NST,b=g%2,i=t/nsb,s0=(t%nsb)*BS;
+   wait(yf+slot,(g/NST)&1);
+   float acc[64]={};wg::fence();
+   #pragma unroll
+   for(int ks=0;ks<4;++ks)wg::mma_m64n128k16(wg::desc(sw+ks*16),wg::desc(sx+slot*XT+ks*16),acc,ks!=0);
+   wg::commit();wg::wait();sync();
+   if(lane==0&&cw==0)arrive(xe+slot);
+   if(lane==0&&cw==0&&g>=2)wait_read<1>();sync();
+   #pragma unroll
+   for(int k=0;k<16;++k){
+    int col=k*8+(lane%4)*2,ch=cw*16+lane/4,h=col/64,cc=col%64;
+    __nv_bfloat16* out=st+b*TT+h*4096;
+    *reinterpret_cast<__nv_bfloat162*>(out+wg::off_n(64,0,ch,cc/8)+cc%8)=__floats2bfloat162_rn(acc[k*4],acc[k*4+1]);
+    *reinterpret_cast<__nv_bfloat162*>(out+wg::off_n(64,0,ch+8,cc/8)+cc%8)=__floats2bfloat162_rn(acc[k*4+2],acc[k*4+3]);
+   }
+   wg::proxy_fence();sync();
+   if(lane==0&&cw==0){
+    for(int h=0;h<2;++h){st2(&am,st+b*TT+h*4096,s0+h*64,i*32);st2(&bm,st+b*TT+h*4096+2048,s0+h*64,i*32);}
+    asm volatile("cp.async.bulk.commit_group;":::"memory");
+   }
+  }
+  if(lane==0&&cw==0)wait_read<0>();sync();
+ }
+ __syncthreads();
+}
+
 // TMA (tensor memory accelerator).  A `cp.async.bulk.tensor` store hands the hardware a descriptor
 // of the GLOBAL tensor plus one coordinate, and it walks the box itself: no per-thread addresses,
 // no shared loads through the LSU, and the store is asynchronous, so it overlaps the next tile's
@@ -1747,6 +1887,52 @@ std::vector<torch::Tensor> opm_native_pack(std::vector<torch::Tensor> p) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {g,b,a,c,o,ob,ot,bw};
 }
+std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor mask,
+ std::vector<torch::Tensor> p,double eps,bool save_stats){
+ TORCH_CHECK(m.is_cuda()&&m.is_contiguous()&&m.scalar_type()==torch::kBFloat16&&m.dim()==3&&m.size(2)==64,"TMA prologue BF16 [S,N,64]");
+ int S=m.size(0),N=m.size(1);
+ TORCH_CHECK(S%256==0&&N%64==0&&mask.is_contiguous()&&mask.scalar_type()==torch::kBool&&mask.device()==m.device()&&mask.numel()==S*N&&p.size()==8,"TMA prologue shape/mask");
+ auto fo=m.options().dtype(torch::kFloat32);
+ auto a=torch::empty({N*32,S},m.options()),b=torch::empty_like(a),mk=torch::empty({S,N},m.options());
+ auto norm=torch::empty({N,N},fo),stats=torch::empty(save_stats?std::vector<int64_t>{S,N,2}:std::vector<int64_t>{0},fo);
+ auto bits=torch::empty({N,S/32},m.options().dtype(torch::kInt32));
+ alignas(64) CUtensorMap xm{},mm{},wam{},wbm{},am{},bm{};
+ auto enc=[&](CUtensorMap* map,CUtensorMapDataType dt,int rank,void* ptr,uint64_t* dims,uint64_t* strides,uint32_t* box,CUtensorMapSwizzle swz){
+  uint32_t es[3]={1,1,1};auto rc=tma_encode()(map,dt,rank,ptr,dims,strides,box,es,CU_TENSOR_MAP_INTERLEAVE_NONE,swz,CU_TENSOR_MAP_L2_PROMOTION_L2_128B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  TORCH_CHECK(rc==CUDA_SUCCESS,"OPM prologue TMA encode: ",int(rc));
+ };
+ uint64_t xd[3]={64,uint64_t(N),uint64_t(S)},xs[2]={128,uint64_t(N)*128};uint32_t xb[3]={64,1,128};
+ enc(&xm,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,3,m.data_ptr(),xd,xs,xb,CU_TENSOR_MAP_SWIZZLE_128B);
+ uint64_t md[2]={uint64_t(N),uint64_t(S)},ms[1]={uint64_t(N)};uint32_t mb[2]={16,128};
+ enc(&mm,CU_TENSOR_MAP_DATA_TYPE_UINT8,2,mask.data_ptr(),md,ms,mb,CU_TENSOR_MAP_SWIZZLE_NONE);
+ uint64_t wd[2]={64,32},ws[1]={128};uint32_t wb[2]={64,32};
+ enc(&wam,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,p[2].data_ptr(),wd,ws,wb,CU_TENSOR_MAP_SWIZZLE_128B);
+ enc(&wbm,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,p[3].data_ptr(),wd,ws,wb,CU_TENSOR_MAP_SWIZZLE_128B);
+ uint64_t od[2]={uint64_t(S),uint64_t(N)*32},os[1]={uint64_t(S)*2};uint32_t ob[2]={64,32};
+ enc(&am,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,a.data_ptr(),od,os,ob,CU_TENSOR_MAP_SWIZZLE_128B);
+ enc(&bm,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,b.data_ptr(),od,os,ob,CU_TENSOR_MAP_SWIZZLE_128B);
+ C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_tma_hopper,cudaFuncAttributeMaxDynamicSharedMemorySize,opm_pro_tma::SMEM));
+ cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,opm_prologue_tma_hopper));
+ const float* gp=p[0].data_ptr<float>();const float* bp=p[1].data_ptr<float>();
+ __nv_bfloat16* mp=reinterpret_cast<__nv_bfloat16*>(mk.data_ptr());float* sp=save_stats?stats.data_ptr<float>():nullptr;unsigned* bitp=reinterpret_cast<unsigned*>(bits.data_ptr());
+ int tiles=N*(S/128);float ep=float(eps);
+ void* args[]={&xm,&mm,&wam,&wbm,&am,&bm,&gp,&bp,&mp,&sp,&bitp,&S,&N,&tiles,&ep};
+ int grid=std::min(tiles,at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+ C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(grid),dim3(512),args,opm_pro_tma::SMEM,at::cuda::getCurrentCUDAStream()));
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+#ifdef MINIWORLD_OPM_CUBLAS_COUNT
+ // Keep the established FP32 cuBLAS mask product; only its cast/clamp are native replacements.
+ // Binary inputs make each count exact throughout the supported MSA depths, including TF32 mode.
+ auto mf=torch::empty({S,N},fo);
+ opm_native_launch(opm_mask_fp32_selective,dim3((S*N+255)/256),dim3(256),mask.data_ptr<bool>(),mf.data_ptr<float>(),S*N);
+ at::mm_out(norm,mf.t(),mf);
+ opm_native_launch(opm_norm_clamp_selective,dim3((N*N+255)/256),dim3(256),norm.data_ptr<float>(),N*N);
+#else
+ opm_native_launch(opm_count_native,dim3((N*N+255)/256),dim3(256),bitp,norm.data_ptr<float>(),S,N);
+#endif
+ return {a,b,stats,mk,norm};
+}
+
 std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mask,
     std::vector<torch::Tensor> p,double eps,bool save_stats) {
   TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type()==torch::kBFloat16 && m.dim()==3 && m.size(2)==64,
@@ -1808,6 +1994,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("raw_weights")=std::vector<torch::Tensor>{});
   m.def("opm_native_pack",&opm_native_pack);
   m.def("opm_native_prologue",&opm_native_prologue);
+  m.def("opm_native_prologue_tma",&opm_native_prologue_tma);
   m.def("opm_native_cast",&opm_native_cast);
   m.def("opm_native_cast_grads",&opm_native_cast_grads);
 }
