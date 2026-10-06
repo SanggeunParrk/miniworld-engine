@@ -60,7 +60,7 @@ def _forward_fake(leaves, mask, ds):
     n = x.shape[1]
     d = x.shape[-1]
     if WIDE.supports(d, n):
-        return [torch.empty_like(x), *WIDE.saved_like(x)]
+        return [torch.empty_like(x), *WIDE.saved_like(x, selected=T.bidi_training(x))]
     return [
         torch.empty_like(x),
         x.new_empty((4 * d, n, n)),
@@ -82,7 +82,7 @@ def forward(
     x = leaves[0]
     n = x.shape[1]
     D = x.shape[-1]
-    with T.native_context(x.device), T.preserved_d128_context(T.d128_training(x, bidirectional=True)):
+    with T.native_context(x.device), T.preserved_d128_context(T.d128_training(x, bidirectional=True)), T.preserved_bidi_context(x):
         if WIDE.supports(D, n):
             return WIDE.forward(leaves, mask, ds)
         from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
@@ -108,7 +108,7 @@ def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
     """Preserve training dropout/residual without backward-only D128 saves."""
     x = leaves[0]
     n, width = x.shape[1], x.shape[-1]
-    with T.native_context(x.device), T.preserved_d128_context(T.d128_training(x, bidirectional=True)):
+    with T.native_context(x.device), T.preserved_d128_context(T.d128_training(x, bidirectional=True)), T.preserved_bidi_context(x):
         if WIDE.supports(width, n):
             return WIDE.forward(leaves, mask, ds)[0]
         from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
@@ -145,7 +145,7 @@ def backward(
     n = x.shape[1]
     D = x.shape[-1]
     if WIDE.supports(D, n):
-        with T.native_context(x.device):
+        with T.native_context(x.device), T.preserved_bidi_context(x):
             return WIDE.backward(leaves, mask, ds, saved, dy, fp32_dw)
     ab, tri, xn, stats, packed, _ = saved
     dy = dy.contiguous()
@@ -192,7 +192,7 @@ class _Training(torch.autograd.Function):
         mask, ds = args[11:]
         weights = leaves[1:7]
         ctx.master = any(w.dtype == torch.float32 for w in weights)
-        ctx.native = T.preserve_training(leaves[0].shape[-1]) or T.d128_training(leaves[0], bidirectional=True)
+        ctx.native = T.preserve_training(leaves[0].shape[-1]) or T.d128_training(leaves[0], bidirectional=True) or T.bidi_training(leaves[0])
         if ctx.native:
             from ._h100_pack import cast_training_weights
             leaves = [leaves[0],*cast_training_weights(weights),*leaves[7:]]
@@ -225,7 +225,7 @@ class _Training(torch.autograd.Function):
 def bidirectional_trimul(*args):
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
-        if T.preserve_training(leaves[0].shape[-1]) or T.d128_training(leaves[0], bidirectional=True):
+        if T.preserve_training(leaves[0].shape[-1]) or T.d128_training(leaves[0], bidirectional=True) or T.bidi_training(leaves[0]):
             from ._h100_pack import cast_training_weights
             leaves = [leaves[0], *cast_training_weights(leaves[1:7]), *leaves[7:]]
         elif any(w.dtype != leaves[0].dtype for w in leaves[1:7]):

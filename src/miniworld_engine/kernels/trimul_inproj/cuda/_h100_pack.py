@@ -134,21 +134,23 @@ def finish_affine_partials(pg, pb, dg, db):
         ((width+columns-1)//columns,1,1), (128,1,1), [pg,pb,dg,db,width,blocks])
 
 
-def fused_wide_glue(width, length, bidirectional=False):
-    """Opt-in live layouts and affine finishing for the six wide D2 cells."""
+def fused_wide_glue(width, length, bidirectional=False, selected=False):
+    """Per-shape live weight layouts and paired deterministic affine finishing."""
+    default = ((width, length, bidirectional) in
+               ((384, 384, False), (384, 768, True)))
     return (length in (384, 768) and (width == 384 or (width == 512 and bidirectional))
-            and T.preserve_wide_training(width)
-            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_FUSED_GLUE") == "1")
+            and (selected or T.preserve_wide_training(width))
+            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_FUSED_GLUE",
+                               "1" if default else "0") == "1")
 
-
-def fused_d256_glue(width, length, selected=False):
+def fused_d256_glue(width, length, selected=False, *, bidirectional=False):
     return ((width == 256 and length == 384
              and (selected or T.preserve_d256_training())
              and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FUSED_GLUE", selected))
-            or (width == 256 and length == 768 and T.preserve_d256_training()
-                and os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE") == "1")
-            or fused_wide_glue(width, length))
-
+            or (width == 256 and length == 768
+                and (selected or T.preserve_d256_training())
+                and T.d256_register_source_enabled(selected and bidirectional))
+            or fused_wide_glue(width, length, bidirectional=bidirectional, selected=selected))
 
 def pack_training_pair(dst, stack, weights):
     """Read live matrices once, retaining both forward and backward layouts."""
