@@ -173,6 +173,112 @@ def _native90(dev):
     return os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "0") == "1" and _sm90(dev)
 
 
+_NATIVE_CALLER_TASKS: set[int] = set()
+
+
+def _activate_native_caller():
+    """Limit installed hooks to backward tasks that actually execute our block."""
+    if (os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") != "1"
+            or torch.compiler.is_compiling()):
+        return
+    task = torch._C._current_graph_task_id()
+    if task >= 0 and task not in _NATIVE_CALLER_TASKS:
+        _NATIVE_CALLER_TASKS.add(task)
+        torch.autograd.Variable._execution_engine.queue_callback(lambda: _NATIVE_CALLER_TASKS.discard(task))
+
+
+def _native_caller_hooks(*tensors):
+    """Keep caller autograd edges while replacing their CUDA sum/add operations.
+
+    Hooks bracket individual existing nodes; no mode escapes to other nodes or
+    the caller, and gradients remain ordinary Tensors. This experimental option
+    is for the manual CUDA-graph path, not a torch.compile transformation.
+    """
+    if (os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") != "1"
+            or torch.compiler.is_compiling()):
+        return
+    import threading
+    from torch.autograd.graph import get_gradient_edge
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
+
+    kernels = ext(rpb=_native_rpb())
+
+    class CallerMode(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            try:
+                return self._dispatch(func, args, kwargs)
+            except BaseException:
+                # Engine completion callbacks do not run after a node throws.
+                # The engine restores its dispatch stack; release our task tag.
+                _NATIVE_CALLER_TASKS.discard(torch._C._current_graph_task_id())
+                raise
+
+        def _dispatch(self, func, args, kwargs):
+            kwargs = kwargs or {}
+            if func is torch.ops.aten.sum.dim_IntList:
+                dims = args[1] if len(args) > 1 else kwargs.get("dim")
+                keep = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
+                x = args[0]
+                if (tuple(dims or ()) == (0,) and x.is_cuda and x.ndim >= 1
+                        and x.is_contiguous() and x.dtype in (BF, torch.float32)
+                        and kwargs.get("dtype") in (None, x.dtype)):
+                    out = kernels.caller_sum90(x)
+                    return out if keep else out.squeeze(0)
+            elif func is torch.ops.aten.add_.Tensor:
+                dst, src = args[:2]
+                if (dst.is_cuda and src.device == dst.device and src.dtype == dst.dtype
+                        and dst.dtype in (BF, torch.float32) and dst.shape == src.shape
+                        and dst.is_contiguous() and src.is_contiguous()
+                        and kwargs.get("alpha", 1) == 1):
+                    kernels.caller_add90(dst, src)
+                    return dst
+            elif func in (torch.ops.aten.zeros.default, torch.ops.aten.new_zeros.default):
+                if func is torch.ops.aten.zeros.default:
+                    out = torch.empty(args[0], **kwargs)
+                else:
+                    out = args[0].new_empty(args[1], **kwargs)
+                if out.is_cuda and out.is_contiguous():
+                    kernels.caller_zero90(out)
+                    return out
+            elif func is torch.ops.aten.zero_.default:
+                if args[0].is_cuda and args[0].is_contiguous():
+                    kernels.caller_zero90(args[0])
+                    return args[0]
+            return func(*args, **kwargs)
+
+    def install(node):
+        if node.metadata.get("miniworld_h100_native_caller"):
+            return
+        state = threading.local()
+
+        def pre(grad_outputs):
+            state.mode = (CallerMode() if torch._C._current_graph_task_id() in _NATIVE_CALLER_TASKS else None)
+            if state.mode is not None:
+                state.mode.__enter__()
+
+        def post(grad_inputs, grad_outputs):
+            if state.mode is not None:
+                state.mode.__exit__(None, None, None)
+            del state.mode
+
+        node.register_prehook(pre)
+        node.register_hook(post)
+        node.metadata["miniworld_h100_native_caller"] = True
+
+    for tensor in tensors:
+        if not tensor.requires_grad:
+            continue
+        node = get_gradient_edge(tensor).node
+        if node.name().endswith("AccumulateGrad"):
+            install(node)
+        elif node.name() in ("ExpandBackward0", "AsStridedBackward0") and tensor.stride(0) == 0:
+            install(node)
+            for ancestor, _ in node.next_functions:
+                if ancestor is not None and ancestor.name().endswith("AccumulateGrad"):
+                    install(ancestor)
+
+
 
 def _pack(P, qk, dev, at):
     """The block's weights in the kernels' layouts (GEMM operands in ``at``, folded cond / pair LayerNorm weights, fp32 bias
@@ -581,6 +687,8 @@ class _Block(torch.autograd.Function):
         single, cond, pair = vals[:3]
         params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
         dx, dc, dpair, *pg = _bwd(single, cond, pair, mask, params, saved, dout.contiguous(), qk, eq, ek, fp32, heads)
+        if _native90(single.device):
+            _activate_native_caller()
         return (dx, dc, dpair, None, None, None, None, None, None, *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)))
 
 
