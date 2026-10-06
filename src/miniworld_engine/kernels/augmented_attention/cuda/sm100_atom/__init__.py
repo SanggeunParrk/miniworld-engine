@@ -153,6 +153,7 @@ _HOPPER_KERNELS = {
     "db_tma": ("attn_dbias", "atom_dbias_tma_sm90", 82240, False),
     "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
     "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
+    "empty_uniform": ("pair_bias", "atom_empty_uniform_sm90", 0, False),
     **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},
 }
 
@@ -175,6 +176,21 @@ def nsm(device_index: int) -> int:
 
 def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
+
+
+def empty_uniform_enabled(device_index: int) -> bool:
+    return _hopper(device_index) and os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM", "0") == "1"
+
+
+def empty_uniform_hopper(keys, src, dst, n, *, value_gradient=False):
+    """Live-mask uniform-mean epilogue; src is dense [A*N,128] BF16."""
+    if keys is None or not empty_uniform_enabled(_dev(src)):
+        return
+    if (src.dtype != torch.bfloat16 or dst.dtype != torch.bfloat16
+            or not src.is_contiguous() or not dst.is_contiguous()):
+        raise ValueError("Atom uniform edge requires contiguous BF16 tensors")
+    atom_kernel("empty_uniform", _dev(src))((4, src.shape[0] // n, 1), (256, 1, 1),
+        keys, src, dst, int(n), int(512 if value_gradient else 128), int(256 if value_gradient else 0))
 
 
 # --------------------------------------------------------------------------------------------------- tensor maps
