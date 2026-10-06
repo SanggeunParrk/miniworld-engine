@@ -1162,6 +1162,67 @@ torch::Tensor ln(torch::Tensor x,torch::Tensor g,torch::Tensor b,double eps){
  int N=x.size(-1);TORCH_CHECK((N==64||N==128||N==384||N==512)&&g.numel()==N&&b.numel()==N,"APB exact LN width");auto y=torch::empty_like(x);int M=x.numel()/N;
  ln_k<<<M,128,0,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),g.data_ptr<float>(),b.data_ptr<float>(),y.data_ptr<float>(),N,eps);C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
 }
+// BF16 load fusion for the accuracy shadow. FP32 output and operation order
+// remain unchanged; this removes the FP32 input temporary, but deliberately
+// keeps normalized pair/projection buffers (not yet the B200 fused lifetime).
+__global__ void ln_bf16_k(const __nv_bfloat16* x,const float* g,const float* b,float* y,int N,float eps) {
+ __shared__ float s[12];int t=threadIdx.x,l=t&31,w=t>>5;
+ Stats a{0.f,0.f,0.f};
+ for(int base=4*t;base<N;base+=512) {
+  #pragma unroll
+  for(int j=0;j<4;j++){
+   float v=__bfloat162float(x[(long)blockIdx.x*N+base+j]), d=v-a.mean, n=a.count+1.f;
+   float m=a.mean+d*(1.f/n);a={m,a.m2+d*(v-m),n};
+  }
+ }
+ for(int o=16;o;o>>=1){
+  Stats b{__shfl_down_sync(0xffffffff,a.mean,o),__shfl_down_sync(0xffffffff,a.m2,o),__shfl_down_sync(0xffffffff,a.count,o)};
+  a=merge(a,b);
+ }
+ for(int o=2;o;o>>=1){
+  if(l==0&&w>=o&&w<2*o){s[2*(w-o)]=a.mean;s[2*(w-o)+1]=a.m2;s[4+w-o]=a.count;}
+  __syncthreads();
+  if(l==0&&w<o)a=merge(a,{s[2*w],s[2*w+1],s[4+w]});
+  __syncthreads();
+ }
+ if(t==0){s[0]=a.mean;s[1]=rsqrtf(a.m2/(float)N+eps);}
+ __syncthreads();
+ for(int c=t;c<N;c+=128)y[(long)blockIdx.x*N+c]=g[c]*(s[1]*(__bfloat162float(x[(long)blockIdx.x*N+c])-s[0]))+b[c];
+}
+
+__global__ void ln_bf16_warp_k(const __nv_bfloat16* x,const float* g,const float* b,float* y,int N,int M,float eps) {
+ int row=blockIdx.x*4+threadIdx.x/32,lane=threadIdx.x&31;
+ if(row>=M)return;
+ Stats a{0.f,0.f,0.f};
+ // Width64/128 uses only warp0 in ln_k. Keep its four-value Welford
+ // sequence, shuffled merges and the two subsequent empty-warp merges.
+ for(int base=4*lane;base<N;base+=512) {
+  #pragma unroll
+  for(int j=0;j<4;j++){
+   float v=__bfloat162float(x[(long)row*N+base+j]),d=v-a.mean,n=a.count+1.f;
+   float m=a.mean+d*(1.f/n);a={m,a.m2+d*(v-m),n};
+  }
+ }
+ for(int o=16;o;o>>=1){
+  Stats z{__shfl_down_sync(0xffffffff,a.mean,o),__shfl_down_sync(0xffffffff,a.m2,o),__shfl_down_sync(0xffffffff,a.count,o)};
+  a=merge(a,z);
+ }
+ if(lane==0){a=merge(a,{0.f,0.f,0.f});a=merge(a,{0.f,0.f,0.f});}
+ float mean=__shfl_sync(0xffffffff,a.mean,0);
+ float rstd=lane==0?rsqrtf(a.m2/(float)N+eps):0.f;
+ rstd=__shfl_sync(0xffffffff,rstd,0);
+ for(int c=lane;c<N;c+=32)y[(long)row*N+c]=g[c]*(rstd*(__bfloat162float(x[(long)row*N+c])-mean))+b[c];
+}
+torch::Tensor ln_bf16(torch::Tensor x,torch::Tensor g,torch::Tensor b,double eps,bool warp_rows) {
+ c10::cuda::CUDAGuard guard(x.device());
+ TORCH_CHECK(x.is_cuda()&&g.device()==x.device()&&b.device()==x.device()&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16&&g.is_contiguous()&&b.is_contiguous()&&g.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat,"APB exact BF16 LN layout/dtype");
+ int N=x.size(-1);TORCH_CHECK((N==64||N==128)&&g.numel()==N&&b.numel()==N,"APB exact BF16 LN width");
+ auto y=torch::empty(x.sizes(),x.options().dtype(at::kFloat));int M=x.numel()/N;
+ if(warp_rows)ln_bf16_warp_k<<<(M+3)/4,128,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),y.data_ptr<float>(),N,M,eps);
+ else ln_bf16_k<<<M,128,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),y.data_ptr<float>(),N,eps);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
 template<int LOG,bool BACK> __global__ void soft_k(const float* x,const float* p,float* y,int L,int M) {
  constexpr int I=(1<<LOG)/32;int r=blockIdx.x*4+threadIdx.x/32,l=threadIdx.x&31;
  if(r>=M)return;
@@ -1297,6 +1358,68 @@ std::vector<torch::Tensor> fp32_inputs(std::vector<torch::Tensor> inputs){
  }
  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
+
+struct FP32InputCasts {
+ const __nv_bfloat16* src[16]; float* dst[16];
+ long sizes[16]; int ends[16]; int count;
+};
+__global__ void fp32_inputs_grouped_k(FP32InputCasts args) {
+ int begin=0;
+ for(int j=0;j<args.count;++j) {
+  if(blockIdx.x<args.ends[j]) {
+   long i=(long)(blockIdx.x-begin)*256+threadIdx.x;
+   if(i<args.sizes[j])args.dst[j][i]=__bfloat162float(args.src[j][i]);
+   return;
+  }
+  begin=args.ends[j];
+ }
+}
+std::vector<torch::Tensor> fp32_inputs_grouped(std::vector<torch::Tensor> inputs){
+ TORCH_CHECK(!inputs.empty()&&inputs.size()<=16,"APB exact grouped inputs count");
+ c10::cuda::CUDAGuard guard(inputs[0].device());std::vector<torch::Tensor> out;
+ FP32InputCasts args{};int blocks=0;
+ for(const auto& t:inputs) {
+  TORCH_CHECK(t.is_cuda()&&t.device()==inputs[0].device()&&t.is_contiguous(),"APB exact grouped inputs layout");
+  TORCH_CHECK(t.scalar_type()==at::kFloat||t.scalar_type()==at::kBFloat16,"APB exact grouped inputs dtype");
+  if(t.scalar_type()==at::kFloat)out.push_back(t);
+  else {
+   auto y=torch::empty(t.sizes(),t.options().dtype(at::kFloat));
+   int j=args.count++;args.src[j]=reinterpret_cast<const __nv_bfloat16*>(t.data_ptr());args.dst[j]=y.data_ptr<float>();args.sizes[j]=t.numel();
+   blocks+=(t.numel()+255)/256;args.ends[j]=blocks;out.push_back(y);
+  }
+ }
+ if(blocks)fp32_inputs_grouped_k<<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(args);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+
+template<int H,bool BACK>
+__global__ void exact_transpose_tiled_k(const float* src,const bool* mask,float* dst,int L,int M) {
+ __shared__ float tile[32][H+1];int t=threadIdx.x,base=blockIdx.x*32;
+ if(BACK) {
+  for(int h=t/32;h<H;h+=4) {int r=base+t%32;if(r<M)tile[t%32][h]=src[(long)h*M+r];}
+ } else {
+  for(int i=t;i<32*H;i+=128){int r=base+i/H;if(r<M)tile[i/H][i%H]=src[(long)r*H+i%H];}
+ }
+ __syncthreads();
+ if(BACK) {
+  for(int i=t;i<32*H;i+=128){int r=base+i/H;if(r<M)dst[(long)r*H+i%H]=(mask&&!mask[r%L])?0.f:tile[i/H][i%H];}
+ } else {
+  int r=base+t%32;bool masked=mask&&r<M&&!mask[r%L];
+  for(int h=t/32;h<H;h+=4)if(r<M)dst[(long)h*M+r]=masked?-3.4028234663852886e38f:tile[t%32][h];
+ }
+}
+torch::Tensor exact_transpose_tiled(torch::Tensor x,c10::optional<torch::Tensor> mask,int64_t L,bool back) {
+ c10::cuda::CUDAGuard guard(x.device());int M=L*L,H=x.numel()/M;
+ TORCH_CHECK(x.is_contiguous()&&x.scalar_type()==at::kFloat,"exact tiled float layout");
+ if(mask)TORCH_CHECK(mask->is_contiguous()&&mask->is_cuda()&&mask->device()==x.device()&&mask->scalar_type()==at::kBool&&mask->numel()==L,"exact tiled mask");
+ auto y=back?torch::empty({M,H},x.options()):torch::empty({H,L,L},x.options());
+ const bool* mp=mask?mask->data_ptr<bool>():nullptr;auto stream=at::cuda::getCurrentCUDAStream();
+ #define EXACT_TILE_CASE(N) case N: if(back)exact_transpose_tiled_k<N,true><<<(M+31)/32,128,0,stream>>>(x.data_ptr<float>(),mp,y.data_ptr<float>(),L,M);else exact_transpose_tiled_k<N,false><<<(M+31)/32,128,0,stream>>>(x.data_ptr<float>(),mp,y.data_ptr<float>(),L,M);break
+ switch(H){EXACT_TILE_CASE(8);EXACT_TILE_CASE(12);EXACT_TILE_CASE(16);EXACT_TILE_CASE(24);default:TORCH_CHECK(false,"exact tiled heads");}
+ #undef EXACT_TILE_CASE
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
 __global__ void point_k(const float* x,const float* z,float* y,long n,float scale,int op){
  long i=(long)blockIdx.x*256+threadIdx.x;
  if(i<n)y[i]=op==0?x[i]*scale:x[i]*(1.f/(1.f+expf(-z[i])));
@@ -1471,10 +1594,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("exact_mask_bias", &apb_shadow_cutlass::mask_bias);
 #endif
   m.def("exact_ln", &apb_exact::ln);
+  m.def("exact_ln_bf16", &apb_exact::ln_bf16, py::arg("x"), py::arg("g"), py::arg("b"), py::arg("eps"), py::arg("warp_rows") = false);
   m.def("exact_mm", &apb_exact::exact_mm, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
   m.def("exact_soft", &apb_exact::soft);
   m.def("exact_beta", &apb_exact::beta);
   m.def("exact_fp32_inputs", &apb_exact::fp32_inputs);
+  m.def("exact_fp32_inputs_grouped", &apb_exact::fp32_inputs_grouped);
+  m.def("exact_transpose_tiled", &apb_exact::exact_transpose_tiled);
   m.def("exact_point", &apb_exact::point);
   m.def("exact_bias_add", &apb_exact::bias_add);
   m.def("exact_db_transpose", &apb_exact::db_transpose);
