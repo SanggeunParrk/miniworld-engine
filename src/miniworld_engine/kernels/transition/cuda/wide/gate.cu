@@ -1,7 +1,13 @@
 // D >= 256 backward, gate stage: dh = dy Ws, [a|b] = xn [Wa;Wb]^T and the SwiGLU backward in one kernel, writing h [M][H] and
 // [dA|dB] [M][2H]. 128 rows x 128 hidden tile, 32-wide K slabs, 4 stages, two-pass epilogue, slab released as its MMAs retire.
 // See kernels/gate_gemm2.cu.
-#if MW_GATE_K64
+#if MW_GATE_FULL_STAGE
+// Retain the complete output tile until its TMA store retires. Three input
+// stages leave room for one full epilogue, avoiding the half-tile refill wait.
+#define TBK 32
+#define NSTAGE 3
+#define STG_HALF 0
+#elif MW_GATE_K64
 // Eight WGMMA instructions per wait: trade four small transaction stages for
 // two larger stages, retaining the B200 recompute/gate boundary and outputs.
 #define TBK 64
@@ -10,7 +16,9 @@
 #define TBK 32
 #define NSTAGE 4
 #endif
+#ifndef STG_HALF
 #define STG_HALF 1
+#endif
 #if MW_GATE_K64 == 2
 #define WAIT0 0
 #else
