@@ -361,10 +361,12 @@ def _bwd_launch(
         aux = _native_ext()
         compact = (d == 512
                    and os.environ.get("MINIWORLD_TRANSITION_H100_COMPACT_LN", "0") == "1")
-        ln = aux.ln_bwd_compact if compact else aux.ln_bwd
+        compact384 = (d == 384 and x.shape[0] == 768 * 768
+                      and os.environ.get("MINIWORLD_TRANSITION_H100_COMPACT_LN_D384", "0") == "1")
+        ln = aux.ln_bwd_compact if compact or compact384 else aux.ln_bwd
         # The compact kernel uses 89 registers without spills, allowing five
         # resident 128-thread CTAs instead of four for the 112-register plan.
-        dx, dgam, dbeta = ln(dab @ w_ab, x, gamma, rstd, c1, dy, 5 if compact else 4)
+        dx, dgam, dbeta = ln(dab @ w_ab, x, gamma, rstd, c1, dy, 6 if compact384 else 5 if compact else 4)
     else:
         from ..triton.fused import _transition_ln_bwd
 
