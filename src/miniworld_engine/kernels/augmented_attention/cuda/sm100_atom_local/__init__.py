@@ -37,7 +37,7 @@ SOURCES = ("lattn_fwd", "lattn_dq", "lattn_dkv", "lbias", "lcross")
 
 
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str) -> str:
+def cubin(stem: str, hopper: bool = False) -> str:
     """Path of ``<stem>.cu`` built for sm_100a; rebuilt only when a source or a flag changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
@@ -96,9 +96,18 @@ KERNELS = {
 def _load(name: str, device_index: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    stem, func, smem = KERNELS[name]
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    hopper = _hopper(device_index)
+    if hopper and name in ("dq", "dkv"):
+        raise NotImplementedError("Local Hopper backward has not been implemented")
+    if hopper and name == "fwd":
+        stem, func, smem = "lattn_fwd", "local_attn_fwd_sm90", 57376
+    elif name == "kv_pack":
+        stem, func, smem = "lcross", "local_kv_pack_sm90", 0
+    else:
+        stem, func, smem = KERNELS[name]
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem), func, smem)
+        return driver.Kernel(cubin(stem, hopper), func, smem)
 
 
 def _dev(t: torch.Tensor) -> int:
@@ -247,6 +256,11 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
 
 def _params(wb, gamma):
     """Wb [4, 16] and gamma [16] as the kernels read them: contiguous, bf16 or fp32 (anything else is converted to fp32)."""
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    if _hopper(_dev(wb)):
+        if wb.dtype not in (torch.bfloat16, torch.float32) or gamma.dtype not in (torch.bfloat16, torch.float32):
+            raise ValueError("Local Hopper pair parameters require BF16 or FP32")
+        return wb.contiguous(), gamma.contiguous(), int(wb.dtype == torch.bfloat16) | (int(gamma.dtype == torch.bfloat16) << 1)
     if wb.dtype != gamma.dtype or wb.dtype not in (torch.bfloat16, torch.float32):
         wb, gamma = wb.float(), gamma.float()
     return wb.contiguous(), gamma.contiguous(), int(wb.dtype == torch.bfloat16)

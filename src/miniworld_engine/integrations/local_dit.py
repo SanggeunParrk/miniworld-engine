@@ -232,11 +232,14 @@ def _kernels_ready(index: int) -> bool:
     )
 
     try:
-        for name in _ROW_KERNELS:
+        hopper = rows._hopper(index)
+        for name in (("cond", "pre", "post", "pack") if hopper else _ROW_KERNELS):
             rows.atom_kernel(name, index)
-        for name in local.KERNELS:
+        for name in (("fwd", "pb_f", "cond_ln", "kv_f", "kv_pack") if hopper else local.KERNELS):
             local._load(name, index)
     except Exception as exc:  # a toolchain or driver problem keeps the module path
+        if rows._hopper(index):
+            raise RuntimeError("Opt-in Hopper local DiT kernel build failed") from exc
         _FAILED = True
         warnings.warn(
             f"sm_100a local atom DiT kernels unavailable, keeping the module path: {exc!r}",
