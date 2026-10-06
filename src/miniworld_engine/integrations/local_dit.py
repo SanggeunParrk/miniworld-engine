@@ -3,9 +3,9 @@
 H100 cross-attention training at A=1/5/48, N=4096/8192 and inference at
 (A,N)=(1,4096),(5,2048),(5,4096),(48,4096) use the CUDA block by default.
 These paths require contiguous bf16 activations and bf16 or fp32 weights;
-unsupported contracts raise. Accuracy and native execution are qualified
-separately from performance; the three smaller inference cells remain slower
-than their recorded compiled PyTorch baseline.
+unsupported contracts raise. The A=5, N=2048/4096 inference cells use a packed
+bf16 post-attention epilogue and persistent conditioning schedule, qualified
+against the previous CUDA path and the recorded compiled PyTorch baseline.
 
 One ``LocalDiTBlock`` call runs, in place of the module path,
 
@@ -650,6 +650,8 @@ def _block_fwd(
     m = a * n
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
+        packed_infer = (not save and cross and a == 5 and n0 in (2048, 4096)
+                        and rows._hopper(single.device.index))
         wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)], backward=save)
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         mod, cn, mkv = _cond_tables(
