@@ -40,7 +40,13 @@ constexpr int F_XN = 0, F_DY = 2 * B64, F_W1 = 4 * B64, F_WS = 8 * B64, F_STAGE 
 #define STG_HALF 0                                        // 1: stage and store the epilogue in two 64-column passes (half the staging smem)
 #endif
 constexpr int NPASS = STG_HALF ? 2 : 1, CPP = 2 / NPASS;                // passes, 64-column blocks per pass
-constexpr int F_STG = NSTAGE * F_STAGE, F_STGW = 3 * CPP * 8192;       // per consumer WG: {h, dA, dB} x CPP blocks of [64][64]
+#if MW_GATE_SAVED_NO_H_STAGE && MW_GATE_SAVED_TMA && MW_GATE_SAVED
+// Forward owns h for the whole backward. Only dA/dB leave this epilogue.
+constexpr int STAGE_H = 0;
+#else
+constexpr int STAGE_H = 1;
+#endif
+constexpr int F_STG = NSTAGE * F_STAGE, F_STGW = (2 + STAGE_H) * CPP * 8192;
 #if MW_GATE_SAVED_TMA && MW_GATE_SAVED
 // Two saved A/B tiles overlap the DH weight ring. Each tile owns both
 // consumer warpgroups' [64,128] operands until both have read the epilogue.
@@ -260,7 +266,7 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
           const float a0 = AB[ia], a1 = AB[ia + 1], b0 = AB[ib], b1 = AB[ib + 1];
 #endif
           const float s0 = sigmoid_(a0), s1 = sigmoid_(a1), l0 = a0 * s0, l1 = a1 * s1;
-          hp[q] = pack_bf16(l0 * b0, l1 * b1);
+          if constexpr (STAGE_H) hp[q] = pack_bf16(l0 * b0, l1 * b1);
 #if MW_EXPAND_ONLY
           dap[q]=pack_bf16(a0,a1);dbp[q]=pack_bf16(b0,b1);
 #else
@@ -270,9 +276,9 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
         }
         const int col = 8 * (2 * gp + (mi >> 1)) - 64 * ps * (NPASS - 1);
         const uint32_t off = (uint32_t)(col >> 6) * 8192 + swz128((uint32_t)mrow, (uint32_t)((col & 63) * 2));
-        stsm_x4(smem_u32(stg) + off, hp[0], hp[1], hp[2], hp[3]);
-        stsm_x4(smem_u32(stg) + CPP * 8192 + off, dap[0], dap[1], dap[2], dap[3]);
-        stsm_x4(smem_u32(stg) + 2 * CPP * 8192 + off, dbp[0], dbp[1], dbp[2], dbp[3]);
+        if constexpr (STAGE_H) stsm_x4(smem_u32(stg) + off, hp[0], hp[1], hp[2], hp[3]);
+        stsm_x4(smem_u32(stg) + STAGE_H * CPP * 8192 + off, dap[0], dap[1], dap[2], dap[3]);
+        stsm_x4(smem_u32(stg) + (1 + STAGE_H) * CPP * 8192 + off, dbp[0], dbp[1], dbp[2], dbp[3]);
       }
     }
     fence_proxy_async();
@@ -283,11 +289,11 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
         const int c = n * THB + 64 * (ps * CPP + cb);
         if (!NO_H) tma_store_2d(&mH, stg + cb * 8192, c, r);   // NO_H: h is the forward's saved activation
 #if MW_EXPAND_ONLY
-        tma_store_2d(&mA, stg + (CPP + cb) * 8192, c, r);
-        tma_store_2d(&mB, stg + (2 * CPP + cb) * 8192, c, r);
+        tma_store_2d(&mA, stg + (STAGE_H * CPP + cb) * 8192, c, r);
+        tma_store_2d(&mB, stg + ((1 + STAGE_H) * CPP + cb) * 8192, c, r);
 #else
-        tma_store_2d(&mDAB, stg + (CPP + cb) * 8192, c, r);
-        tma_store_2d(&mDAB, stg + (2 * CPP + cb) * 8192, H + c, r);
+        tma_store_2d(&mDAB, stg + (STAGE_H * CPP + cb) * 8192, c, r);
+        tma_store_2d(&mDAB, stg + ((1 + STAGE_H) * CPP + cb) * 8192, H + c, r);
 #endif
       }
       tma_store_commit();
