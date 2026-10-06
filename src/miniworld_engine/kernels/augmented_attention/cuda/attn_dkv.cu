@@ -371,6 +371,10 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     }
     fence_proxy_async();                                          // generic (ldmatrix) reads of this TMA stage before its release
     __syncwarp();
+    // LSE/DD use scalar shared reads in addition to the asynchronous MMA
+    // operands. Retire the complete consumer group before any warp releases
+    // the slot to the producer; the producer does not participate in bar 1.
+    asm volatile("bar.sync 1, %0;" :: "r"(128 * NWG) : "memory");
     if (lane == 0 && n + STAGES < nblocks) mbar_arrive(&empty[sn]);
   }
 #pragma unroll
