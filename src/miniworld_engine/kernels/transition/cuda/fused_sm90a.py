@@ -42,12 +42,12 @@ DW_REPL = 8
 
 
 def native_aux_enabled(d: int = 128) -> bool:
-    """Live CUDA preparation for the validated D128/D384 inference paths.
+    """Live CUDA preparation for D64 and the validated D128/D384 inference paths.
 
     An explicit zero retains the frozen pre-sweep path for paired measurements.
     Other widths remain experimental until their complete shape set wins.
     """
-    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1" if d in (128, 384) else "0") == "1"
+    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1" if d in (64, 128, 384) else "0") == "1"
 
 
 @functools.lru_cache(maxsize=1)
@@ -102,11 +102,14 @@ def _sm_count(device: torch.device | int | None = None) -> int:
 
 def _ext(ctas: int, dw_repl: int, save: bool):
     warp_store = os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE", "0") == "1"
-    return _build_ext(ctas, dw_repl, save, warp_store)
+    early_release = os.environ.get("MINIWORLD_TRANSITION_H100_DW_EARLY_RELEASE", "0") == "1"
+    dw_overlap = early_release or os.environ.get("MINIWORLD_TRANSITION_H100_DW_OVERLAP", "0") == "1"
+    return _build_ext(ctas, dw_repl, save, warp_store, dw_overlap, early_release)
 
 
-@functools.lru_cache(maxsize=16)
-def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool):
+@functools.lru_cache(maxsize=32)
+def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool, dw_overlap: bool = False,
+               early_release: bool = False):
     """Build for a given SM count. ``ctas`` is in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid.
 
@@ -122,7 +125,9 @@ def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool):
     # identity so an older prebuilt kernel cannot satisfy the corrected build.
     return load_extension(
         name=(f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1"
-              + ("_affine_warp_store_v1" if warp_store else "")),
+              + ("_affine_warp_store_v1" if warp_store else "")
+              + ("_dw_overlap_v1" if dw_overlap else "")
+              + ("_early_release_v1" if early_release else "")),
         sources=[str(_dir / "transition_fused_sm90a.cu"),
                  str(_dir / "transition_fused_fwd_sm90a_kernel.cu"),
                  str(_dir / "transition_fused_bwd_sm90a_kernel.cu")],
@@ -130,6 +135,8 @@ def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool):
                            f"-I{_dir / 'anthropic_v5'}", f"-DNCTA={ctas}", f"-DDW_REPL={dw_repl}",
                            f"-DFWD_SAVE={int(save)}",
                            *(["-DMW_AFFINE_WARP_STORE=1"] if warp_store else []),
+                           *(["-DMW_DW_OVERLAP=1"] if dw_overlap else []),
+                           *(["-DMW_DW_EARLY_RELEASE=1"] if early_release else []),
                            "--expt-relaxed-constexpr",
                            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
                            "-U__CUDA_NO_BFLOAT162_OPERATORS__"],

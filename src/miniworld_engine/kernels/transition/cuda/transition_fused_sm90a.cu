@@ -141,7 +141,14 @@ std::vector<at::Tensor> prepare(at::Tensor a,at::Tensor b,at::Tensor s,bool tran
   out.push_back(at::empty(transpose?std::vector<int64_t>{s.size(1),s.size(0)}:std::vector<int64_t>{0},s.options().dtype(at::kBFloat16)));
   p.dst[3]=reinterpret_cast<bf*>(out[3].data_ptr());if(transpose)p.tasks[count++]=3;
   int tiles=((a.size(0)+31)/32)*((a.size(1)+31)/32);
-  if(count)prepare_k<<<dim3(tiles,count),256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+  if(count){
+    // Pass an explicit kernel handle, as in the native dropout launcher. This
+    // avoids the runtime probing a host symbol as a CU kernel under memcheck.
+    cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,prepare_k));
+    void* args[]={&p};
+    C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+      dim3(tiles,count),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 at::Tensor pair_layout(at::Tensor a,at::Tensor b,int block,bool transpose){

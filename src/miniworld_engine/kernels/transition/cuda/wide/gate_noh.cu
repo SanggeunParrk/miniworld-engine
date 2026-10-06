@@ -1,14 +1,20 @@
 // D >= 384 backward, gate stage WITHOUT the h store (MINIWORLD_TRANSITION_WIDE_SAVE_H=1: h comes from the forward): dh = dy Ws, [a|b] = xn [Wa;Wb]^T and the SwiGLU backward in one kernel, writing only
 // [dA|dB] [M][2H]. 128 rows x 128 hidden tile, 32-wide K slabs, 4 stages, two-pass epilogue, slab released as its MMAs retire.
 // See kernels/gate_gemm2.cu.
-#if MW_GATE_K64 && !MW_SAVE_AB
+#if MW_GATE_FULL_STAGE && !MW_SAVE_AB
+#define TBK 32
+#define NSTAGE 3
+#define STG_HALF 0
+#elif MW_GATE_K64 && !MW_SAVE_AB
 #define TBK 64
 #define NSTAGE 2
 #else
 #define TBK 32
 #define NSTAGE 4
 #endif
+#ifndef STG_HALF
 #define STG_HALF 1
+#endif
 #if MW_GATE_K64 == 2 && !MW_SAVE_AB
 #define WAIT0 0
 #else
