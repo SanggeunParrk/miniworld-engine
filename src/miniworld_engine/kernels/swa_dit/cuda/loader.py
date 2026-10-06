@@ -33,6 +33,14 @@ _DIR = Path(__file__).resolve().parent
 
 #: stage -> source file stem (and the python-visible entry point it defines).
 SOURCES = {"qkvg": "swa_qkvg_fwd", "fwd": "swa_ffn_fwd", "bwd": "swa_ffn_bwd"}
+SOURCES.update(qkvg_small="swa_qkvg_fwd", fwd_small="swa_ffn_fwd", bwd_overwrite="swa_ffn_bwd")
+
+# Separate build identities preserve the legacy kernels and their schedules.
+_VARIANT_FLAGS = {
+    "qkvg_small": ["-DMW_SWA_QKVG_SP=2", "-DMW_SWA_FWD_STAGES=2"],
+    "fwd_small": ["-DMW_SWA_FFN_SP=4", "-DMW_SWA_FWD_STAGES=2"],
+    "bwd_overwrite": ["-DMW_SWA_FFN_OVERWRITE=1"],
+}
 
 _EXT: dict[str, Any] = {}
 #: stage -> why the extension is unavailable (repr of the build exception).
@@ -84,6 +92,8 @@ def extension(which: str) -> Any:
         ensure_cuda_home()
         src = SOURCES[which]
         name = f"miniworld_swa_dit_{src}"
+        if which in _VARIANT_FLAGS:
+            name += f"_{which}"
         build = jit_root() / name
         build.mkdir(parents=True, exist_ok=True)
         _EXT[which] = load_extension(

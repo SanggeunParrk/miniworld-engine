@@ -1,3 +1,6 @@
+#ifndef MW_SWA_FFN_OVERWRITE
+#define MW_SWA_FFN_OVERWRITE 0
+#endif
 // ESMFold2 SWA atom block, FFN half backward (CUDA sm_90a, C = 128, SwiGLU hidden N = 256, bf16 operands, fp32 accumulate):
 //   forward:  y = rn(RMS(q1) * (1 + scale_f) + shift_f);  a|b = y Wu^T;  h = silu(a) * b;  ffn = rn(h Wd^T);  q2 = q1 + gate_f * ffn
 //   backward: dffn = rn(dq2 * gate_f);  dh = dffn Wd;  da = rn(dh*b*sa*(1 + a*(1-sa))), db = rn(dh*a*sa);  dy = da Wa + db Wb;
@@ -380,7 +383,11 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
           const float4 v = *reinterpret_cast<const float4*>(buf + (c4r >> 3) * XTF + wg::off32(sl * AT + al, c4r & 7));
           acc.x += v.x; acc.y += v.y; acc.z += v.z; acc.w += v.w;
         }
-        if (s0 + al < S) red_add_v4(args.dmod + ((long)b * S + s0 + al) * MODW + col0 + c4r * 4, acc);
+        if (s0 + al < S) {
+          float* dest=args.dmod+((long)b*S+s0+al)*MODW+col0+c4r*4;
+          if(MW_SWA_FFN_OVERWRITE && args.A==1)*reinterpret_cast<float4*>(dest)=acc;
+          else red_add_v4(dest,acc);
+        }
       }
     };
     PR(6, tq == 0);
@@ -499,10 +506,12 @@ void launch(Args args, const torch::Tensor& y, const torch::Tensor& dq2, const C
   CUtensorMap mh = map4d(h, args.A, args.B, args.S, AT, SP, N, HC, CU_TENSOR_MAP_SWIZZLE_64B);
   args.nab = (args.S + AT - 1) / AT; args.nag = (args.A + SP - 1) / SP;
   args.ntile = args.nab * args.nag * args.B;
-  static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(ffn_bwd_kernel<SP>, cudaFuncAttributeMaxDynamicSharedMemorySize, BYTES)); attr = true; }
-  const int grid = std::min(args.ntile, num_sms(y.device().index()));
-  ffn_bwd_kernel<SP><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(args, my, mdq, mwab, mwdt, mwabt, mdab, mh);
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,ffn_bwd_kernel<SP>));
+  C10_CUDA_CHECK(cudaFuncSetAttribute((const void*)kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,BYTES));
+  const int grid=std::min(args.ntile,num_sms(y.device().index()));
+  auto lwab=mwab,lwdt=mwdt,lwabt=mwabt;
+  void* launchargs[]={&args,&my,&mdq,&lwab,&lwdt,&lwabt,&mdab,&mh};
+  C10_CUDA_CHECK(cudaLaunchKernel((const void*)kernel,dim3(grid),dim3(THREADS),launchargs,BYTES,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 }  // namespace
