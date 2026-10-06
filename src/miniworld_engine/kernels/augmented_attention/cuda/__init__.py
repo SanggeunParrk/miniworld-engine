@@ -62,7 +62,7 @@ LOG2E = 1.0 / math.log(2.0)
 def _ext(name: str, defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     return load_extension(
-        name=f"augattn_sm90_{name}" + "".join("_" + d.replace("=", "") for d in defs),
+        name=f"augattn_sm90_{name}" + "".join("_" + d.replace("=", "").replace(".", "p").replace("-", "m") for d in defs),
         sources=[str(_dir / f"{name}.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -101,6 +101,98 @@ class ApbInferenceCore:
             raise ValueError("Hopper APB inference requires one sample and head-major bias")
         self.extension.attn_inf(qkvg, bias, 0, 1)
         return qkvg
+
+
+def _apb_training_defs(heads: int, d: int):
+    from .apb import GEOMETRY, width
+
+    real, padded = GEOMETRY[(heads, d)]
+    return (f"DHP={padded}", f"ROW_WIDTH={width(heads, d)}", "NWG=1", "APB_NATURAL=1",
+            f"RSQDV={real ** -0.5!r}f")
+
+
+def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
+    """Natural-unit packed column views; B200's saved O/LSE lifetimes on Hopper."""
+    O = torch.empty_like(q, memory_format=torch.contiguous_format, dtype=torch.float32)
+    LSE = torch.empty(heads, L, device=q.device, dtype=torch.float32)
+    _ext("attn_fwd", _apb_training_defs(heads, d)).attn_fwd(q, k, v, bias, None, O, LSE)
+    return O, LSE
+
+
+def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
+    """dQB and dKV own their complete rows: no cross-CTA attention atomics."""
+    opts = dict(memory_format=torch.contiguous_format, dtype=torch.float32)
+    DQ, DK, DV = (torch.empty_like(q, **opts) for _ in range(3))
+    DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
+    defs = _apb_training_defs(heads, d)
+    _ext("attn_dq", defs).apb_dqb(q, k, v, dob, bias, LSE, Dd, DQ, DB)
+    _ext("attn_dkv", defs + ("DBIAS=0",)).attn_dkv(q, k, v, dob, bias, None, LSE, Dd, DK, DV, DB)
+    return DQ, DK, DV, DB
+
+
+def natural_forward(q, k, v, bias, *, heads: int, head_dim: int, output_bf16: bool = False):
+    """Generic B1 natural-unit attention for fused callers; q/k/v [A*L,W].
+
+    Returns O [A*L,W] (FP32, or BF16 directly from the epilogue when requested)
+    and log2 LSE [A,H,L]. No Torch conversion kernels run here.
+    """
+    L, W = bias.shape[1], q.shape[1]
+    if q.ndim != 2 or W % heads or W // heads not in (16, 32, 48) or L % 128:
+        raise ValueError("Hopper natural attention requires packed bucketed head geometry")
+    defs = (f"DHP={W // heads}", f"ROW_WIDTH={W}", "NWG=1", "APB_NATURAL=1", f"RSQDV={head_dim ** -0.5!r}f")
+    if output_bf16:
+        defs += ("FWD_BF16=1",)
+    O = torch.empty_like(q, memory_format=torch.contiguous_format, dtype=torch.bfloat16 if output_bf16 else torch.float32)
+    LSE = torch.empty(q.shape[0] // L, heads, L, device=q.device, dtype=torch.float32)
+    _ext("attn_fwd", defs).attn_fwd(q, k, v, bias, None, O, LSE)
+    return O, LSE
+
+
+def natural_backward(q, k, v, dob, bias, LSE, Dd, *, heads: int, head_dim: int, output_bf16: bool = False,
+                     out: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+                     return_bias: bool = True, bias_transposed: bool = True):
+    """dQ/dK/dV and deterministic FP32 per-sample dBiasT [A,H,key,query].
+
+    Caller reduces the sample axis in fixed order. ``output_bf16`` writes the
+    activation gradients directly as BF16; default FP32. ``out`` may provide
+    three disjoint packed column views with a common row stride. Every dBiasT
+    element is written, so no zero-fill. ``return_bias=False`` allocates no
+    bias workspace. For A1, ``bias_transposed=False`` instead writes DB[H,L,L]
+    in query/key order directly in the dQ pass.
+    """
+    L, W = bias.shape[1], q.shape[1]
+    if q.ndim != 2 or W % heads or W // heads not in (16, 32, 48) or L % 128 or q.shape[0] % L:
+        raise ValueError("Hopper natural attention requires packed bucketed head geometry")
+    A = q.shape[0] // L
+    if return_bias and not bias_transposed and A != 1:
+        raise ValueError("Direct query/key dBias requires one sample")
+    defs = (f"DHP={W // heads}", f"ROW_WIDTH={W}", "NWG=1", "APB_NATURAL=1", f"RSQDV={head_dim ** -0.5!r}f")
+    if output_bf16:
+        defs += ("BWD_BF16=1",)
+    dtype = torch.bfloat16 if output_bf16 else torch.float32
+    if out is None:
+        DQ, DK, DV = (torch.empty_like(q, memory_format=torch.contiguous_format, dtype=dtype) for _ in range(3))
+    else:
+        if len(out) != 3 or any(t.shape != q.shape or t.device != q.device or t.dtype != dtype or t.stride(1) != 1
+                               or t.stride(0) != out[0].stride(0) or t.stride(0) < W for t in out):
+            raise ValueError("Gradient outputs must be matching packed column views with a common row stride")
+        DQ, DK, DV = out
+        if DQ.stride(0) != W:
+            defs += (f"BWD_ROW_STRIDE={DQ.stride(0)}",)
+    direct_bias = return_bias and not bias_transposed
+    DBT = (torch.empty((heads, L, L) if direct_bias else (A, heads, L, L), device=q.device, dtype=torch.float32)
+           if return_bias else None)
+    if direct_bias:
+        _ext("attn_dq", defs + ("DQ_BIAS=1",)).apb_dqb(q, k, v, dob, bias, LSE, Dd, DQ, DBT)
+    else:
+        _ext("attn_dq", defs + ("DQ_BIAS=0",)).attn_dq(q, k, v, dob, bias, None, LSE, Dd, DQ)
+    if return_bias and bias_transposed:
+        _ext("attn_dkv", defs + ("DB_PER_SAMPLE=1",)).attn_dkv(q, k, v, dob, bias, None, LSE, Dd, DK, DV, DBT)
+    else:
+        # DBIAS=0 never reads/writes this pointer; reuse an existing contiguous
+        # FP32 tensor instead of allocating or initializing a bias workspace.
+        _ext("attn_dkv", defs + ("DBIAS=0",)).attn_dkv(q, k, v, dob, bias, None, LSE, Dd, DK, DV, LSE)
+    return DQ, DK, DV, DBT
 
 
 # --------------------------------------------------------------------------------------------------- gate
