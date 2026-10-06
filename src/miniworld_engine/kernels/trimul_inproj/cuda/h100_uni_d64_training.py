@@ -88,12 +88,19 @@ def _k1_cache():
     return {}
 
 
+def _bmm(a, b, *, out):
+    if T.d64_uni_owned_bmm_enabled(a.shape[-1]):
+        from ._h100_pack import owned_bmm
+        return owned_bmm(a, b, out=out)
+    return torch.bmm(a, b, out=out)
+
+
 def _triangle(ab, tri, outgoing):
     left, right = ab[:HIDDEN], ab[HIDDEN:]
     if outgoing:
-        torch.bmm(left, right.transpose(-1, -2), out=tri)
+        _bmm(left, right.transpose(-1, -2), out=tri)
     else:
-        torch.bmm(left.transpose(-1, -2), right, out=tri)
+        _bmm(left.transpose(-1, -2), right, out=tri)
 
 
 def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
@@ -161,7 +168,7 @@ def _forward_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_fake, name="trimul_h100_uni64_train_fwd")
 def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> list[torch.Tensor]:
     """Training forward; returns ``[y, ab, tri, stats, w1, maskf]`` (all freshly allocated)."""
-    with T.native_context(leaves[0].device):
+    with T.preserved_d64_context(T.d64_training(leaves[0], outgoing=outgoing)), T.native_context(leaves[0].device):
         return _run_forward(leaves, mask, ds, outgoing, True)
 
 
@@ -173,7 +180,7 @@ def _forward_nograd_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_nograd_fake, name="trimul_h100_uni64_dropout_nograd")
 def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> torch.Tensor:
     """Training-mode (dropout) forward without autograd: no saved activations are returned."""
-    with T.native_context(leaves[0].device):
+    with T.preserved_d64_context(T.d64_training(leaves[0], outgoing=outgoing)), T.native_context(leaves[0].device):
         return _run_forward(leaves, mask, ds, outgoing, False)
 
 
@@ -205,11 +212,11 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     dl = torch.empty_like(tri)
     dr = torch.empty_like(tri)
     if outgoing:        # tri = l r^T
-        torch.bmm(dt, right, out=dl)
-        torch.bmm(dt.transpose(-1, -2), left, out=dr)
+        _bmm(dt, right, out=dl)
+        _bmm(dt.transpose(-1, -2), left, out=dr)
     else:               # tri = l^T r
-        torch.bmm(right, dt.transpose(-1, -2), out=dl)
-        torch.bmm(left, dt, out=dr)
+        _bmm(right, dt.transpose(-1, -2), out=dl)
+        _bmm(left, dt, out=dr)
     dx = torch.empty_like(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
     params = L.Struct.fixed("h100_uni64:b2w", [
@@ -236,7 +243,8 @@ def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False):
 def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
              saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool, master: bool = False) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
-    with T.native_context(leaves[0].device):
+    # Autograd invokes this boundary after the caller's forward scope has ended.
+    with T.preserved_d64_context(T.d64_training(leaves[0], outgoing=outgoing)), T.native_context(leaves[0].device):
         return _run_backward(leaves, mask, ds, saved, dy, outgoing, master)
 
 

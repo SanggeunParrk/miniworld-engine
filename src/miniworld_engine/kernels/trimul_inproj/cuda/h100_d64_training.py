@@ -127,10 +127,18 @@ def _front(x, w1, maskf, gi, bi, ab):
           ch=HIDDEN, cfg=cfg, lnm=2, eps=1e-5, cache=_k1_cache())
 
 
+def _bmm(a, b, *, out):
+    import os
+    if os.environ.get("MINIWORLD_TRIMUL_H100_D64_OWNED_BMM", "0") == "1":
+        from ._h100_pack import owned_bmm
+        return owned_bmm(a, b, out=out)
+    return torch.bmm(a, b, out=out)
+
+
 def _triangle(ab, tri):
     h = WIDTH
-    torch.bmm(ab[:h], ab[2 * h:3 * h].transpose(-1, -2), out=tri[:h])
-    torch.bmm(ab[h:2 * h].transpose(-1, -2), ab[3 * h:], out=tri[h:])
+    _bmm(ab[:h], ab[2 * h:3 * h].transpose(-1, -2), out=tri[:h])
+    _bmm(ab[h:2 * h].transpose(-1, -2), ab[3 * h:], out=tri[h:])
 
 
 def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
@@ -253,10 +261,10 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False):
     b1.launch((g1, 1, 1), (256, 1, 1), [params], B1W_SMEM)
     dl = torch.empty_like(tri)
     dr = torch.empty_like(tri)
-    torch.bmm(dt[:h], ab[2 * h:3 * h], out=dl[:h])
-    torch.bmm(dt[:h].transpose(-1, -2), ab[:h], out=dr[:h])
-    torch.bmm(ab[3 * h:], dt[h:].transpose(-1, -2), out=dl[h:])
-    torch.bmm(ab[h:2 * h], dt[h:], out=dr[h:])
+    _bmm(dt[:h], ab[2 * h:3 * h], out=dl[:h])
+    _bmm(dt[:h].transpose(-1, -2), ab[:h], out=dr[:h])
+    _bmm(ab[3 * h:], dt[h:].transpose(-1, -2), out=dl[h:])
+    _bmm(ab[h:2 * h], dt[h:], out=dr[h:])
     dx = torch.empty_like(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
     maskf = maskf.reshape(m)

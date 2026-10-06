@@ -17,6 +17,7 @@ _d256_scope = threading.local()
 _d128_scope = threading.local()
 _bidi_d256_scope = threading.local()
 _d64_scope = threading.local()
+_uni_owned_blas_scope = threading.local()
 
 
 def d64_training(x, outgoing=False, bidirectional=False):
@@ -30,13 +31,20 @@ def d64_training(x, outgoing=False, bidirectional=False):
         "MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP",
     )):
         return False
-    if (x.shape[1] == 768 and os.environ.get(
-            "MINIWORLD_TRIMUL_H100_D64_GRAPH_WORKSPACE_CANDIDATE") != "1"):
-        return False
     if bidirectional:
-        return True
+        return (x.shape[1] == 384 or os.environ.get(
+            "MINIWORLD_TRIMUL_H100_D64_GRAPH_WORKSPACE_CANDIDATE") == "1")
     return (outgoing and x.shape[1] == 768
-            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT") != "0")
+            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_GRAPH_WORKSPACE_CANDIDATE") == "1"
+            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT") != "0"
+            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_OWNED_BMM") != "0")
+
+
+def d64_uni_owned_bmm_enabled(length):
+    """Only the qualified training scope selects owned L768 scratch by default."""
+    scoped = False if torch.compiler.is_compiling() else getattr(_d64_scope, "enabled", False)
+    return os.environ.get("MINIWORLD_TRIMUL_H100_D64_OWNED_BMM",
+                          "1" if scoped and length == 768 else "0") == "1"
 
 
 def d64_uni_affine_enabled(x, outgoing):
@@ -58,7 +66,7 @@ def preserved_d64_context(enabled):
 
 
 def d128_training(x, outgoing=True, bidirectional=False):
-    """Preserved bidirectional L384 default; other cells remain candidates."""
+    """Preserved D128 candidates; default waits for safe graph-owned scratch."""
     if x.shape[-1] != 128:
         return False
     if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
@@ -67,7 +75,9 @@ def d128_training(x, outgoing=True, bidirectional=False):
     explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
                 and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1")
     return explicit or (bidirectional and x.ndim == 4
-                        and tuple(x.shape[:3]) == (1, 384, 384))
+                        and tuple(x.shape[:3]) == (1, 384, 384)
+                        and os.environ.get(
+                            "MINIWORLD_TRIMUL_H100_D128_GRAPH_WORKSPACE_CANDIDATE") == "1")
 
 
 @contextmanager
@@ -91,7 +101,7 @@ def uni_d256_training(x, outgoing):
                 and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1")
     return explicit or (outgoing and x.ndim == 4
             and tuple(x.shape[:3]) == (1, 384, 384)
-            and os.environ.get("MINIWORLD_TRIMUL_H100_D256_UNI_GRAPH_WORKSPACE_CANDIDATE") == "1")
+            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS") != "0")
 
 
 @contextmanager
@@ -190,10 +200,9 @@ def uni_training(x, outgoing):
         return True
     # Qualified outgoing cells preserve the selected native algorithm per shape.
     return (outgoing and bucket
-            and ((x.shape[-1] == 512 and os.environ.get(
-                    "MINIWORLD_TRIMUL_H100_WIDE_GRAPH_WORKSPACE_CANDIDATE") == "1")
-                 or (x.shape[-1] == 384 and x.shape[1] == 384
-                 and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_DEFAULT_CANDIDATE") == "1"))
+            and (x.shape[-1] == 512
+                 or (x.shape[-1] == 384 and x.shape[1] == 384))
+            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS") != "0"
             and os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") != "0"
             and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") != "0")
 
@@ -202,6 +211,26 @@ def preserve_training(width):
     return ((width == 128 and preserve_d128_training())
             or (width == 256 and preserve_d256_training())
             or preserve_wide_training(width))
+
+
+def wide_owned_blas_enabled():
+    scoped = False if torch.compiler.is_compiling() else getattr(_uni_owned_blas_scope, "enabled", False)
+    return os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS",
+                          "1" if scoped else "0") == "1"
+
+
+@contextmanager
+def preserved_uni_blas_context(x, outgoing):
+    """Graph-owned scratch defaults only for four qualified uni training cells."""
+    bucket = (outgoing and x.ndim == 4 and x.shape[0] == 1 and x.shape[1] == x.shape[2]
+              and ((x.shape[-1] in (256, 384) and x.shape[1] == 384)
+                   or (x.shape[-1] == 512 and x.shape[1] in (384, 768))))
+    previous = getattr(_uni_owned_blas_scope, "enabled", False)
+    _uni_owned_blas_scope.enabled = previous or (bucket and uni_training(x, outgoing))
+    try:
+        yield
+    finally:
+        _uni_owned_blas_scope.enabled = previous
 
 
 @contextmanager
