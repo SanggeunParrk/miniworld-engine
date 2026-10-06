@@ -110,6 +110,19 @@ extern "C" __global__ void mw_aux_mask(const bool* token,bf* pair,int length) {
   int i=blockIdx.x*256+threadIdx.x;
   if(i<length*length)pair[i]=__float2bfloat16_rn(!token||(token[i/length]&&token[i%length])?1.f:0.f);
 }
+__device__ float aux_mask_read(const void* p,int i,int kind) {
+  return kind==1?float(static_cast<const bool*>(p)[i]):
+         kind==2?__bfloat162float(static_cast<const bf*>(p)[i]):static_cast<const float*>(p)[i];
+}
+extern "C" __global__ void mw_aux_train_mask(const void* mask,float* pair,int length,int kind,int token) {
+  int i=blockIdx.x*256+threadIdx.x;
+  if(i>=length*length)return;
+  pair[i]=kind==0?1.f:token?float(aux_mask_read(mask,i/length,kind)!=0.f&&aux_mask_read(mask,i%length,kind)!=0.f):aux_mask_read(mask,i,kind);
+}
+extern "C" __global__ void mw_aux_unit_scale(bf* scale,int count) {
+  int i=blockIdx.x*256+threadIdx.x;
+  if(i<count)scale[i]=__float2bfloat16_rn(1.f);
+}
 #else
 // SPDX-License-Identifier: Apache-2.0
 // MiniWorld wide training forward. Uses the engine's TMA/WGMMA primitives.

@@ -105,6 +105,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
     @typecheck
     def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
         """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p)."""
+        native = _h100.native_training_dropout(self, pair, p)
+        if native is not None:
+            return native
         b, _l1, l2, d = pair.shape
         keep = torch.rand(b, 1, l2, d, device=pair.device, dtype=pair.dtype) > p
         return keep.to(pair.dtype) / (1.0 - p)
@@ -139,6 +142,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         if (torch.is_grad_enabled() or _ds is not None) and _h100.serves(self, pair):
             return _h100.update(self, pair, mask, _ds)
+        if (torch.is_grad_enabled() or _ds is not None) and _h100.requires_cuda_training(self, pair):
+            raise ValueError("native H100 D64 TriMul training requires B1 BF16 buckets L128..768")
 
         if _h100.serves_inference(self, pair, bidirectional=True, dropscale=_ds):
             return _h100.update_inference(self, pair, mask, bidirectional=True)
