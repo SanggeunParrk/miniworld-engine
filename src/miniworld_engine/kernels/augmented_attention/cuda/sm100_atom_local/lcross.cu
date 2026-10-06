@@ -146,3 +146,13 @@ local_cond_ln_bwd(const __nv_bfloat16* __restrict__ c, const __nv_bfloat16* __re
 #pragma unroll
   for (int i = 0; i < 4; ++i) atomicAdd(dgamma + lane * 4 + i, acc[i]);
 }
+
+#if defined(ATOM_HOPPER)
+extern "C" __global__ void local_kv_pack_sm90(const void* gamma,const void* ws,const void* bias,const void* wb,
+ __nv_bfloat16* wm,float* bs,float* gg,int bfmask) {
+ int i=blockIdx.x*blockDim.x+threadIdx.x;
+ auto val=[&](const void* p,int j,int n){return (bfmask&(1<<n))?__bfloat162float(reinterpret_cast<const __nv_bfloat16*>(p)[j]):reinterpret_cast<const float*>(p)[j];};
+ if(i<32768)wm[i]=__float2bfloat16_rn(val(i<16384?ws:wb,i%16384,i<16384?1:3));
+ if(i<128){bs[i]=val(bias,i,2);gg[i]=val(gamma,i,0);}
+}
+#endif

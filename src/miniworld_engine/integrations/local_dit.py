@@ -78,11 +78,14 @@ def _kernels_ready(index: int) -> bool:
     )
 
     try:
-        for name in _ROW_KERNELS:
+        hopper = rows._hopper(index)
+        for name in (("cond", "pre", "post", "pack") if hopper else _ROW_KERNELS):
             rows.atom_kernel(name, index)
-        for name in local.KERNELS:
+        for name in (("fwd", "pb_f", "cond_ln", "kv_f", "kv_pack") if hopper else local.KERNELS):
             local._load(name, index)
     except Exception as exc:  # a toolchain or driver problem keeps the module path
+        if rows._hopper(index):
+            raise RuntimeError("Opt-in Hopper local DiT kernel build failed") from exc
         _FAILED = True
         warnings.warn(f"sm_100a local atom DiT kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
         return False
@@ -98,7 +101,11 @@ def serves(module, single, cond, pair, mask) -> bool:
     a, tr = module.attention, module.transition
     if a._backend != KernelBackend.TRITON or a.use_qk_norm:
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
+    hopper = cap == (9, 0) and os.environ.get("MINIWORLD_LOCAL_DIT_H100", "0") == "1"
+    if hopper and torch.is_grad_enabled():
+        return False  # prototype inference only; existing training remains unchanged
+    if not (cap == (10, 0) or hopper):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):
         return False
@@ -123,6 +130,8 @@ def serves(module, single, cond, pair, mask) -> bool:
 def _keys(mask, n0, n):
     """The valid-key bytes [n] the attention kernels read (None: every key valid and no padding)."""
     if mask is not None:
+        if n == n0:
+            return mask[0].contiguous()
         return F.pad(mask[0], (0, n - n0)).contiguous()
     return None if n == n0 else (torch.arange(n, device=_device_of(mask)) < n0)
 
@@ -131,9 +140,12 @@ def _device_of(mask):
     return torch.cuda.current_device() if mask is None else mask.device
 
 
-def _kv_pack(weights):
+def _kv_pack(weights, packed_pre=None):
     """The cross-attention mode's operands: Wm [256, 128] = [to_scale; to_bias] bf16, the scale bias and the LN weight (fp32), Wk, Wv (bf16)."""
     gamma, w_scale, b_scale, w_bias = weights[len(WEIGHTS):]
+    if packed_pre is not None and torch.cuda.get_device_capability(gamma.device) == (9, 0):
+        from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+        return local.kv_pack_hopper(weights[len(WEIGHTS):], packed_pre)
     wk, wv = weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]
     return torch.cat([w_scale, w_bias]).to(BF), b_scale.float(), gamma.float(), wk.to(BF), wv.to(BF)
 
@@ -180,9 +192,9 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         c2 = _padded(cond, n).reshape(m, DC_).contiguous()
         mod = rows.cond_fwd(c2, *wc)
-        q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save or cross)
+        q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save or cross, cross=cross and rows._hopper(single.device.index))
         if cross:       # keys and values from a second AdaLN of x1 (pre_fwd's own k / v are not used)
-            wm, bs, gkv, wk, wv = _kv_pack(weights)
+            wm, bs, gkv, wk, wv = _kv_pack(weights, wp)
             cn = local.cond_ln(c2, gkv)
             mkv = cn @ wm.t()
             xkv = local.kv_fwd(x1, mkv, bs)

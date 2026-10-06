@@ -1,3 +1,107 @@
+
+#if defined(ATOM_HOPPER)
+#include "../sm100_atom/sm100.cuh"
+using namespace atom90;
+// Two adjacent 32-query windows share a 160-key union. Three TMA stages
+// keep Q/K/V local; register softmax and WGMMA PV never materialize S or P.
+extern "C" __global__ __launch_bounds__(160, 1)
+void local_attn_fwd_sm90(const __grid_constant__ CUtensorMap mq,
+ const __grid_constant__ CUtensorMap mk,const __grid_constant__ CUtensorMap mv,
+ const float* __restrict__ bias,const uint8_t* __restrict__ mask,
+ __nv_bfloat16* __restrict__ out,float* __restrict__ lse,int N,int A) {
+  extern __shared__ __align__(1024) uint8_t sm[];
+  constexpr int TB=8192, KV=TB, VB=KV+3*TB, BAR=VB+3*TB;
+  uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+  const int t=threadIdx.x, lane=t&31, warp=t>>5;
+  const int h=blockIdx.y%4, a=blockIdx.y/4, q0=64*blockIdx.x, key0=q0-48;
+  if(t==0) { for(int j=0;j<4;++j)init(bars+j); init_fence(); }
+  __syncthreads();
+  if(t>=128) {
+    if(t==128) {
+      expect(bars,TB); load3(sm,&mq,bars,h*32,q0,a);
+      #pragma unroll
+      for(int j=0;j<3;++j) {
+        expect(bars+j+1,2*TB);
+        load3(sm+KV+j*TB,&mk,bars+j+1,h*32,key0+64*j,a);
+        load3(sm+VB+j*TB,&mv,bars+j+1,h*32,key0+64*j,a);
+      }
+    }
+    return;
+  }
+  const int r0=warp*16+lane/4, c0=(lane&3)*2;
+  uint32_t qa[8];
+  bwait(bars,0);
+  #pragma unroll
+  for(int k=0;k<2;++k)
+    #pragma unroll
+    for(int hi=0;hi<2;++hi)
+      #pragma unroll
+      for(int rr=0;rr<2;++rr)
+        qa[k*4+2*hi+rr]=*reinterpret_cast<uint32_t*>(sm+off(r0+8*rr,16*k+8*hi+c0));
+  float oo[16]={0.f}, mm[2]={-INFINITY,-INFINITY}, ll[2]={0.f,0.f};
+  #pragma unroll
+  for(int j=0;j<3;++j) {
+    bwait(bars+j+1,0);
+    const uint8_t* sk=sm+KV+j*TB; const uint8_t* sv=sm+VB+j*TB;
+    float ss[32]; fence();
+    mma_rs_n64_first(qa[0],qa[1],qa[2],qa[3],desc(sk),ss);
+    mma_rs_n64(qa[4],qa[5],qa[6],qa[7],desc(sk+32),ss,1);
+    commit();wait();
+    float nm[2]={-INFINITY,-INFINITY};
+    #pragma unroll
+    for(int i=0;i<8;++i)
+      #pragma unroll
+      for(int rr=0;rr<2;++rr) {
+        const int q=q0+r0+8*rr, w=q/32, lo=32*w-48;
+        #pragma unroll
+        for(int e=0;e<2;++e) {
+          const int k=key0+64*j+8*i+c0+e;
+          const bool ok=q<N && k>=0 && k<N && k>=lo && k<lo+128 && (!mask || mask[k]);
+          float s=-INFINITY;
+          if(ok) s=fmaf(ss[4*i+2*rr+e],0.17677669529663687f,
+             bias[((size_t(h)*(N/32)+w)*32+(q&31))*128+(k-lo)])*1.4426950408889634f;
+          ss[4*i+2*rr+e]=s; nm[rr]=fmaxf(nm[rr],s);
+        }
+      }
+    #pragma unroll
+    for(int rr=0;rr<2;++rr) {
+      nm[rr]=fmaxf(mm[rr],max4(nm[rr]));
+      const float safe=nm[rr]==-INFINITY ? 0.f:nm[rr];
+      const float alpha=mm[rr]==-INFINITY?0.f:s100::ex2f(mm[rr]-safe);
+      ll[rr]*=alpha;
+      #pragma unroll
+      for(int i=0;i<4;++i) { oo[4*i+2*rr]*=alpha;oo[4*i+2*rr+1]*=alpha; }
+      mm[rr]=safe;
+    }
+    uint32_t pp[16]; float sum[2]={0.f,0.f};
+    #pragma unroll
+    for(int i=0;i<8;++i)
+      #pragma unroll
+      for(int rr=0;rr<2;++rr) {
+        float p0=s100::ex2f(ss[4*i+2*rr]-mm[rr]);
+        float p1=s100::ex2f(ss[4*i+2*rr+1]-mm[rr]);
+        sum[rr]+=p0+p1;
+        pp[4*(i>>1)+2*(i&1)+rr]=pack(p0,p1);
+      }
+    ll[0]+=sum4(sum[0]);ll[1]+=sum4(sum[1]);
+    fence();
+    #pragma unroll
+    for(int k=0;k<4;++k) pv(oo,pp+4*k,desc(sv+k*2048));
+    commit();wait();
+  }
+  #pragma unroll
+  for(int rr=0;rr<2;++rr) {
+    const int q=q0+r0+8*rr;
+    if(q<N) {
+      const float inv=ll[rr]>0?1.f/ll[rr]:0.f;
+      #pragma unroll
+      for(int i=0;i<4;++i)
+        *reinterpret_cast<uint32_t*>(out+(size_t(a)*N+q)*128+h*32+8*i+c0)=pack(oo[4*i+2*rr]*inv,oo[4*i+2*rr+1]*inv);
+      if((lane&3)==0) lse[(size_t(a)*4+h)*N+q]=ll[rr]>0?mm[rr]+__log2f(ll[rr]):1e30f;
+    }
+  }
+}
+#else
 // lattn_fwd.cu — AF3 windowed atom attention forward (32 queries x 128 keys per window) on tcgen05 (sm_100a).
 //
 //   S = q k^T / sqrt(32) + bias[h][w]      O = softmax(S) v      (bf16 O [A N, 128], row LSE [A, 4, N] in log2 units)
@@ -214,3 +318,5 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
   tc_fence_before(); __syncthreads(); tc_fence_after();
   if (warp == 0) tmem_dealloc(tm, 512);
 }
+
+#endif // ATOM_HOPPER

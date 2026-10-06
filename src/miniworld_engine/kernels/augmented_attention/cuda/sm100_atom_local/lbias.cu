@@ -35,7 +35,11 @@ DEVI float param_f(const void* p, int i, int is_bf16) {
   return is_bf16 ? __uint_as_float((uint32_t)reinterpret_cast<const unsigned short*>(p)[i] << 16) : reinterpret_cast<const float*>(p)[i];
 }
 DEVI void load_w(float* sw, const void* wb, const void* gamma, int is_bf16) {
+#if defined(ATOM_HOPPER)
+  if (threadIdx.x < 64) sw[threadIdx.x] = param_f(wb, threadIdx.x, is_bf16 & 1) * param_f(gamma, threadIdx.x & 15, is_bf16 & 2);
+#else
   if (threadIdx.x < 64) sw[threadIdx.x] = param_f(wb, threadIdx.x, is_bf16) * param_f(gamma, threadIdx.x & 15, is_bf16);
+#endif
 }
 
 extern "C" __global__ void __launch_bounds__(256)
@@ -163,11 +167,16 @@ local_bias_fin(const float* __restrict__ part, int nb, const void* __restrict__ 
   for (int b = 0; b < nb; ++b) s += part[(size_t)b * 64 + t];
   G[t] = s;
   __syncthreads();
-  dwb[t] = s * param_f(gamma, t & 15, is_bf16);
+#if defined(ATOM_HOPPER)
+  const int wb_bf = is_bf16 & 1, gamma_bf = is_bf16 & 2;
+#else
+  const int wb_bf = is_bf16, gamma_bf = is_bf16;
+#endif
+  dwb[t] = s * param_f(gamma, t & 15, gamma_bf);
   if (t < 16) {
     float d = 0.f;
 #pragma unroll
-    for (int h = 0; h < 4; ++h) d += G[h * 16 + t] * param_f(wb, h * 16 + t, is_bf16);
+    for (int h = 0; h < 4; ++h) d += G[h * 16 + t] * param_f(wb, h * 16 + t, wb_bf);
     dgamma[t] = d;
   }
 }

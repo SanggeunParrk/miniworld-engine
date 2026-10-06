@@ -30,17 +30,28 @@ SOURCES = ("lattn_fwd", "lattn_dq", "lattn_dkv", "lbias", "lcross")
 
 
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str) -> str:
+def cubin(stem: str, hopper: bool = False) -> str:
     """Path of ``<stem>.cu`` built for sm_100a; rebuilt only when a source or a flag changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
-    nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}")
+    if hopper:
+        from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, nvcc_path
+        ensure_cuda_home()
+        nvcc, rel, host = nvcc_path(), (12, 9), host_flags()
+        if not nvcc or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+            raise RuntimeError("Local Hopper kernels require matching CUDA <= 12.9")
+    else:
+        nvcc, rel, host = kernel_toolchain()
+    flags = (*host, "-std=c++17", "-O3", "-arch=sm_90a" if hopper else "-arch=sm_100a",
+             *(("-DATOM_HOPPER=1",) if hopper else ()), "-cubin", "-lineinfo", f"-I{_dir}")
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir / "local.cuh", _dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
+    if hopper:
+        h.update((_dir.parent / "sm100_atom" / "sm100.cuh").read_bytes())
+        h.update((_dir.parents[2] / "swa_dit" / "cuda" / "gen" / "wgmma_bf16.inc").read_bytes())
     root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
-    out = root / "atom_local_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    out = root / ("atom_local_sm90" if hopper else "atom_local_sm100") / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
@@ -73,9 +84,18 @@ KERNELS = {
 def _load(name: str, device_index: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    stem, func, smem = KERNELS[name]
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    hopper = _hopper(device_index)
+    if hopper and name in ("dq", "dkv"):
+        raise NotImplementedError("Local Hopper backward has not been implemented")
+    if hopper and name == "fwd":
+        stem, func, smem = "lattn_fwd", "local_attn_fwd_sm90", 57376
+    elif name == "kv_pack":
+        stem, func, smem = "lcross", "local_kv_pack_sm90", 0
+    else:
+        stem, func, smem = KERNELS[name]
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem), func, smem)
+        return driver.Kernel(cubin(stem, hopper), func, smem)
 
 
 def _dev(t: torch.Tensor) -> int:
@@ -130,7 +150,14 @@ def attn_fwd(q, k, v, bias, kmask=None):
     d = _dev(q)
     o = torch.empty_like(q)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
-    km = None if kmask is None else kmask.to(torch.uint8).contiguous()
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    km = None if kmask is None else (kmask.contiguous() if _hopper(d) else kmask.to(torch.uint8).contiguous())
+    if _hopper(d):
+        if N % 64 or N % 32:
+            raise ValueError("Local Hopper attention requires padded N divisible by 64")
+        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v))
+        _load("fwd", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, o, lse, int(N), int(A))
+        return o, lse
     nq = (N + 127) // 128
     sp = max(1, min(A, nsm(d) // (nq * NH)))
     out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
@@ -165,6 +192,11 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
 
 def _params(wb, gamma):
     """Wb [4, 16] and gamma [16] as the kernels read them: contiguous, bf16 or fp32 (anything else is converted to fp32)."""
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    if _hopper(_dev(wb)):
+        if wb.dtype not in (torch.bfloat16, torch.float32) or gamma.dtype not in (torch.bfloat16, torch.float32):
+            raise ValueError("Local Hopper pair parameters require BF16 or FP32")
+        return wb.contiguous(), gamma.contiguous(), int(wb.dtype == torch.bfloat16) | (int(gamma.dtype == torch.bfloat16) << 1)
     if wb.dtype != gamma.dtype or wb.dtype not in (torch.bfloat16, torch.float32):
         wb, gamma = wb.float(), gamma.float()
     return wb.contiguous(), gamma.contiguous(), int(wb.dtype == torch.bfloat16)
@@ -236,3 +268,15 @@ def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5):
     d = _dev(c)
     _load("cln_b", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), c, dcn, gamma.float().contiguous(), dc, dgamma, int(M), float(eps))
     return dc
+
+
+def kv_pack_hopper(weights, packed_pre):
+    gamma, w_scale, b_scale, w_bias = weights
+    dev = gamma.device
+    wm = torch.empty(256, 128, device=dev, dtype=torch.bfloat16)
+    bs, gg = (torch.empty(128, device=dev, dtype=torch.float32) for _ in range(2))
+    if any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in weights):
+        raise ValueError("Local Hopper KV pack requires contiguous BF16/FP32 parameters")
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    _load("kv_pack", _dev(gamma))((128, 1, 1), (256, 1, 1), *weights, wm, bs, gg, bfmask)
+    return wm, bs, gg, packed_pre[0][128:256], packed_pre[0][256:384]
