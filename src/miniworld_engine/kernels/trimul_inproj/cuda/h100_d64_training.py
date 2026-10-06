@@ -83,7 +83,10 @@ FINW_OUT = B2W_SLOT + B1W_SLOT
 
 @T.device_cache
 def _bwd_wg(prof=False, master=False):
-    cubin = T.compile(R / "d64_bwd_wg.cu", _flags(R, [("D64_PROF", int(prof)), ("MASTER_FP32", int(master))]))
+    defines = [("MASTER_FP32", int(master))]
+    if prof:
+        defines.append(("D64_PROF", 1))
+    cubin = T.compile(R / "d64_bwd_wg.cu", _flags(R, defines))
     unit = T.load_unit(str(cubin), "d64_bwd_wg")
     b1, b2, fin = (unit.kernel(n) for n in ("d64_b1w", "d64_b2w", "d64_finw"))
     b1.set_max_dynamic_smem(B1W_SMEM)

@@ -62,8 +62,11 @@ FINW_OUT = B2W_SLOT + B1W_SLOT
 
 
 @T.device_cache
-def _bwd_wg(master=False):
-    cubin = T.compile(R / "uni_bwd_wg.cu", D64._flags(R, [("MASTER_FP32", int(master))]))
+def _bwd_wg(master=False, affine_split=False):
+    defines = [("MASTER_FP32", int(master))]
+    if affine_split:
+        defines.append(("UNI_AFFINE_SPLIT", 1))
+    cubin = T.compile(R / "uni_bwd_wg.cu", D64._flags(R, defines))
     unit = T.load_unit(str(cubin), "uni64_bwd_wg")
     b1, b2, fin = (unit.kernel(n) for n in ("uni64_b1w", "uni64_b2w", "uni64_finw"))
     b1.set_max_dynamic_smem(B1W_SMEM)
@@ -183,7 +186,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     m = n * n
     h = WIDTH
     dy = dy.contiguous()
-    b1, b2, fin = _bwd_wg(master)
+    b1, b2, fin = _bwd_wg(master, T.d64_uni_affine_enabled(x, outgoing))
     sms = D64._sms()
     ntiles = m // 64
     g1 = min(sms, (ntiles + 1) // 2)

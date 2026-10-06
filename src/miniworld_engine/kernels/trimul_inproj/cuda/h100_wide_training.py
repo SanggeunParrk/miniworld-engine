@@ -442,7 +442,7 @@ def _workspace(x):
 
 
 # --------------------------------------------------------------------------- forward
-def saved_like(x):
+def saved_like(x, selected=False):
     """Empty tensors shaped like ``forward``'s saved list (fake/meta support).
 
     ab, tri, x_n, output-LN normalized rows, projection and gate products, output-LN
@@ -458,13 +458,13 @@ def saved_like(x):
     if D == 256:
         from ._h100_pack import fused_d256_glue
         return saved + [x.new_empty((8 * D, D))] + (
-            [x.new_empty((9*D,D))] if fused_d256_glue(D,n) else [])
+            [x.new_empty((9*D,D))] if fused_d256_glue(D,n,selected,bidirectional=True) else [])
     saved.append(x.new_empty((8 * D, M)))
     if D == 512:
         saved += [x.new_empty((max(1, M * H // 4096),), dtype=torch.int64),
                   x.new_empty((1,), dtype=torch.int32), x.new_empty((M // 64,), dtype=torch.int32)]
     from ._h100_pack import fused_wide_glue
-    if fused_wide_glue(D,n,bidirectional=True):
+    if fused_wide_glue(D,n,bidirectional=True,selected=selected):
         saved.append(x.new_empty((9*D,D)))
     return saved
 
@@ -746,7 +746,7 @@ def _source_d256(cell, xn, w1, dl, dr, gp, mask, partial):
     splits = 8 if n == 384 else 16
     defines = _defines(WEIGHT_SPLITS=splits)
     smem = 114816 + 256
-    if n == 384 or (n == 768 and os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE") == "1"):
+    if n == 384 or (n == 768 and T.d256_register_source_enabled()):
         # 208-register workers, 32-register producer: pool of 120 admits two CTAs.
         k = _kernel("source_d256_l384.cu", "mw_d256_register_budget_source", "upstream", defines,
                     smem, pool=("mw_d256_register_budget_source", 120, 208))

@@ -15,6 +15,46 @@ import torch.nn.functional as F
 SOURCES = Path(__file__).with_name("h100_sources")
 _d256_scope = threading.local()
 _d128_scope = threading.local()
+_bidi_d256_scope = threading.local()
+_d64_scope = threading.local()
+
+
+def d64_training(x, outgoing=False, bidirectional=False):
+    """Qualified compact-mask D64 preparation; keep wide-preservation policy separate."""
+    if (x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
+            or x.shape[-1] != 64 or x.shape[1] not in (384, 768)):
+        return False
+    if any(os.environ.get(name) == "0" for name in (
+        "MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS",
+        "MINIWORLD_TRIMUL_H100_TRAIN_CUDA",
+        "MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP",
+    )):
+        return False
+    if (x.shape[1] == 768 and os.environ.get(
+            "MINIWORLD_TRIMUL_H100_D64_GRAPH_WORKSPACE_CANDIDATE") != "1"):
+        return False
+    if bidirectional:
+        return True
+    return (outgoing and x.shape[1] == 768
+            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT") != "0")
+
+
+def d64_uni_affine_enabled(x, outgoing):
+    """Use the qualified L768 split; explicit one permits a source-only experiment."""
+    selected = d64_training(x, outgoing=outgoing, bidirectional=False)
+    return (x.shape[-1] == 64 and outgoing
+            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT",
+                               "1" if selected else "0") == "1")
+
+
+@contextmanager
+def preserved_d64_context(enabled):
+    previous = getattr(_d64_scope, "enabled", False)
+    _d64_scope.enabled = previous or enabled
+    try:
+        yield
+    finally:
+        _d64_scope.enabled = previous
 
 
 def d128_training(x, outgoing=True, bidirectional=False):
@@ -64,6 +104,43 @@ def preserved_d256_context(enabled):
         _d256_scope.enabled = previous
 
 
+def bidi_training(x):
+    """Qualified bidirectional native cells; explicit flags retain diagnostic routes."""
+    width = x.shape[-1]
+    if (x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
+            or x.shape[1] not in (384, 768) or width not in (256, 384, 512)):
+        return False
+    preserve = "MINIWORLD_TRIMUL_H100_PRESERVE_D256" if width == 256 else "MINIWORLD_TRIMUL_H100_PRESERVE_WIDE"
+    if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
+            or os.environ.get(preserve) == "0"):
+        return False
+    explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+                and os.environ.get(preserve) == "1")
+    return (explicit or (width == 256 and x.shape[1] == 768
+                         and os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE") != "0")
+            or (width == 384 and os.environ.get(
+                "MINIWORLD_TRIMUL_H100_WIDE_DEFAULT_CANDIDATE") == "1"))
+
+
+@contextmanager
+def preserved_bidi_context(x):
+    """Keep bidirectional D256 register-source selection out of uni scopes."""
+    enabled = bidi_training(x)
+    previous = getattr(_bidi_d256_scope, "enabled", False)
+    _bidi_d256_scope.enabled = previous or (enabled and x.shape[-1] == 256)
+    try:
+        with preserved_d256_context(enabled):
+            yield
+    finally:
+        _bidi_d256_scope.enabled = previous
+
+
+def d256_register_source_enabled(selected=False):
+    scoped = False if torch.compiler.is_compiling() else getattr(_bidi_d256_scope, "enabled", False)
+    return os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE",
+                          "1" if selected or scoped else "0") == "1"
+
+
 def d256_glue_enabled(name, selected=False):
     scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
     default = "1" if selected or scoped else "0"
@@ -110,9 +187,12 @@ def uni_training(x, outgoing):
               and x.shape[1] in (384, 768))
     if preserve_wide_training(x.shape[-1]) and bucket:
         return True
-    # D512 outgoing: both required lengths passed the historical latency bar,
-    # IEEE all-gradient/live-graph gates, and project-kernel racecheck.
-    return (outgoing and x.shape[-1] == 512 and bucket
+    # Qualified outgoing cells preserve the selected native algorithm per shape.
+    return (outgoing and bucket
+            and ((x.shape[-1] == 512 and os.environ.get(
+                    "MINIWORLD_TRIMUL_H100_WIDE_GRAPH_WORKSPACE_CANDIDATE") == "1")
+                 or (x.shape[-1] == 384 and x.shape[1] == 384
+                 and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_DEFAULT_CANDIDATE") == "1"))
             and os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") != "0"
             and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") != "0")
 
@@ -284,19 +364,23 @@ def pack_into(dst, wl, wlg, wr, wrg, backward_stack=None, gate=None):
 
 def cuda_aux_enabled():
     scoped = False if torch.compiler.is_compiling() else (
-        getattr(_d256_scope, "enabled", False) or getattr(_d128_scope, "enabled", False))
+        getattr(_d256_scope, "enabled", False) or getattr(_d128_scope, "enabled", False)
+        or getattr(_d64_scope, "enabled", False))
     return (scoped
             or os.environ.get("MINIWORLD_TRIMUL_H100_CUDA_AUX") == "1")
 
 
 def cuda_training_aux_enabled():
-    """Explicit D64 training candidate; inference qualification stays independent."""
-    return os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_CUDA") == "1"
+    """D64 launch-local preparation; explicit flags retain diagnostic paths."""
+    scoped = False if torch.compiler.is_compiling() else getattr(_d64_scope, "enabled", False)
+    return os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_CUDA", "1" if scoped else "0") == "1"
 
 
 def cuda_training_fused_prepare_enabled():
+    scoped = False if torch.compiler.is_compiling() else getattr(_d64_scope, "enabled", False)
     return (cuda_training_aux_enabled()
-            and os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP") == "1")
+            and os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP",
+                               "1" if scoped else "0") == "1")
 
 
 @torch.compile(fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
