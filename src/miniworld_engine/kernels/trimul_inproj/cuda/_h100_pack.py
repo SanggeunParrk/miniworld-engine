@@ -64,7 +64,7 @@ def pack_into_cuda(dst, wl, wlg, wr, wrg):
         dst, *quad, r, d, *(w.stride(0) for w in quad), *(w.stride(1) for w in quad),
         *(int(w.dtype == torch.float32) for w in quad)])
     vector = (d == 256 and T.preserve_d256_training()
-              and os.environ.get("MINIWORLD_TRIMUL_H100_FAST_GLUE") == "1"
+              and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad))
     _launch("mw_aux_pack_vec" if vector else "mw_aux_pack",
             (((4*r*d//8 if vector else 4*r*d)+255)//256, 1, 1), [p])
@@ -122,16 +122,17 @@ def dense_copy_into(dst, src):
 
 def finish_affine_partials(pg, pb, dg, db):
     blocks, width = pg.shape
-    parallel = os.environ.get("MINIWORLD_TRIMUL_H100_FAST_GLUE") == "1"
+    parallel = T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
     columns = 4 if parallel else 32
     _aux_unit().kernel("mw_aux_affine_cta_finish_parallel" if parallel
                        else "mw_aux_affine_cta_finish").launch(
         ((width+columns-1)//columns,1,1), (128,1,1), [pg,pb,dg,db,width,blocks])
 
 
-def fused_d256_glue(width, length):
-    return (width == 256 and length == 384 and T.preserve_d256_training()
-            and os.environ.get("MINIWORLD_TRIMUL_H100_FUSED_GLUE") == "1")
+def fused_d256_glue(width, length, selected=False):
+    return (width == 256 and length == 384
+            and (selected or T.preserve_d256_training())
+            and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FUSED_GLUE", selected))
 
 
 def pack_training_pair(dst, stack, weights):
@@ -289,7 +290,7 @@ def stack_backward_weights(weights):
         *weights, out, *(w.shape[0] for w in weights),
         *(w.stride(0) for w in weights), *(w.stride(1) for w in weights), width])
     vector = (width == 256 and T.preserve_d256_training()
-              and os.environ.get("MINIWORLD_TRIMUL_H100_FAST_GLUE") == "1"
+              and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in weights))
     count = max(w.numel() for w in weights) // (8 if vector else 1)
     _launch("mw_aux_stack_vec" if vector else "mw_aux_stack", ((count+255)//256, 5, 1), [p])

@@ -76,7 +76,7 @@ def _output_norm(tri, norm, go, bo, mu, rs):
     W._launch(k, grid, 128, smem, W._params(f"uni_forward_norm{H}", [*maps, go, bo, mu, rs, M]))
 
 
-def saved_like(x):
+def saved_like(x, selected=False):
     """ab, tri, x_n, norm, proj, gate, mean_out, rstd_out, pre, bf16 pair mask."""
     n, D = x.shape[1], x.shape[-1]
     M = n * n
@@ -86,7 +86,7 @@ def saved_like(x):
             x.new_empty((M,), **f32), x.new_empty((M,), **f32), x.new_empty((4 * D, M)),
             x.new_empty((n, n))]
     from ._h100_pack import fused_d256_glue
-    if fused_d256_glue(D,n):
+    if fused_d256_glue(D,n,selected):
         saved.append(x.new_empty((5*D,D)))
     return saved
 
@@ -125,13 +125,13 @@ def _run_forward(leaves, mask, ds, outgoing, save):
 def _forward_fake(leaves, mask, ds, outgoing):
     """y like x, then the saved set (``saved_like``)."""
     x = leaves[0]
-    return [torch.empty_like(x), *saved_like(x)]
+    return [torch.empty_like(x), *saved_like(x, T.uni_d256_training(x, outgoing))]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_uni_wide_train_fwd")
 def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> list[torch.Tensor]:
     """Training forward; returns ``[y, *saved]`` (all freshly allocated)."""
-    with T.native_context(leaves[0].device):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_d256_training(leaves[0], outgoing)):
         return _run_forward(leaves, mask, ds, outgoing, True)
 
 
@@ -143,7 +143,7 @@ def _forward_nograd_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_nograd_fake, name="trimul_h100_uni_wide_dropout_nograd")
 def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> torch.Tensor:
     """Training-mode (dropout) forward without autograd."""
-    with T.native_context(leaves[0].device):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_d256_training(leaves[0], outgoing)):
         return _run_forward(leaves, mask, ds, outgoing, False)
 
 
@@ -286,7 +286,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     return [dx, dws, dwp, dgi, dbi, dgo, dbo]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False):
+def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False, native=False):
     """dx, the stacked [5D, D] weight gradients (g, l, lg, r, rg), dW_p and the four LN affine gradients."""
     x, D = leaves[0], leaves[0].shape[-1]
     return [torch.empty_like(x), x.new_empty((5 * D, D), dtype=torch.float32 if master else x.dtype), torch.empty_like(leaves[6], dtype=torch.float32 if master else leaves[6].dtype),
@@ -295,9 +295,10 @@ def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False):
 
 @opaque(fake=_backward_fake, name="trimul_h100_uni_wide_train_bwd")
 def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
-             saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool, master: bool = False) -> list[torch.Tensor]:
+             saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool, master: bool = False,
+             native: bool = False) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
-    with T.native_context(leaves[0].device):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(native):
         return _run_backward(leaves, mask, ds, saved, dy, outgoing, master)
 
 
@@ -306,7 +307,8 @@ class _Training(torch.autograd.Function):
     def forward(ctx, outgoing, *args):
         leaves = list(args[:11])
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
-        native = leaves[0].shape[-1] == 256 and T.preserve_d256_training()
+        native = T.uni_d256_training(leaves[0], outgoing)
+        ctx.native = native
         if native:
             from ._h100_pack import cast_training_weights
             weights = cast_training_weights(leaves[1:7])
@@ -327,10 +329,10 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         vals = ctx.saved_tensors
         leaves = [vals[0], *vals[-6:], *vals[7:11]]
-        dx, dws, dwp, *affine = backward(leaves, vals[11], vals[12], list(vals[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master)
+        dx, dws, dwp, *affine = backward(leaves, vals[11], vals[12], list(vals[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master, ctx.native)
         dwg, dwl, dwlg, dwr, dwrg = dws.chunk(5)
         grads = [dx, dwl, dwlg, dwr, dwrg, dwg, dwp, *affine]
-        if vals[0].shape[-1] == 256 and T.preserve_d256_training():
+        if ctx.native:
             from ._h100_pack import native_training_grads
             grads = native_training_grads(grads,list(vals[:11]))
         else:
@@ -341,7 +343,7 @@ class _Training(torch.autograd.Function):
 def single_trimul(outgoing, *args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
     import os
-    native = args[0].shape[-1] == 256 and T.preserve_d256_training()
+    native = T.uni_d256_training(args[0], outgoing)
     if os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1" and not native:
         return native_buckets(False, outgoing, *args)
     if not torch.is_grad_enabled():
