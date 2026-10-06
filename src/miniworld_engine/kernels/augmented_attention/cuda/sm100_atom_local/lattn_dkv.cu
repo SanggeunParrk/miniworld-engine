@@ -1,3 +1,115 @@
+#if defined(ATOM_HOPPER)
+#include "../sm100_atom/sm100.cuh"
+using namespace atom90;
+// Key-centric Hopper lowering: 64 keys see six adjacent query windows.
+// TMA stages hold their 192-query union; WGMMA retains dK/dV accumulators.
+// Every valid dBias cell has one writer per sample, followed by fixed-order
+// sample reduction. No atomic gradient accumulation or TMEM is needed.
+extern "C" __global__ __launch_bounds__(160, 1)
+void local_attn_dkv_sm90(const __grid_constant__ CUtensorMap mq,
+ const __grid_constant__ CUtensorMap mk,const __grid_constant__ CUtensorMap mv,
+ const __grid_constant__ CUtensorMap mdo,const float* __restrict__ bias,
+ const uint8_t* __restrict__ mask,const float* __restrict__ lse,
+ const float* __restrict__ dd,__nv_bfloat16* __restrict__ out,
+ float* __restrict__ db,int ldd,int N,int A) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int TB=8192,KB=0,VB=TB,QB=2*TB,DOB=5*TB,BAR=8*TB;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ const int t=threadIdx.x,lane=t&31,warp=t>>5;
+ const int h=blockIdx.y%4,a=blockIdx.y/4,k0=64*blockIdx.x,query0=k0-64;
+ if(t==0){for(int j=0;j<4;++j)init(bars+j);init_fence();}
+ __syncthreads();
+ if(t>=128){
+  if(t==128){
+   expect(bars,2*TB);load3(sm+KB,&mk,bars,h*32,k0,a);load3(sm+VB,&mv,bars,h*32,k0,a);
+   #pragma unroll
+   for(int j=0;j<3;++j){
+    expect(bars+j+1,2*TB);
+    load3(sm+QB+j*TB,&mq,bars+j+1,h*32,query0+64*j,a);
+    load3(sm+DOB+j*TB,&mdo,bars+j+1,h*32,query0+64*j,a);
+   }
+  }
+  return;
+ }
+ const int r0=warp*16+lane/4,c0=(lane&3)*2;
+ uint32_t ka[8],va[8];bwait(bars,0);
+ #pragma unroll
+ for(int kk=0;kk<2;++kk)
+  #pragma unroll
+  for(int hi=0;hi<2;++hi)
+   #pragma unroll
+   for(int rr=0;rr<2;++rr){
+    const int ix=kk*4+2*hi+rr,offx=off(r0+8*rr,16*kk+8*hi+c0);
+    ka[ix]=*reinterpret_cast<uint32_t*>(sm+KB+offx);
+    va[ix]=*reinterpret_cast<uint32_t*>(sm+VB+offx);
+   }
+ float dk[16]={0.f},dv[16]={0.f};
+ #pragma unroll
+ for(int j=0;j<3;++j){
+  bwait(bars+j+1,0);
+  const uint8_t* sq=sm+QB+j*TB;const uint8_t* sd=sm+DOB+j*TB;
+  float ss[32],dp[32];fence();
+  mma_rs_n64_first(ka[0],ka[1],ka[2],ka[3],desc(sq),ss);
+  mma_rs_n64(ka[4],ka[5],ka[6],ka[7],desc(sq+32),ss,1);
+  mma_rs_n64_first(va[0],va[1],va[2],va[3],desc(sd),dp);
+  mma_rs_n64(va[4],va[5],va[6],va[7],desc(sd+32),dp,1);
+  commit();wait();
+  uint32_t ds[16],pp[16];
+  #pragma unroll
+  for(int i=0;i<8;++i)
+   #pragma unroll
+   for(int rr=0;rr<2;++rr){
+    const int k=k0+r0+8*rr;float dsval[2],pval[2];
+    #pragma unroll
+    for(int e=0;e<2;++e){
+     const int q=query0+64*j+8*i+c0+e,w=q/32,lo=32*w-48;
+     const bool window=q>=0&&q<N&&k>=lo&&k<lo+128;
+     const bool ok=window&&k<N&&(!mask||mask[k]);
+     float p=0.f,value=0.f;
+     if(ok){
+      const size_t row=(size_t(a)*4+h)*N+q;
+      const float score=fmaf(ss[4*i+2*rr+e],0.17677669529663687f,
+        bias[((size_t(h)*(N/32)+w)*32+(q&31))*128+(k-lo)]);
+      p=s100::ex2f(score*1.4426950408889634f-lse[row]);
+      value=p*(dp[4*i+2*rr+e]-dd[row]);
+     }
+     if(window&&k<N)
+      db[(((size_t(a)*4+h)*(N/32)+w)*32+(q&31))*128+(k-lo)]=value;
+     dsval[e]=value;pval[e]=p;
+    }
+    const int ix=4*(i>>1)+2*(i&1)+rr;
+    ds[ix]=pack(dsval[0],dsval[1]);pp[ix]=pack(pval[0],pval[1]);
+   }
+  fence();
+  #pragma unroll
+  for(int kk=0;kk<4;++kk){pv(dk,ds+4*kk,desc(sq+kk*2048));pv(dv,pp+4*kk,desc(sd+kk*2048));}
+  commit();wait();
+ }
+ #pragma unroll
+ for(int rr=0;rr<2;++rr){
+  const int k=k0+r0+8*rr;
+  if(k<N)
+   #pragma unroll
+   for(int i=0;i<4;++i){
+    const size_t ix=(size_t(a)*N+k)*ldd+h*32+8*i+c0;
+    *reinterpret_cast<uint32_t*>(out+ix+128)=
+      pack(dk[4*i+2*rr]*0.17677669529663687f,dk[4*i+2*rr+1]*0.17677669529663687f);
+    *reinterpret_cast<uint32_t*>(out+ix+256)=pack(dv[4*i+2*rr],dv[4*i+2*rr+1]);
+   }
+ }
+}
+extern "C" __global__
+void local_bias_samples_sm90(const float* __restrict__ partial,float* __restrict__ out,int N,int A) {
+ const size_t count=size_t(4)*(N/32)*32*128;
+ for(size_t i=size_t(blockIdx.x)*blockDim.x+threadIdx.x;i<count;i+=size_t(gridDim.x)*blockDim.x){
+  const int w=(i/4096)%(N/32),key=32*w-48+(i%128);
+  float value=0.f;
+  // Out-of-domain slots have no key-centric CTA and are never read.
+  if(key>=0&&key<N)for(int a=0;a<A;++a)value+=partial[size_t(a)*count+i];
+  out[i]=value;
+ }
+}
+#else
 // lattn_dkv.cu — dK, dV and dbias of the AF3 windowed atom attention on tcgen05 (sm_100a), key-centric.
 //
 // A CTA owns 128 keys [kb, kb + 128) with kb = 128 j - 112 (so every TMEM lane quadrant's 32 keys see the same 4 query windows), one head and
@@ -223,3 +335,4 @@ local_attn_dkv(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
   tc_fence_before(); __syncthreads(); tc_fence_after();
   if (warp == 0) tmem_dealloc(tm, 512);
 }
+#endif

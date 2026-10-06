@@ -89,10 +89,14 @@ def _load(name: str, device_index: int):
 
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
     hopper = _hopper(device_index)
-    if hopper and name in ("dq", "dkv"):
-        raise NotImplementedError("Local Hopper backward has not been implemented")
     if hopper and name == "fwd":
         stem, func, smem = "lattn_fwd", "local_attn_fwd_sm90", 57376
+    elif hopper and name in ("dq", "dkv"):
+        stem, func, smem = f"lattn_{name}", f"local_attn_{name}_sm90", 65568
+    elif hopper and name == "db_samples":
+        stem, func, smem = "lattn_dkv", "local_bias_samples_sm90", 0
+    elif hopper and name in ("kv_bias_part", "reduce_columns", "zero_kv", "add_cond", "cross_grad_pack"):
+        stem, func, smem = "lcross", f"local_{name}_sm90", 0
     elif name == "kv_pack":
         stem, func, smem = "lcross", "local_kv_pack_sm90", 0
     else:
