@@ -8,6 +8,10 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
+#ifndef TOKEN_EMPTY_UNIFORM
+#define TOKEN_EMPTY_UNIFORM 0
+#endif
+
 #ifndef STAGES
 #define STAGES 4
 #endif
@@ -236,6 +240,7 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   }
   float kmv[2] = {0.f, 0.f};                                         // the key mask of this thread's two key rows
   if (HASM) { kmv[0] = KM[(size_t)samp * L + k0 + wg * 64 + r0]; kmv[1] = KM[(size_t)samp * L + k0 + wg * 64 + r0 + 8]; }
+  const bool empty_uniform = TOKEN_EMPTY_UNIFORM && HASM && kmv[0] == -5e29f;
   float* dbt = DBT + (((DB_PER_SAMPLE ? (size_t)samp * H : 0) + head) * L + k0 + wg * 64 + r0) * L;
 
   float sc[32], dp[32];
@@ -293,9 +298,10 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       for (int h = 0; h < 2; ++h)
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
-          const float p0 = APB_NATURAL && !isfinite(lse[2 * j]) ? 0.f : ex2(sc[4 * j + 2 * h]);
-          const float p1 = APB_NATURAL && !isfinite(lse[2 * j + 1]) ? 0.f : ex2(sc[4 * j + 2 * h + 1]);
-          const float s0 = p0 * (dp[4 * j + 2 * h] - dd[2 * j]), s1 = p1 * (dp[4 * j + 2 * h + 1] - dd[2 * j + 1]);
+          const float p0 = empty_uniform ? 1.f / L : (APB_NATURAL && !isfinite(lse[2 * j]) ? 0.f : ex2(sc[4 * j + 2 * h]));
+          const float p1 = empty_uniform ? 1.f / L : (APB_NATURAL && !isfinite(lse[2 * j + 1]) ? 0.f : ex2(sc[4 * j + 2 * h + 1]));
+          const float s0 = empty_uniform ? 0.f : p0 * (dp[4 * j + 2 * h] - dd[2 * j]);
+          const float s1 = empty_uniform ? 0.f : p1 * (dp[4 * j + 2 * h + 1] - dd[2 * j + 1]);
           const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1), sk = __floats2bfloat162_rn(s0, s1);
           pp[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
           dsr[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&sk);
