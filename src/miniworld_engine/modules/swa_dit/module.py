@@ -58,7 +58,9 @@ class SWADiTBlock(nn.Module):
     computes the whole block in 3 forward and 5-6 backward kernels (plus the
     weight-gradient GEMMs). Anything it
     refuses (:meth:`fused_refusal` says why) runs the per-op path below, and
-    ``settings.swa_dit_fused=False`` turns it off. :meth:`forward_hoisted` takes the
+    ``settings.swa_dit_fused=False`` turns it off unless the H100 CUDA-only route
+    is selected; that route keeps the equivalent native block and validates the
+    same tensor contract. :meth:`forward_hoisted` takes the
     augment-invariant conditioning [B, S, d_cond] instead and computes the adaLN
     modulation once per batch element.
     """
@@ -99,7 +101,10 @@ class SWADiTBlock(nn.Module):
         if self.implementation == ImplementationType.PYTORCH:
             return "implementation is pytorch"
         if not settings.current().swa_dit_fused:
-            return "settings.swa_dit_fused is off"
+            from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
+
+            if not native_h100_enabled(x):
+                return "settings.swa_dit_fused is off"
         if len(attention_params) != 6:
             return f"attention_params must be the 6-tuple of build_attention_params, got {len(attention_params)}"
         projection = self.adaln_modulation[1]

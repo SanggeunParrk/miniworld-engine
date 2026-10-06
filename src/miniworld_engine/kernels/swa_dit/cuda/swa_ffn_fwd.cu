@@ -1,3 +1,12 @@
+#ifndef MW_SWA_QKVG_SP
+#define MW_SWA_QKVG_SP 8
+#endif
+#ifndef MW_SWA_FFN_SP
+#define MW_SWA_FFN_SP 8
+#endif
+#ifndef MW_SWA_FWD_STAGES
+#define MW_SWA_FWD_STAGES 3
+#endif
 // ESMFold2 SWA atom block, second half forward (CUDA sm_90a, C = 128, SwiGLU hidden N = 256, bf16 operands, fp32 accumulate):
 //   gated = rn(sigmoid(g) * o);  att = rn(gated Wo^T);  q1 = rn(q + rn(gate_a * att));
 //   y = rn(RMS(q1) * (1 + scale_f) + shift_f);  a|b = y Wu^T;  h = rn(silu(a) * b);  ffn = rn(h Wd^T);  out = rn(q1 + rn(gate_f * ffn))
@@ -15,8 +24,8 @@
 #include <type_traits>
 
 namespace {
-constexpr int C = 128, N = 256, HC = 64, NCH = N / HC, BR = 64, SP = 8, AT = BR / SP;
-constexpr int NST = 3, SLOT = 32768;                     // weight ring: Wo | per chunk [Wa_j ; Wb_j] (32 KB), Wd_j (16 KB)
+constexpr int C = 128, N = 256, HC = 64, NCH = N / HC, BR = 64, SP = MW_SWA_FFN_SP, AT = BR / SP;
+constexpr int NST = MW_SWA_FWD_STAGES, SLOT = 32768;                     // weight ring: Wo | per chunk [Wa_j ; Wb_j] (32 KB), Wd_j (16 KB)
 constexpr int SPT = 1 + 2 * NCH;                          // stages per tile
 constexpr int THREADS = 384;
 constexpr int TB = BR * 128;                              // bf16 [64 rows][64] k-block (8 KB); a [64][128] tile = 2 k-blocks
@@ -212,9 +221,9 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_fwd_kernel(Args args, const __
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
       const int c = i * 8 + cq;
-      const float2 ga = *modp(sM, 0, al, c);
 #pragma unroll
       for (int rr = 0; rr < 2; ++rr) {
+        const float2 ga = *modp(sM, 0, (r0 + 8 * rr) % AT, c);
         const int r = r0 + 8 * rr;
         const float t0 = rnb(acc[4 * i + 2 * rr]), t1 = rnb(acc[4 * i + 2 * rr + 1]);
         uint32_t* pq = reinterpret_cast<uint32_t*>(sQ + offb(r, c));
@@ -232,9 +241,10 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_fwd_kernel(Args args, const __
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
       const int c = i * 8 + cq;
-      const float2 sh = *modp(sM, 1, al, c), sc = *modp(sM, 2, al, c);
 #pragma unroll
       for (int rr = 0; rr < 2; ++rr) {
+        const int ar = (r0 + 8 * rr) % AT;
+        const float2 sh = *modp(sM, 1, ar, c), sc = *modp(sM, 2, ar, c);
         const float rs = rr ? rs1 : rs0;
         const uint32_t yv = pack(acc[4 * i + 2 * rr] * rs * (1.f + sc.x) + sh.x, acc[4 * i + 2 * rr + 1] * rs * (1.f + sc.y) + sh.y);
         fa[4 * (i >> 1) + 2 * (i & 1) + rr] = yv;
@@ -298,9 +308,9 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_fwd_kernel(Args args, const __
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
       const int c = i * 8 + cq;
-      const float2 gf = *modp(sM, 3, al, c);
 #pragma unroll
       for (int rr = 0; rr < 2; ++rr) {
+        const float2 gf = *modp(sM, 3, (r0 + 8 * rr) % AT, c);
         const int r = r0 + 8 * rr;
         const float f0 = rnb(acc2[4 * i + 2 * rr]), f1 = rnb(acc2[4 * i + 2 * rr + 1]);
         uint32_t* po = reinterpret_cast<uint32_t*>(sO + offb(r, c));
@@ -388,10 +398,11 @@ std::vector<torch::Tensor> ffn_fwd(torch::Tensor q, torch::Tensor g, torch::Tens
   CUtensorMap mmod = mapmod(mod, B * S), mwo = map2d(wo, C, C, 128), mwab = map2d(wab, 2 * N, C, 128), mwd = map2d(wd, C, N, 128);
   Args args; args.S = (int)S; args.A = (int)A; args.B = (int)B; args.eps = (float)eps; args.save = save ? 1 : 0;
   args.nab = (int)((S + AT - 1) / AT); args.nag = (int)((A + SP - 1) / SP); args.ntile = args.nab * args.nag * (int)B;
-  static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(ffn_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, BYTES)); attr = true; }
-  const int grid = std::min(args.ntile, num_sms(q.device().index()));
-  ffn_fwd_kernel<<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(args, mq, mg, mo, mmod, mwo, mwab, mwd, mout, mq1, matt, my, mffn);
+  cudaKernel_t kernel; C10_CUDA_CHECK(cudaGetKernel(&kernel,ffn_fwd_kernel));
+  C10_CUDA_CHECK(cudaFuncSetAttribute((const void*)kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,BYTES));
+  const int grid = std::min(args.ntile,num_sms(q.device().index()));
+  void* launchargs[]={&args,&mq,&mg,&mo,&mmod,&mwo,&mwab,&mwd,&mout,&mq1,&matt,&my,&mffn};
+  C10_CUDA_CHECK(cudaLaunchKernel((const void*)kernel,dim3(grid),dim3(THREADS),launchargs,BYTES,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, q1, att, y, ffn};
 }
