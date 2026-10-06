@@ -4146,6 +4146,113 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         reference="module.reference.torch",
     )
 
+def _anthropic_local_dit_composition(upstream, model, mask, samples: int, length: int, act: "torch.dtype") -> str:
+    """Install Anthropic's AF3 atom-transformer block composition as `model.composed`; return its execution path.
+
+    Their pieces, upstream entry points of the checkout `upstream.configure()` resolved: the windowed atom attention
+    (apb row `fpf_atom`: 32-query x 128-key windows addressed in-kernel, pair bias [H, nwin, 32, 128], gate fused), and the
+    atom stream's 2-D row-tile kernels of the fused atom block (`ditfast.atom_kernels`: adaln2 with the key / value AdaLN,
+    resgate_adaln2, swiglu2d; scales and gates arrive pre-sigmoided). Everything between them is torch (F.linear /
+    F.layer_norm), as in their kits; the pair bias (LayerNorm + Linear on the trunked pair) is computed once per pair tensor. The
+    weights are packed once from the module's parameters. Cross-attention mode (the AF3 block): q | gate from the query-side
+    AdaLN output, k | v from the key-side one.
+    """
+    import importlib
+
+    import torch.nn.functional as F
+
+    root = upstream.configure()
+    try:
+        ak = importlib.import_module("opt_core.kernels.apb.ditfast.atom_kernels")
+    except ImportError as exc:
+        raise UnsupportedBenchmark(f"opt_core.kernels.apb.ditfast.atom_kernels is not importable: {exc}") from exc
+    try:
+        commit = (Path(root) / "UPSTREAM_COMMIT.txt").read_text().split()[0][:12]
+    except (OSError, IndexError):
+        commit = "?"
+    blocks = list(model.layers)
+    at0 = blocks[0].attention
+    if not blocks[0].cross_attention or at0.use_qk_norm:
+        raise UnsupportedBenchmark("the Anthropic atom composition is the cross-attention AF3 block without q/k norm")
+    d = at0.to_query.weight.shape[0]
+    heads = at0.n_head
+    head_dim = d // heads
+    d_cond = at0.ada_ln_in.ln_cond.weight.shape[0]
+
+    def w(t):
+        return t.detach().to(act).contiguous()
+
+    def wf(t):
+        return t.detach().float().contiguous()
+
+    packs = []
+    for block in blocks:
+        at, tr = block.attention, block.transition
+        packs.append({
+            "lnc_a": wf(at.ada_ln_in.ln_cond.weight), "eps_ca": at.ada_ln_in.ln_cond.eps, "eps_a": at.ada_ln_in.ln_in.eps,
+            "ws_a": w(at.ada_ln_in.to_scale.weight), "bs_a": w(at.ada_ln_in.to_scale.bias), "wb_a": w(at.ada_ln_in.to_bias.weight),
+            "lnc_k": wf(at.ada_ln_kv.ln_cond.weight), "eps_ck": at.ada_ln_kv.ln_cond.eps, "eps_k": at.ada_ln_kv.ln_in.eps,
+            "ws_k": w(at.ada_ln_kv.to_scale.weight), "bs_k": w(at.ada_ln_kv.to_scale.bias), "wb_k": w(at.ada_ln_kv.to_bias.weight),
+            "wqg": torch.cat([w(at.to_query.weight), w(at.to_gate.weight)], 0).contiguous(),
+            "bqg": torch.cat([w(at.to_query.bias), torch.zeros(d, device=at.to_query.bias.device, dtype=act)]).contiguous(),
+            "wkv": torch.cat([w(at.to_key.weight), w(at.to_value.weight)], 0).contiguous(),
+            "lnp": wf(at.ln_pair.weight), "eps_p": at.ln_pair.eps, "wbias": w(at.to_bias.weight),
+            "wo": w(at.to_out.weight), "wsc_a": w(at.to_scale.weight), "bsc_a": w(at.to_scale.bias),
+            "lnc_t": wf(tr.ada_ln_in.ln_cond.weight), "eps_ct": tr.ada_ln_in.ln_cond.eps, "eps_t": tr.ada_ln_in.ln_in.eps,
+            "ws_t": w(tr.ada_ln_in.to_scale.weight), "bs_t": w(tr.ada_ln_in.to_scale.bias), "wb_t": w(tr.ada_ln_in.to_bias.weight),
+            "wab": torch.cat([w(tr.expand_a.weight), w(tr.expand_b.weight)], 0).contiguous(),
+            "wsq": w(tr.squeeze.weight), "wsc_t": w(tr.to_scale.weight), "bsc_t": w(tr.to_scale.bias)})
+
+    adaln2 = torch.compiler.disable(ak.adaln2)
+    resgate_adaln2 = torch.compiler.disable(ak.resgate_adaln2)
+    swiglu2d = torch.compiler.disable(ak.swiglu2d)
+    atom_attention = torch.compiler.disable(upstream.atom_attention)
+    hoisted: dict = {}                      # per layer: (pair key, its windowed pair bias [H, nwin, 32, 128])
+    selection_rows: list = []
+
+    def composed(single, cond, pair, mask_arg=None):
+        a, b, n, _ = single.shape
+        if b != 1 or pair.shape[0] != 1:
+            raise UnsupportedBenchmark("the Anthropic atom composition shares one trunked pair bias: B must be 1")
+        rows_m = a * n
+        c = cond.reshape(-1, d_cond).to(act)
+        res = single.reshape(rows_m, d).to(torch.float32, copy=True)       # fp32 residual stream, updated in place
+        for p in packs:
+            cn = F.layer_norm(c.float(), (d_cond,), p["lnc_a"], None, p["eps_ca"]).to(act)
+            sca, sha = torch.sigmoid(F.linear(cn, p["ws_a"], p["bs_a"])), F.linear(cn, p["wb_a"])
+            cnk = F.layer_norm(c.float(), (d_cond,), p["lnc_k"], None, p["eps_ck"]).to(act)
+            sck, shk = torch.sigmoid(F.linear(cnk, p["ws_k"], p["bs_k"])), F.linear(cnk, p["wb_k"])
+            an, kvn = adaln2(res, sca, sha, sck, shk, act, eps=p["eps_a"], kv=True)
+            qg = F.linear(an, p["wqg"], p["bqg"]).view(a, n, 2, heads, head_dim)
+            kv = F.linear(kvn, p["wkv"]).view(a, n, 2, heads, head_dim)
+            bkey = (pair.data_ptr(), pair._version)
+            hit = hoisted.get(id(p))
+            if hit is not None and hit[0] == bkey:
+                bias = hit[1]
+            else:
+                z = F.layer_norm(pair.to(act), (pair.shape[-1],), p["lnp"].to(act), None, p["eps_p"])
+                bias = F.linear(z, p["wbias"]).permute(0, 4, 1, 2, 3)[0].contiguous()     # [H, nwin, 32, 128]
+                if not torch.cuda.is_current_stream_capturing():
+                    hoisted[id(p)] = (bkey, bias)
+            o, selection = atom_attention(qg[:, :, 0], kv[:, :, 0], kv[:, :, 1], bias, qg[:, :, 1], row="fpf_atom",
+                                          scale=head_dim ** -0.5)
+            selection_rows[:] = [selection.row]
+            o2 = F.linear(o.reshape(rows_m, d), p["wo"])
+            gl_a = torch.sigmoid(F.linear(c, p["wsc_a"], p["bsc_a"]))
+            cn_t = F.layer_norm(c.float(), (d_cond,), p["lnc_t"], None, p["eps_ct"]).to(act)
+            xt = resgate_adaln2(gl_a, o2, res, torch.sigmoid(F.linear(cn_t, p["ws_t"], p["bs_t"])), F.linear(cn_t, p["wb_t"]),
+                                None, None, act, eps=p["eps_t"], ln=True, kv=False)        # res += gl_a * o2; xt = AdaLN(res)
+            t = F.linear(swiglu2d(F.linear(xt, p["wab"]), act), p["wsq"])
+            resgate_adaln2(torch.sigmoid(F.linear(c, p["wsc_t"], p["bsc_t"])), t, res, ln=False)   # res += gl_t * t
+        return res.view(a, b, n, d).to(single.dtype)
+
+    model.composed = composed
+    return (f"anthropic[pristine opt_core {commit} at {root}]: torch F.linear/F.layer_norm glue + apb row fpf_atom "
+            "atom_apb (32 x 128 windows addressed in-kernel, gate fused, pair bias hoisted once per pair tensor) + "
+            "ditfast.atom_kernels adaln2 (query + key/value AdaLN) / resgate_adaln2 / swiglu2d; fp32 residual; "
+            "per-sample conditioning rows; weights packed once")
+
+
 def bench_module_local_dit(conf, seq_len, implementation, fabric):
     """AF3 atom transformer block (`modules/local_dit.LocalDiTBlock`): AdaLN, q / k / v / gate, block-local pair-bias attention
     with the 32 x 128 trunking (query window of 32 atoms sees 128 atoms; the pair is the trunked atom pair
@@ -4156,14 +4263,22 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     * miniworld -- the same block on the engine's sm_100a kernels (`integrations.local_dit`) in bf16, where they serve the call,
       else the reference composition -- `execution_path` says which one ran.
 
-    No Anthropic row: its atom attention (apb row fpf_atom) is this windowed op, but there is no block around it to compare.
+    * anthropic -- the block composed from Anthropic's windowed atom attention (apb row fpf_atom) and the atom row kernels of
+      their fused atom block (`ditfast.atom_kernels`), torch GEMMs between them (`_anthropic_local_dit_composition`); inference only.
     """
     from miniworld_engine.modules.local_dit import LocalDiTBlock
     from miniworld_engine.modules.local_dit.module import KEYS, QUERIES, windows
 
-    spec = triton_miniworld_spec(implementation)      # miniworld -> TRITON: the engine's kernels
-    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
-        raise UnsupportedBenchmark(f"local_dit does not implement {implementation!r}")
+    anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
+    if anthropic:
+        if not is_inference_mode(conf.mode):
+            raise UnsupportedBenchmark("anthropic atom block is inference-only: opt_core's atom kernels have no backward")
+        upstream = _anthropic_upstream_or_unsupported()
+        spec = ImplementationSpec(ImplementationType.PYTORCH, None, implementation)     # the module holds the parameters
+    else:
+        spec = triton_miniworld_spec(implementation)      # miniworld -> TRITON: the engine's kernels
+        if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+            raise UnsupportedBenchmark(f"local_dit does not implement {implementation!r}")
     is_train = not is_inference_mode(conf.mode)
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     d_single, d_pair, n_head = conf.d_single_atom, conf.d_pair_atom, 4
@@ -4174,8 +4289,11 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
             self.layers = nn.ModuleList([
                 LocalDiTBlock(d_single, d_single, d_pair, n_head, n=2, cross_attention=True, implementation=impl)
                 for _ in range(conf.n_layers)])
+            self.composed = None
 
         def forward(self, single, cond, pair, mask=None):
+            if self.composed is not None:
+                return self.composed(single, cond, pair, mask)
             for layer in self.layers:
                 single = layer(single, cond, pair, mask)
             return single
@@ -4188,6 +4306,7 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
                 prm.normal_(std=prm.shape[1] ** -0.5)
             elif prm.ndim == 1 and prm.numel() > 1:
                 prm.add_(torch.randn_like(prm) * 0.1)
+    state = {k: v.detach().clone() for k, v in model.state_dict().items()}
     model = model.to(device=DEVICE, dtype=dtype)
     model.train(is_train)
 
@@ -4199,7 +4318,9 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     mask = torch.rand(1, atom_len, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
 
-    if spec.impl == ImplementationType.PYTORCH:
+    if anthropic:
+        execution_path = _anthropic_local_dit_composition(upstream, model, mask, conf.n_augment, atom_len, dtype)
+    elif spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
     else:
         from miniworld_engine.integrations import local_dit as fused
@@ -4210,6 +4331,31 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
             "modules.local_dit.LocalDiTBlock -> integrations.local_dit[local_dit_block_fwd / _bwd: sm_100a window attention + "
             "pair-bias kernels, atom DiT row kernels]" if served else
             "modules.local_dit.LocalDiTBlock[reference composition: integrations.local_dit.serves() declined]")
+
+    accuracy: AccuracyFields = {}
+    reference = "module.reference.torch"
+    if not is_train and single.is_cuda:
+        # fp32 reference on the same weights and inputs, IEEE (TF32 off for its matmuls). Eager and uncompiled: a yardstick.
+        tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+        try:
+            ref_model = MultiLocalDiT(ImplementationType.PYTORCH)
+            ref_model.load_state_dict(state)
+            ref_model = ref_model.to(DEVICE).eval()
+            with torch.no_grad():
+                torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+                try:
+                    expected = ref_model(single.float(), cond.float(), pair.float(), mask)
+                finally:
+                    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+                del ref_model
+                actual = model(single, cond, pair, mask)
+            out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+            accuracy = {"output_max_abs": out_max, "output_rel_frob": out_rel, "output_cosine": out_cos}
+            reference = "module.reference.torch[fp32 IEEE]"
+            del actual, expected
+        except torch.cuda.OutOfMemoryError:
+            print(f"  [{implementation}] fp32 reference did not fit at N={atom_len}: no accuracy columns", flush=True)
+        torch.cuda.empty_cache()
 
     if conf.compile:
         compile_module_for_benchmark(model)
@@ -4233,8 +4379,8 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
         input_dtype=str(dtype).replace("torch.", ""),
         parameter_dtype=parameter_dtype_of(model),
         execution_path=execution_path,
-        reference="module.reference.torch",
-    )
+        reference=reference,
+    )._replace(**accuracy)
 
 
 def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
@@ -4457,7 +4603,8 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             # 32x128 windowed op, not this dense block (see bench_module_dit).
             "dit_atom": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             "swa_dit": ("pytorch", "triton", "miniworld"),
-            "local_dit": ("pytorch", "triton", "miniworld"),
+            # anthropic: the AF3 atom block composed from their windowed atom attention (fpf_atom) and atom row kernels; inference only
+            "local_dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             "bias_only_dit": ("pytorch", "miniworld"),
         }
         if set(supported) != set(MODULE_TARGETS):
