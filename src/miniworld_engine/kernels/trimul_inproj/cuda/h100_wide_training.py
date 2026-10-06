@@ -37,6 +37,24 @@ WORKSPACE = 64 << 20
 LT_SELECTION = "config"
 
 
+def _mm(a, b, *, out=None, out_dtype=None):
+    """Opt-in graph-owned cuBLAS scratch; keep the retained GEMM call unchanged."""
+    if T.wide_owned_blas_enabled():
+        from ._h100_pack import owned_mm
+        return owned_mm(a, b, out=out, out_dtype=out_dtype)
+    kwargs = {} if out_dtype is None else {"out_dtype": out_dtype}
+    if out is not None:
+        kwargs["out"] = out
+    return torch.mm(a, b, **kwargs)
+
+
+def _bmm(a, b, *, out):
+    if T.wide_owned_blas_enabled():
+        from ._h100_pack import owned_bmm
+        return owned_bmm(a, b, out=out)
+    return torch.bmm(a, b, out=out)
+
+
 def supports(width, length):
     # Tuple membership compares values: it also works for symbolic sizes under Dynamo.
     return width in (256, 384, 512) and length in (384, 768)
@@ -536,7 +554,7 @@ def _triangle(cell, ab, tri, workspace):
         if name in frozen:
             _lt(cell, name, a, b, out, workspace)
         else:
-            torch.bmm(a, b, out=out)
+            _bmm(a, b, out=out)
 
 
 def _output_norm(cell, tri, norm, go, bo, mu, rs, delta):
@@ -940,7 +958,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
                 partial.as_strided((32, D, H), (11 * D * D, H, 1)), workspace)
             _weight_reduce_d512(cell, partial, dwp)
         else:
-            torch.mm(dp.t(), norm, out=dwp, **({"out_dtype": torch.float32} if master else {}))
+            _mm(dp.t(), norm, out=dwp, **({"out_dtype": torch.float32} if master else {}))
         joint = cell in ((384, 384), (512, 768))
         if not joint:
             _lt(cell, "dwg", dxin[:D], xn.reshape(M, D), dwg, workspace)

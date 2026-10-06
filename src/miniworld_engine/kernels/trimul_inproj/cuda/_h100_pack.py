@@ -1,10 +1,141 @@
 """Live weight packing without a nested torch.compile runtime invocation."""
 import os
+from functools import lru_cache
+from pathlib import Path
 import triton
 import triton.language as tl
 import torch
 from . import _h100_runtime as T
 from miniworld_engine.kernels._compile import opaque
+
+# Captured cuBLAS scratch belongs to each graph's allocator pool, rather than
+# the framework's per-stream handle cache. Device arithmetic stays in cuBLAS.
+_OWNED_BLAS_CPP = r"""#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cublas_v2.h>
+#include <map>
+#include <memory>
+struct TokenHandle { cublasHandle_t value; TokenHandle(){TORCH_CHECK(cublasCreate(&value)==CUBLAS_STATUS_SUCCESS,"Token cublasCreate");} ~TokenHandle(){cublasDestroy(value);} };
+torch::Tensor owned_mm(torch::Tensor a,torch::Tensor b,bool tf32,bool fp32_output) {
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&a.device()==b.device()&&a.dim()==2&&b.dim()==2&&a.size(1)==b.size(0)&&a.scalar_type()==b.scalar_type()&&(a.scalar_type()==at::kFloat||a.scalar_type()==at::kBFloat16),"Token owned GEMM operands");
+ c10::cuda::CUDAGuard guard(a.device());
+ static thread_local std::map<int,std::unique_ptr<TokenHandle>> handles;
+ auto& owned=handles[a.get_device()];if(!owned)owned=std::make_unique<TokenHandle>();
+ auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"Token private cuBLAS status ",int(s));};
+ auto handle=owned->value;auto stream=at::cuda::getCurrentCUDAStream();
+ ck(cublasSetStream(handle,stream));ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
+ const bool fp32=a.scalar_type()==at::kFloat;
+ ck(cublasSetMathMode(handle,fp32&&tf32?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH));
+ const size_t bytes=at::cuda::getChosenWorkspaceSize();auto workspace=torch::empty({int64_t(bytes)},a.options().dtype(at::kByte));
+ ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
+ const bool output_float=fp32||fp32_output;
+ auto out=torch::empty({a.size(0),b.size(1)},a.options().dtype(output_float?at::kFloat:at::kBFloat16));
+ auto leading=[](torch::Tensor t){bool row=t.stride(1)==1;TORCH_CHECK(row?t.stride(0)>=t.size(1):(t.stride(0)==1&&t.stride(1)>=t.size(0)),"Token dense matrix view");return int(row?t.stride(0):t.stride(1));};
+ int lda=leading(a),ldb=leading(b),m=a.size(0),n=b.size(1),k=a.size(1);float alpha=1,beta=0;
+ const auto dtype=fp32?CUDA_R_32F:CUDA_R_16BF;const auto compute=fp32&&tf32?CUBLAS_COMPUTE_32F_FAST_TF32:CUBLAS_COMPUTE_32F;
+ ck(cublasGemmEx(handle,b.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,a.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,n,m,k,&alpha,b.data_ptr(),dtype,ldb,a.data_ptr(),dtype,lda,&beta,out.data_ptr(),output_float?CUDA_R_32F:CUDA_R_16BF,n,compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ return out;
+}
+
+torch::Tensor owned_mm_out(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool tf32) {
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&a.device()==b.device()&&a.dim()==2&&b.dim()==2&&a.size(1)==b.size(0)&&a.scalar_type()==b.scalar_type()&&(a.scalar_type()==at::kFloat||a.scalar_type()==at::kBFloat16),"Token owned GEMM operands");
+ c10::cuda::CUDAGuard guard(a.device());
+ static thread_local std::map<int,std::unique_ptr<TokenHandle>> handles;
+ auto& owned=handles[a.get_device()];if(!owned)owned=std::make_unique<TokenHandle>();
+ auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"Token private cuBLAS status ",int(s));};
+ auto handle=owned->value;auto stream=at::cuda::getCurrentCUDAStream();
+ ck(cublasSetStream(handle,stream));ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
+ const bool fp32=a.scalar_type()==at::kFloat;
+ ck(cublasSetMathMode(handle,fp32&&tf32?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH));
+ const size_t bytes=at::cuda::getChosenWorkspaceSize();auto workspace=torch::empty({int64_t(bytes)},a.options().dtype(at::kByte));
+ ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
+ const bool output_float=out.scalar_type()==at::kFloat;
+ TORCH_CHECK(out.is_cuda()&&out.device()==a.device()&&out.dim()==2&&out.size(0)==a.size(0)&&out.size(1)==b.size(1)&&(out.scalar_type()==at::kFloat||out.scalar_type()==at::kBFloat16),"TriMul owned GEMM output");
+ auto leading=[](torch::Tensor t){bool row=t.stride(1)==1;TORCH_CHECK(row?t.stride(0)>=t.size(1):(t.stride(0)==1&&t.stride(1)>=t.size(0)),"Token dense matrix view");return int(row?t.stride(0):t.stride(1));};
+ int lda=leading(a),ldb=leading(b),m=a.size(0),n=b.size(1),k=a.size(1);float alpha=1,beta=0;
+ const auto dtype=fp32?CUDA_R_32F:CUDA_R_16BF;const auto compute=fp32&&tf32?CUBLAS_COMPUTE_32F_FAST_TF32:CUBLAS_COMPUTE_32F;
+ int ldc=leading(out);
+ if(out.stride(1)==1)
+  ck(cublasGemmEx(handle,b.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,a.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,n,m,k,&alpha,b.data_ptr(),dtype,ldb,a.data_ptr(),dtype,lda,&beta,out.data_ptr(),output_float?CUDA_R_32F:CUDA_R_16BF,ldc,compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ else
+  ck(cublasGemmEx(handle,a.stride(1)==1?CUBLAS_OP_T:CUBLAS_OP_N,b.stride(1)==1?CUBLAS_OP_T:CUBLAS_OP_N,m,n,k,&alpha,a.data_ptr(),dtype,lda,b.data_ptr(),dtype,ldb,&beta,out.data_ptr(),output_float?CUDA_R_32F:CUDA_R_16BF,ldc,compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ return out;
+}
+
+
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/Context.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cublas_v2.h>
+#include <map>
+#include <memory>
+struct OwnedBmmHandle { cublasHandle_t value; OwnedBmmHandle(){TORCH_CHECK(cublasCreate(&value)==CUBLAS_STATUS_SUCCESS,"TriMul cublasCreate");} ~OwnedBmmHandle(){cublasDestroy(value);} };
+torch::Tensor owned_bmm(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool tf32) {
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&out.is_cuda()&&a.device()==b.device()&&a.device()==out.device()&&a.dim()==3&&b.dim()==3&&out.dim()==3,"TriMul owned BMM operands");
+ TORCH_CHECK(a.size(0)==b.size(0)&&a.size(2)==b.size(1)&&out.size(0)==a.size(0)&&out.size(1)==a.size(1)&&out.size(2)==b.size(2),"TriMul owned BMM shapes");
+ TORCH_CHECK(a.scalar_type()==b.scalar_type()&&out.scalar_type()==a.scalar_type()&&(a.scalar_type()==at::kBFloat16||a.scalar_type()==at::kFloat),"TriMul owned BMM dtype");
+ c10::cuda::CUDAGuard guard(a.device());
+ static thread_local std::map<int,std::unique_ptr<OwnedBmmHandle>> handles;
+ auto& owned=handles[a.get_device()];if(!owned)owned=std::make_unique<OwnedBmmHandle>();
+ auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"TriMul owned BMM status ",int(s));};
+ auto handle=owned->value;auto stream=at::cuda::getCurrentCUDAStream();
+ ck(cublasSetStream(handle,stream));ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
+ const bool fp32=a.scalar_type()==at::kFloat;
+ auto math=fp32&&tf32?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH;
+ if(!fp32&&at::globalContext().allowBF16ReductionCuBLAS()!=at::CuBLASReductionOption::AllowReducedPrecisionWithSplitK) math=static_cast<cublasMath_t>(math|CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION);
+ ck(cublasSetMathMode(handle,math));
+ const size_t bytes=at::cuda::getChosenWorkspaceSize();auto workspace=torch::empty({int64_t(bytes)},a.options().dtype(at::kByte));ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
+ auto leading=[](torch::Tensor t){bool row=t.stride(2)==1;TORCH_CHECK(row?t.stride(1)>=t.size(2):(t.stride(1)==1&&t.stride(2)>=t.size(1)),"TriMul BMM dense view");return int(row?t.stride(1):t.stride(2));};
+ int lda=leading(a),ldb=leading(b),m=a.size(1),n=b.size(2),k=a.size(2);
+ TORCH_CHECK(out.stride(2)==1&&out.stride(1)>=n,"TriMul BMM row output");
+ float alpha=1,beta=0;auto dtype=fp32?CUDA_R_32F:CUDA_R_16BF;
+ auto compute=fp32&&tf32?CUBLAS_COMPUTE_32F_FAST_TF32:CUBLAS_COMPUTE_32F;
+ ck(cublasGemmStridedBatchedEx(handle,b.stride(2)==1?CUBLAS_OP_N:CUBLAS_OP_T,a.stride(2)==1?CUBLAS_OP_N:CUBLAS_OP_T,n,m,k,&alpha,b.data_ptr(),dtype,ldb,b.stride(0),a.data_ptr(),dtype,lda,a.stride(0),&beta,out.data_ptr(),dtype,out.stride(1),out.stride(0),a.size(0),compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ return out;
+}
+"""
+
+
+@lru_cache(maxsize=1)
+def _owned_blas_ext():
+    import hashlib
+    from torch.utils.cpp_extension import load_inline
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home
+
+    cuda_home = ensure_cuda_home()
+    if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+        raise RuntimeError("Hopper owned BLAS requires CUDA <= 12.9")
+    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT",
+                               Path.home() / ".cache" / "miniworld_engine_jit"))
+    build = root / "trimul_owned_blas" / hashlib.sha256(_OWNED_BLAS_CPP.encode()).hexdigest()[:16]
+    build.mkdir(parents=True, exist_ok=True)
+    return load_inline(
+        name="trimul_hopper_owned_blas", cpp_sources=_OWNED_BLAS_CPP,
+        functions=["owned_mm", "owned_mm_out", "owned_bmm"], with_cuda=True,
+        build_directory=str(build),
+        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
+        extra_cflags=["-O3"], extra_ldflags=["-lcublas"], verbose=False,
+    )
+
+
+def owned_mm(a, b, *, out=None, out_dtype=None):
+    """cuBLAS matrix product with graph-owned scratch and optional direct output."""
+    if out_dtype not in (None, torch.float32):
+        raise ValueError("owned MM supports the input dtype or FP32 output")
+    ext = _owned_blas_ext()
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+    if out is not None:
+        if out_dtype is not None and out.dtype != out_dtype:
+            raise ValueError("owned MM output dtype does not match out_dtype")
+        return ext.owned_mm_out(a, b, out, tf32)
+    return ext.owned_mm(a, b, tf32, out_dtype == torch.float32)
+
+
+def owned_bmm(a, b, *, out):
+    """Strided cuBLAS batch product retaining graph-owned scratch."""
+    return _owned_blas_ext().owned_bmm(a, b, out, torch.backends.cuda.matmul.allow_tf32)
 
 
 @triton.jit

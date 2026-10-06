@@ -59,9 +59,9 @@ def _triangle(ab, tri, outgoing):
     D = tri.shape[0]
     left, right = ab[:D], ab[D:]
     if outgoing:
-        torch.bmm(left, right.transpose(-1, -2), out=tri)
+        W._bmm(left, right.transpose(-1, -2), out=tri)
     else:
-        torch.bmm(left.transpose(-1, -2), right, out=tri)
+        W._bmm(left.transpose(-1, -2), right, out=tri)
 
 
 def _output_norm(tri, norm, go, bo, mu, rs):
@@ -113,8 +113,8 @@ def _run_forward(leaves, mask, ds, outgoing, save):
     _front(x, w1, ab, pmask, gi, bi, xn, pre)
     _triangle(ab, tri, outgoing)
     _output_norm(tri, norm, go, bo, mu, rs)
-    torch.mm(norm, wp.t(), out=proj)
-    torch.mm(xn.reshape(M, D), wg.t(), out=gate)
+    W._mm(norm, wp.t(), out=proj)
+    W._mm(xn.reshape(M, D), wg.t(), out=gate)
     y = torch.empty_like(x)
     defines = W._defines(MW_MINB=1, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, WIDTH=D, GROUPS=1, KCHUNK=1)
     k = W._kernel("output_dense.cu", "mw_wide_dense_output_epi", "forward", defines)
@@ -131,7 +131,7 @@ def _forward_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_fake, name="trimul_h100_uni_wide_train_fwd")
 def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> list[torch.Tensor]:
     """Training forward; returns ``[y, *saved]`` (all freshly allocated)."""
-    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)), T.preserved_uni_blas_context(leaves[0], outgoing):
         return _run_forward(leaves, mask, ds, outgoing, True)
 
 
@@ -143,7 +143,7 @@ def _forward_nograd_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_nograd_fake, name="trimul_h100_uni_wide_dropout_nograd")
 def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> torch.Tensor:
     """Training-mode (dropout) forward without autograd."""
-    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)), T.preserved_uni_blas_context(leaves[0], outgoing):
         return _run_forward(leaves, mask, ds, outgoing, False)
 
 
@@ -259,8 +259,8 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     dxin = x.new_empty((5 * D, M))   # [gate-logit gradient; W_l, W_lg, W_r, W_rg preactivation gradients]
     gp = list(dxin[D:].view(4, D, M).unbind())
     _gate(proj, gate, dy, ds.reshape(n, D), dp, dxin[:D])
-    dn = torch.mm(dp, wp)
-    dwp = torch.mm(dp.t(), norm, **({"out_dtype": torch.float32} if master else {}))
+    dn = W._mm(dp, wp)
+    dwp = W._mm(dp.t(), norm, **({"out_dtype": torch.float32} if master else {}))
     dt = torch.empty_like(tri)
     affine_alloc = torch.empty if T.preserve_training(D) else torch.zeros
     dgo, dbo = affine_alloc(D, **f32), affine_alloc(D, **f32)
@@ -268,7 +268,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     _contract_gp(dt, ab, pre, pmask, gp, outgoing)
     # One GEMM for [dW_g; dW_l; dW_lg; dW_r; dW_rg] (five D x D products over K = M: 2x faster than
     # separate GEMMs at D256); the autograd function splits it into views outside this op.
-    dws = torch.mm(dxin, xn2, **({"out_dtype": torch.float32} if master else {}))
+    dws = W._mm(dxin, xn2, **({"out_dtype": torch.float32} if master else {}))
     if fused_glue:
         wcat = saved[10]
     elif T.preserve_training(D):
@@ -276,7 +276,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
         wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
     else:
         wcat = torch.cat((wg, wl, wlg, wr, wrg))
-    dxn = torch.mm(dxin.t(), wcat)
+    dxn = W._mm(dxin.t(), wcat)
     dx = torch.empty_like(x)
     dgi, dbi = affine_alloc(D, **f32), affine_alloc(D, **f32)
     in_affine = _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=fused_glue)
@@ -298,7 +298,7 @@ def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
              saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool, master: bool = False,
              native: bool = False) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
-    with T.native_context(leaves[0].device), T.preserved_d256_context(native):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(native), T.preserved_uni_blas_context(leaves[0], outgoing):
         return _run_backward(leaves, mask, ds, saved, dy, outgoing, master)
 
 
@@ -415,13 +415,13 @@ def native_forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
         _front(x,w1,ab,pmask,gi,bi,xn,pre,hidden=h)
         left,right = ab[:h],ab[h:]
         if bidirectional:
-            torch.bmm(left[:d],right[:d].transpose(-1,-2),out=tri[:d])
-            torch.bmm(left[d:].transpose(-1,-2),right[d:],out=tri[d:])
+            W._bmm(left[:d],right[:d].transpose(-1,-2),out=tri[:d])
+            W._bmm(left[d:].transpose(-1,-2),right[d:],out=tri[d:])
         else:
             _triangle(ab,tri,outgoing)
         _output_norm(tri,norm,go,bo,mu,rs)
-        torch.mm(norm,wp.t(),out=proj)
-        torch.mm(xn.reshape(n*n,d),wg.t(),out=gate)
+        W._mm(norm,wp.t(),out=proj)
+        W._mm(xn.reshape(n*n,d),wg.t(),out=gate)
         y = torch.empty_like(x)
         defines = W._defines(MW_MINB=1,MW_K1_STREAM=0,TMN_SIGMOID_TANH=1,WIDTH=d,GROUPS=1,KCHUNK=1)
         k = W._kernel("output_dense.cu","mw_wide_dense_output_epi","forward",defines)
@@ -478,13 +478,13 @@ def native_backward(leaves: list[torch.Tensor], ds: torch.Tensor,
         dxin = x.new_empty((d+4*h,m))
         gp = list(dxin[d:].view(4,h,m).unbind())
         _gate(proj,gate,dy,ds.reshape(n,d),dp,dxin[:d])
-        dn = torch.mm(dp,wp)
-        dwp = torch.mm(dp.t(),norm,**({"out_dtype":torch.float32} if master else {}))
+        dn = W._mm(dp,wp)
+        dwp = W._mm(dp.t(),norm,**({"out_dtype":torch.float32} if master else {}))
         dt,dgo,dbo = deterministic_ln_backward(tri,dn,go,planes=True,stats=(mu,rs))
         _native_contract_gp(dt,ab,pre,pmask,gp,bidirectional,outgoing)
-        dws = torch.mm(dxin,xn.reshape(m,d),**({"out_dtype":torch.float32} if master else {}))
+        dws = W._mm(dxin,xn.reshape(m,d),**({"out_dtype":torch.float32} if master else {}))
         wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
-        dxn = torch.mm(dxin.t(),wcat)
+        dxn = W._mm(dxin.t(),wcat)
         dx,dgi,dbi = deterministic_ln_backward(x,dxn,gi,residual=dy)
         return [dx,dws,dwp,dgi,dbi,dgo,dbo]
 
