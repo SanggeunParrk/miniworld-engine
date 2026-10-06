@@ -172,6 +172,148 @@ void fused_stage(CUTE_GRID_CONSTANT typename Stage<C,Tail>::TW const tw,
   }
 }
 
+template<int C, bool Tail> __global__ __launch_bounds__(128)
+void fused_stage_reuse(CUTE_GRID_CONSTANT typename Stage<C,Tail>::TW const tw,
+                 CUTE_GRID_CONSTANT typename Stage<C,Tail>::TO const to,
+                 Element const* x,float const* lnw,float const* lnb,Element const* weights,
+                 Element const* o,Element const* gate,Element const* drop,bool const* mask,
+                 Element* proj,Element* bias,Element* result,float* stats,int rows,int L,int H,float eps,int gate_stride) {
+  using T=Stage<C,Tail>;
+  extern __shared__ char memory[]; auto& s=*reinterpret_cast<typename T::Shared*>(memory);
+  constexpr int N=T::N,cols=Tail?C:4*C+64;constexpr int blocks=(cols+N-1)/N;
+  int tid=threadIdx.x,lane=tid%32,warp=tid/32,base=blockIdx.x*64,nb=0;
+  if(tid==0){s.full[0].init(1);s.full[1].init(1);prefetch_tma_descriptor(tw.get_tma_descriptor());cutlass::arch::fence_barrier_init();}
+  __syncthreads();
+  auto wg=tw.get_tma_tensor(make_shape(cols,C));
+  auto load=[&](int kk){int slot=(kk/64)%2;s.full[slot].arrive_and_expect_tx(N*64*sizeof(Element));
+    auto ww=local_tile(wg,Shape<Int<N>,_64>{},make_coord(nb/N,kk/64));
+    auto sw=make_tensor(make_smem_ptr(s.w[slot].data()),typename T::WL{});auto t=tw.get_slice(_0{});
+    copy(tw.with(reinterpret_cast<uint64_t&>(s.full[slot])),t.partition_S(ww),t.partition_D(sw));};
+  if constexpr(!Tail) {
+    for(int c=tid;c<C;c+=128){s.lw[c]=lnw[c];s.lb[c]=lnb[c];}
+    __syncthreads();
+    // Four lanes own one row;32 row groups cover the64-row tile in two rounds.
+    int group=tid/4,sub=tid%4;
+    for(int r=group;r<64;r+=32) {
+      int row=base+r;float vals[C/4],mean=0.f,var=0.f;
+      #pragma unroll
+      for(int k=0;k<C/4;k+=8){
+        uint4 vv=row<rows?*reinterpret_cast<uint4 const*>(x+row*C+sub*(C/4)+k):make_uint4(0,0,0,0);
+        auto* v=reinterpret_cast<Element*>(&vv);
+        #pragma unroll
+        for(int j=0;j<8;++j){vals[k+j]=float(v[j]);mean+=vals[k+j];}
+      }
+      mean+=__shfl_xor_sync(0xffffffff,mean,1);mean+=__shfl_xor_sync(0xffffffff,mean,2);mean/=C;
+      #pragma unroll
+      for(int k=0;k<C/4;++k){float d=vals[k]-mean;var+=d*d;}
+      var+=__shfl_xor_sync(0xffffffff,var,1);var+=__shfl_xor_sync(0xffffffff,var,2);
+      float inv=rsqrtf(var/C+eps);
+      if(sub==0){s.stats[r*2]=mean;s.stats[r*2+1]=inv;
+        if(nb==0 && row<rows){stats[row*2]=mean;stats[row*2+1]=inv;}}
+      if constexpr(C<384){
+        #pragma unroll
+        for(int k=0;k<C/4;k+=8){uint4 vec;auto* v=reinterpret_cast<Element*>(&vec);
+          #pragma unroll
+          for(int j=0;j<8;++j){int c=sub*(C/4)+k+j;v[j]=Element((vals[k+j]-mean)*inv*s.lw[c]+s.lb[c]);vals[k+j]=float(v[j]);}
+          *reinterpret_cast<uint4*>(s.z.data()+r*C+sub*(C/4)+k)=vec;}
+      }
+    }
+  }
+  __syncthreads();
+  // Reuse the normalized row tile for every Q/K/V/gate/bias projection block.
+  for(nb=0;nb<cols;nb+=N) {
+  if(tid==0){load(0);if(C>64)load(64);}
+  using TileMMA=decltype(make_tiled_mma(GMMA::ss_op_selector<Element,Element,float,Shape<_64,Int<N>,_64>>()));
+  TileMMA mma;auto thr=mma.get_slice(tid);
+  auto acc=partition_fragment_C(mma,Shape<_64,Int<N>>{});clear(acc);
+  auto al=as_position_independent_swizzle_layout(TileLayout{});
+  for(int kk=0;kk<C;kk+=64) {
+    // The swizzle preserves16-byte vectors. Both read and write use128 bits.
+    for(int t=tid;t<4096/8;t+=128) {
+      int r=t/8,k=(t%8)*8;uint4 vec;
+      if constexpr(Tail) {
+        int row=base+r;
+        if(row<rows){
+          uint4 gv=*reinterpret_cast<uint4 const*>(gate+row*gate_stride+kk+k),ov=*reinterpret_cast<uint4 const*>(o+row*C+kk+k);
+          auto const* gg=reinterpret_cast<Element const*>(&gv);auto const* oo=reinterpret_cast<Element const*>(&ov);auto* vv=reinterpret_cast<Element*>(&vec);
+          #pragma unroll
+          for(int j=0;j<8;++j)vv[j]=Element(sigmoid(float(gg[j]))*float(oo[j]));
+        }else vec=make_uint4(0,0,0,0);
+      }else if constexpr(C<384)vec=*reinterpret_cast<uint4 const*>(s.z.data()+r*C+kk+k);
+      else {
+        int row=base+r;uint4 raw=row<rows?*reinterpret_cast<uint4 const*>(x+row*C+kk+k):make_uint4(0,0,0,0);
+        auto* in=reinterpret_cast<Element*>(&raw);auto* out=reinterpret_cast<Element*>(&vec);
+        float mu=s.stats[r*2],inv=s.stats[r*2+1];
+        #pragma unroll
+        for(int j=0;j<8;++j)out[j]=Element((float(in[j])-mu)*inv*s.lw[kk+k+j]+s.lb[kk+k+j]);
+      }
+      *reinterpret_cast<uint4*>(s.a.data()+al(make_coord(r,k)))=vec;
+    }
+    cutlass::arch::fence_view_async_shared();__syncthreads();
+    int slot=(kk/64)%2;s.full[slot].wait(((kk/128)+(nb/N)*((C+127)/128))%2);
+    auto aa=make_tensor(make_smem_ptr(s.a.data()),TileLayout{});auto ww=make_tensor(make_smem_ptr(s.w[slot].data()),typename T::WL{});
+    auto ra=thr.partition_fragment_A(aa);auto rb=thr.partition_fragment_B(ww);
+    flash::gemm<false,0>(mma,ra,rb,acc);
+    __syncthreads();
+    if(tid==0 && kk+128<C)load(kk+128);
+  }
+  // The last WGMMA has retired before either weight slot is reused. The
+  // fragments' row-strided global stores wasted most memory sectors. Stage
+  // 64-column output tiles in slot0 and let TMA write complete sectors.
+  warpgroup_wait<0>();warpgroup_fence_operand(acc);__syncthreads();
+  Element* staged=s.w[0].data();Element* seed=s.w[1].data();
+  if constexpr(Tail) {
+    for(int t=tid;t<64*N/8;t+=128) {
+      int r=t/(N/8),k=(t%(N/8))*8;
+      uint4 vec=base+r<rows?*reinterpret_cast<uint4 const*>(x+int64_t(base+r)*C+nb+k):make_uint4(0,0,0,0);
+      *reinterpret_cast<uint4*>(seed+(k/64)*4096+al(make_coord(r,k%64)))=vec;
+    }
+    __syncthreads();
+  }
+  auto coord=thr.partition_C(make_identity_tensor(Shape<_64,Int<N>>{}));
+  #pragma unroll
+  for(int j=0;j<size(acc);j+=2) {
+    int rr=get<0>(coord(j)),cc=get<1>(coord(j));
+    int row=base+rr,col=nb+cc;
+    int stage_offset=(cc/64)*4096+al(make_coord(rr,cc%64));
+    if(row<rows) {
+      Element lo=Element(acc(j)),hi=Element(acc(j+1));
+      if constexpr(Tail) {
+        int64_t idx=int64_t(row)*C+col;
+        if(drop){int off=((row/(L*L))*L+row%L)*C+col;lo=Element(float(lo)*float(drop[off]));hi=Element(float(hi)*float(drop[off+1]));}
+        lo=Element(float(seed[stage_offset])+float(lo));hi=Element(float(seed[stage_offset+1])+float(hi));
+        *reinterpret_cast<uint32_t*>(staged+stage_offset)=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);
+      }else if(col<4*C){
+        int p=col/C,c=col%C;int64_t idx=(int64_t(p)*rows+row)*C+c;
+        *reinterpret_cast<uint32_t*>(staged+stage_offset)=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);
+      }else{
+        int b=row/(L*L),q=(row/L)%L,key=row%L;
+        if(col<4*C+H)bias[((b*H+col-4*C)*L+q)*L+key]=mask && !mask[b*L+key]?Element(-3.3895313892515355e38f):lo;
+        if(col+1<4*C+H)bias[((b*H+col+1-4*C)*L+q)*L+key]=mask && !mask[b*L+key]?Element(-3.3895313892515355e38f):hi;
+      }
+    }
+  }
+  cutlass::arch::fence_view_async_shared();__syncthreads();
+  if(tid==0) {
+    prefetch_tma_descriptor(to.get_tma_descriptor());
+    auto og=to.get_tma_tensor(make_shape(rows,C,Tail?1:4));
+    auto tile=to.get_slice(_0{});
+    #pragma unroll
+    for(int chunk=0;chunk<N/64;++chunk) {
+      int col=nb+chunk*64;
+      if(col<(Tail?C:4*C)) {
+        int track=Tail?0:col/C,channel=col%C;
+        auto dst=local_tile(og(_,_,track),Shape<_64,_64>{},make_coord(base/64,channel/64));
+        auto src=make_tensor(make_smem_ptr(staged+chunk*4096),TileLayout{});
+        copy(to,tile.partition_S(src),tile.partition_D(dst));
+      }
+    }
+    tma_store_arrive();tma_store_wait<0>();
+  }
+  __syncthreads();
+  }
+}
+
 template<int C,bool Tail> auto weight_tma(torch::Tensor w) {
   using T=Stage<C,Tail>;constexpr int cols=Tail?C:4*C+64;
   auto g=make_tensor(make_gmem_ptr((Element const*)w.data_ptr()),make_shape(cols,C),typename T::ST{C,_1{}});
@@ -186,7 +328,7 @@ void metadata(torch::Tensor x) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type()==torch::kBFloat16 && x.is_contiguous() && x.dim()==2,"contiguous BF16 matrix required");
   TORCH_CHECK((x.size(1)==64 || x.size(1)==128 || x.size(1)==256 || x.size(1)==384 || x.size(1)==512) && x.size(0)>0,"C64..512, multiple64 required");
 }
-std::vector<torch::Tensor> h100_front(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,double eps) {
+std::vector<torch::Tensor> h100_front(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,double eps,bool reuse) {
   metadata(x);c10::cuda::CUDAGuard guard(x.device());int C=x.size(1),rows=x.size(0),B=rows/(L*L);
   TORCH_CHECK(L>0 && L%128==0 && rows==B*L*L && H==C/32,"invalid pair/head dimensions");
   TORCH_CHECK(weights.device()==x.device() && weights.scalar_type()==torch::kBFloat16 && weights.is_contiguous() && weights.sizes()==torch::IntArrayRef({4*C+64,C}),"packed weights mismatch");
@@ -195,6 +337,13 @@ std::vector<torch::Tensor> h100_front(torch::Tensor x,torch::Tensor lnw,torch::T
   auto p=torch::empty({4,rows,C},x.options()),bias=torch::empty({B,H,L,L},x.options());
   auto stats=torch::empty({rows,2},x.options().dtype(torch::kFloat32));
   int N=C==64?128:256;dim3 grid(((rows+63)/64)*((4*C+64+N-1)/N));auto stream=at::cuda::getCurrentCUDAStream();
+  if(reuse) {
+    grid=dim3((rows+63)/64);
+#define FR(C_) case C_: C10_CUDA_CHECK(cudaFuncSetAttribute(fused_stage_reuse<C_,false>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(typename Stage<C_,false>::Shared))); fused_stage_reuse<C_,false><<<grid,128,sizeof(typename Stage<C_,false>::Shared),stream>>>(weight_tma<C_,false>(weights),output_tma<C_,false>(p,rows),(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),(Element*)weights.data_ptr(),nullptr,nullptr,nullptr,mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)p.data_ptr(),(Element*)bias.data_ptr(),nullptr,stats.data_ptr<float>(),rows,L,H,float(eps),0);break;
+    switch(C){FR(64) FR(128) FR(256) FR(384) FR(512)}
+#undef FR
+    C10_CUDA_KERNEL_LAUNCH_CHECK();return {p,bias,stats};
+  }
 #define F(C_) case C_: C10_CUDA_CHECK(cudaFuncSetAttribute(fused_stage<C_,false>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(typename Stage<C_,false>::Shared))); fused_stage<C_,false><<<grid,128,sizeof(typename Stage<C_,false>::Shared),stream>>>(weight_tma<C_,false>(weights),output_tma<C_,false>(p,rows),(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),(Element*)weights.data_ptr(),nullptr,nullptr,nullptr,mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)p.data_ptr(),(Element*)bias.data_ptr(),nullptr,stats.data_ptr<float>(),rows,L,H,float(eps),0);break;
   switch(C){F(64) F(128) F(256) F(384) F(512)}
 #undef F
@@ -294,6 +443,7 @@ std::vector<torch::Tensor> h100_ln_backward(torch::Tensor x,torch::Tensor dz,tor
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {dx,z,parts};
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
-  m.def("front",&h100_front);m.def("tail",&h100_tail);m.def("scale",&h100_scale);m.def("gate_backward",&h100_gate_backward);
+  m.def("front",&h100_front,pybind11::arg("x"),pybind11::arg("lnw"),pybind11::arg("lnb"),pybind11::arg("weights"),pybind11::arg("mask"),pybind11::arg("L"),pybind11::arg("H"),pybind11::arg("eps"),pybind11::arg("reuse")=false);
+  m.def("tail",&h100_tail);m.def("scale",&h100_scale);m.def("gate_backward",&h100_gate_backward);
   m.def("pack_backward",&h100_pack_backward);m.def("ln_backward",&h100_ln_backward);
 }
