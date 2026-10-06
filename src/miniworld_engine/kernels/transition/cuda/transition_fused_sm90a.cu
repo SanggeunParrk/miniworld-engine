@@ -121,6 +121,50 @@ __global__ void ln_reduce_k(const float* partial,float* dg,float* db,int nw,int 
   for(int s=128;s;s>>=1){if(t<s){sg[t]=__fadd_rn(sg[t],sg[t+s]);sb[t]=__fadd_rn(sb[t],sb[t+s]);}__syncthreads();}
   if(!t){dg[c]=sg[0];db[c]=sb[0];}
 }
+// D512 candidate: consume the raw gradient in the input pass, so it does not
+// remain live across the row reduction and output pass. Keep affine reduction
+// order and the saved-statistics/residual boundary identical to ln_bwd_k.
+__global__ __launch_bounds__(128,5)
+void ln_bwd_compact512_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const float* c1,
+                        const bf* residual,bf* dx,float* partial,int rows){
+  constexpr int d=512;
+  int lane=threadIdx.x&31,warp=threadIdx.x>>5,gw=blockIdx.x*4+warp,nw=gridDim.x*4;
+  float ag[16]={0},ab[16]={0};
+  union Vec{uint2 u;bf v[4];};
+  for(int row=gw;row<rows;row+=nw){
+    float xh[16],wd[16],a=0.f,b=0.f;
+    float rstd=rs[row],offset=c1[row];
+    #pragma unroll
+    for(int v=0;v<4;++v){
+      int c=(v*32+lane)*4;
+      Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+row*d+c);gv.u=*reinterpret_cast<const uint2*>(dy+row*d+c);
+      #pragma unroll
+      for(int e=0;e<4;++e){
+        int k=4*v+e;float grad=__bfloat162float(gv.v[e]);
+        xh[k]=fmaf(__bfloat162float(xv.v[e]),rstd,-offset);wd[k]=gamma[c+e]*grad;
+        a=__fadd_rn(a,wd[k]*xh[k]);b=__fadd_rn(b,wd[k]);
+        ag[k]=__fadd_rn(ag[k],grad*xh[k]);ab[k]=__fadd_rn(ab[k],grad);
+      }
+    }
+    a=wsum(a)/d;b=wsum(b)/d;
+    #pragma unroll
+    for(int v=0;v<4;++v){
+      int c=(v*32+lane)*4;Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+row*d+c);
+      #pragma unroll
+      for(int e=0;e<4;++e){
+        int k=4*v+e;
+        out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(res.v[e]));
+      }
+      *reinterpret_cast<uint2*>(dx+row*d+c)=out.u;
+    }
+  }
+  #pragma unroll
+  for(int v=0;v<4;++v){
+    int c=(v*32+lane)*4;
+    #pragma unroll
+    for(int e=0;e<4;++e){partial[gw*d+c+e]=ag[4*v+e];partial[(nw+gw)*d+c+e]=ab[4*v+e];}
+  }
+}
 void check(const at::Tensor& t){
   TORCH_CHECK(t.is_cuda()&&(t.scalar_type()==at::kFloat||t.scalar_type()==at::kBFloat16),"CUDA BF16/FP32 tensor required");
 }
@@ -191,6 +235,26 @@ std::vector<at::Tensor> ln_bwd(at::Tensor dy,at::Tensor x,at::Tensor gamma,at::T
   ln_reduce_k<<<d,256,0,stream>>>(partial.data_ptr<float>(),dg.data_ptr<float>(),db.data_ptr<float>(),nw,d);
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {dx,dg,db};
 }
+std::vector<at::Tensor> ln_bwd_compact(at::Tensor dy,at::Tensor x,at::Tensor gamma,at::Tensor rs,at::Tensor c1,at::Tensor residual,int waves){
+  c10::cuda::CUDAGuard guard(x.device());
+  for(auto* t:{&dy,&x,&residual})TORCH_CHECK(t->device()==x.device()&&t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kBFloat16&&t->sizes()==x.sizes(),"LN BF16 rows");
+  int d=x.size(-1),rows=x.numel()/d;
+  TORCH_CHECK(d==512&&waves>0,"compact D512 LN contract");
+  for(auto* t:{&gamma,&rs,&c1})TORCH_CHECK(t->device()==x.device()&&t->is_contiguous()&&t->scalar_type()==at::kFloat,"LN FP32 stats/affine");
+  TORCH_CHECK(gamma.numel()==d&&rs.numel()==rows&&c1.numel()==rows,"LN stats shapes");
+  int sms=0;C10_CUDA_CHECK(cudaDeviceGetAttribute(&sms,cudaDevAttrMultiProcessorCount,x.get_device()));
+  int grid=sms*waves,nw=grid*4;
+  auto dx=at::empty_like(x),dg=at::empty_like(gamma),db=at::empty_like(gamma),partial=at::empty({2,nw,d},gamma.options());
+  auto stream=at::cuda::getCurrentCUDAStream();
+  const bf *yp=reinterpret_cast<const bf*>(dy.data_ptr()),*xp=reinterpret_cast<const bf*>(x.data_ptr()),*rp=reinterpret_cast<const bf*>(residual.data_ptr());
+  const float *gp=gamma.data_ptr<float>(),*rsp=rs.data_ptr<float>(),*cp=c1.data_ptr<float>();
+  bf* dxp=reinterpret_cast<bf*>(dx.data_ptr());float* pp=partial.data_ptr<float>();
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,ln_bwd_compact512_k));
+  void* args[]={&yp,&xp,&gp,&rsp,&cp,&rp,&dxp,&pp,&rows};
+  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(grid),dim3(128),args,0,stream));
+  ln_reduce_k<<<d,256,0,stream>>>(pp,dg.data_ptr<float>(),db.data_ptr<float>(),nw,d);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return {dx,dg,db};
+}
 __global__ void affine_reduce_k(const float* pg,const float* pb,float* dg,float* db,int rows,int d){
   __shared__ float sg[256],sb[256];
   int lane=threadIdx.x&31,warp=threadIdx.x>>5,c=blockIdx.x*32+lane;
@@ -248,6 +312,7 @@ std::vector<at::Tensor> ln_fwd(at::Tensor x,at::Tensor gamma,at::Tensor beta,dou
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {xn,rs,c1};
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){
+  m.def("ln_bwd_compact",&ln_bwd_compact);
   m.def("ln_fwd",&ln_fwd);
   m.def("reduce_affine",&reduce_affine);
   m.def("prepare",&prepare);m.def("pair_layout",&pair_layout);m.def("cast",&cast);m.def("ln_bwd",&ln_bwd);
