@@ -165,6 +165,48 @@ void ln_bwd_compact512_k(const bf* dy,const bf* x,const float* gamma,const float
     for(int e=0;e<4;++e){partial[gw*d+c+e]=ag[4*v+e];partial[(nw+gw)*d+c+e]=ab[4*v+e];}
   }
 }
+// D384 candidate: same fused tensor lifetimes, with twelve live channels per lane.
+__global__ __launch_bounds__(128,6)
+void ln_bwd_compact384_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const float* c1,
+                        const bf* residual,bf* dx,float* partial,int rows){
+  constexpr int d=384;
+  int lane=threadIdx.x&31,warp=threadIdx.x>>5,gw=blockIdx.x*4+warp,nw=gridDim.x*4;
+  float ag[12]={0},ab[12]={0};
+  union Vec{uint2 u;bf v[4];};
+  for(int row=gw;row<rows;row+=nw){
+    float xh[12],wd[12],a=0.f,b=0.f;
+    float rstd=rs[row],offset=c1[row];
+    #pragma unroll
+    for(int v=0;v<3;++v){
+      int c=(v*32+lane)*4;
+      Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+row*d+c);gv.u=*reinterpret_cast<const uint2*>(dy+row*d+c);
+      #pragma unroll
+      for(int e=0;e<4;++e){
+        int k=4*v+e;float grad=__bfloat162float(gv.v[e]);
+        xh[k]=fmaf(__bfloat162float(xv.v[e]),rstd,-offset);wd[k]=gamma[c+e]*grad;
+        a=__fadd_rn(a,wd[k]*xh[k]);b=__fadd_rn(b,wd[k]);
+        ag[k]=__fadd_rn(ag[k],grad*xh[k]);ab[k]=__fadd_rn(ab[k],grad);
+      }
+    }
+    a=wsum(a)/d;b=wsum(b)/d;
+    #pragma unroll
+    for(int v=0;v<3;++v){
+      int c=(v*32+lane)*4;Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+row*d+c);
+      #pragma unroll
+      for(int e=0;e<4;++e){
+        int k=4*v+e;
+        out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(res.v[e]));
+      }
+      *reinterpret_cast<uint2*>(dx+row*d+c)=out.u;
+    }
+  }
+  #pragma unroll
+  for(int v=0;v<3;++v){
+    int c=(v*32+lane)*4;
+    #pragma unroll
+    for(int e=0;e<4;++e){partial[gw*d+c+e]=ag[4*v+e];partial[(nw+gw)*d+c+e]=ab[4*v+e];}
+  }
+}
 void check(const at::Tensor& t){
   TORCH_CHECK(t.is_cuda()&&(t.scalar_type()==at::kFloat||t.scalar_type()==at::kBFloat16),"CUDA BF16/FP32 tensor required");
 }
@@ -239,7 +281,7 @@ std::vector<at::Tensor> ln_bwd_compact(at::Tensor dy,at::Tensor x,at::Tensor gam
   c10::cuda::CUDAGuard guard(x.device());
   for(auto* t:{&dy,&x,&residual})TORCH_CHECK(t->device()==x.device()&&t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kBFloat16&&t->sizes()==x.sizes(),"LN BF16 rows");
   int d=x.size(-1),rows=x.numel()/d;
-  TORCH_CHECK(d==512&&waves>0,"compact D512 LN contract");
+  TORCH_CHECK((d==512||d==384)&&waves>0,"compact D384/D512 LN contract");
   for(auto* t:{&gamma,&rs,&c1})TORCH_CHECK(t->device()==x.device()&&t->is_contiguous()&&t->scalar_type()==at::kFloat,"LN FP32 stats/affine");
   TORCH_CHECK(gamma.numel()==d&&rs.numel()==rows&&c1.numel()==rows,"LN stats shapes");
   int sms=0;C10_CUDA_CHECK(cudaDeviceGetAttribute(&sms,cudaDevAttrMultiProcessorCount,x.get_device()));
@@ -249,7 +291,9 @@ std::vector<at::Tensor> ln_bwd_compact(at::Tensor dy,at::Tensor x,at::Tensor gam
   const bf *yp=reinterpret_cast<const bf*>(dy.data_ptr()),*xp=reinterpret_cast<const bf*>(x.data_ptr()),*rp=reinterpret_cast<const bf*>(residual.data_ptr());
   const float *gp=gamma.data_ptr<float>(),*rsp=rs.data_ptr<float>(),*cp=c1.data_ptr<float>();
   bf* dxp=reinterpret_cast<bf*>(dx.data_ptr());float* pp=partial.data_ptr<float>();
-  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,ln_bwd_compact512_k));
+  cudaKernel_t kernel;
+  if(d==384)C10_CUDA_CHECK(cudaGetKernel(&kernel,ln_bwd_compact384_k));
+  else C10_CUDA_CHECK(cudaGetKernel(&kernel,ln_bwd_compact512_k));
   void* args[]={&yp,&xp,&gp,&rsp,&cp,&rp,&dxp,&pp,&rows};
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(grid),dim3(128),args,0,stream));
   ln_reduce_k<<<d,256,0,stream>>>(pp,dg.data_ptr<float>(),db.data_ptr<float>(),nw,d);
