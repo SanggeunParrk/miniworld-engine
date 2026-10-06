@@ -173,7 +173,7 @@ class TriangleMultiplication(nn.Module):
             if _h100.serves_single(self, pair):
                 return _h100.update(self, pair, mask, _ds, bidirectional=False)
             if _h100.requires_cuda_training(self, pair):
-                raise ValueError("native H100 D64 TriMul training requires B1 BF16 buckets L128..768")
+                raise ValueError("native H100 TriMul training requires a supported B1 BF16 bucket and FP32 norm affine")
             # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
             # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
             # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls

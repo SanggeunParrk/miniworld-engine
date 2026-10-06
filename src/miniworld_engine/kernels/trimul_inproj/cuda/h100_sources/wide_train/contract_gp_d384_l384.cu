@@ -15,6 +15,9 @@ template<int OA,int OB,int TA,int TB> TMN_DEVI void mma128_off(float (&v)[64],ui
 #ifndef GP_DIR          // MiniWorld: 0 = bidirectional (H = 2D, both halves); 1 / 2 = single-direction outgoing / incoming (H = D)
 #define GP_DIR 0
 #endif
+#ifndef GP_GENERIC_LENGTH
+#define GP_GENERIC_LENGTH 0
+#endif
 constexpr int D=WIDTH,H=(GP_DIR ? 1 : 2)*D,INPUT=32768,SLOTS=3,BAR=INPUT*SLOTS;
 constexpr int HALF_CH=GP_DIR ? 0 : D;   // channel offset of the incoming half in pre / gp
 struct Params {CUtensorMap a[4],b[4];const bf* pre;const bf* mask;bf* gp[4];bf* dl;bf* dr;CUtensorMap premap,maskmap,outmap[4];int N;};
@@ -47,7 +50,7 @@ template<int MODE> TMN_DEVI void consume(const Params& p,uint8_t* sm,uint64_t* b
  for(int ki=0,it=0;ki<p.N;ki+=64,++it){
   int slot=it%SLOTS;mbar_wait(bar+slot,(it/SLOTS)&1);__syncthreads();
   // N is divisible by 3*64: slot0/slot1 retire before the last two steps.
-  if(threadIdx.x==0){
+  if(threadIdx.x==0 && !GP_GENERIC_LENGTH){
    if(ki==p.N-128)load_epi<MODE,0>(p,sm,bar,ch,mi,ni);
    if(ki==p.N-64)load_epi<MODE,1>(p,sm,bar,ch,mi,ni);
   }
@@ -61,7 +64,16 @@ template<int MODE> TMN_DEVI void consume(const Params& p,uint8_t* sm,uint64_t* b
  }
  // Both compute groups have now retired slot2.
  __syncthreads();
- if(threadIdx.x==0)load_epi<MODE,2>(p,sm,bar,ch,mi,ni);
+ if(threadIdx.x==0){
+  // The overlapped schedule above assumes N % 192 == 0. Other buckets
+  // retain the same fused contraction/gate boundary, but retire all MMA
+  // readers before recycling the ring as epilogue staging.
+  if constexpr(GP_GENERIC_LENGTH){
+   load_epi<MODE,0>(p,sm,bar,ch,mi,ni);
+   load_epi<MODE,1>(p,sm,bar,ch,mi,ni);
+  }
+  load_epi<MODE,2>(p,sm,bar,ch,mi,ni);
+ }
  mbar_wait(bar+6,0);__syncthreads();
 
  static_for<32>([&](auto jj){constexpr int j=decltype(jj)::value*2;
