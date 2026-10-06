@@ -58,6 +58,8 @@ def cubin(stem: str, defs: tuple = ()) -> str:
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
+    if hopper:
+        h.update((_dir.parents[2] / "swa_dit" / "cuda" / "gen" / "wgmma_bf16.inc").read_bytes())
     root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
     out = root / "local_dit_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
@@ -94,6 +96,37 @@ KERNELS = {
 }
 
 
+@functools.lru_cache(maxsize=8)
+def _hopper(device_index: int) -> bool:
+    return torch.cuda.get_device_capability(device_index) == (9, 0)
+
+
+_HOPPER_KERNELS = {
+    "cond": ("cond_fwd", "atom_cond_fwd_sm90", 131136, False),
+    "cond1": ("cond_fwd", "atom_cond_fwd_single_sm90", 114752, False),
+    "pre": ("pre_fwd", "atom_pre_fwd_sm90", 180288, False),
+    "pre_cross": ("pre_fwd", "atom_pre_cross_fwd_sm90", 114752, False),
+    "post": ("post_fwd", "atom_post_fwd_sm90", 147520, False),
+    "post2": ("post_fwd", "atom_post_fwd_2stage_sm90", 114752, False),
+    "pack": ("cond_fwd", "atom_pack_sm90", 0, False),
+    "pack_t": ("tr_bwd_gate", "atom_pack_transpose_sm90", 0, False),
+    "trg": ("tr_bwd_gate", "atom_tr_bwd_sm90", 131136, False),
+    "postb": ("post_bwd", "atom_post_bwd_sm90", 98368, False),
+    "preb": ("pre_bwd", "atom_pre_bwd_sm90", 98368, False),
+    "condb": ("cond_bwd", "atom_cond_bwd_sm90", 168000, False),
+    "grad_pack": ("pre_bwd", "atom_grad_pack_sm90", 0, False),
+    "col_part": ("cond_bwd", "atom_column_partials_sm90", 0, False),
+    "col_fin": ("cond_bwd", "atom_column_finish_sm90", 0, False),
+    "pb_w": ("pair_bias", "atom_pair_weight_sm90", 0, False),
+    "pb_fin": ("pair_bias", "atom_pair_finish_sm90", 0, False),
+    "pb_part": ("pair_bias", "atom_pair_partials_sm90", 0, False),
+    "db_native": ("attn_dbias", "atom_dbias_sm90", 82208, False),
+    "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
+    "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
+    **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},
+}
+
+
 def atom_kernel(name: str, device_index: int):
     stem, func, smem, pdl, *defs = KERNELS[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
@@ -101,7 +134,7 @@ def atom_kernel(name: str, device_index: int):
 
 def load_all(device_index: int) -> None:
     """Build and load every kernel on the device (raises on any failure)."""
-    for name in KERNELS:
+    for name in (_HOPPER_KERNELS if _hopper(device_index) else KERNELS):
         atom_kernel(name, device_index)
 
 
@@ -170,6 +203,14 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
     """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid))."""
     M = c.shape[0]
     out = torch.empty(M, 6 * DM, device=c.device, dtype=torch.bfloat16)
+    if _hopper(_dev(c)):
+        d = _dev(c)
+        maps = (_map(c, [DM, M], DM * 2, [64, 64]),
+                _map(W, [DM, 6 * DM], DM * 2, [64, 128]))
+        wide = M > 64 * nsm(d)
+        atom_kernel("cond1" if wide else "cond", d)((min((2 if wide else 1) * nsm(d), (M + 63) // 64), 2, 1), (160, 1, 1),
+                              *maps, g1, g2, b, out, int(M), float(eps))
+        return out
     maps = (_rows(c), _map(W, [DM, 6 * DM], DM * 2, [32, 128], swizzle=64), _rows(out, 6 * DM))
     ntile = M // 32
     d = _dev(c)
@@ -177,11 +218,19 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
     return out
 
 
-def pre_fwd(a, mod, W, bq, save=False, eps=1e-5):
+def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
     """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``)."""
     M = a.shape[0]
     Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
+    if _hopper(_dev(a)):
+        d = _dev(a)
+        maps = (_map(a, [DM, M], DM * 2, [64, 64]),
+                _map(mod, [6 * DM, M], 12 * DM, [64, 64]),
+                _map(W, [DM, 4 * DM], DM * 2, [64, 128]))
+        atom_kernel("pre_cross" if cross else "pre", d)((min((2 if cross else 1) * nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                             *maps, bq, Q, K, V, G, X, int(M), float(eps), int(save))
+        return Q, K, V, G, X
     maps = (_rows(a), _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _rows(mod, 6 * DM),
             _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X), _rows(G), _rows(G))
     ntile = M // 32
@@ -212,6 +261,15 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5):
         return torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
     out = new()
     sv = tuple(new() for _ in range(4)) if save else (out,) * 4
+    if _hopper(_dev(a)):
+        d = _dev(a)
+        maps = (_map(Wo, [DM, DM], DM * 2, [64, 128]),
+                _map(Wu, [DM, 4 * DM], DM * 2, [64, 128]),
+                _map(Wd, [2 * DM, DM], DM * 4, [64, 128]))
+        wide = M > 64 * nsm(d)
+        atom_kernel("post2" if wide else "post", d)((min((2 if wide else 1) * nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                              a, o, g, mod, *maps, out, *sv, int(M), float(eps), int(save))
+        return (out, *sv)
     maps = (_rows16(a), _rows16(o), _rows16(g), _rows16(mod, 6 * DM), _map(Wo, [DM, DM], DM * 2, [64, 128]),
             _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _map(Wd, [2 * DM, DM], 4 * DM, [32, 128], swizzle=64),
             _rows16(out), *(_rows16(t) for t in sv))
@@ -228,6 +286,13 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
     DT = torch.empty(M, DM, device=dev, dtype=torch.bfloat16)
     HH = torch.empty(M, 2 * DM, device=dev, dtype=torch.bfloat16)
     DAB = torch.empty(M, 4 * DM, device=dev, dtype=torch.bfloat16)
+    if _hopper(_dev(dy)):
+        d = _dev(dy)
+        maps = (_map(Wu, [DM, 4 * DM], DM * 2, [64, 128]),
+                _map(WsT, [DM, 2 * DM], DM * 2, [64, 128]))
+        atom_kernel("trg", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                             dy, t, mod, x2, *maps, DT, HH, DAB, dmod, int(M))
+        return DT, HH, DAB
     maps = (_rows16(dy), _rows16(t), _rows16(mod, 6 * DM), _rows16(x2), _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
             _map(WsT, [DM, 2 * DM], DM * 2, [32, 128], swizzle=64), _rows16(DT), _rows16(dmod, 6 * DM), _rows16(HH, 2 * DM),
             _rows16(DAB, 4 * DM))
@@ -243,6 +308,14 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
     def new():
         return torch.empty(M, DM, device=dy.device, dtype=torch.bfloat16)
     DA, DU, GATED, DO = new(), new(), new(), new()
+    if _hopper(_dev(dy)):
+        d = _dev(dy)
+        maps = (_map(WuT, [4 * DM, DM], 8 * DM, [64, 128]),
+                _map(WoT, [DM, DM], DM * 2, [64, 128]))
+        atom_kernel("postb", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                               DAB, dy, a2, mod, u, sg, o, *maps, DA, DU, GATED, DO, dmod, dP, Dd,
+                               int(M), int(N), float(eps))
+        return DA, DU, GATED, DO
     maps = (_rows16(DAB, 4 * DM), _rows16(dy), _rows16(a2), _rows16(mod, 6 * DM), _rows16(u), _rows16(sg), _rows16(o),
             _map(WuT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64), _map(WoT, [DM, DM], DM * 2, [32, 128], swizzle=64),
             _rows16(DA), _rows16(dmod, 6 * DM), _rows16(DU), _rows16(GATED), _rows16(DO), _rows16(dP, 4 * DM))
@@ -256,6 +329,12 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
     """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ."""
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
+    if _hopper(_dev(a)):
+        d = _dev(a)
+        atom_kernel("preb", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                              dP, a, mod, DA, _map(WT, [4 * DM, DM], 8 * DM, [64, 128]),
+                              DS, dmod, int(M), float(eps))
+        return DS
     maps = (_rows16(dP, 4 * DM), _rows16(a), _rows16(mod, 6 * DM), _rows16(DA), _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
             _rows16(DS), _rows16(dmod, 6 * DM), _rows16(DA), _rows16(DA), _rows16(DA))
     ntile = M // 16
@@ -285,6 +364,12 @@ def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):
     def new():
         return torch.empty(M, DM, device=c.device, dtype=torch.bfloat16)
     dc, cn1, cn2 = new(), new(), new()
+    if _hopper(_dev(c)):
+        d = _dev(c)
+        atom_kernel("condb", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                               dmod, c, _map(WmodT, [6 * DM, DM], 12 * DM, [64, 128]),
+                               g1, g2, dc, cn1, cn2, DG, int(M), float(eps))
+        return dc, cn1, cn2
     maps = (_rows16(dmod, 6 * DM), _rows16(c), _map(WmodT, [6 * DM, DM], 12 * DM, [32, 128], swizzle=64),
             _rows16(dc), _rows16(cn1), _rows16(cn2))
     ntile = M // 16
