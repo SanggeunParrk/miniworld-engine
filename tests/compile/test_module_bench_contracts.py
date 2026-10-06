@@ -210,7 +210,7 @@ def test_token_conditioning_uses_declared_condition_width(runner):
 
 @pytest.mark.parametrize(("target", "implementation"), [
     ("conditioned_transition", "cuda"),
-    ("adaptive_layernorm", "cuda"), ("dit", "cuequivariance"), ("swa_dit", "anthropic"),
+    ("adaptive_layernorm", "cuda"), ("dit", "cuequivariance"),
 ])
 def test_unsupported_modules_raise_explicit_status_instead_of_nan(runner, target, implementation):
     namespace, seen, fabric = runner
@@ -358,3 +358,13 @@ def test_pair_bias_attention_propagates_adaln_implementation(runner, target, imp
     for attention in attentions:
         assert attention.ada_ln_in.implementation == attention.implementation
         assert (attention.ada_ln_in._backend.value == "pytorch") == (implementation == "pytorch")
+
+
+@pytest.mark.parametrize("target", ["swa_dit", "local_dit"])
+def test_anthropic_atom_blocks_are_inference_only(runner, target):
+    """The Anthropic atom rows are the kit's forward-only kernels: a training request is an explicit unsupported row, decided
+    before any upstream runtime is touched."""
+    namespace, seen, fabric = runner
+    with pytest.raises(UnsupportedBenchmark, match="inference-only"):
+        namespace[f"bench_module_{target}"](config(namespace, target, mode="training"), 2, "anthropic", fabric)
+    assert not seen.measured

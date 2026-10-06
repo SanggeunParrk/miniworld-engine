@@ -4070,6 +4070,61 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
     return result._replace(**acc)
 
 
+def _anthropic_swa_dit_composition(upstream, model, cos, sin, valid, act: "torch.dtype") -> str:
+    """Install Anthropic's ESMFold2 atom-block kernels as `model.composed`; return its execution path.
+
+    The kernels are the fast tier of the kit's atom driver (`esmfold2/opt/forward/fast_inference/driver/ef2_atom.py`, `gemm="bf16"`):
+    one SWAAtomBlock = three Triton kernels -- K1 (rms-adaLN -> q | k | v | gate GEMM -> qk rms-norm -> 3D RoPE), K2 (sliding-window
+    attention per query tile and head), K3 (out_proj + residual -> rms-adaLN -> SwiGLU FFN + residual) -- on bf16 operands with fp32
+    accumulation and an fp32 residual stream. The driver's `install()` patches a whole ESMFold2 model (the transformers fork); its
+    `_fused_block(block, x, modulation, fold_state)` takes any block with the fork's attribute layout, which is what `SWADiTBlock` has
+    (attn_norm, adaln_modulation, attn.Wqkv / gate_proj / out_proj, ffn.w_up / w_down): the same weights drive their kernels here.
+    The modulation is computed inside every call, on every row (SiLU + Linear 128 -> 768), as the module rows do: the PyTorch and the
+    engine rows time it too, so leaving it out of this row would compare unlike work. The weights are packed once on first use.
+    """
+    import importlib
+    import sys as _sys
+
+    root = upstream.configure()
+    driver = Path(root) / "esmfold2" / "opt" / "forward" / "fast_inference" / "driver"
+    if not (driver / "ef2_atom.py").is_file():
+        raise UnsupportedBenchmark(f"Anthropic's ESMFold2 atom driver not found: {driver / 'ef2_atom.py'}")
+    if str(driver) not in _sys.path:
+        _sys.path.append(str(driver))
+    try:
+        ea = importlib.import_module("ef2_atom")
+    except ImportError as exc:
+        raise UnsupportedBenchmark(f"ef2_atom is not importable: {exc}") from exc
+    if not ea._triton():
+        raise UnsupportedBenchmark(f"ef2_atom needs Triton: {ea._TRITON.get('why')}")
+    blocks = list(model.layers)
+    at0 = blocks[0].attn
+    if (at0.n_heads, at0.head_dim) != (4, 32):
+        raise UnsupportedBenchmark("the Anthropic atom kernels serve 4 heads x 32 (d_atom 128)")
+    n, atom_len = valid.shape
+    half = at0.head_dim // 2
+    m_rows = n * atom_len
+    ea._sm_count()
+    ea._CFG.update(gemm="bf16", tc_gemm=True)
+    fold = {"M": m_rows, "N": atom_len, "Bp": n,
+            "cos": cos.expand(n, atom_len, half).reshape(m_rows, half).contiguous(),
+            "sin": sin.expand(n, atom_len, half).reshape(m_rows, half).contiguous(),
+            "seqlen": valid.sum(-1).to(torch.int32).contiguous()}
+
+    def composed(x, cond, ap):
+        h = x.reshape(m_rows, -1).float().contiguous()
+        c_flat = cond.reshape(m_rows, -1)
+        for block in blocks:
+            mod = block.adaln_modulation(c_flat).float().contiguous()
+            h, _ = ea._fused_block(block, h, mod, fold)
+        return h.view(n, atom_len, -1).to(x.dtype)
+
+    model.composed = composed
+    return ("anthropic[pristine opt_core + ESMFold2 kit driver ef2_atom (" + ea.VERSION + f") at {root}]: fused SWAAtomBlock, "
+            "K1 rms-adaLN+qkvg GEMM+qk-norm+RoPE / K2 window-129 attention / K3 out_proj+residual+adaLN+SwiGLU+residual, gemm=bf16 "
+            "(bf16 operands, fp32 accumulation, fp32 residual stream); modulation computed per call on every row, weights packed once")
+
+
 def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     """ESMFold2 atom DiT: RMSNorm + adaLN-Zero gates, windowed 3D-RoPE attention, SwiGLU.
     `modules/swa_dit`. Runs at the atom length (`seq_len * 8`), like the swa_atom_attention
@@ -4082,10 +4137,17 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     )
     from miniworld_engine.modules.swa_dit import SWADiTBlock
 
-    spec = triton_miniworld_spec(implementation)
-    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
-                         ImplementationType.MINIWORLD}:
-        raise UnsupportedBenchmark(f"swa_dit does not implement {implementation!r}")
+    anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
+    if anthropic:
+        if not is_inference_mode(conf.mode):
+            raise UnsupportedBenchmark("anthropic atom block is inference-only: the kit's fused kernels have no backward")
+        upstream = _anthropic_upstream_or_unsupported()
+        spec = ImplementationSpec(ImplementationType.PYTORCH, None, implementation)     # the module holds the parameters
+    else:
+        spec = triton_miniworld_spec(implementation)
+        if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
+                             ImplementationType.MINIWORLD}:
+            raise UnsupportedBenchmark(f"swa_dit does not implement {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     n_head = 4
 
@@ -4096,13 +4158,25 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                 SWADiTBlock(d_atom=conf.d_single_atom, d_cond=conf.d_single_atom,
                             n_head=n_head, implementation=spec.impl)
                 for _ in range(conf.n_layers)])
+            self.composed = None
 
         def forward(self, x, cond, ap):
+            if self.composed is not None:
+                return self.composed(x, cond, ap)
             for layer in self.layers:
                 x = layer(x, cond, ap)
             return x
 
-    model = MultiSWADiT().to(device=DEVICE, dtype=dtype)
+    model = MultiSWADiT()
+    # The adaLN-Zero modulation is zero-initialised, which makes the block the identity: an accuracy column against a reference would
+    # compare identities and say nothing. Real weights (as the other DiT targets draw); measured timings do not depend on them.
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for prm in model.parameters():
+            if prm.ndim == 2:
+                prm.normal_(std=prm.shape[1] ** -0.5)
+    state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    model = model.to(device=DEVICE, dtype=dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:
         compile_module_for_benchmark(model, fullgraph=True)
@@ -4121,6 +4195,36 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     valid = torch.arange(atom_len, device=DEVICE)[None, :] < valid_lengths[:, None]
     ap = build_attention_params(cos, sin, valid, num_aug=n)
     dy = torch.randn_like(x)
+    anthropic_path = _anthropic_swa_dit_composition(upstream, model, cos, sin, valid, dtype) if anthropic else None
+
+    accuracy: AccuracyFields = {}
+    reference = "module.reference.torch"
+    if not wants_grad and x.is_cuda:
+        # fp32 reference on the same weights and inputs, IEEE matmuls (the attention core of the reference block is the flash backend's)
+        tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+        try:
+            ref_layers = nn.ModuleList([
+                SWADiTBlock(d_atom=conf.d_single_atom, d_cond=conf.d_single_atom, n_head=n_head,
+                            implementation=ImplementationType.PYTORCH) for _ in range(conf.n_layers)])
+            ref_layers.load_state_dict({k[len("layers."):]: v for k, v in state.items() if k.startswith("layers.")})
+            ref_layers = ref_layers.to(DEVICE).eval()
+            with torch.no_grad():
+                torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+                try:
+                    expected = x.float()
+                    for layer in ref_layers:
+                        expected = layer(expected, cond.float(), ap)
+                finally:
+                    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+                del ref_layers
+                actual = model(x, cond, ap)
+            out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+            accuracy = {"output_max_abs": out_max, "output_rel_frob": out_rel, "output_cosine": out_cos}
+            reference = "module.reference.torch[fp32 IEEE]"
+            del actual, expected
+        except torch.cuda.OutOfMemoryError:
+            print(f"  [{implementation}] fp32 reference did not fit at N={atom_len}: no accuracy columns", flush=True)
+        torch.cuda.empty_cache()
 
     def inference_step():
         with torch.no_grad():
@@ -4142,9 +4246,9 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         is_train=wants_grad,
         input_dtype=str(dtype).replace("torch.", ""),
         parameter_dtype=parameter_dtype_of(model),
-        execution_path=f"modules.swa_dit.SWADiTBlock[{backend or 'unavailable'}]",
-        reference="module.reference.torch",
-    )
+        execution_path=anthropic_path or f"modules.swa_dit.SWADiTBlock[{backend or 'unavailable'}]",
+        reference=reference,
+    )._replace(**accuracy)
 
 def _anthropic_local_dit_composition(upstream, model, mask, samples: int, length: int, act: "torch.dtype") -> str:
     """Install Anthropic's AF3 atom-transformer block composition as `model.composed`; return its execution path.
@@ -4602,7 +4706,8 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             # ln_proj.pair_bias serves c_pair 64 / 128, and Anthropic's atom attention is the
             # 32x128 windowed op, not this dense block (see bench_module_dit).
             "dit_atom": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
-            "swa_dit": ("pytorch", "triton", "miniworld"),
+            # anthropic: the kit's fused ESMFold2 atom block (ef2_atom, gemm=bf16) on the module's weights; inference only
+            "swa_dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             # anthropic: the AF3 atom block composed from their windowed atom attention (fpf_atom) and atom row kernels; inference only
             "local_dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             "bias_only_dit": ("pytorch", "miniworld"),
