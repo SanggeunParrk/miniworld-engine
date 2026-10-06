@@ -229,8 +229,26 @@ def _pack(wa: torch.Tensor, wb: torch.Tensor, block: int) -> torch.Tensor:
     return torch.stack([wa.reshape(h // block, block, d), wb.reshape(h // block, block, d)], 1).reshape(2 * h, d).contiguous()
 
 
+def _owned_mm_enabled() -> bool:
+    """Opt-in graph-owned scratch; keep explicit legacy comparisons unchanged."""
+    return (native_aux_enabled()
+            and os.environ.get("MINIWORLD_TRANSITION_H100_OWNED_MM", "0") == "1")
+
+
+def _owned_mm(a: torch.Tensor, b: torch.Tensor, fp32_output: bool) -> torch.Tensor:
+    from ...conditioned_transition.cuda.train import owned_gemm_ext
+
+    return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output)
+
+
+def _mm_dx(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return _owned_mm(a, b, False) if _owned_mm_enabled() else a @ b
+
+
 def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """bf16 x bf16 -> fp32 GEMM (cuBLAS with an fp32 output); torch builds without ``out_dtype`` round through bf16."""
+    if _owned_mm_enabled():
+        return _owned_mm(a, b, True)
     try:
         return torch.mm(a, b, out_dtype=torch.float32)
     except TypeError:
@@ -345,11 +363,11 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
         ln = aux.ln_bwd_compact if compact or compact384 else aux.ln_bwd
         # The compact kernel uses 89 registers without spills, allowing five
         # resident 128-thread CTAs instead of four for the 112-register plan.
-        dx, dgam, dbeta = ln(dab @ w_ab, x, gamma, rstd, c1, dy, 6 if compact384 else 5 if compact else 4)
+        dx, dgam, dbeta = ln(_mm_dx(dab, w_ab), x, gamma, rstd, c1, dy, 6 if compact384 else 5 if compact else 4)
     else:
         from ..triton.fused import _transition_ln_bwd
 
-        dx, dgam, dbeta = _transition_ln_bwd(dab @ w_ab, x, rstd, c1, gamma)
+        dx, dgam, dbeta = _transition_ln_bwd(_mm_dx(dab, w_ab), x, rstd, c1, gamma)
         dx = dx.add_(dy)
     if native_aux_enabled(d):
         # The opaque op forbids even disjoint output views of one storage. Copy/cast

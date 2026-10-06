@@ -243,8 +243,13 @@ at::Tensor pair_layout(at::Tensor a,at::Tensor b,int block,bool transpose){
               &&a.scalar_type()==at::kBFloat16&&b.scalar_type()==at::kBFloat16,"packed BF16 projections required");
   int h=a.size(0),d=a.size(1);TORCH_CHECK(block==0||(block>0&&h%block==0),"weight interleave block");
   auto out=at::empty(transpose?std::vector<int64_t>{d,2*h}:std::vector<int64_t>{2*h,d},a.options());
-  pair_layout_k<<<((2*h+31)/32)*((d+31)/32),256,0,at::cuda::getCurrentCUDAStream()>>>(
-    reinterpret_cast<const bf*>(a.data_ptr()),reinterpret_cast<const bf*>(b.data_ptr()),reinterpret_cast<bf*>(out.data_ptr()),h,d,block,transpose);
+  const bf* ap=reinterpret_cast<const bf*>(a.data_ptr());
+  const bf* bp=reinterpret_cast<const bf*>(b.data_ptr());
+  bf* op=reinterpret_cast<bf*>(out.data_ptr());
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,pair_layout_k));
+  void* args[]={&ap,&bp,&op,&h,&d,&block,&transpose};
+  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+    dim3(((2*h+31)/32)*((d+31)/32)),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 std::vector<at::Tensor> cast(std::vector<at::Tensor> in,std::vector<bool> fp32,bool force){
