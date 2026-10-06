@@ -81,4 +81,6 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None):
         forward as native,
     )
 
-    return native(module, pair, mask)
+    from .token_dit_train import _native_caller_output
+
+    return _native_caller_output(native(module, pair, mask), pair, *module.parameters(), force=True)
