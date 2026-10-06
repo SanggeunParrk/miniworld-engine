@@ -463,6 +463,9 @@ def saved_like(x):
     if D == 512:
         saved += [x.new_empty((max(1, M * H // 4096),), dtype=torch.int64),
                   x.new_empty((1,), dtype=torch.int32), x.new_empty((M // 64,), dtype=torch.int32)]
+    from ._h100_pack import fused_wide_glue
+    if fused_wide_glue(D,n,bidirectional=True):
+        saved.append(x.new_empty((9*D,D)))
     return saved
 
 
@@ -511,7 +514,11 @@ def _front(x, w1, ab, mask, gi, bi, xn, stats, pre):
         k = _kernel(source, "mw_wide_front_pre_overlap", fw, common, smem)
         normalize = D != 512
         if not normalize:
-            normalize_into(xn, x, gi, bi)
+            from ._h100_pack import fused_wide_glue
+            if fused_wide_glue(D,x.shape[1],bidirectional=True):
+                normalize_into(xn,x,gi,bi,True)
+            else:
+                normalize_into(xn, x, gi, bi)
         fields, tiles, threads = _front_params(
             x, x if normalize else xn, w1, ab, mask, gi, bi, None, xn if normalize else None,
             cfg, pre)
@@ -585,16 +592,15 @@ def forward(leaves, mask, ds):
     saved = saved_like(x)
     ab, tri, xn, norm, proj, gate, mu, rs = saved[:8]
     w1 = saved[8] if D == 256 else x.new_empty((8 * D, D))
-    if D==256 and len(saved)>9:
-        from ._h100_pack import pack_training_pair
-        pack_training_pair(w1,saved[9],(wg,wl,wlg,wr,wrg))
+    if len(saved) > {256:9,384:9,512:12}[D]:
+        pack_into(w1,wl,wlg,wr,wrg,saved[-1],wg)
     else:
         pack_into(w1, wl, wlg, wr, wrg)
     stats = x.new_empty((M, 2), dtype=torch.float32) if D == 256 else None
     _front(x, w1, ab, mask, gi, bi, xn, stats, None if D == 256 else saved[8])
     workspace = _workspace(x)
     _triangle(cell, ab, tri, workspace)
-    _output_norm(cell, tri, norm, go, bo, mu, rs, saved[9:] if D == 512 else None)
+    _output_norm(cell, tri, norm, go, bo, mu, rs, saved[9:12] if D == 512 else None)
     _lt(cell, "proj", norm, wp.t(), proj, workspace)
     _lt(cell, "gate", xn.reshape(M, D), wg.t(), gate, workspace)
     y = torch.empty_like(x)
@@ -671,6 +677,8 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
         tail[-3:-1] = [pg,pb]
     (_launch if native else _launch_cooperative)(k, grid, threads, smem, _params(source, [*maps, *tail]))
     if native:
+        if defer:
+            return pg,pb,dgo,dbo
         from ._h100_pack import finish_affine_partials
         finish_affine_partials(pg,pb,dgo,dbo)
 
@@ -738,7 +746,7 @@ def _source_d256(cell, xn, w1, dl, dr, gp, mask, partial):
     splits = 8 if n == 384 else 16
     defines = _defines(WEIGHT_SPLITS=splits)
     smem = 114816 + 256
-    if n == 384:
+    if n == 384 or (n == 768 and os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE") == "1"):
         # 208-register workers, 32-register producer: pool of 120 admits two CTAs.
         k = _kernel("source_d256_l384.cu", "mw_d256_register_budget_source", "upstream", defines,
                     smem, pool=("mw_d256_register_budget_source", 120, 208))
@@ -874,7 +882,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     ds = ds.reshape(n, D)
     dy = dy.contiguous()
     ab, tri, xn, norm, proj, gate, mu, rs = saved[:8]
-    fused_glue = D==256 and len(saved)>9
+    fused_glue = len(saved) > {256:9,384:9,512:12}[D]
     f32 = dict(device=x.device, dtype=torch.float32)
     dx = torch.empty_like(x)
     dp = x.new_empty((M, D))
@@ -915,7 +923,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     elif D == 256:
         _lt(cell, "dwp", dp.t(), norm, dwp, workspace)
         _lt(cell, "dwg", dxin[:D], xn.reshape(M, D), dwg, workspace)
-        _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo)
+        out_affine = _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=fused_glue)
         dl, dr = torch.empty_like(tri), torch.empty_like(tri)
         _lt(cell, "bc0", dt[:D], ab[H:H + D], dl[:D], workspace)
         _lt(cell, "bc1", dt[:D].transpose(-1, -2), ab[:D], dr[:D], workspace)
@@ -936,12 +944,12 @@ def backward(leaves, mask, ds, saved, dy, master=False):
         joint = cell in ((384, 384), (512, 768))
         if not joint:
             _lt(cell, "dwg", dxin[:D], xn.reshape(M, D), dwg, workspace)
-        _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo)
+        out_affine = _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=fused_glue)
         _contract_gp(cell, dt, ab, pre, mask, gp)
         if cell != (512, 768):
             _split_input_dw(cell, dxin, xn, partial, workspace, joint)
     if fused_glue:
-        wcat = saved[9]
+        wcat = saved[-1]
     elif T.preserve_training(D):
         from ._h100_pack import stack_backward_weights
         wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
