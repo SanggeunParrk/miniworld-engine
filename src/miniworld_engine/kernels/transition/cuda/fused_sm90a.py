@@ -41,9 +41,13 @@ ROWS = 128
 DW_REPL = 8
 
 
-def native_aux_enabled() -> bool:
-    """Opt-in live CUDA weight preparation and deterministic wide LN backward."""
-    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "0") == "1"
+def native_aux_enabled(d: int = 128) -> bool:
+    """Live CUDA preparation for the validated D128/D384 inference paths.
+
+    An explicit zero retains the frozen pre-sweep path for paired measurements.
+    Other widths remain experimental until their complete shape set wins.
+    """
+    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1" if d in (128, 384) else "0") == "1"
 
 
 @functools.lru_cache(maxsize=1)
@@ -242,7 +246,7 @@ def _master_pack_fake(wa, wb, ws):
 
 @opaque(fake=_master_pack_fake, name="transition_master_weight_pack_sm90a")
 def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if native_aux_enabled():
+    if native_aux_enabled(wa.shape[1]):
         return _cuda_prepare(wa, wb, ws)
     from miniworld_engine.integrations.h100_master import transition_pack_kernel
     a, b, s, st = _master_pack_fake(wa, wb, ws)
@@ -253,7 +257,7 @@ def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[
 
 
 def _cast_weights(weights, dtype):
-    if native_aux_enabled():
+    if native_aux_enabled(weights[0].shape[1]):
         return _cuda_prepare(*weights, False)[:3]
     if all(w.dtype == dtype for w in weights):
         return tuple(w.contiguous() for w in weights)

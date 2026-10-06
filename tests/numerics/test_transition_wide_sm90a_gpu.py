@@ -230,6 +230,28 @@ def test_saved_h_changes_nothing_but_the_kernel(d, monkeypatch):
 
 
 @needs_hopper
+@pytest.mark.parametrize("d", [128, 384])
+@pytest.mark.parametrize("bad", ["dtype", "rows", "expansion", "build"])
+def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
+    from miniworld_engine import settings
+    from miniworld_engine.modules import Transition
+    from miniworld_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
+
+    monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    settings.configure(engine_backend="auto", transition_fused_sm90a=True)
+    monkeypatch.delenv("MINIWORLD_TRANSITION_H100_CUDA_AUX", raising=False)
+    module = Transition(d, n=2 if bad == "expansion" else 4,
+                        implementation=ImplementationType.MINIWORLD).cuda()
+    x = torch.randn(127 if bad == "rows" else 128, d, device="cuda",
+                    dtype=torch.float32 if bad == "dtype" else torch.bfloat16)
+    if bad == "build":
+        monkeypatch.setattr(fused_sm90a, "available", lambda *_: False)
+        monkeypatch.setattr(fused_wide_sm90a, "available", lambda *_: False)
+    with pytest.raises(ValueError, match="H100 CUDA Transition"):
+        module(x)
+
+
+@needs_hopper
 @pytest.mark.parametrize("d,save_ab", [(64, False), (128, False), (256, False),
                                       (384, False), (512, False), (384, True), (512, True)],
                          ids=["D64-save0", "D128-save0", "D256-save0", "D384-save0",
