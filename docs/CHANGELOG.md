@@ -10,6 +10,8 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 token DiT training, faster: the pair-bias projection and its gradients on TF32 tensor cores, narrow weight
+  gradients split over rows. One block, A = 48, whole fused step: 1161 -> 1008 us at L128, 2898 -> 2675 at L384, 6599 -> 6369 at L768.
 - B200 fp32 AF3 local atom DiT inference, faster: three fused kernels per hoisted inference call (`atom_pre_tf32`,
   attention, `atom_post_tf32`), the weight pack in 3 launches, the conditioning tables in 2, PDL. 3 blocks, 5 samples: 1.59-1.98x
   Anthropic's FastAtomStack fp32 per call, 1.14-1.39x with hoisted tables, at 1024-6144 atoms. Page: `docs/gpus/b200/local_dit/local_dit.md`.

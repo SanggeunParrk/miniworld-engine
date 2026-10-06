@@ -1,9 +1,10 @@
 // Token DiT TRAINING row kernels (CUDA): every elementwise / row step of the fused training block
 // (integrations/token_dit_train.py), forward and backward. The GEMMs between them are cuBLAS, the attention core sm_100a.
 //
-// Layout: a block of NT = width / 4 threads walks RPB rows; a thread always owns the same 4 columns, so the per-column
-// gradient sums (biases, qk-norm weights) accumulate in registers across the block's rows and leave as one row of a
-// [blocks, width] partial buffer that the host sums. Row statistics are block sums. x / x1 / dx are fp32 (the residual stream), every
+// Layout: a block of NT = width / 4 threads walks rpb consecutive rows (bf16: RPB = 8; fp32: one resident wave of blocks, the
+// rows dealt evenly -- row_grid); a thread always owns the same 4 columns, so the per-column gradient sums (biases, qk-norm
+// weights) accumulate in registers across the block's rows and leave as one row of a [blocks, width] partial buffer that the host
+// sums. Row statistics are block sums. x / x1 / dx are fp32 (the residual stream), every
 // GEMM operand AT (bf16 on the bf16 path, fp32 on the fp32 path), the block's input / output dtype T (bf16 or fp32).
 //
 //   forward   cond_prep    c -> c_hat = LN(c) bf16, c bf16, (mean, rstd)                          (d_cond = 384)
@@ -13,11 +14,18 @@
 //             res_adaln_b  x1 = x + sigmoid(Gg[:, 0:D] + bg1) y;  xt = sigmoid(G[:, 2D:3D] + bs2) LN(x1) + G[:, 3D:4D]
 //             res_c        out = x1 + sigmoid(Gg[:, D:2D] + bg2) z
 //             pair_ln      p_hat = LN(pair) bf16 and (mean, rstd)                                  (d_pair = 128)
-//   backward  res_c_bwd, swiglu_bwd, res_adaln_b_bwd, gate_o_bwd, qknorm_bwd, adaln_a_bwd, cond_bwd, unfold_lnw, pair_ln_bwd
+//             pair_bias    (fp32 path) LN(pair) folded straight into the head-major bias, key mask as -inf
+//   backward  res_c_bwd, swiglu_bwd, res_adaln_b_bwd, gate_o_bwd, qknorm_bwd, adaln_a_bwd, cond_bwd, unfold_lnw, pair_ln_bwd,
+//             pair_bias_bwd (fp32 path: dpair and the dWf partials in one pass)
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
+
+#include <algorithm>
+#include <mutex>
+#include <type_traits>
+#include <unordered_map>
 
 #include "token_dit_common.cuh"
 
@@ -57,18 +65,16 @@ __device__ __forceinline__ void part_store(float* part, long stride, float4 v) {
 // ------------------------------------------------------------------------------------------------------------- forward
 template <typename CT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT* __restrict__ CHAT, AT* __restrict__ CBF,
-    float2* __restrict__ CST, int M, float eps) {
+    float2* __restrict__ CST, int M, int rpb, float eps) {
   __shared__ float red[NTC / 32];
   const int col = threadIdx.x * 4;
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const float4 c = V4<CT>::load(C + r * DC + col);
     const float mean = block_sum<NTC>(sum4(c), red) / DC;
     const float4 d = make_float4(c.x - mean, c.y - mean, c.z - mean, c.w - mean);
     const float rstd = rsqrtf(block_sum<NTC>(sum4(mul4(d, d)), red) / DC + eps);
     V4<AT>::store(CHAT + r * DC + col, make_float4(d.x * rstd, d.y * rstd, d.z * rstd, d.w * rstd));
-    V4<AT>::store(CBF + r * DC + col, c);
+    if (CBF) V4<AT>::store(CBF + r * DC + col, c);                       // none: the GEMM reads c itself (fp32 c, fp32 operands)
     if (threadIdx.x == 0) CST[r] = make_float2(mean, rstd);
   }
 }
@@ -77,13 +83,11 @@ __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT*
 // receives the fp32 residual (the backward and res_adaln_b read it)
 template <typename XT, typename AT>
 __global__ void __launch_bounds__(NT) adaln_a_k(const XT* __restrict__ X, float* __restrict__ XO, const AT* __restrict__ G, long sg,
-    const float* __restrict__ BS, AT* __restrict__ XA, float2* __restrict__ XST, int M, float eps) {
+    const float* __restrict__ BS, AT* __restrict__ XA, float2* __restrict__ XST, int M, int rpb, float eps) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bs = V4<float>::load(BS + col);
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const float4 x = V4<XT>::load(X + r * D + col);
     if (XO) V4<float>::store(XO + r * D + col, x);
     const float mean = block_sum<NT>(sum4(x), red) / D;
@@ -111,14 +115,12 @@ __device__ __forceinline__ float head_sum(float v, float* part) {
 template <typename AT>
 __global__ void __launch_bounds__(NT) qknorm_k(const AT* __restrict__ QKVG, const float* __restrict__ WQ,
     const float* __restrict__ WK, AT* __restrict__ QN, AT* __restrict__ KN, AT* __restrict__ VC, float* __restrict__ RQK,
-    int M, float eq, float ek, int qk) {
+    int M, int rpb, float eq, float ek, int qk) {
   __shared__ float part[NT];
   const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   const float4 wq = qk ? V4<float>::load(WQ + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
   const float4 wk = qk ? V4<float>::load(WK + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const AT* row = QKVG + r * 4 * D;
     float4 q = V4<AT>::load(row + col), k = V4<AT>::load(row + D + col);
     if (qk) {
@@ -130,17 +132,15 @@ __global__ void __launch_bounds__(NT) qknorm_k(const AT* __restrict__ QKVG, cons
     }
     V4<AT>::store(QN + r * D + col, q);
     V4<AT>::store(KN + r * D + col, k);
-    V4<AT>::store(VC + r * D + col, V4<AT>::load(row + 2 * D + col));
+    if (VC) V4<AT>::store(VC + r * D + col, V4<AT>::load(row + 2 * D + col));   // none: the core reads v from qkvg
   }
 }
 
 template <typename AT>
 __global__ void __launch_bounds__(NT) gate_o_k(const float* __restrict__ O, const AT* __restrict__ QKVG, AT* __restrict__ OG,
-    int M) {
+    int M, int rpb) {
   const int col = threadIdx.x * 4;
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     V4<AT>::store(OG + r * D + col, mul4(sig4(V4<AT>::load(QKVG + r * 4 * D + 3 * D + col)), V4<float>::load(O + r * D + col)));
   }
 }
@@ -148,13 +148,11 @@ __global__ void __launch_bounds__(NT) gate_o_k(const float* __restrict__ O, cons
 template <typename AT>
 __global__ void __launch_bounds__(NT) res_adaln_b_k(const float* __restrict__ X, const AT* __restrict__ Y,
     const AT* __restrict__ GG, long sgg, const float* __restrict__ BG1, const AT* __restrict__ G, long sg,
-    const float* __restrict__ BS2, float* __restrict__ X1, AT* __restrict__ XT, float2* __restrict__ X1ST, int M, float eps) {
+    const float* __restrict__ BS2, float* __restrict__ X1, AT* __restrict__ XT, float2* __restrict__ X1ST, int M, int rpb, float eps) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bg = V4<float>::load(BG1 + col), bs = V4<float>::load(BS2 + col);
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const float4 x1 = add4(V4<float>::load(X + r * D + col),
                            mul4(sig4(add4(V4<AT>::load(GG + r * sgg + col), bg)), V4<AT>::load(Y + r * D + col)));
     V4<float>::store(X1 + r * D + col, x1);
@@ -170,12 +168,10 @@ __global__ void __launch_bounds__(NT) res_adaln_b_k(const float* __restrict__ X,
 
 template <typename OT, typename AT>
 __global__ void __launch_bounds__(NT) res_c_k(const float* __restrict__ X1, const AT* __restrict__ Z, const AT* __restrict__ GG,
-    long sgg, const float* __restrict__ BG2, OT* __restrict__ OUT, int M) {
+    long sgg, const float* __restrict__ BG2, OT* __restrict__ OUT, int M, int rpb) {
   const int col = threadIdx.x * 4;
   const float4 bg = V4<float>::load(BG2 + col);
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     V4<OT>::store(OUT + r * D + col, add4(V4<float>::load(X1 + r * D + col),
         mul4(sig4(add4(V4<AT>::load(GG + r * sgg + D + col), bg)), V4<AT>::load(Z + r * D + col))));
   }
@@ -199,13 +195,11 @@ __global__ void __launch_bounds__(256) pair_ln_k(const ZT* __restrict__ Z, long 
 // ------------------------------------------------------------------------------------------------------------ backward
 template <typename OT, typename AT>
 __global__ void __launch_bounds__(NT) res_c_bwd_k(const OT* __restrict__ DOUT, const AT* __restrict__ Z, const AT* __restrict__ GG,
-    long sgg, const float* __restrict__ BG2, AT* __restrict__ DZ, AT* __restrict__ DGG, long sdg, float* __restrict__ PG2, long sp, int M) {
+    long sgg, const float* __restrict__ BG2, AT* __restrict__ DZ, AT* __restrict__ DGG, long sdg, float* __restrict__ PG2, long sp, int M, int rpb) {
   const int col = threadIdx.x * 4;
   const float4 bg = V4<float>::load(BG2 + col);
   float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const float4 dout = V4<OT>::load(DOUT + r * D + col), z = V4<AT>::load(Z + r * D + col);
     const float4 s = sig4(add4(V4<AT>::load(GG + r * sgg + D + col), bg));
     V4<AT>::store(DZ + r * D + col, mul4(dout, s));
@@ -233,23 +227,21 @@ __global__ void __launch_bounds__(384) swiglu_bwd_k(const AT* __restrict__ DH, c
 }
 
 template <typename OT, typename AT>
-__global__ void __launch_bounds__(NT) res_adaln_b_bwd_k(const OT* __restrict__ DOUT, const AT* __restrict__ DXT,
+__global__ void __launch_bounds__(NT) res_adaln_b_bwd_k(const OT* __restrict__ DOUT, const AT* DXT, long sxt, int dxt_in_dg,
     const float* __restrict__ X1, const float2* __restrict__ X1ST, const AT* __restrict__ G, long sg, const float* __restrict__ BS2,
     const AT* __restrict__ GG, long sgg, const float* __restrict__ BG1, const AT* __restrict__ Y, float* __restrict__ DX1,
-    AT* __restrict__ DY, AT* __restrict__ DG, long sdg, AT* __restrict__ DGG, long sdgg, float* __restrict__ PS2,
-    float* __restrict__ PG1, long sp, int M) {
+    AT* __restrict__ DY, AT* DG, long sdg, AT* __restrict__ DGG, long sdgg, float* __restrict__ PS2,
+    float* __restrict__ PG1, long sp, int M, int rpb) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bs = V4<float>::load(BS2 + col), bg = V4<float>::load(BG1 + col);
   float4 acc_s = make_float4(0.f, 0.f, 0.f, 0.f), acc_g = acc_s;
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
-    const float4 dxt = V4<AT>::load(DXT + r * D + col), x1 = V4<float>::load(X1 + r * D + col);
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
+    const float4 dxt = V4<AT>::load(DXT + r * sxt + col), x1 = V4<float>::load(X1 + r * D + col);
     const float2 st = X1ST[r];
     const float4 xh = make_float4((x1.x - st.x) * st.y, (x1.y - st.x) * st.y, (x1.z - st.x) * st.y, (x1.w - st.x) * st.y);
     const float4 s2 = sig4(add4(V4<AT>::load(G + r * sg + 2 * D + col), bs));
-    V4<AT>::store(DG + r * sdg + 3 * D + col, dxt);
+    if (!dxt_in_dg) V4<AT>::store(DG + r * sdg + 3 * D + col, dxt);     // dxt_in_dg: the dxt GEMM wrote it there
     const float4 ds2 = rnd<AT>(dsig4(mul4(dxt, xh), s2));
     V4<AT>::store(DG + r * sdg + 2 * D + col, ds2);
     acc_s = add4(acc_s, ds2);
@@ -272,12 +264,10 @@ __global__ void __launch_bounds__(NT) res_adaln_b_bwd_k(const OT* __restrict__ D
 // og = sigmoid(g) o: dO = dog s (bf16, the core's input), D = rowsum_head(dO o) (the core backward's prep), dg = dog o s (1 - s)
 template <typename AT>
 __global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, const float* __restrict__ O, const AT* __restrict__ QKVG,
-    AT* __restrict__ DOB, float* __restrict__ DD, AT* __restrict__ DQKVG, int M, int L) {
+    AT* __restrict__ DOB, float* __restrict__ DD, AT* __restrict__ DQKVG, int M, int rpb, int L) {
   __shared__ float part[NT];
   const int col = threadIdx.x * 4, h = threadIdx.x / HT;
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const float4 dog = V4<AT>::load(DOG + r * D + col), o = V4<float>::load(O + r * D + col);
     const float4 s = sig4(V4<AT>::load(QKVG + r * 4 * D + 3 * D + col));
     const float4 d_o = mul4(dog, s);
@@ -291,20 +281,18 @@ __global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, c
 // qn = q rq wq: dq = rq (dqn wq - q rq mean_head(dqn wq q rq)); same for k; dv copied. AT into dqkvg[:, 0:3D]. dbq (column sums
 // of dq) and dwq, dwk (dqn * q rq summed over rows and heads) accumulate per block.
 template <typename AT>
-__global__ void __launch_bounds__(NT) qknorm_bwd_k(const float* __restrict__ DQ, const float* __restrict__ DK, const float* __restrict__ DV,
-    const AT* __restrict__ QKVG, const float* __restrict__ RQK, const float* __restrict__ WQ, const float* __restrict__ WK,
-    AT* __restrict__ DQKVG, float* __restrict__ PBQ, float* __restrict__ DWQK, long sp, long sw, int M, int qk) {
+__global__ void __launch_bounds__(NT) qknorm_bwd_k(const float* DQ, const float* DK, const float* DV, long sq, long sk, long sv,
+    int alias, const AT* __restrict__ QKVG, const float* __restrict__ RQK, const float* __restrict__ WQ, const float* __restrict__ WK,
+    AT* DQKVG, float* __restrict__ PBQ, float* __restrict__ DWQK, long sp, long sw, int M, int rpb, int qk) {
   __shared__ float part[NT];
   const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   const float4 wq = qk ? V4<float>::load(WQ + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
   const float4 wk = qk ? V4<float>::load(WK + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
   float4 acc_b = make_float4(0.f, 0.f, 0.f, 0.f), acc_wq = acc_b, acc_wk = acc_b;
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
 #pragma unroll
     for (int t = 0; t < 2; ++t) {
-      const float4 dn = V4<float>::load((t == 0 ? DQ : DK) + r * D + col);
+      const float4 dn = V4<float>::load(t == 0 ? DQ + r * sq + col : DK + r * sk + col);
       float4 dx = dn;
       if (qk) {
         const float4 x = V4<AT>::load(QKVG + r * 4 * D + t * D + col);
@@ -316,31 +304,29 @@ __global__ void __launch_bounds__(NT) qknorm_bwd_k(const float* __restrict__ DQ,
         if (t == 0) acc_wq = add4(acc_wq, mul4(dn, xh)); else acc_wk = add4(acc_wk, mul4(dn, xh));
       }
       const float4 dxb = rnd<AT>(dx);
-      V4<AT>::store(DQKVG + r * 4 * D + t * D + col, dxb);
+      if (qk || !(alias & (1 << t))) V4<AT>::store(DQKVG + r * 4 * D + t * D + col, dxb);   // aliased and unchanged: already there
       if (t == 0) acc_b = add4(acc_b, dxb);
     }
-    V4<AT>::store(DQKVG + r * 4 * D + 2 * D + col, V4<float>::load(DV + r * D + col));
+    if (!(alias & 4)) V4<AT>::store(DQKVG + r * 4 * D + 2 * D + col, V4<float>::load(DV + r * sv + col));
   }
   part_store(PBQ, sp, acc_b);
   if (qk) { part_store(DWQK, sw, acc_wq); part_store(DWQK + D, sw, acc_wk); }
 }
 
 template <typename OT, typename AT>
-__global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* __restrict__ DXA, const float* __restrict__ X, const float2* __restrict__ XST,
-    const AT* __restrict__ G, long sg, const float* __restrict__ BS1, const float* __restrict__ DX1, OT* __restrict__ DX,
-    AT* __restrict__ DG, long sdg, float* __restrict__ PS1, long sp, int M) {
+__global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int dxa_in_dg, const float* __restrict__ X,
+    const float2* __restrict__ XST, const AT* __restrict__ G, long sg, const float* __restrict__ BS1, const float* __restrict__ DX1,
+    OT* __restrict__ DX, AT* DG, long sdg, float* __restrict__ PS1, long sp, int M, int rpb) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bs = V4<float>::load(BS1 + col);
   float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
-    const float4 dxa = V4<AT>::load(DXA + r * D + col), x = V4<float>::load(X + r * D + col);
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
+    const float4 dxa = V4<AT>::load(DXA + r * sxa + col), x = V4<float>::load(X + r * D + col);
     const float2 st = XST[r];
     const float4 xh = make_float4((x.x - st.x) * st.y, (x.y - st.x) * st.y, (x.z - st.x) * st.y, (x.w - st.x) * st.y);
     const float4 s = sig4(add4(V4<AT>::load(G + r * sg + col), bs));
-    V4<AT>::store(DG + r * sdg + D + col, dxa);
+    if (!dxa_in_dg) V4<AT>::store(DG + r * sdg + D + col, dxa);         // dxa_in_dg: the dxa GEMM wrote it there
     const float4 ds1 = rnd<AT>(dsig4(mul4(dxa, xh), s));
     V4<AT>::store(DG + r * sdg + col, ds1);
     acc = add4(acc, ds1);
@@ -355,12 +341,10 @@ __global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* __restrict__ DXA, 
 
 template <typename CT, typename OT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_bwd_k(const AT* __restrict__ DCHAT, const AT* __restrict__ DCG, const CT* __restrict__ C,
-    const float2* __restrict__ CST, OT* __restrict__ DCO, int M) {
+    const float2* __restrict__ CST, OT* __restrict__ DCO, int M, int rpb) {
   __shared__ float red[NTC / 32];
   const int col = threadIdx.x * 4;
-  for (int i = 0; i < RPB; ++i) {
-    const long r = (long)blockIdx.x * RPB + i;
-    if (r >= M) break;
+  for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const float4 dch = V4<AT>::load(DCHAT + r * DC + col), c = V4<CT>::load(C + r * DC + col);
     const float2 st = CST[r];
     const float4 ch = make_float4((c.x - st.x) * st.y, (c.y - st.x) * st.y, (c.z - st.x) * st.y, (c.w - st.x) * st.y);
@@ -403,6 +387,155 @@ __global__ void __launch_bounds__(256) pair_ln_bwd_k(const float* __restrict__ D
                                                      st.y * (dxh.z - m1 - xh.z * m2), st.y * (dxh.w - m1 - xh.w * m2)));
 }
 
+// ------------------------------------------------------------------------------------------------- pair bias (fp32 path)
+// The pair bias in one pass each way (the fp32 path; bf16 keeps pair_ln + a GEMM): forward LN of the 128-wide pair rows and
+// bias[h, r] = sum_c LN(z)[r, c] Wf[h, c] (Wf = Wb diag(wp), the LN weight folded) with the key mask as -inf, no LN(z) written;
+// backward recomputes LN(z) from the saved (mean, rstd), dxh = sum_h dbias[h, r] Wf[h, :] -> the LN backward, and dWf = dbias LN(z)
+// as per-block partial rows [blocks, NHH 128] the host sums. Persistent blocks walk tiles of PT rows: a warp per row for the row
+// work, the three small products on TF32 tensor cores (mma.sync m16n8k8, fp32 accumulation -- the TF32 the cuBLAS GEMMs they
+// replace ran; on the FMA pipe with shared-memory operands the products were the kernels' whole cost, 269 / 404 us at L768).
+// Heads are padded to HPAD (a multiple of 16) with zero weights / zero dbias rows. Shared-memory row strides are chosen so every
+// fragment load is conflict-free (132: lanes (g, t) -> bank 4g + t; 136: lanes (t, g) -> bank 8t + g).
+constexpr int PT = 32, HPAD = ((NHH + 15) / 16) * 16;
+
+__device__ __forceinline__ uint32_t tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
+// d += A (16 x 8, row) B (8 x 8, col): a0 (g, t), a1 (g + 8, t), a2 (g, t + 4), a3 (g + 8, t + 4); b0 (k t, n g), b1 (k t + 4, n g);
+// d0 (g, 2t), d1 (g, 2t + 1), d2 (g + 8, 2t), d3 (g + 8, 2t + 1); g = lane / 4, t = lane % 4
+__device__ __forceinline__ void mma_tf32(float (&d)[4], float a0, float a1, float a2, float a3, float b0, float b1) {
+  asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+               : "r"(tf32r(a0)), "r"(tf32r(a1)), "r"(tf32r(a2)), "r"(tf32r(a3)), "r"(tf32r(b0)), "r"(tf32r(b1)));
+}
+
+template <typename ZT>
+__global__ void __launch_bounds__(256) pair_bias_k(const ZT* __restrict__ Z, long sz, const float* __restrict__ WF,
+    const bool* __restrict__ MASK, float* __restrict__ BIAS, float2* __restrict__ PST, long R, int L, float eps) {
+  constexpr int S = 132;                                                   // A (rows g, cols t) and B (heads g, cols t): bank 4g + t
+  __shared__ __align__(16) float wf[HPAD * S];
+  __shared__ __align__(16) float ph[PT * S];
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane >> 2, t = lane & 3;
+  for (int i = threadIdx.x; i < HPAD * 32; i += 256) {
+    const int h = i / 32, c4 = i % 32;
+    *reinterpret_cast<float4*>(wf + h * S + 4 * c4) = h < NHH ? reinterpret_cast<const float4*>(WF)[h * 32 + c4] : make_float4(0.f, 0.f, 0.f, 0.f);
+  }
+  const long ntile = (R + PT - 1) / PT;
+  for (long tl = blockIdx.x; tl < ntile; tl += gridDim.x) {
+    const long r0 = tl * PT;
+    __syncthreads();                                                       // wf in; the previous tile's LN(z) consumed
+    for (int j = warp; j < PT; j += 8) {
+      const long r = r0 + j;
+      float4 xh = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (r < R) {
+        const float4 z = V4<ZT>::load(Z + r * sz + lane * 4);
+        const float mean = warp_sum(sum4(z)) / 128.f;
+        const float4 d = make_float4(z.x - mean, z.y - mean, z.z - mean, z.w - mean);
+        const float rstd = rsqrtf(warp_sum(sum4(mul4(d, d))) / 128.f + eps);
+        xh = make_float4(d.x * rstd, d.y * rstd, d.z * rstd, d.w * rstd);
+        if (lane == 0) PST[r] = make_float2(mean, rstd);
+      }
+      *reinterpret_cast<float4*>(ph + j * S + lane * 4) = xh;
+    }
+    __syncthreads();
+    // bias^T [32 rows x HPAD] = LN(z) [32 x 128] Wf^T [128 x HPAD]: (row tile, head tile) items, one per warp
+    constexpr int NIT = 2 * (HPAD / 8);
+    if (warp < NIT) {
+      const int mt = warp & 1, nt = warp >> 1;
+      const float* pa = ph + (mt * 16 + g) * S + t;
+      const float* pb = wf + (nt * 8 + g) * S + t;
+      float d[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+      for (int k0 = 0; k0 < 128; k0 += 8) mma_tf32(d, pa[k0], pa[8 * S + k0], pa[k0 + 4], pa[8 * S + k0 + 4], pb[k0], pb[k0 + 4]);
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        const long r = r0 + mt * 16 + g + (e >= 2 ? 8 : 0);
+        const int h = nt * 8 + 2 * t + (e & 1);
+        if (r < R && h < NHH) BIAS[(long)h * R + r] = (MASK != nullptr && !MASK[r % L]) ? -INFINITY : d[e];   // r = query L + key
+      }
+    }
+  }
+}
+
+template <typename ZT>
+__global__ void __launch_bounds__(256) pair_bias_bwd_k(const float* __restrict__ DB, const ZT* __restrict__ Z, long sz,
+    const float2* __restrict__ PST, const float* __restrict__ WF, ZT* __restrict__ DZ, float* __restrict__ PART, long R) {
+  constexpr int WS = 136, XS = 136, TS = HPAD + 4, AS = PT + 4;
+  __shared__ __align__(16) float wf[HPAD * WS];                           // Wf [heads][128]: B of dxh (k = head t, n = column g)
+  __shared__ __align__(16) float xs[PT * XS];                             // dxh, then LN(z), of the tile's rows: B of dWf
+  __shared__ float dbt[PT * TS];                                           // dbias [rows][heads]: A of dxh
+  __shared__ float dba[HPAD * AS];                                         // dbias [heads][rows]: A of dWf
+  constexpr int NACC = (HPAD / 16) * 16 / 8;                               // dWf (head tile, column tile) accumulators per warp
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane >> 2, t = lane & 3;
+  for (int i = threadIdx.x; i < HPAD * 32; i += 256) {
+    const int h = i / 32, c4 = i % 32;
+    *reinterpret_cast<float4*>(wf + h * WS + 4 * c4) = h < NHH ? reinterpret_cast<const float4*>(WF)[h * 32 + c4] : make_float4(0.f, 0.f, 0.f, 0.f);
+  }
+  float acc[NACC][4];
+#pragma unroll
+  for (int q = 0; q < NACC; ++q) acc[q][0] = acc[q][1] = acc[q][2] = acc[q][3] = 0.f;
+  const long ntile = (R + PT - 1) / PT;
+  for (long tl = blockIdx.x; tl < ntile; tl += gridDim.x) {
+    const long r0 = tl * PT;
+    __syncthreads();                                                       // wf in; the previous tile's db / xs consumed
+    for (int i = threadIdx.x; i < HPAD * PT; i += 256) {                   // dbias[:, tile], 32 consecutive rows per head
+      const int h = i / PT, j = i % PT;
+      const long r = r0 + j;
+      const float v = (h < NHH && r < R) ? DB[(long)h * R + r] : 0.f;
+      dba[h * AS + j] = v;
+      dbt[j * TS + h] = v;
+    }
+    __syncthreads();
+    // dxh [32 x 128] = dbias^T [32 x HPAD] Wf [HPAD x 128]: 2 row tiles x 16 column tiles, 4 per warp
+    for (int it = warp; it < 32; it += 8) {
+      const int mt = it & 1, nt = it >> 1;
+      const float* pa = dbt + (mt * 16 + g) * TS + t;
+      const float* pb = wf + t * WS + nt * 8 + g;
+      float d[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+      for (int k0 = 0; k0 < HPAD; k0 += 8)
+        mma_tf32(d, pa[k0], pa[8 * TS + k0], pa[k0 + 4], pa[8 * TS + k0 + 4], pb[k0 * WS], pb[(k0 + 4) * WS]);
+      float* px = xs + (mt * 16 + g) * XS + nt * 8 + 2 * t;
+      *reinterpret_cast<float2*>(px) = make_float2(d[0], d[1]);
+      *reinterpret_cast<float2*>(px + 8 * XS) = make_float2(d[2], d[3]);
+    }
+    __syncthreads();
+    // the LN backward, a warp per row; the row's LN(z) then replaces its dxh in xs
+    for (int j = warp; j < PT; j += 8) {
+      const long r = r0 + j;
+      float4 xh = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (r < R) {
+        const float2 st = PST[r];
+        const float4 z = V4<ZT>::load(Z + r * sz + lane * 4);
+        xh = make_float4((z.x - st.x) * st.y, (z.y - st.x) * st.y, (z.z - st.x) * st.y, (z.w - st.x) * st.y);
+        const float4 dxh = *reinterpret_cast<const float4*>(xs + j * XS + lane * 4);
+        const float m1 = warp_sum(sum4(dxh)) / 128.f, m2 = warp_sum(sum4(mul4(dxh, xh))) / 128.f;
+        V4<ZT>::store(DZ + r * 128 + lane * 4, make_float4(st.y * (dxh.x - m1 - xh.x * m2), st.y * (dxh.y - m1 - xh.y * m2),
+                                                           st.y * (dxh.z - m1 - xh.z * m2), st.y * (dxh.w - m1 - xh.w * m2)));
+      }
+      __syncwarp();
+      *reinterpret_cast<float4*>(xs + j * XS + lane * 4) = xh;
+    }
+    __syncthreads();
+    // dWf [HPAD x 128] += dbias [HPAD x 32] LN(z) [32 x 128]: (head tile, column tile) accumulators, NACC per warp, over the tile
+#pragma unroll
+    for (int q = 0; q < NACC; ++q) {
+      const int it = warp + 8 * q, hm = it >> 4, cn = it & 15;
+      const float* pa = dba + (hm * 16 + g) * AS + t;
+      const float* pb = xs + t * XS + cn * 8 + g;
+#pragma unroll
+      for (int k0 = 0; k0 < PT; k0 += 8)
+        mma_tf32(acc[q], pa[k0], pa[8 * AS + k0], pa[k0 + 4], pa[8 * AS + k0 + 4], pb[k0 * XS], pb[(k0 + 4) * XS]);
+    }
+  }
+#pragma unroll
+  for (int q = 0; q < NACC; ++q) {
+    const int it = warp + 8 * q, hm = it >> 4, cn = it & 15, c = cn * 8 + 2 * t;
+    float* prow = PART + (long)blockIdx.x * NHH * 128;
+    const int h0 = hm * 16 + g, h1 = h0 + 8;
+    if (h0 < NHH) *reinterpret_cast<float2*>(prow + h0 * 128 + c) = make_float2(acc[q][0], acc[q][1]);
+    if (h1 < NHH) *reinterpret_cast<float2*>(prow + h1 * 128 + c) = make_float2(acc[q][2], acc[q][3]);
+  }
+}
+
 // -------------------------------------------------------------------------------------------------------------- host
 #define TDT_DISPATCH(T, NAME, ...)                                                                   \
   [&] {                                                                                              \
@@ -413,6 +546,7 @@ __global__ void __launch_bounds__(256) pair_ln_bwd_k(const float* __restrict__ D
 
 template <typename C> C* P(const at::Tensor& t) { return reinterpret_cast<C*>(t.data_ptr()); }
 template <typename C> const C* CP(const at::Tensor& t) { return reinterpret_cast<const C*>(t.data_ptr()); }
+template <typename C> C* OP(const c10::optional<at::Tensor>& t) { return t ? P<C>(*t) : nullptr; }
 cudaStream_t S() { return at::cuda::getCurrentCUDAStream(); }
 unsigned blocks(int64_t M) { return (unsigned)((M + RPB - 1) / RPB); }
 // every GEMM operand of one call shares the dtype of `ref` (bf16 or fp32) and has unit column stride
@@ -421,14 +555,52 @@ void actc(const at::Tensor& t, const at::Tensor& ref, const char* n) {
 }
 void f32c(const at::Tensor& t, const char* n) { TORCH_CHECK(t.scalar_type() == at::kFloat && t.is_contiguous(), n, ": contiguous fp32"); }
 
-void cond_prep(at::Tensor c, at::Tensor chat, at::Tensor cbf, at::Tensor cst, double eps) {
+int nsm() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+// resident blocks per SM of a kernel at `threads` threads (cached per kernel)
+template <typename K> int occupancy(K* kern, int threads) {
+  static std::mutex mu;
+  static std::unordered_map<const void*, int> cache;
+  std::lock_guard<std::mutex> lock(mu);
+  auto it = cache.find(reinterpret_cast<const void*>(kern));
+  if (it != cache.end()) return it->second;
+  int n = 0;
+  C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, kern, threads, 0));
+  return cache[reinterpret_cast<const void*>(kern)] = std::max(n, 1);
+}
+
+// The row grid of the D / d_cond-wide kernels. bf16: RPB rows per block, ceil(M / RPB) blocks, as always. fp32: one wave -- every
+// block resident at once (SM count x the kernel's occupancy), the rows dealt evenly, ceil(M / blocks) each: the RPB grid left
+// the last wave 56 % full at L384 (2304 blocks over 1480 slots) and the kernels at 5-5.7 TB/s. `fixed` > 0: exactly that many
+// blocks (the rows of a partial buffer, every one of which is written, zeros by blocks without rows).
+struct RowGrid { unsigned grid; int rpb; };
+template <typename AT, typename K> RowGrid row_grid(K* kern, int threads, int64_t M, int64_t fixed = 0) {
+  if (!std::is_same<AT, float>::value) {
+    TORCH_CHECK(fixed == 0 || fixed == (int64_t)blocks(M), "partial buffer rows: ceil(M / 8) on the bf16 path");
+    return {blocks(M), RPB};
+  }
+  const int64_t g = fixed > 0 ? fixed : std::max<int64_t>(1, std::min<int64_t>(M, (int64_t)nsm() * occupancy(kern, threads)));
+  const int rpb = (int)std::max<int64_t>(1, (M + g - 1) / g);
+  return {(unsigned)(fixed > 0 ? fixed : (M + rpb - 1) / rpb), rpb};
+}
+
+// rows of the backward's shared partial buffer (res_c_bwd, res_adaln_b_bwd, qknorm_bwd, adaln_a_bwd): bf16 ceil(M / 8); fp32 the
+// SM count x the lowest occupancy of the four, so every block of each is resident at once
+int64_t part_rows(int64_t M, bool fp32) {
+  if (!fp32) return blocks(M);
+  const int o = std::min(std::min(occupancy(res_c_bwd_k<float, float>, NT), occupancy(res_adaln_b_bwd_k<float, float>, NT)),
+                         std::min(occupancy(qknorm_bwd_k<float>, NT), occupancy(adaln_a_bwd_k<float, float>, NT)));
+  return std::max<int64_t>(1, std::min<int64_t>(M, (int64_t)nsm() * o));
+}
+
+void cond_prep(at::Tensor c, at::Tensor chat, c10::optional<at::Tensor> cbf, at::Tensor cst, double eps) {
   const int64_t M = chat.size(0);
   TORCH_CHECK(c.is_contiguous() && c.numel() == M * DC, "cond_prep: contiguous [M, 384]");
-  actc(cbf, chat, "cbf");
+  if (cbf) actc(*cbf, chat, "cbf");
   const at::cuda::CUDAGuard g(c.device());
   TDT_DISPATCH(chat.scalar_type(), AT, [&] {
     TDT_DISPATCH(c.scalar_type(), CT, [&] {
-      cond_prep_k<CT, AT><<<blocks(M), NTC, 0, S()>>>(CP<CT>(c), P<AT>(chat), P<AT>(cbf), P<float2>(cst), (int)M, (float)eps);
+      const RowGrid rg = row_grid<AT>(cond_prep_k<CT, AT>, NTC, M);
+      cond_prep_k<CT, AT><<<rg.grid, NTC, 0, S()>>>(CP<CT>(c), P<AT>(chat), OP<AT>(cbf), P<float2>(cst), (int)M, rg.rpb, (float)eps);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -444,22 +616,26 @@ void adaln_a(at::Tensor x, at::Tensor G, at::Tensor bs, at::Tensor xa, at::Tenso
   float* xop = xo ? P<float>(*xo) : nullptr;
   TDT_DISPATCH(G.scalar_type(), AT, [&] {
     TDT_DISPATCH(x.scalar_type(), XT, [&] {
-      adaln_a_k<XT, AT><<<blocks(M), NT, 0, S()>>>(CP<XT>(x), xop, CP<AT>(G), G.stride(0), CP<float>(bs), P<AT>(xa), P<float2>(xst),
-                                                   (int)M, (float)eps);
+      const RowGrid rg = row_grid<AT>(adaln_a_k<XT, AT>, NT, M);
+      adaln_a_k<XT, AT><<<rg.grid, NT, 0, S()>>>(CP<XT>(x), xop, CP<AT>(G), G.stride(0), CP<float>(bs), P<AT>(xa), P<float2>(xst),
+                                                 (int)M, rg.rpb, (float)eps);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void qknorm(at::Tensor qkvg, at::Tensor wq, at::Tensor wk, at::Tensor qn, at::Tensor kn, at::Tensor vc, at::Tensor rqk,
+// vc none: v is not copied (the core reads it as a column view of qkvg)
+void qknorm(at::Tensor qkvg, at::Tensor wq, at::Tensor wk, at::Tensor qn, at::Tensor kn, c10::optional<at::Tensor> vc, at::Tensor rqk,
             double eq, double ek, bool qk) {
   const int64_t M = qkvg.size(0);
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.size(1) == 4 * D, "qknorm: qkvg [M, 3072]");
-  actc(qn, qkvg, "qn"); actc(kn, qkvg, "kn"); actc(vc, qkvg, "vc");
+  actc(qn, qkvg, "qn"); actc(kn, qkvg, "kn");
+  if (vc) actc(*vc, qkvg, "vc");
   const at::cuda::CUDAGuard g(qkvg.device());
   TDT_DISPATCH(qkvg.scalar_type(), AT, [&] {
-    qknorm_k<AT><<<blocks(M), NT, 0, S()>>>(CP<AT>(qkvg), CP<float>(wq), CP<float>(wk), P<AT>(qn), P<AT>(kn), P<AT>(vc), P<float>(rqk),
-                                            (int)M, (float)eq, (float)ek, qk ? 1 : 0);
+    const RowGrid rg = row_grid<AT>(qknorm_k<AT>, NT, M);
+    qknorm_k<AT><<<rg.grid, NT, 0, S()>>>(CP<AT>(qkvg), CP<float>(wq), CP<float>(wk), P<AT>(qn), P<AT>(kn), OP<AT>(vc), P<float>(rqk),
+                                          (int)M, rg.rpb, (float)eq, (float)ek, qk ? 1 : 0);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -469,7 +645,8 @@ void gate_o(at::Tensor o, at::Tensor qkvg, at::Tensor og) {
   actc(og, qkvg, "og");
   const at::cuda::CUDAGuard g(o.device());
   TDT_DISPATCH(qkvg.scalar_type(), AT, [&] {
-    gate_o_k<AT><<<blocks(M), NT, 0, S()>>>(CP<float>(o), CP<AT>(qkvg), P<AT>(og), (int)M);
+    const RowGrid rg = row_grid<AT>(gate_o_k<AT>, NT, M);
+    gate_o_k<AT><<<rg.grid, NT, 0, S()>>>(CP<float>(o), CP<AT>(qkvg), P<AT>(og), (int)M, rg.rpb);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -480,8 +657,9 @@ void res_adaln_b(at::Tensor x, at::Tensor y, at::Tensor Gg, at::Tensor bg1, at::
   f32c(x, "x"); actc(Gg, y, "Gg"); actc(G, y, "G"); actc(xt, y, "xt");
   const at::cuda::CUDAGuard g(x.device());
   TDT_DISPATCH(y.scalar_type(), AT, [&] {
-    res_adaln_b_k<AT><<<blocks(M), NT, 0, S()>>>(CP<float>(x), CP<AT>(y), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(G), G.stride(0),
-                                                 CP<float>(bs2), P<float>(x1), P<AT>(xt), P<float2>(x1st), (int)M, (float)eps);
+    const RowGrid rg = row_grid<AT>(res_adaln_b_k<AT>, NT, M);
+    res_adaln_b_k<AT><<<rg.grid, NT, 0, S()>>>(CP<float>(x), CP<AT>(y), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(G), G.stride(0),
+                                               CP<float>(bs2), P<float>(x1), P<AT>(xt), P<float2>(x1st), (int)M, rg.rpb, (float)eps);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -492,7 +670,9 @@ void res_c(at::Tensor x1, at::Tensor z, at::Tensor Gg, at::Tensor bg2, at::Tenso
   const at::cuda::CUDAGuard g(x1.device());
   TDT_DISPATCH(z.scalar_type(), AT, [&] {
     TDT_DISPATCH(out.scalar_type(), OT, [&] {
-      res_c_k<OT, AT><<<blocks(M), NT, 0, S()>>>(CP<float>(x1), CP<AT>(z), CP<AT>(Gg), Gg.stride(0), CP<float>(bg2), P<OT>(out), (int)M);
+      const RowGrid rg = row_grid<AT>(res_c_k<OT, AT>, NT, M);
+      res_c_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<float>(x1), CP<AT>(z), CP<AT>(Gg), Gg.stride(0), CP<float>(bg2), P<OT>(out), (int)M,
+                                               rg.rpb);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -510,14 +690,54 @@ void pair_ln(at::Tensor z, at::Tensor ph, at::Tensor pst, double eps) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// blocks of the persistent pair-bias kernels (and rows of pair_bias_bwd's dWf partial buffer)
+int64_t pair_grid(int64_t R) {
+  const int64_t tiles = (R + PT - 1) / PT;
+  return std::max<int64_t>(1, std::min<int64_t>(tiles, (int64_t)nsm() * occupancy(pair_bias_bwd_k<float>, 256)));
+}
+
+// z [R, 128] (fp32 or bf16 rows), wf [NHH, 128] fp32, mask [L] bool or none -> bias [NHH, R] fp32 (head-major, masked keys -inf),
+// pst [R, 2] (mean, rstd)
+void pair_bias(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, at::Tensor bias, at::Tensor pst, int64_t L, double eps) {
+  const int64_t R = z.size(0);
+  TORCH_CHECK(z.size(1) == 128 && z.stride(1) == 1, "pair_bias: z [R, 128]");
+  f32c(wf, "wf"); f32c(bias, "bias"); f32c(pst, "pst");
+  TORCH_CHECK(wf.numel() == NHH * 128 && bias.numel() == NHH * R && R == L * L, "pair_bias: wf [heads, 128], bias [heads, L, L]");
+  if (mask) TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "pair_bias: mask [L] bool");
+  const at::cuda::CUDAGuard g(z.device());
+  const bool* mp = mask ? reinterpret_cast<const bool*>(mask->data_ptr()) : nullptr;
+  TDT_DISPATCH(z.scalar_type(), ZT, [&] {
+    const int64_t grid = std::max<int64_t>(1, std::min<int64_t>((R + PT - 1) / PT, (int64_t)nsm() * occupancy(pair_bias_k<ZT>, 256)));
+    pair_bias_k<ZT><<<(unsigned)grid, 256, 0, S()>>>(CP<ZT>(z), z.stride(0), CP<float>(wf), mp, P<float>(bias), P<float2>(pst), R,
+                                                     (int)L, (float)eps);
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// db [NHH, R] fp32 (the core's dbias), z / pst as pair_bias got / gave -> dz [R, 128] (z's dtype), part [pair_grid(R), NHH 128] fp32
+// (per-block dWf partials; the host sums the rows)
+void pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf, at::Tensor dz, at::Tensor part) {
+  const int64_t R = z.size(0);
+  TORCH_CHECK(z.size(1) == 128 && z.stride(1) == 1 && dz.is_contiguous() && dz.scalar_type() == z.scalar_type(), "pair_bias_bwd: z / dz");
+  f32c(db, "db"); f32c(pst, "pst"); f32c(wf, "wf"); f32c(part, "part");
+  TORCH_CHECK(db.numel() == NHH * R && part.size(1) == NHH * 128, "pair_bias_bwd: db [heads, R], part [blocks, heads 128]");
+  const at::cuda::CUDAGuard g(z.device());
+  TDT_DISPATCH(z.scalar_type(), ZT, [&] {
+    pair_bias_bwd_k<ZT><<<(unsigned)part.size(0), 256, 0, S()>>>(CP<float>(db), CP<ZT>(z), z.stride(0), CP<float2>(pst), CP<float>(wf),
+                                                                P<ZT>(dz), P<float>(part), R);
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void res_c_bwd(at::Tensor dout, at::Tensor z, at::Tensor Gg, at::Tensor bg2, at::Tensor dz, at::Tensor dGg, at::Tensor pg2) {
   const int64_t M = z.size(0);
   actc(Gg, z, "Gg"); actc(dz, z, "dz"); actc(dGg, z, "dGg");
   const at::cuda::CUDAGuard g(z.device());
   TDT_DISPATCH(z.scalar_type(), AT, [&] {
     TDT_DISPATCH(dout.scalar_type(), OT, [&] {
-      res_c_bwd_k<OT, AT><<<blocks(M), NT, 0, S()>>>(CP<OT>(dout), CP<AT>(z), CP<AT>(Gg), Gg.stride(0), CP<float>(bg2), P<AT>(dz), P<AT>(dGg),
-                                                     dGg.stride(0), P<float>(pg2), pg2.stride(0), (int)M);
+      const RowGrid rg = row_grid<AT>(res_c_bwd_k<OT, AT>, NT, M, pg2.size(0));
+      res_c_bwd_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<OT>(dout), CP<AT>(z), CP<AT>(Gg), Gg.stride(0), CP<float>(bg2), P<AT>(dz), P<AT>(dGg),
+                                                   dGg.stride(0), P<float>(pg2), pg2.stride(0), (int)M, rg.rpb);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -534,17 +754,26 @@ void swiglu_bwd(at::Tensor dh, at::Tensor ab, at::Tensor dab, at::Tensor h) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// is t the column block [col, col + D) of the [M, 4D] buffer `buf` (same rows)?
+bool col_view_of(const at::Tensor& t, const at::Tensor& buf, int64_t col) {
+  return t.data_ptr() == static_cast<void*>(static_cast<char*>(buf.data_ptr()) + col * buf.element_size()) && t.stride(0) == buf.stride(0);
+}
+
+// dxt: [M, D] rows (any row stride), possibly dG's column block 3D (the dxt GEMM wrote it there: no copy)
 void res_adaln_b_bwd(at::Tensor dout, at::Tensor dxt, at::Tensor x1, at::Tensor x1st, at::Tensor G, at::Tensor bs2, at::Tensor Gg,
                      at::Tensor bg1, at::Tensor y, at::Tensor dx1, at::Tensor dy, at::Tensor dG, at::Tensor dGg, at::Tensor ps2,
                      at::Tensor pg1) {
   const int64_t M = x1.size(0);
   actc(G, dxt, "G"); actc(Gg, dxt, "Gg"); actc(y, dxt, "y"); actc(dy, dxt, "dy"); actc(dG, dxt, "dG"); actc(dGg, dxt, "dGg");
+  TORCH_CHECK(ps2.size(0) == pg1.size(0), "res_adaln_b_bwd: partial rows");
+  const int in_dg = col_view_of(dxt, dG, 3 * D) ? 1 : 0;
   const at::cuda::CUDAGuard g(x1.device());
   TDT_DISPATCH(dxt.scalar_type(), AT, [&] {
     TDT_DISPATCH(dout.scalar_type(), OT, [&] {
-      res_adaln_b_bwd_k<OT, AT><<<blocks(M), NT, 0, S()>>>(CP<OT>(dout), CP<AT>(dxt), CP<float>(x1), CP<float2>(x1st), CP<AT>(G), G.stride(0),
-          CP<float>(bs2), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(y), P<float>(dx1), P<AT>(dy), P<AT>(dG), dG.stride(0),
-          P<AT>(dGg), dGg.stride(0), P<float>(ps2), P<float>(pg1), ps2.stride(0), (int)M);
+      const RowGrid rg = row_grid<AT>(res_adaln_b_bwd_k<OT, AT>, NT, M, ps2.size(0));
+      res_adaln_b_bwd_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<OT>(dout), CP<AT>(dxt), dxt.stride(0), in_dg, CP<float>(x1), CP<float2>(x1st),
+          CP<AT>(G), G.stride(0), CP<float>(bs2), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(y), P<float>(dx1), P<AT>(dy), P<AT>(dG),
+          dG.stride(0), P<AT>(dGg), dGg.stride(0), P<float>(ps2), P<float>(pg1), ps2.stride(0), (int)M, rg.rpb);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -555,34 +784,47 @@ void gate_o_bwd(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, a
   actc(qkvg, dog, "qkvg"); actc(dob, dog, "dob"); actc(dqkvg, dog, "dqkvg");
   const at::cuda::CUDAGuard g(o.device());
   TDT_DISPATCH(dog.scalar_type(), AT, [&] {
-    gate_o_bwd_k<AT><<<blocks(M), NT, 0, S()>>>(CP<AT>(dog), CP<float>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd), P<AT>(dqkvg), (int)M,
-                                                (int)L);
+    const RowGrid rg = row_grid<AT>(gate_o_bwd_k<AT>, NT, M);
+    gate_o_bwd_k<AT><<<rg.grid, NT, 0, S()>>>(CP<AT>(dog), CP<float>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd), P<AT>(dqkvg), (int)M,
+                                              rg.rpb, (int)L);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// dq / dk / dv: fp32 [M, D] rows (any row stride), each possibly dqkvg's own column block (the core wrote it there): read and
+// rewritten in place by the thread that owns it, and not rewritten at all where it is unchanged
 void qknorm_bwd(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor qkvg, at::Tensor rqk, at::Tensor wq, at::Tensor wk,
                 at::Tensor dqkvg, at::Tensor pbq, at::Tensor dwqk, bool qk) {
   const int64_t M = qkvg.size(0);
   actc(dqkvg, qkvg, "dqkvg");
+  for (const at::Tensor* t : {&dq, &dk, &dv})
+    TORCH_CHECK(t->scalar_type() == at::kFloat && t->stride(1) == 1 && t->size(0) == M && t->size(1) == D, "qknorm_bwd: fp32 [M, D] rows");
+  const bool f32 = dqkvg.scalar_type() == at::kFloat;
+  const int alias = f32 ? ((col_view_of(dq, dqkvg, 0) ? 1 : 0) | (col_view_of(dk, dqkvg, D) ? 2 : 0) | (col_view_of(dv, dqkvg, 2 * D) ? 4 : 0))
+                        : 0;
   const at::cuda::CUDAGuard g(qkvg.device());
   TDT_DISPATCH(qkvg.scalar_type(), AT, [&] {
-    qknorm_bwd_k<AT><<<blocks(M), NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), CP<AT>(qkvg), CP<float>(rqk), CP<float>(wq),
-                                                CP<float>(wk), P<AT>(dqkvg), P<float>(pbq), P<float>(dwqk), pbq.stride(0), dwqk.stride(0),
-                                                (int)M, qk ? 1 : 0);
+    const RowGrid rg = row_grid<AT>(qknorm_bwd_k<AT>, NT, M, pbq.size(0));
+    qknorm_bwd_k<AT><<<rg.grid, NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), dq.stride(0), dk.stride(0), dv.stride(0), alias,
+                                              CP<AT>(qkvg), CP<float>(rqk), CP<float>(wq), CP<float>(wk), P<AT>(dqkvg), P<float>(pbq),
+                                              P<float>(dwqk), pbq.stride(0), dwqk.stride(0), (int)M, rg.rpb, qk ? 1 : 0);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// dxa: [M, D] rows (any row stride), possibly dG's column block D (the dxa GEMM wrote it there: no copy)
 void adaln_a_bwd(at::Tensor dxa, at::Tensor x, at::Tensor xst, at::Tensor G, at::Tensor bs1, at::Tensor dx1, at::Tensor dx,
                  at::Tensor dG, at::Tensor ps1) {
   const int64_t M = x.size(0);
   actc(G, dxa, "G"); actc(dG, dxa, "dG");
+  const int in_dg = col_view_of(dxa, dG, D) ? 1 : 0;
   const at::cuda::CUDAGuard g(x.device());
   TDT_DISPATCH(dxa.scalar_type(), AT, [&] {
     TDT_DISPATCH(dx.scalar_type(), OT, [&] {
-      adaln_a_bwd_k<OT, AT><<<blocks(M), NT, 0, S()>>>(CP<AT>(dxa), CP<float>(x), CP<float2>(xst), CP<AT>(G), G.stride(0), CP<float>(bs1),
-                                                       CP<float>(dx1), P<OT>(dx), P<AT>(dG), dG.stride(0), P<float>(ps1), ps1.stride(0), (int)M);
+      const RowGrid rg = row_grid<AT>(adaln_a_bwd_k<OT, AT>, NT, M, ps1.size(0));
+      adaln_a_bwd_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<AT>(dxa), dxa.stride(0), in_dg, CP<float>(x), CP<float2>(xst), CP<AT>(G), G.stride(0),
+                                                     CP<float>(bs1), CP<float>(dx1), P<OT>(dx), P<AT>(dG), dG.stride(0), P<float>(ps1),
+                                                     ps1.stride(0), (int)M, rg.rpb);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -595,7 +837,8 @@ void cond_bwd(at::Tensor dchat, at::Tensor dcg, at::Tensor c, at::Tensor cst, at
   TDT_DISPATCH(dchat.scalar_type(), AT, [&] {
     TDT_DISPATCH(c.scalar_type(), CT, [&] {
       TDT_DISPATCH(dc.scalar_type(), OT, [&] {
-        cond_bwd_k<CT, OT, AT><<<blocks(M), NTC, 0, S()>>>(CP<AT>(dchat), CP<AT>(dcg), CP<CT>(c), CP<float2>(cst), P<OT>(dc), (int)M);
+        const RowGrid rg = row_grid<AT>(cond_bwd_k<CT, OT, AT>, NTC, M);
+        cond_bwd_k<CT, OT, AT><<<rg.grid, NTC, 0, S()>>>(CP<AT>(dchat), CP<AT>(dcg), CP<CT>(c), CP<float2>(cst), P<OT>(dc), (int)M, rg.rpb);
       });
     });
   });
@@ -630,6 +873,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("res_adaln_b", &res_adaln_b);
   m.def("res_c", &res_c);
   m.def("pair_ln", &pair_ln);
+  m.def("pair_bias", &pair_bias);
+  m.def("pair_bias_bwd", &pair_bias_bwd);
+  m.def("pair_grid", &pair_grid);
+  m.def("part_rows", &part_rows);
   m.def("res_c_bwd", &res_c_bwd);
   m.def("swiglu_bwd", &swiglu_bwd);
   m.def("res_adaln_b_bwd", &res_adaln_b_bwd);

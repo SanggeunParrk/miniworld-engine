@@ -74,3 +74,32 @@ def test_backward_tf32_matches_fp64(A, L, masked):
     o.backward(do.double())
     for name, got, want in (("dq", DQ, leaves[0].grad), ("dk", DK, leaves[1].grad), ("dv", DV, leaves[2].grad), ("dbias", DB, bd.grad)):
         assert _rel(got, want) < 3e-3, f"{name}: {_rel(got, want):.2e}"
+
+
+@pytest.mark.parametrize(("A", "L"), [(8, 128), (6, 256)])
+def test_backward_tf32_into_column_blocks_and_sample_groups(A, L):
+    """dQ / dK / dV written into column blocks of a wider buffer (the fused training block's q|k|v|g gradient: rows 4 W floats
+    apart) match the fresh-buffer call to fp32 reassociation (not bit for bit: attn_dkv_tf32's two MMA warps accumulate their
+    alternate query blocks onto one dK / dV accumulator in the order they get there, so two identical calls differ in the last
+    bits), and fp64 everywhere. A = 8, L = 128 takes attn_dqb_tf32's sample groups (32 items x NS = 4 on the B200's SMs: dbias as
+    reductions into a zeroed buffer)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
+    q, k, v, bias = _inputs(A, L, True, A * 100 + L)
+    do = torch.randn(A * L, H * DH, device="cuda", generator=torch.Generator(device="cuda").manual_seed(L + 1))
+    O, LSE = sm100.forward_tf32(q, k, v, bias, A, L)
+    Dd = (do * O).view(A, L, H, DH).sum(-1).permute(0, 2, 1).contiguous()
+    W = H * DH
+    buf = torch.full((A * L, 4 * W), float("nan"), device="cuda")
+    DQ, DK, DV, DB = sm100.backward_tf32(q, k, v, do, bias, LSE, Dd, A, L, dq=buf[:, :W], dk=buf[:, W:2 * W], dv=buf[:, 2 * W:3 * W])
+    DQ0, DK0, DV0, DB0 = sm100.backward_tf32(q, k, v, do, bias, LSE, Dd, A, L)
+    torch.cuda.synchronize()
+    assert DQ.data_ptr() == buf.data_ptr() and torch.isnan(buf[:, 3 * W:]).all(), "outputs left their column blocks"
+    assert _rel(DK, DK0) < 1e-5 and _rel(DV, DV0) < 1e-5, (_rel(DK, DK0), _rel(DV, DV0))
+    leaves = [t.double().requires_grad_() for t in (q, k, v)]
+    bd = bias.double().requires_grad_()
+    o, _, _ = _reference(leaves[0], leaves[1], leaves[2], bd, A, L)
+    o.backward(do.double())
+    for name, got, want in (("dq", DQ, leaves[0].grad), ("dk", DK, leaves[1].grad), ("dv", DV, leaves[2].grad), ("dbias", DB, bd.grad),
+                            ("dq fresh", DQ0, leaves[0].grad), ("dbias fresh", DB0, bd.grad)):
+        assert _rel(got, want) < 3e-3, f"{name}: {_rel(got, want):.2e}"

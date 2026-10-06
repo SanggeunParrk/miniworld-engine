@@ -205,15 +205,30 @@ def forward_tf32(q, k, v, bias_hll, A, L, heads: int = H, dh: int = D):
     return O, LSE
 
 
-def backward_tf32(q, k, v, do, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int = D):
+def _dqb_split(items: int, A: int, dev: int) -> int:
+    """attn_dqb_tf32's sample groups: the largest NS dividing A with items x NS <= the SM count (1 when the items alone fill
+    the GPU). L = 128 at 16 heads: 32 items -> NS = 4 at A = 48."""
+    nsm = torch.cuda.get_device_properties(dev).multi_processor_count
+    return max([s for s in (1, 2, 3, 4, 6, 8, 12, 16) if A % s == 0 and (s == 1 or items * s <= nsm)])
+
+
+def backward_tf32(q, k, v, do, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int = D, dq=None, dk=None, dv=None):
     """The fp32 training backward (``attn_dkv_tf32.cu`` then ``attn_dqb_tf32.cu``, TF32 tensor cores): q, k, v, do [A L, heads dh]
     fp32 rows, bias [heads, L, L] fp32 as given to ``forward_tf32``, LSE from it, Dd = rowsum(dO O) [A, heads, L] fp32 -> dQ, dK, dV
-    [A L, heads dh] fp32 and dbias [heads, L, L] fp32. Default 16 x 48 (d 768); any of TDIT_HEADS."""
+    [A L, heads dh] fp32 and dbias [heads, L, L] fp32. Default 16 x 48 (d 768); any of TDIT_HEADS. ``dq`` / ``dk`` / ``dv``: where
+    to write them (fp32 [A L, heads dh] with unit column stride and 16-byte rows, e.g. column blocks of the caller's q|k|v|g
+    gradient), else fresh buffers."""
     dev = _index(q)
     W = heads * dh
-    DQ = torch.empty(A * L, W, device=q.device, dtype=torch.float32)
-    DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
-    DK, DV = torch.empty_like(DQ), torch.empty_like(DQ)
+    out = lambda t: torch.empty(A * L, W, device=q.device, dtype=torch.float32) if t is None else t  # noqa: E731
+    DQ, DK, DV = out(dq), out(dk), out(dv)
+    for t in (DQ, DK, DV):
+        assert t.dtype == torch.float32 and tuple(t.shape) == (A * L, W)
+        _rs(t)
+    items = heads * (L // 128) * (L // 64)
+    ns = _dqb_split(items, A, dev)
+    # sample groups add their dbias into it (attn_dqb_tf32 -DNS > 1): zeroed then, else written once
+    DB = (torch.zeros if ns > 1 else torch.empty)(heads, L, L, device=q.device, dtype=torch.float32)
     f32 = dict(dtype="f32")
     dims = [W, A * L]
     a = lambda t, rows: _tm(t, dims, _rs(t), [32, rows], swizzle=128, **f32)       # noqa: E731  K-major, columns 0-31
@@ -224,11 +239,12 @@ def backward_tf32(q, k, v, do, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int 
     dqb_maps = (a(q, 128), b(q, 128), a(do, 128), b(do, 128), a(v, 64), b(v, 64), a(k, 64), b(k, 64), m(k, 64),
                 _tm(bias_hll, [L, heads * L], L * 4, [32, 128], swizzle=128, **f32))
     defs = _tdit_defs(heads, dh)
-    # attn_dkv_tf32 zero-fills dQ on the way; attn_dqb_tf32 then adds one partial per 64-key chunk.
+    ldq = DQ.stride(0)
+    # attn_dkv_tf32 zero-fills dQ on the way; attn_dqb_tf32 then adds one partial per 64-key chunk (and sample group).
     _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev, defs=defs)(_grid(A * heads * (L // 128), dev), (384, 1, 1), *dkv_maps,
-                                                                             LSE, Dd, DQ, int(L), int(A))
-    _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=defs)(_grid(heads * (L // 128) * (L // 64), dev), (384, 1, 1),
-                                                                             *dqb_maps, LSE, Dd, DQ, DB, int(L), int(A))
+                                                                             LSE, Dd, DQ, int(L), int(A), int(ldq))
+    _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=defs)(_grid(items * ns, dev), (384, 1, 1),
+                                                                             *dqb_maps, LSE, Dd, DQ, DB, int(L), int(A), int(ns), int(ldq))
     return DQ, DK, DV, DB
 
 

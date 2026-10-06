@@ -76,7 +76,7 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
                        const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mdka,
                        const __grid_constant__ CUtensorMap mdkb, const __grid_constant__ CUtensorMap mdva,
                        const __grid_constant__ CUtensorMap mdvb, const float* __restrict__ LSE, const float* __restrict__ DD,
-                       float* __restrict__ DQZ, int L, int A) {
+                       float* __restrict__ DQZ, int L, int A, int ldq) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -304,11 +304,11 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         if (lane == 0) mbar_arrive(&B.acc_free);
         if (DQZ) {                                                         // zero this tile of dQ for attn_dqb_tf32's reductions (it runs next)
           constexpr int C4 = DH / 4;                                       // 128 rows x C4 float4, lanes along rows, half per warpgroup
-          float4* zq = reinterpret_cast<float4*>(DQZ + ((size_t)a * L + k0) * DM + head * DH);
+          float4* zq = reinterpret_cast<float4*>(DQZ + ((size_t)a * L + k0) * ldq + head * DH);   // dQ rows: ldq floats apart
 #pragma unroll
           for (int k = 0; k < C4 / 2; ++k) {
             const int idx = w * 64 * C4 + k * 128 + (int)r, row = idx / C4, ch = idx % C4;
-            zq[(size_t)row * (DM / 4) + ch] = make_float4(0.f, 0.f, 0.f, 0.f);
+            zq[(size_t)row * (ldq / 4) + ch] = make_float4(0.f, 0.f, 0.f, 0.f);
           }
         }
         const uint32_t xa = su + O_KV + (li % KVS) * SLOT + w * TKV, xb = xa + NA * KVA;   // A boxes at xa + j KVA, the B box at xb

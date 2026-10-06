@@ -6,6 +6,10 @@
 // keys w * 32 .. w * 32 + 31 of the chunk, one query row per thread):
 //   S = q K_w^T, dP = dO V_w^T  (TMEM, fp32)      P = 2^(S log2 e / sqrt 48 + bias log2 e - LSE)      dS = P (dP - D)
 //   dbias_w += dS (registers)   dS -> TMEM (fp32)  dQ += dS K_w  (TS MMA, both warpgroups into one accumulator)
+// Sample split (``NS`` > 1, the host's choice when the (head, query tile, key chunk) items alone leave SMs idle -- L = 128 at 16
+// heads: 32 items for 148 SMs): an item is (head, query tile, key chunk, sample group of A / NS samples) and its dbias leaves as
+// v4 reductions into a zeroed DB instead of plain stores. dQ goes to rows of stride ``ldq`` floats (a column block of a wider
+// buffer, e.g. the q columns of the q|k|v|g gradient).
 // What the fp32 operands change: 64-key chunks (the fp32 tiles of a 128-key chunk do not fit twice), K read twice per sample --
 // K-major for S (32 + 16 columns) and MN-major for dQ, which a tf32 MMA takes only in the 128-B swizzle with 32-B atoms (two
 // 32-column boxes) -- and the dQ partials leave through per-thread v4 reductions (no staging buffer left).
@@ -76,21 +80,24 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
                        const __grid_constant__ CUtensorMap mka, const __grid_constant__ CUtensorMap mkb,
                        const __grid_constant__ CUtensorMap mkm, const __grid_constant__ CUtensorMap mb,
                        const float* __restrict__ LSE, const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB,
-                       int L, int A) {
+                       int L, int A, int NS, int ldq) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int mt = L / QM, nch = L / KC;
-  const int items = NHEAD * mt * nch;
+  const int AS = A / NS;                                                   // samples per item (the host keeps A % NS == 0)
+  const int items = NHEAD * mt * nch * NS;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
-  const int ng = my_items * A;                                             // (item, sample) steps of this CTA
-  auto item_of = [&](int li, int& c, int& m0, int& head) {
-    const int wi = (int)blockIdx.x + li * (int)gridDim.x;
+  const int ng = my_items * AS;                                            // (item, sample) steps of this CTA
+  // an item's sample group is its first sample s0 = (wi % NS) AS; the walk covers s0 .. s0 + AS - 1
+  auto item_of = [&](int li, int& c, int& m0, int& head, int& s0) {
+    int wi = (int)blockIdx.x + li * (int)gridDim.x;
+    s0 = (wi % NS) * AS; wi /= NS;
     c = wi % nch; const int r = wi / nch;
     m0 = (r % mt) * QM; head = r / mt;
   };
-  auto samp = [&](int c, int i) { return ROT ? (i + c) % A : i; };
+  auto samp = [&](int c, int s0, int i) { return s0 + (ROT ? (i + c) % AS : i); };
 
   if (tid == 0) {
     for (int s = 0; s < STA; ++s) { mbar_init(&B.fullA[s], 1); mbar_init(&B.emptyA[s], 2); }
@@ -124,13 +131,13 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     if (lane == 0) {
       int g = 0;
       for (int li = 0; li < my_items; ++li) {
-        int c, m0, head; item_of(li, c, m0, head);
+        int c, m0, head, s0; item_of(li, c, m0, head, s0);
         const int qcol = head * DH;
         if (li >= 1) mbar_wait(&B.bempty, (li - 1) & 1);
         mbar_expect_tx(&B.bfull, 2 * TBI);
         for (int w = 0; w < 2; ++w) tma_load_2d(su + O_B + w * TBI, &mb, &B.bfull, c * KC + w * BN, head * L + m0);
-        for (int i = 0; i < A; ++i, ++g) {
-          const int sa = g % STA, sk = g % STK, a = samp(c, i);
+        for (int i = 0; i < AS; ++i, ++g) {
+          const int sa = g % STA, sk = g % STK, a = samp(c, s0, i);
           if (g >= STA) mbar_wait(&B.emptyA[sa], ((g / STA) - 1) & 1);
           const uint32_t pa = su + O_A + sa * SA;
           mbar_expect_tx(&B.fullA[sa], SA);
@@ -246,7 +253,7 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.dq_free[b]);
-      float* drow = DQ + ((size_t)arow + r) * DM + head * DH + c0;
+      float* drow = DQ + ((size_t)arow + r) * ldq + head * DH + c0;
 #pragma unroll
       for (int k = 0; k < 8; ++k) {
         if (k * 4 >= nc) break;
@@ -256,12 +263,13 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     };
     float db[BN];
     // positions advance incrementally: the runtime divisions of item_of run once per item, not per step
+    // (a sample group starts at a multiple of AS, so the walk wraps where a + 1 is one: no group start kept in registers)
     auto advance = [&](int& pli, int& pi, int& pc, int& pm0, int& ph, int& pa) {
-      if (++pi == A) { pi = 0; if (++pli < my_items) { item_of(pli, pc, pm0, ph); pa = samp(pc, 0); } }
-      else pa = (pa + 1 == A) ? 0 : pa + 1;
+      if (++pi == AS) { pi = 0; if (++pli < my_items) { int ps0; item_of(pli, pc, pm0, ph, ps0); pa = samp(pc, ps0, 0); } }
+      else pa = ((pa + 1) % AS == 0) ? pa + 1 - AS : pa + 1;
     };
     int li = 0, i = 0, c = 0, m0 = 0, head = 0, a = 0;
-    if (ng > 0) { item_of(0, c, m0, head); a = samp(c, 0); }
+    if (ng > 0) { int s0; item_of(0, c, m0, head, s0); a = samp(c, s0, 0); }
     int nli = li, ni = i, nc_ = c, nm0 = m0, nh = head, na = a;          // the next step's position (LSE / D prefetch)
     float lse_n = 0.f, dd_n = 0.f;
     if (ng > 0) { const size_t ri = ((size_t)a * NHEAD + head) * L + m0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
@@ -312,14 +320,20 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.ds_full[w]);
       if (g >= 2) epi(g - 2, e2r, e2h);
-      if (i == A - 1) {
-        // ---- the item's dbias: this thread's 32 keys of query row m0 + r, natural units, plain stores
+      if (i == AS - 1) {
+        // ---- the item's dbias: this thread's 32 keys of query row m0 + r, natural units: plain stores, or (sample groups)
+        // reductions into the zeroed DB
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.bempty);
         float* brow = DB + ((size_t)head * L + m0 + r) * L + c * KC + w * BN;
+        if (NS == 1) {
 #pragma unroll
-        for (int k = 0; k < BN / 4; ++k)
-          *reinterpret_cast<float4*>(brow + 4 * k) = make_float4(db[4 * k], db[4 * k + 1], db[4 * k + 2], db[4 * k + 3]);
+          for (int k = 0; k < BN / 4; ++k)
+            *reinterpret_cast<float4*>(brow + 4 * k) = make_float4(db[4 * k], db[4 * k + 1], db[4 * k + 2], db[4 * k + 3]);
+        } else {
+#pragma unroll
+          for (int k = 0; k < BN / 4; ++k) red4(brow + 4 * k, db[4 * k], db[4 * k + 1], db[4 * k + 2], db[4 * k + 3]);
+        }
       }
       e2r = e1r; e2h = e1h; e1r = a * L + m0; e1h = head;
       advance(li, i, c, m0, head, a);
