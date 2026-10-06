@@ -27,6 +27,31 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 
+#ifdef MINIWORLD_OPM_OWNED_BLAS
+
+#include <ATen/Context.h>
+#include <cublas_v2.h>
+#include <map>
+#include <memory>
+static void opm_owned_count(torch::Tensor norm,torch::Tensor mf) {
+ struct Handle {cublasHandle_t value;Handle(){TORCH_CHECK(cublasCreate(&value)==CUBLAS_STATUS_SUCCESS,"OPM cublasCreate");}~Handle(){cublasDestroy(value);}};
+ static thread_local std::map<int,std::unique_ptr<Handle>> handles;
+ auto& h=handles[mf.get_device()];if(!h)h=std::make_unique<Handle>();
+ auto handle=h->value;
+ auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"OPM owned count cuBLAS ",int(s));};
+ ck(cublasSetStream(handle,at::cuda::getCurrentCUDAStream()));
+ ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));
+ ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
+ ck(cublasSetMathMode(handle,at::globalContext().allowTF32CuBLAS()?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH));
+ size_t bytes=at::cuda::getChosenWorkspaceSize();
+ auto workspace=torch::empty({int64_t(bytes)},mf.options().dtype(at::kByte));
+ ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
+ int n=mf.size(1),s=mf.size(0);float alpha=1,beta=0;
+ ck(cublasSgemm(handle,CUBLAS_OP_N,CUBLAS_OP_T,n,n,s,&alpha,mf.data_ptr<float>(),n,mf.data_ptr<float>(),n,&beta,norm.data_ptr<float>(),n));
+}
+
+#endif
+
 namespace {
 
 constexpr int CH = 32;             // c_hidden
@@ -2028,7 +2053,11 @@ std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor
  // Binary inputs make each count exact throughout the supported MSA depths, including TF32 mode.
  auto mf=torch::empty({S,N},fo);
  opm_native_launch(opm_mask_fp32_selective,dim3((S*N+255)/256),dim3(256),mask.data_ptr<bool>(),mf.data_ptr<float>(),S*N);
+#ifdef MINIWORLD_OPM_OWNED_BLAS
+ opm_owned_count(norm,mf);
+#else
  at::mm_out(norm,mf.t(),mf);
+#endif
  opm_native_launch(opm_norm_clamp_selective,dim3((N*N+255)/256),dim3(256),norm.data_ptr<float>(),N*N);
 #else
  opm_native_launch(opm_count_native,dim3((N*N+255)/256),dim3(256),bitp,norm.data_ptr<float>(),S,N);
