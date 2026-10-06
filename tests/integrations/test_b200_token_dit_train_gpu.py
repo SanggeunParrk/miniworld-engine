@@ -64,9 +64,9 @@ def _run(m, single, cond, pair, mask, w, tf32=None):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
-def test_train_block_matches_the_module_path(dtype, qk, masked, monkeypatch):
+@pytest.mark.parametrize(("A", "L"), [(4, 256), (3, 200)])     # (3, 200): the block pads to an even A and L % 128 == 0
+def test_train_block_matches_the_module_path(dtype, qk, masked, A, L, monkeypatch):
     torch.manual_seed(7)
-    A, L = 4, 256
     ref = _randomize(DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda())
     eng = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda()
     eng.load_state_dict(ref.state_dict())
@@ -118,3 +118,30 @@ def test_train_block_under_torch_compile(monkeypatch):
     assert calls, "the compiled block did not take the fused path"
     for k in eager:
         assert _rel(compiled[k], eager[k]) < 1e-3, k
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_sample_expanded_mask_takes_the_fused_path(dtype, monkeypatch):
+    """A diffusion module hands the token DiT its token mask expanded over the samples ([A, B, L], stride 0): DiTBlock gives
+    the fused block its [B, L] row (the same result as passing that row); a mask that differs per sample keeps the module path."""
+    torch.manual_seed(13)
+    A, L = 4, 256
+    eng = _randomize(DiTBlock(use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda()).to(dtype)
+    g = torch.Generator(device="cuda").manual_seed(14)
+    single = torch.randn(A, 1, L, 768, device="cuda", generator=g)
+    cond = torch.randn(A, 1, L, 384, device="cuda", generator=g)
+    pair = torch.randn(1, L, L, 128, device="cuda", generator=g)
+    mask = torch.rand(1, L, device="cuda", generator=g) > 0.15
+    w = torch.randn(A, 1, L, 768, device="cuda", generator=g)
+    calls = []
+    orig = token_dit_train._Block.apply
+    monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a))
+    flat = _run(eng, single, cond, pair, mask, w)
+    expanded = _run(eng, single, cond, pair, mask.unsqueeze(0).expand(A, -1, -1), w)
+    assert len(calls) == 2, "the [A, B, L] expanded mask did not take the fused path"
+    for k in flat:                           # the same kernels; the backward's dQ reductions are atomic, so not bit-for-bit
+        assert _rel(expanded[k], flat[k]) < 1e-3, k
+    per_sample = mask.unsqueeze(0).repeat(A, 1, 1)
+    per_sample[1, 0, 5] = ~per_sample[1, 0, 5]
+    _run(eng, single, cond, pair, per_sample, w)
+    assert len(calls) == 2, "a per-sample mask must keep the module path"

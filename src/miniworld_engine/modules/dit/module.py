@@ -33,6 +33,19 @@ from miniworld_engine.modules.conditioned_transition import ConditionedTransitio
 from miniworld_engine.modules.exceptions import ImplementationType
 
 
+def _shared_key_mask(mask: torch.Tensor | None) -> tuple[torch.Tensor | None, bool]:
+    """(the [B, L] key mask the samples share, True), or (``mask``, False) when an [A, B, L] mask may differ per sample.
+
+    A diffusion module hands the token DiT its token mask expanded over the augmented samples
+    (``token_mask.unsqueeze(0).expand(A, -1, -1)``): the same [B, L] row for every sample, recognised by its stride 0 (no
+    device read, so it holds under torch.compile and CUDA-graph capture). A materialized [A, B, L] mask is not inspected."""
+    if mask is None or mask.ndim == 2:
+        return mask, True
+    if mask.ndim == 3 and (mask.shape[0] == 1 or mask.stride(0) == 0):
+        return mask[0], True
+    return mask, False
+
+
 class DiTBlock(nn.Module):
     """Token or ordinary atom DiT: pair-bias attention, then conditioned transition.
 
@@ -69,15 +82,20 @@ class DiTBlock(nn.Module):
         single: Float[torch.Tensor, "A B L d_single"],
         cond: Float[torch.Tensor, "A B L d_cond"],
         pair: Float[torch.Tensor, "B L L d_pair"],
-        mask: Bool[torch.Tensor, "B L"] | None = None,
+        mask: Bool[torch.Tensor, "B L"] | Bool[torch.Tensor, "A B L"] | None = None,
         *,
         compute_dtype: torch.dtype | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
-        """AF3 Alg. 23; each part returns its residual output (stream in, stream out)."""
-        if _h100.serves(self, single, cond, pair, compute_dtype):
-            return _h100.update(self, single, cond, pair, mask)
-        if _train.serves(self, single, cond, pair, mask, compute_dtype):
-            return _train.block(self, single, cond, pair, mask, compute_dtype)
+        """AF3 Alg. 23; each part returns its residual output (stream in, stream out).
+
+        ``mask`` is a key mask: [B, L], or [A, B, L] (the attention's own contract). The fused token DiT paths take one key
+        mask shared by the samples, so an [A, B, L] mask that is one -- a [B, L] mask expanded over A (stride 0), or A == 1 --
+        reaches them as its [B, L] row; a mask that differs per sample keeps the module path."""
+        key_mask, shared = _shared_key_mask(mask)
+        if shared and _h100.serves(self, single, cond, pair, compute_dtype):
+            return _h100.update(self, single, cond, pair, key_mask)
+        if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype):
+            return _train.block(self, single, cond, pair, key_mask, compute_dtype)
         if _atom.serves(self, single, cond, pair, mask, compute_dtype):
             return _atom.block(self, single, cond, pair, mask)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}

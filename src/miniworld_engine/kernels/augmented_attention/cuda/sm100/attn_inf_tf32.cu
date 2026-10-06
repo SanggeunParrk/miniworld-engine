@@ -19,6 +19,10 @@
 //     128 + w * 64 + b * 32, O[w] at 256 + w * 64 (48 columns).
 // L is any multiple of 8, as in attn_inf.cu: 3-D maps (columns, row of the sample, sample | head; v^T: key, sample, channel) make
 // TMA zero-fill the tails and clip the stores, and the last key block's keys past L are masked to -inf.
+//
+// Head layouts (-DNHEAD -DDHP, as the bf16 core; none = 16 x 48; the logits come pre-scaled, so no RSQDV): a DH-wide fp32 row is
+// NA 32-column boxes in the 128-B swizzle and NBX 16-column ones in the 64-B swizzle (48 = 32 + 16, 32 = 32, 64 = 32 + 32); the
+// v^T tile is DH channel rows. smem: 16 x 48 217 KB (3 stages), 24 x 32 161 KB (3), 12 x 64 / 16 x 64 225 KB (2 stages).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -29,16 +33,25 @@ using namespace s100;
 #ifndef LAZY
 #define LAZY 8.0f                        // log2 units
 #endif
-#ifndef ST
-#define ST 3
+#ifndef DHP
+#define DHP 48                           // head width: 48 (16 x 48), 32 (24 x 32), 64 (12 x 64; 16 x 64 at d 1024)
 #endif
-constexpr int BN = 32, DH = 48, QM = 128;
-// q tile of one sample: A (cols 0-31, 128 x 128 B, SW128) + B (cols 32-47, 128 x 64 B, SW64)
-constexpr int QA = QM * 128, QB = QM * 64, TQ = QA + QB;                   // 24 KB
-// stage: k A / B and v^T of both samples, then the bias tile (128 queries x 32 keys fp32, SW128)
+#ifndef NHEAD
+#define NHEAD 16
+#endif
+static_assert(DHP == 64 || DHP == 48 || DHP == 32, "TF32 head width 64, 48 or 32");
+#ifndef ST
+#define ST (DHP == 64 ? 2 : 3)
+#endif
+constexpr int BN = 32, DH = DHP, QM = 128;
+constexpr int NA = DH / 32, NBX = (DH % 32) / 16;                         // 128-B boxes and 64-B boxes of a head row
+// q tile of one sample: NA boxes A (32 columns, 128 x 128 B, SW128), then NBX box B (16 columns, 128 x 64 B, SW64)
+constexpr int QA = QM * 128, QB = QM * 64, TQ = NA * QA + NBX * QB;        // 24 KB at 48
+// stage: k A / B and v^T of both samples, then the bias tile (128 queries x 32 keys fp32, SW128); k of sample w, box j at
+// S_KA + (w NA + j) KA
 constexpr int KA = BN * 128, KB = BN * 64, TV = DH * BN * 4;
-constexpr int S_KA = 0, S_KB = 2 * KA, S_VT = 2 * KA + 2 * KB, S_BIAS = S_VT + 2 * TV;
-constexpr int TBIAS = QM * BN * 4, STB = S_BIAS + TBIAS;                  // 40 KB
+constexpr int S_KA = 0, S_KB = 2 * NA * KA, S_VT = S_KB + 2 * NBX * KB, S_BIAS = S_VT + 2 * TV;
+constexpr int TBIAS = QM * BN * 4, STB = S_BIAS + TBIAS;                  // 40 KB at 48
 constexpr int O_Q = 0, O_ST = 2 * TQ, O_BAR = O_ST + ST * STB;
 constexpr int XG = TQ;                                                     // per warpgroup: g in, gated o out (A + B boxes)
 constexpr int O_X = O_BAR + 1024, SMEM_BYTES = O_X + 2 * XG;
@@ -68,7 +81,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int npair = (A + 1) >> 1, mt = (L + QM - 1) / QM, nb = (L + BN - 1) / BN;
-  const int items = npair * mt * 16;
+  const int items = npair * mt * NHEAD;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int nblk = my_items * nb;
   auto item_of = [&](int li, int& a0, int& m0, int& head) {
@@ -103,8 +116,9 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         mbar_expect_tx(&B.q_full, 2 * TQ);
         for (int w = 0; w < 2; ++w) {
           const int a = min(a0 + w, A - 1);
-          tma_load_3d(su + O_Q + w * TQ, &mqa, &B.q_full, qcol, m0, a);
-          tma_load_3d(su + O_Q + w * TQ + QA, &mqb, &B.q_full, qcol + 32, m0, a);
+#pragma unroll
+          for (int j = 0; j < NA; ++j) tma_load_3d(su + O_Q + w * TQ + j * QA, &mqa, &B.q_full, qcol + 32 * j, m0, a);
+          if (NBX) tma_load_3d(su + O_Q + w * TQ + NA * QA, &mqb, &B.q_full, qcol + 32 * NA, m0, a);
         }
         for (int n = 0; n < nb; ++n, ++g) {
           const int s = g % ST;
@@ -113,8 +127,9 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
           mbar_expect_tx(&B.kv_full[s], STB);
           for (int w = 0; w < 2; ++w) {
             const int a = min(a0 + w, A - 1);
-            tma_load_3d(st + S_KA + w * KA, &mka, &B.kv_full[s], qcol, n * BN, a);
-            tma_load_3d(st + S_KB + w * KB, &mkb, &B.kv_full[s], qcol + 32, n * BN, a);
+#pragma unroll
+            for (int j = 0; j < NA; ++j) tma_load_3d(st + S_KA + (w * NA + j) * KA, &mka, &B.kv_full[s], qcol + 32 * j, n * BN, a);
+            if (NBX) tma_load_3d(st + S_KB + w * KB, &mkb, &B.kv_full[s], qcol + 32 * NA, n * BN, a);
             tma_load_3d(st + S_VT + w * TV, &mvt, &B.kv_full[s], n * BN, a, qcol);
           }
           tma_load_3d(st + S_BIAS, &mb, &B.kv_full[s], n * BN, m0, head);
@@ -130,14 +145,19 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       mbar_wait(&B.kv_full[s], (G / ST) & 1);
       tc_fence_after();
       const uint32_t qa = su + O_Q + w * TQ, st = su + O_ST + s * STB;
-      const uint64_t dqa = desc_k128(qa), dqb = desc_sw64(qa + QA);
-      const uint64_t dka = desc_k128(st + S_KA + w * KA), dkb = desc_sw64(st + S_KB + w * KB);
       const uint32_t d = tmem + T_S + w * 64 + (G & 1) * 32;
       if (elect_one()) {
 #pragma unroll
-        for (int ks = 0; ks < 4; ++ks) umma_ss_tf32(d, dqa + (uint64_t)(ks * 2), dka + (uint64_t)(ks * 2), I_QK, ks > 0 ? 1u : 0u);
+        for (int j = 0; j < NA; ++j) {
+          const uint64_t dqa = desc_k128(qa + j * QA), dka = desc_k128(st + S_KA + (w * NA + j) * KA);
 #pragma unroll
-        for (int ks = 0; ks < 2; ++ks) umma_ss_tf32(d, dqb + (uint64_t)(ks * 2), dkb + (uint64_t)(ks * 2), I_QK, 1u);
+          for (int ks = 0; ks < 4; ++ks) umma_ss_tf32(d, dqa + (uint64_t)(ks * 2), dka + (uint64_t)(ks * 2), I_QK, (j > 0 || ks > 0) ? 1u : 0u);
+        }
+        if (NBX) {
+          const uint64_t dqb = desc_sw64(qa + NA * QA), dkb = desc_sw64(st + S_KB + w * KB);
+#pragma unroll
+          for (int ks = 0; ks < 2; ++ks) umma_ss_tf32(d, dqb + (uint64_t)(ks * 2), dkb + (uint64_t)(ks * 2), I_QK, 1u);
+        }
         tc_commit(&B.s_full[w][G & 1]);
         if (n == nb - 1) tc_commit(&B.q_empty);
       }
@@ -173,7 +193,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     const int w = (warp - 4) >> 2;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     if (PP && w == 1) named_bar_arrive(3, 256);
-    const uint32_t xa = su + O_X + w * XG, xb = xa + QA;
+    const uint32_t xa = su + O_X + w * XG, xb = xa + NA * QA;              // A boxes at xa + j QA, the B box at xb
     float m_i = -INFINITY, l_i = 0.f;
     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
       if (n == nb) { n = 0; ++li; }
@@ -185,8 +205,9 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
           tma_store_wait_read0();
           mbar_expect_tx(&B.g_full[w], XG);
           const int a = min(a0 + w, A - 1);
-          tma_load_3d(xa, &mga, &B.g_full[w], head * DH, m0, a);
-          tma_load_3d(xb, &mgb, &B.g_full[w], head * DH + 32, m0, a);
+#pragma unroll
+          for (int j = 0; j < NA; ++j) tma_load_3d(xa + j * QA, &mga, &B.g_full[w], head * DH + 32 * j, m0, a);
+          if (NBX) tma_load_3d(xb, &mgb, &B.g_full[w], head * DH + 32 * NA, m0, a);
         }
       }
       mbar_wait(&B.kv_full[s], (G / ST) & 1);                              // the bias tile of this block
@@ -228,7 +249,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         if (n >= 1) {
           uint32_t ov[16];
 #pragma unroll
-          for (int cc = 0; cc < 3; ++cc) {
+          for (int cc = 0; cc < DH / 16; ++cc) {
             tmem_ld16(trow + T_O + w * 64 + cc * 16, ov);
             tmem_wait_ld();
 #pragma unroll
@@ -263,17 +284,17 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         mbar_wait(&B.p_free[w][G & 1], (G >> 1) & 1);
         tc_fence_after();
         const float inv = 1.f / l_i;
-        uint32_t ov[48];
+        uint32_t ov[DH];
 #pragma unroll
-        for (int cc = 0; cc < 3; ++cc) tmem_ld16(trow + T_O + w * 64 + cc * 16, *reinterpret_cast<uint32_t(*)[16]>(ov + 16 * cc));
+        for (int cc = 0; cc < DH / 16; ++cc) tmem_ld16(trow + T_O + w * 64 + cc * 16, *reinterpret_cast<uint32_t(*)[16]>(ov + 16 * cc));
         tmem_wait_ld();
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.o_free[w]);
         mbar_wait(&B.g_full[w], li & 1);
 #pragma unroll
-        for (int q = 0; q < 12; ++q) {                                     // 4 channels per 16-byte chunk: 8 chunks in A, 4 in B
-          const uint32_t ad = q < 8 ? xa + sw128(r, q) : xb + sw64(r, q - 8);
+        for (int q = 0; q < DH / 4; ++q) {                                 // 4 channels per 16-byte chunk: 8 in each A box, 4 in B
+          const uint32_t ad = q < 8 * NA ? xa + (q / 8) * QA + sw128(r, q % 8) : xb + sw64(r, q - 8 * NA);
           const uint4 gw = lds128(ad);
           const float o0 = __uint_as_float(ov[4 * q + 0]) * inv * sigmoid_kit(__uint_as_float(gw.x));
           const float o1 = __uint_as_float(ov[4 * q + 1]) * inv * sigmoid_kit(__uint_as_float(gw.y));
@@ -284,8 +305,9 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         fence_proxy_async();
         named_bar_sync(1 + w, 128);
         if (r == 0 && a0 + w < A) {
-          tma_store_3d(&mqa, xa, head * DH, m0, a0 + w);
-          tma_store_3d(&mqb, xb, head * DH + 32, m0, a0 + w);
+#pragma unroll
+          for (int j = 0; j < NA; ++j) tma_store_3d(&mqa, xa + j * QA, head * DH + 32 * j, m0, a0 + w);
+          if (NBX) tma_store_3d(&mqb, xb, head * DH + 32 * NA, m0, a0 + w);
           tma_store_commit();
         }
       }

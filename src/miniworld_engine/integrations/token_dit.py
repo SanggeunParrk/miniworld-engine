@@ -9,6 +9,9 @@ captured with; single and cond stay live). The conditioning may be shared by the
 B200 (one in-place CUDA row pass after the projection; the logit scale folds into the q norm's weight). Calls with
 autograd, different model dimensions, or QK-norm off B200 keep the general module path.
 
+Precision: the runner's, i.e. single's dtype (bf16, or fp32 on TF32 tensor cores at every head layout of LAYOUTS on B200); the
+step runs with autocast off.
+
 Lengths: on H100 L must be a multiple of 128 (the Triton gated core's tiles). On B200 any L >= 8: the sm_100a core takes a
 multiple of 8 (its TMA maps are 3-D per sample, so tile tails load as zeros and stores clip), and ``update`` pads the other
 lengths to the next multiple of 8 -- single / cond with zero rows, the pair with zero rows and columns, the key mask with
@@ -50,7 +53,8 @@ WEIGHTS = (
     "transition.expand_b.weight",
     "transition.squeeze.weight",
 )
-#: (heads, d_single) layouts the fused step serves: 16 x 48 everywhere; 24 x 32, 12 x 64 and 16 x 64 (d 1024) on B200 (bf16)
+#: (heads, d_single) layouts the fused step serves: 16 x 48 everywhere; 24 x 32, 12 x 64 and 16 x 64 (d 1024) on B200 (bf16, and
+#: fp32 through the TF32 core built per layout)
 LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
 #: the QK-norm weights, appended to WEIGHTS when the block has use_qk_norm
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
@@ -157,7 +161,9 @@ def _infer(
         block.attention.n_head = heads
         return FusedTokenDiT([block], dtype=single.dtype)
 
-    with torch.cuda.device(single.device):
+    # autocast off: the step's precision is the runner's dtype (single's), and an enclosing bf16 autocast would turn the fp32
+    # step's conditioning GEMMs bf16
+    with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
         # This path is inference only (the token DiT is not recycled; training takes integrations/token_dit_train), so
         # the weights do not change between the calls of a sampling run. Packing is tens of small kernels (~0.2 ms a
         # call, more than the block's step at L384): reuse the pack while every weight's (pointer, version) is the same

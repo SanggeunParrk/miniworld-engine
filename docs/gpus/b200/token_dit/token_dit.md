@@ -18,6 +18,12 @@ training, built from the same kernels with the head count and width as compile-t
 leads Anthropic by 1.30-1.56x and training (CUDA graph on) PyTorch compiled by 1.20-2.73x at L256-768. fp32 stays 16 x 48
 only.
 
+fp32 head layouts, any training shape, MiniWorld routing (2026-10-06; see the section of that name): the TF32 cores are built
+per layout too, so fp32 serves all four layouts (미검증 until the B200 run); training takes any A and L (padded internally
+to an even A and L % 128 == 0); `DiTBlock` takes an [A, B, L] key mask that is one [B, L] mask expanded over the samples.
+MiniWorld's fp32 diffusion training had not reached the fused block at all: team-gm routes every [A, B, L] mask -- the one
+the diffusion module passes -- around `DiTBlock.forward`.
+
 On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, no quack -- on two paths that
 `modules/dit` dispatches to:
 
@@ -42,7 +48,8 @@ On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, n
   reads the pack and pair bias it was captured with and the live single / cond.
 - **Training** (`integrations/token_dit_train.py`): serves `DiTBlock` calls under autograd, engine kernel backend
   (implementation TRITON or MINIWORLD), bf16 (inputs, or `compute_dtype=bf16`) or fp32 (fp32 inputs, no `compute_dtype`),
-  B == 1, even A, L % 128 == 0, key mask [B, L] or none. One autograd Function per block whose forward and backward are
+  B == 1, any A and L (padded to an even A and L % 128 == 0 inside, 2026-10-06), key mask [B, L] or none (`DiTBlock` passes
+  the [B, L] row of an [A, B, L] mask expanded over the samples). One autograd Function per block whose forward and backward are
   each one opaque op (torch.compile keeps them as nodes): cuBLAS GEMMs (operands in the path's dtype -- fp32 ones forced to
   TF32 -- fp32 accumulation, fp32 weight gradients; in bf16 the expand GEMM is `gemm_swiglu2_sm100 -DSAVE_AB`, the SwiGLU in
   its epilogue and [a | b] saved for the backward), the sm_100a attention forward / backward (bf16: `attn_fwd2`,
@@ -463,14 +470,14 @@ of the group below 70 % SoL; ✓ would need every kernel of the group at 70 % or
 | heads x head dim | d_single | inference bf16 | inference fp32 | training bf16 | training fp32 |
 |---|---|---|---|---|---|
 | 16 x 48 (registry row) | 768 | ✓ | ✓ | ✓ | ✓ |
-| 24 x 32 | 768 | ✓ | module path | ✓ | module path |
-| 12 x 64 | 768 | ✓ | module path | ✓ | module path |
-| 16 x 64 | 1024 | ✓ | module path | ✓ | module path |
+| 24 x 32 | 768 | ✓ | CUDA 미검증 (2026-10-06) | ✓ | CUDA 미검증 (2026-10-06) |
+| 12 x 64 | 768 | ✓ | CUDA 미검증 (2026-10-06) | ✓ | CUDA 미검증 (2026-10-06) |
+| 16 x 64 | 1024 | ✓ | CUDA 미검증 (2026-10-06) | ✓ | CUDA 미검증 (2026-10-06) |
 
 d_cond 384, d_pair 128 and transition n = 2 in every layout; the transition and the projections scale with d_single.
 `integrations/token_dit.py` and `integrations/token_dit_train.py` list the layouts as `LAYOUTS` ((heads, d_single) pairs);
-`serves()` takes a layout from the block's `n_head` and the input width, and the fp32 path stays 16 x 48 (the TF32 kernels'
-tiles are built around 48-wide rows: see T1'-T3').
+`serves()` takes a layout from the block's `n_head` and the input width. Until 2026-10-06 the fp32 path stayed 16 x 48 (the
+TF32 kernels' tiles were built around 48-wide rows: see T1'-T3'); see "fp32 head layouts" below.
 
 How each piece takes a layout:
 - **Attention cores** (`attn_inf`, `attn_fwd2`, `attn_dkv`, `attn_dqb`): one cubin per layout, built with `-DNHEAD=<heads>
@@ -547,6 +554,71 @@ L512-768 (2.35 / 3.60 ms). Where the 24 x 32 difference goes is not profiled per
 tables above are 16 x 48 only. With CUDA graphs off, ours trails PyTorch compiled at L256 in 16 x 48 (0.94x) and 12 x 64
 (0.97x); host time, as in the 16 x 48 tables.
 
+## fp32 head layouts, any training shape, MiniWorld routing (2026-10-06)
+
+**Why MiniWorld's fp32 diffusion training ran the Triton per-op path.** A profile of the phase-2 training micro-step (token
+DiT fp32, trunk bf16) showed engine Triton kernels on top (`_adaln_fwd_gate`, `gated_projection`, `cond_transition`,
+`layernorm_*`, `adaln_bwd_pre`): every token DiT block ran `AugmentedAttentionPairBias` + `ConditionedTransition` one op at a
+time. Not one of `token_dit_train.serves()`'s conditions was the cause -- it was never asked:
+
+- MiniWorld's `DiffusionModule.forward` (`src/miniworld/modules/diffusion_module.py`, origin/main 501cb4c) calls the token
+  DiT with `mask=structure.token_mask.unsqueeze(0).expand(A, -1, -1)`, an [A, B, L] mask.
+- team-gm's `DiffusionTransformerBlock.forward` (`src/team_gm/modules/blocks/diffusion_transformer.py`, exp/miniworld
+  731ec0c, since af2bda7 2026-10-01) hands only `mask is None or mask.ndim == 2` to `DiTBlock.forward`; an [A, B, L] mask
+  goes to `self.attention(...)` then `self.transition(...)` -- the module path, whatever the dtype (bf16 too).
+- The engine's `DiTBlock.forward` took only a [B, L] mask (its fused paths take one key mask shared by the samples), which
+  is why team-gm routed [A, B, L] around it.
+
+Every other condition holds for that call: grad on, `implementation: miniworld_engine` (-> TRITON backend),
+`engine_backend: auto`, B200, fp32 activations (`diffusion.dtype: fp32`), B = 1, A = 48 (even), L = 384 (the crop is padded to
+`bucket_token_multiple: 384`), 16 x 48, cond [A, 1, L, 384], pair [1, L, L, 128], LayerNorm eps 1e-5, QK-norm (served),
+non-reentrant `checkpoint_sequential` (grad stays on inside, so the fused Function runs and is recomputed in the backward),
+torch.compile (the block's forward / backward are opaque ops).
+
+Fixed in the engine: `DiTBlock.forward` takes `[B, L] | [A, B, L]` masks; an [A, B, L] mask that is one [B, L] mask for every
+sample -- stride 0 over A (an `expand`, which is what MiniWorld passes; decided from strides, so no device read under
+compile or capture) or A == 1 -- reaches the fused inference / training paths as its [B, L] row, and a mask that differs per
+sample keeps the module path. team-gm's block then has no reason to route [A, B, L] masks around `DiTBlock.forward`: it
+needs `if mask is None or mask.ndim in (2, 3)` (or simply always) `-> DiTBlock.forward(...)` for MiniWorld to reach the
+fused block (a team-gm change, not made here).
+
+**Any A and L in training.** The kernels tile L by 128 and pair the samples. `token_dit_train.block` now pads L to the next
+multiple of 128 and A to an even count -- zero single / cond rows and samples, zero pair rows and columns, padded keys masked
+-- and returns the slice of the real ones; padded queries and samples get a zero output gradient and padded keys P = 0, so
+they add nothing to any gradient. (MiniWorld's L384 / L768 crops need no padding.)
+
+**Autocast.** The fused forward / backward and the inference step run with autocast off: the precision follows the tensors
+(bf16 operands for bf16 activations or `compute_dtype=bf16`, else fp32 / TF32). Under bf16-mixed training an fp32 diffusion
+block's fp32 activations therefore take the TF32 kernels; before, an enclosing bf16 autocast turned the fp32 path's
+`torch.mm` outputs bf16. The bf16 path is unchanged (its GEMMs are bf16 either way).
+
+**TF32 cores at every layout.** `attn_fwd_tf32`, `attn_dkv_tf32`, `attn_dqb_tf32` and `attn_inf_tf32` take `-DNHEAD -DDHP
+-DRSQDV` (`sm100._tdit_defs`, as the bf16 cores; no flags = 16 x 48, the cubins as before). A DH-wide fp32 row is NA = DH / 32
+K-major boxes of 32 columns in the 128-B swizzle and NBX = (DH % 32) / 16 boxes of 16 columns in the 64-B swizzle (48 = 32 + 16,
+32 = 32, 64 = 32 + 32); QK / S / dP run 4 K-steps per 128-B box and 2 per 64-B box; the MN-major operands (v, q / dO, K) are
+NV = ceil(DH / 32) atoms of 32 columns (128-B swizzle, 32-B atoms); O / dK / dV / gated-o stores go box by box. The 16-column
+maps are still encoded on the host for every layout and read only at DH 48.
+
+| kernel | 16 x 48 | 24 x 32 | 12 x 64, 16 x 64 | TMEM |
+|---|---|---|---|---|
+| `attn_fwd_tf32` | 213 KB, 3 stages | 161 KB, 3 | 193 KB, **2 stages** | O at 256 + 64 w, DH columns |
+| `attn_inf_tf32` | 217 KB, 3 stages | 161 KB, 3 | 225 KB, **2 stages** | as fwd |
+| `attn_dkv_tf32` | 184 KB, 3 stages | 132 KB, 3 | 212 KB, 3 | dK 256, dV 320 (64 columns at DH 64) |
+| `attn_dqb_tf32` | 208 KB, STA 2 / STK 2 | 144 KB, 2 / 2 | 224 KB, STA 2 / **STK 1** | 3 dQ buffers at 192 + DH b (384 at DH 64) |
+
+At DH 64 three stages (fwd / inf) or a second K slot (dqb) do not fit in 227 KB; the 16 x 48 note above measured STK 1
+slower at 48 (dkv + dqb 558 / 1968 against 452 / 1554 us), so the 64-wide dqb is expected to trail its bf16 ratio until it is
+restructured (a 128-key item streaming 64-key sub-chunks, as in "Limits and next"). The dQ read-out splits the columns
+between the two warpgroups as 32 + 16 (48), 32 + 32 (64), 16 + 16 (32). The CUDA row kernels needed nothing: they were
+already built per (d, head dim) and templated on the operand dtype.
+
+Tests: `tests/integrations/test_b200_token_dit_tf32_layouts_gpu.py` (the TF32 cores at every layout against fp64 -- training
+L128 / 384, key mask on / off; inference L128 / 200 / 384 --; the fused fp32 inference step and training block at every layout
+against the fp32 IEEE block, held to 1.5x the module path's error in the same TF32 regime, the training block at A L = 4 x 256,
+2 x 384 and 3 x 200 (padding); fp32 under bf16 autocast) and `tests/integrations/test_b200_token_dit_train_gpu.py` (now also A L
+= 3 x 200, and the [A, B, L] expanded mask taking the fused path while a per-sample mask keeps the module path). Not run yet;
+no measurements yet.
+
 ## What was tried and not kept
 
 | attempt | result |
@@ -563,7 +635,7 @@ tables above are 16 x 48 only. With CUDA graphs off, ours trails PyTorch compile
 
 ## Limits and next
 
-- Head layouts other than 16 x 48: bf16 only (fp32 keeps the module path), and no per-kernel SoL yet.
+- Head layouts other than 16 x 48: fp32 built (2026-10-06) but not yet run or measured; no per-kernel SoL yet in either dtype.
 - A DiTBlock call sees one block, so the pair bias and the cond LayerNorm are recomputed per block; the research stack
   runner (branch `b200/token-dit`) hoisted them for the whole stack (training 1.62 / 3.56 ms per block there, with Triton
   and quack).

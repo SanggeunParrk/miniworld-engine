@@ -13,6 +13,10 @@
 //     next item's K / V load waits for that store: deeper q / dO staging paid more than a second slot).
 // The two warpgroups take alternate blocks of the same key tile and feed one dK / dV accumulator pair.
 // TMEM: S^T[w] at w * 64, dP^T[w] at w * 64 + 32, P^T[w] at 128 + w * 64, dS^T[w] at 160 + w * 64, dK at 256, dV at 320.
+//
+// Head layouts (-DNHEAD -DDHP -DRSQDV, as the bf16 cores; none = 16 x 48): a DH-wide fp32 row is NA 32-column boxes in the
+// 128-B swizzle and NBX 16-column ones in the 64-B swizzle (48 = 32 + 16, 32 = 32, 64 = 32 + 32); the MN-major q / dO NV
+// 32-column atoms. smem (3 stages): 16 x 48 184 KB, 24 x 32 132 KB, 12 x 64 / 16 x 64 212 KB.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -26,18 +30,32 @@ using namespace s100;
 #ifndef KVS
 #define KVS 1                            // K / V item slots (each doubles as the item's dK / dV staging)
 #endif
-constexpr int BQ = 32, KM = 128, DH = 48, DM = 768;
-constexpr int KVA = KM * 128, KVB = KM * 64, TKV = KVA + KVB;              // K (or V) of the item: 24 KB
+#ifndef DHP
+#define DHP 48                           // head width: 48 (16 x 48), 32 (24 x 32), 64 (12 x 64; 16 x 64 at d 1024)
+#endif
+#ifndef NHEAD
+#define NHEAD 16
+#endif
+#ifndef RSQDV
+#define RSQDV 0.14433756729740643f       // 1 / sqrt(head dim): 1 / sqrt 48; 1 / sqrt 32 = 0.17677669529663687f; 1 / sqrt 64 = 0.125f
+#endif
+static_assert(DHP == 64 || DHP == 48 || DHP == 32, "TF32 head width 64, 48 or 32");
+constexpr int BQ = 32, KM = 128, DH = DHP, DM = NHEAD * DHP;
+constexpr int NA = DH / 32, NBX = (DH % 32) / 16, NV = (DH + 31) / 32;    // 128-B boxes, 64-B boxes, MN atoms of a head row
+constexpr int KVA = KM * 128, KVB = KM * 64, TKV = NA * KVA + NBX * KVB;   // K (or V) of the item: 24 KB at 48 (box j at j KVA)
 constexpr int SLOT = 2 * TKV;                                              // K | V
-constexpr int QA = BQ * 128, QB = BQ * 64, QM = 2 * BQ * 128, TB = KM * BQ * 4;
-constexpr int S_QA = 0, S_DA = QA, S_QB = 2 * QA, S_DB = 2 * QA + QB, S_QM = 2 * QA + 2 * QB, S_DM = S_QM + QM, S_BI = S_DM + QM;
+constexpr int QA = BQ * 128, QB = BQ * 64, QM = NV * BQ * 128, TB = KM * BQ * 4;
+// q boxes j at S_QA + j QA, dO boxes at S_DA + j QA, then the 16-column boxes, the MN-major q / dO, the bias, LSE | D
+constexpr int S_QA = 0, S_DA = NA * QA, S_QB = 2 * NA * QA, S_DB = S_QB + NBX * QB, S_QM = S_DB + NBX * QB, S_DM = S_QM + QM,
+              S_BI = S_DM + QM;
 constexpr int S_LD = S_BI + TB, STB = S_LD + 1024;                         // + LSE | D of the block's queries (128 B each)
 constexpr int O_KV = 0, O_ST = KVS * SLOT, O_BAR = O_ST + ST * STB, SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 static_assert((S_QM % 1024) == 0 && (S_DM % 1024) == 0 && (STB % 1024) == 0 && (SLOT % 1024) == 0 && (TKV % 1024) == 0, "alignment");
 constexpr uint32_t T_S = 0, T_P = 128, T_DK = 256, T_DV = 320;
 constexpr uint32_t I_S = idesc_tf32(128, BQ), I_O = idesc_tf32(128, DH, 0, 1);
-constexpr float LOG2E = 1.4426950408889634f, RSQD = 0.14433756729740643f;
+constexpr float LOG2E = 1.4426950408889634f, RSQD = RSQDV;
+static_assert(T_DV + DH <= 512 && T_DK + DH <= T_DV, "TMEM");
 
 struct Bars {
   uint64_t full[ST], empty[ST], kvfull[KVS], kvempty[KVS], s_full[2], s_free[2], ds_full[2], ds_free[2], acc_full, acc_free;
@@ -64,7 +82,7 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int kt = L / KM, nb = L / BQ;                                      // nb is a multiple of 4: every item starts on warpgroup 0
-  const int items = A * 16 * kt;
+  const int items = A * NHEAD * kt;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int nblk = my_items * nb;
   auto item_of = [&](int li, int& a, int& k0, int& head) {
@@ -92,7 +110,7 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     const uint32_t z[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     const uint32_t trow = tmem + ((uint32_t)(warp & 3) * 32 << 16);
 #pragma unroll
-    for (int c = 0; c < 3; ++c) { tmem_st16(trow + T_DK + c * 16, z); tmem_st16(trow + T_DV + c * 16, z); }
+    for (int c = 0; c < DH / 16; ++c) { tmem_st16(trow + T_DK + c * 16, z); tmem_st16(trow + T_DV + c * 16, z); }
     tmem_wait_st();
   }
   tc_fence_before();
@@ -110,24 +128,35 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         const uint32_t kv = su + O_KV + ks * SLOT;
         if (li >= KVS) mbar_wait(&B.kvempty[ks], ((li / KVS) - 1) & 1);
         mbar_expect_tx(&B.kvfull[ks], SLOT);
-        tma_load_2d(kv, &mka, &B.kvfull[ks], qcol, a * L + k0);
-        tma_load_2d(kv + KVA, &mkb, &B.kvfull[ks], qcol + 32, a * L + k0);
-        tma_load_2d(kv + TKV, &mva, &B.kvfull[ks], qcol, a * L + k0);
-        tma_load_2d(kv + TKV + KVA, &mvb, &B.kvfull[ks], qcol + 32, a * L + k0);
-        const size_t li0 = ((size_t)a * 16 + head) * L;
+#pragma unroll
+        for (int j = 0; j < NA; ++j) {
+          tma_load_2d(kv + j * KVA, &mka, &B.kvfull[ks], qcol + 32 * j, a * L + k0);
+          tma_load_2d(kv + TKV + j * KVA, &mva, &B.kvfull[ks], qcol + 32 * j, a * L + k0);
+        }
+        if (NBX) {
+          tma_load_2d(kv + NA * KVA, &mkb, &B.kvfull[ks], qcol + 32 * NA, a * L + k0);
+          tma_load_2d(kv + TKV + NA * KVA, &mvb, &B.kvfull[ks], qcol + 32 * NA, a * L + k0);
+        }
+        const size_t li0 = ((size_t)a * NHEAD + head) * L;
         for (int n = 0; n < nb; ++n, ++G) {
           const int s = G % ST, row = a * L + n * BQ;
           if (G >= ST) mbar_wait(&B.empty[s], ((G / ST) - 1) & 1);
           const uint32_t st = su + O_ST + s * STB;
-          mbar_expect_tx(&B.full[s], 2 * (QA + QB + QM) + TB + 2 * BQ * 4);
-          tma_load_2d(st + S_QA, &mqa, &B.full[s], qcol, row);
-          tma_load_2d(st + S_QB, &mqb, &B.full[s], qcol + 32, row);
-          tma_load_2d(st + S_QM, &mqm, &B.full[s], qcol, row);
-          tma_load_2d(st + S_QM + BQ * 128, &mqm, &B.full[s], qcol + 32, row);
-          tma_load_2d(st + S_DA, &mda, &B.full[s], qcol, row);
-          tma_load_2d(st + S_DB, &mdb, &B.full[s], qcol + 32, row);
-          tma_load_2d(st + S_DM, &mdm, &B.full[s], qcol, row);
-          tma_load_2d(st + S_DM + BQ * 128, &mdm, &B.full[s], qcol + 32, row);
+          mbar_expect_tx(&B.full[s], 2 * (NA * QA + NBX * QB + QM) + TB + 2 * BQ * 4);
+#pragma unroll
+          for (int j = 0; j < NA; ++j) {
+            tma_load_2d(st + S_QA + j * QA, &mqa, &B.full[s], qcol + 32 * j, row);
+            tma_load_2d(st + S_DA + j * QA, &mda, &B.full[s], qcol + 32 * j, row);
+          }
+          if (NBX) {
+            tma_load_2d(st + S_QB, &mqb, &B.full[s], qcol + 32 * NA, row);
+            tma_load_2d(st + S_DB, &mdb, &B.full[s], qcol + 32 * NA, row);
+          }
+#pragma unroll
+          for (int j = 0; j < NV; ++j) {
+            tma_load_2d(st + S_QM + j * BQ * 128, &mqm, &B.full[s], qcol + 32 * j, row);
+            tma_load_2d(st + S_DM + j * BQ * 128, &mdm, &B.full[s], qcol + 32 * j, row);
+          }
 #pragma unroll
           for (int j = 0; j < KM / 32; ++j) tma_load_2d(st + S_BI + j * BQ * 128, &mb, &B.full[s], k0 + j * 32, head * L + n * BQ);
           bulk_g2s(st + S_LD, LSE + li0 + n * BQ, BQ * 4, &B.full[s]);
@@ -151,18 +180,30 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       if (G >= 2) mbar_wait(&B.s_free[w], ((G >> 1) - 1) & 1);
       tc_fence_after();
       const uint32_t st = su + O_ST + s * STB, kv = su + O_KV + ks * SLOT;
-      const uint64_t dka = desc_k128(kv), dkb = desc_sw64(kv + KVA), dva = desc_k128(kv + TKV), dvb = desc_sw64(kv + TKV + KVA);
-      const uint64_t dqa = desc_k128(st + S_QA), dqb = desc_sw64(st + S_QB), dda = desc_k128(st + S_DA), ddb = desc_sw64(st + S_DB);
       const uint32_t ts = tmem + T_S + w * 64;
       if (elect_one()) {
 #pragma unroll
-        for (int k = 0; k < 4; ++k) umma_ss_tf32(ts, dka + (uint64_t)(k * 2), dqa + (uint64_t)(k * 2), I_S, k > 0 ? 1u : 0u);
+        for (int j = 0; j < NA; ++j) {
+          const uint64_t dka = desc_k128(kv + j * KVA), dqa = desc_k128(st + S_QA + j * QA);
 #pragma unroll
-        for (int k = 0; k < 2; ++k) umma_ss_tf32(ts, dkb + (uint64_t)(k * 2), dqb + (uint64_t)(k * 2), I_S, 1u);
+          for (int k = 0; k < 4; ++k) umma_ss_tf32(ts, dka + (uint64_t)(k * 2), dqa + (uint64_t)(k * 2), I_S, (j > 0 || k > 0) ? 1u : 0u);
+        }
+        if (NBX) {
+          const uint64_t dkb = desc_sw64(kv + NA * KVA), dqb = desc_sw64(st + S_QB);
 #pragma unroll
-        for (int k = 0; k < 4; ++k) umma_ss_tf32(ts + 32, dva + (uint64_t)(k * 2), dda + (uint64_t)(k * 2), I_S, k > 0 ? 1u : 0u);
+          for (int k = 0; k < 2; ++k) umma_ss_tf32(ts, dkb + (uint64_t)(k * 2), dqb + (uint64_t)(k * 2), I_S, 1u);
+        }
 #pragma unroll
-        for (int k = 0; k < 2; ++k) umma_ss_tf32(ts + 32, dvb + (uint64_t)(k * 2), ddb + (uint64_t)(k * 2), I_S, 1u);
+        for (int j = 0; j < NA; ++j) {
+          const uint64_t dva = desc_k128(kv + TKV + j * KVA), dda = desc_k128(st + S_DA + j * QA);
+#pragma unroll
+          for (int k = 0; k < 4; ++k) umma_ss_tf32(ts + 32, dva + (uint64_t)(k * 2), dda + (uint64_t)(k * 2), I_S, (j > 0 || k > 0) ? 1u : 0u);
+        }
+        if (NBX) {
+          const uint64_t dvb = desc_sw64(kv + TKV + NA * KVA), ddb = desc_sw64(st + S_DB);
+#pragma unroll
+          for (int k = 0; k < 2; ++k) umma_ss_tf32(ts + 32, dvb + (uint64_t)(k * 2), ddb + (uint64_t)(k * 2), I_S, 1u);
+        }
         tc_commit(&B.s_full[w]);
       }
       __syncwarp();
@@ -248,41 +289,49 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         tc_fence_after();
         const float sc = w == 0 ? RSQD : 1.f;
         const uint32_t tc = w == 0 ? T_DK : T_DV;
-        uint32_t v[32], u[16];
-        tmem_ld32(trow + tc, v);
-        tmem_ld16(trow + tc + 32, u);
+        uint32_t v[DH];
+#pragma unroll
+        for (int c = 0; c < DH / 16; ++c) tmem_ld16(trow + tc + c * 16, *reinterpret_cast<uint32_t(*)[16]>(v + 16 * c));
         tmem_wait_ld();
         {
           const uint32_t z[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-          tmem_st16(trow + tc, z); tmem_st16(trow + tc + 16, z); tmem_st16(trow + tc + 32, z);
+#pragma unroll
+          for (int c = 0; c < DH / 16; ++c) tmem_st16(trow + tc + c * 16, z);
           tmem_wait_st();
         }
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.acc_free);
         if (DQZ) {                                                         // zero this tile of dQ for attn_dqb_tf32's reductions (it runs next)
-          float4* zq = reinterpret_cast<float4*>(DQZ + ((size_t)a * L + k0) * DM + head * DH);   // 128 rows x 12 float4, lanes along rows
+          constexpr int C4 = DH / 4;                                       // 128 rows x C4 float4, lanes along rows, half per warpgroup
+          float4* zq = reinterpret_cast<float4*>(DQZ + ((size_t)a * L + k0) * DM + head * DH);
 #pragma unroll
-          for (int k = 0; k < 6; ++k) {
-            const int idx = w * 768 + k * 128 + (int)r, row = idx / 12, ch = idx % 12;
+          for (int k = 0; k < C4 / 2; ++k) {
+            const int idx = w * 64 * C4 + k * 128 + (int)r, row = idx / C4, ch = idx % C4;
             zq[(size_t)row * (DM / 4) + ch] = make_float4(0.f, 0.f, 0.f, 0.f);
           }
         }
-        const uint32_t xa = su + O_KV + (li % KVS) * SLOT + w * TKV, xb = xa + KVA;
+        const uint32_t xa = su + O_KV + (li % KVS) * SLOT + w * TKV, xb = xa + NA * KVA;   // A boxes at xa + j KVA, the B box at xb
+        auto put = [&](int q) {
+          return make_uint4(__float_as_uint(__uint_as_float(v[4 * q]) * sc), __float_as_uint(__uint_as_float(v[4 * q + 1]) * sc),
+                            __float_as_uint(__uint_as_float(v[4 * q + 2]) * sc), __float_as_uint(__uint_as_float(v[4 * q + 3]) * sc));
+        };
         named_bar_sync(1 + w, 128);
 #pragma unroll
-        for (int q = 0; q < 8; ++q)
-          sts128(xa + sw128(r, q), make_uint4(__float_as_uint(__uint_as_float(v[4 * q]) * sc), __float_as_uint(__uint_as_float(v[4 * q + 1]) * sc),
-                                              __float_as_uint(__uint_as_float(v[4 * q + 2]) * sc), __float_as_uint(__uint_as_float(v[4 * q + 3]) * sc)));
+        for (int j = 0; j < NA; ++j) {
 #pragma unroll
-        for (int q = 0; q < 4; ++q)
-          sts128(xb + sw64(r, q), make_uint4(__float_as_uint(__uint_as_float(u[4 * q]) * sc), __float_as_uint(__uint_as_float(u[4 * q + 1]) * sc),
-                                             __float_as_uint(__uint_as_float(u[4 * q + 2]) * sc), __float_as_uint(__uint_as_float(u[4 * q + 3]) * sc)));
+          for (int q = 0; q < 8; ++q) sts128(xa + j * KVA + sw128(r, q), put(8 * j + q));
+        }
+        if (NBX) {
+#pragma unroll
+          for (int q = 0; q < 4; ++q) sts128(xb + sw64(r, q), put(8 * NA + q));
+        }
         fence_proxy_async();
         named_bar_sync(1 + w, 128);
         if (r == 0) {
-          tma_store_2d(w == 0 ? &mdka : &mdva, xa, head * DH, a * L + k0);
-          tma_store_2d(w == 0 ? &mdkb : &mdvb, xb, head * DH + 32, a * L + k0);
+#pragma unroll
+          for (int j = 0; j < NA; ++j) tma_store_2d(w == 0 ? &mdka : &mdva, xa + j * KVA, head * DH + 32 * j, a * L + k0);
+          if (NBX) tma_store_2d(w == 0 ? &mdkb : &mdvb, xb, head * DH + 32 * NA, a * L + k0);
           tma_store_commit();
           tma_store_wait_read0();                                          // the slot may take the next item's K / V
           mbar_arrive(&B.kvempty[li % KVS]);

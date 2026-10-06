@@ -20,7 +20,10 @@ The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers):
   attn_fwd_tf32.cu, attn_dkv_tf32.cu, attn_dqb_tf32.cu, attn_inf_tf32.cu
                 the fp32 twins (kind::tf32 MMAs, fp32 softmax): 32-key / 32-query blocks, 48-wide fp32 rows as a
                 32-column 128-B-swizzled box + a 16-column 64-B one, MN-major operands in the 128-B swizzle with 32-B atoms
-                (sm100.cuh); the inference twin reads v^T (q | k | g + v^T).
+                (sm100.cuh); the inference twin reads v^T (q | k | g + v^T). Built per token DiT head layout like the bf16
+                cores (``_tdit_defs``: 16 x 48 default, 24 x 32, 12 x 64, 16 x 64): a 32-wide fp32 head row is one 128-B box,
+                a 64-wide one two; the 64-wide builds drop a pipeline stage where three do not fit (attn_fwd_tf32 /
+                attn_inf_tf32: 2 stages, attn_dqb_tf32: one K slot).
   glue.cu       dO -> bf16 with D = rowsum(dO O), and the bf16 bias transpose attn_dkv reads.
 
 Numerics against fp64 at A = 48: O 1.6e-3, dq 3.0e-3, dk 2.9e-3, dv 2.9e-3, dbias 2.4e-3 (bf16-input-rounding floor). The fp32
@@ -181,46 +184,51 @@ def forward(q2, k2, v2, bias_hll, A, L, heads: int = H, dh: int = D):
     return O, LSE
 
 
-def forward_tf32(q, k, v, bias_hll, A, L):
-    """The fp32 training forward (``attn_fwd_tf32.cu``, TF32 tensor cores): q, k, v [A L, 768] fp32 rows, bias [16, L, L]
-    fp32 (natural units) -> O [A L, 768] fp32, LSE [A, 16, L] (log2)."""
+def forward_tf32(q, k, v, bias_hll, A, L, heads: int = H, dh: int = D):
+    """The fp32 training forward (``attn_fwd_tf32.cu``, TF32 tensor cores): q, k, v [A L, heads dh] fp32 rows, bias [heads, L, L]
+    fp32 (natural units) -> O [A L, heads dh] fp32, LSE [A, heads, L] (log2). Default 16 x 48 (d 768); any of TDIT_HEADS (the
+    kernel built with ``_tdit_defs``). A fp32 head row is 32-column 128-B-swizzled boxes and, at 48, a 16-column 64-B one: the
+    16-column maps are encoded for every layout and read only where the head has that box."""
     dev = _index(q)
-    O = torch.empty(A * L, H * D, device=q.device, dtype=torch.float32)
-    LSE = torch.empty(A, H, L, device=q.device, dtype=torch.float32)
+    W = heads * dh
+    O = torch.empty(A * L, W, device=q.device, dtype=torch.float32)
+    LSE = torch.empty(A, heads, L, device=q.device, dtype=torch.float32)
     f32 = dict(dtype="f32")
-    dims, rs = [H * D, A * L], H * D * 4
+    dims, rs = [W, A * L], W * 4
     maps = (_tm(q, dims, _rs(q), [32, 128], swizzle=128, **f32), _tm(q, dims, _rs(q), [16, 128], swizzle=64, **f32),
             _tm(k, dims, _rs(k), [32, 32], swizzle=128, **f32), _tm(k, dims, _rs(k), [16, 32], swizzle=64, **f32),
             _tm(v, dims, _rs(v), [32, 32], swizzle="128a32", **f32),
-            _tm(bias_hll, [L, H * L], L * 4, [32, 128], swizzle=128, **f32),
+            _tm(bias_hll, [L, heads * L], L * 4, [32, 128], swizzle=128, **f32),
             _tm(O, dims, rs, [32, 128], swizzle=128, **f32), _tm(O, dims, rs, [16, 128], swizzle=64, **f32))
-    _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev)(_grid((A // 2) * H * (L // 128), dev), (384, 1, 1), *maps, LSE,
-                                                                  int(L), int(A))
+    _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=_tdit_defs(heads, dh))(
+        _grid((A // 2) * heads * (L // 128), dev), (384, 1, 1), *maps, LSE, int(L), int(A))
     return O, LSE
 
 
-def backward_tf32(q, k, v, do, bias_hll, LSE, Dd, A, L):
-    """The fp32 training backward (``attn_dkv_tf32.cu`` then ``attn_dqb_tf32.cu``, TF32 tensor cores): q, k, v, do [A L, 768] fp32
-    contiguous, bias [16, L, L] fp32 as given to ``forward_tf32``, LSE from it, Dd = rowsum(dO O) [A, 16, L] fp32 -> dQ, dK, dV
-    [A L, 768] fp32 and dbias [16, L, L] fp32."""
+def backward_tf32(q, k, v, do, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int = D):
+    """The fp32 training backward (``attn_dkv_tf32.cu`` then ``attn_dqb_tf32.cu``, TF32 tensor cores): q, k, v, do [A L, heads dh]
+    fp32 rows, bias [heads, L, L] fp32 as given to ``forward_tf32``, LSE from it, Dd = rowsum(dO O) [A, heads, L] fp32 -> dQ, dK, dV
+    [A L, heads dh] fp32 and dbias [heads, L, L] fp32. Default 16 x 48 (d 768); any of TDIT_HEADS."""
     dev = _index(q)
-    DQ = torch.empty(A * L, H * D, device=q.device, dtype=torch.float32)
-    DB = torch.empty(H, L, L, device=q.device, dtype=torch.float32)
+    W = heads * dh
+    DQ = torch.empty(A * L, W, device=q.device, dtype=torch.float32)
+    DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
     DK, DV = torch.empty_like(DQ), torch.empty_like(DQ)
     f32 = dict(dtype="f32")
-    dims = [H * D, A * L]
+    dims = [W, A * L]
     a = lambda t, rows: _tm(t, dims, _rs(t), [32, rows], swizzle=128, **f32)       # noqa: E731  K-major, columns 0-31
     b = lambda t, rows: _tm(t, dims, _rs(t), [16, rows], swizzle=64, **f32)        # noqa: E731  K-major, columns 32-47
     m = lambda t, rows: _tm(t, dims, _rs(t), [32, rows], swizzle="128a32", **f32)  # noqa: E731  MN-major, 32-column atoms
     dkv_maps = (a(q, 32), b(q, 32), m(q, 32), a(do, 32), b(do, 32), m(do, 32), a(k, 128), b(k, 128), a(v, 128), b(v, 128),
-                _tm(bias_hll, [L, H * L], L * 4, [32, 32], swizzle=0, **f32), a(DK, 128), b(DK, 128), a(DV, 128), b(DV, 128))
+                _tm(bias_hll, [L, heads * L], L * 4, [32, 32], swizzle=0, **f32), a(DK, 128), b(DK, 128), a(DV, 128), b(DV, 128))
     dqb_maps = (a(q, 128), b(q, 128), a(do, 128), b(do, 128), a(v, 64), b(v, 64), a(k, 64), b(k, 64), m(k, 64),
-                _tm(bias_hll, [L, H * L], L * 4, [32, 128], swizzle=128, **f32))
+                _tm(bias_hll, [L, heads * L], L * 4, [32, 128], swizzle=128, **f32))
+    defs = _tdit_defs(heads, dh)
     # attn_dkv_tf32 zero-fills dQ on the way; attn_dqb_tf32 then adds one partial per 64-key chunk.
-    _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev)(_grid(A * H * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd, DQ,
-                                                                  int(L), int(A))
-    _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev)(_grid(H * (L // 128) * (L // 64), dev), (384, 1, 1), *dqb_maps, LSE, Dd,
-                                                                  DQ, DB, int(L), int(A))
+    _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev, defs=defs)(_grid(A * heads * (L // 128), dev), (384, 1, 1), *dkv_maps,
+                                                                             LSE, Dd, DQ, int(L), int(A))
+    _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=defs)(_grid(heads * (L // 128) * (L // 64), dev), (384, 1, 1),
+                                                                             *dqb_maps, LSE, Dd, DQ, DB, int(L), int(A))
     return DQ, DK, DV, DB
 
 
@@ -310,15 +318,15 @@ class GatedInferenceCore:
     * bf16 (``attn_inf.cu``): ``qkvg`` [S L, 4 D], q | k | v | g column views of one GEMM output.
     * fp32 with TF32 tensor cores (``attn_inf_tf32.cu``): ``qkvg`` is q | k | g, [S L, 3 D], and ``vt`` is v transposed,
       [D, S L] -- a kind::tf32 MMA takes v only K-major. Every 48-wide fp32 q / k / g tile is a 32-column 128-B-swizzled
-      box and a 16-column 64-B-swizzled one; the v^T tile is 48 rows x 32 keys.
+      box and a 16-column 64-B-swizzled one (32: one 32-column box, 64: two); the v^T tile is dh rows x 32 keys.
 
-    Bindings (TMA descriptors) are cached per buffer."""
+    Both at every layout of TDIT_HEADS. Bindings (TMA descriptors) are cached per buffer."""
 
     def __init__(self, device_index: int, dtype: torch.dtype = torch.bfloat16, heads: int = H, dh: int = D):
         self.fp32 = dtype is torch.float32
         self.heads, self.dh = heads, dh
-        assert not self.fp32 or (heads, dh) == (H, D), "the TF32 core is 16 x 48"
-        self.k = (_sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", device_index) if self.fp32
+        assert (heads, dh) in TDIT_HEADS, (heads, dh)
+        self.k = (_sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", device_index, defs=_tdit_defs(heads, dh)) if self.fp32
                   else _sm100_kernel("attn_inf", "augattn_inf_sm100", device_index, defs=_tdit_defs(heads, dh)))
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs: dict = {}
@@ -340,7 +348,7 @@ class GatedInferenceCore:
             a = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [32, rows, 1], swizzle=128, **f32)  # noqa: E731
             b = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [16, rows, 1], swizzle=64, **f32)   # noqa: E731
             maps = (a(q, 128), b(q, 128), a(k, 32), b(k, 32),
-                    _tm(vt, [L, S, Dm], [L * 4, M * 4], [32, 1, D], swizzle=128, **f32),   # v^T: key, sample, channel
+                    _tm(vt, [L, S, Dm], [L * 4, M * 4], [32, 1, self.dh], swizzle=128, **f32),   # v^T: key, sample, channel
                     bias_map([32, 128], swizzle=128, **f32), a(g, 128), b(g, 128))
 
             def run():
@@ -501,11 +509,11 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
 
 
 def inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
-    """bf16 at a head layout of TDIT_HEADS (d = heads x head dim), or fp32 (TF32 MMA) at 16 x 48; L a multiple of 8 (the fused
-    step pads other lengths to one), sm_100."""
+    """bf16, or fp32 (TF32 MMA), at a head layout of TDIT_HEADS (d = heads x head dim); L a multiple of 8 (the fused step pads
+    other lengths to one), sm_100."""
     if os.environ.get("MINIWORLD_AUGATTN_BF16_SM100", "1") == "0" or d % h:
         return False
-    ok = (h, d // h) == (H, D) if dtype is torch.float32 else dtype is torch.bfloat16 and (h, d // h) in TDIT_HEADS
+    ok = dtype in (torch.float32, torch.bfloat16) and (h, d // h) in TDIT_HEADS
     return ok and L % 8 == 0 and L >= 8 and _is_blackwell(device_index)
 
 

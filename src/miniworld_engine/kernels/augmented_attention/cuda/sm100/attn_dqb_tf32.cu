@@ -9,7 +9,12 @@
 // What the fp32 operands change: 64-key chunks (the fp32 tiles of a 128-key chunk do not fit twice), K read twice per sample --
 // K-major for S (32 + 16 columns) and MN-major for dQ, which a tf32 MMA takes only in the 128-B swizzle with 32-B atoms (two
 // 32-column boxes) -- and the dQ partials leave through per-thread v4 reductions (no staging buffer left).
-// TMEM: S[w] at w * 64, dP[w] at w * 64 + 32, dS[w] at 128 + w * 32 (fp32), dQ[b] at 192 + b * 48 (NDQ buffers, round robin).
+// TMEM: S[w] at w * 64, dP[w] at w * 64 + 32, dS[w] at 128 + w * 32 (fp32), dQ[b] at 192 + b * DH (NDQ buffers, round robin).
+//
+// Head layouts (-DNHEAD -DDHP -DRSQDV, as the bf16 cores; none = 16 x 48): a DH-wide fp32 row is NA 32-column boxes in the
+// 128-B swizzle and NBX 16-column ones in the 64-B swizzle (48 = 32 + 16, 32 = 32, 64 = 32 + 32); the MN-major K NV 32-column
+// atoms. smem: 16 x 48 208 KB (STA 2, STK 2), 24 x 32 144 KB (2, 2), 12 x 64 / 16 x 64 224 KB (STA 2, STK 1: a second K slot
+// does not fit; the next step's K then loads behind this step's dQ MMAs).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -17,29 +22,43 @@ using namespace s100;
 #ifndef PP
 #define PP 1                             // the two dS warpgroups take turns on the exponentials (named bars 3, 4)
 #endif
+#ifndef DHP
+#define DHP 48                           // head width: 48 (16 x 48), 32 (24 x 32), 64 (12 x 64; 16 x 64 at d 1024)
+#endif
+#ifndef NHEAD
+#define NHEAD 16
+#endif
+#ifndef RSQDV
+#define RSQDV 0.14433756729740643f       // 1 / sqrt(head dim): 1 / sqrt 48; 1 / sqrt 32 = 0.17677669529663687f; 1 / sqrt 64 = 0.125f
+#endif
+static_assert(DHP == 64 || DHP == 48 || DHP == 32, "TF32 head width 64, 48 or 32");
 #ifndef STA
-#define STA 2                            // q | dO | V ring (60 KB slots): released as soon as both S / dP MMAs of the step are done
+#define STA 2                            // q | dO | V ring (60 KB slots at 48): released as soon as both S / dP MMAs of the step are done
 #endif
 #ifndef STK
-#define STK 2                            // K ring (28 KB slots): released after the step's dQ MMAs
+#define STK (DHP == 64 ? 1 : 2)          // K ring (28 KB slots at 48): released after the step's dQ MMAs
 #endif
 #ifndef ROT
 #define ROT 1                            // start each key chunk's sample walk at a different sample (spreads the dQ reductions)
 #endif
 constexpr int NDQ = 3;                   // dQ accumulator buffers (the epilogue of step g runs NDQ - 1 = 2 steps later)
-constexpr int BN = 32, KC = 64, DH = 48, QM = 128, DM = 768;
-constexpr int QA = QM * 128, QB = QM * 64, VA = KC * 128, VB = KC * 64, KMN = 2 * KC * 128;
-constexpr int A_Q = 0, A_D = QA + QB, A_VA = 2 * (QA + QB), A_VB = A_VA + VA, SA = A_VB + VB;   // q | dO | V: 60 KB
-constexpr int K_A = 0, K_B = VA, K_M = VA + VB, SK = K_M + KMN;                               // K (K-major) | K (MN-major): 28 KB
+constexpr int BN = 32, KC = 64, DH = DHP, QM = 128, DM = NHEAD * DHP;
+constexpr int NA = DH / 32, NBX = (DH % 32) / 16, NV = (DH + 31) / 32;    // 128-B boxes, 64-B boxes, MN atoms of a head row
+constexpr int QA = QM * 128, QB = QM * 64, VA = KC * 128, VB = KC * 64, KMN = NV * KC * 128;
+constexpr int TQX = NA * QA + NBX * QB;                                                        // q (or dO) of one sample
+// q boxes j at A_Q + j QA (the 16-column box after them), dO likewise at A_D, V boxes j at A_VA + j VA, its 16-column box at A_VB
+constexpr int A_Q = 0, A_D = TQX, A_VA = 2 * TQX, A_VB = A_VA + NA * VA, SA = A_VB + NBX * VB;  // q | dO | V: 60 KB at 48
+constexpr int K_A = 0, K_B = NA * VA, K_M = K_B + NBX * VB, SK = K_M + KMN;                   // K (K-major) | K (MN-major): 28 KB at 48
 constexpr int TBI = QM * BN * 4;                                                               // bias: two [128 q][32 keys] boxes
 constexpr int O_A = 0, O_K = STA * SA, O_B = O_K + STK * SK, O_BAR = O_B + 2 * TBI, SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 static_assert((SA % 1024) == 0 && (A_D % 1024) == 0 && (A_VA % 1024) == 0 && (SK % 1024) == 0 && (K_M % 1024) == 0 &&
               (O_K % 1024) == 0 && (O_B % 1024) == 0, "alignment");
 constexpr uint32_t T_S = 0, T_DS = 128, T_DQ = 192;
-static_assert(T_DQ + NDQ * 48 <= 512, "TMEM");
+static_assert(T_DQ + NDQ * DH <= 512, "TMEM");
 constexpr uint32_t I_S = idesc_tf32(128, BN), I_DQ = idesc_tf32(128, DH, 0, 1);
-constexpr float LOG2E = 1.4426950408889634f, RSQD = 0.14433756729740643f;
+constexpr float LOG2E = 1.4426950408889634f, RSQD = RSQDV;
+constexpr int EC0 = DH == 32 ? 16 : 32;  // the dQ read-out: warpgroup 0 takes columns 0 .. EC0 - 1, warpgroup 1 the rest
 
 struct Bars {
   uint64_t fullA[STA], emptyA[STA], fullK[STK], emptyK[STK], bfull, bempty, s_full[2], s_free[2], ds_full[2], ds_free[2], dq_full[NDQ],
@@ -63,7 +82,7 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int mt = L / QM, nch = L / KC;
-  const int items = 16 * mt * nch;
+  const int items = NHEAD * mt * nch;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int ng = my_items * A;                                             // (item, sample) steps of this CTA
   auto item_of = [&](int li, int& c, int& m0, int& head) {
@@ -92,7 +111,7 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
   if (warp >= 4 && warp < 8) {                                             // the dQ buffers start at zero; every dQ MMA accumulates
     const uint32_t z[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     const uint32_t trow = tmem + ((uint32_t)(warp & 3) * 32 << 16);
-    for (int c = 0; c < NDQ * 3; ++c) tmem_st16(trow + T_DQ + c * 16, z);
+    for (int c = 0; c < NDQ * DH / 16; ++c) tmem_st16(trow + T_DQ + c * 16, z);
     tmem_wait_st();
   }
   tc_fence_before();
@@ -115,19 +134,25 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
           if (g >= STA) mbar_wait(&B.emptyA[sa], ((g / STA) - 1) & 1);
           const uint32_t pa = su + O_A + sa * SA;
           mbar_expect_tx(&B.fullA[sa], SA);
-          tma_load_2d(pa + A_Q, &mqa, &B.fullA[sa], qcol, a * L + m0);
-          tma_load_2d(pa + A_Q + QA, &mqb, &B.fullA[sa], qcol + 32, a * L + m0);
-          tma_load_2d(pa + A_D, &mda, &B.fullA[sa], qcol, a * L + m0);
-          tma_load_2d(pa + A_D + QA, &mdb, &B.fullA[sa], qcol + 32, a * L + m0);
-          tma_load_2d(pa + A_VA, &mva, &B.fullA[sa], qcol, a * L + c * KC);
-          tma_load_2d(pa + A_VB, &mvb, &B.fullA[sa], qcol + 32, a * L + c * KC);
+#pragma unroll
+          for (int j = 0; j < NA; ++j) {
+            tma_load_2d(pa + A_Q + j * QA, &mqa, &B.fullA[sa], qcol + 32 * j, a * L + m0);
+            tma_load_2d(pa + A_D + j * QA, &mda, &B.fullA[sa], qcol + 32 * j, a * L + m0);
+            tma_load_2d(pa + A_VA + j * VA, &mva, &B.fullA[sa], qcol + 32 * j, a * L + c * KC);
+          }
+          if (NBX) {
+            tma_load_2d(pa + A_Q + NA * QA, &mqb, &B.fullA[sa], qcol + 32 * NA, a * L + m0);
+            tma_load_2d(pa + A_D + NA * QA, &mdb, &B.fullA[sa], qcol + 32 * NA, a * L + m0);
+            tma_load_2d(pa + A_VB, &mvb, &B.fullA[sa], qcol + 32 * NA, a * L + c * KC);
+          }
           if (g >= STK) mbar_wait(&B.emptyK[sk], ((g / STK) - 1) & 1);
           const uint32_t pk = su + O_K + sk * SK;
           mbar_expect_tx(&B.fullK[sk], SK);
-          tma_load_2d(pk + K_A, &mka, &B.fullK[sk], qcol, a * L + c * KC);
-          tma_load_2d(pk + K_B, &mkb, &B.fullK[sk], qcol + 32, a * L + c * KC);
-          tma_load_2d(pk + K_M, &mkm, &B.fullK[sk], qcol, a * L + c * KC);
-          tma_load_2d(pk + K_M + KC * 128, &mkm, &B.fullK[sk], qcol + 32, a * L + c * KC);
+#pragma unroll
+          for (int j = 0; j < NA; ++j) tma_load_2d(pk + K_A + j * VA, &mka, &B.fullK[sk], qcol + 32 * j, a * L + c * KC);
+          if (NBX) tma_load_2d(pk + K_B, &mkb, &B.fullK[sk], qcol + 32 * NA, a * L + c * KC);
+#pragma unroll
+          for (int j = 0; j < NV; ++j) tma_load_2d(pk + K_M + j * KC * 128, &mkm, &B.fullK[sk], qcol + 32 * j, a * L + c * KC);
         }
       }
     }
@@ -143,19 +168,30 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       if (g >= 1) mbar_wait(&B.s_free[w], (g - 1) & 1);
       tc_fence_after();
       const uint32_t pa = su + O_A + (g % STA) * SA, pk = su + O_K + (g % STK) * SK;
-      const uint64_t dqa = desc_k128(pa + A_Q), dqb = desc_sw64(pa + A_Q + QA), dda = desc_k128(pa + A_D), ddb = desc_sw64(pa + A_D + QA);
-      const uint64_t dka = desc_k128(pk + K_A + w * BN * 128), dkb = desc_sw64(pk + K_B + w * BN * 64);
-      const uint64_t dva = desc_k128(pa + A_VA + w * BN * 128), dvb = desc_sw64(pa + A_VB + w * BN * 64);
       const uint32_t ts = tmem + T_S + w * 64;
       if (elect_one()) {
 #pragma unroll
-        for (int k = 0; k < 4; ++k) umma_ss_tf32(ts, dqa + (uint64_t)(k * 2), dka + (uint64_t)(k * 2), I_S, k > 0 ? 1u : 0u);
+        for (int j = 0; j < NA; ++j) {
+          const uint64_t dqa = desc_k128(pa + A_Q + j * QA), dka = desc_k128(pk + K_A + j * VA + w * BN * 128);
 #pragma unroll
-        for (int k = 0; k < 2; ++k) umma_ss_tf32(ts, dqb + (uint64_t)(k * 2), dkb + (uint64_t)(k * 2), I_S, 1u);
+          for (int k = 0; k < 4; ++k) umma_ss_tf32(ts, dqa + (uint64_t)(k * 2), dka + (uint64_t)(k * 2), I_S, (j > 0 || k > 0) ? 1u : 0u);
+        }
+        if (NBX) {
+          const uint64_t dqb = desc_sw64(pa + A_Q + NA * QA), dkb = desc_sw64(pk + K_B + w * BN * 64);
 #pragma unroll
-        for (int k = 0; k < 4; ++k) umma_ss_tf32(ts + 32, dda + (uint64_t)(k * 2), dva + (uint64_t)(k * 2), I_S, k > 0 ? 1u : 0u);
+          for (int k = 0; k < 2; ++k) umma_ss_tf32(ts, dqb + (uint64_t)(k * 2), dkb + (uint64_t)(k * 2), I_S, 1u);
+        }
 #pragma unroll
-        for (int k = 0; k < 2; ++k) umma_ss_tf32(ts + 32, ddb + (uint64_t)(k * 2), dvb + (uint64_t)(k * 2), I_S, 1u);
+        for (int j = 0; j < NA; ++j) {
+          const uint64_t dda = desc_k128(pa + A_D + j * QA), dva = desc_k128(pa + A_VA + j * VA + w * BN * 128);
+#pragma unroll
+          for (int k = 0; k < 4; ++k) umma_ss_tf32(ts + 32, dda + (uint64_t)(k * 2), dva + (uint64_t)(k * 2), I_S, (j > 0 || k > 0) ? 1u : 0u);
+        }
+        if (NBX) {
+          const uint64_t ddb = desc_sw64(pa + A_D + NA * QA), dvb = desc_sw64(pa + A_VB + w * BN * 64);
+#pragma unroll
+          for (int k = 0; k < 2; ++k) umma_ss_tf32(ts + 32, ddb + (uint64_t)(k * 2), dvb + (uint64_t)(k * 2), I_S, 1u);
+        }
         tc_commit(&B.s_full[w]);
         tc_commit(&B.emptyA[g % STA]);
       }
@@ -177,7 +213,7 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       if (elect_one()) {
 #pragma unroll
         for (int k = 0; k < BN / 8; ++k)
-          umma_ts_tf32(tmem + T_DQ + b * 48, tmem + T_DS + w * 32 + k * 8, dk + (uint64_t)((k * 1024) >> 4), I_DQ, 1u);
+          umma_ts_tf32(tmem + T_DQ + b * DH, tmem + T_DS + w * 32 + k * 8, dk + (uint64_t)((k * 1024) >> 4), I_DQ, 1u);
         tc_commit(&B.ds_free[w]);
         tc_commit(&B.emptyK[g % STK]);
         tc_commit(&B.dq_full[b]);
@@ -194,21 +230,23 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       const int b = g % NDQ;
       mbar_wait(&B.dq_full[b], (g / NDQ) & 1);
       tc_fence_after();
-      const int nc = w == 0 ? 32 : 16;                                     // warpgroup 0: columns 0-31, warpgroup 1: 32-47
+      // warpgroup 0: columns 0 .. EC0 - 1, warpgroup 1: EC0 .. DH - 1 (48: 32 + 16, 64: 32 + 32, 32: 16 + 16)
+      const int c0 = w == 0 ? 0 : EC0, nc = w == 0 ? EC0 : DH - EC0;
+      const uint32_t tq = trow + T_DQ + b * DH + c0;
       uint32_t v[32];
-      if (w == 0) tmem_ld32(trow + T_DQ + b * 48, v);
-      else tmem_ld16(trow + T_DQ + b * 48 + 32, *reinterpret_cast<uint32_t(*)[16]>(v));
+      if (nc == 32) tmem_ld32(tq, v);
+      else tmem_ld16(tq, *reinterpret_cast<uint32_t(*)[16]>(v));
       tmem_wait_ld();
       {
         const uint32_t z[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        tmem_st16(trow + T_DQ + b * 48 + w * 32, z);
-        if (w == 0) tmem_st16(trow + T_DQ + b * 48 + 16, z);
+        tmem_st16(tq, z);
+        if (nc == 32) tmem_st16(tq + 16, z);
         tmem_wait_st();
       }
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.dq_free[b]);
-      float* drow = DQ + ((size_t)arow + r) * DM + head * DH + w * 32;
+      float* drow = DQ + ((size_t)arow + r) * DM + head * DH + c0;
 #pragma unroll
       for (int k = 0; k < 8; ++k) {
         if (k * 4 >= nc) break;
@@ -226,13 +264,13 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     if (ng > 0) { item_of(0, c, m0, head); a = samp(c, 0); }
     int nli = li, ni = i, nc_ = c, nm0 = m0, nh = head, na = a;          // the next step's position (LSE / D prefetch)
     float lse_n = 0.f, dd_n = 0.f;
-    if (ng > 0) { const size_t ri = ((size_t)a * 16 + head) * L + m0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
+    if (ng > 0) { const size_t ri = ((size_t)a * NHEAD + head) * L + m0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
     int e1r = 0, e1h = 0, e2r = 0, e2h = 0;                                // (DQ row, head) of steps g - 1 and g - 2
     const uint32_t sb = su + O_B + w * TBI;
     for (int g = 0; g < ng; ++g) {
       const float lse = lse_n, dd = dd_n;                                  // loaded one step ahead
       advance(nli, ni, nc_, nm0, nh, na);
-      if (g + 1 < ng) { const size_t ri = ((size_t)na * 16 + nh) * L + nm0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
+      if (g + 1 < ng) { const size_t ri = ((size_t)na * NHEAD + nh) * L + nm0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
       if (i == 0) {
 #pragma unroll
         for (int j = 0; j < BN; ++j) db[j] = 0.f;

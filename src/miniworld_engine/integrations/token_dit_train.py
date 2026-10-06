@@ -15,9 +15,17 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
   * the residual stream fp32 inside the block, the output in the input's dtype.
 
 ``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), B200, a bf16 or
-fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths
-(768 / 16 x 48 / cond 384 / pair 128 / transition n = 2), B == 1, an even A, L a multiple of 128, a key mask of [B, L]
-or none, LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off.
+fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair 128 /
+transition n = 2) at a head layout of LAYOUTS (16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; bf16 and fp32 alike),
+B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples over as its [B, L] row),
+LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off.
+
+Any A and L: the kernels tile L by 128 and pair the samples, so ``block`` pads L to the next multiple of 128 and A to an even
+count -- zero single / cond rows and samples, zero pair rows and columns, the padded keys masked out -- and returns the first
+A samples' first L rows. The padding is computed and dropped; it adds nothing to any gradient.
+
+The precision follows the tensors, not an enclosing autocast: the forward and backward run with autocast off (bf16-mixed
+training hands an fp32 diffusion block fp32 activations, which take the fp32 / TF32 kernels).
 
 The forward and the backward are each one opaque op (``kernels/_compile.opaque``) with a fake implementation, inside an
 autograd Function, so torch.compile keeps them as single nodes (as the H100 TriMul training path does).
@@ -38,8 +46,9 @@ from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
 D, DC, DP, H, DH = 768, 384, 128, 16, 48          # the default layout; serves() takes LAYOUTS
-#: (heads, d_single): 16 x 48 (bf16 and fp32); 24 x 32, 12 x 64 and 16 x 64 (d 1024) in bf16
+#: (heads, d_single): 16 x 48, 24 x 32, 12 x 64 and 16 x 64 (d 1024), bf16 and fp32 (the TF32 cores are built per layout too)
 LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
+QM = 128                                          # the attention kernels' query / key tile: L is padded to a multiple of it
 EPS = 1e-5
 BF = torch.bfloat16
 
@@ -67,15 +76,14 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         return False
     if not any(t.requires_grad for t in (single, cond, pair)) and not any(p.requires_grad for p in module.parameters()):
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[0] % 2 or single.shape[2] % 128:
+    # any A and L >= 1: ``block`` pads L to a multiple of 128 and A to an even count (the kernels' tiles / sample pairs)
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[0] < 1 or single.shape[2] < 1:
         return False
     d = single.shape[-1]
     if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP):
         return False
     if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
-    if (a.n_head, d) != (H, D) and operand_dtype(single, compute_dtype) is not BF:
-        return False                         # fp32 (TF32 kernels) at 16 x 48 only
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
         return False
     norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, module.transition.ada_ln_in.ln_in,
@@ -198,8 +206,9 @@ def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads):
 def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
          qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
     """The block's forward: [out, *saved activations] (every output freshly allocated); ``fp32``: fp32 GEMM operands (on TF32
-    tensor cores, whatever the caller's allow_tf32) and the TF32 attention kernels, else bf16."""
-    with _tf32(fp32):
+    tensor cores, whatever the caller's allow_tf32) and the TF32 attention kernels, else bf16. Autocast off: the precision is
+    ``fp32``'s, and an enclosing bf16 autocast would otherwise turn the fp32 path's GEMM outputs bf16."""
+    with _tf32(fp32), torch.autocast("cuda", enabled=False):
         return _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, heads)
 
 
@@ -241,7 +250,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     bias = torch.mm(W["Wf_at"], ph.t()).view(H, L, L)                           # head-major, natural units; Wf = Wb diag(wp)
     if mask is not None:
         bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
-    O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
+    O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
     og = torch.empty(M, D, device=dev, dtype=at)
     T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
@@ -274,8 +283,8 @@ def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, h
 @opaque(fake=_bwd_fake, name="token_dit_train_sm100_bwd")
 def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
          saved: list[torch.Tensor], dout: torch.Tensor, qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
-    """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes."""
-    with _tf32(fp32):
+    """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes (autocast off, as ``_fwd``)."""
+    with _tf32(fp32), torch.autocast("cuda", enabled=False):
         return _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads)
 
 
@@ -318,7 +327,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dob = torch.empty(M, D, device=dev, dtype=at); dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
     T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
-    DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L) if fp32
+    DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH) if fp32
                       else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
     dxa = torch.mm(dqkvg, Wqkvg)
@@ -381,16 +390,36 @@ class _Block(torch.autograd.Function):
         return (dx, dc, dpair, None, None, None, None, None, None, *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)))
 
 
+def _pad(single, cond, pair, mask, Ap, Lp):
+    """The inputs padded to Ap samples of Lp rows (``block``): zero single / cond rows and samples, zero pair rows and columns,
+    the padded keys masked out of every softmax. The padded queries and samples are computed and dropped, so their output
+    gradient is zero and they add nothing to any gradient; the masked keys get P = 0, so they add nothing either."""
+    F = torch.nn.functional
+    A, _, L, _ = single.shape
+    rows = (0, 0, 0, Lp - L, 0, 0, 0, Ap - A)
+    if mask is None:
+        mask = torch.ones(1, L, device=single.device, dtype=torch.bool)
+    return (F.pad(single, rows), F.pad(cond, rows), F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L)),
+            F.pad(mask.to(torch.bool), (0, Lp - L), value=False))
+
+
 def block(module, single, cond, pair, mask=None, compute_dtype=None):
     """One DiTBlock (attention + transition, both residuals) through the fused training path, in the precision
-    ``operand_dtype`` picks. Call ``serves`` first."""
+    ``operand_dtype`` picks. Call ``serves`` first. L is padded to a multiple of 128 and A to an even count where needed
+    (``_pad``; a padded call returns the slice of the real samples and rows)."""
     a = module.attention
     qk = bool(a.use_qk_norm)
     eq = float(a.norm_query.effective_eps(torch.float32)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
     fp32 = operand_dtype(single, compute_dtype) is torch.float32
-    return _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
-                        *[module.get_parameter(n) for n in _names_for(qk)])
+    A, _, L, _ = single.shape
+    Ap, Lp = A + A % 2, -(-L // QM) * QM
+    padded = (Ap, Lp) != (A, L)
+    if padded:
+        single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
+    out = _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
+                       *[module.get_parameter(n) for n in _names_for(qk)])
+    return out[:A, :, :L] if padded else out
 
 
 __all__ = ["block", "serves"]

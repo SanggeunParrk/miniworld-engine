@@ -10,6 +10,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 token DiT: fp32 (TF32) at every head layout (16 x 48, 24 x 32, 12 x 64, 16 x 64); `DiTBlock.forward` serves [A, B, L]
+  masks with shared rows on the fused path (they used to take the per-op path in bf16 and fp32); the fused training op pads odd A
+  and L % 128 != 0 instead of refusing. Tests: `tests/integrations/test_b200_token_dit_tf32_layouts_gpu.py`; page:
+  `docs/gpus/b200/token_dit/token_dit.md`.
 - B200 fp32 path of the bias-only token DiT (`kernels/bias_only_dit/cuda/tf32.py`, `pv_gate_tf32.cu`, `dpb_tf32.cu`,
   `bias_only_dit_f32_rows.cu`): inference and training, every head layout, TF32 MMA. Tests:
   `tests/integrations/test_b200_bias_only_dit_tf32_gpu.py`; page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`.
