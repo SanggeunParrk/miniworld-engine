@@ -331,7 +331,7 @@ class TriangleAttention(nn.Module):
                 return _b200.forward_wide(self, pair, mask)
         from miniworld_engine.integrations import triattn_h100
 
-        requested_h100 = (triattn_h100.validated_inference(self, pair)
+        requested_h100 = (triattn_h100.native_requested(self, pair)
                           or getattr(self, "_h100_b200style_cuda", False)
                           or (self.implementation in {ImplementationType.MINIWORLD, ImplementationType.TRITON}
                               and os.environ.get("MINIWORLD_TRIATTN_H100_CANDIDATE") == "1"))
