@@ -1,8 +1,8 @@
 """OuterProductMean with measured H100 dispatch for BF16 inputs and BF16/FP32 master weights.
 
 H100 uses a WGMMA prologue, deterministic CUDA mask/parameter passes, cuBLAS contractions and CUDA epilogues.
-The six qualified inference cells and S1024/L384 training use the persistent TMA prologue.
-S2048/L384 inference also uses the gathered-TMA, overlapping-WGMMA epilogue.
+The seven qualified inference cells and S1024/L384 training use the persistent TMA prologue.
+S1024/L384 and S2048/L384 inference also use the gathered-TMA, overlapping-WGMMA epilogue.
 Other required inference cells retain the faster accurate historical composition;
 training retains zero-gamma-safe CUDA backward. The all-shape CUDA-only goal remains open.
 MINIWORLD_OPM_H100_TMA_PROLOGUE=1 explicitly tests the TMA prologue on other shapes.
@@ -64,7 +64,7 @@ def _h100_path(s: int, n: int, *, training: bool) -> str:
         return "tma" if tma_prologue_enabled() else "native"
     if training:
         return "tma" if (s, n) == (1024, 384) else "native"
-    if (s, n) in ((1024, 128), (1024, 256), (2048, 128), (2048, 256), (2048, 384), (4096, 128)):
+    if (s, n) in ((1024, 128), (1024, 256), (1024, 384), (2048, 128), (2048, 256), (2048, 384), (4096, 128)):
         return "tma"
     if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
         return "legacy"
@@ -130,12 +130,17 @@ _SM100_TRAIN = True        # the sm_100a backward kernels (csrc/sm100/opm_sm100.
 
 
 def _epilogue_tma_enabled(s: int, n: int, *, training: bool) -> bool:
-    """The only measured default; explicit zero/one keeps diagnostic comparisons exact."""
-    default = not training and (s, n) == (2048, 384)
+    """Measured defaults; explicit zero/one keeps diagnostic comparisons exact."""
+    default = not training and (s, n) in ((1024, 384), (2048, 384))
     return os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_TMA", "1" if default else "0") == "1"
 
 
-def _ext(device=None, *, native=None, tma=None, epi_tma=None):
+def _epilogue_half_enabled(s: int, n: int, *, training: bool) -> bool:
+    default = not training and (s, n) == (1024, 384)
+    return os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_HALF", "1" if default else "0") == "1"
+
+
+def _ext(device=None, *, native=None, tma=None, epi_tma=None, epi_half=None):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM)."""
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
@@ -146,11 +151,21 @@ def _ext(device=None, *, native=None, tma=None, epi_tma=None):
     if epi_tma is None:
         epi_tma = os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_TMA", "0") == "1"
     epi_tma = not sm100 and native and tma and epi_tma
+    if epi_half is None:
+        epi_half = os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_HALF", "0") == "1"
+    epi_half = epi_tma and epi_half
+    epi_wide = epi_tma and os.environ.get("MINIWORLD_OPM_H100_EPILOGUE_WIDE", "0") == "1"
+    if epi_half and epi_wide:
+        raise ValueError("OPM epilogue HALF and WIDE candidates are mutually exclusive")
     key = "sm100" if sm100 else ("mod_native_tma_cublas_count" if count
                                else "mod_native_tma_static" if native and tma
                                else "mod_native" if native else "mod")
     if epi_tma:
         key += "_epi_tma_overlap"
+    if epi_half:
+        key += "_half"
+    if epi_wide:
+        key += "_wide"
     if key in _EXT:
         return _EXT[key]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -168,12 +183,18 @@ def _ext(device=None, *, native=None, tma=None, epi_tma=None):
                   else "_native" if native else "")
         if epi_tma:
             suffix += "_epi_tma_overlap"
+        if epi_half:
+            suffix += "_half"
+        if epi_wide:
+            suffix += "_wide"
         build = root / ("opm_epilogue" + suffix)
         build.mkdir(parents=True, exist_ok=True)
         _EXT[key] = load(name="miniworld_opm_epilogue" + suffix, sources=[str(csrc / "opm_epilogue.cu")], build_directory=str(build),
                          extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"]
                          + (["-DMINIWORLD_OPM_CUBLAS_COUNT=1"] if count else [])
-                         + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else []),
+                         + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
+                         + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
+                         + (["-DMINIWORLD_OPM_EPILOGUE_TMA_WIDE=1"] if epi_wide else []),
                          extra_cflags=["-O3"])
     return _EXT[key]
 
@@ -279,7 +300,8 @@ class _OpmMath(torch.autograd.Function):
     def forward(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual=None, save_stats=True):
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
         ext = _ext(msa.device, native=path != "legacy", tma=path == "tma",
-                   epi_tma=_epilogue_tma_enabled(msa.shape[1], msa.shape[2], training=save_stats))
+                   epi_tma=_epilogue_tma_enabled(msa.shape[1], msa.shape[2], training=save_stats),
+                   epi_half=_epilogue_half_enabled(msa.shape[1], msa.shape[2], training=save_stats))
         if torch.cuda.get_device_capability(msa.device) == (10, 0):
             z, m, mk, bits, a2, bt, stats, o = _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats)
             ctx.save_o = bool(save_o)
@@ -322,7 +344,8 @@ class _OpmMath(torch.autograd.Function):
         s, n = m.shape[0], m.shape[1]
         path = _h100_path(s, n, training=True)
         ext = _ext(dz.device, native=path != "legacy", tma=path == "tma",
-                   epi_tma=_epilogue_tma_enabled(s, n, training=True))
+                   epi_tma=_epilogue_tma_enabled(s, n, training=True),
+                   epi_half=_epilogue_half_enabled(s, n, training=True))
         if torch.cuda.get_device_capability(dz.device) == (10, 0):
             # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
             dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, wo.detach().to(bf).contiguous(), n, n, int(bo.dtype == bf))

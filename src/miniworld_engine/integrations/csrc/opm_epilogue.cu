@@ -32,7 +32,13 @@ namespace {
 constexpr int CH = 32;             // c_hidden
 constexpr int CM_MSA = 64;         // d_msa (the LayerNorm width in the prologue backward)
 constexpr int CZ = 128;            // d_pair
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF)
+constexpr int BI = 2;              // one warpgroup shares each gathered TMA stage
+#elif defined(MINIWORLD_OPM_EPILOGUE_TMA_WIDE)
+constexpr int BI = 8;              // four warpgroups share each projection-weight stage
+#else
 constexpr int BI = 4;              // i tokens per CTA
+#endif
 constexpr int BJ = 32;             // j tokens per CTA  (BJ*CH = 512 contiguous columns of O per read)
 constexpr int NP = BI * BJ;        // 64 (i,j) pairs per CTA
 constexpr int KC = 64;             // K chunk = 2 c values
@@ -808,7 +814,13 @@ __device__ __forceinline__ void stmatrix_x4(uint32_t dst, uint32_t r0, uint32_t 
 }
 }  // namespace tma
 
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF)
+constexpr int WARPS = 4;
+#elif defined(MINIWORLD_OPM_EPILOGUE_TMA_WIDE)
+constexpr int WARPS = 16;
+#else
 constexpr int WARPS = 8;            // two warpgroups of 64 rows each
+#endif
 constexpr int THREADS = WARPS * 32;
 constexpr int ROWT = NP / 16;      // 4 mma row tiles
 constexpr int NTILE = CZ / 8;      // 16 mma n tiles
@@ -1900,7 +1912,11 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   auto stream = at::cuda::getCurrentCUDAStream();
   static bool ep_attr = false;                 // the staged weight pushes the tiles past 48 KiB
   if (!ep_attr) {
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_WIDE)
+    cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 192 * 1024);
+#else
     cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 128 * 1024);
+#endif
     ep_attr = true;
   }
   // z[i, j, z] as TMA sees it, innermost first: 64 z, then j, then the z half, then i
