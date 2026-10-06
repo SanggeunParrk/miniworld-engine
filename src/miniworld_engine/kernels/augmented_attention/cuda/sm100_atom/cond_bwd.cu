@@ -1,3 +1,141 @@
+
+#if defined(ATOM_HOPPER)
+#include "sm100.cuh"
+using namespace atom90;
+extern "C" __global__ __launch_bounds__(160,1)
+void atom_cond_bwd_sm90(const __nv_bfloat16* dm,const __nv_bfloat16* c,
+ const __grid_constant__ CUtensorMap mw,const float* g1,const float* g2,
+ __nv_bfloat16* dc,__nv_bfloat16* cn1,__nv_bfloat16* cn2,float* dgparts,int M,float eps) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int NST=3,TEMP=98304,RED=TEMP+65536,BAR=RED+4096;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ int t=threadIdx.x,l=t&31,w=t>>5,nt=(M+63)/64;
+ int tiles=blockIdx.x<nt?(nt-int(blockIdx.x)+int(gridDim.x)-1)/int(gridDim.x):0;
+ if(t==0){for(int j=0;j<6;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128){
+   if(t==128)for(int it=0;it<tiles;++it)for(int p=0;p<6;++p){
+     int g=it*6+p,st=g%NST;
+     if(g>=NST)bwait(bars+NST+st,((g/NST)-1)&1);
+     expect(bars+st,32768);
+     for(int k=0;k<2;++k)load2(sm+st*32768+k*16384,&mw,bars+st,128*p+64*k,0);
+   }
+   return;
+ }
+ int r0=w*16+l/4,cq=2*(l&3);
+ for(int it=0;it<tiles;++it){
+   int tile=int(blockIdx.x)+it*int(gridDim.x),row=64*tile;float acc[64];
+   for(int p=0;p<6;++p){
+     int dblock=p<2?p:p==2?4:p==3?2:p==4?3:5;
+     uint32_t fa[32];
+     #pragma unroll
+     for(int i=0;i<16;++i)
+       #pragma unroll
+       for(int rr=0;rr<2;++rr){
+         int r=row+r0+8*rr,cx=8*i+cq;
+         fa[4*(i>>1)+2*(i&1)+rr]=r<M?*reinterpret_cast<const uint32_t*>(dm+size_t(r)*768+dblock*128+cx):0;
+       }
+     int g=it*6+p,st=g%NST;bwait(bars+st,(g/NST)&1);
+     const uint8_t* sw=sm+st*32768;fence();
+     #pragma unroll
+     for(int k=0;k<8;++k){
+       uint64_t d=desc(sw+(k>>2)*16384+(k&3)*32);
+       if(p!=1&&p!=4&&k==0)mma_rs_n128_first(fa[0],fa[1],fa[2],fa[3],d,acc);
+       else mma_rs_n128(fa[4*k],fa[4*k+1],fa[4*k+2],fa[4*k+3],d,acc,1);
+     }
+     commit();wait();bsync();
+     if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+NST+st)):"memory");
+     if(p==1||p==2||p==4||p==5){
+       int b=p==1?0:p==2?1:p==4?2:3;
+       #pragma unroll
+       for(int i=0;i<16;++i)
+         #pragma unroll
+         for(int rr=0;rr<2;++rr)*reinterpret_cast<uint32_t*>(sm+TEMP+b*16384+off(r0+8*rr,8*i+cq))=pack(acc[4*i+2*rr],acc[4*i+2*rr+1]);
+     }
+   }
+   float mu[2]={0,0},vv[2]={0,0};
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,cx=8*i+cq;
+       float2 x=r<M?unpack(*reinterpret_cast<const uint32_t*>(c+size_t(r)*128+cx)):make_float2(0,0);
+       acc[4*i+2*rr]=x.x;acc[4*i+2*rr+1]=x.y;mu[rr]+=x.x+x.y;
+     }
+   mu[0]=sum4(mu[0])/128.f;mu[1]=sum4(mu[1])/128.f;
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){float x=acc[4*i+2*rr]-mu[rr],y=acc[4*i+2*rr+1]-mu[rr];vv[rr]+=x*x+y*y;}
+   vv[0]=rsqrtf(sum4(vv[0])/128.f+eps);vv[1]=rsqrtf(sum4(vv[1])/128.f+eps);
+   float ma[2][2]={{0,0},{0,0}},mb[2][2]={{0,0},{0,0}},gg1[32]={0},gg2[32]={0};
+   #pragma unroll
+   for(int i=0;i<16;++i){
+     float2 a1=*reinterpret_cast<const float2*>(g1+8*i+cq),a2=*reinterpret_cast<const float2*>(g2+8*i+cq);
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int pos=off(r0+8*rr,8*i+cq);
+       float2 d1=unpack(*reinterpret_cast<uint32_t*>(sm+TEMP+pos)),d2=unpack(*reinterpret_cast<uint32_t*>(sm+TEMP+32768+pos));
+       float x=(acc[4*i+2*rr]-mu[rr])*vv[rr],y=(acc[4*i+2*rr+1]-mu[rr])*vv[rr];
+       acc[4*i+2*rr]=x;acc[4*i+2*rr+1]=y;
+       gg1[2*i]+=d1.x*x;gg1[2*i+1]+=d1.y*y;gg2[2*i]+=d2.x*x;gg2[2*i+1]+=d2.y*y;
+       d1.x*=a1.x;d1.y*=a1.y;d2.x*=a2.x;d2.y*=a2.y;
+       ma[0][rr]+=d1.x+d1.y;mb[0][rr]+=d1.x*x+d1.y*y;
+       ma[1][rr]+=d2.x+d2.y;mb[1][rr]+=d2.x*x+d2.y*y;
+     }
+   }
+   for(int k=0;k<2;++k)for(int rr=0;rr<2;++rr){ma[k][rr]=sum4(ma[k][rr])/128.f;mb[k][rr]=sum4(mb[k][rr])/128.f;}
+   #pragma unroll
+   for(int i=0;i<16;++i){
+     int cx=8*i+cq;float2 a1=*reinterpret_cast<const float2*>(g1+cx),a2=*reinterpret_cast<const float2*>(g2+cx);
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,pos=off(r0+8*rr,cx);
+       float2 d1=unpack(*reinterpret_cast<uint32_t*>(sm+TEMP+pos)),d2=unpack(*reinterpret_cast<uint32_t*>(sm+TEMP+32768+pos));
+       float2 do1=unpack(*reinterpret_cast<uint32_t*>(sm+TEMP+16384+pos)),dt=unpack(*reinterpret_cast<uint32_t*>(sm+TEMP+49152+pos));
+       float x=acc[4*i+2*rr],y=acc[4*i+2*rr+1];
+       float dx10=rn(vv[rr]*(d1.x*a1.x-ma[0][rr]-x*mb[0][rr])),dx11=rn(vv[rr]*(d1.y*a1.y-ma[0][rr]-y*mb[0][rr]));
+       float dx20=rn(vv[rr]*(d2.x*a2.x-ma[1][rr]-x*mb[1][rr])),dx21=rn(vv[rr]*(d2.y*a2.y-ma[1][rr]-y*mb[1][rr]));
+       if(r<M){
+         *reinterpret_cast<uint32_t*>(dc+size_t(r)*128+cx)=pack(rn(rn(dt.x+dx20)+do1.x)+dx10,rn(rn(dt.y+dx21)+do1.y)+dx11);
+         *reinterpret_cast<uint32_t*>(cn1+size_t(r)*128+cx)=pack(a1.x*x,a1.y*y);
+         *reinterpret_cast<uint32_t*>(cn2+size_t(r)*128+cx)=pack(a2.x*x,a2.y*y);
+       }
+     }
+   }
+   float* red=reinterpret_cast<float*>(sm+RED);
+   #pragma unroll
+   for(int i=0;i<32;++i){
+     float u=gg1[i],v=gg2[i];
+     u+=__shfl_xor_sync(~0u,u,4);u+=__shfl_xor_sync(~0u,u,8);u+=__shfl_xor_sync(~0u,u,16);
+     v+=__shfl_xor_sync(~0u,v,4);v+=__shfl_xor_sync(~0u,v,8);v+=__shfl_xor_sync(~0u,v,16);
+     int cx=8*(i/2)+cq+(i&1);
+     if(l<4){red[w*256+cx]=u;red[w*256+128+cx]=v;}
+   }
+   bsync();
+   float u=0,v=0;
+   for(int ww=0;ww<4;++ww){u+=red[ww*256+t];v+=red[ww*256+128+t];}
+   dgparts[size_t(tile)*256+t]=u;dgparts[size_t(tile)*256+128+t]=v;
+   bsync();
+ }
+}
+
+extern "C" __global__ void atom_column_partials_sm90(const __nv_bfloat16* dm,const __nv_bfloat16* dp,float* part,int M){
+ __shared__ float s[16][16];
+ const int x=threadIdx.x&15,y=threadIdx.x>>4,c=blockIdx.x*16+x,shard=blockIdx.y;
+ const int lo=int((long long)M*shard/4),hi=int((long long)M*(shard+1)/4);
+ float v=0;
+ for(int r=lo+y;r<hi;r+=16)v+=__bfloat162float(c<768?dm[size_t(r)*768+c]:dp[size_t(r)*512+c-768]);
+ s[y][x]=v;__syncthreads();
+ if(y==0){float sum=0;for(int j=0;j<16;++j)sum+=s[j][x];part[shard*896+c]=sum;}
+}
+extern "C" __global__ void atom_column_finish_sm90(const float* part,const float* dgpart,
+ float* dbias,float* dbq,float* dg,int ntile){
+ int c=blockIdx.x*blockDim.x+threadIdx.x;
+ if(c<896){float v=0;for(int j=0;j<4;++j)v+=part[j*896+c];if(c<768)dbias[c]=v;else dbq[c-768]=v;}
+ if(c<256){float v=0;for(int j=0;j<ntile;++j)v+=dgpart[size_t(j)*256+c];dg[c]=v;}
+}
+
+#else
 // cond_bwd.cu — the atom DiT block's conditioning backward on sm_100a (dmod in the backward layout [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts]):
 //   dcn_k = rn(dsc_k Wsc_k + dbi_k Wbi_k)  (k = 1, 2; one fp32 accumulation);  dco = rn(dos Wos);  dct = rn(dts Wts)
 //   cn_k = rn(g_k xhat):  dx_k = rn(LN_bwd(dcn_k g_k)),  d g_k += sum_rows dcn_k xhat
@@ -268,3 +406,5 @@ atom_cond_bwd_sm100(const __grid_constant__ CUtensorMap mdmod, const __grid_cons
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
+
+#endif // ATOM_HOPPER

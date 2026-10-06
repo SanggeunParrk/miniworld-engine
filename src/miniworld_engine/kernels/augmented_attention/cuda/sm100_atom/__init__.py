@@ -49,17 +49,27 @@ SOURCES = ("attn_fwd", "attn_dkv", "attn_dq", "attn_dbias", "attn_dd", "pair_bia
 
 # --------------------------------------------------------------------------------------------------- build
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str) -> str:
+def cubin(stem: str, hopper: bool = False) -> str:
     """Path of ``<stem>.cu`` built for sm_100a with the sources' default options; rebuilt only when a source or a flag changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
-    nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}")
+    if hopper:
+        from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, nvcc_path
+        ensure_cuda_home()
+        nvcc, rel, host = nvcc_path(), (12, 9), host_flags()
+        if not nvcc or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+            raise RuntimeError("Atom Hopper kernels require the matching CUDA <= 12.9 toolchain")
+    else:
+        nvcc, rel, host = kernel_toolchain()
+    flags = (*host, "-std=c++17", "-O3", "-arch=sm_90a" if hopper else "-arch=sm_100a",
+             *(("-DATOM_HOPPER=1",) if hopper else ()), "-cubin", "-lineinfo", f"-I{_dir}")
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
+    if hopper:
+        h.update((_dir.parents[2] / "swa_dit" / "cuda" / "gen" / "wgmma_bf16.inc").read_bytes())
     root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
-    out = root / "atom_dit_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    out = root / ("atom_dit_sm90" if hopper else "atom_dit_sm100") / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
@@ -77,7 +87,7 @@ def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem), func, smem, pdl=pdl)
+        return driver.Kernel(cubin(stem, _hopper(device_index)), func, smem, pdl=pdl)
 
 
 #: (stem, function, dynamic smem, PDL) of every kernel the block launches
@@ -100,14 +110,47 @@ KERNELS = {
 }
 
 
+@functools.lru_cache(maxsize=8)
+def _hopper(device_index: int) -> bool:
+    return torch.cuda.get_device_capability(device_index) == (9, 0)
+
+
+_HOPPER_KERNELS = {
+    "cond": ("cond_fwd", "atom_cond_fwd_sm90", 131136, False),
+    "cond1": ("cond_fwd", "atom_cond_fwd_single_sm90", 114752, False),
+    "pre": ("pre_fwd", "atom_pre_fwd_sm90", 180288, False),
+    "pre_cross": ("pre_fwd", "atom_pre_cross_fwd_sm90", 114752, False),
+    "post": ("post_fwd", "atom_post_fwd_sm90", 147520, False),
+    "post2": ("post_fwd", "atom_post_fwd_2stage_sm90", 114752, False),
+    "pack": ("cond_fwd", "atom_pack_sm90", 0, False),
+    "pack_t": ("tr_bwd_gate", "atom_pack_transpose_sm90", 0, False),
+    "trg": ("tr_bwd_gate", "atom_tr_bwd_sm90", 131136, False),
+    "postb": ("post_bwd", "atom_post_bwd_sm90", 98368, False),
+    "preb": ("pre_bwd", "atom_pre_bwd_sm90", 98368, False),
+    "condb": ("cond_bwd", "atom_cond_bwd_sm90", 168000, False),
+    "grad_pack": ("pre_bwd", "atom_grad_pack_sm90", 0, False),
+    "col_part": ("cond_bwd", "atom_column_partials_sm90", 0, False),
+    "col_fin": ("cond_bwd", "atom_column_finish_sm90", 0, False),
+    "pb_w": ("pair_bias", "atom_pair_weight_sm90", 0, False),
+    "pb_fin": ("pair_bias", "atom_pair_finish_sm90", 0, False),
+    "pb_part": ("pair_bias", "atom_pair_partials_sm90", 0, False),
+    "db_native": ("attn_dbias", "atom_dbias_sm90", 82208, False),
+    "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
+    "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
+    **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},
+}
+
+
 def atom_kernel(name: str, device_index: int):
-    stem, func, smem, pdl = KERNELS[name]
+    if _hopper(device_index) and name not in _HOPPER_KERNELS:
+        raise NotImplementedError(f"Atom Hopper kernel {name} is not implemented")
+    stem, func, smem, pdl = (_HOPPER_KERNELS if _hopper(device_index) else KERNELS)[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl)
 
 
 def load_all(device_index: int) -> None:
     """Build and load every kernel on the device (raises on any failure)."""
-    for name in KERNELS:
+    for name in (_HOPPER_KERNELS if _hopper(device_index) else KERNELS):
         atom_kernel(name, device_index)
 
 
@@ -179,7 +222,7 @@ def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True, n=None, kv=None):
     z = z.reshape(z.shape[-3], z.shape[-2], DP)
     NZ = z.shape[0]
     N = NZ if n is None else n
-    w = (wb.float() * gamma.float()[None]).contiguous()
+    w = pair_weight_hopper(wb, gamma) if _hopper(_dev(z)) else (wb.float() * gamma.float()[None]).contiguous()
     bo = torch.empty(NH, N, N, device=z.device, dtype=torch.bfloat16)
     bt = torch.empty_like(bo) if trans else None
     atom_kernel("pb_f" if N == NZ else "pb_fp", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, bo, bt, int(N), int(NZ), kv,
@@ -192,12 +235,22 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5, kv=None):
     keys kv marks invalid is dropped."""
     z = z.reshape(z.shape[-3], z.shape[-2], DP)
     NZ, N = z.shape[0], dbias.shape[-1]
-    w = (wb.float() * gamma.float()[None]).contiguous()
+    w = pair_weight_hopper(wb, gamma) if _hopper(_dev(z)) else (wb.float() * gamma.float()[None]).contiguous()
     dz = torch.empty_like(z)
     nb = (N // 64) * (N // 32)
     pw = torch.empty(nb, NH, DP, device=z.device, dtype=torch.float32)
     atom_kernel("pb_b", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, dbias.contiguous(), dz, pw, int(N), int(NZ), kv,
                                  float(eps))
+    if _hopper(_dev(z)):
+        dg = torch.empty(DP, device=z.device, dtype=torch.float32)
+        dw = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
+        if os.environ.get("MINIWORLD_ATOM_DIT_H100_BWD_V2", "0") == "1":
+            part = torch.empty(16, NH, DP, device=z.device, dtype=torch.float32)
+            atom_kernel("pb_part", _dev(z))((4, 16, 1), (256, 1, 1), pw, part, int(nb))
+            pw, nb = part, 16
+        bfmask = int(wb.dtype == torch.bfloat16) | (int(gamma.dtype == torch.bfloat16) << 1)
+        atom_kernel("pb_fin", _dev(z))((1, 1, 1), (64, 1, 1), pw, wb, gamma, dg, dw, int(nb), bfmask)
+        return dz, dg, dw
     dw = pw.sum(0)
     return dz, (dw * wb.float()).sum(0), dw * gamma.float()[None]
 
@@ -206,6 +259,9 @@ def attn_fwd(q, k, v, bias):
     """q, k, v [A, N, 128] bf16 (4 heads x 32), bias [4, N, N] bf16 -> O [A N, 128] bf16, LSE [A, 4, N] fp32 (log2)."""
     A, N, _ = q.shape
     q2, k2, v2 = (t.reshape(A * N, DM) for t in (q, k, v))
+    if _hopper(_dev(q)):
+        from miniworld_engine.kernels.augmented_attention import cuda as core
+        return core.natural_forward(q2, k2, v2, bias, heads=NH, head_dim=DH, output_bf16=True)
     O = torch.empty(A * N, DM, device=q.device, dtype=torch.bfloat16)
     LSE = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
     bsrc = bias.contiguous()
@@ -231,6 +287,25 @@ def attn_bwd(q, k, v, do, bias, bias_t, LSE, Dd, dP):
     A, N, _ = q.shape
     d = _dev(q)
     q2, k2, v2, do2 = (t.reshape(A * N, DM) for t in (q, k, v, do))
+    if _hopper(d):
+        from miniworld_engine.kernels.augmented_attention import cuda as core
+        if os.environ.get("MINIWORLD_ATOM_DIT_H100_BWD_V2", "0") == "1":
+            out = tuple(dP[:, DM * i:DM * (i + 1)] for i in range(3))
+            _, _, _, db = core.natural_backward(q2, k2, v2, do2, bias, LSE, Dd, heads=NH, head_dim=DH,
+                                                output_bf16=True, out=out, return_bias=A == 1, bias_transposed=False)
+            if A != 1:
+                db = torch.empty(NH, N, N, device=q.device, dtype=torch.float32)
+                maps = tuple(_map(t, [DM, A * N], DM * 2, [64, 64]) for t in (q2, k2, v2, do2))
+                atom_kernel("db_native", d)((N // 64, N // 64, NH), (160, 1, 1),
+                                            *maps, bias, LSE, Dd, db, int(N), int(A))
+            return db
+        dq, dk, dv, dbt = core.natural_backward(q2, k2, v2, do2, bias, LSE, Dd,
+                                             heads=NH, head_dim=DH, output_bf16=True)
+        db = torch.empty(NH, N, N, device=q.device, dtype=torch.float32)
+        atom_kernel("db_sum", d)((N // 32, N // 32, NH), (32, 8, 1), dbt, db, int(N), int(A))
+        atom_kernel("dq_pack", d)((min(4 * nsm(d), (A * N * 64 + 255) // 256), 1, 1),
+                                  (256, 1, 1), dq, dk, dv, dP, int(A * N))
+        return db
     DQ, DK, DV = (dP[:, DM * i:DM * (i + 1)] for i in range(3))
     DB = torch.empty(NH, N, N, device=q.device, dtype=torch.float32)
     mb = _map(bias, [N, NH * N], N * 2, [64, 128])
@@ -253,6 +328,14 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
     """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid))."""
     M = c.shape[0]
     out = torch.empty(M, 6 * DM, device=c.device, dtype=torch.bfloat16)
+    if _hopper(_dev(c)):
+        d = _dev(c)
+        maps = (_map(c, [DM, M], DM * 2, [64, 64]),
+                _map(W, [DM, 6 * DM], DM * 2, [64, 128]))
+        wide = M > 64 * nsm(d)
+        atom_kernel("cond1" if wide else "cond", d)((min((2 if wide else 1) * nsm(d), (M + 63) // 64), 2, 1), (160, 1, 1),
+                              *maps, g1, g2, b, out, int(M), float(eps))
+        return out
     maps = (_rows(c), _map(W, [DM, 6 * DM], DM * 2, [32, 128], swizzle=64), _rows(out, 6 * DM))
     ntile = M // 32
     d = _dev(c)
@@ -260,11 +343,19 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
     return out
 
 
-def pre_fwd(a, mod, W, bq, save=False, eps=1e-5):
+def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
     """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``)."""
     M = a.shape[0]
     Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
+    if _hopper(_dev(a)):
+        d = _dev(a)
+        maps = (_map(a, [DM, M], DM * 2, [64, 64]),
+                _map(mod, [6 * DM, M], 12 * DM, [64, 64]),
+                _map(W, [DM, 4 * DM], DM * 2, [64, 128]))
+        atom_kernel("pre_cross" if cross else "pre", d)((min((2 if cross else 1) * nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                             *maps, bq, Q, K, V, G, X, int(M), float(eps), int(save))
+        return Q, K, V, G, X
     maps = (_rows(a), _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _rows(mod, 6 * DM),
             _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X))
     ntile = M // 32
@@ -280,6 +371,15 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5):
         return torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
     out = new()
     sv = tuple(new() for _ in range(4)) if save else (out,) * 4
+    if _hopper(_dev(a)):
+        d = _dev(a)
+        maps = (_map(Wo, [DM, DM], DM * 2, [64, 128]),
+                _map(Wu, [DM, 4 * DM], DM * 2, [64, 128]),
+                _map(Wd, [2 * DM, DM], DM * 4, [64, 128]))
+        wide = M > 64 * nsm(d)
+        atom_kernel("post2" if wide else "post", d)((min((2 if wide else 1) * nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                              a, o, g, mod, *maps, out, *sv, int(M), float(eps), int(save))
+        return (out, *sv)
     maps = (_rows16(a), _rows16(o), _rows16(g), _rows16(mod, 6 * DM), _map(Wo, [DM, DM], DM * 2, [64, 128]),
             _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _map(Wd, [2 * DM, DM], 4 * DM, [32, 128], swizzle=64),
             _rows16(out), *(_rows16(t) for t in sv))
@@ -296,6 +396,13 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
     DT = torch.empty(M, DM, device=dev, dtype=torch.bfloat16)
     HH = torch.empty(M, 2 * DM, device=dev, dtype=torch.bfloat16)
     DAB = torch.empty(M, 4 * DM, device=dev, dtype=torch.bfloat16)
+    if _hopper(_dev(dy)):
+        d = _dev(dy)
+        maps = (_map(Wu, [DM, 4 * DM], DM * 2, [64, 128]),
+                _map(WsT, [DM, 2 * DM], DM * 2, [64, 128]))
+        atom_kernel("trg", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                             dy, t, mod, x2, *maps, DT, HH, DAB, dmod, int(M))
+        return DT, HH, DAB
     maps = (_rows16(dy), _rows16(t), _rows16(mod, 6 * DM), _rows16(x2), _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
             _map(WsT, [DM, 2 * DM], DM * 2, [32, 128], swizzle=64), _rows16(DT), _rows16(dmod, 6 * DM), _rows16(HH, 2 * DM),
             _rows16(DAB, 4 * DM))
@@ -311,6 +418,14 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
     def new():
         return torch.empty(M, DM, device=dy.device, dtype=torch.bfloat16)
     DA, DU, GATED, DO = new(), new(), new(), new()
+    if _hopper(_dev(dy)):
+        d = _dev(dy)
+        maps = (_map(WuT, [4 * DM, DM], 8 * DM, [64, 128]),
+                _map(WoT, [DM, DM], DM * 2, [64, 128]))
+        atom_kernel("postb", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                               DAB, dy, a2, mod, u, sg, o, *maps, DA, DU, GATED, DO, dmod, dP, Dd,
+                               int(M), int(N), float(eps))
+        return DA, DU, GATED, DO
     maps = (_rows16(DAB, 4 * DM), _rows16(dy), _rows16(a2), _rows16(mod, 6 * DM), _rows16(u), _rows16(sg), _rows16(o),
             _map(WuT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64), _map(WoT, [DM, DM], DM * 2, [32, 128], swizzle=64),
             _rows16(DA), _rows16(dmod, 6 * DM), _rows16(DU), _rows16(GATED), _rows16(DO), _rows16(dP, 4 * DM))
@@ -324,6 +439,12 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
     """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ."""
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
+    if _hopper(_dev(a)):
+        d = _dev(a)
+        atom_kernel("preb", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                              dP, a, mod, DA, _map(WT, [4 * DM, DM], 8 * DM, [64, 128]),
+                              DS, dmod, int(M), float(eps))
+        return DS
     maps = (_rows16(dP, 4 * DM), _rows16(a), _rows16(mod, 6 * DM), _rows16(DA), _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
             _rows16(DS), _rows16(dmod, 6 * DM))
     ntile = M // 16
@@ -338,9 +459,59 @@ def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):
     def new():
         return torch.empty(M, DM, device=c.device, dtype=torch.bfloat16)
     dc, cn1, cn2 = new(), new(), new()
+    if _hopper(_dev(c)):
+        d = _dev(c)
+        atom_kernel("condb", d)((min(nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
+                               dmod, c, _map(WmodT, [6 * DM, DM], 12 * DM, [64, 128]),
+                               g1, g2, dc, cn1, cn2, DG, int(M), float(eps))
+        return dc, cn1, cn2
     maps = (_rows16(dmod, 6 * DM), _rows16(c), _map(WmodT, [6 * DM, DM], 12 * DM, [32, 128], swizzle=64),
             _rows16(dc), _rows16(cn1), _rows16(cn2))
     ntile = M // 16
     d = _dev(c)
     atom_kernel("condb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, g1, g2, DG, int(ntile), float(eps))
     return dc, cn1, cn2
+
+
+def pack_hopper(weights, backward=False):
+    """Live CUDA weight packing; identical launch count for BF16 and FP32 masters."""
+    if len(weights) != 23:
+        raise ValueError("Atom weight pack requires the 23 canonical weights")
+    d, dev = _dev(weights[0]), weights[0].device
+    shapes = ((768, 128), (512, 128), (128, 128), (512, 128), (128, 256))
+    wc, wp, wo, wu, wd = (torch.empty(s, device=dev, dtype=torch.bfloat16) for s in shapes)
+    b = torch.empty(768, device=dev, dtype=torch.float32)
+    g1, g2, bq = (torch.empty(128, device=dev, dtype=torch.float32) for _ in range(3))
+    if any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in weights):
+        raise ValueError("Atom Hopper pack requires contiguous BF16/FP32 parameters")
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    atom_kernel("pack", d)((384, 1, 1), (256, 1, 1), *weights, wc, wp, wo, wu, wd, b, g1, g2, bq, bfmask)
+    wb = {}
+    if backward:
+        wt = [torch.empty(tuple(reversed(s)), device=dev, dtype=torch.bfloat16) for s in shapes]
+        atom_kernel("pack_t", d)((272, 1, 1), (32, 8, 1), wc, wp, wo, wu, wd, *wt)
+        wb = dict(zip(("WmodT", "WpT", "WoT", "WuT", "WsT"), wt, strict=True))
+    return (wc, b, g1, g2), (wp, bq), (wo, wu, wd), wb
+
+
+def pair_weight_hopper(wb, gamma):
+    out = torch.empty(NH, DP, device=wb.device, dtype=torch.float32)
+    bfmask = int(wb.dtype == torch.bfloat16) | (int(gamma.dtype == torch.bfloat16) << 1)
+    atom_kernel("pb_w", _dev(wb))((1, 1, 1), (64, 1, 1), wb, gamma, out, bfmask)
+    return out
+
+
+def finish_columns_hopper(dmod, dp, dgparts, dbias, dbq, dg):
+    part = torch.empty(4, 896, device=dmod.device, dtype=torch.float32)
+    d, m = _dev(dmod), dmod.shape[0]
+    atom_kernel("col_part", d)((56, 4, 1), (256, 1, 1), dmod, dp, part, int(m))
+    atom_kernel("col_fin", d)((4, 1, 1), (256, 1, 1), part, dgparts, dbias, dbq, dg, int((m + 63) // 64))
+
+
+def grad_pack_hopper(grads, weights):
+    if any(g.dtype != torch.float32 or not g.is_contiguous() for g in grads):
+        raise ValueError("Hopper gradient pack requires contiguous FP32 gradient views")
+    out = [torch.empty_like(w) for w in weights]
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    atom_kernel("grad_pack", _dev(weights[0]))((128, 1, 1), (256, 1, 1), *grads, *out, bfmask)
+    return out

@@ -17,6 +17,64 @@
 #include <cstdint>
 #include <cuda_bf16.h>
 
+#if defined(ATOM_HOPPER)
+extern "C" __global__ void atom_pair_partials_sm90(const float* src,float* dst,int nb) {
+ __shared__ float s[16][16];
+ int x=threadIdx.x&15,y=threadIdx.x>>4,c=blockIdx.x*16+x,shard=blockIdx.y;
+ int lo=int((long long)nb*shard/16),hi=int((long long)nb*(shard+1)/16);float sum=0;
+ for(int j=lo+y;j<hi;j+=16)sum+=src[size_t(j)*64+c];
+ s[y][x]=sum;__syncthreads();
+ if(y==0){float v=0;for(int j=0;j<16;++j)v+=s[j][x];dst[shard*64+c]=v;}
+}
+#endif
+
+#if defined(ATOM_HOPPER)
+extern "C" __global__ void atom_pair_weight_sm90(const void* wb,const void* gamma,float* out,int bfmask) {
+ int c=threadIdx.x;
+ if(c<64){float w=(bfmask&1)?__bfloat162float(reinterpret_cast<const __nv_bfloat16*>(wb)[c]):reinterpret_cast<const float*>(wb)[c];
+ float g=(bfmask&2)?__bfloat162float(reinterpret_cast<const __nv_bfloat16*>(gamma)[c&15]):reinterpret_cast<const float*>(gamma)[c&15];
+ out[c]=w*g;}
+}
+extern "C" __global__ void atom_pair_finish_sm90(const float* part,const void* wb,const void* gamma,
+ float* dg,float* dw,int nb,int bfmask) {
+ __shared__ float x[64];
+ int c=threadIdx.x;float sum=0;
+ for(int j=0;j<nb;++j)sum+=part[size_t(j)*64+c];
+ float g=(bfmask&2)?__bfloat162float(reinterpret_cast<const __nv_bfloat16*>(gamma)[c&15]):reinterpret_cast<const float*>(gamma)[c&15];
+ float w=(bfmask&1)?__bfloat162float(reinterpret_cast<const __nv_bfloat16*>(wb)[c]):reinterpret_cast<const float*>(wb)[c];
+ dw[c]=sum*g;x[c]=sum*w;__syncthreads();
+ if(c<16)dg[c]=((x[c]+x[16+c])+x[32+c])+x[48+c];
+}
+#endif
+
+#if defined(ATOM_HOPPER)
+extern "C" __global__ void atom_dbias_transpose_sum_sm90(const float* src,float* dst,int N,int A){
+ __shared__ float tile[32][33];
+ int h=blockIdx.z,q0=blockIdx.x*32,k0=blockIdx.y*32,x=threadIdx.x,y=threadIdx.y;
+ #pragma unroll
+ for(int j=0;j<32;j+=8){
+   float v=0;for(int a=0;a<A;++a)v+=src[((size_t(a)*4+h)*N+k0+y+j)*N+q0+x];
+   tile[y+j][x]=v;
+ }
+ __syncthreads();
+ #pragma unroll
+ for(int j=0;j<32;j+=8)dst[(size_t(h)*N+q0+y+j)*N+k0+x]=tile[x][y+j];
+}
+extern "C" __global__ void atom_pack_dqkv_sm90(const __nv_bfloat16* q,const __nv_bfloat16* k,
+ const __nv_bfloat16* v,__nv_bfloat16* dp,int M){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;
+ for(;i<M*64;i+=blockDim.x*gridDim.x){
+   int row=i/64,c=2*(i%64);
+   const uint32_t a=*reinterpret_cast<const uint32_t*>(q+size_t(row)*128+c);
+   const uint32_t b=*reinterpret_cast<const uint32_t*>(k+size_t(row)*128+c);
+   const uint32_t d=*reinterpret_cast<const uint32_t*>(v+size_t(row)*128+c);
+   *reinterpret_cast<uint32_t*>(dp+size_t(row)*512+c)=a;
+   *reinterpret_cast<uint32_t*>(dp+size_t(row)*512+128+c)=b;
+   *reinterpret_cast<uint32_t*>(dp+size_t(row)*512+256+c)=d;
+ }
+}
+#endif
+
 constexpr int C = 16, H = 4, TI = 32, TJ = 64, NT = 256;
 constexpr float MASKED = -1e4f;
 

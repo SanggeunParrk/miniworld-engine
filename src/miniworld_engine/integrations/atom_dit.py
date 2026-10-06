@@ -90,6 +90,8 @@ def _kernels_ready(index: int) -> bool:
     try:
         sm100.load_all(index)
     except Exception as exc:  # a toolchain or driver problem keeps the module path
+        if sm100._hopper(index):
+            raise RuntimeError("Opt-in Hopper atom DiT kernel build failed") from exc
         _FAILED = True
         warnings.warn(f"sm_100a atom DiT kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
         return False
@@ -105,7 +107,9 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
     a, tr = module.attention, module.transition
     if a._backend != KernelBackend.TRITON or a.use_qk_norm:
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
+    hopper = cap == (9, 0) and os.environ.get("MINIWORLD_ATOM_DIT_H100", "0") == "1"
+    if not (cap == (10, 0) or hopper):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF) or compute_dtype not in (None, BF):
         return False
@@ -139,11 +143,13 @@ def _namespace(weights) -> SimpleNamespace:
     return block
 
 
-def _pack(weights):
+def _pack(weights, backward=False):
     """The kernels' stacked bf16 weights and the backward's transposed A operands."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as sm100
 
     block = _namespace(weights)
+    if sm100._hopper(weights[0].device.index):
+        return sm100.pack_hopper(weights, backward=backward)
     with torch.no_grad():
         wc, wp, wo = sm100.cond_params(block), sm100.pre_params(block), sm100.post_params(block)
 
@@ -160,15 +166,15 @@ def _pack(weights):
 _PACKS: dict = {}
 
 
-def _weights(weights):
+def _weights(weights, backward=False):
     """Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once and records it."""
     try:
         versions = tuple(w._version for w in weights)
     except RuntimeError:  # inference tensors carry no version counter: nothing could invalidate an entry
-        return _pack(weights)
-    key = _capture.scoped(tuple(id(w) for w in weights))
+        return _pack(weights, backward=backward)
+    key = _capture.scoped((bool(backward), *(id(w) for w in weights)))
     if key is None:
-        return _pack(weights)
+        return _pack(weights, backward=backward)
     hit = _PACKS.get(key)
     if hit is not None:
         refs, seen, pack = hit
@@ -177,7 +183,7 @@ def _weights(weights):
     _capture.prune(_PACKS)
     if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
         _PACKS.pop(next(iter(_PACKS)))
-    pack = _pack(weights)
+    pack = _pack(weights, backward=backward)
     _PACKS[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
     return pack
 
@@ -231,7 +237,7 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     rows = a * n
     keys = _keys(mask)
     with torch.cuda.device(single.device):
-        wc, wp, wo, _ = _weights(weights)
+        wc, wp, wo, _ = _weights(weights, backward=save)
         s2 = _padded(single, n).reshape(rows, DS_).contiguous()
         c2 = _padded(cond, n).reshape(rows, DC_).contiguous()
         mod = sm100.cond_fwd(c2, *wc)
@@ -261,25 +267,35 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
     rows = a * n
     dev = single.device
     with torch.cuda.device(dev):
-        wc, _, wo, wb = _weights(weights)
+        hopper = sm100._hopper(dev.index)
+        wc, _, wo, wb = _weights(weights, backward=True)
         s2 = _padded(single, n).reshape(rows, DS_).contiguous()
         c2 = _padded(cond, n).reshape(rows, DC_).contiguous()
         dy = _padded(dy, n).reshape(rows, DS_).to(BF).contiguous()   # zero rows: the padded atoms contribute nothing
         dmod = torch.empty(rows, 6 * DS_, device=dev, dtype=BF)      # [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts]
         dp = torch.empty(rows, 4 * DS_, device=dev, dtype=BF)        # [dq | dk | dv | dg]
-        dbias_cols = torch.zeros(6 * DS_, device=dev)
-        dbq = torch.zeros(DS_, device=dev)
-        dgamma_cond = torch.zeros(2 * DS_, device=dev)
+        allocate = torch.empty if hopper else torch.zeros
+        dbias_cols = allocate(6 * DS_, device=dev)
+        dbq = allocate(DS_, device=dev)
+        dgamma_cond = allocate(2 * DS_, device=dev)
+        dgparts = torch.empty((rows + 63) // 64, 2 * DS_, device=dev) if hopper else dgamma_cond
         dd = torch.empty(a, NH_, n, device=dev)
         dt, hh, dab = sm100.tr_bwd_gate(dy, t, mod, x2, wo[1], wb["WsT"], dmod, dbias_cols[640:])
         da, du, gated, do = sm100.post_bwd(dab, dy, a2, mod, u, sg, o, wb["WuT"], wb["WoT"], dmod, dp, dd, dbias_cols, n)
         db = sm100.attn_bwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias, bias_t, lse, dd, dp)
         dz, dgamma, dwb = sm100.pair_bias_bwd(pair, weights[_GAMMA], weights[_WBIAS], db, kv=_keys(mask))
         ds = sm100.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
-        dc, cn1, cn2 = sm100.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
+        dc, cn1, cn2 = sm100.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgparts)
         # weight gradients (cuBLAS)
-        dws, dwu, dwo, dwp = dt.t() @ hh, dab.t() @ x2, du.t() @ gated, dp.t() @ x1
-        dw1, dw2, dw3 = dmod[:, 0:256].t() @ cn1, dmod[:, 256:512].t() @ cn2, dmod[:, 512:768].t() @ c2
+        if hopper:
+            sm100.finish_columns_hopper(dmod, dp, dgparts, dbias_cols, dbq, dgamma_cond)
+            def wgrad(g, x):
+                return torch.mm(g.t(), x, out_dtype=torch.float32)
+            dws, dwu, dwo, dwp = wgrad(dt, hh), wgrad(dab, x2), wgrad(du, gated), wgrad(dp, x1)
+            dw1, dw2, dw3 = wgrad(dmod[:, 0:256], cn1), wgrad(dmod[:, 256:512], cn2), wgrad(dmod[:, 512:768], c2)
+        else:
+            dws, dwu, dwo, dwp = dt.t() @ hh, dab.t() @ x2, du.t() @ gated, dp.t() @ x1
+            dw1, dw2, dw3 = dmod[:, 0:256].t() @ cn1, dmod[:, 256:512].t() @ cn2, dmod[:, 512:768].t() @ c2
     grads = {
         "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128], "attention.ada_ln_in.to_scale.weight": dw1[:128],
         "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128], "attention.ada_ln_in.to_bias.weight": dw1[128:],
@@ -293,7 +309,8 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         "transition.to_scale.bias": dbias_cols[640:768],
     }
     # an op returns fresh, unaliased tensors: the gradients are slices of shared buffers, so each is copied
-    per_weight = [grads[name].to(w.dtype).reshape(w.shape).clone() for name, w in zip(WEIGHTS, weights, strict=True)]
+    per_weight = (sm100.grad_pack_hopper([grads[name] for name in WEIGHTS], weights) if hopper else
+                  [grads[name].to(w.dtype).reshape(w.shape).clone() for name, w in zip(WEIGHTS, weights, strict=True)])
     return [_unpadded(ds.view(a, 1, n, DS_), single.shape), _unpadded(dc.view(a, 1, n, DC_), cond.shape), dz.view(pair.shape),
             *per_weight]
 

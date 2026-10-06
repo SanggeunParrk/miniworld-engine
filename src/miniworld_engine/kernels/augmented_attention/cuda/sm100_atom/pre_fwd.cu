@@ -1,3 +1,158 @@
+
+#if defined(ATOM_HOPPER)
+#include "sm100.cuh"
+using namespace atom90;
+extern "C" __global__ __launch_bounds__(160, 1)
+void atom_pre_fwd_sm90(const __grid_constant__ CUtensorMap ma,
+ const __grid_constant__ CUtensorMap mm,const __grid_constant__ CUtensorMap mw,
+ const float* __restrict__ bq,__nv_bfloat16* __restrict__ q,__nv_bfloat16* __restrict__ k,
+ __nv_bfloat16* __restrict__ v,__nv_bfloat16* __restrict__ sg,__nv_bfloat16* __restrict__ xsave,
+ int M,float eps,int save) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int MOD=16384,W=49152,BAR=W+4*32768;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ const int t=threadIdx.x,lane=t&31,warp=t>>5,nt=(M+63)/64;
+ const int tiles=blockIdx.x<nt?(nt-int(blockIdx.x)+int(gridDim.x)-1)/int(gridDim.x):0;
+ if(t==0){for(int j=0;j<6;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128) {
+   if(t==128) {
+     for(int p=0;p<4;++p) {
+       expect(bars+p,32768);
+       for(int b=0;b<2;++b)load2(sm+W+p*32768+b*16384,&mw,bars+p,64*b,128*p);
+     }
+     for(int it=0;it<tiles;++it) {
+       if(it)bwait(bars+5,(it-1)&1);
+       expect(bars+4,49152);
+       int row=64*(int(blockIdx.x)+it*int(gridDim.x));
+       for(int b=0;b<2;++b)load2(sm+b*8192,&ma,bars+4,b*64,row);
+       for(int b=0;b<4;++b)load2(sm+MOD+b*8192,&mm,bars+4,b*64,row);
+     }
+   }
+   return;
+ }
+ const int r0=warp*16+lane/4,cq=2*(lane&3);
+ for(int it=0;it<tiles;++it) {
+   const int row=64*(int(blockIdx.x)+it*int(gridDim.x));bwait(bars+4,it&1);
+   float xx[64],mu[2]={0.f,0.f},vv[2]={0.f,0.f};
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       float2 x=unpack(*reinterpret_cast<uint32_t*>(sm+off(r0+8*rr,8*i+cq)));
+       xx[4*i+2*rr]=x.x;xx[4*i+2*rr+1]=x.y;mu[rr]+=x.x+x.y;
+     }
+   mu[0]=sum4(mu[0])/128.f;mu[1]=sum4(mu[1])/128.f;
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){float x=xx[4*i+2*rr]-mu[rr],y=xx[4*i+2*rr+1]-mu[rr];vv[rr]+=x*x+y*y;}
+   vv[0]=rsqrtf(sum4(vv[0])/128.f+eps);vv[1]=rsqrtf(sum4(vv[1])/128.f+eps);
+   uint32_t fa[32];
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       int pos=off(r0+8*rr,8*i+cq);
+       float2 s=unpack(*reinterpret_cast<uint32_t*>(sm+MOD+pos));
+       float2 b=unpack(*reinterpret_cast<uint32_t*>(sm+MOD+16384+pos));
+       uint32_t x=pack(rn(rn((xx[4*i+2*rr]-mu[rr])*vv[rr])*s.x)+b.x,
+                       rn(rn((xx[4*i+2*rr+1]-mu[rr])*vv[rr])*s.y)+b.y);
+       fa[4*(i>>1)+2*(i&1)+rr]=x;
+       if(save && row+r0+8*rr<M)*reinterpret_cast<uint32_t*>(xsave+size_t(row+r0+8*rr)*128+8*i+cq)=x;
+     }
+   bsync();if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+5)):"memory");
+   for(int p=0;p<4;++p) {
+     bwait(bars+p,0);float acc[64];matmul128(fa,sm+W+p*32768,acc);
+     __nv_bfloat16* dst=p==0?q:p==1?k:p==2?v:sg;
+     #pragma unroll
+     for(int i=0;i<16;++i) {
+       const int c=8*i+cq;float2 b=p==0?*reinterpret_cast<const float2*>(bq+c):make_float2(0.f,0.f);
+       #pragma unroll
+       for(int rr=0;rr<2;++rr) {
+         float x=rn(acc[4*i+2*rr]+b.x),y=rn(acc[4*i+2*rr+1]+b.y);
+         if(p==3){x=sig(x);y=sig(y);}
+         if(row+r0+8*rr<M)*reinterpret_cast<uint32_t*>(dst+size_t(row+r0+8*rr)*128+c)=pack(x,y);
+       }
+     }
+   }
+ }
+}
+extern "C" __global__ __launch_bounds__(160, 1)
+void atom_pre_cross_fwd_sm90(const __grid_constant__ CUtensorMap ma,
+ const __grid_constant__ CUtensorMap mm,const __grid_constant__ CUtensorMap mw,
+ const float* __restrict__ bq,__nv_bfloat16* __restrict__ q,__nv_bfloat16* __restrict__ k,
+ __nv_bfloat16* __restrict__ v,__nv_bfloat16* __restrict__ sg,__nv_bfloat16* __restrict__ xsave,
+ int M,float eps,int save) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int MOD=16384,W=49152,BAR=W+2*32768;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ const int t=threadIdx.x,lane=t&31,warp=t>>5,nt=(M+63)/64;
+ const int tiles=blockIdx.x<nt?(nt-int(blockIdx.x)+int(gridDim.x)-1)/int(gridDim.x):0;
+ if(t==0){for(int j=0;j<4;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128) {
+   if(t==128) {
+     for(int p=0;p<2;++p) {
+       expect(bars+p,32768);
+       for(int b=0;b<2;++b)load2(sm+W+p*32768+b*16384,&mw,bars+p,64*b,128*(p?3:0));
+     }
+     for(int it=0;it<tiles;++it) {
+       if(it)bwait(bars+3,(it-1)&1);
+       expect(bars+2,49152);
+       int row=64*(int(blockIdx.x)+it*int(gridDim.x));
+       for(int b=0;b<2;++b)load2(sm+b*8192,&ma,bars+2,b*64,row);
+       for(int b=0;b<4;++b)load2(sm+MOD+b*8192,&mm,bars+2,b*64,row);
+     }
+   }
+   return;
+ }
+ const int r0=warp*16+lane/4,cq=2*(lane&3);
+ for(int it=0;it<tiles;++it) {
+   const int row=64*(int(blockIdx.x)+it*int(gridDim.x));bwait(bars+2,it&1);
+   float xx[64],mu[2]={0.f,0.f},vv[2]={0.f,0.f};
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       float2 x=unpack(*reinterpret_cast<uint32_t*>(sm+off(r0+8*rr,8*i+cq)));
+       xx[4*i+2*rr]=x.x;xx[4*i+2*rr+1]=x.y;mu[rr]+=x.x+x.y;
+     }
+   mu[0]=sum4(mu[0])/128.f;mu[1]=sum4(mu[1])/128.f;
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){float x=xx[4*i+2*rr]-mu[rr],y=xx[4*i+2*rr+1]-mu[rr];vv[rr]+=x*x+y*y;}
+   vv[0]=rsqrtf(sum4(vv[0])/128.f+eps);vv[1]=rsqrtf(sum4(vv[1])/128.f+eps);
+   uint32_t fa[32];
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       int pos=off(r0+8*rr,8*i+cq);
+       float2 s=unpack(*reinterpret_cast<uint32_t*>(sm+MOD+pos));
+       float2 b=unpack(*reinterpret_cast<uint32_t*>(sm+MOD+16384+pos));
+       uint32_t x=pack(rn(rn((xx[4*i+2*rr]-mu[rr])*vv[rr])*s.x)+b.x,
+                       rn(rn((xx[4*i+2*rr+1]-mu[rr])*vv[rr])*s.y)+b.y);
+       fa[4*(i>>1)+2*(i&1)+rr]=x;
+       if(save && row+r0+8*rr<M)*reinterpret_cast<uint32_t*>(xsave+size_t(row+r0+8*rr)*128+8*i+cq)=x;
+     }
+   bsync();if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+3)):"memory");
+   for(int p=0;p<2;++p) {
+     bwait(bars+p,0);float acc[64];matmul128(fa,sm+W+p*32768,acc);
+     __nv_bfloat16* dst=p==0?q:sg;
+     #pragma unroll
+     for(int i=0;i<16;++i) {
+       const int c=8*i+cq;float2 b=p==0?*reinterpret_cast<const float2*>(bq+c):make_float2(0.f,0.f);
+       #pragma unroll
+       for(int rr=0;rr<2;++rr) {
+         float x=rn(acc[4*i+2*rr]+b.x),y=rn(acc[4*i+2*rr+1]+b.y);
+         if(p==1){x=sig(x);y=sig(y);}
+         if(row+r0+8*rr<M)*reinterpret_cast<uint32_t*>(dst+size_t(row+r0+8*rr)*128+c)=pack(x,y);
+       }
+     }
+   }
+ }
+}
+#else
 // pre_fwd.cu — the atom DiT block's attention input stage on sm_100a (per row r of M = A N; the bf16 module's rounding points):
 //   xn = rn(LayerNorm(a))  (no affine, eps 1e-5);  x1 = rn(rn(s1 xn) + bi1)   (AdaLN; s1 = rn(sigmoid(sc1)) / bi1 from cond_fwd's mod)
 //   Q = rn(x1 Wq^T + bq);  K = rn(x1 Wk^T);  V = rn(x1 Wv^T);  SG = rn(sigmoid(rn(x1 Wg^T)))   all row-major bf16 [M, 128]; optionally
@@ -253,3 +408,5 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
+
+#endif // ATOM_HOPPER
