@@ -172,6 +172,8 @@ class TriangleMultiplication(nn.Module):
                 raise ValueError("H100 TriMul D64/D128 inference requires the native CUDA bucket/dtype contract")
             if _h100.serves_single(self, pair):
                 return _h100.update(self, pair, mask, _ds, bidirectional=False)
+            if _h100.requires_cuda_training(self, pair):
+                raise ValueError("native H100 D64 TriMul training requires B1 BF16 buckets L128..768")
             # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
             # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
             # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls
@@ -299,6 +301,9 @@ class TriangleMultiplication(nn.Module):
     def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
         """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p), broadcast
         over the i-index — matches modules.primitives.Dropout for the pair track."""
+        native = _h100.native_training_dropout(self, pair, p)
+        if native is not None:
+            return native
         b, _l1, l2, d = pair.shape
         keep = torch.rand(b, 1, l2, d, device=pair.device, dtype=pair.dtype) > p
         return keep.to(pair.dtype) / (1.0 - p)

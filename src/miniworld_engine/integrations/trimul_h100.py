@@ -33,7 +33,9 @@ def serves(module, pair: torch.Tensor) -> bool:
         pair.ndim != 4
         or pair.shape[0] != 1
         or pair.shape[1] != pair.shape[2]
-        or pair.shape[1] not in (384, 768)
+        or pair.shape[1] not in ((128, 256, 384, 512, 640, 768)
+                                if pair.shape[-1] == 64 and _native_training_enabled()
+                                else (384, 768))
     ):
         return False
     if (
@@ -77,7 +79,12 @@ def update(
     # Bidirectional D128 takes the token mask [n]: its front K1 and B7 form m[i] & m[j] themselves.
     # The other paths read a bf16 pair mask in forward and backward, so it is built once here.
     token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2)
-    if mask is None:
+    if d == 64 and _native_training_enabled():
+        # Keep token masks compact until the saved forward boundary constructs
+        # its owned FP32 pair mask. No intermediate BF16 square allocation.
+        pair_mask = (torch.empty(0, device=pair.device, dtype=torch.bool)
+                     if mask is None else mask)
+    elif mask is None:
         pair_mask = (torch.ones(n, device=pair.device, dtype=torch.bool) if token_path
                      else torch.ones((n, n), device=pair.device, dtype=torch.bfloat16))
     elif token_path:
@@ -89,11 +96,12 @@ def update(
             (mask.unsqueeze(-1) & mask.unsqueeze(-2)) if mask.ndim == 2 else mask
         )
         pair_mask = pair_mask.to(torch.bfloat16).contiguous()
-    scale = (
-        pair.new_ones((n, d))
-        if dropscale is None
-        else dropscale.reshape(n, d).contiguous()
-    )
+    if dropscale is None and d == 64 and _native_training_enabled():
+        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
+        scale = training_unit_scale(pair)
+    else:
+        scale = (pair.new_ones((n, d)) if dropscale is None
+                 else dropscale.reshape(n, d).contiguous())
     weights = (
         module.to_left.weight,
         module.to_left_gate.weight,
@@ -136,6 +144,29 @@ def update(
         pair_mask,
         scale,
     )
+
+
+def _native_training_enabled():
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import cuda_training_aux_enabled
+    return cuda_training_aux_enabled()
+
+
+def native_training_dropout(module, pair, probability):
+    """Share the hand-CUDA Philox primitive; preserve PyTorch RNG progression."""
+    if pair.shape[-1] != 64 or not _native_training_enabled() or not serves(module, pair):
+        return None
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
+    return extension("pack").drop_scale(pair, probability).reshape(
+        pair.shape[0], 1, pair.shape[1], pair.shape[-1])
+
+
+def requires_cuda_training(module, pair):
+    """The explicit D64 candidate never silently substitutes a Triton shape."""
+    return (_native_training_enabled()
+            and module.implementation == ImplementationType.MINIWORLD
+            and settings.current().engine_backend != "triton"
+            and pair.is_cuda and pair.shape[-1] == 64
+            and torch.cuda.get_device_capability(pair.device) == (9, 0))
 
 
 def serves_inference(

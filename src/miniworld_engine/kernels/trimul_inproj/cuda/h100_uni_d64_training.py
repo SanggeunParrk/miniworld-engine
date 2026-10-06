@@ -8,7 +8,9 @@ The bidirectional D64 path (``h100_d64_training``) at half the hidden width:
        saves LN_in / LN_out mean and rstd.
 Backward (``h100_sources/d64_train/uni_bwd_wg.cu``): uni64_b1w (output side) -> dt, dxg; 2x cuBLAS
 contraction gradients -> dl, dr; uni64_b2w (input side) -> dx; uni64_finw reduces the per-CTA
-partials. B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5, L in (384, 768).
+partials. B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5.
+The default covers L384/768; MINIWORLD_TRIMUL_H100_TRAIN_CUDA=1 selects
+native preparation and the six L128..768 buckets for the CUDA sweep candidate.
 """
 
 from __future__ import annotations
@@ -27,7 +29,8 @@ K3_TILE = (2, 64, 4, 1)
 
 
 def supports(width, length) -> bool:
-    return width == WIDTH and length in (384, 768)
+    return width == WIDTH and length in ((128, 256, 384, 512, 640, 768)
+                                         if T.cuda_training_aux_enabled() else (384, 768))
 
 
 def _k3_smem(tile):
@@ -115,6 +118,10 @@ def _prepare(leaves, mask):
     x, wl, wlg, wr, wrg = leaves[:5]
     n = x.shape[1]
     w1 = x.new_empty((4 * HIDDEN, WIDTH))
+    if T.cuda_training_aux_enabled():
+        from ._h100_pack import pack_into_cuda, training_pair_mask
+        pack_into_cuda(w1, wl, wlg, wr, wrg)
+        return w1, training_pair_mask(mask, n, x.device)
     T.pack_into(w1, wl, wlg, wr, wrg)
     return w1, mask.reshape(n, n).to(torch.float32, copy=True)
 
@@ -229,8 +236,12 @@ class _Training(torch.autograd.Function):
     def forward(ctx, outgoing, *args):
         leaves = list(args[:11])
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
-        weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
-        if ctx.master:
+        if T.cuda_training_aux_enabled():
+            from ._h100_pack import cast_weights
+            weights = cast_weights(leaves[1:7])
+        else:
+            weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
+        if ctx.master and not T.cuda_training_aux_enabled():
             torch._foreach_copy_(weights, leaves[1:7])
         leaves = [leaves[0], *weights, *leaves[7:]]
         mask, ds = args[11:]
@@ -255,7 +266,10 @@ def single_trimul(outgoing, *args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
-        if any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
+        if T.cuda_training_aux_enabled():
+            from ._h100_pack import cast_weights
+            leaves = [leaves[0], *cast_weights(leaves[1:7]), *leaves[7:]]
+        elif any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
             torch._foreach_copy_(weights, leaves[1:7])
             leaves = [leaves[0], *weights, *leaves[7:]]
