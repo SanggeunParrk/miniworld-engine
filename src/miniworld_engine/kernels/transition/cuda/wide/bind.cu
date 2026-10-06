@@ -118,6 +118,25 @@ constexpr int64_t D = WIDE_D, H = 4 * WIDE_D, ROWS = 128;
 
 }  // namespace
 
+#if MW_FUSED_D384
+void wide_fused_d384_launch(const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,
+ const float*,const float*,__nv_bfloat16*,float*,float*,__nv_bfloat16*,__nv_bfloat16*,__nv_bfloat16*,
+ int,float,int,cudaStream_t);
+std::vector<torch::Tensor> fwd_fused_d384(torch::Tensor x,torch::Tensor gamma,torch::Tensor beta,
+ torch::Tensor wa,torch::Tensor wb,torch::Tensor wst,double eps,bool save){
+ const int64_t M=x.size(0);
+ bf16_2d(x,M,384,"D384 fused x");bf16_2d(wa,1536,384,"D384 wa");
+ bf16_2d(wb,1536,384,"D384 wb");bf16_2d(wst,1536,384,"D384 ws transpose");
+ f32_1d(gamma,384,"D384 gamma");f32_1d(beta,384,"D384 beta");expect(M%64==0,"D384 whole rows");
+ auto out=torch::empty_like(x),xn=torch::empty({save?M:1,384},x.options());
+ auto rs=torch::empty({save?M:1},gamma.options()),c1=torch::empty_like(rs);
+ auto h=torch::empty({save?M:1,save?1536:1},x.options()),a=torch::empty_like(h),b=torch::empty_like(h);
+ wide_fused_d384_launch(rm(x,64,64),rm(wa,64,32),rm(wb,64,32),rm(wst,64,32),rm(out,64,64),
+  fp(gamma),fp(beta),bp(xn),fp(rs),fp(c1),bp(h),bp(a),bp(b),M,eps,save,at::cuda::getCurrentCUDAStream());
+ return {out,xn,rs,c1,h,a,b};
+}
+#endif
+
 #if WIDE_D == 64 || WIDE_D == 256
 // x [M,D]; gamma/beta fp32 [D]; wa, wb [H,D]; wst = ws^T [H,D]. Returns (out, xn, rstd, c1); out = transition(x) + x.
 // save = false: inference -- xn / rstd / c1 come back as 1-element placeholders and are never written.
@@ -288,6 +307,9 @@ std::vector<torch::Tensor> dxln_partials(torch::Tensor dab, torch::Tensor wabt, 
 #endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+#if MW_FUSED_D384
+  m.def("fwd_fused_d384",&fwd_fused_d384);
+#endif
   m.def("fwd", &fwd, "wide-width fused Transition forward (+ residual)");
 #if WIDE_D == 64
   m.def("bwd_master", &bwd_master);
