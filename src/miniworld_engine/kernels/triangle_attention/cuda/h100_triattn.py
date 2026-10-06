@@ -115,7 +115,7 @@ def _join(parts):
 
 def _core_forward(q, k, v, bias):
     core = extension("training_forward", int(os.environ.get("MINIWORLD_TRIATTN_H100_KV_TILE", "64")),
-                     int(os.environ.get("MINIWORLD_TRIATTN_H100_ROW_GROUP", "1")))
+                     int(os.environ.get("MINIWORLD_TRIATTN_H100_ROW_GROUP", "2")))
     results = [
         core.forward(q[b : b + 1], k[b : b + 1], v[b : b + 1], bias[b : b + 1])
         for b in range(q.shape[0])
@@ -144,7 +144,7 @@ class H100Triangle(torch.autograd.Function):
     @staticmethod
     def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, packed):
         B, L, _, C = pair.shape
-        vector_rows = os.environ.get("MINIWORLD_TRIATTN_H100_ROW_VECTOR", "0") == "1"
+        vector_rows = os.environ.get("MINIWORLD_TRIATTN_H100_ROW_VECTOR", "1") == "1"
         m = extension("module")
         x = pair.contiguous().view(-1, C)
         wall, outweight = packed
