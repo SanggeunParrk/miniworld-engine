@@ -63,8 +63,37 @@ def _native_ext():
     )
 
 
+def _cuda_prepare_fake(wa, wb, ws, transpose=True):
+    fresh = [torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
+             for w in (wa, wb, ws)
+             if w.dtype != torch.bfloat16 or not w.is_contiguous()]
+    fresh.append(torch.empty((ws.shape[1], ws.shape[0]) if transpose else (0,),
+                             device=ws.device, dtype=torch.bfloat16))
+    return fresh
+
+
+@opaque(fake=_cuda_prepare_fake, name="transition_native_prepare_sm90a")
+def _cuda_prepare_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
+                         transpose: bool = True) -> list[torch.Tensor]:
+    if _is_fake(wa, wb, ws):
+        return _cuda_prepare_fake(wa, wb, ws, transpose)
+    packed = _native_ext().prepare(wa, wb, ws, transpose)
+    # A custom operator may only return fresh tensors. Keep the no-copy BF16
+    # aliases outside the opaque launch, where Dynamo can see their identity.
+    return [p for w, p in zip((wa, wb, ws), packed[:3])
+            if w.dtype != torch.bfloat16 or not w.is_contiguous()] + [packed[3]]
+
+
 def _cuda_prepare(wa, wb, ws, transpose=True):
-    return tuple(_native_ext().prepare(wa, wb, ws, transpose))
+    fresh = _cuda_prepare_launch(wa, wb, ws, transpose)
+    packed, index = [], 0
+    for w in (wa, wb, ws):
+        if w.dtype != torch.bfloat16 or not w.is_contiguous():
+            packed.append(fresh[index])
+            index += 1
+        else:
+            packed.append(w)
+    return (*packed, fresh[-1])
 
 
 def _sm_count(device: torch.device | int | None = None) -> int:
