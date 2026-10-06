@@ -1,3 +1,131 @@
+
+#if defined(ATOM_HOPPER)
+#include "sm100.cuh"
+using namespace atom90;
+extern "C" __global__ __launch_bounds__(160,1)
+void atom_post_bwd_sm90(const __nv_bfloat16* dab,const __nv_bfloat16* dy,const __nv_bfloat16* a2,
+ const __nv_bfloat16* mod,const __nv_bfloat16* u,const __nv_bfloat16* sg,const __nv_bfloat16* o,
+ const __grid_constant__ CUtensorMap mwu,const __grid_constant__ CUtensorMap mwo,
+ __nv_bfloat16* da,__nv_bfloat16* du,__nv_bfloat16* gated,__nv_bfloat16* dout,
+ __nv_bfloat16* dm,__nv_bfloat16* dp,float* dd,int M,int N,float eps) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int NST=3,BAR=NST*32768;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ int t=threadIdx.x,l=t&31,w=t>>5,nt=(M+63)/64;
+ int tiles=blockIdx.x<nt?(nt-int(blockIdx.x)+int(gridDim.x)-1)/int(gridDim.x):0;
+ if(t==0){for(int j=0;j<6;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128){
+   if(t==128)for(int it=0;it<tiles;++it)for(int p=0;p<5;++p){
+     int g=it*5+p,st=g%NST;
+     if(g>=NST)bwait(bars+NST+st,((g/NST)-1)&1);
+     expect(bars+st,32768);
+     for(int k=0;k<2;++k)load2(sm+st*32768+k*16384,p<4?&mwu:&mwo,bars+st,(p<4?p*128:0)+64*k,0);
+   }
+   return;
+ }
+ int r0=w*16+l/4,cq=2*(l&3);
+ auto release=[&](int st){bsync();if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+NST+st)):"memory");};
+ for(int it=0;it<tiles;++it){
+   int row=64*(int(blockIdx.x)+it*int(gridDim.x));float dx[64],acc[64];uint32_t fa[32];
+   for(int p=0;p<4;++p){
+     #pragma unroll
+     for(int i=0;i<16;++i)
+       #pragma unroll
+       for(int rr=0;rr<2;++rr){
+         int r=row+r0+8*rr,c=8*i+cq;
+         fa[4*(i>>1)+2*(i&1)+rr]=r<M?*reinterpret_cast<const uint32_t*>(dab+size_t(r)*512+128*p+c):0;
+       }
+     int g=it*5+p,st=g%NST;bwait(bars+st,(g/NST)&1);
+     const uint8_t* sw=sm+st*32768;fence();
+     #pragma unroll
+     for(int k=0;k<8;++k){
+       uint64_t d=desc(sw+(k>>2)*16384+(k&3)*32);
+       if((p&1)==0&&k==0)mma_rs_n128_first(fa[0],fa[1],fa[2],fa[3],d,acc);
+       else mma_rs_n128(fa[4*k],fa[4*k+1],fa[4*k+2],fa[4*k+3],d,acc,1);
+     }
+     commit();wait();release(st);
+     if(p&1){
+       #pragma unroll
+       for(int j=0;j<64;++j)dx[j]=p==1?rn(acc[j]):rn(dx[j]+rn(acc[j]));
+     }
+   }
+   float mu[2]={0,0},vv[2]={0,0};
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,c=8*i+cq;
+       float2 x=r<M?unpack(*reinterpret_cast<const uint32_t*>(a2+size_t(r)*128+c)):make_float2(0,0);
+       acc[4*i+2*rr]=x.x;acc[4*i+2*rr+1]=x.y;mu[rr]+=x.x+x.y;
+     }
+   mu[0]=sum4(mu[0])/128.f;mu[1]=sum4(mu[1])/128.f;
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){float x=acc[4*i+2*rr]-mu[rr],y=acc[4*i+2*rr+1]-mu[rr];vv[rr]+=x*x+y*y;}
+   vv[0]=rsqrtf(sum4(vv[0])/128.f+eps);vv[1]=rsqrtf(sum4(vv[1])/128.f+eps);
+   float m1[2]={0,0},m2[2]={0,0};
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,c=8*i+cq;
+       float2 s=r<M?unpack(*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+384+c)):make_float2(0,0);
+       float xh0=(acc[4*i+2*rr]-mu[rr])*vv[rr],xh1=(acc[4*i+2*rr+1]-mu[rr])*vv[rr];
+       float d0=dx[4*i+2*rr],d1=dx[4*i+2*rr+1];
+       if(r<M){
+         *reinterpret_cast<uint32_t*>(dm+size_t(r)*768+256+c)=pack(rn(rn(d0*rn(xh0))*rn(1.f-s.x))*s.x,rn(rn(d1*rn(xh1))*rn(1.f-s.y))*s.y);
+         *reinterpret_cast<uint32_t*>(dm+size_t(r)*768+384+c)=pack(d0,d1);
+       }
+       d0=rn(d0*s.x);d1=rn(d1*s.y);dx[4*i+2*rr]=d0;dx[4*i+2*rr+1]=d1;
+       acc[4*i+2*rr]=xh0;acc[4*i+2*rr+1]=xh1;m1[rr]+=d0+d1;m2[rr]+=d0*xh0+d1*xh1;
+     }
+   for(int rr=0;rr<2;++rr){m1[rr]=sum4(m1[rr])/128.f;m2[rr]=sum4(m2[rr])/128.f;}
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,c=8*i+cq;float2 dyv=make_float2(0,0),uv=dyv,so=dyv;
+       if(r<M){
+         dyv=unpack(*reinterpret_cast<const uint32_t*>(dy+size_t(r)*128+c));
+         uv=unpack(*reinterpret_cast<const uint32_t*>(u+size_t(r)*128+c));
+         so=unpack(*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+256+c));
+       }
+       float d0=rn(dyv.x+rn(vv[rr]*(dx[4*i+2*rr]-m1[rr]-acc[4*i+2*rr]*m2[rr])));
+       float d1=rn(dyv.y+rn(vv[rr]*(dx[4*i+2*rr+1]-m1[rr]-acc[4*i+2*rr+1]*m2[rr])));
+       uint32_t dv=pack(d0*so.x,d1*so.y);fa[4*(i>>1)+2*(i&1)+rr]=dv;
+       if(r<M){
+         *reinterpret_cast<uint32_t*>(da+size_t(r)*128+c)=pack(d0,d1);
+         *reinterpret_cast<uint32_t*>(du+size_t(r)*128+c)=dv;
+         *reinterpret_cast<uint32_t*>(dm+size_t(r)*768+512+c)=pack(rn(rn(d0*uv.x)*rn(1.f-so.x))*so.x,rn(rn(d1*uv.y)*rn(1.f-so.y))*so.y);
+       }
+     }
+   int g=it*5+4,st=g%NST;bwait(bars+st,(g/NST)&1);matmul128(fa,sm+st*32768,acc);release(st);
+   float dots[4][2]={{0,0},{0,0},{0,0},{0,0}};
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,c=8*i+cq;
+       if(r<M){
+         float2 ov=unpack(*reinterpret_cast<const uint32_t*>(o+size_t(r)*128+c)),gate=unpack(*reinterpret_cast<const uint32_t*>(sg+size_t(r)*128+c));
+         float d0=rn(acc[4*i+2*rr]),d1=rn(acc[4*i+2*rr+1]),do0=rn(d0*gate.x),do1=rn(d1*gate.y);
+         *reinterpret_cast<uint32_t*>(dout+size_t(r)*128+c)=pack(do0,do1);
+         *reinterpret_cast<uint32_t*>(gated+size_t(r)*128+c)=pack(ov.x*gate.x,ov.y*gate.y);
+         *reinterpret_cast<uint32_t*>(dp+size_t(r)*512+384+c)=pack(rn(rn(d0*ov.x)*rn(1.f-gate.x))*gate.x,rn(rn(d1*ov.y)*rn(1.f-gate.y))*gate.y);
+         dots[i/4][rr]+=do0*ov.x+do1*ov.y;
+       }
+     }
+   #pragma unroll
+   for(int h=0;h<4;++h)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       float d=sum4(dots[h][rr]);int r=row+r0+8*rr;
+       if((l&3)==0&&r<M)dd[(size_t(r/N)*4+h)*N+r%N]=d;
+     }
+ }
+}
+#else
 // post_bwd.cu — second part of the atom DiT block's post-attention backward on sm_100a (the bf16 module's autograd rounding points):
 //   dx2 = rn(rn(da Wa) + rn(db Wb))                                        (DAB = [da | db] from tr_bwd_gate.cu)
 //   x2 = rn(rn(s2 xn) + bi2), xn = rn(LN(a2)):  dbi2 = dx2;  ds2 = rn(dx2 xn);  dxn = rn(dx2 s2);  dsc2 = rn(rn(ds2 rn(1 - s2)) s2)
@@ -340,3 +468,5 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
+
+#endif // ATOM_HOPPER

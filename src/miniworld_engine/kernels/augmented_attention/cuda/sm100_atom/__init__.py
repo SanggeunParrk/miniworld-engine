@@ -125,6 +125,37 @@ KERNELS = {
 }
 
 
+@functools.lru_cache(maxsize=8)
+def _hopper(device_index: int) -> bool:
+    return torch.cuda.get_device_capability(device_index) == (9, 0)
+
+
+_HOPPER_KERNELS = {
+    "cond": ("cond_fwd", "atom_cond_fwd_sm90", 131136, False),
+    "cond1": ("cond_fwd", "atom_cond_fwd_single_sm90", 114752, False),
+    "pre": ("pre_fwd", "atom_pre_fwd_sm90", 180288, False),
+    "pre_cross": ("pre_fwd", "atom_pre_cross_fwd_sm90", 114752, False),
+    "post": ("post_fwd", "atom_post_fwd_sm90", 147520, False),
+    "post2": ("post_fwd", "atom_post_fwd_2stage_sm90", 114752, False),
+    "pack": ("cond_fwd", "atom_pack_sm90", 0, False),
+    "pack_t": ("tr_bwd_gate", "atom_pack_transpose_sm90", 0, False),
+    "trg": ("tr_bwd_gate", "atom_tr_bwd_sm90", 131136, False),
+    "postb": ("post_bwd", "atom_post_bwd_sm90", 98368, False),
+    "preb": ("pre_bwd", "atom_pre_bwd_sm90", 98368, False),
+    "condb": ("cond_bwd", "atom_cond_bwd_sm90", 168000, False),
+    "grad_pack": ("pre_bwd", "atom_grad_pack_sm90", 0, False),
+    "col_part": ("cond_bwd", "atom_column_partials_sm90", 0, False),
+    "col_fin": ("cond_bwd", "atom_column_finish_sm90", 0, False),
+    "pb_w": ("pair_bias", "atom_pair_weight_sm90", 0, False),
+    "pb_fin": ("pair_bias", "atom_pair_finish_sm90", 0, False),
+    "pb_part": ("pair_bias", "atom_pair_partials_sm90", 0, False),
+    "db_native": ("attn_dbias", "atom_dbias_sm90", 82208, False),
+    "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
+    "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
+    **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},
+}
+
+
 def atom_kernel(name: str, device_index: int):
     stem, func, smem, pdl, *defs = KERNELS[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
@@ -132,7 +163,7 @@ def atom_kernel(name: str, device_index: int):
 
 def load_all(device_index: int) -> None:
     """Build and load every kernel on the device (raises on any failure)."""
-    for name in KERNELS:
+    for name in (_HOPPER_KERNELS if _hopper(device_index) else KERNELS):
         atom_kernel(name, device_index)
 
 
@@ -257,7 +288,7 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
     return out
 
 
-def pre_fwd(a, mod, W, bq, save=False, eps=1e-5):
+def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
     """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``)."""
     M = a.shape[0]
     Q, K, V, G = (

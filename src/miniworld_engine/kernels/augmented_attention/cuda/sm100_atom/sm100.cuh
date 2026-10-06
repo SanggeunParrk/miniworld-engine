@@ -374,3 +374,56 @@ DEVI void tma_store_2d_h(const CUtensorMap* m, uint32_t src, int c0, int c1, uin
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group.L2::cache_hint [%0, {%2, %3}], [%1], %4;" :: "l"(m), "r"(src), "r"(c0), "r"(c1), "l"(pol) : "memory");
 }
 }  // namespace s100
+
+#if defined(ATOM_HOPPER)
+// Hopper lowering of the atom block's B200 fusion boundaries. Register-fragment
+// WGMMA replaces TMEM; TMA descriptors and transaction barriers own shared tiles.
+namespace atom90 {
+#include "../../../swa_dit/cuda/gen/wgmma_bf16.inc"
+DEVI uint32_t sa(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
+DEVI uint64_t desc(const void* p) {
+  return uint64_t((sa(p)>>4)&0x3fff) | (1ull<<16) | (64ull<<32) | (1ull<<62);
+}
+DEVI void fence() { asm volatile("wgmma.fence.sync.aligned;" ::: "memory"); }
+DEVI void commit() { asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory"); }
+DEVI void wait() { asm volatile("wgmma.wait_group.sync.aligned 0;" ::: "memory"); }
+DEVI void proxy() { asm volatile("fence.proxy.async.shared::cta;" ::: "memory"); }
+DEVI void init(uint64_t* b) { asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "r"(sa(b)) : "memory"); }
+DEVI void init_fence() { asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory"); }
+DEVI void expect(uint64_t* b, int n) { asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(sa(b)), "r"(n) : "memory"); }
+DEVI void bwait(uint64_t* b,int phase) {
+  asm volatile("{ .reg .pred p; L_%=: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1; @!p bra L_%=; }" :: "r"(sa(b)), "r"(phase) : "memory");
+}
+DEVI void load2(void* dst,const CUtensorMap* m,uint64_t* b,int c,int r) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3,%4}], [%2];"
+    :: "r"(sa(dst)), "l"(m), "r"(sa(b)), "r"(c), "r"(r) : "memory");
+}
+DEVI void load3(void* dst,const CUtensorMap* m,uint64_t* b,int c,int r,int a) {
+  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3,%4,%5}], [%2];"
+    :: "r"(sa(dst)), "l"(m), "r"(sa(b)), "r"(c), "r"(r), "r"(a) : "memory");
+}
+DEVI void bsync() { asm volatile("bar.sync 1, 128;" ::: "memory"); }
+DEVI int off(int r,int c) { return (c>>6)*8192 + r*128 + ((((c&63)>>3)^(r&7))<<4)+(c&7)*2; }
+DEVI uint32_t pack(float a,float b) { return s100::pack_bf16(a,b); }
+DEVI float2 unpack(uint32_t v) { return make_float2(s100::bf16lo(v),s100::bf16hi(v)); }
+DEVI float rn(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
+DEVI float sig(float x) { return 1.f/(1.f+__expf(-x)); }
+DEVI float sum4(float v) { v+=__shfl_xor_sync(~0u,v,1); return v+__shfl_xor_sync(~0u,v,2); }
+DEVI float max4(float v) { v=fmaxf(v,__shfl_xor_sync(~0u,v,1)); return fmaxf(v,__shfl_xor_sync(~0u,v,2)); }
+DEVI void pv(float* d, const uint32_t* a, uint64_t b) {
+  asm volatile("wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19}, %20, 1, 1, 1, 1;"
+  : "+f"(d[0]),"+f"(d[1]),"+f"(d[2]),"+f"(d[3]),"+f"(d[4]),"+f"(d[5]),"+f"(d[6]),"+f"(d[7]),"+f"(d[8]),"+f"(d[9]),"+f"(d[10]),"+f"(d[11]),"+f"(d[12]),"+f"(d[13]),"+f"(d[14]),"+f"(d[15])
+  : "r"(a[0]),"r"(a[1]),"r"(a[2]),"r"(a[3]),"l"(b) : "memory");
+}
+DEVI void matmul128(const uint32_t* a,const uint8_t* w,float* d) {
+  fence();
+  #pragma unroll
+  for(int k=0;k<8;++k) {
+    const uint64_t b=desc(w+(k>>2)*16384+(k&3)*32);
+    if(k==0) mma_rs_n128_first(a[0],a[1],a[2],a[3],b,d);
+    else mma_rs_n128(a[4*k],a[4*k+1],a[4*k+2],a[4*k+3],b,d,1);
+  }
+  commit(); wait();
+}
+} // namespace atom90
+#endif

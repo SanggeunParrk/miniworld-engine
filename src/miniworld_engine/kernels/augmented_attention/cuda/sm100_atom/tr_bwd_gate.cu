@@ -1,3 +1,104 @@
+
+#if defined(ATOM_HOPPER)
+#include "sm100.cuh"
+using namespace atom90;
+// Same B200 recomputation boundary: transition output gate, dH GEMM,
+// expand A/B recompute and SwiGLU gradients. Bias sums are reduced separately
+// in fixed row order, rather than nondeterministic cross-CTA atomics.
+extern "C" __global__ __launch_bounds__(160, 1)
+void atom_tr_bwd_sm90(const __nv_bfloat16* dy,const __nv_bfloat16* ts,
+ const __nv_bfloat16* mod,const __nv_bfloat16* x2,
+ const __grid_constant__ CUtensorMap mwu,const __grid_constant__ CUtensorMap mwst,
+ __nv_bfloat16* dt,__nv_bfloat16* hh,__nv_bfloat16* dab,__nv_bfloat16* dmod,int M) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int NST=3,TD=98304,TA=TD+16384,BAR=TA+16384;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ int t=threadIdx.x,l=t&31,w=t>>5,nt=(M+63)/64;
+ int tiles=blockIdx.x<nt?(nt-int(blockIdx.x)+int(gridDim.x)-1)/int(gridDim.x):0;
+ if(t==0){for(int j=0;j<6;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128) {
+   if(t==128)for(int it=0;it<tiles;++it)for(int p=0;p<6;++p){
+     int g=it*6+p,st=g%NST,half=p/3,type=p%3;
+     if(g>=NST)bwait(bars+NST+st,((g/NST)-1)&1);
+     expect(bars+st,32768);
+     const CUtensorMap* wm=type==0?&mwst:&mwu;
+     int nr=128*half+(type==2?256:0);
+     for(int k=0;k<2;++k)load2(sm+st*32768+k*16384,wm,bars+st,k*64,nr);
+   }
+   return;
+ }
+ const int r0=w*16+l/4,cq=2*(l&3);
+ for(int it=0;it<tiles;++it){
+   int row=64*(int(blockIdx.x)+it*int(gridDim.x));
+   uint32_t fd[32],fx[32];
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,c=8*i+cq;float2 dyv=make_float2(0,0),tv=dyv,st=dyv;
+       uint32_t xv=0;
+       if(r<M){
+         dyv=unpack(*reinterpret_cast<const uint32_t*>(dy+size_t(r)*128+c));
+         tv=unpack(*reinterpret_cast<const uint32_t*>(ts+size_t(r)*128+c));
+         st=unpack(*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+640+c));
+         xv=*reinterpret_cast<const uint32_t*>(x2+size_t(r)*128+c);
+       }
+       uint32_t dv=pack(dyv.x*st.x,dyv.y*st.y);
+       uint32_t ds=pack(rn(rn(dyv.x*tv.x)*rn(1.f-st.x))*st.x,rn(rn(dyv.y*tv.y)*rn(1.f-st.y))*st.y);
+       fd[4*(i>>1)+2*(i&1)+rr]=dv;fx[4*(i>>1)+2*(i&1)+rr]=xv;
+       if(r<M){*reinterpret_cast<uint32_t*>(dt+size_t(r)*128+c)=dv;*reinterpret_cast<uint32_t*>(dmod+size_t(r)*768+640+c)=ds;}
+     }
+   #pragma unroll 1
+   for(int p=0;p<6;++p){
+     int g=it*6+p,st=g%NST,half=p/3,type=p%3;bwait(bars+st,(g/NST)&1);
+     uint32_t input[32];
+     #pragma unroll
+     for(int j=0;j<32;++j)input[j]=type==0?fd[j]:fx[j];
+     float acc[64];matmul128(input,sm+st*32768,acc);
+     bsync();if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+NST+st)):"memory");
+     #pragma unroll
+     for(int i=0;i<16;++i)
+       #pragma unroll
+       for(int rr=0;rr<2;++rr){
+         int pos=off(r0+8*rr,8*i+cq);
+         if(type<2)*reinterpret_cast<uint32_t*>(sm+(type==0?TD:TA)+pos)=pack(acc[4*i+2*rr],acc[4*i+2*rr+1]);
+         else{
+           float2 av=unpack(*reinterpret_cast<uint32_t*>(sm+TA+pos)),dh=unpack(*reinterpret_cast<uint32_t*>(sm+TD+pos));
+           float b0=rn(acc[4*i+2*rr]),b1=rn(acc[4*i+2*rr+1]);
+           float s0=sig(av.x),s1=sig(av.y),sl0=rn(av.x*s0),sl1=rn(av.y*s1);
+           float da0=rn(dh.x*b0)*s0*(1.f+av.x*(1.f-s0));
+           float da1=rn(dh.y*b1)*s1*(1.f+av.y*(1.f-s1));
+           int r=row+r0+8*rr,c=half*128+8*i+cq;
+           if(r<M){
+             *reinterpret_cast<uint32_t*>(hh+size_t(r)*256+c)=pack(sl0*b0,sl1*b1);
+             *reinterpret_cast<uint32_t*>(dab+size_t(r)*512+c)=pack(da0,da1);
+             *reinterpret_cast<uint32_t*>(dab+size_t(r)*512+256+c)=pack(dh.x*sl0,dh.y*sl1);
+           }
+         }
+       }
+   }
+ }
+}
+
+extern "C" __global__ void atom_pack_transpose_sm90(const __nv_bfloat16* wc,const __nv_bfloat16* wp,
+ const __nv_bfloat16* wo,const __nv_bfloat16* wu,const __nv_bfloat16* wd,
+ __nv_bfloat16* wct,__nv_bfloat16* wpt,__nv_bfloat16* wot,__nv_bfloat16* wut,__nv_bfloat16* wdt) {
+ __shared__ __nv_bfloat16 tile[32][33];
+ int b=blockIdx.x,rows,cols;const __nv_bfloat16* src;__nv_bfloat16* dst;
+ if(b<96){rows=768;cols=128;src=wc;dst=wct;}
+ else if(b<160){b-=96;rows=512;cols=128;src=wp;dst=wpt;}
+ else if(b<176){b-=160;rows=128;cols=128;src=wo;dst=wot;}
+ else if(b<240){b-=176;rows=512;cols=128;src=wu;dst=wut;}
+ else {b-=240;rows=128;cols=256;src=wd;dst=wdt;}
+ int r0=(b/(cols/32))*32,c0=(b%(cols/32))*32,x=threadIdx.x,y=threadIdx.y;
+ #pragma unroll
+ for(int j=0;j<32;j+=8)tile[y+j][x]=src[(r0+y+j)*cols+c0+x];
+ __syncthreads();
+ #pragma unroll
+ for(int j=0;j<32;j+=8)dst[(c0+y+j)*rows+r0+x]=tile[x][y+j];
+}
+
+#else
 // tr_bwd_gate.cu — first part of the atom DiT block's ConditionedTransition backward on sm_100a (the bf16 module's autograd rounding
 // points; forward y = rn(st t), t = rn(h Ws^T), h = rn(rn(silu(a)) b), a | b = rn(x2 Wa^T) | rn(x2 Wb^T)):
 //   dt = rn(dy st);  dst = rn(dy t);  dts = rn(rn(dst rn(1 - st)) st)                       (st = rn(sigmoid(ts)) from cond_fwd's mod)
@@ -266,3 +367,5 @@ atom_tr_bwd_gate_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_con
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
+
+#endif // ATOM_HOPPER
