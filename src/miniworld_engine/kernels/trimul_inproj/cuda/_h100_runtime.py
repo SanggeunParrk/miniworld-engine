@@ -18,7 +18,7 @@ _d128_scope = threading.local()
 
 
 def d128_training(x, outgoing=True, bidirectional=False):
-    """Preserved L384 B1/B7 defaults; L768 remains an explicit candidate."""
+    """Preserved bidirectional L384 default; other cells remain candidates."""
     if x.shape[-1] != 128:
         return False
     if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
@@ -26,7 +26,7 @@ def d128_training(x, outgoing=True, bidirectional=False):
         return False
     explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
                 and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1")
-    return explicit or ((outgoing or bidirectional) and x.ndim == 4
+    return explicit or (bidirectional and x.ndim == 4
                         and tuple(x.shape[:3]) == (1, 384, 384))
 
 
