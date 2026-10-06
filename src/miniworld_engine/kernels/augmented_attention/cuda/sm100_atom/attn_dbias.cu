@@ -90,6 +90,100 @@ void atom_dbias_sm90(const __grid_constant__ CUtensorMap mq,
   db[(size_t(h)*N+q0+q)*N+k0+k]=tile[k*65+q];
  }
 }
+
+// Final Hopper candidate: preserve B200's retained bias-tile lifetime across A.
+// The BF16 bias tile aliases the final FP32 transpose region after the last sample.
+extern "C" __global__ __launch_bounds__(160,1)
+void atom_dbias_tma_sm90(const __grid_constant__ CUtensorMap mq,
+ const __grid_constant__ CUtensorMap mk,const __grid_constant__ CUtensorMap mv,
+ const __grid_constant__ CUtensorMap mdo,const __grid_constant__ CUtensorMap mb,
+ const float* lse,const float* dd,float* db,int N,int A) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int NST=2,ST=32768,RED=NST*ST,BAR=RED+64*65*4;
+ constexpr float LOG2=1.4426950408889634f,RSQ=0.1767766952966369f;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ int t=threadIdx.x,l=t&31,w=t>>5,q0=64*blockIdx.x,k0=64*blockIdx.y,h=blockIdx.z;
+ if(t==0){for(int j=0;j<5;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128){
+  if(t==128){
+   expect(bars+4,8192);
+   load2(sm+RED,&mb,bars+4,k0,h*N+q0);
+   for(int a=0;a<A;++a){
+   int st=a&1;
+   if(a>=2)bwait(bars+2+st,((a>>1)-1)&1);
+   expect(bars+st,ST);
+   load2(sm+st*ST,&mq,bars+st,h*32,a*N+q0);
+   load2(sm+st*ST+8192,&mk,bars+st,h*32,a*N+k0);
+   load2(sm+st*ST+16384,&mv,bars+st,h*32,a*N+k0);
+   load2(sm+st*ST+24576,&mdo,bars+st,h*32,a*N+q0);
+   }
+  }
+  return;
+ }
+ int r0=w*16+l/4,cq=2*(l&3);
+ float sums[32];
+ #pragma unroll
+ for(int i=0;i<32;++i)sums[i]=0;
+ bwait(bars+4,0);
+ for(int a=0;a<A;++a){
+  int st=a&1;bwait(bars+st,(a>>1)&1);
+  uint32_t kr[8],vr[8];
+  #pragma unroll
+  for(int i=0;i<4;++i)
+   #pragma unroll
+   for(int rr=0;rr<2;++rr){
+    int j=4*(i>>1)+2*(i&1)+rr,pos=off(r0+8*rr,8*i+cq);
+    kr[j]=*reinterpret_cast<uint32_t*>(sm+st*ST+8192+pos);
+    vr[j]=*reinterpret_cast<uint32_t*>(sm+st*ST+16384+pos);
+   }
+  float sc[32],dp[32],ld[16],dt[16];
+  #pragma unroll
+  for(int j=0;j<8;++j){
+   int q=q0+j*8+cq;
+   float2 f=*reinterpret_cast<const float2*>(lse+(size_t(a)*4+h)*N+q);
+   float2 d=*reinterpret_cast<const float2*>(dd+(size_t(a)*4+h)*N+q);
+   ld[2*j]=f.x;ld[2*j+1]=f.y;dt[2*j]=d.x;dt[2*j+1]=d.y;
+   #pragma unroll
+   for(int rr=0;rr<2;++rr){
+    int k=k0+r0+8*rr;
+    float b0=__bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(sm+RED+off(j*8+cq,r0+8*rr)));
+    float b1=__bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(sm+RED+off(j*8+cq+1,r0+8*rr)));
+    sc[4*j+2*rr]=(b0-f.x/LOG2)/RSQ;
+    sc[4*j+2*rr+1]=(b1-f.y/LOG2)/RSQ;
+   }
+  }
+  fence();
+  mma_rs_n64(kr[0],kr[1],kr[2],kr[3],desc(sm+st*ST),sc,1);
+  mma_rs_n64(kr[4],kr[5],kr[6],kr[7],desc(sm+st*ST+32),sc,1);
+  mma_rs_n64_first(vr[0],vr[1],vr[2],vr[3],desc(sm+st*ST+24576),dp);
+  mma_rs_n64(vr[4],vr[5],vr[6],vr[7],desc(sm+st*ST+24576+32),dp,1);
+  commit();wait();bsync();
+  if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+2+st)):"memory");
+  #pragma unroll
+  for(int j=0;j<8;++j)
+   #pragma unroll
+   for(int rr=0;rr<2;++rr){
+    int idx=4*j+2*rr;
+    float p0=isfinite(ld[2*j])?s100::ex2f(sc[idx]*(RSQ*LOG2)):0.f;
+    float p1=isfinite(ld[2*j+1])?s100::ex2f(sc[idx+1]*(RSQ*LOG2)):0.f;
+    sums[idx]+=p0*(dp[idx]-dt[2*j]);sums[idx+1]+=p1*(dp[idx+1]-dt[2*j+1]);
+   }
+ }
+ bsync();  // All consumers finished the retained bias before aliasing its storage.
+ float* tile=reinterpret_cast<float*>(sm+RED);
+ #pragma unroll
+ for(int j=0;j<8;++j)
+  #pragma unroll
+  for(int rr=0;rr<2;++rr){
+   tile[(r0+8*rr)*65+j*8+cq]=sums[4*j+2*rr];
+   tile[(r0+8*rr)*65+j*8+cq+1]=sums[4*j+2*rr+1];
+  }
+ bsync();
+ for(int i=t;i<4096;i+=128){
+  int q=i>>6,k=i&63;
+  db[(size_t(h)*N+q0+q)*N+k0+k]=tile[k*65+q];
+ }
+}
 #else
 // attn_dbias.cu — the atom DiT's attention backward, dbias pass, sm_100a:  dbias[h, i, j] = sum_a dS[a, h, i, j]  (fp32, [4, N, N]).
 //

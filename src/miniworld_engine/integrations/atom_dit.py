@@ -1,4 +1,10 @@
-"""The AF3-style atom DiT block on B200 (sm_100a): inference and training through ``kernels/augmented_attention/cuda/sm100_atom``.
+"""The AF3-style atom DiT block on B200 (sm_100a) and qualified H100 shapes.
+
+H100 inference and training use the CUDA block for A in {1, 5}, N in {1024, 2048, 4096},
+with contiguous bf16 activations and bf16 or fp32 parameters. Unsupported H100 atom
+contracts raise instead of falling through to the composed module path. Training
+writes attention gradients directly into the packed projection buffer; A1 fuses
+dBias with dQ, while A5 retains each bias tile across augmentations with Hopper TMA.
 
 One ``DiTBlock`` call at atom widths runs, in place of the module path,
 
@@ -91,7 +97,7 @@ def _kernels_ready(index: int) -> bool:
         sm100.load_all(index)
     except Exception as exc:  # a toolchain or driver problem keeps the module path
         if sm100._hopper(index):
-            raise RuntimeError("Opt-in Hopper atom DiT kernel build failed") from exc
+            raise RuntimeError("Hopper atom DiT kernel build failed") from exc
         _FAILED = True
         warnings.warn(f"sm_100a atom DiT kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
         return False
@@ -100,6 +106,9 @@ def _kernels_ready(index: int) -> bool:
 
 
 def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
+    qualified = _serves_hopper(module, single, cond, pair, mask, compute_dtype)
+    if qualified is not None:
+        return qualified
     if _FAILED or os.environ.get("MINIWORLD_ATOM_DIT_SM100", "1") == "0" or settings.current().engine_backend == "triton":
         return False
     from miniworld_engine.modules.dispatch import KernelBackend
@@ -126,6 +135,49 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         return False
     index = single.device.index if single.device.index is not None else torch.cuda.current_device()
     return _kernels_ready(index)
+
+
+def _serves_hopper(module, single, cond, pair, mask, compute_dtype):
+    """The measured six-shape H100 contract for both modes; None leaves other families alone."""
+    from miniworld_engine.modules.dispatch import KernelBackend
+
+    a, tr = module.attention, module.transition
+    if a._backend != KernelBackend.TRITON or not single.is_cuda:
+        return None
+    if torch.cuda.get_device_capability(single.device) != (9, 0):
+        return None
+    # Identify the atom family from its parameters, not potentially malformed inputs.
+    if (a.to_query.weight.shape[1], a.to_bias.weight.shape[1]) != (DS_, DP_):
+        return None
+    weights = tuple(module.get_parameter(name) for name in WEIGHTS)
+
+    def require(ok, detail):
+        if not ok:
+            raise NotImplementedError(f"H100 atom DiT requires {detail}; no composed fallback")
+
+    require(settings.current().engine_backend != "triton", "the CUDA engine backend")
+    require(not a.use_qk_norm, "use_qk_norm=False")
+    require((a.n_head, a.to_query.weight.shape[0], a.ada_ln_in.to_scale.weight.shape[1],
+             tr.expand_a.weight.shape[0]) == (NH_, DS_, DC_, 2 * DS_), "128/128/16 widths, four heads, transition n=2")
+    require(single.ndim == 4 and single.shape[0] in (1, 5) and single.shape[1] == 1
+            and single.shape[2] in (1024, 2048, 4096) and single.shape[3] == DS_,
+            "single [A,1,N,128] with A in {1,5}, N in {1024,2048,4096}")
+    n = single.shape[2]
+    require(tuple(cond.shape) == (*single.shape[:3], DC_) and tuple(pair.shape) == (1, n, n, DP_),
+            "matching contiguous conditioning and dense pair shapes")
+    require(compute_dtype in (None, BF), "bf16 compute")
+    require(all(t.dtype == BF and t.device == single.device and t.is_contiguous() for t in (single, cond, pair)),
+            "contiguous bf16 activations on one CUDA device")
+    require(all(w.dtype in (BF, torch.float32) and w.device == single.device and w.is_contiguous() for w in weights),
+            "contiguous bf16 or fp32 parameters on the input device")
+    require(mask is None or (mask.dtype == torch.bool and tuple(mask.shape) == (1, n)
+            and mask.device == single.device and mask.is_contiguous()), "a contiguous [1,N] bool mask or None")
+    norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, tr.ada_ln_in.ln_in, tr.ada_ln_in.ln_cond)
+    require(all(norm.eps == EPS for norm in norms), "LayerNorm eps=1e-5")
+    index = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    if not _kernels_ready(index):
+        raise RuntimeError("H100 atom DiT CUDA kernels unavailable; no composed fallback")
+    return True
 
 
 # ------------------------------------------------------------------------------------------------------------ weight packs
@@ -268,6 +320,8 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
     dev = single.device
     with torch.cuda.device(dev):
         hopper = sm100._hopper(dev.index)
+        if hopper and (dy.dtype != BF or dy.device != dev or dy.shape != single.shape or not dy.is_contiguous()):
+            raise NotImplementedError("H100 atom DiT backward requires contiguous bf16 upstream gradient matching single")
         wc, _, wo, wb = _weights(weights, backward=True)
         s2 = _padded(single, n).reshape(rows, DS_).contiguous()
         c2 = _padded(cond, n).reshape(rows, DC_).contiguous()
@@ -282,8 +336,9 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         dd = torch.empty(a, NH_, n, device=dev)
         dt, hh, dab = sm100.tr_bwd_gate(dy, t, mod, x2, wo[1], wb["WsT"], dmod, dbias_cols[640:])
         da, du, gated, do = sm100.post_bwd(dab, dy, a2, mod, u, sg, o, wb["WuT"], wb["WoT"], dmod, dp, dd, dbias_cols, n)
-        db = sm100.attn_bwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias, bias_t, lse, dd, dp)
-        dz, dgamma, dwb = sm100.pair_bias_bwd(pair, weights[_GAMMA], weights[_WBIAS], db, kv=_keys(mask))
+        db = sm100.attn_bwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias, bias_t, lse, dd, dp,
+                            native_hopper=hopper)
+        dz, dgamma, dwb = sm100.pair_bias_bwd(pair, weights[_GAMMA], weights[_WBIAS], db, kv=_keys(mask), native_hopper=hopper)
         ds = sm100.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
         dc, cn1, cn2 = sm100.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgparts)
         # weight gradients (cuBLAS)

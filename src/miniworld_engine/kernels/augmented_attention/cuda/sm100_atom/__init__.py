@@ -135,6 +135,7 @@ _HOPPER_KERNELS = {
     "pb_fin": ("pair_bias", "atom_pair_finish_sm90", 0, False),
     "pb_part": ("pair_bias", "atom_pair_partials_sm90", 0, False),
     "db_native": ("attn_dbias", "atom_dbias_sm90", 82208, False),
+    "db_tma": ("attn_dbias", "atom_dbias_tma_sm90", 82240, False),
     "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
     "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
     **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},
@@ -230,7 +231,7 @@ def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True, n=None, kv=None):
     return bo, bt
 
 
-def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5, kv=None):
+def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5, kv=None, *, native_hopper=False):
     """dbias [4, n, n] fp32 (summed over the samples) -> dz (z's dtype and layout), dgamma [16], dWb [4, 16] (fp32); dbias on
     keys kv marks invalid is dropped."""
     z = z.reshape(z.shape[-3], z.shape[-2], DP)
@@ -244,7 +245,7 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5, kv=None):
     if _hopper(_dev(z)):
         dg = torch.empty(DP, device=z.device, dtype=torch.float32)
         dw = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
-        if os.environ.get("MINIWORLD_ATOM_DIT_H100_BWD_V2", "0") == "1":
+        if native_hopper or os.environ.get("MINIWORLD_ATOM_DIT_H100_BWD_V2", "0") == "1":
             part = torch.empty(16, NH, DP, device=z.device, dtype=torch.float32)
             atom_kernel("pb_part", _dev(z))((4, 16, 1), (256, 1, 1), pw, part, int(nb))
             pw, nb = part, 16
@@ -282,22 +283,27 @@ def attn_dd(do, o):
     return D
 
 
-def attn_bwd(q, k, v, do, bias, bias_t, LSE, Dd, dP):
+def attn_bwd(q, k, v, do, bias, bias_t, LSE, Dd, dP, *, native_hopper=False):
     """dK, dV, dQ (bf16, into dP's blocks 1 / 2 / 0; dP [A N, 512]) and dbias [4, N, N] fp32 (summed over the samples)."""
     A, N, _ = q.shape
     d = _dev(q)
     q2, k2, v2, do2 = (t.reshape(A * N, DM) for t in (q, k, v, do))
     if _hopper(d):
         from miniworld_engine.kernels.augmented_attention import cuda as core
-        if os.environ.get("MINIWORLD_ATOM_DIT_H100_BWD_V2", "0") == "1":
+        if native_hopper or os.environ.get("MINIWORLD_ATOM_DIT_H100_BWD_V2", "0") == "1":
             out = tuple(dP[:, DM * i:DM * (i + 1)] for i in range(3))
             _, _, _, db = core.natural_backward(q2, k2, v2, do2, bias, LSE, Dd, heads=NH, head_dim=DH,
                                                 output_bf16=True, out=out, return_bias=A == 1, bias_transposed=False)
             if A != 1:
                 db = torch.empty(NH, N, N, device=q.device, dtype=torch.float32)
                 maps = tuple(_map(t, [DM, A * N], DM * 2, [64, 64]) for t in (q2, k2, v2, do2))
-                atom_kernel("db_native", d)((N // 64, N // 64, NH), (160, 1, 1),
-                                            *maps, bias, LSE, Dd, db, int(N), int(A))
+                if native_hopper or os.environ.get("MINIWORLD_ATOM_DIT_H100_DB_TMA", "0") == "1":
+                    mb = _map(bias, [N, NH * N], N * 2, [64, 64])
+                    atom_kernel("db_tma", d)((N // 64, N // 64, NH), (160, 1, 1),
+                                             *maps, mb, LSE, Dd, db, int(N), int(A))
+                else:
+                    atom_kernel("db_native", d)((N // 64, N // 64, NH), (160, 1, 1),
+                                                *maps, bias, LSE, Dd, db, int(N), int(A))
             return db
         dq, dk, dv, dbt = core.natural_backward(q2, k2, v2, do2, bias, LSE, Dd,
                                              heads=NH, head_dim=DH, output_bf16=True)
