@@ -10,6 +10,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- `kernels._capture.static_weights()` / `MINIWORLD_STATIC_WEIGHTS=1`: declares that weights stay fixed between the replays of a CUDA graph
+  (inference), so the weight-pack caches serve a capture like an eager call and a replay no longer re-runs the packing kernels. The
+  capture scoping of the weight-pack caches (previous entry) repacks at every replay -- right when an optimizer step follows, but a token
+  DiT inference block replayed in a graph went from 84 us to 200 us (58 kernels instead of 12), the bias-only DiT, AttentionPairBias and
+  atom DiT inference likewise. Default unchanged (scoped); the benchmark harness sets it for `mode=inference`. Test:
+  `tests/integrations/test_b200_pack_cache_capture_gpu.py` (`-k static`).
 - fp32 master parameters (AMP `bf16-mixed`: fp32 parameters over bf16 activations) on every B200 training path, at the speed of bf16
   parameters: TriMul, Transition (D 64-512), AttentionPairBias, OuterProductMean, local and SWA atom DiT, token pair init (PWA,
   TriangleAttention and the token / bias-only DiT already were). The integrations cast the parameters for the kernels inside their

@@ -14,14 +14,41 @@ the capture shares it).
 One case no key can catch: an update that writes a tensor without bumping its ``_version``. torch's fused optimizers
 (``Adam(..., fused=True)`` and the like) do that; after their step call ``torch.autograd.graph.increment_version(params)``
 (no kernel) so eager calls repack.
+
+**Static weights.** A graph whose weights never change between replays (inference: a sampling run, a served model) gains nothing
+from repacking and pays for it: every replay then re-runs the packing kernels (tens of small copies and casts per block -- a token
+DiT inference block goes from 84 us to 200 us). ``static_weights()`` (or ``MINIWORLD_STATIC_WEIGHTS=1``) declares that contract: the
+scoping is off and a capture serves from, and fills, the same caches as an eager call, as the integrations did before the scoping.
+Under it an in-place weight update after the capture is *not* seen by replays -- do not set it around a training graph, nor around a
+sampling run inside one. The benchmark harness sets it for ``mode=inference``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import functools
+import os
 
 import torch
+
+_STATIC = [os.environ.get("MINIWORLD_STATIC_WEIGHTS", "0") == "1"]
+
+
+def set_static_weights(on: bool) -> bool:
+    """Declare (or withdraw) that weights stay fixed between graph replays; returns the previous setting."""
+    prev, _STATIC[0] = _STATIC[0], bool(on)
+    return prev
+
+
+@contextlib.contextmanager
+def static_weights(on: bool = True):
+    """Within the block, weight-pack caches ignore the capture scope (see the module docstring). Inference graphs only."""
+    prev = set_static_weights(on)
+    try:
+        yield
+    finally:
+        set_static_weights(prev)
 
 
 @functools.lru_cache(maxsize=1)
@@ -34,8 +61,9 @@ def _capture_info():
 
 
 def capture_id() -> int | None:
-    """None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read)."""
-    if not torch.cuda.is_current_stream_capturing():
+    """None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read). Always None under
+    ``static_weights``: captures then share the eager entries."""
+    if _STATIC[0] or not torch.cuda.is_current_stream_capturing():
         return None
     try:
         fn = _capture_info()

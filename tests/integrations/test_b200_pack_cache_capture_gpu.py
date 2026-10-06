@@ -172,3 +172,60 @@ def test_lookup_scopes_entries():
     assert len(built) == 2                              # the capture builds its own once, never the eager entry
     _capture.lookup(store, "k", build)
     assert len(built) == 2                              # eager again: the eager entry
+
+
+def _graph_of(m, args):
+    """Capture one inference call after eager warm-up; returns (graph, output)."""
+    for _ in range(2):
+        with torch.no_grad():
+            m(*args)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side), torch.no_grad():
+        m(*args)
+    torch.cuda.current_stream().wait_stream(side)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g), torch.no_grad():
+        out = m(*args)
+    return g, out
+
+
+def _kernels_per_replay(g):
+    from torch.profiler import ProfilerActivity, profile
+
+    g.replay()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        g.replay()
+        torch.cuda.synchronize()
+    return sum(1 for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA)
+
+
+@pytest.mark.parametrize("name", ["token DiT inference", "bias-only DiT inference", "APB inference", "atom (local) DiT inference"])
+def test_static_weights_replay_does_not_repack(name):
+    """``static_weights``: the capture serves from the eager caches, so a replay launches fewer kernels (no packing) and still
+    computes the eager result; the default (scoped) capture repacks at every replay."""
+    torch.manual_seed(11)
+    m, args = CASES[name]()
+    m.eval()
+    scoped_graph, _ = _graph_of(m, args)
+    scoped = _kernels_per_replay(scoped_graph)
+    with _capture.static_weights():
+        m2, args2 = CASES[name]()
+        m2.load_state_dict(m.state_dict())
+        m2.eval()
+        static_graph, out = _graph_of(m2, args2)
+        static = _kernels_per_replay(static_graph)
+        static_graph.replay()
+        torch.cuda.synchronize()
+        with torch.no_grad():
+            eager = m2(*args2)
+    assert static < scoped, f"{name}: static weights should drop the packing kernels ({static} vs {scoped} per replay)"
+    assert relative(out, eager) < 1e-3, f"{name}: static replay {relative(out, eager):.2e} off the eager result"
+
+
+def test_static_weights_switch_restores():
+    assert _capture.set_static_weights(False) is False
+    with _capture.static_weights():
+        assert _capture.capture_id() is None
+    assert _capture.set_static_weights(False) is False

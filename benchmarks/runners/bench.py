@@ -5008,6 +5008,12 @@ def main(cfg: DictConfig) -> None:
         bench_args.append(conf.name_suffix)
     run_name = "_".join(bench_args)
 
+    if conf.mode == "inference":
+        # inference weights never change between graph replays: no repacking inside the captured graph (kernels/_capture.py)
+        from miniworld_engine.kernels import _capture
+
+        _capture.set_static_weights(True)
+
     gpu_name = torch.cuda.get_device_name(0)
     results_dir = target_dir(conf.level, conf.target) / "artifacts" / gpu_name
     results_dir.mkdir(parents=True, exist_ok=True)
