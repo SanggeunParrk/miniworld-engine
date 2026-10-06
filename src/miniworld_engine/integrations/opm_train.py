@@ -124,7 +124,7 @@ def _ext(device=None):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM)."""
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
-    key = "sm100" if sm100 else "mod"
+    key = "sm100" if sm100 else ("mod_native" if native_aux_enabled() else "mod")
     if key in _EXT:
         return _EXT[key]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -143,7 +143,8 @@ def _ext(device=None):
             extra_cflags=["-O3"],
         )
     else:
-        build = root / "opm_epilogue"
+        suffix = "_native" if native_aux_enabled() else ""
+        build = root / ("opm_epilogue" + suffix)
         build.mkdir(parents=True, exist_ok=True)
         _EXT[key] = load(
             name="miniworld_opm_epilogue",

@@ -44,6 +44,127 @@ constexpr int KC = 64;             // K chunk = 2 c values
 constexpr int KCP = KC;
 constexpr int NCHUNK = CH * CH / KC;
 
+template <typename Kernel, typename... Args>
+void opm_native_launch(Kernel fn, dim3 grid, dim3 block, Args... args) {
+  cudaKernel_t kernel;
+  C10_CUDA_CHECK(cudaGetKernel(&kernel, fn));
+  void* argv[] = {static_cast<void*>(&args)...};
+  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel), grid, block, argv, 0,
+                                at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Native auxiliary path.  Live BF16/FP32 master parameters are read on every
+// replay; no cached casts, ATen arithmetic, or data-dependent host work.
+__device__ float opm_read(const void* p, int i, bool fp32) {
+  return fp32 ? static_cast<const float*>(p)[i]
+              : __bfloat162float(static_cast<const __nv_bfloat16*>(p)[i]);
+}
+__global__ void opm_pack_native(const void* g, const void* b, const void* wa,
+    const void* wb, const void* wo, const void* bo, int types, float* gf, float* bf,
+    __nv_bfloat16* a, __nv_bfloat16* c, __nv_bfloat16* o, float* ob,
+    __nv_bfloat16* ot, __nv_bfloat16* bw) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < 64) { gf[i] = opm_read(g,i,types&1); bf[i] = opm_read(b,i,types&2); }
+  if (i < 2048) {
+    a[i] = __float2bfloat16_rn(opm_read(wa,i,types&4));
+    c[i] = __float2bfloat16_rn(opm_read(wb,i,types&8));
+  }
+  if (i < 4096) {
+    int k = i / 64, ch = i % 64;
+    float w = opm_read(ch < 32 ? wa : wb, (ch%32)*64+k, types & (ch<32?4:8));
+    bw[i] = __float2bfloat16_rn(w * opm_read(g,k,types&1));
+  }
+  if (i < 128) ob[i] = __bfloat162float(__float2bfloat16_rn(opm_read(bo,i,types&32)));
+  if (i < 131072) {
+    __nv_bfloat16 v = __float2bfloat16_rn(opm_read(wo,i,types&16));
+    o[i] = v; ot[(i%1024)*128+i/1024] = v;
+  }
+}
+__device__ float opm_warp_sum(float x) {
+  for (int d=16;d;d>>=1) x += __shfl_xor_sync(0xffffffff,x,d);
+  return x;
+}
+__global__ void opm_prologue_native_kernel(const __nv_bfloat16* m, const bool* mask,
+    const float* gamma, const float* beta, const __nv_bfloat16* wa,
+    const __nv_bfloat16* wb, __nv_bfloat16* a, __nv_bfloat16* b,
+    __nv_bfloat16* mask16, float* stats, int S, int N, float eps) {
+  int lane=threadIdx.x%32;
+  int r=(blockIdx.x*blockDim.x+threadIdx.x)/32;
+  if (r>=S*N) return;
+  float x0=__bfloat162float(m[(long)r*64+lane]);
+  float x1=__bfloat162float(m[(long)r*64+lane+32]);
+  float mean=opm_warp_sum(x0+x1)*(1.f/64);
+  x0-=mean; x1-=mean;
+  float var=opm_warp_sum(x0*x0+x1*x1)*(1.f/64);
+  float rs=rsqrtf(var+eps);
+  float y0=__bfloat162float(__float2bfloat16_rn(__fadd_rn(__fmul_rn(x0*rs,gamma[lane]),beta[lane])));
+  float y1=__bfloat162float(__float2bfloat16_rn(__fadd_rn(__fmul_rn(x1*rs,gamma[lane+32]),beta[lane+32])));
+  float va=0, vb=0;
+  #pragma unroll
+  for(int k=0;k<64;++k) {
+    float y=__shfl_sync(0xffffffff,k<32?y0:y1,k%32);
+    va=fmaf(y,__bfloat162float(wa[lane*64+k]),va);
+    vb=fmaf(y,__bfloat162float(wb[lane*64+k]),vb);
+  }
+  bool keep=mask[r]; int s=r/N, n=r%N;
+  a[((long)n*32+lane)*S+s]=__float2bfloat16_rn(keep?va:0.f);
+  b[((long)n*32+lane)*S+s]=__float2bfloat16_rn(keep?vb:0.f);
+  if(lane==0) {
+    mask16[r]=__float2bfloat16_rn(keep?1.f:0.f);
+    if(stats) {stats[r*2]=mean;stats[r*2+1]=rs;}
+  }
+}
+__global__ void opm_mask_bits_native(const bool* mask, unsigned* bits, int S, int N) {
+  int t=blockIdx.x*blockDim.x+threadIdx.x;
+  int word=t/32, lane=t%32;
+  if(word>=N*(S/32)) return;
+  int n=word/(S/32), s=(word%(S/32))*32+lane;
+  unsigned v=__ballot_sync(0xffffffff,mask[(long)s*N+n]);
+  if(lane==0)bits[word]=v;
+}
+__global__ void opm_count_native(const unsigned* bits, float* norm, int S, int N) {
+  int p=blockIdx.x*blockDim.x+threadIdx.x;
+  if(p>=N*N)return;
+  int i=p/N,j=p%N,v=0;
+  for(int k=0;k<S/32;++k)v+=__popc(bits[i*(S/32)+k]&bits[j*(S/32)+k]);
+  norm[p]=float(max(v,1));
+}
+__global__ void opm_finish_native(const float* red,const float* gamma,const float* beta,
+    const __nv_bfloat16* wa,const __nv_bfloat16* wb,float* da,float* db,float* dg,float* de) {
+  int i=blockIdx.x*blockDim.x+threadIdx.x;
+  if(i<2048) {
+    int c=i/64,k=i%64;
+    da[i]=__fadd_rn(__fmul_rn(red[i],gamma[k]),red[4096+c]*beta[k]);
+    db[i]=__fadd_rn(__fmul_rn(red[2048+i],gamma[k]),red[4128+c]*beta[k]);
+  }
+  if(i<64) {
+    float g=0,b=0;
+    for(int c=0;c<64;++c) {
+      float w=__bfloat162float((c<32?wa:wb)[(c%32)*64+i]);
+      g=__fadd_rn(g,__fmul_rn(w,red[c*64+i]));
+      b=__fadd_rn(b,__fmul_rn(w,red[4096+c]));
+    }
+    // Raw projection weights also cover gamma==0.  Dividing a gamma-folded
+    // matrix by gamma loses that derivative and produced NaNs in the old path.
+    dg[i]=g;de[i]=b;
+  }
+}
+__global__ void opm_cast_native_kernel(const float* src,__nv_bfloat16* dst,long count) {
+  long i=(long)blockIdx.x*blockDim.x+threadIdx.x;
+  if(i<count)dst[i]=__float2bfloat16_rn(src[i]);
+}
+struct OpmGradCast { const float* src[6]; void* dst[6]; int sizes[6],fp32[6]; };
+__global__ void opm_grad_cast_native(OpmGradCast p) {
+  int i=blockIdx.x*blockDim.x+threadIdx.x;
+  #pragma unroll
+  for(int k=0;k<6;++k)if(i<p.sizes[k]) {
+    float v=p.src[k][i];
+    if(p.fp32[k])static_cast<float*>(p.dst[k])[i]=v;
+    else static_cast<__nv_bfloat16*>(p.dst[k])[i]=__float2bfloat16_rn(v);
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Hopper warpgroup mma.  Both operands are addressed in shared memory through descriptors, so there
 // is no ldmatrix and no LDS for the weight: one instruction per 16-deep k step covers a 64x128 tile
@@ -458,6 +579,55 @@ __device__ __forceinline__ void proxy_fence() {
 __device__ __forceinline__ void commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
 __device__ __forceinline__ void wait()   { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
 }  // namespace wg
+
+// One 64-MSA-row tile per token. LN/affine rounding, the two projections,
+// masking, and grouped output layout remain one fusion boundary. WGMMA reads
+// the normalized rows and stacked weights from shared memory; the output is
+// transposed there so each global store spans contiguous MSA rows.
+__global__ __launch_bounds__(128) void opm_prologue_wgmma_native(
+    const __nv_bfloat16* m,const bool* mask,const float* gamma,const float* beta,
+    const __nv_bfloat16* wa,const __nv_bfloat16* wb,__nv_bfloat16* a,
+    __nv_bfloat16* b,__nv_bfloat16* mask16,float* stats,int S,int N,float eps) {
+  __shared__ __align__(1024) __nv_bfloat16 sx[64*64],sw[64*64],so[64*64];
+  int tid=threadIdx.x,lane=tid%32,warp=tid/32,n=blockIdx.x,s0=blockIdx.y*64;
+  for(int i=tid;i<4096;i+=128) {
+    int c=i/64,k=i%64;
+    sw[wg::off_n(64,0,c,k/8)+k%8]=(c<32?wa:wb)[(c%32)*64+k];
+  }
+  for(int rr=0;rr<16;++rr) {
+    int r=warp*16+rr;long row=(long)(s0+r)*N+n;
+    float x0=__bfloat162float(m[row*64+lane]);
+    float x1=__bfloat162float(m[row*64+lane+32]);
+    float mean=opm_warp_sum(x0+x1)*(1.f/64);
+    x0-=mean;x1-=mean;
+    float rs=rsqrtf(opm_warp_sum(x0*x0+x1*x1)*(1.f/64)+eps);
+    sx[wg::off_n(64,0,r,lane/8)+lane%8]=__float2bfloat16_rn(__fadd_rn(__fmul_rn(x0*rs,gamma[lane]),beta[lane]));
+    sx[wg::off_n(64,0,r,(lane+32)/8)+lane%8]=__float2bfloat16_rn(__fadd_rn(__fmul_rn(x1*rs,gamma[lane+32]),beta[lane+32]));
+    if(lane==0) {
+      mask16[row]=__float2bfloat16_rn(mask[row]?1.f:0.f);
+      if(stats){stats[row*2]=mean;stats[row*2+1]=rs;}
+    }
+  }
+  wg::proxy_fence();__syncthreads();wg::fence();
+  float acc[32]={};
+  #pragma unroll
+  for(int ks=0;ks<4;++ks)
+    wg::mma_m64n64k16(wg::desc(sx+wg::off_n(64,0,0,ks*2)),
+                       wg::desc(sw+wg::off_n(64,0,0,ks*2)),acc,ks!=0);
+  wg::commit();wg::wait();
+  #pragma unroll
+  for(int t=0;t<8;++t) {
+    int c=t*8+(lane%4)*2,r=warp*16+lane/4;
+    *reinterpret_cast<__nv_bfloat162*>(so+r*64+c)=__floats2bfloat162_rn(acc[t*4],acc[t*4+1]);
+    *reinterpret_cast<__nv_bfloat162*>(so+(r+8)*64+c)=__floats2bfloat162_rn(acc[t*4+2],acc[t*4+3]);
+  }
+  __syncthreads();
+  for(int t=tid;t<4096;t+=128) {
+    int c=t/64,r=t%64;
+    (c<32?a:b)[((long)n*32+c%32)*S+s0+r]=
+        mask[(long)(s0+r)*N+n]?so[r*64+c]:__float2bfloat16_rn(0.f);
+  }
+}
 
 // ----------------------------------------------------------------------------------------------
 // TMA (tensor memory accelerator).  A `cp.async.bulk.tensor` store hands the hardware a descriptor
@@ -1383,7 +1553,9 @@ torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor o, int64_t ni, int64_t nj
 
 std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m,
                                             torch::Tensor stats, torch::Tensor mask, torch::Tensor gamma, torch::Tensor beta,
-                                            double eps, torch::Tensor bwp, int64_t N, int64_t S) {
+                                            double eps, torch::Tensor bwp, int64_t N, int64_t S,
+                                            bool native_finish = false,
+                                            std::vector<torch::Tensor> raw_weights = {}) {
   TORCH_CHECK(dA.is_contiguous() && dB.is_contiguous() && m.is_contiguous(), "inputs must be contiguous");
   TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == torch::kFloat32 && stats.numel() == S * N * 2,
               "stats: contiguous fp32 [S, N, 2] (mean, rstd) from the forward prologue");
@@ -1418,6 +1590,19 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
       pbase, pbase + W, (int)N, (int)S);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   auto red = reduce_partials(part);
+  if (native_finish) {
+    TORCH_CHECK(raw_weights.size()==2 && raw_weights[0].scalar_type()==torch::kBFloat16
+        && raw_weights[1].scalar_type()==torch::kBFloat16,"native finish needs raw BF16 projection weights");
+    auto da=torch::empty({32,64},fopts), db=torch::empty({32,64},fopts);
+    auto dg=torch::empty({64},fopts), de=torch::empty({64},fopts);
+    opm_native_launch(opm_finish_native,dim3(8),dim3(256),
+        red.data_ptr<float>(),gamma.data_ptr<float>(),beta.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(raw_weights[0].data_ptr()),
+        reinterpret_cast<const __nv_bfloat16*>(raw_weights[1].data_ptr()),da.data_ptr<float>(),
+        db.data_ptr<float>(),dg.data_ptr<float>(),de.data_ptr<float>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {dm,da,db,dg,de};
+  }
   // The kernel ran its GEMM against xh and saw g = dout * gamma, so gamma and beta are applied once
   // here instead of once per element inside it: dWa = gamma .* (da^T xh) + beta (x) sum_r da, and the
   // two LayerNorm gradients come back gamma-scaled.
@@ -1539,10 +1724,90 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   return out;
 }
 
+std::vector<torch::Tensor> opm_native_pack(std::vector<torch::Tensor> p) {
+  TORCH_CHECK(p.size()==6,"six parameters required");
+  const int sizes[6]={64,64,2048,2048,131072,128};
+  int types=0;
+  for(int k=0;k<6;++k) {
+    TORCH_CHECK(p[k].is_cuda() && p[k].device()==p[0].device() && p[k].is_contiguous()
+        && p[k].numel()==sizes[k],"native OPM canonical parameter contract");
+    TORCH_CHECK(p[k].scalar_type()==torch::kFloat32 || p[k].scalar_type()==torch::kBFloat16,
+        "native OPM parameters must be BF16 or FP32");
+    if(p[k].scalar_type()==torch::kFloat32)types|=1<<k;
+  }
+  auto fo=p[0].options().dtype(torch::kFloat32), bo=p[0].options().dtype(torch::kBFloat16);
+  auto g=torch::empty({64},fo),b=torch::empty({64},fo);
+  auto a=torch::empty({32,64},bo),c=torch::empty({32,64},bo),o=torch::empty({128,1024},bo);
+  auto ob=torch::empty({128},fo),ot=torch::empty({1024,128},bo),bw=torch::empty({64,64},bo);
+  opm_native_launch(opm_pack_native,dim3(512),dim3(256),
+      p[0].data_ptr(),p[1].data_ptr(),p[2].data_ptr(),p[3].data_ptr(),p[4].data_ptr(),p[5].data_ptr(),types,
+      g.data_ptr<float>(),b.data_ptr<float>(),reinterpret_cast<__nv_bfloat16*>(a.data_ptr()),
+      reinterpret_cast<__nv_bfloat16*>(c.data_ptr()),reinterpret_cast<__nv_bfloat16*>(o.data_ptr()),
+      ob.data_ptr<float>(),reinterpret_cast<__nv_bfloat16*>(ot.data_ptr()),reinterpret_cast<__nv_bfloat16*>(bw.data_ptr()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {g,b,a,c,o,ob,ot,bw};
+}
+std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mask,
+    std::vector<torch::Tensor> p,double eps,bool save_stats) {
+  TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type()==torch::kBFloat16 && m.dim()==3 && m.size(2)==64,
+      "native OPM input must be contiguous BF16 [S,N,64]");
+  int S=m.size(0),N=m.size(1);
+  TORCH_CHECK(S%256==0 && N%64==0 && mask.is_contiguous() && mask.scalar_type()==torch::kBool
+      && mask.device()==m.device() && mask.numel()==S*N && p.size()==8,"native OPM mask/shape contract");
+  auto fo=m.options().dtype(torch::kFloat32);
+  auto a=torch::empty({N*32,S},m.options()),b=torch::empty_like(a);
+  auto mk=torch::empty({S,N},m.options()),norm=torch::empty({N,N},fo);
+  auto stats=torch::empty(save_stats?std::vector<int64_t>{S,N,2}:std::vector<int64_t>{0},fo);
+  auto bits=torch::empty({N,S/32},m.options().dtype(torch::kInt32));
+  auto stream=at::cuda::getCurrentCUDAStream();
+  opm_native_launch(opm_prologue_wgmma_native,dim3(N,S/64),dim3(128),
+      reinterpret_cast<const __nv_bfloat16*>(m.data_ptr()),mask.data_ptr<bool>(),
+      p[0].data_ptr<float>(),p[1].data_ptr<float>(),reinterpret_cast<const __nv_bfloat16*>(p[2].data_ptr()),
+      reinterpret_cast<const __nv_bfloat16*>(p[3].data_ptr()),reinterpret_cast<__nv_bfloat16*>(a.data_ptr()),
+      reinterpret_cast<__nv_bfloat16*>(b.data_ptr()),reinterpret_cast<__nv_bfloat16*>(mk.data_ptr()),
+      save_stats?stats.data_ptr<float>():nullptr,S,N,float(eps));
+  opm_native_launch(opm_mask_bits_native,dim3((S*N+255)/256),dim3(256),mask.data_ptr<bool>(),reinterpret_cast<unsigned*>(bits.data_ptr()),S,N);
+  opm_native_launch(opm_count_native,dim3((N*N+255)/256),dim3(256),reinterpret_cast<const unsigned*>(bits.data_ptr()),norm.data_ptr<float>(),S,N);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {a,b,stats,mk,norm};
+}
+torch::Tensor opm_native_cast(torch::Tensor value,torch::Tensor like) {
+  TORCH_CHECK(value.is_cuda() && value.is_contiguous() && value.scalar_type()==torch::kFloat32,
+      "native gradient cast requires contiguous FP32");
+  TORCH_CHECK(like.device()==value.device() && like.numel()==value.numel(),"native gradient cast shape/device");
+  if(like.scalar_type()==torch::kFloat32)return value;
+  TORCH_CHECK(like.scalar_type()==torch::kBFloat16,"native gradient cast destination must be BF16/FP32");
+  auto out=torch::empty(value.sizes(),like.options());
+  opm_native_launch(opm_cast_native_kernel,dim3((value.numel()+255)/256),dim3(256),
+      value.data_ptr<float>(),reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),value.numel());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+std::vector<torch::Tensor> opm_native_cast_grads(std::vector<torch::Tensor> values,std::vector<torch::Tensor> likes) {
+  TORCH_CHECK(values.size()==6 && likes.size()==6,"six gradients and parameters required");
+  OpmGradCast p{};std::vector<torch::Tensor> out;int count=0;
+  for(int k=0;k<6;++k) {
+    TORCH_CHECK(values[k].is_contiguous() && values[k].scalar_type()==torch::kFloat32
+        && values[k].device()==likes[k].device() && values[k].numel()==likes[k].numel(),"native gradient cast contract");
+    TORCH_CHECK(likes[k].scalar_type()==torch::kFloat32 || likes[k].scalar_type()==torch::kBFloat16,"native gradient type");
+    out.push_back(torch::empty(likes[k].sizes(),likes[k].options()));
+    p.src[k]=values[k].data_ptr<float>();p.dst[k]=out.back().data_ptr();p.sizes[k]=values[k].numel();
+    p.fp32[k]=likes[k].scalar_type()==torch::kFloat32;count=std::max(count,p.sizes[k]);
+  }
+  opm_native_launch(opm_grad_cast_native,dim3((count+255)/256),dim3(256),p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
         py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none());
   m.def("opm_dgrad", &opm_dgrad, "fused OPM dO: (dz @ Wo) / n straight into the grouped layout");
   m.def("opm_dwo", &opm_dwo, "dWo straight off the grouped outer product, no permute");
-  m.def("opm_prologue_bwd", &opm_prologue_bwd, "fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");
+  m.def("opm_prologue_bwd", &opm_prologue_bwd, "fused OPM prologue backward: mask, both projections and the LayerNorm in one pass",
+        py::arg("dA"),py::arg("dB"),py::arg("m"),py::arg("stats"),py::arg("mask"),py::arg("gamma"),py::arg("beta"),
+        py::arg("eps"),py::arg("bwp"),py::arg("N"),py::arg("S"),py::arg("native_finish")=false,
+        py::arg("raw_weights")=std::vector<torch::Tensor>{});
+  m.def("opm_native_pack",&opm_native_pack);
+  m.def("opm_native_prologue",&opm_native_prologue);
+  m.def("opm_native_cast",&opm_native_cast);
+  m.def("opm_native_cast_grads",&opm_native_cast_grads);
 }
