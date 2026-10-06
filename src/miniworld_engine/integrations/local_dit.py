@@ -285,6 +285,7 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     a, _, n0, _ = single.shape
     n = _padded_length(n0)
     m = a * n
+    owned = _owned_blas_enabled(single, save)
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
         packed_infer = (not save and cross and a == 5 and n0 in (2048, 4096)
@@ -297,9 +298,9 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         if cross:       # keys and values from a second AdaLN of x1 (pre_fwd's own k / v are not used)
             wm, bs, gkv, wk, wv = _kv_pack(weights, wp)
             cn = local.cond_ln(c2, gkv)
-            mkv = cn @ wm.t()
+            mkv = _mm(cn, wm.t(), owned)
             xkv = local.kv_fwd(x1, mkv, bs)
-            k, v = xkv @ wk.t(), xkv @ wv.t()
+            k, v = _mm(xkv, wk.t(), owned), _mm(xkv, wv.t(), owned)
         bias = local.pair_bias_fwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS])
         o, lse = local.attn_fwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n))
         out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save,
@@ -311,9 +312,27 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     return [*saved, cn, mkv, xkv] if cross else saved
 
 
-def _wgrad(dout, x):
+def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
+    """Opt-in graph workspace ownership; defaults require paired qualification."""
+    return (training and single.shape[2] in (4096, 8192)
+            and torch.cuda.get_device_capability(single.device) == (9, 0)
+            and os.environ.get("MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS", "0") == "1")
+
+
+def _owned_mm(a: torch.Tensor, b: torch.Tensor, fp32_output: bool = False) -> torch.Tensor:
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+
+    return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output)
+
+
+def _mm(a: torch.Tensor, b: torch.Tensor, owned: bool) -> torch.Tensor:
+    return _owned_mm(a, b) if owned else a @ b
+
+
+def _wgrad(dout, x, owned: bool = False):
     """dout^T x, fp32: the weight gradients stay unrounded for fp32 parameters (an fp32 master); bf16 ones round once, as before."""
-    return torch.mm(dout.t(), x, out_dtype=torch.float32)
+    return (_owned_mm(dout.t(), x, True) if owned else
+            torch.mm(dout.t(), x, out_dtype=torch.float32))
 
 
 def _bwd_fake(dy, single, cond, pair, mask, weights, saved):
@@ -335,6 +354,7 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
     n = _padded_length(n0)
     m = a * n
     dev = single.device
+    owned = _owned_blas_enabled(single, True)
     with torch.cuda.device(dev):
         hopper = rows._hopper(dev.index)
         if hopper and (dy.dtype != BF or dy.device != dev or dy.shape != single.shape or not dy.is_contiguous()):
@@ -361,9 +381,9 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
             wm, bs, gkv, wk, wv = _kv_pack(weights, wp if hopper else None)
             dk, dv = dp[:, DS_:2 * DS_], dp[:, 2 * DS_:3 * DS_]
             dxkv = torch.addmm(dk @ wk, dv, wv)
-            dwk, dwv = _wgrad(dk, xkv), _wgrad(dv, xkv)
+            dwk, dwv = _wgrad(dk, xkv, owned), _wgrad(dv, xkv, owned)
             dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv)
-            dwm = _wgrad(dmkv, cn)
+            dwm = _wgrad(dmkv, cn, owned)
             dbs = local.kv_bias_hopper(dmkv) if hopper else dmkv[:, :DS_].float().sum(0)
             dg_kv = allocate(DS_, device=dev)
             dc_kv = local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv)
@@ -382,8 +402,8 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
                 dc = dc + dc_kv
         if hopper:
             rows.finish_columns_hopper(dmod, dp, dgparts, dbias_cols, dbq, dgamma_cond)
-        dws, dwu, dwo, dwp = _wgrad(dt, hh), _wgrad(dab, x2), _wgrad(du, gated), _wgrad(dp, x1)
-        dw1, dw2, dw3 = _wgrad(dmod[:, 0:256], cn1), _wgrad(dmod[:, 256:512], cn2), _wgrad(dmod[:, 512:768], c2)
+        dws, dwu, dwo, dwp = _wgrad(dt, hh, owned), _wgrad(dab, x2, owned), _wgrad(du, gated, owned), _wgrad(dp, x1, owned)
+        dw1, dw2, dw3 = _wgrad(dmod[:, 0:256], cn1, owned), _wgrad(dmod[:, 256:512], cn2, owned), _wgrad(dmod[:, 512:768], c2, owned)
     grads = {
         "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128], "attention.ada_ln_in.to_scale.weight": dw1[:128],
         "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128], "attention.ada_ln_in.to_bias.weight": dw1[128:],
