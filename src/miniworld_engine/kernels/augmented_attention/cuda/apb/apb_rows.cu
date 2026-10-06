@@ -1487,6 +1487,101 @@ void forward_entry(typename K::Params p) {
 template<typename K>
 __global__ __launch_bounds__(K::kNumThreads,K::kMinBlocksPerSm)
 void backward_entry(typename K::Params p) { if(p.advance_to_block())K::attention_kernel(p); }
+// Exact FP32 dBias producer. Reuse the installed template's SIMT MMA and
+// epilogue types, including their accumulation order, but never form discarded
+// dQ/dK/dV or their cross-CTA workspaces. Each CTA owns one query/key tile.
+template<int MaxK>
+__global__ __launch_bounds__(B<MaxK>::kNumThreads,B<MaxK>::kMinBlocksPerSm)
+void backward_bias_only_entry(typename B<MaxK>::Params p) {
+ using Kernel=B<MaxK>;
+ using QK=typename Kernel::MatmulQK;
+ using DOV=typename Kernel::MatmulDOIVJ;
+ extern __shared__ char storage[];
+ auto& sm=*reinterpret_cast<typename Kernel::SharedStorage*>(storage);
+ const int t=threadIdx.x,warp=t/32,lane=t%32;
+ const int qi=blockIdx.x*64,kj=blockIdx.y*64,h=blockIdx.z;
+ p.query_ptr+=h*p.q_strideH;p.key_ptr+=h*p.k_strideH;p.value_ptr+=h*p.v_strideH;
+ p.grad_output_ptr+=h*p.gO_strideH;p.bias_ptr+=h*p.bias_strideH;
+ p.logsumexp_ptr+=h*p.lse_strideH;p.delta_ptr+=h*p.delta_strideH;
+ p.grad_bias_ptr+=h*p.gB_strideH;
+ if(t<64)sm.di()[t]=p.delta_ptr[qi+t];
+ __syncthreads();
+ const cutlass::MatrixCoord origin{0,0};
+ {
+  using Mma=typename QK::Mma;
+  typename Mma::IteratorA a({int32_t(p.k_strideM)},const_cast<float*>(p.key_ptr+kj*p.k_strideM),{64,p.head_dim},t,origin);
+  typename Mma::IteratorB b({int32_t(p.q_strideM)},const_cast<float*>(p.query_ptr+qi*p.q_strideM),{p.head_dim,64},t,origin);
+  Mma mma(sm.mm_qk_k(),sm.mm_qk_q(),t,warp,lane);
+  typename Mma::FragmentC acc;acc.clear();
+  mma.set_prologue_done(false);mma.set_zero_outside_bounds(true);
+  mma((p.head_dim+Mma::Shape::kK-1)/Mma::Shape::kK,acc,a,b,acc);
+  // The reference backward rounds QK*scale before adding bias.  The smaller
+  // dBias-only producer otherwise lets NVCC contract these into an FMA;
+  // that changes the tiny, cancellation-dominated pair-LN beta gradient.
+  CUTLASS_PRAGMA_UNROLL
+  for(int i=0;i<Mma::FragmentC::kElements;++i)acc[i]=__fmul_rn(p.scale,acc[i]);
+  const int w=warp%(Mma::Base::WarpCount::kM*Mma::Base::WarpCount::kN);
+  const cutlass::MatrixCoord tile{w%Mma::Base::WarpCount::kM,w/Mma::Base::WarpCount::kM};
+  __syncthreads();
+  typename QK::BiasLoader::GmemTileIterator gi({cutlass::layout::RowMajor(p.bias_strideM)},const_cast<float*>(p.bias_ptr+qi*p.bias_strideM+kj),{64,64},t);
+  cutlass::TensorRef<float,cutlass::layout::RowMajor> br(sm.bias().data(),cutlass::layout::RowMajor(QK::ThreadblockShape::kM));
+  typename QK::BiasLoader::SmemTileIterator si(br,t);
+  QK::BiasLoader::load(gi,si);
+  __syncthreads();
+  auto offset=QK::AccumLambdaIterator::get_lane_offset(lane,warp,tile);
+  QK::AccumLambdaIterator::iterateRows(offset,[&](int){},[&](int m,int n,int i){acc[i]+=br.at({n,m});},[&](int){});
+  __syncthreads();
+  QK::B2bGemm::accumApplyLSEToSmem(sm.attn_shared_storage(),acc,p.logsumexp_ptr+qi,64,t,warp,lane,tile);
+ }
+ __syncthreads();
+ {
+  using Mma=typename DOV::Mma;
+  typename Mma::IteratorA a({int32_t(p.gO_strideM)},const_cast<float*>(p.grad_output_ptr+qi*p.gO_strideM),{64,p.head_dim_value},t,origin);
+  typename Mma::IteratorB b({int32_t(p.v_strideM)},const_cast<float*>(p.value_ptr+kj*p.v_strideM),{p.head_dim_value,64},t,origin);
+  Mma mma(sm.mm_doivj(),t,warp,lane);
+  mma.set_prologue_done(false);mma.set_zero_outside_bounds(true);
+  typename Mma::FragmentC acc;acc.clear();
+  mma((p.head_dim_value+Mma::Shape::kK-1)/Mma::Shape::kK,acc,a,b,acc);
+  __syncthreads();
+  const int w=warp%(Mma::Base::WarpCount::kM*Mma::Base::WarpCount::kN);
+  const cutlass::MatrixCoord tile{w%Mma::Base::WarpCount::kM,w/Mma::Base::WarpCount::kM};
+  using It=typename DOV::AccumLambdaIterator;
+  auto offset=It::get_lane_offset(lane,warp,tile);
+  auto attn=sm.attn_shared_storage().accum_ref();float delta;
+  It::iterateRows(offset,[&](int m){delta=sm.di()[m];},[&](int m,int n,int i){acc[i]=(acc[i]-delta)*attn.at({n,m});},[&](int){});
+  __syncthreads();
+  typename DOV::BiasGradEpilogue::OutputTileIterator out(typename DOV::BiasGradEpilogue::OutputTileIterator::Params{p.gB_strideM},p.grad_bias_ptr+qi*p.gB_strideM+kj,{64,64},t);
+  typename DOV::BiasGradEpilogue::OutputOp op({1,1});
+  typename DOV::BiasGradEpilogue ep(sm.gradB_epilogue(),t,warp,lane);
+  ep(op,out,acc,out);
+ }
+}
+template<int MaxK>
+torch::Tensor bwd_bias_only_t(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor b,torch::Tensor lse,torch::Tensor go,torch::Tensor delta) {
+ using Kernel=B<MaxK>;typename Kernel::Params p;
+ int L=q.size(0),H=q.size(1),D=q.size(2),W=H*D;
+ auto gb=torch::empty_like(b);
+ p.query_ptr=q.data_ptr<float>();p.key_ptr=k.data_ptr<float>();p.value_ptr=v.data_ptr<float>();p.bias_ptr=b.data_ptr<float>();
+ p.logsumexp_ptr=lse.data_ptr<float>();p.grad_output_ptr=go.data_ptr<float>();p.delta_ptr=delta.data_ptr<float>();p.grad_bias_ptr=gb.data_ptr<float>();
+ p.head_dim=D;p.head_dim_value=D;p.num_queries=L;p.num_keys=L;p.num_heads=H;p.num_batches=1;p.scale=static_cast<float>(1.0/std::sqrt(double(D)));
+ p.q_strideM=p.k_strideM=p.v_strideM=p.gO_strideM=W;
+ p.q_strideH=p.k_strideH=p.v_strideH=p.gO_strideH=D;
+ p.bias_strideM=p.gB_strideM=L;p.bias_strideH=p.gB_strideH=L*L;p.lse_strideH=p.delta_strideH=L;
+ constexpr int smem=sizeof(typename Kernel::SharedStorage);
+ auto fn=backward_bias_only_entry<MaxK>;
+ C10_CUDA_CHECK(cudaFuncSetAttribute(fn,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
+ void* args[]={&p};C10_CUDA_CHECK(cudaLaunchKernel((const void*)fn,dim3(L/64,L/64,H),dim3(Kernel::kNumThreads),args,smem,at::cuda::getCurrentCUDAStream()));
+ return gb;
+}
+torch::Tensor bwd_bias_only(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor b,torch::Tensor lse,torch::Tensor go,torch::Tensor delta) {
+ c10::cuda::CUDAGuard guard(q.device());
+ TORCH_CHECK(q.dim()==3&&q.size(0)%64==0,"APB exact dBias-only geometry");
+ int L=q.size(0),H=q.size(1),D=q.size(2);
+ TORCH_CHECK((D==16||D==24||D==32||D==48)&&k.sizes()==q.sizes()&&v.sizes()==q.sizes()&&go.sizes()==q.sizes()
+   &&b.sizes()==torch::IntArrayRef({H,L,L})&&lse.sizes()==torch::IntArrayRef({H,L})&&delta.sizes()==lse.sizes(),"APB exact dBias-only shapes");
+ for(const auto& t:{q,k,v,b,lse,go,delta})TORCH_CHECK(t.is_cuda()&&t.device()==q.device()&&t.is_contiguous()&&t.scalar_type()==at::kFloat,"APB exact dBias-only FP32 contiguous");
+ return D<=32?bwd_bias_only_t<32>(q,k,v,b,lse,go,delta):bwd_bias_only_t<64>(q,k,v,b,lse,go,delta);
+}
 std::vector<torch::Tensor> fwd(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor b) {
  c10::cuda::CUDAGuard guard(q.device());
  int L=q.size(0),H=q.size(1),D=q.size(2),W=H*D;
@@ -1590,6 +1685,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef APB_H100_FP32_SHADOW
   m.def("exact_attention_fwd", &apb_shadow_cutlass::fwd);
   m.def("exact_attention_db", &apb_shadow_cutlass::bwd);
+  m.def("exact_attention_db_only", &apb_shadow_cutlass::bwd_bias_only);
   m.def("exact_delta", &apb_shadow_cutlass::delta);
   m.def("exact_mask_bias", &apb_shadow_cutlass::mask_bias);
 #endif
