@@ -155,16 +155,6 @@ def test_the_ops_take_every_parameter_of_the_block():
     assert set(atom_dit.WEIGHTS) == {name for name, _ in eng.named_parameters()}
 
 
-def _kernel_names(fn):
-    """Names of the CUDA kernels one call of ``fn`` launches."""
-    from torch.profiler import ProfilerActivity, profile
-
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        fn()
-        torch.cuda.synchronize()
-    return {e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA}
-
-
 @pytest.mark.parametrize(("A", "N", "masked"), [(3, 384, True), (2, 300, False)])
 def test_compiled_training_runs_the_sm100_kernels_and_matches_the_module_path(A, N, masked, monkeypatch):
     """The block is two opaque ops, so ``torch.compile(fullgraph=True)`` keeps it in the graph and serves it: the kernels run
@@ -182,7 +172,10 @@ def test_compiled_training_runs_the_sm100_kernels_and_matches_the_module_path(A,
         (out.double() * w).sum().backward()
         return out, leaves
 
-    names = _kernel_names(step)
+    from tests.cuda_graph_nodes import launched_kernels
+
+    step()                                                             # compile outside the capture
+    names = launched_kernels(step)                                     # forward + backward; not the profiler (drops these launches)
     assert any("atom_pre_fwd_sm100" in n for n in names), sorted(names)[:12]
     assert any("atom_post_bwd_sm100" in n for n in names), sorted(names)[:12]
     eng.zero_grad(set_to_none=True)
@@ -205,7 +198,10 @@ def test_compiled_inference_runs_the_sm100_kernels():
     compiled = torch.compile(eng, fullgraph=True, dynamic=False)
     with torch.no_grad():
         eager = eng(s, c, z, None)
-        names = _kernel_names(lambda: compiled(s, c, z, None))
+        from tests.cuda_graph_nodes import launched_kernels
+
+        compiled(s, c, z, None)                                        # compile outside the capture
+        names = launched_kernels(lambda: compiled(s, c, z, None))      # not the profiler: it drops these driver-API launches
         out = compiled(s, c, z, None)
     assert any("atom_pre_fwd_sm100" in n for n in names), sorted(names)[:12]
     torch.testing.assert_close(out, eager, atol=0, rtol=0)

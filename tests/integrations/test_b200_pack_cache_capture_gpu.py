@@ -184,21 +184,17 @@ def _graph_of(m, args):
     with torch.cuda.stream(side), torch.no_grad():
         m(*args)
     torch.cuda.current_stream().wait_stream(side)
-    g = torch.cuda.CUDAGraph()
+    g = torch.cuda.CUDAGraph(keep_graph=True)
     with torch.cuda.graph(g), torch.no_grad():
         out = m(*args)
     return g, out
 
 
 def _kernels_per_replay(g):
-    from torch.profiler import ProfilerActivity, profile
+    """The kernel launches of one replay: the graph's kernel nodes (``tests.cuda_graph_nodes``, not the profiler)."""
+    from tests.cuda_graph_nodes import graph_kernels
 
-    g.replay()
-    torch.cuda.synchronize()
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        g.replay()
-        torch.cuda.synchronize()
-    return sum(1 for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA)
+    return len(graph_kernels(g))
 
 
 @pytest.mark.parametrize("name", ["token DiT inference", "bias-only DiT inference", "APB inference", "atom (local) DiT inference"])
