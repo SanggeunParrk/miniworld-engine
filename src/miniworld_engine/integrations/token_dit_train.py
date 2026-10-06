@@ -717,7 +717,8 @@ class _Block(torch.autograd.Function):
         single, cond, pair = vals[:3]
         params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
         dx, dc, dpair, *pg = _bwd(single, cond, pair, mask, params, saved, dout.contiguous(), qk, eq, ek, fp32, heads)
-        if _native90(single.device):
+        if (_native90(single.device)
+                and os.environ.get("MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE", "1") != "0"):
             _activate_native_caller(force=True)
         return (dx, dc, dpair, None, None, None, None, None, None, *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)))
 
