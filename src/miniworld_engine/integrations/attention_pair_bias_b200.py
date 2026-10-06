@@ -341,7 +341,7 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
             out32, lse32 = E.exact_attention_fwd(qh, kh, vh, bm)
             delta32 = E.exact_delta(do_rows, out32)
             ds = (E.exact_attention_db_only(qh, kh, vh, bm, lse32, do_rows, delta32)
-                  if os.environ.get("MINIWORLD_APB_H100_SHADOW_DB_ONLY", "0") == "1"
+                  if os.environ.get("MINIWORLD_APB_H100_SHADOW_DB_ONLY", "1" if qualified else "0") == "1"
                   else E.exact_attention_db(qh, kh, vh, bm, out32, lse32, do_rows, delta32))
             db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
                   else E.exact_db_transpose(ds, mask))
