@@ -143,8 +143,9 @@ def _epilogue_half_enabled(s: int, n: int, *, training: bool) -> bool:
 
 
 def _owned_blas_for(s: int, n: int, *, training: bool) -> bool:
-    """Graph-owned cuBLAS only for qualified training cells, or an explicit override."""
-    default = training and (s, n) == (1024, 768)
+    """Graph-owned cuBLAS for qualified exact shapes, or an explicit override."""
+    default = ((training and (s, n) == (1024, 768))
+               or (not training and (s, n) == (4096, 128)))
     return os.environ.get("MINIWORLD_OPM_H100_OWNED_BLAS", "1" if default else "0") == "1"
 
 
