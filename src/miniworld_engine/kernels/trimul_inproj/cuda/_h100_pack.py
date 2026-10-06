@@ -87,6 +87,74 @@ def cast_weights(weights):
     return out
 
 
+def dense_native(value, dtype=None):
+    """Small live matrix layout/cast glue; preserve exact bits when dtype agrees."""
+    dtype = value.dtype if dtype is None else dtype
+    if value.is_contiguous() and value.dtype == dtype:
+        return value
+    if value.ndim != 2 or value.dtype not in (torch.bfloat16, torch.float32) or dtype not in (torch.bfloat16, torch.float32):
+        raise ValueError("native dense copy requires a BF16/FP32 matrix")
+    out = torch.empty(value.shape, device=value.device, dtype=dtype)
+    _launch("mw_aux_dense_copy", ((value.numel()+255)//256,1,1),
+            [value,out,*value.shape,*value.stride(),int(value.dtype==torch.float32),int(dtype==torch.float32)])
+    return out
+
+
+def zeros_native(shape, *, device, dtype=torch.float32):
+    out = torch.empty(shape,device=device,dtype=dtype)
+    size = out.numel()*out.element_size()
+    _launch("mw_aux_zero_bytes", (min(512,(size+255)//256),1,1), [out,size])
+    return out
+
+
+def native_training_grads(grads, leaves):
+    result = list(grads)
+    indices = [i for i in range(1,7) if result[i].dtype!=leaves[i].dtype or result[i].stride()!=leaves[i].stride()]
+    if indices:
+        copies = _training_gradient_copies([result[i] for i in indices],
+                                           [leaves[i] for i in indices])
+        for i,g in zip(indices,copies,strict=True):
+            result[i]=g
+    return result
+
+
+def _training_cast_indices(weights):
+    return [i for i,w in enumerate(weights)
+            if w.dtype!=torch.bfloat16 or (i>=4 and not w.is_contiguous())]
+
+
+def _training_cast_fake(weights):
+    return [torch.empty(weights[i].shape,device=weights[i].device,dtype=torch.bfloat16)
+            for i in _training_cast_indices(weights)]
+
+
+@opaque(fake=_training_cast_fake,name="trimul_h100_preserved_weight_copies")
+def _training_cast_copies(weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    with T.native_context(weights[0].device):
+        out = cast_weights(weights)
+        return [out[i] for i in _training_cast_indices(weights)]
+
+
+def cast_training_weights(weights):
+    # A custom op returns only fresh storage; BF16 aliases stay outside its outputs.
+    out=list(weights)
+    indices=_training_cast_indices(weights)
+    if indices:
+        for i,value in zip(indices,_training_cast_copies(weights),strict=True):
+            out[i]=value
+    return out
+
+
+def _owned_training_mask_fake(pair,mask):
+    return pair.new_empty((pair.shape[1],pair.shape[1]),dtype=torch.bfloat16)
+
+
+@opaque(fake=_owned_training_mask_fake,name="trimul_h100_preserved_owned_mask")
+def owned_training_mask(pair: torch.Tensor,mask: torch.Tensor | None) -> torch.Tensor:
+    with T.native_context(pair.device):
+        return owned_bf16_mask(mask,pair.shape[1],pair.device)
+
+
 def normalize_into(dst, x, g, b, stats=None):
     if not x.is_contiguous() or x.dtype != torch.bfloat16 or g.dtype != torch.float32 or b.dtype != torch.float32:
         raise ValueError("CUDA input LN requires contiguous BF16 input and FP32 affine")
@@ -159,6 +227,13 @@ def preserve_parameter_layout(grads, weights):
     for i,g in zip(indices,copies,strict=True):
         result[i] = g
     return result
+
+
+@opaque(fake=_gradient_layout_fake,name="trimul_h100_preserved_gradient_copies")
+def _training_gradient_copies(grads: list[torch.Tensor],weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    with T.native_context(grads[0].device):
+        dense=[dense_native(g,w.dtype) for g,w in zip(grads,weights,strict=True)]
+        return preserve_parameter_layout(dense,weights)
 
 
 def stack_backward_weights(weights):

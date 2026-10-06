@@ -27,6 +27,19 @@ struct AuxCast {
   const void* src[6]; bf* dst[6];
   int count[6], cols[6], s0[6], s1[6], fp32[6];
 };
+extern "C" __global__ void mw_aux_dense_copy(const void* src,void* dst,
+    int rows,int cols,int s0,int s1,int src32,int dst32) {
+  int i=blockIdx.x*256+threadIdx.x;if(i>=rows*cols)return;
+  int j=(i/cols)*s0+(i%cols)*s1;
+  if(src32==dst32) {
+    if(src32)static_cast<unsigned int*>(dst)[i]=static_cast<const unsigned int*>(src)[j];
+    else static_cast<unsigned short*>(dst)[i]=static_cast<const unsigned short*>(src)[j];
+  } else if(dst32)static_cast<float*>(dst)[i]=__bfloat162float(static_cast<const bf*>(src)[j]);
+  else static_cast<bf*>(dst)[i]=__float2bfloat16_rn(static_cast<const float*>(src)[j]);
+}
+extern "C" __global__ void mw_aux_zero_bytes(unsigned char* dst,int n) {
+  for(int i=blockIdx.x*256+threadIdx.x;i<n;i+=gridDim.x*256)dst[i]=0;
+}
 extern "C" __global__ void mw_aux_cast(AuxCast p) {
   int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
   if (i<p.count[leaf]) {

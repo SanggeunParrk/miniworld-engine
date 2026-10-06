@@ -24,6 +24,12 @@ def _launch_module():
     return _h100_launch
 
 
+def preserve_d128_training():
+    """Opt-in native glue around the existing, selected D128 B1/B7 kernels."""
+    return (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1")
+
+
 @contextmanager
 def native_context(device):
     """One verified framework CUDA context for all maps within a native call."""

@@ -70,7 +70,7 @@ class Plan:
             self.front = Front(
                 x[0],
                 self.w1,
-                self.mask.float(),
+                self._front_mask(),
                 gi,
                 bi,
                 tuple(self.config["k1"]),
@@ -95,6 +95,12 @@ class Plan:
             self.xn = saved[2]
         self.back = None
         self.front_back = None
+
+    def _front_mask(self):
+        if T.preserve_d128_training():
+            from ._h100_pack import dense_native
+            return dense_native(self.mask,torch.float32)
+        return self.mask.float()
 
     def forward(self):
         T.pack_into(self.w1, *self.weights)
@@ -132,6 +138,7 @@ class Plan:
         else:
             torch.bmm(right, dt.transpose(-1, -2), out=dl)
             torch.bmm(left, dt, out=dr)
+        from ._h100_pack import dense_native
         d = dict(
             n=self.n,
             master_weights=self.master,
@@ -139,7 +146,8 @@ class Plan:
             mask=self.mask,
             ds=self.ds,
             w1=self.w1,
-            wt=[w.t().contiguous() for w in (*self.weights, self.wg)],
+            wt=[dense_native(w.t()) if T.preserve_d128_training() else w.t().contiguous()
+                for w in (*self.weights, self.wg)],
             gi=self.gi,
             bi=self.bi,
         )
@@ -218,8 +226,12 @@ class _Training(torch.autograd.Function):
     def forward(ctx, outgoing, *args):
         leaves = list(args[:11])
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
-        weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
-        if ctx.master:
+        if T.preserve_d128_training():
+            from ._h100_pack import cast_training_weights
+            weights = cast_training_weights(leaves[1:7])
+        else:
+            weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
+        if ctx.master and not T.preserve_d128_training():
             torch._foreach_copy_(weights, leaves[1:7])
         leaves = [leaves[0], *weights, *leaves[7:]]
         y, *saved = forward(leaves, args[11], args[12], outgoing)
@@ -235,7 +247,11 @@ class _Training(torch.autograd.Function):
         leaves = [v[0], *v[-6:], *v[7:11]]
         grads = backward(leaves, v[11], v[12], list(v[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master)
         grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
-        grads = [g.to(t.dtype) for g,t in zip(grads,v[:11],strict=True)]
+        if T.preserve_d128_training():
+            from ._h100_pack import native_training_grads
+            grads = native_training_grads(grads,list(v[:11]))
+        else:
+            grads = [g.to(t.dtype) for g,t in zip(grads,v[:11],strict=True)]
         return (None, *grads, None, None)
 
 

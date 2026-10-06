@@ -89,7 +89,9 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     )
 
     n, d = pair.shape[1], pair.shape[-1]
-    if _native_buckets_enabled() and d != 64:
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import preserve_d128_training
+    preserve = d == 128 and preserve_d128_training()
+    if _native_buckets_enabled() and d != 64 and not preserve:
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import native_buckets, single_trimul
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
         empty_mask = torch.empty(0,device=pair.device,dtype=torch.bool) if mask is None else mask
@@ -104,8 +106,12 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         return native_buckets(True, True, *args)
     # Bidirectional D128 takes the token mask [n]: its front K1 and B7 form m[i] & m[j] themselves.
     # The other paths read a bf16 pair mask in forward and backward, so it is built once here.
-    token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2)
-    if d == 64 and _native_training_enabled():
+    token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2) and not preserve
+    if preserve:
+        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import owned_training_mask
+        with torch.no_grad():
+            pair_mask = owned_training_mask(pair,mask)
+    elif d == 64 and _native_training_enabled():
         # Keep token masks compact until the saved forward boundary constructs
         # its owned FP32 pair mask. No intermediate BF16 square allocation.
         pair_mask = (torch.empty(0, device=pair.device, dtype=torch.bool)
@@ -122,7 +128,7 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
             (mask.unsqueeze(-1) & mask.unsqueeze(-2)) if mask.ndim == 2 else mask
         )
         pair_mask = pair_mask.to(torch.bfloat16).contiguous()
-    if dropscale is None and d == 64 and _native_training_enabled():
+    if dropscale is None and (preserve or (d == 64 and _native_training_enabled())):
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
         scale = training_unit_scale(pair)
     else:
