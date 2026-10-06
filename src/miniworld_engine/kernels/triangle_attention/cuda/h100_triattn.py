@@ -145,7 +145,7 @@ def _weight_gradient(dy, x):
 
 class H100Triangle(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, packed):
+    def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, packed, fused_tail):
         B, L, _, C = pair.shape
         vector_rows = os.environ.get("MINIWORLD_TRIATTN_H100_ROW_VECTOR", "1") == "1"
         m = extension("module")
@@ -165,7 +165,7 @@ class H100Triangle(torch.autograd.Function):
         q, k, v = (_view(t, B, L, C) for t in (qr, kr, vr))
         o, lse = _core_forward(q, k, v, bias)
         o_rows = _rows(o, C)
-        if os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "grouped") == "grouped":
+        if os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "fused" if fused_tail else "grouped") == "grouped":
             f = extension("front_grouped")
             result = f.residual(x, f.gate(gr, o_rows, vector_rows) @ outweight.T, drop, L, vector_rows).view_as(
                 pair
@@ -241,11 +241,12 @@ class H100Triangle(torch.autograd.Function):
         params = extension("pack").finish(
             grad, dwo, dnorm, [dt == torch.float32 for dt in ctx.dtypes]
         )
-        return (dx.view(B, L, L, C), *params, None, None, None, None)
+        return (dx.view(B, L, L, C), *params, None, None, None, None, None)
 
 
 def triangle_attention(
-    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None, packed=None
+    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None, packed=None,
+    fused_tail=False,
 ):
     weights = (wq, wk, wv, wg, wb, wo)
     if not supports(pair, weights, lnw, lnb, mask):
@@ -262,7 +263,7 @@ def triangle_attention(
     if drop is None:
         drop = pair.new_empty(0)
     return H100Triangle.apply(
-        pair, lnw, lnb, *weights, mask, eps, drop.contiguous(), packed
+        pair, lnw, lnb, *weights, mask, eps, drop.contiguous(), packed, fused_tail
     )
 
 
@@ -277,6 +278,10 @@ def forward(module, pair, mask=None):
             "native candidate requires self-attention without QK normalization, Dhead32"
         )
     B, L, _, C = pair.shape
+    # Qualification is specific to these four inference cells. Evaluate grad
+    # mode here: autograd.Function.forward itself always runs with grads disabled.
+    fused_tail = (not torch.is_grad_enabled() and not module.training and module.starting
+                  and B == 1 and C in (128, 256) and L in (512, 640))
     drop = (
         extension("pack").drop_scale(pair, module.p_drop)
         if module.training and module.p_drop
@@ -308,5 +313,6 @@ def forward(module, pair, mask=None):
         module.ln_pair.eps,
         drop,
         cached[1],
+        fused_tail=fused_tail,
     )
     return out if module.starting else out.transpose(1, 2).contiguous()
