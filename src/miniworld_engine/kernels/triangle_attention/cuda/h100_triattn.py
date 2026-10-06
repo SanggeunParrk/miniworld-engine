@@ -24,7 +24,7 @@ _PARENT = _SRC.parent
 
 
 @functools.lru_cache(maxsize=None)
-def extension(part: str):
+def extension(part: str, kv_tile: int = 64, row_group: int = 1):
     if part not in (
         "module",
         "training_forward",
@@ -40,7 +40,8 @@ def extension(part: str):
     if not (cutlass / "include/cute/tensor.hpp").is_file():
         raise RuntimeError("CUTLASS_PATH must contain CUTLASS 4.2 headers")
     return load_extension(
-        name=f"triattn_h100_b200style_{part}_v1",
+        name=(f"triattn_h100_b200style_{part}_v1" + (f"_kv{kv_tile}" if kv_tile != 64 else "")
+              + (f"_r{row_group}" if row_group != 1 else "")),
         sources=[str(_SRC / f"{part}.cu")],
         extra_include_paths=[str(_PARENT), str(cutlass / "include")],
         extra_cflags=["-O3"],
@@ -49,6 +50,8 @@ def extension(part: str):
             *gencodes("90a"),
             "-O3",
             "-std=c++17",
+            f"-DMW_TRIATTN_KV_TILE={kv_tile}",
+            *([f"-DMW_TRIATTN_ROW_GROUP={row_group}"] if row_group != 1 else []),
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "-lineinfo",
@@ -111,7 +114,8 @@ def _join(parts):
 
 
 def _core_forward(q, k, v, bias):
-    core = extension("training_forward")
+    core = extension("training_forward", int(os.environ.get("MINIWORLD_TRIATTN_H100_KV_TILE", "64")),
+                     int(os.environ.get("MINIWORLD_TRIATTN_H100_ROW_GROUP", "1")))
     results = [
         core.forward(q[b : b + 1], k[b : b + 1], v[b : b + 1], bias[b : b + 1])
         for b in range(q.shape[0])
@@ -140,25 +144,27 @@ class H100Triangle(torch.autograd.Function):
     @staticmethod
     def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, packed):
         B, L, _, C = pair.shape
+        vector_rows = os.environ.get("MINIWORLD_TRIATTN_H100_ROW_VECTOR", "0") == "1"
         m = extension("module")
         x = pair.contiguous().view(-1, C)
         wall, outweight = packed
         lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
         if os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND", "grouped") == "grouped":
             f = extension("front_grouped")
-            z, stats = f.norm(x, lw, lb, eps)
+            z, stats = f.norm(x, lw, lb, eps, vector_rows)
             projection = z @ wall.T
             qr, kr, vr, gr = (projection[:, j * C : (j + 1) * C] for j in range(4))
             bias = f.bias(projection, mask, C, L)
         else:
-            p, bias, stats = m.front(x, lw, lb, wall, mask, L, C // 32, eps)
+            p, bias, stats = m.front(x, lw, lb, wall, mask, L, C // 32, eps,
+                                     os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND") == "fused_reuse")
             qr, kr, vr, gr = p.unbind(0)
         q, k, v = (_view(t, B, L, C) for t in (qr, kr, vr))
         o, lse = _core_forward(q, k, v, bias)
         o_rows = _rows(o, C)
         if os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "grouped") == "grouped":
             f = extension("front_grouped")
-            result = f.residual(x, f.gate(gr, o_rows) @ outweight.T, drop, L).view_as(
+            result = f.residual(x, f.gate(gr, o_rows, vector_rows) @ outweight.T, drop, L, vector_rows).view_as(
                 pair
             )
         else:

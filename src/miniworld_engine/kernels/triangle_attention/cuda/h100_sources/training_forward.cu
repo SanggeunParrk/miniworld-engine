@@ -17,27 +17,39 @@ __device__ __forceinline__ void store_pair(uint32_t p,float a,float b) {
   uint32_t v; asm("cvt.rn.bf16x2.f32 %0,%1,%2;":"=r"(v):"f"(b),"f"(a));
   asm volatile("st.shared.b32 [%0],%1;"::"r"(p),"r"(v):"memory");
 }
+#ifndef MW_TRIATTN_KV_TILE
+#define MW_TRIATTN_KV_TILE 64
+#endif
+static constexpr int KV=MW_TRIATTN_KV_TILE;
+static_assert(KV==64 || KV==128);
+#ifndef MW_TRIATTN_ROW_GROUP
+#define MW_TRIATTN_ROW_GROUP 1
+#endif
 struct Config {
-  static constexpr int R=1;
+  static constexpr int R=MW_TRIATTN_ROW_GROUP;
+  static_assert(R==1 || R==2);
   using QL=decltype(tile_to_shape(GMMA::Layout_K_SW64_Atom<Element>{},Shape<_64,_32>{}));
-  using VT=decltype(tile_to_shape(GMMA::Layout_MN_SW64_Atom<Element>{},Shape<_32,_64>{}));
-  using BL=decltype(tile_to_shape(GMMA::Layout_K_SW128_Atom<Element>{},Shape<_64,_64>{}));
+  using KL=decltype(tile_to_shape(GMMA::Layout_K_SW64_Atom<Element>{},Shape<Int<KV>,_32>{}));
+  using VT=decltype(tile_to_shape(GMMA::Layout_MN_SW64_Atom<Element>{},Shape<_32,Int<KV>>{}));
+  using BL=decltype(tile_to_shape(GMMA::Layout_K_SW128_Atom<Element>{},Shape<_64,Int<KV>>{}));
   using QS=Shape<int32_t,_32,int32_t,int32_t>;
   using QStride=Stride<int64_t,_1,_32,int64_t>;
   using BS=Shape<int32_t,int32_t,int32_t>;
   using BStride=Stride<int64_t,_1,int64_t>;
   using TQ=decltype(make_tma_copy(SM90_TMA_LOAD{},make_tensor(make_gmem_ptr((Element const*)nullptr),QS{},QStride{}),QL{},Shape<_64,_32>{},_1{}));
-  using TB=decltype(make_tma_copy(SM90_TMA_LOAD{},make_tensor(make_gmem_ptr((Element const*)nullptr),BS{},BStride{}),BL{},Shape<_64,_64>{},_1{}));
+  using TK=decltype(make_tma_copy(SM90_TMA_LOAD{},make_tensor(make_gmem_ptr((Element const*)nullptr),QS{},QStride{}),KL{},Shape<Int<KV>,_32>{},_1{}));
+  using TB=decltype(make_tma_copy(SM90_TMA_LOAD{},make_tensor(make_gmem_ptr((Element const*)nullptr),BS{},BStride{}),BL{},Shape<_64,Int<KV>>{},_1{}));
   using TO=decltype(make_tma_copy(SM90_TMA_STORE{},make_tensor(make_gmem_ptr((Element*)nullptr),QS{},QStride{}),QL{},Shape<_64,_32>{},_1{}));
-  using Score=decltype(make_tiled_mma(GMMA::ss_op_selector<Element,Element,float,Shape<_64,_64,_32>>()));
-  using PV=decltype(make_tiled_mma(GMMA::rs_op_selector<Element,Element,float,Shape<_64,_32,_64>,GMMA::Major::K,GMMA::Major::MN>()));
+  using Score=decltype(make_tiled_mma(GMMA::ss_op_selector<Element,Element,float,Shape<_64,Int<KV>,_32>>()));
+  using PV=decltype(make_tiled_mma(GMMA::rs_op_selector<Element,Element,float,Shape<_64,_32,Int<KV>>,GMMA::Major::K,GMMA::Major::MN>()));
   struct Shared {
-    array_aligned<Element,2048,1024> q[R], k[2][R], v[2][R];
-    array_aligned<Element,4096,1024> bias[2];
+    array_aligned<Element,2048,1024> q[R];
+    array_aligned<Element,KV*32,1024> k[2][R],v[2][R];
+    array_aligned<Element,64*KV,1024> bias[2];
     cutlass::arch::ClusterTransactionBarrier qfull, full[2][R], bfull[2];
     cutlass::arch::ClusterBarrier empty[2][R], bempty[2];
   };
-  struct Params { TQ q,k,v; TB bias; TO out; float* lse; int L,H; Element const* raw_bias; };
+  struct Params { TQ q; TK k,v; TB bias; TO out; float* lse; int L,H; Element const* raw_bias; };
 };
 template<class T,class G,class S>
 __device__ __forceinline__ void tma_load(T const& t,G const& g,S const& s,
@@ -45,11 +57,11 @@ __device__ __forceinline__ void tma_load(T const& t,G const& g,S const& s,
   auto c=t.get_slice(_0{});
   copy(t.with(reinterpret_cast<uint64_t&>(bar)),c.partition_S(g),c.partition_D(s));
 }
-template<bool Single> __global__ __launch_bounds__(128,5) void training_fwd_stream(CUTE_GRID_CONSTANT Config::Params const p) {
+template<bool Single> __global__ __launch_bounds__(128*Config::R,Config::R==2?3:(KV==128?3:5)) void training_fwd_stream(CUTE_GRID_CONSTANT Config::Params const p) {
   extern __shared__ char storage[];
   auto& s=*reinterpret_cast<Config::Shared*>(storage);
-  int tid=threadIdx.x, qt=blockIdx.x, rg=blockIdx.y, h=blockIdx.z, L=p.L, nt=L/64;
-  bool live=false;for(int j=tid;j<L;j+=128)live|=float(p.raw_bias[h*L*L+j])>-1e30f;
+  int tid=threadIdx.x, qt=blockIdx.x, rg=blockIdx.y, h=blockIdx.z, L=p.L, nt=L/KV;
+  bool live=false;for(int j=tid;j<L;j+=128*Config::R)live|=float(p.raw_bias[h*L*L+j])>-1e30f;
   bool allMasked=!__syncthreads_or(live);
   if(tid==0) {
     s.qfull.init(1);
@@ -70,28 +82,34 @@ template<bool Single> __global__ __launch_bounds__(128,5) void training_fwd_stre
   auto bg=p.bias.get_tma_tensor(make_shape(L,L,p.H));
   auto load=[&](int kt) {
     int stage=kt%2;
-    s.full[stage][0].arrive_and_expect_tx(2*2048*sizeof(Element));
-    s.bfull[stage].arrive_and_expect_tx(4096*sizeof(Element));
-    auto kk=local_tile(kg(_,_,h,rg),Shape<_64,_32>{},make_coord(kt,0));
-    auto vv=local_tile(vg(_,_,h,rg),Shape<_64,_32>{},make_coord(kt,0));
-    auto bb=local_tile(bg(_,_,h),Shape<_64,_64>{},make_coord(qt,kt));
-    tma_load(p.k,kk,make_tensor(make_smem_ptr(s.k[stage][0].data()),Config::QL{}),s.full[stage][0]);
-    tma_load(p.v,vv,make_tensor(make_smem_ptr(s.v[stage][0].data()),Config::QL{}),s.full[stage][0]);
+    s.bfull[stage].arrive_and_expect_tx(64*KV*sizeof(Element));
+    auto bb=local_tile(bg(_,_,h),Shape<_64,Int<KV>>{},make_coord(qt,kt));
+    #pragma unroll
+    for(int r=0;r<Config::R;++r) {
+      s.full[stage][r].arrive_and_expect_tx(2*KV*32*sizeof(Element));
+      auto kk=local_tile(kg(_,_,h,rg*Config::R+r),Shape<Int<KV>,_32>{},make_coord(kt,0));
+      auto vv=local_tile(vg(_,_,h,rg*Config::R+r),Shape<Int<KV>,_32>{},make_coord(kt,0));
+      tma_load(p.k,kk,make_tensor(make_smem_ptr(s.k[stage][r].data()),Config::KL{}),s.full[stage][r]);
+      tma_load(p.v,vv,make_tensor(make_smem_ptr(s.v[stage][r].data()),Config::KL{}),s.full[stage][r]);
+    }
     tma_load(p.bias,bb,make_tensor(make_smem_ptr(s.bias[stage].data()),Config::BL{}),s.bfull[stage]);
   };
   if(tid==0) {
-    s.qfull.arrive_and_expect_tx(2048*sizeof(Element));
-    auto qq=local_tile(qg(_,_,h,rg),Shape<_64,_32>{},make_coord(qt,0));
-    tma_load(p.q,qq,make_tensor(make_smem_ptr(s.q[0].data()),Config::QL{}),s.qfull);
+    s.qfull.arrive_and_expect_tx(Config::R*2048*sizeof(Element));
+    #pragma unroll
+    for(int r=0;r<Config::R;++r) {
+      auto qq=local_tile(qg(_,_,h,rg*Config::R+r),Shape<_64,_32>{},make_coord(qt,0));
+      tma_load(p.q,qq,make_tensor(make_smem_ptr(s.q[r].data()),Config::QL{}),s.qfull);
+    }
     load(0);if(nt>1)load(1);
   }
   {
-    int r=0, lane=tid, row=rg;
+    int r=tid/128, lane=tid%128, row=rg*Config::R+r;
     Config::Score smma; Config::PV pmma;
     auto st=smma.get_slice(lane); auto pt=pmma.get_slice(lane);
-    auto sc=st.partition_C(make_identity_tensor(Shape<_64,_64>{}));
+    auto sc=st.partition_C(make_identity_tensor(Shape<_64,Int<KV>>{}));
     auto oc=pt.partition_C(make_identity_tensor(Shape<_64,_32>{}));
-    auto score=partition_fragment_C(smma,Shape<_64,_64>{});
+    auto score=partition_fragment_C(smma,Shape<_64,Int<KV>>{});
     auto out=partition_fragment_C(pmma,Shape<_64,_32>{}); clear(out);
     float m[2]={-INFINITY,-INFINITY}, l[2]={1.f,1.f};
     s.qfull.wait(0);
@@ -100,11 +118,12 @@ template<bool Single> __global__ __launch_bounds__(128,5) void training_fwd_stre
     for(int kt=0;kt<nt;++kt) {
         int stage=kt%2;
         s.full[stage][r].wait((kt/2)%2);
-        auto sk=make_tensor(make_smem_ptr(s.k[stage][r].data()),Config::QL{});
+        auto sk=make_tensor(make_smem_ptr(s.k[stage][r].data()),Config::KL{});
         auto kb=st.partition_fragment_B(sk);
         flash::gemm<true,0>(smma,qa,kb,score);
         // QK retirement also completes PV(k-1) in every consuming warp.
-        cutlass::arch::NamedBarrier::sync(128,r+1);
+        if constexpr(Config::R==1) cutlass::arch::NamedBarrier::sync(128,r+1);
+        else __syncthreads();  // every row group retires the shared bias stage before refill
         if(tid==0 && kt>0 && kt+1<nt)load(kt+1);
         s.bfull[stage].wait((kt/2)%2);
         asm volatile("":::"memory");
@@ -183,7 +202,7 @@ template<bool Single> __global__ __launch_bounds__(128,5) void training_fwd_stre
 std::vector<torch::Tensor> launch_forward(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor b) {
   TORCH_CHECK(q.is_cuda() && q.dim()==5 && q.size(0)==1 && (q.size(1)>=1 && q.size(1)<=16) && q.size(4)==32,"B1 H1..16 D32 required");
   c10::cuda::CUDAGuard guard(q.device()); int L=q.size(2),H=q.size(1),C=H*32;
-  TORCH_CHECK(L>=64 && L<=1024 && (L==64 || L%128==0) && q.size(3)==L,"square L multiple64 <=1024");
+  TORCH_CHECK(L>=64 && L<=1024 && (L==64 || L%128==0) && q.size(3)==L && L%KV==0,"square L divisible by KV tile <=1024");
   for(auto const& t:{q,k,v}) {
     TORCH_CHECK(t.device()==q.device() && t.scalar_type()==torch::kBFloat16 && t.sizes()==q.sizes(),"QKV metadata mismatch");
     TORCH_CHECK(t.stride(4)==1 && t.stride(1)==32 && t.stride(3)>=C && t.stride(3)%8==0 && t.stride(2)==L*t.stride(3),"projection layout required");
@@ -196,17 +215,21 @@ std::vector<torch::Tensor> launch_forward(torch::Tensor q,torch::Tensor k,torch:
     auto g=make_tensor(make_gmem_ptr((Element const*)x.data_ptr()),shape,Config::QStride{x.stride(3),_1{},_32{},x.stride(2)});
     return make_tma_copy(SM90_TMA_LOAD{},g,Config::QL{},Shape<_64,_32>{},_1{});
   };
+  auto make_k=[&](torch::Tensor const& x) {
+    auto g=make_tensor(make_gmem_ptr((Element const*)x.data_ptr()),shape,Config::QStride{x.stride(3),_1{},_32{},x.stride(2)});
+    return make_tma_copy(SM90_TMA_LOAD{},g,Config::KL{},Shape<Int<KV>,_32>{},_1{});
+  };
   auto bg=make_tensor(make_gmem_ptr((Element const*)b.data_ptr()),make_shape(L,L,H),Config::BStride{L,_1{},int64_t(L)*L});
-  auto tb=make_tma_copy(SM90_TMA_LOAD{},bg,Config::BL{},Shape<_64,_64>{},_1{});
+  auto tb=make_tma_copy(SM90_TMA_LOAD{},bg,Config::BL{},Shape<_64,Int<KV>>{},_1{});
   auto og=make_tensor(make_gmem_ptr((Element*)output.data_ptr()),shape,Config::QStride{C,_1{},_32{},int64_t(L)*C});
   auto to=make_tma_copy(SM90_TMA_STORE{},og,Config::QL{},Shape<_64,_32>{},_1{});
-  Config::Params p{make_q(q),make_q(k),make_q(v),tb,to,lse.data_ptr<float>(),L,H,(Element const*)b.data_ptr()};
+  Config::Params p{make_q(q),make_k(k),make_k(v),tb,to,lse.data_ptr<float>(),L,H,(Element const*)b.data_ptr()};
   if(L==64) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(training_fwd_stream<true>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Config::Shared)));
-    training_fwd_stream<true><<<dim3(L/64,L/Config::R,H),128,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
+    training_fwd_stream<true><<<dim3(L/64,L/Config::R,H),128*Config::R,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
   } else {
     C10_CUDA_CHECK(cudaFuncSetAttribute(training_fwd_stream<false>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Config::Shared)));
-    training_fwd_stream<false><<<dim3(L/64,L/Config::R,H),128,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
+    training_fwd_stream<false><<<dim3(L/64,L/Config::R,H),128*Config::R,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {output.view({1,L,L,H,32}).permute({0,3,1,2,4}),lse};
