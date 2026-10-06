@@ -38,9 +38,15 @@ std::vector<torch::Tensor> h100_norm(torch::Tensor x,torch::Tensor w,torch::Tens
   auto z=torch::empty_like(x),s=torch::empty({rows,2},w.options());
   auto stream=at::cuda::getCurrentCUDAStream();
   if(vectorized){
-#define NORM(C_) case C_:norm_rows_fixed<C_><<<(rows+7)/8,256,0,stream>>>((__nv_bfloat16*)x.data_ptr(),w.data_ptr<float>(),b.data_ptr<float>(),(__nv_bfloat16*)z.data_ptr(),s.data_ptr<float>(),rows,float(eps));break;
+    cudaKernel_t kernel;
+#define NORM(C_) case C_:C10_CUDA_CHECK(cudaGetKernel(&kernel,norm_rows_fixed<C_>));break;
     switch(C){NORM(64) NORM(128) NORM(256) NORM(384) NORM(512)}
 #undef NORM
+    auto* xp=(__nv_bfloat16*)x.data_ptr();auto* wp=w.data_ptr<float>();auto* bp=b.data_ptr<float>();
+    auto* zp=(__nv_bfloat16*)z.data_ptr();auto* sp=s.data_ptr<float>();float e=eps;
+    void* args[]={&xp,&wp,&bp,&zp,&sp,&rows,&e};
+    C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+      dim3((rows+7)/8),dim3(256),args,0,stream));
   }else norm_rows<<<(rows+7)/8,256,0,stream>>>((__nv_bfloat16*)x.data_ptr(),w.data_ptr<float>(),b.data_ptr<float>(),(__nv_bfloat16*)z.data_ptr(),s.data_ptr<float>(),rows,C,float(eps));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {z,s};
 }
