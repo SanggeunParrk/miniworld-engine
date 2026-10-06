@@ -121,6 +121,7 @@ _HOPPER_KERNELS = {
     "pb_fin": ("pair_bias", "atom_pair_finish_sm90", 0, False),
     "pb_part": ("pair_bias", "atom_pair_partials_sm90", 0, False),
     "db_native": ("attn_dbias", "atom_dbias_sm90", 82208, False),
+    "db_tma": ("attn_dbias", "atom_dbias_tma_sm90", 82240, False),
     "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
     "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
     **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},

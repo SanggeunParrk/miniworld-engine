@@ -1,4 +1,9 @@
-"""The AF3 atom transformer block with block-local attention on B200 (sm_100a): inference and training.
+"""The AF3 atom transformer block with block-local attention on B200 and qualified H100 inference.
+
+H100 cross-attention inference at A=48, N=4096 uses the CUDA block by default.
+That selected path requires contiguous bf16 activations and bf16 or fp32 weights;
+unsupported contracts raise. Other H100 shapes keep their existing module path,
+with experimental native inference still available through MINIWORLD_LOCAL_DIT_H100=1.
 
 One ``LocalDiTBlock`` call runs, in place of the module path,
 
@@ -214,7 +219,7 @@ def _kernels_ready(index: int) -> bool:
             local._load(name, index)
     except Exception as exc:  # a toolchain or driver problem keeps the module path
         if rows._hopper(index):
-            raise RuntimeError("Opt-in Hopper local DiT kernel build failed") from exc
+            raise RuntimeError("Hopper local DiT kernel build failed") from exc
         _FAILED = True
         warnings.warn(f"sm_100a local atom DiT kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
         return False
@@ -314,6 +319,45 @@ def serves(module, single, cond, pair, mask) -> bool:
         return False
     index = single.device.index if single.device.index is not None else torch.cuda.current_device()
     return _kernels32_ready(index) if fp32 else _kernels_ready(index)
+
+
+def _serves_hopper_inference(module, single, cond, pair, mask):
+    """Only the measured A48/N4096 cell is promoted; other shapes remain unqualified."""
+    from miniworld_engine.modules.dispatch import KernelBackend
+
+    a, tr = module.attention, module.transition
+    if a._backend != KernelBackend.TRITON or torch.is_grad_enabled() or not single.is_cuda:
+        return None
+    if torch.cuda.get_device_capability(single.device) != (9, 0):
+        return None
+    if single.ndim != 4 or (single.shape[0], single.shape[2]) != (48, 4096):
+        return None
+
+    def require(ok, detail):
+        if not ok:
+            raise NotImplementedError(f"H100 local atom DiT A48/N4096 inference requires {detail}; no composed fallback")
+
+    require(settings.current().engine_backend != "triton", "the CUDA engine backend")
+    require(module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm")
+    require((a.n_head, a.to_query.weight.shape[0], a.to_query.weight.shape[1],
+             a.to_bias.weight.shape[1], a.ada_ln_in.to_scale.weight.shape[1], tr.expand_a.weight.shape[0])
+            == (NH_, DS_, DS_, DP_, DC_, 2 * DS_), "128/128/16 widths, four heads, transition n=2")
+    require(tuple(single.shape) == (48, 1, 4096, DS_) and tuple(cond.shape) == (48, 1, 4096, DC_)
+            and tuple(pair.shape) == (1, 128, QUERIES, KEYS, DP_), "canonical single, conditioning and trunked pair shapes")
+    require(all(t.dtype == BF and t.device == single.device and t.is_contiguous() for t in (single, cond, pair)),
+            "contiguous bf16 activations on one CUDA device")
+    weights = tuple(module.get_parameter(name) for name in (*WEIGHTS, *CROSS_WEIGHTS))
+    require(all(w.dtype in (BF, torch.float32) and w.device == single.device and w.is_contiguous() for w in weights),
+            "contiguous bf16 or fp32 parameters on the input device")
+    require(mask is None or (mask.dtype == torch.bool and tuple(mask.shape) == (1, 4096)
+            and mask.device == single.device and mask.is_contiguous()), "a contiguous [1,4096] bool mask or None")
+    norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, tr.ada_ln_in.ln_in,
+             tr.ada_ln_in.ln_cond, a.ada_ln_kv.ln_in, a.ada_ln_kv.ln_cond)
+    require(all(norm.eps == EPS for norm in norms), "LayerNorm eps=1e-5")
+    index = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    if not _kernels_ready(index):
+        raise RuntimeError("H100 local atom DiT CUDA kernels unavailable; no composed fallback")
+    return True
 
 
 def _keys(mask, n0, n):
