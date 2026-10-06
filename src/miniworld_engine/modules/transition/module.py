@@ -108,6 +108,8 @@ class Transition(nn.Module):
         The raw op without the residual is available through ``ops.transition``.
         """
         if self._requires_h100_cuda(x):
+            if not _fused_sm90a_enabled():
+                raise ValueError("H100 MiniWorld Transition requires the native CUDA backend")
             matrices = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight)
             if (x.dtype != torch.bfloat16 or not x.is_contiguous() or x.numel() == 0
                     or any(p.dtype != torch.float32 or not p.is_contiguous()
@@ -126,7 +128,7 @@ class Transition(nn.Module):
     def _requires_h100_cuda(self, x: torch.Tensor) -> bool:
         from miniworld_engine.kernels.transition.cuda.fused_sm90a import native_aux_enabled
 
-        return (self.implementation == ImplementationType.MINIWORLD and _fused_sm90a_enabled()
+        return (self.implementation == ImplementationType.MINIWORLD
                 and x.is_cuda and native_aux_enabled(self.d_hidden)
                 and torch.cuda.get_device_capability(x.device) == (9, 0))
 

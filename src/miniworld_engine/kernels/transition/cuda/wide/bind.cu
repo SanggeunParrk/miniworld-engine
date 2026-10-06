@@ -17,6 +17,10 @@
 #include <mutex>
 #include <stdexcept>
 
+#ifndef MW_DXLN_FULL_ROW
+#define MW_DXLN_FULL_ROW 0
+#endif
+
 #if WIDE_D == 64
 int wide_d64_fwd_ctas();
 void wide_d64_fwd_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
@@ -95,7 +99,10 @@ const CUtensorMap& tile_map(const torch::Tensor& t, uint32_t inner, uint32_t out
   const CUtensorMapSwizzle sw = swizzle == 128 ? CU_TENSOR_MAP_SWIZZLE_128B : CU_TENSOR_MAP_SWIZZLE_64B;
   CUresult r = encoder()(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, t.data_ptr(), dims, strides, box, elem,
                          CU_TENSOR_MAP_INTERLEAVE_NONE, sw, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  if (r != CUDA_SUCCESS) throw std::runtime_error("cuTensorMapEncodeTiled failed");
+  TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled failed: result=", int(r),
+              " inner=", inner, " outer=", outer, " stride=", row_stride_elems,
+              " box=", box_inner, "x", box_outer, " swizzle=", swizzle,
+              " pointer_mod_128=", reinterpret_cast<uintptr_t>(t.data_ptr()) % 128);
   return cache.emplace(key, map).first->second;
 }
 // the common case: a contiguous [rows][cols] tensor
@@ -227,6 +234,9 @@ std::vector<torch::Tensor> fwd_split(torch::Tensor xn,torch::Tensor x,torch::Ten
 // Returns (dx, dgamma, dbeta, dWa, dWb, dWs); dx carries the residual branch.
 std::vector<torch::Tensor> bwd_master(torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rstd, torch::Tensor c1,
                                torch::Tensor gamma, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws, bool fp32_dw) {
+  // Like the D128 native entry, attach the autograd worker's primary context
+  // before encoding TMA maps; cached empty allocations need not initialize it.
+  expect(cudaSetDevice(x.get_device()) == cudaSuccess, "CUDA context initialization failed");
   const int64_t M = x.size(0);
   bf16_2d(dy, M, D, "dy must be contiguous bf16 [M, D]"); bf16_2d(x, M, D, "x"); bf16_2d(xn, M, D, "xn");
   f32_1d(rstd, M, "rstd"); f32_1d(c1, M, "c1"); f32_1d(gamma, D, "gamma must be fp32 [D]");
@@ -302,7 +312,7 @@ std::vector<torch::Tensor> dxln(torch::Tensor dab, torch::Tensor wabt, torch::Te
   auto dx = torch::empty_like(x);
   auto f32 = x.options().dtype(torch::kFloat32);
   auto pdg = torch::empty({WIDE_SMS, D}, f32), pdb = torch::empty({WIDE_SMS, D}, f32);
-  wide_dxln_launch(rm(dab, 64, 64), rm(wabt, 64, D / 2), rm(x, 64, 64), rm(dx, 64, 64), bp(x), bp(dy), bp(dx), fp(gamma), fp(rstd), fp(c1), fp(pdg), fp(pdb), (int)M,
+  wide_dxln_launch(rm(dab, 64, 64), rm(wabt, 64, MW_DXLN_FULL_ROW ? D : D / 2), rm(x, 64, 64), rm(dx, 64, 64), bp(x), bp(dy), bp(dx), fp(gamma), fp(rstd), fp(c1), fp(pdg), fp(pdb), (int)M,
                    WIDE_SMS, at::cuda::getCurrentCUDAStream());
   return {dx, pdg.sum(0), pdb.sum(0)};
 }
@@ -317,7 +327,8 @@ std::vector<torch::Tensor> dxln_partials(torch::Tensor dab, torch::Tensor wabt, 
   auto dx = torch::empty_like(x);
   auto f32 = x.options().dtype(torch::kFloat32);
   auto pdg = torch::empty({WIDE_SMS, D}, f32), pdb = torch::empty({WIDE_SMS, D}, f32);
-  wide_dxln_launch(rm(dab, 64, 64), rm(wabt, 64, D / 2), rm(x, 64, 64), rm(dx, 64, 64), bp(x), bp(dy), bp(dx),
+  constexpr int weight_rows = MW_DXLN_FULL_ROW ? D : D / 2;
+  wide_dxln_launch(rm(dab, 64, 64), rm(wabt, 64, weight_rows), rm(x, 64, 64), rm(dx, 64, 64), bp(x), bp(dy), bp(dx),
                    fp(gamma), fp(rstd), fp(c1), fp(pdg), fp(pdb), (int)M, WIDE_SMS, at::cuda::getCurrentCUDAStream());
   return {dx, pdg, pdb};
 }

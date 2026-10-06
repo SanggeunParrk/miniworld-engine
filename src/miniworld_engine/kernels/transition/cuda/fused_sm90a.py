@@ -42,12 +42,12 @@ DW_REPL = 8
 
 
 def native_aux_enabled(d: int = 128) -> bool:
-    """Live CUDA preparation for D64 and the validated D128/D384 inference paths.
+    """Live CUDA preparation for every required Hopper width.
 
     An explicit zero retains the frozen pre-sweep path for paired measurements.
-    Other widths remain experimental until their complete shape set wins.
+    Native coverage is independent of latency wins; slower cells stay labeled.
     """
-    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1" if d in (64, 128, 384) else "0") == "1"
+    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1") == "1"
 
 
 @functools.lru_cache(maxsize=1)
@@ -371,4 +371,8 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
                                    beta.float().contiguous(), wa.contiguous(), wb.contiguous(),
                                    wst, float(eps), False)
         return out.reshape(shape)
-    return _FusedTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
+    out = _FusedTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
+    if native_aux_enabled():
+        from miniworld_engine.integrations.token_dit_train import _native_caller_output
+        out = _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)
+    return out

@@ -80,7 +80,8 @@ def fused_d384_enabled(d: int) -> bool:
 @functools.lru_cache(maxsize=8)
 def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split_fwd: bool = False,
          fused_d384: bool = False, multicast: bool = False, affine_parallel: bool = False,
-         gate_multicast: bool = False, gate_k64: int = 0, gate_full_stage: bool = False):
+         gate_multicast: bool = False, gate_k64: int = 0, gate_full_stage: bool = False,
+         dxln_full_row: bool = False):
     """Build the extension for one channel width and SM count (both in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid)."""
     ensure_cuda_home()
@@ -105,6 +106,8 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
         revision += f"_gate_k64_v1_{gate_k64}"
     if gate_full_stage:
         revision += "_gate_full_stage_v1"
+    if dxln_full_row:
+        revision += "_dxln_full_row_xsm_v1"
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
@@ -116,6 +119,7 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
                            *(["-DMW_GATE_MULTICAST=1"] if gate_multicast else []),
                            *([f"-DMW_GATE_K64={gate_k64}"] if gate_k64 else []),
                            *(["-DMW_GATE_FULL_STAGE=1"] if gate_full_stage else []),
+                           *(["-DMW_DXLN_FULL_ROW=1"] if dxln_full_row else []),
                            *([ "-DMW_SAVE_AB=1" ] if save_ab else []),
                            *([ "-DMW_SPLIT_FWD=1" ] if split_fwd else []),
                            *([ "-DMW_FUSED_D384=1" ] if fused_d384 else []),
@@ -145,7 +149,9 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False):
                 and os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_PARALLEL", "1") == "1",
                 x.shape[-1] in (256, 512) and not save_ab and not gate_k64 and not gate_full_stage
                 and os.environ.get("MINIWORLD_TRANSITION_H100_GATE_MULTICAST", "0") == "1",
-                gate_k64, gate_full_stage)
+                gate_k64, gate_full_stage,
+                x.shape[-1] == 256 and native_aux_enabled(256)
+                and os.environ.get("MINIWORLD_TRANSITION_H100_DXLN_FULL_ROW", "0") == "1")
 
 
 @functools.lru_cache(maxsize=8)
@@ -314,7 +320,13 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
         else:
             dx, dgam, dbeta = ext.dxln(dab, w_ab.t().contiguous(), x, dy, gamma, rstd, c1)
     elif native_aux_enabled(d):
-        dx, dgam, dbeta = _native_ext().ln_bwd(dab @ w_ab, x, gamma, rstd, c1, dy, 4)
+        aux = _native_ext()
+        compact = (d == 512
+                   and os.environ.get("MINIWORLD_TRANSITION_H100_COMPACT_LN", "0") == "1")
+        ln = aux.ln_bwd_compact if compact else aux.ln_bwd
+        # The compact kernel uses 89 registers without spills, allowing five
+        # resident 128-thread CTAs instead of four for the 112-register plan.
+        dx, dgam, dbeta = ln(dab @ w_ab, x, gamma, rstd, c1, dy, 5 if compact else 4)
     else:
         from ..triton.fused import _transition_ln_bwd
 
@@ -401,4 +413,8 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
                                    beta.float().contiguous(), wa.contiguous(), wb.contiguous(), ws.contiguous(),
                                    float(eps), False, wst)
         return out.reshape(shape)
-    return _WideTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
+    out = _WideTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
+    if native_aux_enabled(x.shape[-1]):
+        from miniworld_engine.integrations.token_dit_train import _native_caller_output
+        out = _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)
+    return out
