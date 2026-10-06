@@ -155,8 +155,12 @@ class SWADiTBlock(nn.Module):
         of once per augment (the team-gm ``SWAAtomTransformer`` contract). Where the fused block cannot serve the call,
         this is ``forward(x, c_base.repeat(A, 1, 1), attention_params)`` -- the same function.
         """
-        if self.fused_refusal(x, c_base, attention_params) is None:
+        refusal = self.fused_refusal(x, c_base, attention_params)
+        if refusal is None:
             return self._fused(x, c_base, attention_params)
+        from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
+        if self.implementation != ImplementationType.PYTORCH and native_h100_enabled(x):
+            raise ValueError(f"native H100 SWA unsupported contract: {refusal}")
         return self(x, c_base.repeat(x.shape[0] // c_base.shape[0], 1, 1), attention_params)
 
     def forward(
@@ -166,9 +170,13 @@ class SWADiTBlock(nn.Module):
         attention_params: tuple,
     ) -> Float[torch.Tensor, "N S d_atom"]:
         if self.implementation != ImplementationType.PYTORCH:
-            if self.fused_refusal(x, cond, attention_params) is None:
+            refusal = self.fused_refusal(x, cond, attention_params)
+            if refusal is None:
                 # One modulation row per sequence row (B = N): no augment structure is known here.
                 return self._fused(x, cond, attention_params)
+            from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
+            if native_h100_enabled(x):
+                raise ValueError(f"native H100 SWA unsupported contract: {refusal}")
             from miniworld_engine import ops
 
             activated = self.adaln_modulation[0](cond)

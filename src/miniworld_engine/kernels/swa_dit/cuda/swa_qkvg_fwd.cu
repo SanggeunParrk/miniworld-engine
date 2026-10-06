@@ -360,6 +360,92 @@ std::vector<torch::Tensor> qkvg_fwd(torch::Tensor q, torch::Tensor mod, torch::T
   return {Q, K, V, G, X, PQ, PK};
 }
 
+// Deterministic native auxiliary stages.  Modulation reductions own one
+// (batch, atom) row and visit augments in fixed order; no floating atomics.
+namespace swa_native {
+struct Rows { const void* x[12]; void* y[8]; bool xb[12],yb[8],bf; int A,B,S,stage; float eps; };
+__device__ float get(const Rows& p,int k,long i) { return p.xb[k]?__bfloat162float(((const __nv_bfloat16*)p.x[k])[i]):((const float*)p.x[k])[i]; }
+__device__ void put(const Rows& p,int k,long i,float v) { if(p.yb[k]) ((__nv_bfloat16*)p.y[k])[i]=__float2bfloat16_rn(v); else ((float*)p.y[k])[i]=v; }
+__device__ float rnd(float v,bool bf) { return bf?__bfloat162float(__float2bfloat16_rn(v)):v; }
+__device__ float sum(float v) { for(int d=16;d;d>>=1)v+=__shfl_xor_sync(0xffffffff,v,d); return v; }
+__device__ float sig(float v) { return 1.f/(1.f+expf(-v)); }
+template<typename K,typename...T> void launch(K fn,int grid,T...args) {
+ cudaKernel_t k; C10_CUDA_CHECK(cudaGetKernel(&k,fn)); void* a[]={static_cast<void*>(&args)...};
+ C10_CUDA_CHECK(cudaLaunchKernel((const void*)k,dim3(grid),dim3(128),a,0,at::cuda::getCurrentCUDAStream())); C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+__global__ void rows(Rows p) {
+ long r=(long)blockIdx.x*4+threadIdx.x/32; int lane=threadIdx.x%32; long M=(long)p.A*p.B*p.S;
+ bool reduce=p.stage==8||p.stage==9||p.stage==12||p.stage==6;
+ if(r>=(reduce?(long)p.B*p.S:M))return;
+ long mr=r%(p.B*p.S);
+ if(p.stage==0) {
+  float z[4],ss=0; for(int h=0;h<4;++h){z[h]=get(p,0,r*128+h*32+lane);ss+=z[h]*z[h];}float rs=rsqrtf(sum(ss)/128+p.eps);
+  for(int h=0;h<4;++h){int c=h*32+lane;put(p,0,r*128+c,z[h]*rs*(1+get(p,1,mr*768+128+c))+get(p,1,mr*768+c));}
+ } else if(p.stage==1) {
+  for(int h=0;h<4;++h){int c=h*32+lane;long hm=((r/p.S*4+h)*p.S+r%p.S)*32+lane;
+   float cs=get(p,1,mr*16+lane%16),sn=get(p,2,mr*16+lane%16);
+   for(int k=0;k<2;++k){float z=get(p,0,r*512+k*128+c);put(p,4+k,r*128+c,z);float v=rnd(z*rsqrtf(sum(z*z)/32+p.eps),p.bf);float pair=__shfl_xor_sync(0xffffffff,v,16);put(p,k,hm,v*cs+(lane<16?-pair:pair)*sn);}
+   put(p,2,hm,get(p,0,r*512+256+c));put(p,3,r*128+c,get(p,0,r*512+384+c));
+  }
+ } else if(p.stage==2) {
+  for(int h=0;h<4;++h){long i=r*128+h*32+lane;put(p,0,i,get(p,0,i)*sig(get(p,1,i)));}
+ } else if(p.stage==3) {
+  float z[4],ss=0;for(int h=0;h<4;++h){int c=h*32+lane;long i=r*128+c;z[h]=rnd(get(p,0,i)+rnd(rnd(get(p,2,mr*768+256+c),p.bf)*get(p,1,i),p.bf),p.bf);ss+=z[h]*z[h];put(p,0,i,z[h]);}
+  float rs=rsqrtf(sum(ss)/128+p.eps);for(int h=0;h<4;++h){int c=h*32+lane;put(p,1,r*128+c,z[h]*rs*(1+get(p,2,mr*768+512+c))+get(p,2,mr*768+384+c));}
+ } else if(p.stage==4||p.stage==7) {
+  for(int h=0;h<8;++h){int c=h*32+lane;float a=get(p,0,r*512+c),b=get(p,0,r*512+256+c),s=sig(a);if(p.stage==4)put(p,0,r*256+c,a*s*b);else{float dh=get(p,1,r*256+c);put(p,0,r*512+c,dh*b*s*(1+a*(1-s)));put(p,0,r*512+256+c,dh*a*s);put(p,1,r*256+c,a*s*b);}}
+ } else if(p.stage==5) {
+  for(int h=0;h<4;++h){int c=h*32+lane;long i=r*128+c;put(p,0,i,get(p,0,i)+rnd(rnd(get(p,2,mr*768+640+c),p.bf)*get(p,1,i),p.bf));}
+ } else if(p.stage==6||p.stage==9) {
+  int col=p.stage==6?640:256;float dm[4]={};
+  for(int a=0;a<p.A;++a){long rr=r+(long)a*p.B*p.S;for(int h=0;h<4;++h){int c=h*32+lane;long i=rr*128+c;float d=get(p,0,i);dm[h]+=d*get(p,2,i);put(p,0,i,d*rnd(get(p,1,mr*768+col+c),p.bf));if(p.stage==9)put(p,1,i,get(p,3,i)*sig(get(p,4,i)));}}
+  for(int h=0;h<4;++h)put(p,p.stage==6?1:2,mr*768+col+h*32+lane,dm[h]);
+ } else if(p.stage==8||p.stage==12) {
+  int col=p.stage==8?384:0;float ds[4]={},dt[4]={};
+  for(int a=0;a<p.A;++a){long rr=r+(long)a*p.B*p.S;float q[4],g[4],ss=0,dot=0;for(int h=0;h<4;++h){int c=h*32+lane;q[h]=get(p,2,rr*128+c);ss+=q[h]*q[h];}
+   float rs=rsqrtf(sum(ss)/128+p.eps);for(int h=0;h<4;++h){int c=h*32+lane;float d=get(p,1,rr*128+c);q[h]*=rs;ds[h]+=d;dt[h]+=d*q[h];g[h]=d*(1+get(p,3,mr*768+col+128+c));dot+=g[h]*q[h];}dot=sum(dot)/128;
+   for(int h=0;h<4;++h){int c=h*32+lane;put(p,0,rr*128+c,get(p,0,rr*128+c)+rs*(g[h]-q[h]*dot));}}
+  for(int h=0;h<4;++h){int c=h*32+lane;put(p,1,mr*768+col+c,ds[h]);put(p,1,mr*768+col+128+c,dt[h]);}
+ } else if(p.stage==10) {
+  for(int h=0;h<4;++h){long i=r*128+h*32+lane;float d=get(p,0,i),o=get(p,1,i),s=sig(get(p,2,i));float dO=rnd(d*s,true);put(p,0,i,dO);put(p,1,i,d*o*s*(1-s));float delta=sum(dO*o);if(lane==0)put(p,2,(r/p.S*4+h)*p.S+r%p.S,delta);}
+ } else if(p.stage==11) {
+  for(int h=0;h<4;++h){int c=h*32+lane;long hm=((r/p.S*4+h)*p.S+r%p.S)*32+lane;float cs=get(p,6,mr*16+lane%16),sn=get(p,7,mr*16+lane%16);
+   for(int k=0;k<2;++k){float g=get(p,2+k,hm),pair=__shfl_xor_sync(0xffffffff,g,16);g=rnd(g*cs+(lane<16?pair:-pair)*sn,p.bf);float z=get(p,k,r*128+c),rs=rsqrtf(sum(z*z)/32+p.eps),xh=z*rs;float dz=rs*(g-xh*sum(g*xh)/32);put(p,0,r*512+k*128+c,dz);}
+   put(p,0,r*512+256+c,get(p,4,hm));put(p,0,r*512+384+c,get(p,5,r*128+c));}
+ }
+}
+struct Att {const __nv_bfloat16 *q,*k,*v,*d;const float *lse,*delta;const int* used;__nv_bfloat16 *o,*dq,*dk,*dv;float* olse;int N,S,stage;};
+__global__ void attention(Att p) {
+ int id=blockIdx.x*4+threadIdx.x/32,lane=threadIdx.x%32;if(id>=p.N*4*p.S)return;int i=id%p.S,nh=id/p.S,n=nh/4,h=nh%4,su=p.used[n];long hb=(long)nh*p.S*32,oi=((long)n*p.S+i)*128+h*32+lane;
+ const float scale=.1767766952966369f;float acc=0,av=0;
+ if(p.stage==0){float q=i<su?__bfloat162float(p.q[hb+i*32+lane]):0,maxv=-INFINITY,den=0;
+  for(int j=max(0,i-64);j<min(su,i+65)&&i<su;++j){float sc=sum(q*__bfloat162float(p.k[hb+j*32+lane]))*scale;maxv=fmaxf(maxv,sc);}
+  for(int j=max(0,i-64);j<min(su,i+65)&&i<su;++j){float pr=expf(sum(q*__bfloat162float(p.k[hb+j*32+lane]))*scale-maxv);den+=pr;acc+=rnd(pr,true)*__bfloat162float(p.v[hb+j*32+lane]);}
+  p.o[oi]=__float2bfloat16_rn(den>0?acc/den:0);if(lane==0)p.olse[id]=den>0?maxv+logf(den):0;
+ }else if(p.stage==1){float q=i<su?__bfloat162float(p.q[hb+i*32+lane]):0,d=i<su?__bfloat162float(p.d[oi]):0;
+  for(int j=max(0,i-64);j<min(su,i+65)&&i<su;++j){float k=__bfloat162float(p.k[hb+j*32+lane]),v=__bfloat162float(p.v[hb+j*32+lane]);float pr=expf(sum(q*k)*scale-p.lse[id]);float ds=rnd(pr*(sum(d*v)-p.delta[id]),true);acc+=ds*k;}p.dq[hb+i*32+lane]=__float2bfloat16_rn(acc*scale);
+ }else{float k=i<su?__bfloat162float(p.k[hb+i*32+lane]):0,v=i<su?__bfloat162float(p.v[hb+i*32+lane]):0;
+  for(int j=max(0,i-64);j<min(su,i+65)&&i<su;++j){float q=__bfloat162float(p.q[hb+j*32+lane]),d=__bfloat162float(p.d[((long)n*p.S+j)*128+h*32+lane]);float pr=expf(sum(q*k)*scale-p.lse[nh*p.S+j]);float ds=rnd(pr*(sum(d*v)-p.delta[nh*p.S+j]),true);acc+=ds*q;av+=rnd(pr,true)*d;}p.dk[hb+i*32+lane]=__float2bfloat16_rn(acc*scale);p.dv[hb+i*32+lane]=__float2bfloat16_rn(av);}
+}
+struct Copy {const void* x[8];void* y[8];bool xb[8],yb[8];long sizes[8];int count,stage;};
+__global__ void copies(Copy p){long j=(long)blockIdx.x*128+threadIdx.x;for(int k=0;k<p.count;++k){if(j>=p.sizes[k])continue;float z=p.xb[k]?__bfloat162float(((const __nv_bfloat16*)p.x[k])[j]):((const float*)p.x[k])[j];
+ if(p.stage==1)z=rnd(z*sig(z),p.xb[k]);long dest=j;if(p.stage==2){long row=j/128,c=j%128;dest=((row%256)/64*128+(row/256)*64+row%64)*128+c;}
+ if(p.yb[k])((__nv_bfloat16*)p.y[k])[dest]=__float2bfloat16_rn(z);else((float*)p.y[k])[dest]=z;}}
+__global__ void mod_bwd(Rows p,int count){int i=blockIdx.x*128+threadIdx.x;if(i>=count)return;float c=get(p,0,i),s=sig(c),d=rnd(get(p,1,i),p.bf);put(p,0,i,d*s*(1+c*(1-s)));}
+}
+void native_rows(std::vector<torch::Tensor> x,std::vector<torch::Tensor> y,int stage,int A,int B,int S,bool bf,double eps){
+ TORCH_CHECK(x.size()<=12&&y.size()<=8,"native row arity");swa_native::Rows p{};p.A=A;p.B=B;p.S=S;p.stage=stage;p.bf=bf;p.eps=eps;
+ for(int k=0;k<x.size();++k){TORCH_CHECK(x[k].is_cuda()&&x[k].is_contiguous(),"native row inputs must be contiguous");p.x[k]=x[k].data_ptr();p.xb[k]=x[k].scalar_type()==torch::kBFloat16;}
+ for(int k=0;k<y.size();++k){TORCH_CHECK(y[k].is_cuda()&&y[k].is_contiguous(),"native row outputs must be contiguous");p.y[k]=y[k].data_ptr();p.yb[k]=y[k].scalar_type()==torch::kBFloat16;}
+ if(stage==14)swa_native::launch(swa_native::mod_bwd,(x[0].numel()+127)/128,p,(int)x[0].numel());
+ else {int nr=(stage==6||stage==8||stage==9||stage==12)?B*S:A*B*S;swa_native::launch(swa_native::rows,(nr+3)/4,p);}
+}
+void native_copy(std::vector<torch::Tensor>x,std::vector<torch::Tensor>y,int stage){TORCH_CHECK(x.size()==y.size()&&x.size()<=8,"native copy arity");swa_native::Copy p{};p.count=x.size();p.stage=stage;long mx=0;
+ for(int k=0;k<x.size();++k){TORCH_CHECK(x[k].is_cuda()&&y[k].is_cuda()&&x[k].is_contiguous()&&y[k].is_contiguous()&&x[k].numel()==y[k].numel(),"native copy shape/layout");p.x[k]=x[k].data_ptr();p.y[k]=y[k].data_ptr();p.xb[k]=x[k].scalar_type()==torch::kBFloat16;p.yb[k]=y[k].scalar_type()==torch::kBFloat16;p.sizes[k]=x[k].numel();mx=std::max(mx,p.sizes[k]);}swa_native::launch(swa_native::copies,(mx+127)/128,p);}
+void native_attention(std::vector<torch::Tensor>x,std::vector<torch::Tensor>y,int stage){swa_native::Att p{};p.q=(const __nv_bfloat16*)x[0].data_ptr();p.k=(const __nv_bfloat16*)x[1].data_ptr();p.v=(const __nv_bfloat16*)x[2].data_ptr();p.used=x[3].data_ptr<int>();p.N=x[0].size(0);p.S=x[0].size(2);p.stage=stage;
+ if(stage==0){p.o=(__nv_bfloat16*)y[0].data_ptr();p.olse=y[1].data_ptr<float>();}else{p.d=(const __nv_bfloat16*)x[4].data_ptr();p.lse=x[5].data_ptr<float>();p.delta=x[6].data_ptr<float>();p.dq=(__nv_bfloat16*)y[0].data_ptr();p.dk=(__nv_bfloat16*)y[1].data_ptr();p.dv=(__nv_bfloat16*)y[2].data_ptr();}swa_native::launch(swa_native::attention,(p.N*4*p.S+3)/4,p);}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("native_rows",&native_rows);m.def("native_copy",&native_copy);m.def("native_attention",&native_attention);
   m.def("qkvg_fwd", &qkvg_fwd, "ESMFold2 SWA atom block RMSNorm/adaLN + QKVG projection + qk-norm + RoPE (bf16 wgmma)");
 }

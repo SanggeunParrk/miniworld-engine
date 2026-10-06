@@ -15,6 +15,7 @@ from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.integrations.h100_master import pack as pack_master
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.swa_dit.dispatch import (
+    native_h100_enabled, native_h100_cast, native_h100_mod_fwd, native_h100_mod_bwd,
     swa_dit_block_bwd,
     swa_dit_block_fwd,
     swa_dit_mod_bwd_sm100,
@@ -32,7 +33,10 @@ class SWADiTBlockFunction(torch.autograd.Function):
         # weights get the backward's fp32 gradients in their own dtype (fp32 ones unrounded).
         ctx.param_dtypes = [w.dtype for w in (wqkv, wg, wo, wu, wd)]
         raw_weights = (wqkv, wg, wo, wu, wd)
-        if q.dtype == torch.bfloat16 and any(w.dtype == torch.float32 for w in raw_weights) and is_h100(q.device):
+        ctx.native_h100 = native_h100_enabled(q)
+        if ctx.native_h100:
+            wqkv, wg, wo, wu, wd = native_h100_cast(list(raw_weights), [torch.empty_like(w, dtype=q.dtype) for w in raw_weights])
+        elif q.dtype == torch.bfloat16 and any(w.dtype == torch.float32 for w in raw_weights) and is_h100(q.device):
             wqkv, wg, wo, wu, wd = pack_master(raw_weights)
         else:
             wqkv, wg, wo, wu, wd = (w.to(q.dtype) for w in raw_weights)
@@ -44,10 +48,30 @@ class SWADiTBlockFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         B, half_window = ctx.meta
+        if ctx.native_h100 and not dy.is_contiguous():
+            raise ValueError("native H100 SWA requires contiguous upstream gradient")
         grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors[:-5], B, half_window, FP32_EPS)
         dq, dmod, *dw = grads
-        dwqkv, dwg, dwo, dwu, dwd = (g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True))
+        if ctx.native_h100:
+            dwqkv, dwg, dwo, dwu, dwd = native_h100_cast(dw, list(ctx.saved_tensors[-5:]))
+        else:
+            dwqkv, dwg, dwo, dwu, dwd = (g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True))
         return dq, dmod, None, None, None, dwqkv, dwg, dwo, dwu, dwd, None, None
+
+
+class SWADiTModulationH100(torch.autograd.Function):
+    """Native SiLU and dtype boundaries around the FP32 cuBLAS modulation."""
+    @staticmethod
+    def forward(ctx, c, w):
+        out, a, w32 = native_h100_mod_fwd(c, w)
+        ctx.save_for_backward(c, a, w32, w)
+        return out
+
+    @staticmethod
+    def backward(ctx, dy):
+        if not dy.is_contiguous():
+            raise ValueError("native SWA modulation requires contiguous upstream gradient")
+        return native_h100_mod_bwd(dy, *ctx.saved_tensors)
 
 
 class SWADiTModulationSm100(torch.autograd.Function):

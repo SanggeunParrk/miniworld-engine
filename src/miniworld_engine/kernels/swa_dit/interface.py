@@ -1,5 +1,9 @@
 """Public entry points of the fused ESMFold2 SWA atom DiT block (kernel family ``swa_dit``).
 
+The supported H100 window64 path defaults to handwritten CUDA plus cuBLAS, including live FP32 master parameters and
+native caller-gradient accumulation. Unsupported selected-native contracts raise. Explicit
+MINIWORLD_SWA_H100_CUDA_ONLY=0 retains the historical backend descriptions below.
+
 Provenance: moved from team-gm (``src/team_gm/modules/blocks/swa_fused_triton.py`` and ``swa_cuda/``, introduced by team-gm
 commit 14f2c73 "research(swa): preserve opt-in fused atom transformer work", copied from team-gm 4fafa83). Kernel math is
 unchanged; the engine owns the autotune keys, the config sets, the CUDA build and the runtime switches (``settings.swa_dit_*``).
@@ -279,6 +283,14 @@ def swa_dit_block(
     """
     from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
     from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_block_fwd
+    from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
+
+    if native_h100_enabled(q):
+        if (q.ndim != 3 or q.shape[-1] != 128 or q.numel() == 0
+                or q.dtype not in (torch.bfloat16, torch.float32)
+                or any(not t.is_contiguous() for t in (q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd))
+                or any(w.dtype not in (q.dtype, torch.float32) for w in (wqkv, wg, wo, wu, wd))):
+            raise ValueError("native H100 SWA requires canonical contiguous BF16/FP32 operands")
 
     s = q.shape[1]
     cos = cos.reshape(-1, cos.shape[-1]).contiguous()
