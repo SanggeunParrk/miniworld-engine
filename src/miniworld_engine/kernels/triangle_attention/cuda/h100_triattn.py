@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import functools
 import os
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -21,6 +23,36 @@ from miniworld_engine.kernels._nvcc import (
 
 _SRC = Path(__file__).with_name("h100_sources")
 _PARENT = _SRC.parent
+
+# Retain each forward's resolved workspace policy for its later backward.
+_OWNED_BLAS_STATE = threading.local()
+
+
+def _owned_blas_enabled():
+    selected = getattr(_OWNED_BLAS_STATE, "enabled", None)
+    if selected is not None:
+        return selected
+    return os.environ.get("MINIWORLD_TRIATTN_H100_OWNED_BLAS", "0") == "1"
+
+
+def _owned_blas_for_module(module, pair):
+    override = os.environ.get("MINIWORLD_TRIATTN_H100_OWNED_BLAS")
+    if override is not None:
+        return override == "1"
+    B, L, _, C = pair.shape
+    return (module.training and torch.is_grad_enabled() and module.starting
+            and B == 1 and (C, L) in ((128, 768), (512, 384)))
+
+
+@contextmanager
+def _owned_blas_scope(enabled):
+    previous = getattr(_OWNED_BLAS_STATE, "enabled", None)
+    _OWNED_BLAS_STATE.enabled = enabled
+    try:
+        yield
+    finally:
+        _OWNED_BLAS_STATE.enabled = previous
+
 
 
 @functools.lru_cache(maxsize=None)
@@ -129,13 +161,13 @@ def _core_forward(q, k, v, bias):
 def _weight_gradient(dy, x):
     """Split the long reduction so skinny FP32-output GEMMs fill the H100."""
     if os.environ.get("MINIWORLD_TRIATTN_H100_SPLIT_WGRAD", "1") == "0":
-        return torch.mm(dy.T, x, out_dtype=torch.float32)
+        return _mm(dy.T, x, out_dtype=torch.float32)
     tiles = ((dy.shape[1] + 127) // 128) * ((x.shape[1] + 127) // 128)
     splits = 32 if tiles < 32 else 16 if tiles < 64 else 8
     while dy.shape[0] % splits:
         splits //= 2
     rows = dy.shape[0] // splits
-    partial = torch.bmm(
+    partial = _bmm(
         dy.view(splits, rows, -1).transpose(1, 2),
         x.view(splits, rows, -1),
         out_dtype=torch.float32,
@@ -146,6 +178,7 @@ def _weight_gradient(dy, x):
 class H100Triangle(torch.autograd.Function):
     @staticmethod
     def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, packed, fused_tail):
+        ctx.owned_blas = _owned_blas_enabled()
         B, L, _, C = pair.shape
         vector_rows = os.environ.get("MINIWORLD_TRIATTN_H100_ROW_VECTOR", "1") == "1"
         m = extension("module")
@@ -155,7 +188,7 @@ class H100Triangle(torch.autograd.Function):
         if os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND", "grouped") == "grouped":
             f = extension("front_grouped")
             z, stats = f.norm(x, lw, lb, eps, vector_rows)
-            projection = z @ wall.T
+            projection = _mm(z, wall.T)
             qr, kr, vr, gr = (projection[:, j * C : (j + 1) * C] for j in range(4))
             bias = f.bias(projection, mask, C, L)
         else:
@@ -167,7 +200,7 @@ class H100Triangle(torch.autograd.Function):
         o_rows = _rows(o, C)
         if os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "fused" if fused_tail else "grouped") == "grouped":
             f = extension("front_grouped")
-            result = f.residual(x, f.gate(gr, o_rows, vector_rows) @ outweight.T, drop, L, vector_rows).view_as(
+            result = f.residual(x, _mm(f.gate(gr, o_rows, vector_rows), outweight.T), drop, L, vector_rows).view_as(
                 pair
             )
         else:
@@ -196,6 +229,11 @@ class H100Triangle(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
+        with _owned_blas_scope(ctx.owned_blas):
+            return H100Triangle._backward_impl(ctx, dy)
+
+    @staticmethod
+    def _backward_impl(ctx, dy):
         x, lw, lb, wall, wo, qr, kr, vr, gr, bias, stats, o, lse, mask, drop = (
             ctx.saved_tensors
         )
@@ -203,7 +241,7 @@ class H100Triangle(torch.autograd.Function):
         m, dqe, dve = extension("module"), extension("dq"), extension("bias_fusion")
         dy = dy.contiguous().view(-1, C)
         dys = m.scale(dy, drop, L)
-        du = dys @ wo
+        du = _mm(dys, wo)
         do, dg, u, delta = extension("front_grouped").gate_backward(du, gr, o, L)
         q, k, v = (_view(t, B, L, C) for t in (qr, kr, vr))
         do = _view(do, B, L, C)
@@ -233,7 +271,7 @@ class H100Triangle(torch.autograd.Function):
                 x, dall, wall, dy, stats, lw, lb
             )
         else:
-            dz = torch.mm(dall, wall, out_dtype=torch.float32)
+            dz = _mm(dall, wall, out_dtype=torch.float32)
             dx, z, parts = m.ln_backward(x, dz, dy, stats, lw, lb)
         dnorm = extension("pack").reduce_partials(parts)
         grad = _weight_gradient(dall, z)
@@ -304,15 +342,145 @@ def forward(module, pair, mask=None):
         with torch.no_grad():
             cached = (key, pack_weights(*weights))
         module._h100_b200style_pack = cached
-    out = triangle_attention(
-        x.contiguous(),
-        module.ln_pair.weight,
-        module.ln_pair.bias,
-        *weights,
-        mask,
-        module.ln_pair.eps,
-        drop,
-        cached[1],
-        fused_tail=fused_tail,
-    )
+    with _owned_blas_scope(_owned_blas_for_module(module, pair)):
+        out = triangle_attention(
+            x.contiguous(),
+            module.ln_pair.weight,
+            module.ln_pair.bias,
+            *weights,
+            mask,
+            module.ln_pair.eps,
+            drop,
+            cached[1],
+            fused_tail=fused_tail,
+        )
     return out if module.starting else out.transpose(1, 2).contiguous()
+
+
+# Opt-in graph-owned scratch; all CUDA arithmetic and cuBLAS layouts are retained.
+_OWNED_BLAS_CPP = r"""#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cublas_v2.h>
+#include <map>
+#include <memory>
+struct TokenHandle { cublasHandle_t value; TokenHandle(){TORCH_CHECK(cublasCreate(&value)==CUBLAS_STATUS_SUCCESS,"Token cublasCreate");} ~TokenHandle(){cublasDestroy(value);} };
+torch::Tensor owned_mm(torch::Tensor a,torch::Tensor b,bool tf32,bool fp32_output) {
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&a.device()==b.device()&&a.dim()==2&&b.dim()==2&&a.size(1)==b.size(0)&&a.scalar_type()==b.scalar_type()&&(a.scalar_type()==at::kFloat||a.scalar_type()==at::kBFloat16),"Token owned GEMM operands");
+ c10::cuda::CUDAGuard guard(a.device());
+ static thread_local std::map<int,std::unique_ptr<TokenHandle>> handles;
+ auto& owned=handles[a.get_device()];if(!owned)owned=std::make_unique<TokenHandle>();
+ auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"Token private cuBLAS status ",int(s));};
+ auto handle=owned->value;auto stream=at::cuda::getCurrentCUDAStream();
+ ck(cublasSetStream(handle,stream));ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
+ const bool fp32=a.scalar_type()==at::kFloat;
+ ck(cublasSetMathMode(handle,fp32&&tf32?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH));
+ const size_t bytes=at::cuda::getChosenWorkspaceSize();auto workspace=torch::empty({int64_t(bytes)},a.options().dtype(at::kByte));
+ ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
+ const bool output_float=fp32||fp32_output;
+ auto out=torch::empty({a.size(0),b.size(1)},a.options().dtype(output_float?at::kFloat:at::kBFloat16));
+ auto leading=[](torch::Tensor t){bool row=t.stride(1)==1;TORCH_CHECK(row?t.stride(0)>=t.size(1):(t.stride(0)==1&&t.stride(1)>=t.size(0)),"Token dense matrix view");return int(row?t.stride(0):t.stride(1));};
+ int lda=leading(a),ldb=leading(b),m=a.size(0),n=b.size(1),k=a.size(1);float alpha=1,beta=0;
+ const auto dtype=fp32?CUDA_R_32F:CUDA_R_16BF;const auto compute=fp32&&tf32?CUBLAS_COMPUTE_32F_FAST_TF32:CUBLAS_COMPUTE_32F;
+ ck(cublasGemmEx(handle,b.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,a.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,n,m,k,&alpha,b.data_ptr(),dtype,ldb,a.data_ptr(),dtype,lda,&beta,out.data_ptr(),output_float?CUDA_R_32F:CUDA_R_16BF,n,compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ return out;
+}
+
+torch::Tensor owned_mm_out(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool tf32) {
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&a.device()==b.device()&&a.dim()==2&&b.dim()==2&&a.size(1)==b.size(0)&&a.scalar_type()==b.scalar_type()&&(a.scalar_type()==at::kFloat||a.scalar_type()==at::kBFloat16),"Token owned GEMM operands");
+ c10::cuda::CUDAGuard guard(a.device());
+ static thread_local std::map<int,std::unique_ptr<TokenHandle>> handles;
+ auto& owned=handles[a.get_device()];if(!owned)owned=std::make_unique<TokenHandle>();
+ auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"Token private cuBLAS status ",int(s));};
+ auto handle=owned->value;auto stream=at::cuda::getCurrentCUDAStream();
+ ck(cublasSetStream(handle,stream));ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
+ const bool fp32=a.scalar_type()==at::kFloat;
+ ck(cublasSetMathMode(handle,fp32&&tf32?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH));
+ const size_t bytes=at::cuda::getChosenWorkspaceSize();auto workspace=torch::empty({int64_t(bytes)},a.options().dtype(at::kByte));
+ ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
+ const bool output_float=out.scalar_type()==at::kFloat;
+ TORCH_CHECK(out.is_cuda()&&out.device()==a.device()&&out.dim()==2&&out.size(0)==a.size(0)&&out.size(1)==b.size(1)&&(out.scalar_type()==at::kFloat||out.scalar_type()==at::kBFloat16),"TriMul owned GEMM output");
+ auto leading=[](torch::Tensor t){bool row=t.stride(1)==1;TORCH_CHECK(row?t.stride(0)>=t.size(1):(t.stride(0)==1&&t.stride(1)>=t.size(0)),"Token dense matrix view");return int(row?t.stride(0):t.stride(1));};
+ int lda=leading(a),ldb=leading(b),m=a.size(0),n=b.size(1),k=a.size(1);float alpha=1,beta=0;
+ const auto dtype=fp32?CUDA_R_32F:CUDA_R_16BF;const auto compute=fp32&&tf32?CUBLAS_COMPUTE_32F_FAST_TF32:CUBLAS_COMPUTE_32F;
+ int ldc=leading(out);
+ if(out.stride(1)==1)
+  ck(cublasGemmEx(handle,b.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,a.stride(1)==1?CUBLAS_OP_N:CUBLAS_OP_T,n,m,k,&alpha,b.data_ptr(),dtype,ldb,a.data_ptr(),dtype,lda,&beta,out.data_ptr(),output_float?CUDA_R_32F:CUDA_R_16BF,ldc,compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ else
+  ck(cublasGemmEx(handle,a.stride(1)==1?CUBLAS_OP_T:CUBLAS_OP_N,b.stride(1)==1?CUBLAS_OP_T:CUBLAS_OP_N,m,n,k,&alpha,a.data_ptr(),dtype,lda,b.data_ptr(),dtype,ldb,&beta,out.data_ptr(),output_float?CUDA_R_32F:CUDA_R_16BF,ldc,compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ return out;
+}
+
+
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/Context.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cublas_v2.h>
+#include <map>
+#include <memory>
+struct OwnedBmmHandle { cublasHandle_t value; OwnedBmmHandle(){TORCH_CHECK(cublasCreate(&value)==CUBLAS_STATUS_SUCCESS,"TriMul cublasCreate");} ~OwnedBmmHandle(){cublasDestroy(value);} };
+torch::Tensor owned_bmm(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool tf32) {
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&out.is_cuda()&&a.device()==b.device()&&a.device()==out.device()&&a.dim()==3&&b.dim()==3&&out.dim()==3,"TriMul owned BMM operands");
+ TORCH_CHECK(a.size(0)==b.size(0)&&a.size(2)==b.size(1)&&out.size(0)==a.size(0)&&out.size(1)==a.size(1)&&out.size(2)==b.size(2),"TriMul owned BMM shapes");
+ TORCH_CHECK(a.scalar_type()==b.scalar_type()&&(out.scalar_type()==a.scalar_type()||out.scalar_type()==at::kFloat)&&(a.scalar_type()==at::kBFloat16||a.scalar_type()==at::kFloat),"TriMul owned BMM dtype");
+ c10::cuda::CUDAGuard guard(a.device());
+ static thread_local std::map<int,std::unique_ptr<OwnedBmmHandle>> handles;
+ auto& owned=handles[a.get_device()];if(!owned)owned=std::make_unique<OwnedBmmHandle>();
+ auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"TriMul owned BMM status ",int(s));};
+ auto handle=owned->value;auto stream=at::cuda::getCurrentCUDAStream();
+ ck(cublasSetStream(handle,stream));ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
+ const bool fp32=a.scalar_type()==at::kFloat;
+ auto math=fp32&&tf32?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH;
+ if(!fp32&&at::globalContext().allowBF16ReductionCuBLAS()!=at::CuBLASReductionOption::AllowReducedPrecisionWithSplitK) math=static_cast<cublasMath_t>(math|CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION);
+ ck(cublasSetMathMode(handle,math));
+ const size_t bytes=at::cuda::getChosenWorkspaceSize();auto workspace=torch::empty({int64_t(bytes)},a.options().dtype(at::kByte));ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
+ auto leading=[](torch::Tensor t){bool row=t.stride(2)==1;TORCH_CHECK(row?t.stride(1)>=t.size(2):(t.stride(1)==1&&t.stride(2)>=t.size(1)),"TriMul BMM dense view");return int(row?t.stride(1):t.stride(2));};
+ int lda=leading(a),ldb=leading(b),m=a.size(1),n=b.size(2),k=a.size(2);
+ TORCH_CHECK(out.stride(2)==1&&out.stride(1)>=n,"TriMul BMM row output");
+ float alpha=1,beta=0;auto dtype=fp32?CUDA_R_32F:CUDA_R_16BF;
+ auto compute=fp32&&tf32?CUBLAS_COMPUTE_32F_FAST_TF32:CUBLAS_COMPUTE_32F;
+ ck(cublasGemmStridedBatchedEx(handle,b.stride(2)==1?CUBLAS_OP_N:CUBLAS_OP_T,a.stride(2)==1?CUBLAS_OP_N:CUBLAS_OP_T,n,m,k,&alpha,b.data_ptr(),dtype,ldb,b.stride(0),a.data_ptr(),dtype,lda,a.stride(0),&beta,out.data_ptr(),out.scalar_type()==at::kFloat?CUDA_R_32F:CUDA_R_16BF,out.stride(1),out.stride(0),a.size(0),compute,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+ return out;
+}
+"""
+
+
+@functools.lru_cache(maxsize=1)
+def _owned_blas_extension():
+    from torch.utils.cpp_extension import load_inline
+    import hashlib
+
+    cuda_home = ensure_cuda_home()
+    if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+        raise RuntimeError("Hopper owned BLAS requires CUDA <= 12.9")
+    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    build = root / "triattn_owned_blas" / hashlib.sha256(_OWNED_BLAS_CPP.encode()).hexdigest()[:16]
+    build.mkdir(parents=True, exist_ok=True)
+    return load_inline(
+        name="triattn_h100_owned_blas", cpp_sources=_OWNED_BLAS_CPP,
+        functions=["owned_mm", "owned_bmm"], with_cuda=True, build_directory=str(build),
+        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
+        extra_cflags=["-O3"], extra_ldflags=["-lcublas"], verbose=False,
+    )
+
+
+def _mm(a, b, *, out_dtype=None):
+    if not _owned_blas_enabled():
+        return torch.mm(a, b, **({"out_dtype": out_dtype} if out_dtype is not None else {}))
+    return _owned_blas_extension().owned_mm(
+        a, b, torch.backends.cuda.matmul.allow_tf32, out_dtype == torch.float32,
+    )
+
+
+def _bmm(a, b, *, out_dtype=None):
+    # Held-graph replay requires owned scratch for this reduction geometry only.
+    # Other required training cells retain their original cuBLAS BMM calls.
+    needs_owned = (a.shape[0] * a.shape[2] == 384 * 384 and b.shape[2] == 256)
+    if not _owned_blas_enabled() or not needs_owned:
+        return torch.bmm(a, b, **({"out_dtype": out_dtype} if out_dtype is not None else {}))
+    out = torch.empty(
+        (a.shape[0], a.shape[1], b.shape[2]), device=a.device,
+        dtype=a.dtype if out_dtype is None else out_dtype,
+    )
+    return _owned_blas_extension().owned_bmm(a, b, out, torch.backends.cuda.matmul.allow_tf32)
