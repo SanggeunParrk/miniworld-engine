@@ -24,7 +24,11 @@ template<int C,int NT> TMN_DEVI void aggregate_ln(float (&gg)[C/32],float (&bb)[
  for(int c=tid;c<C;c+=NT){float g=0,b=0;
   #pragma unroll
   for(int w=0;w<NT/32;++w){g+=sm[w*C+c];b+=sm[(NT/32+w)*C+c];}
+  #if MW_LN_PARTIALS
+  dg[blockIdx.x*C+c]=g;db[blockIdx.x*C+c]=b;
+  #else
   atomicAdd(dg+c,g);atomicAdd(db+c,b);
+  #endif
  }
  __syncthreads();
 }
@@ -75,6 +79,7 @@ void mw_independent_input_ln(__grid_constant__ const Params p){
  }
  aggregate_ln<D,NT>(gg,bb,reinterpret_cast<float*>(sm),p.dg,p.db);
 
+ #if !INPUT_NO_REDUCE
  for(int i=blockIdx.x*NT+tid;i<4*D*D;i+=gridDim.x*NT){
   int which=i/(D*D),j=(i%(D*D))*2;float a=0,b=0;
   #pragma unroll
@@ -85,4 +90,5 @@ void mw_independent_input_ln(__grid_constant__ const Params p){
   *reinterpret_cast<uint32_t*>(p.dw[which]+j)=pack_bf16(a,b);
 #endif
  }
+ #endif
 }

@@ -95,9 +95,24 @@ def preserve_d256_training():
                 and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1"))
 
 
+def preserve_wide_training(width):
+    """Opt-in D384/D512 native glue around the selected Hopper compute kernels."""
+    return (width in (384, 512)
+            and os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") == "1")
+
+
+def uni_training(x, outgoing):
+    return (uni_d256_training(x, outgoing)
+            or (preserve_wide_training(x.shape[-1]) and x.ndim == 4
+                and x.shape[0] == 1 and x.shape[1] == x.shape[2]
+                and x.shape[1] in (384, 768)))
+
+
 def preserve_training(width):
     return ((width == 128 and preserve_d128_training())
-            or (width == 256 and preserve_d256_training()))
+            or (width == 256 and preserve_d256_training())
+            or preserve_wide_training(width))
 
 
 @contextmanager

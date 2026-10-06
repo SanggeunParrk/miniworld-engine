@@ -161,7 +161,7 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         )
     elif bidirectional:
         apply = bidirectional_trimul
-    elif d in (64, 256, 384):
+    elif d in (64, 256, 384, 512):
         if d == 64:
             from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_d64_training import (
                 single_trimul,
