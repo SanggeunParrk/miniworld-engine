@@ -60,6 +60,7 @@ UNITS: list[tuple[str, str, str]] = [
     ("dit", "", "DiT"),
     ("dit_atom", "", "Atom DiT"),
     ("swa_dit", "", "SWA DiT"),
+    ("local_dit", "", "AF3 atom DiT (32 x 128)"),
 ]
 TABLE_RE = re.compile(r"^(inference|training)_(seq_len|d_pair)(?:_(.+))?\.csv$")
 

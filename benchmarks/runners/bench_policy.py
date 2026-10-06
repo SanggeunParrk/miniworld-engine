@@ -73,6 +73,8 @@ MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
     "dit_atom": "the same pair-bias DiT block at atom widths; both components support bf16|fp32",
     "swa_dit": "the SWA atom DiT block wraps swa_atom_attention, so it inherits its flash bf16-only "
                "core even though the adaLN and the transition around it are bf16|fp32",
+    "local_dit": "the AF3 atom transformer block (32 x 128 windows): its sm_100a kernels are bf16-only; fp32 falls to the "
+                 "module's PyTorch composition",
     "outer_product": "no registry family of its own: the fused path (integrations/opm_train.py, "
                      "csrc/opm_epilogue.cu) and the Anthropic path are bf16-only; fp32 falls to "
                      "the module's statements",
@@ -101,6 +103,7 @@ MODULE_SUPPORTS_FP32: dict[str, bool] = {
     "dit": True,
     "dit_atom": True,
     "swa_dit": False,
+    "local_dit": False,
     "outer_product": False,
     "msa_pair_weighted_averaging": False,
     "attention_pair_bias": False,

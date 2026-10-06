@@ -4146,6 +4146,97 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         reference="module.reference.torch",
     )
 
+def bench_module_local_dit(conf, seq_len, implementation, fabric):
+    """AF3 atom transformer block (`modules/local_dit.LocalDiTBlock`): AdaLN, q / k / v / gate, block-local pair-bias attention
+    with the 32 x 128 trunking (query window of 32 atoms sees 128 atoms; the pair is the trunked atom pair
+    [1, nwin, 32, 128, d_pair]), gated out-projection, conditioned SwiGLU transition. Cross-attention mode (a second AdaLN for K / V),
+    4 heads x 32, atom widths. Runs at the atom length (`seq_len * 8`), like the other atom targets.
+
+    * pytorch -- `LocalDiTBlock(implementation=PYTORCH)`, the reference composition (fp32 windowed softmax).
+    * miniworld -- the same block on the engine's sm_100a kernels (`integrations.local_dit`) in bf16, where they serve the call,
+      else the reference composition -- `execution_path` says which one ran.
+
+    No Anthropic row: its atom attention (apb row fpf_atom) is this windowed op, but there is no block around it to compare.
+    """
+    from miniworld_engine.modules.local_dit import LocalDiTBlock
+    from miniworld_engine.modules.local_dit.module import KEYS, QUERIES, windows
+
+    spec = triton_miniworld_spec(implementation)      # miniworld -> TRITON: the engine's kernels
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+        raise UnsupportedBenchmark(f"local_dit does not implement {implementation!r}")
+    is_train = not is_inference_mode(conf.mode)
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    d_single, d_pair, n_head = conf.d_single_atom, conf.d_pair_atom, 4
+
+    class MultiLocalDiT(nn.Module):
+        def __init__(self, impl) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([
+                LocalDiTBlock(d_single, d_single, d_pair, n_head, n=2, cross_attention=True, implementation=impl)
+                for _ in range(conf.n_layers)])
+
+        def forward(self, single, cond, pair, mask=None):
+            for layer in self.layers:
+                single = layer(single, cond, pair, mask)
+            return single
+
+    model = MultiLocalDiT(spec.impl)
+    torch.manual_seed(0)
+    with torch.no_grad():                              # zero-initialised gates / norms at identity would make backward vacuous
+        for prm in model.parameters():
+            if prm.ndim == 2:
+                prm.normal_(std=prm.shape[1] ** -0.5)
+            elif prm.ndim == 1 and prm.numel() > 1:
+                prm.add_(torch.randn_like(prm) * 0.1)
+    model = model.to(device=DEVICE, dtype=dtype)
+    model.train(is_train)
+
+    atom_len = seq_len * 8
+    torch.manual_seed(1)
+    single = torch.randn(conf.n_augment, 1, atom_len, d_single, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    cond = torch.randn(conf.n_augment, 1, atom_len, d_single, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    pair = torch.randn(1, windows(atom_len), QUERIES, KEYS, d_pair, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    mask = torch.rand(1, atom_len, device=DEVICE) > conf.mask_prob
+    dy = torch.randn_like(single)
+
+    if spec.impl == ImplementationType.PYTORCH:
+        execution_path = "module.reference.torch"
+    else:
+        from miniworld_engine.integrations import local_dit as fused
+
+        with torch.set_grad_enabled(is_train):
+            served = fused.serves(model.layers[0], single, cond, pair, mask)
+        execution_path = (
+            "modules.local_dit.LocalDiTBlock -> integrations.local_dit[local_dit_block_fwd / _bwd: sm_100a window attention + "
+            "pair-bias kernels, atom DiT row kernels]" if served else
+            "modules.local_dit.LocalDiTBlock[reference composition: integrations.local_dit.serves() declined]")
+
+    if conf.compile:
+        compile_module_for_benchmark(model)
+    model = fabric.setup_module(model)
+
+    def inference_step():
+        with torch.no_grad():
+            return model(single, cond, pair, mask)
+
+    def training_step() -> torch.Tensor:
+        y = model(single, cond, pair, mask)
+        fabric.backward(y, dy)
+        return y
+
+    return measured_result(
+        conf=conf,
+        func=inference_step if not is_train else training_step,
+        grad_to_none=[single, cond, pair, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=is_train,
+        input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
+        execution_path=execution_path,
+        reference="module.reference.torch",
+    )
+
+
 def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     """Bias-only token DiT block (`modules/bias_only_dit`): AF3 Alg. 23 with the attention's query-key half removed --
     softmax(pair bias) v, gated -- then the conditioned transition, at the token widths of the `dit` target.
@@ -4294,6 +4385,7 @@ MODULE_TARGETS = {
     "dit": bench_module_dit,
     "dit_atom": bench_module_dit_atom,
     "swa_dit": bench_module_swa_dit,
+    "local_dit": bench_module_local_dit,
     "bias_only_dit": bench_module_bias_only_dit,
     "outer_product": bench_module_outer_product,
     "msa_pair_weighted_averaging": bench_module_msa_pair_weighted_averaging,
@@ -4365,6 +4457,7 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             # 32x128 windowed op, not this dense block (see bench_module_dit).
             "dit_atom": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             "swa_dit": ("pytorch", "triton", "miniworld"),
+            "local_dit": ("pytorch", "triton", "miniworld"),
             "bias_only_dit": ("pytorch", "miniworld"),
         }
         if set(supported) != set(MODULE_TARGETS):
