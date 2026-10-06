@@ -26,6 +26,7 @@ module's row-broadcast dropout on the update are applied inside the kernel: the 
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,11 +38,20 @@ ENV = "MINIWORLD_PWA_TRAIN"
 H, C, D, DZ = 8, 32, 64, 128
 HC = H * C
 _EXT: dict[str, Any] = {}
+_NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar("pwa_native_training", default=False)
 
 
-def native_aux_enabled() -> bool:
-    """Experimental H100 CUDA preparation and deterministic reduction path."""
-    return os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "0") == "1"
+def _h100_training_default(msa: torch.Tensor) -> bool:
+    """The six required training shapes with full native accuracy qualification."""
+    return (msa.device.type == "cuda" and torch.cuda.get_device_capability(msa.device) == (9, 0)
+            and msa.ndim == 4 and msa.shape[0] == 1 and msa.shape[3] == D
+            and msa.shape[1] in (1024, 2048, 4096) and msa.shape[2] in (384, 768))
+
+
+def native_aux_enabled(msa: torch.Tensor | None = None) -> bool:
+    """Qualified training defaults; explicit AUX=0 preserves the legacy path."""
+    default = _h100_training_default(msa) if msa is not None else _NATIVE_TRAINING_SCOPE.get()
+    return os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "1" if default else "0") == "1"
 
 
 def native_inference_enabled(device: torch.device) -> bool:
@@ -92,7 +102,7 @@ def refusal(msa: torch.Tensor, pair: torch.Tensor, d_msa: int, d_pair: int, n_he
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         n, s = msa.shape[2], msa.shape[1]
-        native = native_aux_enabled() or (not torch.is_grad_enabled() and native_inference_enabled(msa.device))
+        native = native_aux_enabled(msa) or (not torch.is_grad_enabled() and native_inference_enabled(msa.device))
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > 1024):
             return f"the CUDA-only H100 path needs positive S and N <= 1024, got N={n}, S={s}"
         if n % 128 or s % 2:
@@ -342,6 +352,7 @@ class _PwaMath(torch.autograd.Function):
         sm100 = torch.cuda.get_device_capability(m.device) == (10, 0)
         k = _k100() if sm100 else _k()
         if not sm100 and native_aux_enabled() and pm.numel() <= N:
+            ctx.key_mask = pm
             pm = k["pair3"].mask(m, None if pm.numel() == 0 else pm, N)
         if sm100:                                                                   # pm: the [N] bool key mask (pair_weighted_averaging)
             w16 = k["pwa"].pair_fwd(z, pm, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous())
@@ -358,7 +369,11 @@ class _PwaMath(torch.autograd.Function):
         # x * mask / (1 - p); applied to the bf16 update inside the kernel's residual epilogue
         dmask, dscale = None, 1.0
         if p_drop > 0:
-            dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
+            if not sm100 and native_aux_enabled():
+                from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
+                dmask = extension("pack").drop_keep(m, N, D, float(p_drop))
+            else:
+                dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
         if sm100:
             o = torch.bmm(w16, v)                   # the contraction on cuBLAS: 5-15 % faster than pwa_ctr at L 256-1024, bit-identical
@@ -459,7 +474,7 @@ def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask:
     n = msa.shape[2]
     if torch.cuda.get_device_capability(msa.device) == (10, 0):                  # sm_100a: the [N] key mask itself
         pm = torch.ones(n, dtype=torch.bool, device=msa.device) if mask is None else mask[0].to(torch.bool).contiguous()
-    elif native_aux_enabled():
+    elif native_aux_enabled(msa):
         # Keep the CUDA launch inside the opaque forward so torch.compile can
         # trace the module without following a pybind extension call.
         pm = mask if mask is not None else torch.empty((0,), device=msa.device, dtype=torch.bool)
@@ -500,9 +515,60 @@ def _forward_op(args:list[torch.Tensor],eps_m:float,eps_z:float,p_drop:float)->l
 def _backward_fake(args,kept,dy,eps_m,eps_z,p_drop):return [torch.empty_like(args[i]) for i in (0,1,3,4,5,6,7,8,9)]
 
 
+def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
+    """Opt-in FP32 numerical beta residual, using the forward's actual keep mask.
+
+    This accuracy-first path materializes FP32 MSA/pair workspaces and does not
+    yet preserve the B200 fused backward's tensor lifetimes or performance.
+    """
+    from miniworld_engine.kernels.augmented_attention.cuda import apb
+    E = apb.ext()
+    K = _k()["pair3"]
+    with torch.cuda.device(dy.device), torch.autocast("cuda", enabled=False):
+        # Keep the valid IO0 incumbent at S4096/L768: IO1 did not beat its
+        # archived accurate latency, despite winning the same-allocation pair.
+        io_default = _h100_training_default(args[0]) and args[0].shape[1:3] != (4096, 768)
+        native_io = os.environ.get("MINIWORLD_PWA_H100_SHADOW_IO", "1" if io_default else "0") == "1"
+        if native_io:
+            df, lmw, lmb, wv, wg, lzw, lzb, wb, wo = E.exact_fp32_inputs_grouped([dy, *args[3:]])
+            S, L = args[0].shape[1:3]
+            xn = E.exact_ln_bf16(args[0], lmw, lmb, eps_m, True).view(S * L, D)
+            zn = E.exact_ln_bf16(args[1], lzw, lzb, eps_z, True).view(L * L, DZ)
+            # The tiled transpose is retained for diagnosis: it was slower
+            # than the original CUDA copy on the required H100 shapes.
+            pack = K.shadow_pack_tiled if os.environ.get("MINIWORLD_PWA_H100_SHADOW_PACK_TILED", "0") == "1" else K.shadow_pack
+        else:
+            x, z, df, lmw, lmb, wv, wg, lzw, lzb, wb, wo = E.exact_fp32_inputs([args[0], args[1], dy, *args[3:]])
+            S, L = x.shape[1:3]
+            xn = E.exact_ln(x, lmw, lmb, eps_m).view(S * L, D)
+            zn = E.exact_ln(z, lzw, lzb, eps_z).view(L * L, DZ)
+            pack = K.shadow_pack
+        value = pack(E.exact_mm(xn, wv.t()), S, L)
+        gate = E.exact_mm(xn, wg.t())
+        du = K.shadow_dropout(df, kept[4], float(p_drop)) if p_drop else df
+        dog = E.exact_mm(du.view(S * L, D), wo)
+        do = pack(E.exact_point(dog, gate, 1.0, 1), S, L)
+        mask = args[2].view(L) if args[2].numel() else None
+        bias = E.exact_mask_bias(E.exact_mm(zn, wb.t()), mask, L)
+        prob = E.exact_soft(bias, bias, False)
+        dw = E.exact_mm(do, value.transpose(1, 2))
+        ds = E.exact_soft(dw, prob, True)
+        db = E.exact_db_transpose(ds, mask)
+        return E.exact_beta(E.exact_mm(db, wb))
+
+
 @opaque(fake=_backward_fake,name="pwa_h100_bwd")
 def _backward_op(args:list[torch.Tensor],kept:list[torch.Tensor],dy:torch.Tensor,eps_m:float,eps_z:float,p_drop:float)->list[torch.Tensor]:
+    scope = _NATIVE_TRAINING_SCOPE.set(_h100_training_default(args[0]))
+    try:
+        return _backward_math(args, kept, dy, eps_m, eps_z, p_drop)
+    finally:
+        _NATIVE_TRAINING_SCOPE.reset(scope)
+
+
+def _backward_math(args, kept, dy, eps_m, eps_z, p_drop):
     ctx=_SavedContext();ctx.eps=(eps_m,eps_z);ctx.dscale=1/(1-p_drop) if p_drop else 1.
+    ctx.key_mask=args[2]
     ctx.saved_tensors=(args[0][0],args[1][0],*kept[:4],*args[3:],*((kept[4],) if p_drop else ()))
     gradients=_PwaMath.backward(ctx,dy)
     return [gradients[i] for i in (0,1,3,4,5,6,7,8,9)]
