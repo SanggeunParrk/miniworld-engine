@@ -5,7 +5,11 @@ CUDA rows and SwiGLU GEMM). Inference only: the weights are packed once and the 
 (pointer, version) is unchanged, CUDA-graph replays included; the attention weights P = softmax(pair bias) are made once per
 pair and mask (keyed on the tensors' pointer and version) -- they depend on nothing else.
 
-``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16, the
+fp32 (single, cond and pair fp32, the block's weights fp32, no CUDA autocast) runs the same schedule in fp32 on TF32 tensor
+cores (``kernels/bias_only_dit/cuda/tf32.py``: the ``pv_gate_tf32`` core, the fp32 rows and pair bias, cuBLAS forced to TF32);
+the fp32 kernels build on first use and a failed build warns once and keeps the module path.
+
+``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128, a key mask [1, L] or
 none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
 MINIWORLD_BIAS_ONLY_DIT=0 turns it off. Anything else keeps the module's PyTorch composition.
@@ -60,8 +64,11 @@ def serves(module, single, cond, pair, mask=None) -> bool:
         return False
     if settings.current().engine_backend == "triton":
         return False
-    if not (single.is_cuda and single.dtype is torch.bfloat16 and cond.dtype is torch.bfloat16 and pair.dtype is torch.bfloat16):
+    dt = single.dtype
+    if not (single.is_cuda and dt in (torch.bfloat16, torch.float32) and cond.dtype is dt and pair.dtype is dt):
         return False
+    if dt is torch.float32 and (module.attention.to_value.weight.dtype is not torch.float32 or torch.is_autocast_enabled("cuda")):
+        return False                     # fp32 = an fp32 block; under autocast the module path keeps its casts
     if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != D or single.shape[2] % 128:
         return False
     A, _, L, _ = single.shape

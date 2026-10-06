@@ -15,9 +15,10 @@ running max, no rescale.
 
 ## Scope and dispatch
 
-Both paths run **hand-written CUDA and cuBLAS only** (no Triton, no quack), bf16, B == 1, L a multiple of 128 up to 768, a key
-mask [1, L] or none, LayerNorm eps 1e-5, implementation MINIWORLD or TRITON. Everything else -- fp32, other cards, other widths --
-runs the module's PyTorch composition. Each integration's `serves()` is the whole gate.
+Both paths run **hand-written CUDA and cuBLAS only** (no Triton, no quack), bf16 -- or fp32 on TF32 tensor cores (an fp32 block:
+fp32 inputs and weights, no CUDA autocast; see [fp32 path](#fp32-path-tf32)) -- B == 1, L a multiple of 128 up to 768, a key
+mask [1, L] or none, LayerNorm eps 1e-5, implementation MINIWORLD or TRITON. Everything else -- other cards, other widths, fp32
+under autocast or with bf16 weights -- runs the module's PyTorch composition. Each integration's `serves()` is the whole gate.
 
 - **Inference** (no autograd): `BiasOnlyDiTBlock.forward` -> `integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`
   (`FusedBiasOnlyDiT`). One conditioning per sample or one shared by the samples (sample axis 1 or stride 0). The weight pack and
@@ -197,6 +198,85 @@ shared driver rebuilt ctypes arguments per call, 25-35 us each). The descriptors
 pinned a step's activations per call (7 cudaMallocs per step, 13 GB reserved after a few steps). A step issues in ~0.9 ms of host
 time at L384 against ~1.0 ms of GPU time, so without CUDA graphs the GPU stays the bound.
 
+## fp32 path (TF32)
+
+Status (2026-10-06): written, **not yet built or measured on B200** -- the kernels below compile on first use; the tests are
+`tests/integrations/test_b200_bias_only_dit_tf32_gpu.py`. Every head layout of the bf16 path (16 x 48, 24 x 32, 12 x 64,
+16 x 64), the same lengths (L a multiple of 128 up to 768), masks, shared / per-sample conditioning, eager, `torch.compile`
+(the same opaque ops) and CUDA graphs.
+
+**Gate.** `serves()` takes fp32 when single, cond and pair are fp32, the block's weights are fp32 (`to_value.weight`) and CUDA
+autocast is off (under autocast the module path keeps its casts, as before), and `tf32_ready` (a `device_constant`) has built the
+fp32 kernels: the fp32 row extension, the bf16 row extensions whose dtype-generic passes the fp32 path shares, the attention core
+(and for training the ungated core and `dpb_tf32`). A failed build warns once and keeps the module path for the process.
+`MINIWORLD_BIAS_ONLY_DIT_TF32=0` turns the fp32 path off.
+
+**Recipe.** Every activation, saved tensor, table and gradient fp32; the residual stream fp32. General GEMMs are cuBLAS on TF32
+tensor cores (`tf32_gemms`: forced whatever the caller's `allow_tf32`, restored after -- the token DiT fp32 path's rule). The
+products of the attention are tcgen05 `kind::tf32` (fp32 operands rounded to tf32 by the MMA, fp32 accumulation). The pair
+bias and its backward are exact fp32 on the FMA pipe. Weight gradients fp32 (cuBLAS), the small ones through the bf16
+extension's dtype-generic `unfold` / `finalize`.
+
+| step | inference | training forward | training backward |
+|---|---|---|---|
+| pair bias `LN(pair) Wf^T` | `pair_bias` (f32 rows) per block | `pair_bias` + row stats | `pair_bias_bwd`: d pair, dWf partials |
+| softmax | `softmax_rows` (f32) | `softmax_t` (P and P^T, f32) | -- |
+| attention | **`pv_gate_tf32`** (gated) | **`pv_gate_tf32`** (gated) | `gate_bwd` rows, **`pv_gate_tf32`** ungated on P^T (dV), **`dpb_tf32`** |
+| conditioning | `ln_rows` (fp32 in / out) + 2 cuBLAS TF32 GEMMs | `cond_ln` + 2 GEMMs | `cond_bwd`, `unfold`, `finalize` |
+| rows | `adaln_in_rows`, `resgate_*_rows` (dtype-generic), `swiglu` (f32) | `adaln_a`, `res_adaln_b`, `swiglu`, `res_c` | `res_c_bwd`, `swiglu_bwd`, `res_adaln_b_bwd`, `adaln_a_bwd` |
+| v\|g, out, expand, squeeze | cuBLAS TF32 | cuBLAS TF32 | cuBLAS TF32 (data and weight gradients) |
+
+### F1 · `pv_gate_tf32.cu` (a = sigmoid(g) (P v), or P v)
+
+P no longer fits tensor memory in fp32 (a 128-query tile is L columns, 768 > 512), so the loop is turned around: **key-outer,
+sample-inner**. A 32-key chunk of P [128 i][32 j] (128-B rows, SW128, 16 KB) is the K-major A operand from shared memory and
+feeds the products of the item's SG samples, each into its own accumulator. v is the B operand with the head's channels as N:
+MN-major, which `kind::tf32` reads only from the 128-B swizzle with 32-B atoms (`SWIZZLE_128B_ATOM_32B`, UMMA layout type 1:
+the operand form `attn_fwd_tf32` / `attn_dkv_tf32` use) -- a sample's chunk is DH / 32 (rounded up) boxes [32 keys][32 channels],
+4 KB each, LBO 4 KB, 1 KB per K step of 8 keys. Accumulators double-buffered by item parity (2 SG DH <= 512 TMEM columns), so an
+item's epilogue (fp32 gate, staged g / a tiles by TMA: channels 0-31 SW128 + 32..DH-1 SW64 / SW128) runs under the next item's
+products.
+
+| budget | 16 x 48 | 24 x 32 | 12 x 64 / 16 x 64 |
+|---|---|---|---|
+| sample groups SG built | 1, 2, 4, 5 | 1, 2, 4, 8 | 1, 2, 4 |
+| stage (P chunk + SG v chunks), at the largest SG | 16 + 5 x 8 KB = 56 KB, 2 stages (SG 4: 48 KB, 3) | 16 + 8 x 4 KB = 48 KB, 3 stages | 16 + 4 x 8 KB = 48 KB, 2 stages |
+| g / a staging (3 tiles) | 3 x 24 KB | 3 x 16 KB | 3 x 32 KB |
+| TMEM (2 SG DH columns) | 480 -> 512 | 512 | 512 |
+
+Warps: 0 TMA producer, 1 MMA (whole warp waits, `elect_one()` issues), 2 TMEM allocator, 4-7 epilogue (a query row per thread);
+`__launch_bounds__(256, 2)` caps the registers at 128 (shared memory keeps one CTA per SM). SG per call: the fewest bytes into the
+busiest SM (`pick_group_tf32`: rounds x (P once + SG v tiles + their g / a)); `MINIWORLD_BIAS_ONLY_DIT_SG` forces one.
+
+### F2 · `dpb_tf32.cu` (dbias = P o (sum_a dO v^T - D))
+
+As `dpb_sm100.cu` with fp32 operands: per sample the dO tile [128 i][DH] and the key tile [NJ j][DH], both K-major (channels 0-31
+one SW128 box, 32..DH-1 a SW64 box for DH 48 / SW128 for DH 64, as `attn_inf_tf32`'s q / k tiles), one M 128 x N NJ x K DH product
+(K = 8 per MMA); accumulators double-buffered (2 NJ <= 512 columns); P streams in [128][32] fp32 pieces (two-slot ring, its own
+producer warp); each epilogue warp stages its 32 rows x 32 keys of dbias (fp32 SW128, 4 KB, two per warp) for TMA stores.
+Shared memory 32 KB P ring + 32 KB staging + NST >= 2 stages of (128 + NJ)(128 + 4 (DH - 32)) bytes; NJ in {128, 192, 256} by
+the bf16 kernel's cost model where two stages fit (12 / 16 x 64: NJ <= 192).
+
+### F3 · fp32 rows (`bias_only_dit_f32_rows.cu`)
+
+The training rows keep the bf16 kernels' layout (768-wide rows on two warps, persistent blocks, per-block column-sum partials that
+the shared `finalize` sums); every kernel at most 128 registers. `pair_bias`: a block takes 128 pair rows into shared memory (pitch
+129), a thread one row: two-pass statistics, then the H dot products with Wf^T read as float4 broadcasts -- exact fp32, no
+LN(pair) in memory. `pair_bias_bwd`: 32 rows per step, a thread one channel (Wf's column and its dWf column in registers,
+dbias^T as broadcasts), then a warp per row for the LayerNorm backward. `softmax_t` keeps 32 rows in shared memory (pitch L + 1)
+and writes P^T with 16-byte stores.
+
+**Not ported:** `gemm_resln_sm100` and `cond_tables_sm100` (opt-in, measured slower than the default composition in bf16; the
+cond-table kernel's resident [128 x 384] A tile is 192 KB in fp32 and does not fit beside its B stages). The fp32 step runs the
+default composition (`MINIWORLD_BIAS_ONLY_DIT_RESLN` / `_COND` are ignored for fp32).
+
+**Accuracy contract** (the tests): output and every gradient against an fp64 reference within 1.5x the error of the PyTorch fp32
+module with TF32 GEMMs (`allow_tf32 = True`) + 1e-3. A TF32 operand keeps 10 mantissa bits (unit roundoff 2^-11 ~ 4.9e-4):
+every product of the block carries O(1e-3) relative error whoever computes it, so IEEE fp32 is not the bar; the floor is one
+truncation step, 2^-10 (a `kind::tf32` MMA drops the operands' low 13 bits where cuBLAS may round to nearest; the token DiT's
+fp32 tests take 1.5x + 3e-3). Kernel tests: the TF32 products (core, dV, dbias) within 3e-3 of fp64 einsum; the exact-fp32 kernels (softmax, pair bias and
+its backward, gate backward) within 1e-5.
+
 ## Measurements (2026-09-30 / 2026-10-01)
 
 B200 (148 SMs, 1000 W power cap), the v2.2.0 pixi env (torch 2.13.0+cu129), one GPU through `gpuq` with nothing else on it.
@@ -359,7 +439,7 @@ Inference:
 
 ## Limits and next
 
-- fp32 (TF32) inference and training are not written; fp32 calls run the PyTorch module.
+- fp32 (TF32) inference and training: written (see [fp32 path](#fp32-path-tf32)); not yet built, tested or measured on B200.
 - Training: half the step is cuBLAS at the power cap; the row kernels and the SwiGLU GEMM are at their floor (✓). Below it (△):
   the pair-bias kernels (T1, issue-bound), `softmax_t` (T2), `dpb` (T3, TMA intake), `finalize` (~8 us of reduction latency)
   and, with 32-wide heads, the core's N = 32 products (24 x 32 L768 at 80 % of its floor; two samples per N = 64 product would

@@ -17,6 +17,12 @@ What each call hoists, and why it may:
           shift, output gates) of every block come from two GEMMs over L rows when the samples share one conditioning, over
           S L rows when each has its own. The residual stream is fp32.
 
+fp32 (``dtype=torch.float32``, the TF32 recipe): the same schedule with every activation, table and weight fp32. The hoist is
+``pair_bias`` (LN(pair) Wf^T in exact fp32, ``bias_only_dit_f32_rows.cu``) and the fp32 softmax, P [nb H, L, L] fp32; the core is
+``pv_gate_tf32`` (kind::tf32 MMAs, P streamed through shared memory); GEMMs are cuBLAS on TF32 tensor cores (``tf32_gemms``); the
+expand GEMM is cuBLAS + the fp32 SwiGLU rows; the conditioning tables and the opt-in fused kernels (cond tables, GEMM + residual +
+AdaLN) stay bf16-only -- the fp32 step runs the default composition.
+
 Tried and not kept: splitting the samples over two or three CUDA streams (each chain leaves SMs idle at these sizes, but the
 core and cuBLAS's kernels each fill an SM's shared memory, so the chains did not overlap: L384 70 -> 80 us), and the
 output-gate table GEMM on a side stream (no change).
@@ -33,6 +39,12 @@ from miniworld_engine.kernels.bias_only_dit import cuda as C
 EPS = 1e-5
 
 
+def _tf32():
+    """The fp32 path's kernels (``cuda/tf32.py``)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+    return tf32
+
+
 def _rows():
     """The token DiT's CUDA row kernels: the pair LayerNorm (C = 128) of the hoist."""
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
@@ -41,6 +53,7 @@ def _rows():
 
 class FusedBiasOnlyDiT:
     def __init__(self, blocks, dtype=torch.bfloat16):
+        assert dtype in (torch.bfloat16, torch.float32), "bf16, or fp32 on TF32 tensor cores"
         blocks = list(blocks)
         a0 = blocks[0].attention
         self.nb = len(blocks)
@@ -49,7 +62,7 @@ class FusedBiasOnlyDiT:
         self.da = a0.to_value.weight.shape[0]                    # the attention's: n_head x head width (768 or 1024)
         self.dc = a0.ada_ln_in.ln_cond.weight.shape[0]
         self.dp = a0.ln_pair.weight.shape[0]
-        assert dtype is torch.bfloat16, "the core is bf16 only"
+        self.fp32 = dtype is torch.float32
         dev = a0.to_value.weight.device
         f32 = lambda t: t.detach().float()
         w1, b1, w2, b2, pw = [], [], [], [], []
@@ -88,15 +101,24 @@ class FusedBiasOnlyDiT:
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
-        """pair [1, L, L, dp] -> every block's attention weights P [nb H, L, L] bf16 (rows sum to 1 over the keys).
+        """pair [1, L, L, dp] -> every block's attention weights P [nb H, L, L] in the runner's dtype (rows sum to 1 over the keys).
         ``mask`` [L] bool marks the real tokens; the other keys get zero weight."""
         L = pair.shape[1]
         z2d = pair.reshape(L * L, self.dp)
+        m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
+        if self.fp32:
+            # one pass of the pair per block: its LayerNorm and the H biases on the FMA pipe, exact fp32 (no LN(pair) in memory)
+            R32 = _tf32().rows32()
+            P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=torch.float32)
+            z32 = z2d.float().contiguous()
+            for b in range(self.nb):
+                R32.pair_bias_cuda(z32, self.pw[b * self.h:(b + 1) * self.h], P[b * self.h:(b + 1) * self.h], None, EPS)
+            R32.softmax_rows_cuda(P.view(-1, L), P.view(-1, L), m)
+            return P
         zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)
         _rows()._ext().layernorm128_rows(z2d, zh, EPS)
         P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
         torch.mm(self.pw, zh.t(), out=P.view(self.nb * self.h, L * L))
-        m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
         C.softmax_rows(P.view(-1, L), P.view(-1, L), m)
         return P
 
@@ -112,13 +134,14 @@ class FusedBiasOnlyDiT:
     def _core(self, device):
         idx = device.index if device.index is not None else torch.cuda.current_device()
         if ("core", idx) not in self._ops:
-            self._ops[("core", idx)] = C.PvGateCore(idx, nh=self.h, dh=self.da // self.h)
+            self._ops[("core", idx)] = (_tf32().PvGateCoreTF32(idx, nh=self.h, dh=self.da // self.h) if self.fp32 else
+                                        C.PvGateCore(idx, nh=self.h, dh=self.da // self.h))
         return self._ops[("core", idx)]
 
     def _cond(self, device):
         """The one-kernel conditioning tables (MINIWORLD_BIAS_ONLY_DIT_COND=1); off by default: slower than LayerNorm rows + two
         cuBLAS GEMMs at every measured shape (the sigmoids of the tables on 256 epilogue threads per SM dominate its time)."""
-        if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_COND", "0") == "0":
+        if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_COND", "0") == "0" or self.fp32:
             return None
         idx = device.index if device.index is not None else torch.cuda.current_device()
         if ("cond", idx) not in self._ops:
@@ -128,7 +151,7 @@ class FusedBiasOnlyDiT:
     def _resln(self, device, final, presig):
         """The width-768 GEMM with residual + gate + AdaLN (or the final output) in its epilogue; None: cuBLAS + rows.
         Off by default until the conditioning tables carry their sigmoids (MINIWORLD_BIAS_ONLY_DIT_RESLN=1 turns it on)."""
-        if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_RESLN", "0") == "0":
+        if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_RESLN", "0") == "0" or self.fp32:
             return None
         idx = device.index if device.index is not None else torch.cuda.current_device()
         key = ("resln", idx, final, presig)
@@ -140,6 +163,8 @@ class FusedBiasOnlyDiT:
         """The sm_100a expand GEMM with the SwiGLU epilogue where it fits (M >= its row threshold); None: cuBLAS + rows."""
         idx = device.index if device.index is not None else torch.cuda.current_device()
         key = ("gsw", idx, xa.shape[0])
+        if self.fp32:
+            return None
         if key not in self._ops:
             from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
             wab = self.per[0]["wab"]
@@ -151,6 +176,12 @@ class FusedBiasOnlyDiT:
     def step(self, single, cond, P, out_dtype=None):
         """One solver step: single [S, 1, L, D], cond [S or 1, 1, L, dc] (one conditioning shared by the samples when
         its sample axis is 1 or has stride 0), P from ``hoist``. Returns [S, 1, L, D] in ``out_dtype`` (single's)."""
+        if not self.fp32:
+            return self._step(single, cond, P, out_dtype)
+        with _tf32().tf32_gemms():
+            return self._step(single, cond, P, out_dtype)
+
+    def _step(self, single, cond, P, out_dtype=None):
         S, B, L, D = single.shape
         assert B == 1 and L % 128 == 0 and D == self.d
         M, nb = S * L, self.nb
@@ -196,7 +227,10 @@ class FusedBiasOnlyDiT:
                 gsw(xa, p["wab"], h)                                      # expand + SwiGLU, one sm_100a kernel
             else:
                 torch.mm(xa, p["wab"].t(), out=ab)
-                C.swiglu_rows(ab, h)
+                if self.fp32:
+                    _tf32().rows32().swiglu_cuda(ab, h)
+                else:
+                    C.swiglu_rows(ab, h)
             last = b + 1 == self.nb
             if resln is not None:                                         # squeeze GEMM + residual + gate (+ AdaLN)
                 if last:

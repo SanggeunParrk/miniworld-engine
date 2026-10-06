@@ -10,6 +10,9 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 path of the bias-only token DiT (`kernels/bias_only_dit/cuda/tf32.py`, `pv_gate_tf32.cu`, `dpb_tf32.cu`,
+  `bias_only_dit_f32_rows.cu`): inference and training, every head layout, TF32 MMA. Tests:
+  `tests/integrations/test_b200_bias_only_dit_tf32_gpu.py`; page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`.
 - B200 fp32 path of the AF3 local atom DiT (`integrations/local_dit.py` ops `local_dit_block_{fwd,bwd}_tf32`; kernels
   `sm100_atom_local/*_tf32.cu`, `sm100_atom/gemm_tf32.cu`, `rows_tf32.cu`): inference and training with fp32 activations and
   parameters on TF32 MMA (operands rounded to nearest); fp32 calls no longer fall back to the module path. Tests:

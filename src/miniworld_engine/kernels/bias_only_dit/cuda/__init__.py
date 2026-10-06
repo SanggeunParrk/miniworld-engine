@@ -9,6 +9,8 @@
 The core is a cubin built on first use into ``MINIWORLD_ENGINE_JIT_ROOT`` and launched through the sm_100a driver of
 ``kernels/augmented_attention/cuda/sm100`` (TMA descriptors, current stream, CUDA-graph capturable); the rows are a
 torch extension. Neither is built at import.
+
+The fp32 path (TF32 tensor cores: ``pv_gate_tf32.cu``, ``dpb_tf32.cu``, ``bias_only_dit_f32_rows.cu``) is ``tf32.py``.
 """
 
 from __future__ import annotations
@@ -126,9 +128,16 @@ def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
 
 def core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
     """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
-    up to 768 (the P tile and two accumulators in 512 TMEM columns), sm_100. MINIWORLD_BIAS_ONLY_DIT_CORE=0 turns it off."""
+    up to 768 (the P tile and two accumulators in 512 TMEM columns), sm_100. MINIWORLD_BIAS_ONLY_DIT_CORE=0 turns it off.
+    fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
     if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_CORE", "1") == "0":
         return False
+    if dtype is torch.float32:
+        if not (d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
+                and torch.cuda.get_device_capability(device_index) == (10, 0)):
+            return False
+        from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import tf32_ready
+        return tf32_ready(device_index, h, d // h, False)
     return (dtype is torch.bfloat16 and d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
             and torch.cuda.get_device_capability(device_index) == (10, 0))
 
