@@ -30,6 +30,17 @@ def preserve_d128_training():
             and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1")
 
 
+def preserve_d256_training():
+    """Keep selected wide CUDA plans; use deterministic native auxiliary work."""
+    return (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1")
+
+
+def preserve_training(width):
+    return ((width == 128 and preserve_d128_training())
+            or (width == 256 and preserve_d256_training()))
+
+
 @contextmanager
 def native_context(device):
     """One verified framework CUDA context for all maps within a native call."""

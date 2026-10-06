@@ -192,7 +192,7 @@ class _Training(torch.autograd.Function):
         mask, ds = args[11:]
         weights = leaves[1:7]
         ctx.master = any(w.dtype == torch.float32 for w in weights)
-        if T.preserve_d128_training():
+        if T.preserve_training(leaves[0].shape[-1]):
             from ._h100_pack import cast_training_weights
             leaves = [leaves[0],*cast_training_weights(weights),*leaves[7:]]
         elif ctx.master:
@@ -213,7 +213,7 @@ class _Training(torch.autograd.Function):
         grads = backward(leaves, vals[11], vals[12], list(vals[13:end]), dy, ctx.master)
         if vals[0].shape[-1] == 128:
             grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
-        if T.preserve_d128_training():
+        if T.preserve_training(vals[0].shape[-1]):
             from ._h100_pack import native_training_grads
             grads = native_training_grads(grads,list(vals[:11]))
         else:
@@ -224,7 +224,10 @@ class _Training(torch.autograd.Function):
 def bidirectional_trimul(*args):
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
-        if any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
+        if T.preserve_training(leaves[0].shape[-1]):
+            from ._h100_pack import cast_training_weights
+            leaves = [leaves[0], *cast_training_weights(leaves[1:7]), *leaves[7:]]
+        elif any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
             torch._foreach_copy_(weights, leaves[1:7])
             leaves = [leaves[0], *weights, *leaves[7:]]
