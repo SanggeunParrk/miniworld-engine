@@ -351,6 +351,8 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         if hopper:
             sm100.finish_columns_hopper(dmod, dp, dgparts, dbias_cols, dbq, dgamma_cond)
             def wgrad(g, x):
+                if os.environ.get("MINIWORLD_ATOM_DIT_H100_OWNED_WGRAD", "0") == "1":
+                    return sm100.owned_wgrad_hopper(g, x)
                 return torch.mm(g.t(), x, out_dtype=torch.float32)
             dws, dwu, dwo, dwp = wgrad(dt, hh), wgrad(dab, x2), wgrad(du, gated), wgrad(dp, x1)
             dw1, dw2, dw3 = wgrad(dmod[:, 0:256], cn1), wgrad(dmod[:, 256:512], cn2), wgrad(dmod[:, 512:768], c2)

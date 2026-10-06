@@ -499,6 +499,91 @@ def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):
     return dc, cn1, cn2
 
 
+# PyTorch may erase its cached cuBLASLt workspace when a different graph is reset.
+# A capture-local tensor keeps each retained graph's scratch storage alive.
+# This is an opt-in lifetime repair; all projection operands and CUDA kernels stay unchanged.
+_OWNED_WGRAD_CPP = r"""
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cublasLt.h>
+torch::Tensor owned_wgrad(torch::Tensor g, torch::Tensor x) {
+  TORCH_CHECK(g.is_cuda() && x.is_cuda() && g.device()==x.device()
+    && g.scalar_type()==at::kBFloat16 && x.scalar_type()==at::kBFloat16
+    && g.dim()==2 && x.dim()==2 && g.size(0)==x.size(0)
+    && g.stride(1)==1 && x.stride(1)==1 && g.size(0)>0
+    && g.stride(0)>=g.size(1) && x.stride(0)>=x.size(1),
+    "owned cuBLASLt wgrad requires BF16 row-major or row-padded operands");
+  c10::cuda::CUDAGuard guard(g.device());
+  const int64_t reduction=g.size(0), outputs=g.size(1), inputs=x.size(1);
+  auto out=torch::empty({outputs,inputs},g.options().dtype(at::kFloat));
+  const size_t workspace_bytes=at::cuda::getCUDABlasLtWorkspaceSize();
+  auto workspace=torch::empty({int64_t(workspace_bytes)},g.options().dtype(at::kByte));
+  auto checked=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"owned cuBLASLt wgrad status ",int(s));};
+  struct Descriptors {
+    cublasLtMatmulDesc_t operation=nullptr;
+    cublasLtMatrixLayout_t a=nullptr,b=nullptr,c=nullptr;
+    cublasLtMatmulPreference_t preference=nullptr;
+    ~Descriptors(){
+      if(preference)cublasLtMatmulPreferenceDestroy(preference);
+      if(c)cublasLtMatrixLayoutDestroy(c);
+      if(b)cublasLtMatrixLayoutDestroy(b);
+      if(a)cublasLtMatrixLayoutDestroy(a);
+      if(operation)cublasLtMatmulDescDestroy(operation);
+    }
+  } d;
+  checked(cublasLtMatmulDescCreate(&d.operation,CUBLAS_COMPUTE_32F,CUDA_R_32F));
+  cublasOperation_t op_a=CUBLAS_OP_N,op_b=CUBLAS_OP_T;
+  checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_TRANSA,&op_a,sizeof(op_a)));
+  checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_TRANSB,&op_b,sizeof(op_b)));
+  checked(cublasLtMatrixLayoutCreate(&d.a,CUDA_R_16BF,inputs,reduction,x.stride(0)));
+  checked(cublasLtMatrixLayoutCreate(&d.b,CUDA_R_16BF,outputs,reduction,g.stride(0)));
+  checked(cublasLtMatrixLayoutCreate(&d.c,CUDA_R_32F,inputs,outputs,inputs));
+  checked(cublasLtMatmulPreferenceCreate(&d.preference));
+  checked(cublasLtMatmulPreferenceSetAttribute(d.preference,CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,&workspace_bytes,sizeof(workspace_bytes)));
+  const void* ptrs[]={x.data_ptr(),g.data_ptr(),out.data_ptr(),out.data_ptr()};
+  cublasLtMatmulPreferenceAttributes_t attrs[]={CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES};
+  for(int i=0;i<4;++i){
+    uint32_t alignment=256;
+    while(reinterpret_cast<uintptr_t>(ptrs[i])%alignment)alignment>>=1;
+    checked(cublasLtMatmulPreferenceSetAttribute(d.preference,attrs[i],&alignment,sizeof(alignment)));
+  }
+  cublasLtMatmulHeuristicResult_t algo{};int found=0;
+  auto handle=at::cuda::getCurrentCUDABlasLtHandle();
+  checked(cublasLtMatmulAlgoGetHeuristic(handle,d.operation,d.a,d.b,d.c,d.c,d.preference,1,&algo,&found));
+  TORCH_CHECK(found==1,"owned cuBLASLt wgrad has no valid algorithm");
+  float alpha=1.f,beta=0.f;
+  checked(cublasLtMatmul(handle,d.operation,&alpha,x.data_ptr(),d.a,g.data_ptr(),d.b,
+    &beta,out.data_ptr(),d.c,out.data_ptr(),d.c,&algo.algo,workspace.data_ptr(),workspace_bytes,at::cuda::getCurrentCUDAStream()));
+  return out;
+}
+
+"""
+
+
+@functools.lru_cache(maxsize=1)
+def _owned_wgrad_extension():
+    from torch.utils.cpp_extension import load_inline
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home
+
+    cuda_home = ensure_cuda_home()
+    if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+        raise RuntimeError("Atom Hopper cuBLASLt gradients require CUDA <= 12.9")
+    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    build = root / "atom_owned_wgrad" / hashlib.sha256(_OWNED_WGRAD_CPP.encode()).hexdigest()[:16]
+    build.mkdir(parents=True, exist_ok=True)
+    return load_inline(
+        name="atom_hopper_owned_wgrad", cpp_sources=_OWNED_WGRAD_CPP, functions=["owned_wgrad"],
+        with_cuda=True, build_directory=str(build),
+        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
+        extra_cflags=["-O3"], extra_ldflags=["-lcublasLt"], verbose=False,
+    )
+
+
+def owned_wgrad_hopper(gradient, activation):
+    """BF16 GEMM to FP32 with cuBLASLt scratch owned by the captured graph."""
+    return _owned_wgrad_extension().owned_wgrad(gradient, activation)
+
+
 def pack_hopper(weights, backward=False):
     """Live CUDA weight packing; identical launch count for BF16 and FP32 masters."""
     if len(weights) != 23:
