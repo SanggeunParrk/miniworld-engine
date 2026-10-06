@@ -22,6 +22,10 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
+#ifndef TOKEN_EMPTY_UNIFORM
+#define TOKEN_EMPTY_UNIFORM 0
+#endif
+
 #ifndef DB_PER_SAMPLE
 #define DB_PER_SAMPLE 0
 #endif
@@ -379,6 +383,7 @@ attn_tf32_dkv_kernel(const __grid_constant__ CUtensorMap mk, const __grid_consta
   const float* ddp = DDP + ((size_t)samp * 16 + head) * L + 2 * t;
   float kmr[2] = {0.f, 0.f};
   if (HASM) { kmr[0] = KM[(size_t)samp * L + key]; kmr[1] = KM[(size_t)samp * L + key + 8]; }
+  const bool empty_uniform = TOKEN_EMPTY_UNIFORM && HASM && kmr[0] == -5e29f;
   float dk[24], dv[24];
 #pragma unroll
   for (int i = 0; i < 24; ++i) dk[i] = dv[i] = 0.f;
@@ -413,9 +418,9 @@ attn_tf32_dkv_kernel(const __grid_constant__ CUtensorMap mk, const __grid_consta
       const float2 dd = *reinterpret_cast<const float2*>(ddp + n * BN + 8 * j);
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
-        const float p = ex2(st[4 * j + e]);
+        const float p = empty_uniform ? 1.f / L : ex2(st[4 * j + e]);
         pa[4 * j + e] = tf32(p);
-        da[4 * j + e] = tf32(p * (dpt[4 * j + e] - ((e & 1) ? dd.y : dd.x)));
+        da[4 * j + e] = tf32(empty_uniform ? 0.f : p * (dpt[4 * j + e] - ((e & 1) ? dd.y : dd.x)));
       }
     }
     const uint32_t tq = slot + 4 * TCH, tdo = tq + 2 * VCH;
@@ -515,6 +520,7 @@ attn_tf32_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   const float* br0 = BP + ((size_t)head * L + row) * L + 2 * t;
   const float* br1 = br0 + 8 * (size_t)L;
   const float* kmr = HASM ? KMP + (size_t)samp * L + 2 * t : nullptr;
+  const bool empty_uniform = TOKEN_EMPTY_UNIFORM && HASM && kmr[0] == -5e29f;
   float lse[2], dd[2];
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
@@ -555,7 +561,7 @@ attn_tf32_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     for (int i = 0; i < 32; ++i) { fence_reg(sc[i]); fence_reg(dp[i]); }
 #pragma unroll
     for (int i = 0; i < 32; ++i) {
-      const float s = ex2(sc[i]) * (dp[i] - dd[(i >> 1) & 1]);      // dS (fp32)
+      const float s = empty_uniform ? 0.f : ex2(sc[i]) * (dp[i] - dd[(i >> 1) & 1]); // masked_fill has zero dS
       sc[i] = s;
       da[i] = tf32(s);
     }

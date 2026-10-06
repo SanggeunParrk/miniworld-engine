@@ -17,6 +17,10 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
+#ifndef TOKEN_EMPTY_UNIFORM
+#define TOKEN_EMPTY_UNIFORM 0
+#endif
+
 #ifndef STAGES
 #define STAGES 4
 #endif
@@ -218,6 +222,7 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
     }
   }
   const float* kmr = HASM ? KM + (size_t)samp * L : nullptr;
+  const bool empty_uniform = TOKEN_EMPTY_UNIFORM && HASM && kmr[0] == -5e29f;
 
   float sc[32], dp[32];
   uint32_t pa[BN / 16][4];
@@ -271,7 +276,8 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
         for (int j = 0; j < 8; ++j) {
           const float p0 = APB_NATURAL && !isfinite(lse[h]) ? 0.f : ex2(sc[4 * j + 2 * h]);
           const float p1 = APB_NATURAL && !isfinite(lse[h]) ? 0.f : ex2(sc[4 * j + 2 * h + 1]);
-          const float s0 = p0 * (dp[4 * j + 2 * h] - dd[h]), s1 = p1 * (dp[4 * j + 2 * h + 1] - dd[h]);
+          const float s0 = empty_uniform ? 0.f : p0 * (dp[4 * j + 2 * h] - dd[h]);
+          const float s1 = empty_uniform ? 0.f : p1 * (dp[4 * j + 2 * h + 1] - dd[h]);
           if constexpr (DQ_BIAS) {
             const int row = m0 + wg * 64 + r0 + 8 * h;
             *reinterpret_cast<float2*>(DB + ((size_t)head * L + row) * L + n * BN + j * 8 + cb) = make_float2(s0, s1);

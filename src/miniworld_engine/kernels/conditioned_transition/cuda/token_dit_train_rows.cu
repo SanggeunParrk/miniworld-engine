@@ -35,6 +35,9 @@ using bf = __nv_bfloat16;
 #ifndef TD_RPB
 #define TD_RPB 8
 #endif
+#ifndef TOKEN_EMPTY_UNIFORM
+#define TOKEN_EMPTY_UNIFORM 0
+#endif
 constexpr int D = TD_D, NT = D / 4, DC = 384, NTC = DC / 4, RPB = TD_RPB, HD = TD_HD;
 static_assert(RPB == 1 || RPB == 2 || RPB == 4 || RPB == 8, "rows per block");
 constexpr int HT = HD / 4, NHH = D / HD;                                   // threads per head, heads
@@ -847,7 +850,20 @@ __device__ __forceinline__ int inv90(int x){return (x&~7)+2*(x&3)+((x&7)>>2);}
 template<typename AT> __global__ void train_bias90_k(const AT* in,AT* out,const bool* mask,float* km,float* kmp,int A,int L,bool perm) {
  long i=(long)blockIdx.x*256+threadIdx.x,n=(long)NHH*L*L;
  if(i<n&&perm){int k=i%L;out[i]=in[i-k+perm90(k)];}
- if(i<A*L){int k=i%L;km[i]=(!mask||mask[k])?0.f:-1e30f;if(kmp)kmp[i]=(!mask||mask[perm90(k)])?0.f:-1e30f;}
+ // The finite fully masked softmax is uniform, but -1e30 + log2(L)
+ // rounds back to -1e30. Preserve the boolean-mask fact in the existing
+ // mask buffer so backward never reconstructs probabilities from that LSE.
+ bool empty=false;
+ if constexpr(TOKEN_EMPTY_UNIFORM) {
+  if(mask&&(long)blockIdx.x*256<A*L) {
+   int any=0;for(int k=threadIdx.x;k<L;k+=256)any|=mask[k];
+   empty=__syncthreads_or(any)==0;
+  }
+ }
+ // Keep the marker above the TF32 forward softmax's finite -1e30 clamp.
+ // Its magnitude still erases every finite score, giving uniform attention.
+ const float masked=empty?-5e29f:-1e30f;
+ if(i<A*L){int k=i%L;km[i]=(!mask||mask[k])?0.f:masked;if(kmp)kmp[i]=(!mask||mask[perm90(k)])?0.f:masked;}
 }
 std::vector<at::Tensor> train_bias90(at::Tensor bias,c10::optional<at::Tensor> mask,int64_t A,bool perm) {
  const at::cuda::CUDAGuard guard(bias.device());const int L=bias.size(1);
