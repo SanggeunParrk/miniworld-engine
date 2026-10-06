@@ -137,6 +137,7 @@ _HOPPER_KERNELS = {
     "pre_cross": ("pre_fwd", "atom_pre_cross_fwd_sm90", 114752, False),
     "post": ("post_fwd", "atom_post_fwd_sm90", 147520, False),
     "post2": ("post_fwd", "atom_post_fwd_2stage_sm90", 114752, False),
+    "post2_packed": ("post_fwd", "atom_post_fwd_2stage_packed_sm90", 114752, False),
     "pack": ("cond_fwd", "atom_pack_sm90", 0, False),
     "pack_t": ("tr_bwd_gate", "atom_pack_transpose_sm90", 0, False),
     "trg": ("tr_bwd_gate", "atom_tr_bwd_sm90", 131136, False),
