@@ -69,6 +69,8 @@ def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L
         acc = torch.zeros(acc_n(heads, d), device=pair2d.device)
     dz = torch.empty_like(pair2d)
     ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
+    if acc.ndim == 2:
+        return dz, None, None  # Hopper block partials are reduced by finalize.
     o = 2 * d + width(heads, d)
     return dz, acc[o:o + heads * DP].view(heads, DP), acc[o + heads * DP:]
 

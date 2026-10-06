@@ -25,6 +25,7 @@ its pair bias where the PyTorch module's masked_fill gives zero."""
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -60,8 +61,8 @@ def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tens
     if mask is not None and tuple(mask.shape) != (1, L):
         return False
     capability = torch.cuda.get_device_capability(single.device)
-    return capability == (10, 0) or (capability == (9, 0) and not torch.is_grad_enabled()
-                                    and L % 128 == 0)
+    return capability == (10, 0) or (capability == (9, 0) and L % 128 == 0
+                                    and (not torch.is_grad_enabled() or os.environ.get("MINIWORLD_APB_H100_TRAIN", "0") == "1"))
 
 
 def serves_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
@@ -98,6 +99,13 @@ def _rows():
 def _sm100():
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     return sm100
+
+
+def _training_core(device):
+    if torch.cuda.get_device_capability(device) == (9, 0):
+        from miniworld_engine.kernels.augmented_attention import cuda as sm90
+        return sm90
+    return _sm100()
 
 
 def _inference_core(device, heads: int, d: int):
@@ -201,8 +209,9 @@ def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
         y = torch.empty_like(x)
         rows.ext().ln_rows(x, lnw, lnb, xa, st, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
-        bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, NEG)
-        O, LSE = _sm100().apb_forward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], bias, L, H, D)
+        neg = -math.inf if torch.cuda.get_device_capability(single.device) == (9, 0) else NEG
+        bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, neg)
+        O, LSE = _training_core(single.device).apb_forward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], bias, L, H, D)
         og = x.new_empty((L, W))
         rows.ext().gate_rows(O, qkvg, og)
         y = y.addmm_(og, wo.t()).view(1, L, D)   # in place onto the residual seed: no copy of x into the output
@@ -228,14 +237,20 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
     with torch.cuda.device(single.device):
         x = single.view(L, D)
         dy2 = dy.contiguous().view(L, D)
-        acc = torch.zeros(rows.acc_n(H, D), device=x.device)    # dlnw | dlnb | dbq | dWf | head sums, added by the kernels
+        if torch.cuda.get_device_capability(x.device) == (9, 0):
+            # Every producer owns a block partial; finalize reduces in block order.
+            nblocks = max(2 * torch.cuda.get_device_properties(x.device).multi_processor_count, (L + rows.RW - 1) // rows.RW)
+            acc = torch.empty(nblocks, rows.acc_n(H, D), device=x.device)
+            E.zero_acc(acc)
+        else:
+            acc = torch.zeros(rows.acc_n(H, D), device=x.device)
         dog = dy2 @ wo                                       # [L, W]: zero in the pads (Wo's pad columns are zero)
         dwo = torch.mm(dy2.t(), og, out_dtype=f32)           # [D, W]; finalize keeps the real columns
         dob = x.new_empty((L, W))
         dd = x.new_empty((H, L), dtype=f32)
         dqkvg = torch.empty_like(qkvg)
         E.gate_bwd(dog, O, qkvg, dob, dd, dqkvg)
-        DQ, DK, DV, DB = _sm100().apb_backward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], dob, bias, LSE, dd, L, H, D)
+        DQ, DK, DV, DB = _training_core(single.device).apb_backward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], dob, bias, LSE, dd, L, H, D)
         E.qkv_bwd(DQ, DK, DV, dqkvg, acc, D)
         del DQ, DK, DV
         dxa = dqkvg @ wpack
@@ -267,6 +282,9 @@ class _Training(torch.autograd.Function):
         v = ctx.saved_tensors
         mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:14]), list(v[14:])          # saved: 10 or 11 tensors
         dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
+        if torch.cuda.get_device_capability(single.device) == (9, 0):
+            grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
+            return (None, None, None, dx, dz, *grads)
         return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
 
 

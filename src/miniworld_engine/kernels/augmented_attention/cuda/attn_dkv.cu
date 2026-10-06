@@ -45,13 +45,35 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef DBIAS
 #define DBIAS 1                  // 0: skip the dbias atomics (to price them)
 #endif
+#ifndef DB_PER_SAMPLE
+#define DB_PER_SAMPLE 0          // own [sample, head, key, query] slice; caller reduces samples in fixed order
+#endif
+static_assert(!DB_PER_SAMPLE || (DBIAS && DBC == 1 && !RV4), "per-sample dBias requires the direct one-sample writer");
+#ifndef DHP
+#define DHP 48
+#endif
+#ifndef ROW_WIDTH
+#define ROW_WIDTH 768
+#endif
+#ifndef BWD_ROW_STRIDE
+#define BWD_ROW_STRIDE ROW_WIDTH
+#endif
+#ifndef APB_NATURAL
+#define APB_NATURAL 0
+#endif
+#ifndef BWD_BF16
+#define BWD_BF16 0
+#endif
+#ifndef RSQDV
+#define RSQDV 0.14433756729740643f
+#endif
 #ifndef QWID
-#define QWID 48                  // TMA box width for q / k / v / dO: 48 loads exactly the head (the 128-B swizzled smem
+#define QWID DHP                  // TMA box width for q / k / v / dO: 48 loads exactly the head (the 128-B swizzled smem
 #endif                           // image keeps its 128-B row pitch), 64 also pulls 16 columns of the next head
 #ifndef FLOOR
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
-constexpr int BN = 64, DH = 48, QW = QWID, QM = 64 * NWG, DM = 768;
+constexpr int BN = 64, DH = DHP, QW = QWID, QM = 64 * NWG, DM = ROW_WIDTH;
 constexpr float LOG2E = 1.4426950408889634f;
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
@@ -64,10 +86,20 @@ TMN_DEVI void mma_s_rs(float* d, const uint32_t (&a)[4], uint64_t b, int accumul
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b), "r"(accumulate));
 }
-TMN_DEVI void mma_o(float (&d)[24], const uint32_t (&a)[4], uint64_t b) {
+TMN_DEVI void mma_o(float (&d)[DH / 2], const uint32_t (&a)[4], uint64_t b) {
+#if DHP == 48
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n48k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23}, {%24,%25,%26,%27}, %28, p, 1, 1, 1; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#elif DHP == 32
+  asm volatile("wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19}, %20, 1, 1, 1, 1;"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#else
+  asm volatile("wgmma.mma_async.sync.aligned.m64n16k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9,%10,%11}, %12, 1, 1, 1, 1;"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#endif
 }
 TMN_DEVI void tma_load_mc(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
@@ -188,9 +220,9 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 
   const int lane = tid & 31, warp = (tid >> 5) & 3, wt = tid & 127;
   const int r0 = warp * 16 + (lane >> 2), cb = 2 * (lane & 3);
-  float dk[24], dv[24];
+  float dk[DH / 2], dv[DH / 2];
 #pragma unroll
-  for (int i = 0; i < 24; ++i) { dk[i] = 0.f; dv[i] = 0.f; }
+  for (int i = 0; i < DH / 2; ++i) { dk[i] = 0.f; dv[i] = 0.f; }
   mbar_wait(kvbar, 0);
   uint32_t kr[DH / 16][4], vr[DH / 16][4];
   {
@@ -204,7 +236,7 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   }
   float kmv[2] = {0.f, 0.f};                                         // the key mask of this thread's two key rows
   if (HASM) { kmv[0] = KM[(size_t)samp * L + k0 + wg * 64 + r0]; kmv[1] = KM[(size_t)samp * L + k0 + wg * 64 + r0 + 8]; }
-  float* dbt = DBT + ((size_t)head * L + k0 + wg * 64 + r0) * L;
+  float* dbt = DBT + (((DB_PER_SAMPLE ? (size_t)samp * H : 0) + head) * L + k0 + wg * 64 + r0) * L;
 
   float sc[32], dp[32];
   float dsv[2][16];
@@ -238,6 +270,10 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
           const float2 b = bf2f(bm[j >> 2][j & 3]);
           sc[4 * j + 2 * h] = b.x + (kmv[h] - lse[2 * j]);
           sc[4 * j + 2 * h + 1] = b.y + (kmv[h] - lse[2 * j + 1]);
+          if constexpr (APB_NATURAL) {
+            sc[4 * j + 2 * h] = (b.x - lse[2 * j] / LOG2E) / RSQDV;
+            sc[4 * j + 2 * h + 1] = (b.y - lse[2 * j + 1] / LOG2E) / RSQDV;
+          }
         }
       }
       wgmma_fence();
@@ -249,16 +285,25 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       wgmma_wait<0>();
 #pragma unroll
       for (int i = 0; i < 32; ++i) { fence_reg(sc[i]); fence_reg(dp[i]); }
+      if constexpr (APB_NATURAL) {
+#pragma unroll
+        for (int i = 0; i < 32; ++i) sc[i] *= RSQDV * LOG2E;
+      }
 #pragma unroll
       for (int h = 0; h < 2; ++h)
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
-          const float p0 = ex2(sc[4 * j + 2 * h]), p1 = ex2(sc[4 * j + 2 * h + 1]);
+          const float p0 = APB_NATURAL && !isfinite(lse[2 * j]) ? 0.f : ex2(sc[4 * j + 2 * h]);
+          const float p1 = APB_NATURAL && !isfinite(lse[2 * j + 1]) ? 0.f : ex2(sc[4 * j + 2 * h + 1]);
           const float s0 = p0 * (dp[4 * j + 2 * h] - dd[2 * j]), s1 = p1 * (dp[4 * j + 2 * h + 1] - dd[2 * j + 1]);
           const __nv_bfloat162 pk = __floats2bfloat162_rn(p0, p1), sk = __floats2bfloat162_rn(s0, s1);
           pp[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
           dsr[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&sk);
-          if (DBIAS && !RV4 && DBC == 1) red_v2(dbt + (size_t)(8 * h) * L + nb * QB + j * 8 + cb, s0, s1);
+          if (DBIAS && !RV4 && DBC == 1) {
+            float* dst = dbt + (size_t)(8 * h) * L + nb * QB + j * 8 + cb;
+            if constexpr (DB_PER_SAMPLE) *reinterpret_cast<float2*>(dst) = make_float2(s0, s1);
+            else red_v2(dst, s0, s1);
+          }
           if (DBIAS && (RV4 || DBC > 1)) { dsv[h][2 * j] = s0; dsv[h][2 * j + 1] = s1; }
         }
       if (DBIAS && DBC > 1) {
@@ -314,7 +359,7 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       }
       wgmma_fence();
 #pragma unroll
-      for (int i = 0; i < 24; ++i) { fence_reg(dk[i]); fence_reg(dv[i]); }
+      for (int i = 0; i < DH / 2; ++i) { fence_reg(dk[i]); fence_reg(dv[i]); }
 #pragma unroll
       for (int ks = 0; ks < QB / 16; ++ks) mma_o(dv, pp[ks], dM0 + ((sn * ST_BYTES + OFF_DOT + ks * 2048) >> 4));
 #pragma unroll
@@ -329,17 +374,24 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     if (lane == 0 && n + STAGES < nblocks) mbar_arrive(&empty[sn]);
   }
 #pragma unroll
-  for (int i = 0; i < 24; ++i) { fence_reg(dk[i]); fence_reg(dv[i]); }
-  constexpr float RL2E = 0.6931471805599453f;                        // 1 / log2 e: q was pre-scaled by log2 e / sqrt 48
+  for (int i = 0; i < DH / 2; ++i) { fence_reg(dk[i]); fence_reg(dv[i]); }
+  constexpr float RL2E = APB_NATURAL ? RSQDV : 0.6931471805599453f;
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const size_t row = (size_t)samp * L + k0 + wg * 64 + r0 + 8 * h;
-    float* pk = DK + row * DM + qcol;
-    float* pv = DV + row * DM + qcol;
+    float* pk = DK + row * BWD_ROW_STRIDE + qcol;
+    float* pv = DV + row * BWD_ROW_STRIDE + qcol;
 #pragma unroll
-    for (int j = 0; j < 6; ++j) {
-      *reinterpret_cast<float2*>(pk + j * 8 + cb) = make_float2(dk[4 * j + 2 * h] * RL2E, dk[4 * j + 2 * h + 1] * RL2E);
-      *reinterpret_cast<float2*>(pv + j * 8 + cb) = make_float2(dv[4 * j + 2 * h], dv[4 * j + 2 * h + 1]);
+    for (int j = 0; j < DH / 8; ++j) {
+      if constexpr (BWD_BF16) {
+        auto* bk = reinterpret_cast<__nv_bfloat16*>(DK) + row * BWD_ROW_STRIDE + qcol;
+        auto* bv = reinterpret_cast<__nv_bfloat16*>(DV) + row * BWD_ROW_STRIDE + qcol;
+        *reinterpret_cast<__nv_bfloat162*>(bk + j * 8 + cb) = __floats2bfloat162_rn(dk[4 * j + 2 * h] * RL2E, dk[4 * j + 2 * h + 1] * RL2E);
+        *reinterpret_cast<__nv_bfloat162*>(bv + j * 8 + cb) = __floats2bfloat162_rn(dv[4 * j + 2 * h], dv[4 * j + 2 * h + 1]);
+      } else {
+        *reinterpret_cast<float2*>(pk + j * 8 + cb) = make_float2(dk[4 * j + 2 * h] * RL2E, dk[4 * j + 2 * h + 1] * RL2E);
+        *reinterpret_cast<float2*>(pv + j * 8 + cb) = make_float2(dv[4 * j + 2 * h], dv[4 * j + 2 * h + 1]);
+      }
     }
   }
   if (DBC > 1) { __syncwarp(); cluster_sync_all(); }
@@ -385,9 +437,15 @@ void attn_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   const int H = bias.size(0), L = bias.size(1);
   const int A = q.size(0) / L;
   for (auto* t : {&q, &k, &v, &dO})
-    TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
+    TORCH_CHECK(t->stride(1) == 1 && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
-  for (auto* t : {&DK, &DV, &DBT}) TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kFloat32, "out layout");
+  for (auto* t : {&DK, &DV}) TORCH_CHECK(t->dim() == 2 && t->size(0) == A * L && t->size(1) == DM &&
+      t->stride(0) == BWD_ROW_STRIDE && t->stride(1) == 1 &&
+      t->scalar_type() == (BWD_BF16 ? torch::kBFloat16 : torch::kFloat32), "out layout");
+  TORCH_CHECK(DBT.is_contiguous() && DBT.scalar_type() == torch::kFloat32, "dbias layout");
+  if constexpr (DB_PER_SAMPLE)
+    TORCH_CHECK(DBT.dim() == 4 && DBT.size(0) == A && DBT.size(1) == H && DBT.size(2) == L && DBT.size(3) == L,
+                "per-sample dbias must be [A,H,L,L]");
   TORCH_CHECK(L % (64 * NWG) == 0 && L % QB == 0, "shape");
   const size_t smem = 1024 + OFF_BARS + 256;
   TORCH_CHECK(A % DBC == 0, "A must be a multiple of the dbias cluster");
@@ -395,10 +453,10 @@ void attn_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   auto kern = hasm ? attn_dkv_kernel<true> : attn_dkv_kernel<false>;
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   const int nt = L / (64 * NWG);
-  auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, DM, QW, QB);
-  auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, DM, QW, 64 * NWG);
-  auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, DM, QW, 64 * NWG);
-  auto mdo = tile_map(dO.data_ptr(), (uint64_t)A * L, DM, DM, QW, QB);
+  auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, q.stride(0), QW, QB);
+  auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, k.stride(0), QW, 64 * NWG);
+  auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, v.stride(0), QW, 64 * NWG);
+  auto mdo = tile_map(dO.data_ptr(), (uint64_t)A * L, DM, dO.stride(0), QW, QB);
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, 64, QB);
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3(A * H * nt);
@@ -410,7 +468,7 @@ void attn_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   at[0].val.clusterDim.x = DBC; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = 1;
   TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mdo, mb, hasm ? kmask->data_ptr<float>() : nullptr,
-                                 LSE.data_ptr<float>(), Dd.data_ptr<float>(), DK.data_ptr<float>(), DV.data_ptr<float>(),
+                                 LSE.data_ptr<float>(), Dd.data_ptr<float>(), reinterpret_cast<float*>(DK.data_ptr()), reinterpret_cast<float*>(DV.data_ptr()),
                                  DBT.data_ptr<float>(), L, H, A, nt) == cudaSuccess, "launch failed");
 }
 
