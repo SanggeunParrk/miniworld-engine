@@ -348,8 +348,12 @@ void swiglu_rows(at::Tensor ab, at::Tensor out) {
   check_rows(ab, "ab", 2 * N);
   const at::cuda::CUDAGuard g(ab.device());
   TDR_DISPATCH(ab.scalar_type(), T, [&] {
-    swiglu_rows_kernel<T><<<(unsigned)M, (unsigned)std::min<int64_t>(512, N / 4), 0, at::cuda::getCurrentCUDAStream()>>>(
-        ptr<const T>(ab), ptr<T>(out), (int)N, ab.stride(0));
+    cudaKernel_t kernel; C10_CUDA_CHECK(cudaGetKernel(&kernel, swiglu_rows_kernel<T>));
+    const T* src = ptr<const T>(ab); T* dst = ptr<T>(out);
+    int cols = (int)N; long stride = ab.stride(0);
+    void* args[] = {&src, &dst, &cols, &stride};
+    C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel), dim3((unsigned)M),
+        dim3((unsigned)std::min<int64_t>(512, N / 4)), args, 0, at::cuda::getCurrentCUDAStream()));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
