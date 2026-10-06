@@ -1,5 +1,9 @@
 """Public entry points of the fused ESMFold2 SWA atom DiT block (kernel family ``swa_dit``).
 
+The supported H100 window64 path defaults to handwritten CUDA plus cuBLAS, including live FP32 master parameters and
+native caller-gradient accumulation. Unsupported selected-native contracts raise. Explicit
+MINIWORLD_SWA_H100_CUDA_ONLY=0 retains the historical backend descriptions below.
+
 Provenance: moved from team-gm (``src/team_gm/modules/blocks/swa_fused_triton.py`` and ``swa_cuda/``, introduced by team-gm
 commit 14f2c73 "research(swa): preserve opt-in fused atom transformer work", copied from team-gm 4fafa83). Kernel math is
 unchanged; the engine owns the autotune keys, the config sets, the CUDA build and the runtime switches (``settings.swa_dit_*``).
@@ -155,6 +159,21 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
     conditioning [N, S, d_cond] when there is no augment structure. silu runs in ``c_base``'s dtype, then the product is
     accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable.
     """
+    from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled, native_h100_mod_fwd
+    if native_h100_enabled(c_base):
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationH100
+        if (c_base.ndim != 3 or c_base.shape[-1] != 128 or c_base.numel() == 0
+                or not c_base.is_contiguous() or not wmod.is_contiguous()
+                or c_base.dtype not in (torch.bfloat16, torch.float32)
+                or wmod.dtype not in (c_base.dtype, torch.float32)
+                or tuple(wmod.shape) != (768, 128) or wmod.device != c_base.device):
+            raise ValueError("native H100 SWA modulation requires contiguous BF16/FP32 width128 and [768,128] weights")
+        c = c_base.reshape(-1, c_base.shape[-1])
+        if torch.is_grad_enabled() and (c.requires_grad or wmod.requires_grad):
+            from miniworld_engine.integrations.token_dit_train import _native_caller_output
+            out = SWADiTModulationH100.apply(c, wmod)
+            return _native_caller_output(out, c_base, wmod, force=True)
+        return native_h100_mod_fwd(c, wmod)[0]
     if _mod_sm100(c_base, wmod):                         # B200, bf16, d_cond 128: the sm_100a mod_fwd / mod_bwd kernels
         from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationSm100
         from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm100
@@ -191,6 +210,14 @@ def swa_dit_block(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: to
     """
     from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
     from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_block_fwd
+    from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
+
+    if native_h100_enabled(q):
+        if (q.ndim != 3 or q.shape[-1] != 128 or q.numel() == 0
+                or q.dtype not in (torch.bfloat16, torch.float32)
+                or any(not t.is_contiguous() for t in (q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd))
+                or any(w.dtype not in (q.dtype, torch.float32) for w in (wqkv, wg, wo, wu, wd))):
+            raise ValueError("native H100 SWA requires canonical contiguous BF16/FP32 operands")
 
     s = q.shape[1]
     cos = cos.reshape(-1, cos.shape[-1]).contiguous()
@@ -203,7 +230,15 @@ def swa_dit_block(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: to
     q = q.contiguous()
     weights = [w.contiguous() for w in (wqkv, wg, wo, wu, wd)]
     if torch.is_grad_enabled() and any(t.requires_grad for t in (q, mod, *weights)):
-        return SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, B, half_window)
+        out = SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, B, half_window)
+        if native_h100_enabled(q):
+            from miniworld_engine.integrations.token_dit_train import _native_caller_output
+            out = _native_caller_output(out, q, mod, *weights, force=True)
+        return out
+    from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled, native_h100_cast
+    if native_h100_enabled(q):
+        weights = native_h100_cast(weights, [torch.empty_like(w, dtype=q.dtype) for w in weights])
+        return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, B, half_window, FP32_EPS, False)[0]
     return swa_dit_block_fwd(q, mod, cos, sin, seqused, *(w.to(q.dtype) for w in weights), B, half_window, FP32_EPS, False)[0]
 
 
