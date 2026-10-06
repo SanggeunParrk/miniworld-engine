@@ -1351,6 +1351,50 @@ torch::Tensor beta(torch::Tensor x){
  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
 }
 
+// Fuse the final exact FP32 projection with beta_parts without changing either
+// dot-product FMA order or the ordered row reduction. Four independent row dots
+// share warp-broadcast input loads; the L*L*128 FP32 intermediate is never stored.
+template<int H> __global__ void beta_mm_parts(const float* a,const float* b,float* y,int M,int P){
+ int c=threadIdx.x,lane=threadIdx.x&31;float sum=0.f,w[H];
+ #pragma unroll
+ for(int k=0;k<H;++k)w[k]=b[k*128+c];
+ for(int r=blockIdx.y*32;r<M;r+=32*P){
+  #pragma unroll 1
+  for(int j=0;j<32;j+=4){
+   float v[4]={0.f,0.f,0.f,0.f},ax[4];
+   #pragma unroll
+   for(int n=0;n<4;++n)ax[n]=lane<H?a[(long)(r+j+n)*H+lane]:0.f;
+   #pragma unroll
+   for(int k=0;k<H;++k){
+    #pragma unroll
+    for(int n=0;n<4;++n)v[n]=__fmaf_rn(__shfl_sync(0xffffffffu,ax[n],k),w[k],v[n]);
+   }
+   #pragma unroll
+   for(int n=0;n<4;++n)sum=__fadd_rn(sum,v[n]);
+  }
+ }
+ y[(long)blockIdx.y*128+c]=sum;
+}
+
+torch::Tensor beta_mm(torch::Tensor a,torch::Tensor b){
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&a.device()==b.device()
+  &&a.dim()==2&&b.dim()==2&&a.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat
+  &&a.is_contiguous()&&b.is_contiguous(),"APB exact beta mm CUDA FP32 matrix layout");
+ c10::cuda::CUDAGuard guard(a.device());
+ int64_t M64=a.size(0),H64=a.size(1);
+ TORCH_CHECK(M64>65536&&M64%128==0&&M64<=INT_MAX&&b.size(0)==H64&&b.size(1)==128
+  &&(H64==8||H64==12||H64==16||H64==24),"APB exact beta mm required large-row/head layout");
+ int M=M64,H=H64,P=std::min(8192,M/32),C=(P+63)/64;
+ auto p=torch::empty({P,128},a.options()),q=torch::empty({C,128},a.options()),out=torch::empty({128},a.options());
+ auto stream=at::cuda::getCurrentCUDAStream();
+ #define APB_BETA_MM_CASE(HH) case HH:beta_mm_parts<HH><<<dim3(1,P),128,0,stream>>>(a.data_ptr<float>(),b.data_ptr<float>(),p.data_ptr<float>(),M,P);break;
+ switch(H){APB_BETA_MM_CASE(8) APB_BETA_MM_CASE(12) APB_BETA_MM_CASE(16) APB_BETA_MM_CASE(24)}
+ #undef APB_BETA_MM_CASE
+ beta_reduce_parts<<<C,dim3(32,4),0,stream>>>(p.data_ptr<float>(),q.data_ptr<float>(),P,C);
+ beta_final<<<1,dim3(32,4),0,stream>>>(q.data_ptr<float>(),out.data_ptr<float>(),C);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+
 __global__ void fp32_copy_k(const __nv_bfloat16* x,float* y,long n){
  long i=(long)blockIdx.x*256+threadIdx.x;if(i<n)y[i]=__bfloat162float(x[i]);
 }
@@ -1704,6 +1748,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("exact_mm", &apb_exact::exact_mm, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
   m.def("exact_soft", &apb_exact::soft);
   m.def("exact_beta", &apb_exact::beta);
+  m.def("exact_beta_mm", &apb_exact::beta_mm);
   m.def("exact_fp32_inputs", &apb_exact::fp32_inputs);
   m.def("exact_fp32_inputs_grouped", &apb_exact::fp32_inputs_grouped);
   m.def("exact_transpose_tiled", &apb_exact::exact_transpose_tiled);
