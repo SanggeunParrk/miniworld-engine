@@ -244,17 +244,18 @@ def test_in_place_update_of_conditioning_or_pair_is_seen(cross):
         assert not torch.equal(eng(single, *other[1:]), got), "different conditioning / pair must change the result"
 
 
-@pytest.mark.parametrize("static", [False, True])
-def test_graph_replays_and_static_inputs(static):
-    """Default: a capture packs the tables once and every replay remakes them (so an in-place update between replays is seen).
-    ``static_inputs()``: the capture serves from the eager entries and a replay launches none of those kernels."""
+@pytest.mark.parametrize(("static", "weights"), [(False, False), (False, True), (True, False)])
+def test_graph_replays_and_static_inputs(static, weights):
+    """Default: a capture packs the tables once and every replay remakes them (so an in-place update between replays is seen) --
+    also under ``static_weights()``, which declares the weights fixed, not the inputs. ``static_inputs()``: the capture serves from
+    the eager entries and a replay launches none of those kernels."""
     from miniworld_engine.kernels import _capture
 
     _, eng = _block(cross=True)
     single, cond, pair = _bf(*_inputs(4, 384))
     local_dit._HOIST_COND.clear()
     local_dit._HOIST_BIAS.clear()
-    with torch.no_grad():
+    with torch.no_grad(), _capture.static_weights(weights):
         eng(single, cond, pair)
         eng(single, cond, pair)
         side = torch.cuda.Stream()

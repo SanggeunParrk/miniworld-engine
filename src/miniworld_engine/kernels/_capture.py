@@ -80,10 +80,9 @@ def _capture_info():
     return fn
 
 
-def capture_id() -> int | None:
-    """None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read). Always None under
-    ``static_weights``: captures then share the eager entries."""
-    if _STATIC[0] or not torch.cuda.is_current_stream_capturing():
+def _graph_capture_id() -> int | None:
+    """None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read) -- whatever is declared static."""
+    if not torch.cuda.is_current_stream_capturing():
         return None
     try:
         fn = _capture_info()
@@ -95,6 +94,12 @@ def capture_id() -> int | None:
     return int(cid.value) or 0
 
 
+def capture_id() -> int | None:
+    """The scope of a WEIGHT pack: None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read).
+    Always None under ``static_weights``: captures then share the eager entries."""
+    return None if _STATIC[0] else _graph_capture_id()
+
+
 def scoped(key):
     """``key`` extended by the current scope -- or None when the call must not touch the cache (a capture whose id is unknown)."""
     cid = capture_id()
@@ -103,9 +108,11 @@ def scoped(key):
     return (cid, key)
 
 
-def prune(store: dict) -> None:
-    """Drop the entries of captures other than the current one (eager entries stay)."""
-    cid = capture_id()
+def prune(store: dict, cid: int | None | bool = False) -> None:
+    """Drop the entries of captures other than the current one (eager entries stay). ``cid``: the current scope, when the caller
+    scopes by something other than ``capture_id()``."""
+    if cid is False:
+        cid = capture_id()
     stale = [k for k in store if isinstance(k, tuple) and len(k) == 2 and k[0] is not None and k[0] != cid]
     for k in stale:
         del store[k]
@@ -133,15 +140,22 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
 
     An input is an activation: its storage address is reused as soon as it is freed, so (pointer, version) alone can name a different tensor
     with the same version. ``valid(entry)`` is asked of a hit (False: the entry belongs to another tensor, it is remade and replaced) and
-    ``alive(entry)`` of every entry when the store is pruned (False: the tensor is gone, the entry is dropped)."""
-    sk = (None, key) if _STATIC_INPUTS[0] else scoped(key)
-    if sk is None:
-        return build()
+    ``alive(entry)`` of every entry when the store is pruned (False: the tensor is gone, the entry is dropped).
+
+    The scope is the capture itself, not ``capture_id()``: ``static_weights()`` says nothing about the inputs, so a capture under it alone
+    still makes its own tables and a replay remakes them."""
+    if _STATIC_INPUTS[0]:
+        cid = None
+    else:
+        cid = _graph_capture_id()
+        if cid == 0:
+            return build()
+    sk = (cid, key)
     hit = store.get(sk)
     if hit is not None and (valid is None or valid(hit)):
         return hit
     if not _STATIC_INPUTS[0]:
-        prune(store)
+        prune(store, cid)
     if alive is not None:
         for k in [k for k, e in store.items() if not alive(e)]:
             del store[k]
