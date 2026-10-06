@@ -25,10 +25,16 @@ B200 (sm_100a), bf16, the served widths (``cuda/sm100.supported``): every stage 
 ``cuda/sm100`` (``_sm100``); the atom count must be a multiple of 128 there -- the block refuses otherwise.
 ``MINIWORLD_SWA_DIT_SM100=0`` keeps the Triton path; a build or load failure warns once and keeps it too.
 
-fp32 stages (q fp32; Triton only -- the hand-CUDA kernels are bf16 wgmma code): ``triton/forward_fp32.py`` and
-``triton/backward_fp32.py`` for qkvg, out-projection + FFN and their backwards, around the SAME window-attention kernels on
-bf16 operands (what FlashAttention-4 runs in the per-op fp32 path). ``swa_dit_ffn_dw`` and ``swa_dit_dq1`` are bf16 knobs;
-the fp32 backward always materialises the dW operands and keeps dq1 in fp32.
+fp32 stages, B200 (sm_100a) at the served widths with S a multiple of 128 (``cuda/sm100/tf32_fwd.supported_tf32``): every stage on
+the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32_fwd.block_fwd_tf32`` and ``tf32_bwd.block_bwd_tf32``
+(``_tf32``), the window attention included (TF32 Q / K / V / P, fp32 softmax). A training forward (``save``) takes them only when the
+TF32 backward loads too: its saves (heads and O in fp32) are what only that backward reads, so the backward follows the saved heads'
+dtype. ``MINIWORLD_SWA_DIT_TF32=0`` (or ``MINIWORLD_SWA_DIT_SM100=0`` / ``engine_backend="triton"``) keeps the Triton fp32 path, and so
+does a build or load failure (warned once). The hoisted modulation has the same split (``swa_dit_mod_{fwd,bwd}_tf32``).
+
+fp32 stages elsewhere (q fp32; Triton): ``triton/forward_fp32.py`` and ``triton/backward_fp32.py`` for qkvg, out-projection + FFN and
+their backwards, around the SAME window-attention kernels on bf16 operands (what FlashAttention-4 runs in the per-op fp32 path).
+``swa_dit_ffn_dw`` and ``swa_dit_dq1`` are bf16 knobs; the fp32 backward always materialises the dW operands and keeps dq1 in fp32.
 """
 from __future__ import annotations
 
@@ -42,7 +48,8 @@ import triton
 
 from miniworld_engine import settings
 from miniworld_engine.autotune.shape_key import atom_key
-from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._compile import device_constant, opaque
+from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
 from miniworld_engine.kernels.swa_dit.interface import (
     D_ATOM,
     FP32_EPS,
@@ -114,6 +121,72 @@ def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
     return sm100
 
 
+_TF32_FAILED = False
+_TF32_BWD_FAILED = False
+
+
+def _tf32_off() -> bool:
+    """The switches that keep the Triton fp32 path: ``MINIWORLD_SWA_DIT_TF32=0``, ``MINIWORLD_SWA_DIT_SM100=0``, engine_backend triton."""
+    return (os.environ.get("MINIWORLD_SWA_DIT_TF32", "1") == "0" or os.environ.get("MINIWORLD_SWA_DIT_SM100", "1") == "0"
+            or settings.current().engine_backend == "triton")
+
+
+def _device_index(device: torch.device) -> int:
+    return device.index if device.index is not None else torch.cuda.current_device()
+
+
+@device_constant
+def _tf32_bwd_ready(device: torch.device) -> bool:
+    """Whether the sm_100a TF32 backward (``cuda/sm100/tf32_bwd``) serves fp32 calls on ``device``: the switches, B200, and its
+    kernels build and load (import, build and load happen here, once; a failure warns once and keeps the Triton fp32 path for
+    training). A constant to the compiled graph (``device_constant``): Dynamo never traces the build."""
+    global _TF32_BWD_FAILED
+    if _TF32_BWD_FAILED or device.type != "cuda" or _tf32_off() or not tf32_fwd.is_b200(device):
+        return False
+    try:
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+        load = getattr(tf32_bwd, "kernels_tf32", None) or getattr(tf32_bwd, "kernels", None)
+        if load is not None:
+            load(_device_index(device))
+    except Exception as exc:  # a missing module, a toolchain or a driver problem keeps the Triton path
+        _TF32_BWD_FAILED = True
+        warnings.warn(f"sm_100a TF32 SWA atom DiT backward unavailable, keeping the Triton fp32 path for training: {exc!r}",
+                      RuntimeWarning, stacklevel=2)
+        return False
+    return True
+
+
+@device_constant
+def _tf32_ready(device: torch.device, save: bool) -> bool:
+    """Whether the sm_100a TF32 kernels serve fp32 calls on ``device``: the switches, B200, and the forward kernels build and load
+    -- with ``save`` (a training forward, whose fp32 saves only the TF32 backward reads) the backward's too. Build and load happen
+    here, once per device; a failure warns once and keeps the Triton fp32 path. A constant to the compiled graph
+    (``device_constant``): Dynamo bakes the answer in and never traces the build."""
+    global _TF32_FAILED
+    if _TF32_FAILED or device.type != "cuda" or _tf32_off() or not tf32_fwd.is_b200(device):
+        return False
+    try:
+        tf32_fwd.kernels_tf32(_device_index(device))
+    except Exception as exc:  # a toolchain or driver problem keeps the Triton path
+        _TF32_FAILED = True
+        warnings.warn(f"sm_100a TF32 SWA atom DiT kernels unavailable, keeping the Triton fp32 path: {exc!r}", RuntimeWarning,
+                      stacklevel=2)
+        return False
+    return not save or _tf32_bwd_ready(device)
+
+
+def _tf32(q: torch.Tensor, nhid: int, half_window: int, eps: float, save: bool) -> Any:
+    """The sm_100a TF32 forward module (``cuda/sm100/tf32_fwd``) when it serves this fp32 call, else None -> the Triton fp32 path.
+    Traceable: tensor metadata (``tf32_fwd.supported_tf32``) and the per-device constant ``_tf32_ready``. A deterministic function
+    of the call (shapes, dtype, device, switches, earlier failures), so the op's fake reaches the same answer as the launch."""
+    if q.dtype != torch.float32 or not tf32_fwd.supported_tf32(q, nhid, half_window, eps):
+        return None
+    if not _tf32_ready(q.device, save):
+        return None
+    return tf32_fwd
+
+
 @functools.lru_cache(maxsize=16)
 def _sm_count(index: int) -> int:
     return torch.cuda.get_device_properties(index).multi_processor_count
@@ -136,17 +209,20 @@ def _pack_ffn(wu: torch.Tensor, wd: torch.Tensor) -> tuple[torch.Tensor, torch.T
 
 def _swa_dit_block_fwd_fake(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save):
     """Shapes of the forward's outputs: [out [N, S, C] in q's dtype] alone, or with ``save`` the 13 tensors the backward
-    reads -- Q / K / V head-major [N, 4, S, C/4] bf16 (the attention operands in both precisions), G [N*S, C] in q's dtype,
-    O [N*S, C] bf16 (the attention output), lse [N, 4, S] fp32, then q1, x, pq, pk, att, y, ffn [N*S, C] in q's dtype.
-    The structure depends on ``save`` alone."""
+    reads -- Q / K / V head-major [N, 4, S, C/4] (the attention operands: bf16, except fp32 on the TF32 path), G [N*S, C] in
+    q's dtype, O [N*S, C] (the attention output: bf16, except fp32 on the TF32 path), lse [N, 4, S] fp32, then q1, x, pq, pk,
+    att, y, ffn [N*S, C] in q's dtype. The structure depends on ``save`` alone; the heads' / O's dtype on the path, chosen by the
+    same ``_tf32`` the launch asks."""
     N, S, C = q.shape
     H = N_HEAD
     M = N * S
     outputs = [q.new_empty((N, S, C))]
     if save:
-        heads = [q.new_empty((N, H, S, C // H), dtype=torch.bfloat16) for _ in range(3)]
+        tf32 = q.dtype == torch.float32 and not is_global(half_window) and _tf32(q, wd.shape[1], half_window, eps, save) is not None
+        hd = torch.float32 if tf32 else torch.bfloat16
+        heads = [q.new_empty((N, H, S, C // H), dtype=hd) for _ in range(3)]
         saved = [q.new_empty((M, C)) for _ in range(7)]
-        outputs += [*heads, q.new_empty((M, C)), q.new_empty((M, C), dtype=torch.bfloat16),
+        outputs += [*heads, q.new_empty((M, C)), q.new_empty((M, C), dtype=hd),
                     q.new_empty((N, H, S), dtype=torch.float32), *saved]
     return outputs
 
@@ -165,6 +241,9 @@ def swa_dit_block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin
                                "interface.refusal first")
         return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
     if q.dtype == torch.float32:
+        tf32 = _tf32(q, wd.shape[1], half_window, eps, save)
+        if tf32 is not None:                               # B200: every stage on the TF32 tensor-core kernels
+            return tf32.block_fwd_tf32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
         return _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
     if sm100 is not None:
@@ -300,6 +379,12 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
         return sm100.block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att,
                                y, ffn, B, half_window)
     if q.dtype == torch.float32:
+        if qh.dtype == torch.float32:                      # saved by the TF32 forward, which ran only with the TF32 backward loaded
+            from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+            dq, dmod, *dw = tf32_bwd.block_bwd_tf32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1,
+                                                    x, pq, pk, att, y, ffn, B, half_window)
+            return [dq.reshape(q.shape), dmod, *dw]
         return _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x,
                                         pq, pk, att, y, ffn, B, half_window, eps)
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
@@ -453,3 +538,46 @@ def swa_dit_mod_bwd_sm100(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) 
 
     dc, dw = sm100.mod_bwd(g, c, wmod)
     return [dc, dw]
+
+
+def _swa_dit_mod_fwd_tf32_fake(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
+    """Shape of the output: [R, 6C] fp32."""
+    return c.new_empty((c.shape[0], wmod.shape[0]), dtype=torch.float32)
+
+
+@opaque(fake=_swa_dit_mod_fwd_tf32_fake, name="swa_dit_mod_fwd_tf32")
+def swa_dit_mod_fwd_tf32(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
+    """silu(c) Wmod^T [R, 6C] fp32 on the sm_100a TF32 mod_fwd_tf32 kernel; c [R, C] fp32 contiguous, Wmod [6C, C] fp32."""
+    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+
+    return tf32_fwd.mod_fwd_tf32(c, wmod)
+
+
+def _swa_dit_mod_bwd_tf32_fake(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """Shapes of the outputs: dc like c (fp32), dWmod fp32 in Wmod's shape."""
+    return [torch.empty_like(c), torch.empty(wmod.shape, dtype=torch.float32, device=wmod.device)]
+
+
+@opaque(fake=_swa_dit_mod_bwd_tf32_fake, name="swa_dit_mod_bwd_tf32")
+def swa_dit_mod_bwd_tf32(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """[dc, dWmod] (fp32) of :func:`swa_dit_mod_fwd_tf32` from g = d mod [R, 6C] fp32 (``tf32_bwd.mod_bwd_tf32``)."""
+    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+    dc, dw = tf32_bwd.mod_bwd_tf32(g, c, wmod)
+    return [dc, dw]
+
+
+class SWADiTModulationTf32(torch.autograd.Function):
+    """``swa_dit_hoist_modulation`` on the sm_100a TF32 kernels: silu(c) Wmod^T (mod_fwd_tf32) and its backward (tf32_bwd.mod_bwd_tf32);
+    c [R, C] fp32 contiguous with R a multiple of 128, Wmod [6C, C] fp32. ``interface`` takes it only when the backward loads."""
+
+    @staticmethod
+    def forward(ctx, c, wmod):
+        ctx.save_for_backward(c, wmod)
+        return swa_dit_mod_fwd_tf32(c, wmod)
+
+    @staticmethod
+    def backward(ctx, g):
+        c, wmod = ctx.saved_tensors
+        dc, dw = swa_dit_mod_bwd_tf32(g.contiguous(), c, wmod)
+        return dc, dw

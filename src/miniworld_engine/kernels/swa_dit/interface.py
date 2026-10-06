@@ -22,10 +22,12 @@ reads row ``b*S + s`` of it. A caller without that structure passes ``B = N`` (o
 Served: bf16 or fp32 (all activations, conditioning and weights in one of the two), d_atom 128 with 4 heads of 32, SwiGLU
 hidden 256, half window 64 (window 128) -- or GLOBAL attention (``is_global``: bf16 on B200 only, the attention stage runs
 FlashAttention-4 around the same sm_100a stages) -- 3D-RoPE cos/sin of D/2 = 16 frequencies. bf16 runs the Triton kernels
-(``triton/forward.py``, ``backward.py``) with hand-CUDA wgmma stages on sm_90; fp32 runs ``triton/forward_fp32.py`` and
-``backward_fp32.py`` (Triton only), which keep the residual stream and every elementwise step in fp32, run the
-projections as TF32 and the window attention on bf16 operands -- the precisions of the per-op fp32 path it replaces (see
-those files). :func:`refusal` says why anything else is not served; it never raises.
+(``triton/forward.py``, ``backward.py``) with hand-CUDA wgmma stages on sm_90, and the hand-written sm_100a stages on B200. fp32
+keeps the residual stream and every elementwise step in fp32: on B200 (window attention, S a multiple of 128) every stage runs on
+hand-written TF32 tensor-core kernels (``cuda/sm100/tf32_fwd``, ``tf32_bwd``; the attention on TF32 operands, the hoisted modulation
+too), elsewhere on ``triton/forward_fp32.py`` and ``backward_fp32.py``, which run the projections as TF32 and the window attention on
+bf16 operands -- the precisions of the per-op fp32 path it replaces (see those files). :func:`refusal` says why anything else is not
+served; it never raises.
 """
 from __future__ import annotations
 
@@ -148,12 +150,28 @@ def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
     return _sm100(c_base.reshape(1, -1, D_ATOM), N_HIDDEN, HALF_WINDOW, FP32_EPS) is not None
 
 
+def _mod_tf32(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
+    """Whether the hoisted modulation runs on the sm_100a TF32 kernel (mod_fwd_tf32): B200, fp32 c and Wmod, d_cond = C = 128, rows a
+    multiple of 128, the TF32 kernels load (``MINIWORLD_SWA_DIT_TF32=0`` / ``MINIWORLD_SWA_DIT_SM100=0`` / ``engine_backend="triton"``
+    keep the torch fp32 GEMM) -- and, when a gradient is recorded, the TF32 backward (``tf32_bwd.mod_bwd_tf32``) loads too.
+    Traceable: tensor metadata and the per-device constant ``dispatch._tf32_ready`` (which owns the build / load)."""
+    if not (c_base.is_cuda and c_base.dtype == torch.float32 and wmod.dtype == torch.float32):
+        return False
+    if c_base.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or (c_base.numel() // D_ATOM) % 128:
+        return False
+    from miniworld_engine.kernels.swa_dit.dispatch import _tf32_ready
+
+    grad = torch.is_grad_enabled() and (c_base.requires_grad or wmod.requires_grad)
+    return _tf32_ready(c_base.device, grad)
+
+
 def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
     """The block's adaLN modulation, once per (batch element, atom): ``[B*S, 6C]`` fp32 = silu(c) @ Wmod^T.
 
     ``c_base`` [B, S, d_cond] is the augment-invariant conditioning (``c[a*B + b] == c_base[b]``), or the per-row
     conditioning [N, S, d_cond] when there is no augment structure. silu runs in ``c_base``'s dtype, then the product is
-    accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable.
+    accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable. On B200 a
+    bf16 call runs the sm_100a mod_fwd / mod_bwd kernels, an fp32 call the TF32 ones (mod_fwd_tf32 / tf32_bwd.mod_bwd_tf32).
     """
     if _mod_sm100(c_base, wmod):                         # B200, bf16, d_cond 128: the sm_100a mod_fwd / mod_bwd kernels
         from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationSm100
@@ -164,6 +182,14 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
         if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
             return SWADiTModulationSm100.apply(c2, w)
         return swa_dit_mod_fwd_sm100(c2, w.to(c2.dtype))
+    if _mod_tf32(c_base, wmod):                          # B200, fp32, d_cond 128: the TF32 mod_fwd_tf32 kernel (+ the TF32 backward)
+        from miniworld_engine.kernels.swa_dit.dispatch import SWADiTModulationTf32, swa_dit_mod_fwd_tf32
+
+        c2 = c_base.reshape(-1, c_base.shape[-1]).contiguous()
+        w = wmod.contiguous()
+        if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
+            return SWADiTModulationTf32.apply(c2, w)
+        return swa_dit_mod_fwd_tf32(c2, w)
     a = F.silu(c_base).float()
     return (a.reshape(-1, a.shape[-1]) @ wmod.float().t()).contiguous()
 

@@ -10,6 +10,11 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 SWA atom DiT on TF32 sm_100a kernels (`kernels/swa_dit/cuda/sm100/*_tf32.cu`, `tf32_fwd.py`, `tf32_bwd.py`): forward,
+  backward and the hoisted modulation, fp32 activations with TF32 MMA on round-to-nearest operands (attention operands fp32, not
+  bf16). Replaces the Triton fp32 path on B200 (`MINIWORLD_SWA_DIT_TF32=0` keeps it); compiles under `torch.compile(fullgraph=True)`.
+  Tests: `tests/integrations/test_b200_swa_dit_tf32_gpu.py`, `test_b200_swa_dit_tf32_bwd_gpu.py`; page:
+  `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`.
 - `kernels._capture.static_weights()` / `MINIWORLD_STATIC_WEIGHTS=1`: declares that weights stay fixed between the replays of a CUDA graph
   (inference), so the weight-pack caches serve a capture like an eager call and a replay no longer re-runs the packing kernels. The
   capture scoping of the weight-pack caches (previous entry) repacks at every replay -- right when an optimizer step follows, but a token

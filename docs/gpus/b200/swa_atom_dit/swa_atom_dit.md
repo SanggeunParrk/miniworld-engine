@@ -20,7 +20,8 @@ the kernel ran at that shape there.
   S = 4096 / 8192. **S must be a multiple of 128**: callers pad the atoms (seqused masks the padding); anything else raises
   `ValueError` -- there is no fallback path.
 - Dtypes: activations, weights and their gradients bf16; the modulation (shift / scale / gate, [B S, 768]) and its gradient
-  fp32; RoPE tables and the attention LSE fp32; every MMA accumulates in fp32 (TMEM).
+  fp32; RoPE tables and the attention LSE fp32; every MMA accumulates in fp32 (TMEM). The fp32 block has its own TF32 kernels:
+  section "fp32 (TF32) path" below.
 - cache build ✓ everywhere: nothing autotunes (cubins with fixed launch shapes; dispatch by fixed size rules).
 - 성능 확인 in this page follows the rule set on 2026-09-30: **✓** = the block is the fastest of every measured
   implementation at that shape **and** the kernel reaches >= 70 % of its measured floor (SoL section); **△** = the block is the
@@ -281,6 +282,52 @@ The weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) is keyed on the ten
 2026-10-02. The old key (data_ptr, version, shape) served the old tensor's packed copy to a new weight placed at a freed one's address; the
 cache is also bypassed while a CUDA graph is captured, so that the pack kernels are recorded into the graph and every replay repacks the
 weights an optimizer step changed (`tests/integrations/test_swa_dit_pack_cache.py`).
+
+## fp32 (TF32) path (2026-10-06)
+
+The fp32 block (MiniWorld's fp32 atom transformer: fp32 parameters, no autocast) on B200 runs every stage on hand-written sm_100a
+kernels with TF32 tensor-core MMAs (`tcgen05.mma kind::tf32`, fp32 accumulation in TMEM) instead of the Triton fp32 kernels
+(`triton/forward_fp32.py`, `backward_fp32.py`). Residual stream, modulation, RoPE tables, softmax and every elementwise step stay
+fp32. Host side: `kernels/swa_dit/cuda/sm100/tf32_fwd.py` (forward, `block_fwd_tf32`, `mod_fwd_tf32`) and `tf32_bwd.py` (backward);
+`dispatch._tf32` picks them for fp32 q on B200 at the served widths with S a multiple of 128 (else the Triton fp32 path, which takes
+any S). A training forward takes them only when the TF32 backward loads (its fp32 saves are what only that backward reads);
+`MINIWORLD_SWA_DIT_TF32=0` (or `MINIWORLD_SWA_DIT_SM100=0`, `engine_backend="triton"`) keeps the Triton fp32 path, and a build or
+load failure warns once and keeps it too. The hoisted modulation (`swa_dit_hoist_modulation`, fp32 c and Wmod) runs on
+`mod_fwd_tf32` (+ `tf32_bwd.mod_bwd_tf32` when a gradient is recorded).
+
+Precision against the Triton fp32 path: the window attention runs on TF32 Q / K / V / P instead of bf16 (the Triton path rounds the
+attention operands to bf16, as FlashAttention-4 does), and every GEMM is single-pass TF32 with operands **rounded** to the nearest
+TF32 (`cvt.rna` in the kernels for activations; the weights once per weight version on the host, `tf32_fwd._round_tf32`, cached like
+the bf16 weight packs) -- the tensor core alone truncates the low 13 mantissa bits, a bias toward zero that does not average out over
+K and is why the Triton path pays for "tf32x3" in its FFN.
+
+Saves for the backward, all fp32: Qh / Kh / Vh head-major [N, 4, S, 32] (TF32-valued, exactly the attention operands), G (raw gate),
+O (attention output, pre-gate), lse [N, 4, S] (natural log), q1, X (the TF32-rounded qkvg operand), PQ / PK (raw, pre head RMS), Att,
+Y, FF -- the meanings of the bf16 saves.
+
+Why not the bf16 kernels' layouts: in fp32 the weights do not stay on chip. The qkvg weights are 256 KB (bf16: 128 KB resident in
+shared memory, or the TMEM A operand), Wu + Wd are 384 KB (bf16 ffn_fwd2: resident in TMEM as the A operand -- in fp32 that would be
+768 columns). So the activations are the A operand (in TMEM, one column per TF32 element, written by the row threads with
+`tcgen05.st`) and the weights stream from L2 as the B operand through a ring of 8-KB `[64 output rows][32 inputs]` slots (one slot =
+four M128 N64 K8 MMAs).
+
+| kernel | role | tiles, threads | shared memory | TMEM (512 columns) |
+|---|---|---|---|---|
+| `mod_fwd_tf32` | silu(c) Wmod^T, [R, 768] fp32 | CTA per (128 rows, 128 outputs), 128 threads; 16 SS MMAs M128 N128 K8 | c 64 KB (silu in place, then the out staging) + Wmod block 64 KB = 128 KB | accumulator 128 |
+| `qkvg_fwd_tf32` | RMS-adaLN, q / k / v / gate projections, head RMS, RoPE | persistent; items (tile of SP = min(A, 16) augments x 128 / SP atoms, projection group); NG = 1 / 2 / 4 groups split the four projections when tiles are few (A = 1: 8 tiles at S = 1024); warp 0 q TMA, 1 MMA, 3 weight TMA, 4-11 row threads (thread = row, two warpgroups split columns / heads) | q ring 8 x 16 KB (two tiles) + weight ring 12 x 8 KB = 224 KB | x[2] 2 x 128 + acc[2] 2 x 128 |
+| `attn_fwd_tf32` | window attention, fp32 softmax, lse | persistent; items (sample, 128 queries, head); S = q K^T as 4 SS MMAs M128 N256 K8; P in place over S (fp32, one column per element); PV 2 x 16 TS MMAs M128 N32 K8 with V MN-major (128-B swizzle, 32-B atoms); warpgroup kb = key block kb | item stage (q 16 + K 32 + V 32 KB) x 2 = 160 KB + 2 KB row exchange | S / P 256 (single) + O[2] 2 x 32 |
+| `ffn_fwd_tf32` | gated out-projection, residual, RMS-adaLN, SwiGLU (8 chunks of 32 hidden units), residual | persistent; tiles as qkvg; warp 0 g / o / q TMA, 1 MMA, 3 weight TMA, 4-11 row threads | g / o / q ring 8 x 16 KB + weight ring 12 x 8 KB + 2 KB = 226.5 KB | gated / y 128, att / ffn 128, q1 128, a / b [2] 2 x 64 (h over a) |
+
+Every kernel keeps the shared-memory base 1024-B aligned (dynamic only), issues MMAs from a whole warp with `elect_one()`, and is
+designed for <= 128 registers per thread (launch bound 384 x 1). The single S / P buffer of the attention and the shared a / b buffer
+of hidden chunks j and j + 2 in the FFN wait on the previous MMA's commit before they are overwritten; `-DMMA_INORDER=1` drops that
+wait (relying on in-order `tcgen05.mma` execution) for a measurement.
+
+Tests: `tests/integrations/test_b200_swa_dit_tf32_gpu.py` (`-k fwd`: the output against an fp64 reference and the Triton fp32 path at
+A = 1 / 5 / 48, S = 1024 / 4096 -- no worse than Triton; every training save against its fp64 meaning; the kernels that ran, by the
+profiler; spills; the fake; CUDA-graph capture; `test_bwd_*`: forward + backward with `tf32_bwd`).
+
+**Measurements pending**: nothing in this section has been timed yet (2026-10-06); the kernels have not run at the table shapes.
 
 ## What was tried and not kept
 
