@@ -1464,6 +1464,24 @@ torch::Tensor exact_transpose_tiled(torch::Tensor x,c10::optional<torch::Tensor>
  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
 }
 
+// PWA's exact sigmoid product feeds only the head-major contraction operand.
+// Preserve the precise point_k arithmetic while eliminating its FP32 temporary.
+__global__ void point_pack_k(const float* x,const float* g,float* y,long n,int S,int L){
+ long i=(long)blockIdx.x*256+threadIdx.x;
+ if(i<n){
+  int c=i%32,s=(i/32)%S,q=(i/(32L*S))%L,h=i/(32L*S*L);
+  long r=((long)s*L+q)*256+h*32+c;
+  y[i]=x[r]*(1.f/(1.f+expf(-g[r])));
+ }
+}
+torch::Tensor point_pack(torch::Tensor x,torch::Tensor g,int64_t S,int64_t L){
+ TORCH_CHECK(x.is_cuda()&&g.is_cuda()&&x.device()==g.device()&&x.is_contiguous()&&g.is_contiguous()
+  &&x.scalar_type()==at::kFloat&&g.scalar_type()==at::kFloat&&x.numel()==g.numel()&&x.numel()==S*L*256,"FP32 PWA point pack");
+ c10::cuda::CUDAGuard guard(x.device());auto y=torch::empty({8,L,S*32},x.options());
+ point_pack_k<<<(x.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),g.data_ptr<float>(),y.data_ptr<float>(),x.numel(),S,L);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
 __global__ void point_k(const float* x,const float* z,float* y,long n,float scale,int op){
  long i=(long)blockIdx.x*256+threadIdx.x;
  if(i<n)y[i]=op==0?x[i]*scale:x[i]*(1.f/(1.f+expf(-z[i])));
@@ -1743,6 +1761,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("exact_fp32_inputs_grouped", &apb_exact::fp32_inputs_grouped);
   m.def("exact_transpose_tiled", &apb_exact::exact_transpose_tiled);
   m.def("exact_point", &apb_exact::point);
+  m.def("exact_point_pack", &apb_exact::point_pack);
   m.def("exact_bias_add", &apb_exact::bias_add);
   m.def("exact_db_transpose", &apb_exact::db_transpose);
   m.def("cast_leaves", &cast_leaves);
