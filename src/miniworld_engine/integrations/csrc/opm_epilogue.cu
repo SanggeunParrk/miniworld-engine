@@ -848,6 +848,20 @@ __device__ __forceinline__ void stage(const __nv_bfloat16* __restrict__ src, __n
   __pipeline_commit();
 }
 
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+
+namespace opm_epi_tma {
+__device__ __forceinline__ uint64_t desc64(const void* p) {
+ const uint32_t a=static_cast<uint32_t>(__cvta_generic_to_shared(p));
+ return uint64_t((a>>4)&0x3fff) | (uint64_t(1)<<16) | (uint64_t(32)<<32) | (uint64_t(2)<<62);
+}
+__device__ __forceinline__ void ld4(const void* map,void* dst,uint64_t* b,int x,int y,int z,int w) {
+ asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1,{%3,%4,%5,%6}],[%2];"
+ ::"r"(opm_pro_tma::sa(dst)),"l"(map),"r"(opm_pro_tma::sa(b)),"r"(x),"r"(y),"r"(z),"r"(w):"memory");
+}
+}
+
+#endif
 __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     const __nv_bfloat16* __restrict__ O,      // [N*CH, N*CH] grouped GEMM output
     const float* __restrict__ NORM,           // [N, N]  mask counts in fp32, already clamped >= 1
@@ -858,7 +872,13 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     // z[i, j, :] as a 4-D box: (64 z) x j x (2 halves of z) x i.  j sits INSIDE the z half on
     // purpose: it is what makes the accumulator's eight rows land on eight distinct swizzle chunks,
     // so the write is conflict-free.  The strides are not monotonic, and TMA does not mind.
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+    const __grid_constant__ CUtensorMap OUT_MAP,
+    const __grid_constant__ CUtensorMap O_MAP,
+    const __grid_constant__ CUtensorMap W_MAP) {
+#else
     const __grid_constant__ CUtensorMap OUT_MAP) {
+#endif
   extern __shared__ char smem[];
   // both wgmma's swizzle and TMA's are functions of the absolute shared address: 1 KiB alignment
   const uint32_t sbase = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
@@ -870,6 +890,9 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
   __nv_bfloat16* sW = sP + NSTAGE * NP * KCP;                        // [NSTAGE][CZ][KC], swizzled
   float* sAcc = reinterpret_cast<float*>(smem);                      // [NP][CZ] after the K loop
   __shared__ float sInv[NP];
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+  __shared__ uint64_t epi_full[NSTAGE];
+#endif
   __shared__ float sBias[CZ];                        // 128 numbers, otherwise re-read from global per element
 
   const int tid = threadIdx.x;
@@ -889,6 +912,19 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
   float acc[64];                                       // one warpgroup's 64x128 tile
   const int wgi = tid >> 7, wl = (tid >> 5) & 3;
 
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+
+  if (tid==0) {
+    for(int k=0;k<NSTAGE;++k)opm_pro_tma::init(epi_full+k,1);
+    asm volatile("fence.mbarrier_init.release.cluster;":::"memory");
+  }
+  __syncthreads();
+  auto fill = [&](int c) {
+    const int slot=c%NSTAGE;
+    opm_pro_tma::expect(epi_full+slot,(NP*KC+WSL)*2);
+    opm_epi_tma::ld4(&O_MAP,sP+slot*NP*KC,epi_full+slot,0,j0,i0,c*2);
+    opm_pro_tma::ld2(&W_MAP,sW+slot*WSL,epi_full+slot,c*KC,0);
+#else
   // this thread's fixed slot in the tile, and the two streams walked forward one chunk at a time
   const int k8 = tid & 3, jl = (tid >> 2) & (BJ - 1), cl = (tid >> 7) & (KC / CH - 1);
   const int chunk0 = cl * (CH / 8) + k8;
@@ -902,7 +938,25 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
       const int v = q * THREADS + tid, kc = v & (KC / 8 - 1), n = v / (KC / 8);
       __pipeline_memcpy_async(dst + sp_off(n, kc), src + (size_t)n * (CH * CH) + kc * 8, 16);
     }
+#endif
   };
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+  if(tid==0) for(int p=0;p<NSTAGE-1;++p)fill(p);
+  #pragma unroll 1
+  for(int ck=0;ck<NCHUNK;++ck) {
+    opm_pro_tma::wait(epi_full+ck%NSTAGE,(ck/NSTAGE)&1);
+    const __nv_bfloat16* p=sP+(ck%NSTAGE)*NP*KC;
+    const __nv_bfloat16* w=sW+(ck%NSTAGE)*WSL;
+    wg::fence();
+    #pragma unroll
+    for(int ks=0;ks<KSTEP;++ks)
+      wg::mma_m64n128k16(
+        opm_epi_tma::desc64(p+(ks>>1)*NP*32+wgi*64*32+(ks&1)*16),
+        wg::desc(w+sp_off(0,ks*2)),acc,(ck==0&&ks==0)?0:1);
+    wg::commit();
+    asm volatile("wgmma.wait_group.sync.aligned 1;":::"memory");
+    // Both groups finish reading ck-1 before its ring slot is overwritten.
+#else
   auto fill = [&](int c) {
     weights(wsrc + (size_t)c * KC, sW + (c % NSTAGE) * WSL);
     stage(osrc + (size_t)c * (KC / CH) * M, sP + (c % NSTAGE) * NP * KCP, jl, chunk0, M);
@@ -916,7 +970,11 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     __pipeline_wait_prior(left < NSTAGE - 2 ? left : NSTAGE - 2);
     // The one barrier of the chunk.  Behind it sits the previous chunk's wgmma, finished, which is
     // what makes it safe to refill that chunk's buffer on the line after.
+#endif
     __syncthreads();
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+    if(tid==0 && ck+NSTAGE-1<NCHUNK)fill(ck+NSTAGE-1);
+#else
     if (ck + NSTAGE - 1 < NCHUNK) fill(ck + NSTAGE - 1);
     const __nv_bfloat16* p = sP + (ck % NSTAGE) * NP * KCP;
     const __nv_bfloat16* w = sW + (ck % NSTAGE) * WSL;
@@ -927,8 +985,13 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
                          wg::desc(w + sp_off(0, ks * 2)), acc, (ck == 0 && ks == 0) ? 0 : 1);
     wg::commit();
     wg::wait();
+#endif
   }
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+  wg::wait();
+#else
 
+#endif
   __syncthreads();
   // / num_mask and + bias in fp32 -> bf16, one rounding, straight from the accumulator into the TMA
   // box over the dead staging buffers.  It used to go out as fp32 through a padded [NP][CZ] tile and
@@ -1853,13 +1916,37 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
                               CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled (epilogue) failed: ", (int)r);
   }
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+
+  alignas(64) CUtensorMap o_map{}, w_map{};
+  {
+    uint64_t dims[4]={32,(uint64_t)nj,(uint64_t)ni,32};
+    uint64_t strides[3]={64,(uint64_t)32*M*2,(uint64_t)M*2};
+    uint32_t box[4]={32,BJ,BI,2},elem[4]={1,1,1,1};
+    CUresult r=tma_encode()(&o_map,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,4,O.data_ptr(),dims,strides,box,elem,
+      CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_64B,CU_TENSOR_MAP_L2_PROMOTION_L2_128B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    TORCH_CHECK(r==CUDA_SUCCESS,"OPM gathered input TMA encode failed ",int(r));
+  }
+  {
+    uint64_t dims[2]={CH*CH,CZ},strides[1]={CH*CH*2};
+    uint32_t box[2]={KC,CZ},elem[2]={1,1};
+    CUresult r=tma_encode()(&w_map,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,bf.data_ptr(),dims,strides,box,elem,
+      CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_L2_128B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    TORCH_CHECK(r==CUDA_SUCCESS,"OPM weight TMA encode failed ",int(r));
+  }
+
+#endif
   opm_epilogue_kernel<<<grid, THREADS, SMEM_BYTES + 1024, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(O.data_ptr<at::BFloat16>()),
       norm.data_ptr<float>(),
       reinterpret_cast<const __nv_bfloat16*>(bf.data_ptr<at::BFloat16>()),
       bias.data_ptr<float>(),
       residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+      (int)ni, (int)nj, M, out_map, o_map, w_map);
+#else
       (int)ni, (int)nj, M, out_map);
+#endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
