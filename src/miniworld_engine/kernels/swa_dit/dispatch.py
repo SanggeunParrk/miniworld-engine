@@ -1,5 +1,10 @@
 """The fused SWA atom DiT block's host side: which implementation serves each stage, and its launches.
 
+On H100, the supported window64 path defaults to handwritten CUDA and cuBLAS for BF16/FP32 forwards and backwards.
+The BF16 front/FFN retain TMA/WGMMA fusion; deterministic CUDA rows and window attention cover the remaining stages.
+Unsupported native contracts and failed builds raise. MINIWORLD_SWA_H100_CUDA_ONLY=0 selects the legacy composition
+described below for diagnostics; its timings are not the native path's performance.
+
 Moved from team-gm ``swa_fused_triton.block_fwd`` / ``block_bwd`` (commit 14f2c73). The launch sequence, the buffers and
 the arguments are team-gm's; what differs is the engine plumbing:
 
@@ -83,6 +88,173 @@ from miniworld_engine.kernels.swa_dit.triton.forward_fp32 import (
 
 #: ``pack`` keys an axis only below 4096; an augment count at or above it shares the top key.
 _A_KEY_MAX = 4095
+
+# Accuracy-first native H100 path. Explicit zero retains the legacy diagnostic path.
+def native_h100_enabled(q):
+    from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
+    return os.environ.get("MINIWORLD_SWA_H100_CUDA_ONLY", "1") == "1" and is_sm90(q.device)
+
+
+def _native_h100_extension():
+    from miniworld_engine.kernels.swa_dit.cuda.loader import extension, ERRORS
+    if settings.current().engine_backend == "triton":
+        raise RuntimeError("native H100 SWA rejects a forced Triton backend")
+    ext = extension("qkvg")
+    if ext is None:
+        raise RuntimeError(f"native H100 SWA extension unavailable: {ERRORS.get('qkvg')}")
+    return ext
+
+
+def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window):
+    if (q.dtype not in (torch.bfloat16, torch.float32) or q.ndim != 3 or q.shape[-1] != 128
+            or not q.is_cuda or not q.is_contiguous() or q.numel() == 0
+            or half_window != 64 or B <= 0 or q.shape[0] % B
+            or mod.dtype != torch.float32 or not mod.is_contiguous()
+            or seqused.dtype != torch.int32 or not seqused.is_contiguous()
+            or tuple(mod.shape) != (B * q.shape[1], 768)
+            or tuple(seqused.shape) != (q.shape[0],)):
+        raise ValueError("native H100 SWA requires contiguous BF16/FP32 [A*B,S,128], FP32 modulation and window64")
+    if any(t.device != q.device for t in (mod, cs, sn, seqused, *weights)):
+        raise ValueError("native H100 SWA tensors must be on the same CUDA device")
+    if any(t.dtype != torch.float32 or not t.is_contiguous()
+           or tuple(t.shape) != (B * q.shape[1], 16) for t in (cs, sn)):
+        raise ValueError("native H100 SWA requires contiguous FP32 RoPE [B*S,16]")
+    shapes = ((384, 128), (128, 128), (128, 128), (512, 128), (128, 256))
+    if any(t.dtype != q.dtype or not t.is_contiguous() or tuple(t.shape) != shape
+           for t, shape in zip(weights, shapes)):
+        raise ValueError("native H100 SWA requires canonical packed projection weights")
+
+
+def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, save):
+    _native_contract(q, mod, cs, sn, sequ, (wqkv, wg, wo, wu, wd), B, hw)
+    ext = _native_h100_extension()
+    N, S, _ = q.shape
+    A, M = N // B, N * S
+    bf = q.dtype == torch.bfloat16
+    def empty(*shape, dtype=None):
+        return torch.empty(shape, device=q.device, dtype=q.dtype if dtype is None else dtype)
+    def rows(stage, ins, outs):
+        ext.native_rows(ins, outs, stage, A, B, S, bf, eps)
+    wstack = empty(512, 128)
+    ext.native_copy([wqkv, wg], [wstack[:384], wstack[384:]], 0)
+    if bf:
+        qh, kh, vh, g, x, pq, pk = ext.qkvg_fwd(q.reshape(M, 128), mod, cs, sn, wstack, A, B, S, eps, FP32_EPS, True)
+    else:
+        x = empty(M, 128)
+        rows(0, [q, mod], [x])
+        p = torch.mm(x, wstack.t())
+        qh, kh, vh = [empty(N, 4, S, 32, dtype=torch.bfloat16) for _ in range(3)]
+        g, pq, pk = [empty(M, 128) for _ in range(3)]
+        rows(1, [p, cs, sn], [qh, kh, vh, g, pq, pk])
+    o, lse = empty(M, 128, dtype=torch.bfloat16), empty(N, 4, S, dtype=torch.float32)
+    ext.native_attention([qh, kh, vh, sequ], [o, lse], 0)
+    if bf:
+        from miniworld_engine.kernels.swa_dit.cuda.loader import extension, ERRORS
+        ffn_ext = extension("fwd")
+        if ffn_ext is None:
+            raise RuntimeError(f"native H100 SWA FFN unavailable: {ERRORS.get('fwd')}")
+        packed_wu = torch.empty_like(wu)
+        ext.native_copy([wu], [packed_wu], 2)
+        out, q1, att, y, ffn = ffn_ext.ffn_fwd(q.reshape(M, 128), g, o, mod, wo, packed_wu, wd, A, B, S, eps, True)
+    else:
+        gated = empty(M, 128)
+        rows(2, [o, g], [gated])
+        att = torch.mm(gated, wo.t())
+        q1, y = empty(M, 128), empty(M, 128)
+        rows(3, [q, att, mod], [q1, y])
+        ab = torch.mm(y, wu.t())
+        hh = empty(M, 256)
+        rows(4, [ab], [hh])
+        ffn = torch.mm(hh, wd.t())
+        out = empty(M, 128)
+        rows(5, [q1, ffn, mod], [out])
+    outputs = [out.view(N, S, 128)]
+    if save:
+        outputs += [qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn]
+    return outputs
+
+
+def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
+                     qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, hw, eps):
+    _native_contract(q, mod, cs, sn, sequ, (wqkv, wg, wo, wu, wd), B, hw)
+    if not dy.is_contiguous():
+        raise ValueError("native H100 SWA requires contiguous upstream gradient")
+    ext = _native_h100_extension()
+    N, S, _ = q.shape
+    A, M, bf = N // B, N * S, q.dtype == torch.bfloat16
+    def empty(*shape, dtype=None):
+        return torch.empty(shape, device=q.device, dtype=q.dtype if dtype is None else dtype)
+    def rows(stage, ins, outs):
+        ext.native_rows(ins, outs, stage, A, B, S, bf, eps)
+    dmod = torch.empty_like(mod)
+    dffn = empty(M, 128)
+    rows(6, [dy, mod, ffn], [dffn, dmod])
+    ab, dh = _mm32(y, wu.t()), _mm32(dffn, wd)
+    dab, hh = empty(M, 512), empty(M, 256)
+    rows(7, [ab, dh], [dab, hh])
+    dY = _mm32(dab, wu)
+    dq1 = empty(M, 128)
+    rows(8, [dy, dY, q1, mod], [dq1, dmod])
+    datt, gated = empty(M, 128), empty(M, 128)
+    rows(9, [dq1, mod, att, o, g], [datt, gated, dmod])
+    dgated = _mm32(datt, wo)
+    dO, dG, delta = empty(M, 128, dtype=torch.bfloat16), empty(M, 128), empty(N, 4, S, dtype=torch.float32)
+    rows(10, [dgated, o, g], [dO, dG, delta])
+    dqh, dkh, dvh = [torch.empty_like(qh) for _ in range(3)]
+    ai, ao = [qh, kh, vh, sequ, dO, lse, delta], [dqh, dkh, dvh]
+    ext.native_attention(ai, ao, 1)
+    ext.native_attention(ai, ao, 2)
+    dp = empty(M, 512)
+    rows(11, [pq, pk, dqh, dkh, dvh, dG, cs, sn], [dp])
+    wstack = empty(512, 128)
+    ext.native_copy([wqkv, wg], [wstack[:384], wstack[384:]], 0)
+    dX = _mm32(dp, wstack)
+    dq = empty(M, 128)
+    rows(12, [dq1, dX, q, mod], [dq, dmod])
+    return [dq.view_as(q), dmod, _mm32(dp[:, :384].t(), x), _mm32(dp[:, 384:].t(), x),
+            _mm32(datt.t(), gated), _mm32(dab.t(), y), _mm32(dffn.t(), hh)]
+
+
+def _native_cast_fake(values, templates):
+    return [torch.empty_like(t) for t in templates]
+
+
+@opaque(fake=_native_cast_fake, name="h100_swa_native_cast")
+def native_h100_cast(values: list[torch.Tensor], templates: list[torch.Tensor]) -> list[torch.Tensor]:
+    out = [torch.empty_like(t) for t in templates]
+    _native_h100_extension().native_copy(values, out, 0)
+    return out
+
+
+def _native_mod_fwd_fake(c, w):
+    return (c.new_empty((c.shape[0], 768), dtype=torch.float32),
+            c.new_empty(c.shape, dtype=torch.float32), w.new_empty(w.shape, dtype=torch.float32))
+
+
+@opaque(fake=_native_mod_fwd_fake, name="h100_swa_native_mod_fwd")
+def native_h100_mod_fwd(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ext = _native_h100_extension()
+    a, w32 = torch.empty_like(c, dtype=torch.float32), torch.empty_like(w, dtype=torch.float32)
+    ext.native_copy([c], [a], 1)
+    ext.native_copy([w], [w32], 0)
+    with torch.autocast("cuda", enabled=False):
+        return torch.mm(a, w32.t()), a, w32
+
+
+def _native_mod_bwd_fake(dy, c, a, w32, w):
+    return torch.empty_like(c), torch.empty_like(w)
+
+
+@opaque(fake=_native_mod_bwd_fake, name="h100_swa_native_mod_bwd")
+def native_h100_mod_bwd(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    ext = _native_h100_extension()
+    with torch.autocast("cuda", enabled=False):
+        da, dw = torch.mm(dy, w32), torch.mm(dy.t(), a)
+    dc, dweight = torch.empty_like(c), torch.empty_like(w)
+    ext.native_rows([c, da], [dc], 14, 1, 1, c.shape[0], c.dtype == torch.bfloat16, FP32_EPS)
+    ext.native_copy([dw], [dweight], 0)
+    return dc, dweight
+
 
 
 def _augments(N: int, B: int) -> int:
@@ -221,6 +393,8 @@ def swa_dit_block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin
     """The block forward. q [N, S, C] bf16 or fp32 (the weights in the same dtype); mod [B*S, 6C] fp32 (hoisted adaLN
     modulation of this block); cos / sin [B*S, D/2] fp32; seqused [N] int32. Returns [out] or, with ``save``,
     [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads)."""
+    if native_h100_enabled(q):
+        return _native_h100_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
     if is_global(half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
@@ -358,6 +532,9 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
     """Backward of :func:`swa_dit_block_fwd` from its saved tensors. dy [N, S, C] in q's dtype. Returns [dq [N, S, C] in q's
     dtype, dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd fp32]: the weight gradients leave their fp32 accumulators unrounded
     (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype)."""
+    if native_h100_enabled(q):
+        return _native_h100_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd,
+                                qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps)
     if is_global(half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
