@@ -25,6 +25,34 @@ needs_hopper = pytest.mark.skipif(
 )
 
 
+@needs_hopper
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_native_prepare_compile_and_alias_contract(dtype, strided, transpose):
+    from miniworld_engine.kernels.transition.cuda.fused_sm90a import (
+        _cuda_prepare, _cuda_prepare_launch,
+    )
+
+    def weight(rows, cols):
+        value = torch.randn(rows, cols, device="cuda", dtype=dtype)
+        return value.t().contiguous().t() if strided else value
+
+    weights = (weight(512, 128), weight(512, 128), weight(128, 512))
+    torch.library.opcheck(_cuda_prepare_launch, (*weights, transpose))
+    compiled = torch.compile(_cuda_prepare, fullgraph=True)
+    for prepare in (_cuda_prepare, compiled):
+        outputs = prepare(*weights, transpose)
+        for source, output in zip(weights, outputs[:3], strict=True):
+            torch.testing.assert_close(output, source.bfloat16(), rtol=0, atol=0)
+            if dtype == torch.bfloat16 and not strided:
+                assert output.data_ptr() == source.data_ptr()
+        if transpose:
+            torch.testing.assert_close(outputs[3], weights[2].t().bfloat16(), rtol=0, atol=0)
+        else:
+            assert outputs[3].numel() == 0
+
+
 def _weights(d=128, h=512, dev="cuda"):
     wa = torch.randn(h, d, device=dev, dtype=torch.bfloat16)
     ws = torch.randn(d, h, device=dev, dtype=torch.bfloat16)
