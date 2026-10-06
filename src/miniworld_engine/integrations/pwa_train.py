@@ -562,9 +562,13 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
     E = apb.ext()
     K = _k()["pair3"]
     with torch.cuda.device(dy.device), torch.autocast("cuda", enabled=False):
-        # Keep the valid IO0 incumbent at S4096/L768: IO1 did not beat its
-        # archived accurate latency, despite winning the same-allocation pair.
-        io_default = _h100_training_default(args[0]) and args[0].shape[1:3] != (4096, 768)
+        qualified = _h100_training_default(args[0])
+        point_pack = os.environ.get(
+            "MINIWORLD_PWA_H100_SHADOW_POINT_PACK", "1" if qualified else "0") == "1"
+        # The fused point/pack path beat the accurate historical incumbent on
+        # all six required shapes. Explicit POINT_PACK=0 keeps the prior IO0
+        # selection at S4096/L768 as well as the original separate point/pack.
+        io_default = qualified and (args[0].shape[1:3] != (4096, 768) or point_pack)
         native_io = os.environ.get("MINIWORLD_PWA_H100_SHADOW_IO", "1" if io_default else "0") == "1"
         if native_io:
             df, lmw, lmb, wv, wg, lzw, lzb, wb, wo = E.exact_fp32_inputs_grouped([dy, *args[3:]])
@@ -585,7 +589,7 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
         du = K.shadow_dropout(df, kept[4], float(p_drop)) if p_drop else df
         dog = E.exact_mm(du.view(S * L, D), wo)
         do = (E.exact_point_pack(dog, gate, S, L)
-              if os.environ.get("MINIWORLD_PWA_H100_SHADOW_POINT_PACK", "0") == "1"
+              if point_pack
               else pack(E.exact_point(dog, gate, 1.0, 1), S, L))
         mask = args[2].view(L) if args[2].numel() else None
         bias = E.exact_mask_bias(E.exact_mm(zn, wb.t()), mask, L)
