@@ -41,7 +41,14 @@ constexpr int F_XN = 0, F_DY = 2 * B64, F_W1 = 4 * B64, F_WS = 8 * B64, F_STAGE 
 #endif
 constexpr int NPASS = STG_HALF ? 2 : 1, CPP = 2 / NPASS;                // passes, 64-column blocks per pass
 constexpr int F_STG = NSTAGE * F_STAGE, F_STGW = 3 * CPP * 8192;       // per consumer WG: {h, dA, dB} x CPP blocks of [64][64]
+#if MW_GATE_SAVED_TMA && MW_GATE_SAVED
+// Two saved A/B tiles overlap the DH weight ring. Each tile owns both
+// consumer warpgroups' [64,128] operands until both have read the epilogue.
+constexpr int AB_TILE = 65536, F_AB = F_STG + 2 * F_STGW;
+constexpr int F_BAR = F_AB + 2 * AB_TILE;
+#else
 constexpr int F_BAR = F_STG + 2 * F_STGW;
+#endif
 constexpr int SMEM_BYTES = F_BAR + 128;
 static_assert(SMEM_BYTES <= 231424, "shared memory budget");
 
@@ -87,6 +94,11 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + F_BAR);
   uint64_t* empty = full + NSTAGE;
+#if MW_GATE_SAVED_TMA && MW_GATE_SAVED
+  uint64_t* ab_full = empty + NSTAGE;
+  uint64_t* ab_empty = ab_full + 2;
+  static_assert((2*NSTAGE+4)*sizeof(uint64_t)<=128,"saved-operand barriers");
+#endif
 #if MCW
   uint64_t* ready = empty + NSTAGE;
   static_assert(3 * NSTAGE * sizeof(uint64_t) <= 128, "cluster pipeline barrier area");
@@ -108,6 +120,9 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
       mbar_init(ready + s, 2);
 #endif
     }
+#if MW_GATE_SAVED_TMA && MW_GATE_SAVED
+    for(int s=0;s<2;++s){mbar_init(ab_full+s,1);mbar_init(ab_empty+s,2);}
+#endif
     fence_barrier_init();
   }
   __syncthreads();
@@ -118,8 +133,19 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
     setmaxnreg_dec<24>();
     if (tid == 0) {
       uint32_t it = 0;
-      for (int t = t0; t < tiles; t += tstep) {
+      int item=0;
+      for (int t = t0; t < tiles; t += tstep,++item) {
         const int m0 = TILE_M0(t), n = t % NT;
+#if MW_GATE_SAVED_TMA && MW_GATE_SAVED
+        const int as=item&1;
+        if(item>=2)mbar_wait(ab_empty+as,((item/2)-1)&1);
+        mbar_arrive_expect_tx(ab_full+as,AB_TILE);
+        for(int cw=0;cw<2;++cw)for(int cb=0;cb<2;++cb){
+          uint8_t* dst=sm+F_AB+as*AB_TILE+cw*16384+cb*8192;
+          tma_load_2d(dst,&mXN,ab_full+as,n*THB+cb*64,m0+cw*64);
+          tma_load_2d(dst+32768,&mW1,ab_full+as,n*THB+cb*64,m0+cw*64);
+        }
+#endif
         for (int kb = 0; kb < KB; ++kb, ++it) {
           const int s = (int)(it % NSTAGE);
           if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
@@ -159,7 +185,8 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
   const int cw = wg - 1;
   uint8_t* stg = sm + F_STG + cw * F_STGW;
   uint32_t it = 0;
-  for (int t = t0; t < tiles; t += tstep) {
+  int item=0;
+  for (int t = t0; t < tiles; t += tstep,++item) {
     const int m0 = TILE_M0(t), n = t % NT;
 #if !MW_EXPAND_ONLY
     float DH[64];
@@ -199,6 +226,9 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
     wgmma_wait<0>(); GATE_FENCE_AB(AB); GATE_FENCE_DH(DH);
     if (wtid == 0) { mbar_arrive(empty + prev); if (MCW) mbar_arrive_peer(empty + prev, peer); }
 #endif
+#if MW_GATE_SAVED_TMA && MW_GATE_SAVED
+    mbar_wait(ab_full+(item&1),(item/2)&1);
+#endif
 #pragma unroll
     for (int ps = 0; ps < NPASS; ++ps) {
     if (wtid == 0) tma_store_wait_read<0>();
@@ -217,8 +247,14 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
           const float g0 = bf16lo(dhp), g1 = bf16hi(dhp);
 #endif
 #if MW_GATE_SAVED
+#if MW_GATE_SAVED_TMA
+          const int ar=16*warp+(lane>>2)+8*rb,ac=8*g+2*(lane&3);
+          const uint32_t off=F_AB+(item&1)*AB_TILE+cw*16384+(ac/64)*8192+swz128(ar,(ac%64)*2);
+          const uint32_t ap=*reinterpret_cast<const uint32_t*>(sm+off),bp=*reinterpret_cast<const uint32_t*>(sm+off+32768);
+#else
           const size_t off=(size_t)(m0+64*cw+16*warp+(lane>>2)+8*rb)*H+n*THB+8*g+2*(lane&3);
           const uint32_t ap=*reinterpret_cast<const uint32_t*>(saved_a+off),bp=*reinterpret_cast<const uint32_t*>(saved_b+off);
+#endif
           const float a0=bf16lo(ap),a1=bf16hi(ap),b0=bf16lo(bp),b1=bf16hi(bp);
 #else
           const float a0 = AB[ia], a1 = AB[ia + 1], b0 = AB[ib], b1 = AB[ib + 1];
@@ -257,6 +293,10 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
       tma_store_commit();
     }
     }
+#if MW_GATE_SAVED_TMA && MW_GATE_SAVED
+    // The preceding epilogue barrier joins every shared A/B reader.
+    if(wtid==0)mbar_arrive(ab_empty+(item&1));
+#endif
   }
   if (wtid == 0) tma_store_wait_all();
   }

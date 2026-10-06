@@ -47,8 +47,12 @@ void wide_lnsg_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&
                       );
 void wide_squeeze_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, int, int, int, int,
                          cudaStream_t);
+#ifndef MW_GATE_SAVED_TMA
+#define MW_GATE_SAVED_TMA 0
+#endif
 #if MW_SAVE_AB
 void wide_gate_saved_launch(const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,
+                           const CUtensorMap&,const CUtensorMap&,
                            const __nv_bfloat16*,const __nv_bfloat16*,int,int,int,int,cudaStream_t);
 #if MW_SPLIT_FWD
 void wide_expand_saved_launch(const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,const CUtensorMap&,
@@ -209,8 +213,8 @@ torch::Tensor gate_saved(torch::Tensor dy,torch::Tensor wst,torch::Tensor a,torc
   bf16_2d(dy,M,D,"dy");bf16_2d(wst,H,D,"wst");bf16_2d(a,M,H,"saved a");bf16_2d(b,M,H,"saved b");
   expect(M%ROWS==0,"whole 128-row tiles required");
   auto dab=torch::empty({M,2*H},dy.options());
-  wide_gate_saved_launch(rm(dy,32,64,64),rm(wst,32,128,64),rm(dab,64,64),bp(a),bp(b),
-                        (int)M,(int)D,(int)H,2*WIDE_SMS,at::cuda::getCurrentCUDAStream());
+  wide_gate_saved_launch(rm(dy,32,64,64),rm(wst,32,128,64),rm(dab,64,64),rm(a,64,64),rm(b,64,64),bp(a),bp(b),
+                        (int)M,(int)D,(int)H,(MW_GATE_SAVED_TMA?1:2)*WIDE_SMS,at::cuda::getCurrentCUDAStream());
   return dab;
 }
 #if MW_SPLIT_FWD

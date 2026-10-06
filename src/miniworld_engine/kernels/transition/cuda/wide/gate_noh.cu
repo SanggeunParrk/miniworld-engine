@@ -1,7 +1,11 @@
 // D >= 384 backward, gate stage WITHOUT the h store (MINIWORLD_TRANSITION_WIDE_SAVE_H=1: h comes from the forward): dh = dy Ws, [a|b] = xn [Wa;Wb]^T and the SwiGLU backward in one kernel, writing only
 // [dA|dB] [M][2H]. 128 rows x 128 hidden tile, 32-wide K slabs, 4 stages, two-pass epilogue, slab released as its MMAs retire.
 // See kernels/gate_gemm2.cu.
-#if MW_GATE_FULL_STAGE && !MW_SAVE_AB
+#if MW_GATE_SAVED_TMA && MW_SAVE_AB
+#define TBK 32
+#define NSTAGE 3
+#define STG_HALF 1
+#elif MW_GATE_FULL_STAGE && !MW_SAVE_AB
 #define TBK 32
 #define NSTAGE 3
 #define STG_HALF 0
@@ -36,10 +40,11 @@
 
 #if MW_SAVE_AB
 void wide_gate_saved_launch(const CUtensorMap& mdy,const CUtensorMap& mwst,const CUtensorMap& mdab,
+                           const CUtensorMap& ma,const CUtensorMap& mb,
                            const __nv_bfloat16* a,const __nv_bfloat16* b,int M,int K,int H,int ctas,cudaStream_t stream){
   static const bool ready=(wide_smem_optin(reinterpret_cast<const void*>(wide_gate_saved_kernel),SMEM_BYTES,"saved gate"),true);
   (void)ready;
-  wide_gate_saved_kernel<<<ctas,384,SMEM_BYTES,stream>>>(mdy,mdy,mwst,mwst,mdab,mdab,M,K,H,a,b);
+  wide_gate_saved_kernel<<<ctas,384,SMEM_BYTES,stream>>>(ma,mdy,mb,mwst,mdab,mdab,M,K,H,a,b);
 }
 #else
 void wide_gate_noh_launch(const CUtensorMap& mxn, const CUtensorMap& mdy, const CUtensorMap& mw1p, const CUtensorMap& mwst,
