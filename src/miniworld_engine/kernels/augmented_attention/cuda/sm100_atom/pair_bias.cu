@@ -18,6 +18,40 @@
 #include <cuda_bf16.h>
 
 #if defined(ATOM_HOPPER)
+// The module reference uses a finite masked_fill: no valid keys means
+// uniform attention, with zero Q/K/bias gradients and mean(dO) for every V.
+// The main attention uses -inf for masked columns; this deterministic edge
+// epilogue supplies mean(V) or mean(dO) only when the live mask is all false.
+extern "C" __global__ void atom_empty_uniform_sm90(
+    const unsigned char* keys, const __nv_bfloat16* src, __nv_bfloat16* dst,
+    int N, int dst_stride, int dst_offset) {
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  __shared__ int valid_warp[8];
+  int valid = 0;
+  for (int j = tid; j < N; j += 256) valid |= int(keys[j] != 0);
+  for (int d = 16; d; d >>= 1) valid |= __shfl_down_sync(0xffffffffu, valid, d);
+  if (lane == 0) valid_warp[warp] = valid;
+  __syncthreads();
+  valid = 0;
+  for (int w = 0; w < 8; ++w) valid |= valid_warp[w];
+  if (valid) return;
+
+  __shared__ float partial[8][32];
+  const int col = blockIdx.x * 32 + lane, sample = blockIdx.y;
+  float sum = 0.f;
+  for (int j = warp; j < N; j += 8)
+    sum += __bfloat162float(src[(size_t(sample) * N + j) * 128 + col]);
+  partial[warp][lane] = sum;
+  __syncthreads();
+  sum = 0.f;
+  for (int w = 0; w < 8; ++w) sum += partial[w][lane];
+  const __nv_bfloat16 mean = __float2bfloat16_rn(sum / float(N));
+  for (int j = warp; j < N; j += 8)
+    dst[(size_t(sample) * N + j) * dst_stride + dst_offset + col] = mean;
+}
+#endif
+
+#if defined(ATOM_HOPPER)
 extern "C" __global__ void atom_pair_partials_sm90(const float* src,float* dst,int nb) {
  __shared__ float s[16][16];
  int x=threadIdx.x&15,y=threadIdx.x>>4,c=blockIdx.x*16+x,shard=blockIdx.y;
@@ -76,7 +110,14 @@ extern "C" __global__ void atom_pack_dqkv_sm90(const __nv_bfloat16* q,const __nv
 #endif
 
 constexpr int C = 16, H = 4, TI = 32, TJ = 64, NT = 256;
+#if defined(ATOM_HOPPER_TRUE_MASK)
+// Opt-in Hopper correction for the efficient-SDPA all-masked reference.
+// The natural attention core records a nonfinite LSE for an empty row and
+// its backward already returns zero probability for those rows.
+constexpr float MASKED = -__builtin_inff();
+#else
 constexpr float MASKED = -1e4f;
+#endif
 
 __device__ __forceinline__ void load_row(const __nv_bfloat16* z, size_t e, float (&x)[C]) {
   const uint4* p = reinterpret_cast<const uint4*>(z + e * C);

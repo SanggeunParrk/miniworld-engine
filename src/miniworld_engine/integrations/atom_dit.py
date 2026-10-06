@@ -159,9 +159,13 @@ def _serves_hopper(module, single, cond, pair, mask, compute_dtype):
     require(not a.use_qk_norm, "use_qk_norm=False")
     require((a.n_head, a.to_query.weight.shape[0], a.ada_ln_in.to_scale.weight.shape[1],
              tr.expand_a.weight.shape[0]) == (NH_, DS_, DC_, 2 * DS_), "128/128/16 widths, four heads, transition n=2")
+    lengths = (1024, 2048, 4096)
+    if module.training and torch.is_grad_enabled() and os.environ.get("MINIWORLD_ATOM_DIT_H100_TRAIN_N8192") == "1":
+        # Shape-extension candidate; inference retains its measured contract.
+        lengths = (*lengths, 8192)
     require(single.ndim == 4 and single.shape[0] in (1, 5) and single.shape[1] == 1
-            and single.shape[2] in (1024, 2048, 4096) and single.shape[3] == DS_,
-            "single [A,1,N,128] with A in {1,5}, N in {1024,2048,4096}")
+            and single.shape[2] in lengths and single.shape[3] == DS_,
+            f"single [A,1,N,128] with A in {{1,5}}, N in {lengths}")
     n = single.shape[2]
     require(tuple(cond.shape) == (*single.shape[:3], DC_) and tuple(pair.shape) == (1, n, n, DP_),
             "matching contiguous conditioning and dense pair shapes")
@@ -296,6 +300,7 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         q, k, v, sg, x1 = sm100.pre_fwd(s2, mod, *wp, save=save)
         bias, bias_t = sm100.pair_bias_fwd(pair, weights[_GAMMA], weights[_WBIAS], trans=save, n=n, kv=keys)
         o, lse = sm100.attn_fwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias)
+        sm100.empty_uniform_hopper(keys, v, o, n)
         out, u, a2, x2, t = sm100.post_fwd(s2, o, sg, mod, *wo, save=save)
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
@@ -338,6 +343,7 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         da, du, gated, do = sm100.post_bwd(dab, dy, a2, mod, u, sg, o, wb["WuT"], wb["WoT"], dmod, dp, dd, dbias_cols, n)
         db = sm100.attn_bwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias, bias_t, lse, dd, dp,
                             native_hopper=hopper)
+        sm100.empty_uniform_hopper(_keys(mask), do, dp, n, value_gradient=True)
         dz, dgamma, dwb = sm100.pair_bias_bwd(pair, weights[_GAMMA], weights[_WBIAS], db, kv=_keys(mask), native_hopper=hopper)
         ds = sm100.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
         dc, cn1, cn2 = sm100.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgparts)
@@ -398,5 +404,9 @@ def block(module, single, cond, pair, mask=None):
     """The block's output stream (both residuals included), on the sm_100a kernels; ``serves()`` must have accepted the call."""
     weights = [module.get_parameter(name) for name in WEIGHTS]
     if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights)):
-        return _AtomBlock.apply(mask, single, cond, pair, *weights)
+        out = _AtomBlock.apply(mask, single, cond, pair, *weights)
+        if torch.cuda.get_device_capability(single.device) == (9, 0):
+            from .token_dit_train import _native_caller_output
+            out = _native_caller_output(out, single, cond, pair, *weights, force=True)
+        return out
     return _infer(single, cond, pair, mask, weights)
