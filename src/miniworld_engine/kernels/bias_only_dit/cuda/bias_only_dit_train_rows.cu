@@ -1347,12 +1347,12 @@ __global__ void head_pack(const bf* d,const bf* v,float* dh,float* vh,int M,int 
 }
 __device__ float sumwarp(float x){for(int d=16;d;d>>=1)x+=__shfl_xor_sync(0xffffffff,x,d);return x;}
 __device__ float maxwarp(float x){for(int d=16;d;d>>=1)x=fmaxf(x,__shfl_xor_sync(0xffffffff,x,d));return x;}
-__global__ void soft_grad(const float* score,const float* dp,const bool* mask,float* db,int L) {
+__global__ void soft_grad(const float* score,const float* dp,const bool* mask,float* db,int L,int64_t mask_stride) {
  __shared__ float scratch[8],mx,den,delta;
  int t=threadIdx.x,row=blockIdx.x,lane=t%32,w=t/32;
  float vals[3],p[3],m=-3.402823466e38f;
  #pragma unroll
- for(int k=0;k<3;++k){int j=t+k*256;vals[k]=j<L&&(!mask||mask[j])?score[(long)row*L+j]:-3.402823466e38f;m=fmaxf(m,vals[k]);}
+ for(int k=0;k<3;++k){int j=t+k*256;vals[k]=j<L&&(!mask||mask[j*mask_stride])?score[(long)row*L+j]:-3.402823466e38f;m=fmaxf(m,vals[k]);}
  m=maxwarp(m);if(lane==0)scratch[w]=m;__syncthreads();
  if(w==0){m=maxwarp(lane<8?scratch[lane]:-3.402823466e38f);if(lane==0)mx=m;}__syncthreads();
  float s=0.f;
@@ -1366,7 +1366,7 @@ __global__ void soft_grad(const float* score,const float* dp,const bool* mask,fl
  d=sumwarp(d);if(lane==0)scratch[w]=d;__syncthreads();
  if(w==0){d=sumwarp(lane<8?scratch[lane]:0.f);if(lane==0)delta=d;}__syncthreads();
  #pragma unroll
- for(int k=0;k<3;++k){int j=t+k*256;if(j<L)db[(long)row*L+j]=(!mask||mask[j])?__fmul_rn(p[k],dp[(long)row*L+j]-delta):0.f;}
+ for(int k=0;k<3;++k){int j=t+k*256;if(j<L)db[(long)row*L+j]=(!mask||mask[j*mask_stride])?__fmul_rn(p[k],dp[(long)row*L+j]-delta):0.f;}
 }
 template<class T> __global__ void finish_gamma(const float* dw,const float* wb,T* norm) {
  int c=threadIdx.x;float acc=0.f;for(int h=0;h<16;++h)acc+=__fmul_rn(dw[h*128+c],wb[h*128+c]);
@@ -1392,7 +1392,7 @@ std::vector<torch::Tensor> prepare(torch::Tensor p,torch::Tensor st,torch::Tenso
 }
 torch::Tensor backward_bias(torch::Tensor score,torch::Tensor dp,torch::Tensor mask) {
  int L=score.size(2);auto db=torch::empty_like(score);auto stream=at::cuda::getCurrentCUDAStream();
- soft_grad<<<16*L,256,0,stream>>>(score.data_ptr<float>(),dp.data_ptr<float>(),mask.numel()?mask.data_ptr<bool>():nullptr,db.data_ptr<float>(),L);
+ soft_grad<<<16*L,256,0,stream>>>(score.data_ptr<float>(),dp.data_ptr<float>(),mask.numel()?mask.data_ptr<bool>():nullptr,db.data_ptr<float>(),L,mask.numel()?mask.stride(-1):1);
  C10_CUDA_KERNEL_LAUNCH_CHECK();return db;
 }
 void finish(torch::Tensor dw,torch::Tensor wb,torch::Tensor norm) {
