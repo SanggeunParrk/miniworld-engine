@@ -39,8 +39,8 @@ def randomize(module):
 
 @pytest.fixture(autouse=True)
 def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("Blackwell (sm_100) required")
+    if torch.cuda.get_device_capability() != (10, 0) and not C.h100_enabled(torch.cuda.current_device()):
+        pytest.skip("Blackwell or explicitly enabled Hopper prototype required")
     old = settings.configure(engine_backend="auto")
     torch.backends.cuda.matmul.allow_tf32 = False
     try:

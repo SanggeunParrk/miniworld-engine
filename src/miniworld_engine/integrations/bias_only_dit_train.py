@@ -670,7 +670,14 @@ def _split_grads(bufs, params, skip=()):
             out.append(None)
             continue
         g = bufs[b][lo:hi] if shape is None else bufs[b][lo:hi].view(shape)
-        out.append(g if g.dtype == p.dtype else g.to(p.dtype))
+        if g.dtype != p.dtype:
+            from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+            if h100_enabled(p.device):
+                from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+                g = ext().pack90([g], [], p.dtype is torch.float32).view(p.shape)
+            else:
+                g = g.to(p.dtype)
+        out.append(g)
     return out
 
 
@@ -1150,6 +1157,10 @@ def _bwd_fused_step(
 class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, *params):
+        ctx.shared_cond = cond.shape[0] == 1 and single.shape[0] != 1
+        if ctx.shared_cond:
+            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+            cond = ext().repeat90(cond, single.shape[0])
         out, *saved = _fwd(single, cond, pair, mask, list(params))
         ctx.save_for_backward(single, cond, pair, *params, *saved)
         ctx.meta = (mask, len(params))
