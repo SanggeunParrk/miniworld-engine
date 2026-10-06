@@ -49,6 +49,15 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef ROW_WIDTH
 #define ROW_WIDTH 768
 #endif
+#ifndef APB_NATURAL
+#define APB_NATURAL 0
+#endif
+#ifndef FWD_BF16
+#define FWD_BF16 0
+#endif
+#ifndef RSQDV
+#define RSQDV 0.14433756729740643f
+#endif
 #ifndef QWID
 #define QWID DHP                 // Load exactly one head; shared rows retain their 128-byte pitch.
 #endif                           // image keeps its 128-B row pitch), 64 also pulls 16 columns of the next head
@@ -256,6 +265,10 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
           const float2 b = bf2f(bm[j >> 2][j & 3]);
           sc[4 * j + 2 * h] = HASM ? b.x + mk[2 * j] : b.x;          // x + 0.f is not foldable (signed zero)
           sc[4 * j + 2 * h + 1] = HASM ? b.y + mk[2 * j + 1] : b.y;
+          if constexpr (APB_NATURAL) {
+            sc[4 * j + 2 * h] /= RSQDV;
+            sc[4 * j + 2 * h + 1] /= RSQDV;
+          }
         }
       }
       wgmma_fence();
@@ -265,6 +278,10 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       wgmma_wait<0>();
 #pragma unroll
       for (int i = 0; i < 32; ++i) fence_reg(sc[i]);
+      if constexpr (APB_NATURAL) {
+#pragma unroll
+        for (int i = 0; i < 32; ++i) sc[i] *= RSQDV * LOG2E;
+      }
       // Lazy running max (FA4): the max only moves when a block exceeds it by more than LAZY (log2 units), so p stays
       // under 2^LAZY and the accumulator rescale -- 24 FMULs a thread -- runs only in warps where some row moved.
       float m_new[2];
@@ -351,8 +368,15 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
     } else {
       float* orow = O + (size_t)(samp * L + row) * DM + qcol;
 #pragma unroll
-      for (int j = 0; j < DH / 8; ++j)
-        *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
+      for (int j = 0; j < DH / 8; ++j) {
+        if constexpr (FWD_BF16) {
+          auto* brow = reinterpret_cast<__nv_bfloat16*>(O) + (size_t)(samp * L + row) * DM + qcol;
+          *reinterpret_cast<__nv_bfloat162*>(brow + j * 8 + cb) =
+              __floats2bfloat162_rn(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
+        } else {
+          *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
+        }
+      }
     }
     if ((lane & 3) == 0) LSE[((size_t)samp * H + head) * L + row] = m_i[h] + __log2f(l);
   }
@@ -418,19 +442,19 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   const int H = bias.size(0), L = bias.size(1);
   const int A = q.size(0) / L;
   for (auto* t : {&q, &k, &v})
-    TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
+    TORCH_CHECK(t->stride(1) == 1 && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
-  TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kFloat32 && LSE.is_contiguous(), "out layout");
+  TORCH_CHECK(O.is_contiguous() && O.scalar_type() == (FWD_BF16 ? torch::kBFloat16 : torch::kFloat32) && LSE.is_contiguous(), "out layout");
   TORCH_CHECK(L % QM == 0, "L must be a multiple of the query tile");
   const bool hasm = kmask.has_value() && kmask->defined();
   const int mt = L / QM;
-  auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, DM, QW, QM);
-  auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
-  auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
+  auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, q.stride(0), QW, QM);
+  auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, k.stride(0), QW, BN);
+  auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, v.stride(0), QW, BN);
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
   TORCH_CHECK(A % FCLS == 0, "A must be a multiple of the cluster size");
   launch(hasm ? attn_fwd_kernel<true, 0> : attn_fwd_kernel<false, 0>, A * H * mt, mq, mk, mv, mb, mq,   // (no g tile)
-         hasm ? kmask->data_ptr<float>() : nullptr, O.data_ptr<float>(), LSE.data_ptr<float>(), nullptr, L, H, A, mt);
+         hasm ? kmask->data_ptr<float>() : nullptr, reinterpret_cast<float*>(O.data_ptr()), LSE.data_ptr<float>(), nullptr, L, H, A, mt);
 }
 
 // The token DiT training forward (MODE 2): as attn_fwd, but og = sigmoid(g) O [A L, 768] bf16 (g from qkvg [A L, 3072]) in place
