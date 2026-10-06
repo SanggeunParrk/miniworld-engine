@@ -1,6 +1,7 @@
 """Native K1/K3 inference, packaged with its measured tile table and CUDA sources."""
 
 import json
+import os
 import torch
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -8,6 +9,10 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
 
 
 class _Kernels(K.Kernels):
+    def __init__(self, native_residual=False):
+        super().__init__()
+        self.native_residual = native_residual
+
     def has_unit(self, cz, ch):
         return ("sm_90a", cz, ch, "b") in K.TILE_TABLE
 
@@ -15,6 +20,8 @@ class _Kernels(K.Kernels):
         if (cz, ch) not in self._units:
             inc = T.SOURCES / "inference"
             defs = json.loads((inc / "defines.json").read_text())
+            if self.native_residual:
+                defs["TMN_K3W_NATIVE_RESIDUAL"] = 1
             source = (
                 '#include "tmn_kernels.cuh"\n#define TMN_CZ %d\n#define TMN_CH %d\n#include "tmn_sm90_unit.cuh"\n'
                 % (cz, ch)
@@ -39,8 +46,8 @@ class _Kernels(K.Kernels):
 
 
 @T.device_cache
-def _kernels():
-    return _Kernels()
+def _kernels(native_residual=False):
+    return _Kernels(native_residual)
 
 
 def _inference_fake(x, weights, mask, direction, eps):
@@ -89,7 +96,11 @@ def _run_inference(x, weights, mask, direction, eps, config):
     npad = (n + 15) // 16 * 16
     with torch.cuda.device(x.device):
         T._launch_module()._make_context_current(x.device.index)
-        kk = _kernels()
+        # Measured D384/L512 outgoing candidate. Keep a separate loaded unit
+        # so toggling the opt-in never reuses a cubin with different arithmetic.
+        native_residual = (cz == ch == 384 and n == 512 and direction == 1
+                           and os.environ.get("MINIWORLD_TRIMUL_H100_K3W_NATIVE_RESIDUAL", "1") == "1")
+        kk = _kernels(True) if native_residual else _kernels()
         from miniworld_engine.autotune.fused_config import unpack_trimul
         cfg = unpack_trimul(config)
         # K1 reads row-major weights in place (no pack kernel, nothing snapshotted); any other layout is packed live, which a
@@ -98,7 +109,7 @@ def _run_inference(x, weights, mask, direction, eps, config):
         quad = (wl, wlg, wr, wrg)
         if all(t.dtype == torch.bfloat16 and t.stride() == (cz, 1) for t in quad):
             wmap = {"wq": quad}
-        elif cz in (64, 128) or T.cuda_aux_enabled():
+        elif cz in (64, 128) or native_residual or T.cuda_aux_enabled():
             from ._h100_pack import pack_into_cuda
             packed = x.new_empty((4 * ch, cz))
             pack_into_cuda(packed, *quad)
