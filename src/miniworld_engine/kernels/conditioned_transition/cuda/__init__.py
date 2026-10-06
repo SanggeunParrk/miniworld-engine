@@ -80,16 +80,23 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         raise ValueError("Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768/384/128, 16 heads")
     qs = math.log2(math.e) / math.sqrt(48)
     fp32 = single.dtype is torch.float32
-    asynchronous = os.environ.get("MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC", "0") == "1"
+    asynchronous = int(os.environ.get("MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC", "0"))
+    if asynchronous not in (0, 1, 2):
+        raise ValueError("Hopper token inference pack schedule must be 0, 1 or 2")
     key = (asynchronous, qk, heads, single.dtype, os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", "0"), *((w.data_ptr(), w._version) for w in weights))
     def prepare():
         if not asynchronous:
-            return token_pack(weights, heads, qk, qs, single.dtype), weights, None, None
+            return token_pack(weights, heads, qk, qs, single.dtype), weights, None, None, None
         idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
         if idx not in _TOKEN_STREAMS:
             _TOKEN_STREAMS[idx] = torch.cuda.Stream(device=single.device)
         stream = _TOKEN_STREAMS[idx]
         out = _ext().token_alloc90(weights, heads, qk, fp32)
+        if asynchronous == 2:
+            # Keep the bandwidth-heavy pair projection separate from large
+            # weight casts; release the latter beside conditioning GEMMs.
+            _ext().token_stage90(weights, out, heads, qk, qs, fp32, 0, 5)
+            return out, weights, None, torch.cuda.Event(), {"stream": stream, "pending": True}
         stream.wait_stream(torch.cuda.current_stream(single.device))
         cond_ready, matrix_ready = torch.cuda.Event(), torch.cuda.Event()
         with torch.cuda.stream(stream):
@@ -98,8 +105,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
             _ext().token_stage90(weights, out, heads, qk, qs, fp32, 5, 13)
             matrix_ready.record(stream)
         _ext().token_stage90(weights, out, heads, qk, qs, fp32, 4, 5)
-        return out, weights, cond_ready, matrix_ready
-    packed, _, cond_ready, matrix_ready = _capture.lookup(_TOKEN_PACKS, key, prepare, limit=8)
+        return out, weights, cond_ready, matrix_ready, None
+    packed, _, cond_ready, matrix_ready, late_pack = _capture.lookup(_TOKEN_PACKS, key, prepare, limit=8)
     w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
     mask = None if mask is None else mask.reshape(L)
     # The augmented-attention module fills fully masked rows with a finite
@@ -118,6 +125,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     P = c.shape[0]
     cn = single.new_empty((P, 384)); cc = torch.empty_like(cn)
     cond_rows(c, cn, cc, 1e-5)
+    if late_pack is not None and late_pack["pending"]:
+        stream = late_pack["stream"]
+        stream.wait_stream(torch.cuda.current_stream(single.device))
+        with torch.cuda.stream(stream):
+            _ext().token_stage90(weights, packed, heads, qk, qs, fp32, 5, 13)
+            matrix_ready.record(stream)
+        late_pack["pending"] = False
     if cond_ready is not None:
         torch.cuda.current_stream(single.device).wait_event(cond_ready)
     g1 = torch.addmm(b1, cn, w1.t()).view(P, 4, D)

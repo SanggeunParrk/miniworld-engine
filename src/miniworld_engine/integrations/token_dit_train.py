@@ -138,6 +138,7 @@ def _key_mask(mask, A, L, perm=None):
 
 
 _PACKS: dict = {}
+_PACK_STREAMS: dict = {}
 
 def _native_rpb():
     return int(os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_RPB", "2"))
@@ -154,7 +155,8 @@ def _pack(P, qk, dev, at):
     it once per block, not once per forward. Scoped to the CUDA-graph capture (``kernels._capture``): an eager pack is never
     reused inside a capture, whose replays would otherwise run on the weights of capture time after every optimizer step."""
     native = _native90(dev)
-    key = (native, *((t.data_ptr(), t._version) for t in P.values()))
+    pipeline = native and os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC", "0") == "1"
+    key = (native, pipeline, *((t.data_ptr(), t._version) for t in P.values()))
     slot = _capture.scoped((next(iter(P.values())).data_ptr(), at))
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
@@ -165,7 +167,25 @@ def _pack(P, qk, dev, at):
         names = WEIGHTS + (QK_WEIGHTS if qk else ())
         keys = ("w1", "w2", "Wraw", "Wn", "Wg", "bs1", "bs2", "bg1", "bg2", "Wqkvg", "bqkvg",
                 "nq", "nk", "wp", "Wb", "Wf", "Wf_at", "Wf_l2", "Wo", "Wab", "Wsq")
-        W = dict(zip(keys, ext(rpb=_native_rpb()).train_pack90([P[n] for n in names], qk, at is torch.float32), strict=True))
+        T = ext(rpb=_native_rpb())
+        weights = [P[n] for n in names]
+        if pipeline:
+            idx = dev.index if dev.index is not None else torch.cuda.current_device()
+            if idx not in _PACK_STREAMS:
+                _PACK_STREAMS[idx] = torch.cuda.Stream(device=dev)
+            stream = _PACK_STREAMS[idx]
+            out = T.train_alloc90(weights, qk, at is torch.float32)
+            stream.wait_stream(torch.cuda.current_stream(dev))
+            cond_ready, ready = torch.cuda.Event(), torch.cuda.Event()
+            with torch.cuda.stream(stream):
+                T.train_stage90(weights, out, qk, at is torch.float32, 0, 9)
+                cond_ready.record(stream)
+                T.train_stage90(weights, out, qk, at is torch.float32, 9, 21)
+                ready.record(stream)
+            W = dict(zip(keys, out, strict=True))
+            W["_cond_ready"], W["_pack_ready"] = cond_ready, ready
+        else:
+            W = dict(zip(keys, T.train_pack90(weights, qk, at is torch.float32), strict=True))
         if slot is not None:
             _capture.prune(_PACKS)
             _PACKS[slot] = (key, W)
@@ -268,11 +288,15 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     c2 = None if native else cond.reshape(M, DC).contiguous()
     chat = torch.empty(M, DC, device=dev, dtype=at); cbf = torch.empty_like(chat)
     cst = torch.empty(M, 2, device=dev)
+    pipeline = native and os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC", "0") == "1"
+    W = _pack(P, qk, dev, at) if pipeline else None
     if native:
         T.cond_prep90(cond, chat, cbf, cst, EPS)
     else:
         T.cond_prep(c2, chat, cbf, cst, EPS)
-    W = _pack(P, qk, dev, at)
+    W = W if pipeline else _pack(P, qk, dev, at)
+    if pipeline:
+        torch.cuda.current_stream(dev).wait_event(W["_cond_ready"])
     Wn, Wg = W["Wn"], W["Wg"]
     G = torch.mm(chat, Wn.t())                                                  # [M, 4D] s1 | sh1 | s2 | sh2
     Gg = torch.mm(cbf, Wg.t())                                                  # [M, 2D] gate1 | gate2
@@ -280,6 +304,8 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     xa = torch.empty(M, D, device=dev, dtype=at); xst = torch.empty(M, 2, device=dev)
     T.adaln_a(single.reshape(M, D).contiguous(), G, bs1, xa, xst, EPS, x)  # reads the input, writes x on the way
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
+    if pipeline:
+        torch.cuda.current_stream(dev).wait_event(W["_pack_ready"])
     qkvg = torch.addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
@@ -423,6 +449,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     names = _names_for(qk)
     at = torch.float32 if fp32 else BF
     W = _pack(dict(zip(names, params, strict=False)), qk, single.device, at)
+    if W.get("_pack_ready") is not None:
+        torch.cuda.current_stream(single.device).wait_event(W["_pack_ready"])
     Wn, Wraw, Wg, Wqkvg, Wo, Wab, Wsq, Wf = W["Wn"], W["Wraw"], W["Wg"], W["Wqkvg"], W["Wo"], W["Wab"], W["Wsq"], W["Wf"]
     nq, nk, bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (W[k] for k in ("nq", "nk", "bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb"))
     A, _, L, _ = single.shape
