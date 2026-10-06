@@ -300,6 +300,7 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         shape = (leaves[-1].shape[0], single.shape[-1])
         qualified = single.shape[1] in (384, 768) and shape in (
             (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
+        fused_beta = qualified and os.environ.get("MINIWORLD_APB_H100_SHADOW_BETA_MM", "0") == "1"
         shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "1" if qualified else "0") == "1"
         convert = E.exact_fp32_inputs_grouped if shadow_io else E.exact_fp32_inputs
         pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "2" if qualified else "0"))
@@ -344,7 +345,7 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
                   else E.exact_attention_db(qh, kh, vh, bm, out32, lse32, do_rows, delta32))
             db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
                   else E.exact_db_transpose(ds, mask))
-            return E.exact_beta(E.exact_mm(db, wb))
+            return E.exact_beta_mm(db, wb) if fused_beta else E.exact_beta(E.exact_mm(db, wb))
         scale = math.sqrt(1.0 / math.sqrt(dh))
         qs = E.exact_point(q, q, scale, 0).view(1, L, H, dh).transpose(1, 2)
         ks = E.exact_point(k, k, scale, 0).view(1, L, H, dh).transpose(1, 2)
@@ -357,6 +358,8 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         ds = E.exact_soft(dp, probs, True)
         db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
                   else E.exact_db_transpose(ds, mask))
+        if fused_beta:
+            return E.exact_beta_mm(db, wb)
         dln = E.exact_mm(db, wb)
         return E.exact_beta(dln)
 
