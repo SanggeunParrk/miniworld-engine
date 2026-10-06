@@ -1,6 +1,14 @@
 """Automatic dispatch to the B200 (sm_100a) AttentionPairBias: inference and training, all hand CUDA but the plain GEMMs
 (cuBLAS).
 
+H100 inference and training use native CUDA by default for the required buckets.
+The original B200 exact-zero LN beta gradient fails the FP32 oracle cosine, so
+H100 training reconstructs that FP32 rounding with native CUDA and cuBLAS. This
+accuracy-first shadow materializes extra FP32 workspaces: the B200 tensor
+lifetimes and former fast-path latency do not describe this training default.
+MINIWORLD_APB_H100_TRAIN=0 retains the explicit legacy comparison path; disabling
+MINIWORLD_APB_H100_BETA_SHADOW selects the known-inaccurate experimental gradient.
+
 Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
 128, no QK-norm, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_100. Inference: L a multiple of 16;
@@ -19,8 +27,10 @@ ln_pair's bias adds Wb . b to every (i, j) of a head: the softmax cancels it, so
 
 Training (autograd Function, opaque forward / backward): the same forward in natural units with attn_fwd2 -DQPAIR (O, LSE),
 gate_rows and addmm; backward: dO GEMMs, gate_bwd (dO, D, dg), attn_dkv / attn_dqb -DNHEAD, qkv_bwd, the dxa / dW GEMMs,
-ln_bwd (+ residual), pair_bias_bwd. A key masked for every query (the whole sample) gets the uniform softmax's gradient on
-its pair bias where the PyTorch module's masked_fill gives zero."""
+ln_bwd (+ residual), pair_bias_bwd. B200 retains its finite masked logits. H100 uses
+-inf in the native attention core, matching the FP32 efficient-SDPA reference's
+zero attention update for an all-false key mask; its beta shadow also applies
+masked_fill's zero derivative at every masked key."""
 
 from __future__ import annotations
 
@@ -43,6 +53,11 @@ _packs: dict = {}
 _cores: dict = {}
 
 
+def native_training_enabled() -> bool:
+    """Validated H100 CUDA training; explicit zero retains the legacy baseline."""
+    return os.environ.get("MINIWORLD_APB_H100_TRAIN", "1") == "1"
+
+
 def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
     if module.implementation != ImplementationType.MINIWORLD or settings.current().engine_backend == "triton":
         return False
@@ -62,7 +77,7 @@ def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tens
         return False
     capability = torch.cuda.get_device_capability(single.device)
     return capability == (10, 0) or (capability == (9, 0) and L % 128 == 0
-                                    and (not torch.is_grad_enabled() or os.environ.get("MINIWORLD_APB_H100_TRAIN", "0") == "1"))
+                                    and (not torch.is_grad_enabled() or native_training_enabled()))
 
 
 def serves_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
@@ -266,27 +281,101 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
     return [dx.view(single.shape), dz.view(pair.shape), *outs]
 
 
+
+def _beta_shadow_fake(single, pair, mask, leaves, eps_s, eps_p, dy):
+    return torch.empty((DP,), device=single.device, dtype=torch.float32)
+
+
+@opaque(fake=_beta_shadow_fake, name="apb_h100_beta_fp32_shadow")
+def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
+                 leaves: list[torch.Tensor], eps_s: float, eps_p: float, dy: torch.Tensor) -> torch.Tensor:
+    """Accuracy-first beta residual with native CUDA arithmetic and cuBLAS.
+
+    This intentionally recreates the FP32 numerical path: beta's mathematical
+    gradient is zero, but the required oracle contains reduction roundoff.
+    The full FP32 pair normalization and attention probabilities are temporary
+    workspaces. This is slower and does not retain the B200 tensor lifetimes.
+    """
+    E = _rows().ext()
+    with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
+        values = E.exact_fp32_inputs([single, pair, dy, *leaves])
+        x, z, dy32 = values[:3]
+        lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = values[3:]
+        L, D = single.shape[1:]
+        H, dh = wb.shape[0], D // wb.shape[0]
+        xa = E.exact_ln(x, lnw, lnb, eps_s).view(L, D)
+        za = E.exact_ln(z, lnpw, lnpb, eps_p).view(L * L, DP)
+        q = E.exact_mm(xa, wq.t(), bq)
+        k = E.exact_mm(xa, wk.t())
+        v = E.exact_mm(xa, wv.t())
+        gate = E.exact_mm(xa, wg.t())
+        bias = E.exact_mm(za, wb.t())
+        dog = E.exact_mm(dy32.view(L, D), wo)
+        do_rows = E.exact_point(dog, gate, 1.0, 1).view(L, H, dh)
+        if mask is not None:
+            # masked_fill makes the oracle's bias contiguous and selects its
+            # efficient CUTLASS FP32 attention. Reproduce that arithmetic with
+            # project CUDA launches of the installed C++ templates, including
+            # the FP32 rounded product/reduction used for its delta tensor.
+            qh, kh, vh = (t.view(L, H, dh) for t in (q, k, v))
+            bm = E.exact_mask_bias(bias, mask, L)
+            out32, lse32 = E.exact_attention_fwd(qh, kh, vh, bm)
+            delta32 = E.exact_delta(do_rows, out32)
+            ds = E.exact_attention_db(qh, kh, vh, bm, out32, lse32, do_rows, delta32)
+            db = E.exact_db_transpose(ds, mask)
+            return E.exact_beta(E.exact_mm(db, wb))
+        scale = math.sqrt(1.0 / math.sqrt(dh))
+        qs = E.exact_point(q, q, scale, 0).view(1, L, H, dh).transpose(1, 2)
+        ks = E.exact_point(k, k, scale, 0).view(1, L, H, dh).transpose(1, 2)
+        scores = E.exact_mm(qs, ks.transpose(-2, -1))
+        E.exact_bias_add(scores, bias, mask)
+        probs = E.exact_soft(scores, scores, False)
+        do = do_rows.view(1, L, H, dh).transpose(1, 2)
+        vh = v.view(1, L, H, dh).transpose(1, 2)
+        dp = E.exact_mm(do, vh.transpose(-2, -1))
+        ds = E.exact_soft(dp, probs, True)
+        db = E.exact_db_transpose(ds, mask)
+        dln = E.exact_mm(db, wb)
+        return E.exact_beta(dln)
+
+
 class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, eps_s, eps_p, mask, single, pair, *leaves):
         ctx.param_dtypes = [t.dtype for t in leaves]
+        params = leaves
+        ctx.beta_shadow = (torch.cuda.get_device_capability(single.device) == (9, 0)
+                           and os.environ.get("MINIWORLD_APB_H100_BETA_SHADOW", "1") == "1")
         leaves = _kernel_leaves(leaves)
         y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
         ctx.eps = (eps_s, eps_p)
-        ctx.save_for_backward(mask, single, pair, *leaves, *saved)
+        ctx.saved_count = len(saved)
+        ctx.save_for_backward(mask, single, pair, *leaves, *saved, *(params if ctx.beta_shadow else ()))
         return y
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:14]), list(v[14:])          # saved: 10 or 11 tensors
+        mask, single, pair, leaves = v[0], v[1], v[2], list(v[3:14])
+        saved = list(v[14:14 + ctx.saved_count])
         dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
+        if ctx.beta_shadow:
+            params = list(v[14 + ctx.saved_count:])
+            grads[9] = _beta_shadow(single, pair, mask, params, *ctx.eps, dy)
         if torch.cuda.get_device_capability(single.device) == (9, 0):
             grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
+            from .token_dit_train import _activate_native_caller
+            _activate_native_caller(force=True)
             return (None, None, None, dx, dz, *grads)
         return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
 
 
 def update_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-    return _Training.apply(module.ln_single.eps, module.ln_pair.eps, _mask(mask, single.shape[1]), single, pair, *_leaves(module))
+    out = _Training.apply(module.ln_single.eps, module.ln_pair.eps, _mask(mask, single.shape[1]), single, pair, *_leaves(module))
+    if torch.cuda.get_device_capability(single.device) == (9, 0):
+        from .token_dit_train import _native_caller_hooks
+        # The result graph now owns its AccumulateGrad nodes. Installing on
+        # fresh leaves before apply can hook a temporary weak-held node.
+        _native_caller_hooks(single, pair, *module.parameters(), force=True)
+    return out
