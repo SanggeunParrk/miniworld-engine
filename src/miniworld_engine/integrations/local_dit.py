@@ -17,6 +17,14 @@ mask or none, LayerNorm eps 1e-5. N is padded to a multiple of 128 for the row k
 masked as keys, the pair padded with zero windows) and the first N rows come back. ``MINIWORLD_LOCAL_DIT_SM100=0`` turns it off. A
 build or load failure warns once and keeps the module path.
 
+**Hoisted per-item tables (inference).** The conditioning tables (``cond_fwd``'s modulation and, in the cross-attention mode, the key / value
+modulation) depend on the conditioning tensor and the weights only, and the windowed pair bias on the pair and two weights only; a sampler calls
+every block tens of times with one conditioning and one pair. An inference call takes them from the hoist: made once per tensor (pointer and
+in-place version) and weights, so later calls launch neither ``cond_fwd``, ``cond_ln`` + its GEMM nor ``pair_bias_fwd``. Inside a CUDA-graph capture
+the entries are scoped to the capture (a replay recomputes them, as it repacks the weights), unless the caller declares the inputs static
+(``kernels._capture.static_inputs()`` / ``MINIWORLD_STATIC_CONDITIONING=1``): then a replay runs none of those kernels. The training path
+(``save``) computes them every call. ``MINIWORLD_LOCAL_DIT_HOIST=0`` turns the hoist off.
+
 The block is two opaque ops, ``local_dit_block_fwd`` and ``local_dit_block_bwd`` (``kernels._compile.opaque``), so a ``torch.compile``d
 model keeps them in its graph. The ops take the 23 parameters as a list (``WEIGHTS``); packing them for the kernels is reused while
 every weight's tensor object and version are unchanged, except while a CUDA graph is captured. Parameters may be bf16 or fp32; their
@@ -27,12 +35,14 @@ from __future__ import annotations
 
 import os
 import warnings
+import weakref
 
 import torch
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.integrations.atom_dit import (  # the row kernels' weight packs are the dense atom block's
     _GAMMA,
     _WBIAS,
@@ -52,6 +62,13 @@ from miniworld_engine.kernels._compile import device_constant, opaque
 
 QUERIES, KEYS = 32, 128
 _LOADED: set[int] = set()
+_HOIST_COND: dict = {}      # (conditioning tensor, weights) -> (mod, mkv): the per-item conditioning tables of an inference call
+_HOIST_BIAS: dict = {}      # (pair tensor, LN / bias weights) -> the windowed pair bias
+_KV: dict = {}              # weights -> the cross-attention operands (kv_pack)
+
+
+def _hoisting() -> bool:
+    return os.environ.get("MINIWORLD_LOCAL_DIT_HOIST", "1") != "0"
 _FAILED = False
 _ROW_KERNELS = ("cond", "pre", "post", "trg", "postb", "preb", "condb")
 #: The parameters of the cross-attention mode's second AdaLN (keys / values), appended to ``WEIGHTS``.
@@ -131,11 +148,68 @@ def _device_of(mask):
     return torch.cuda.current_device() if mask is None else mask.device
 
 
+def _hoisted(store, tensor, key, build):
+    """The table ``build()`` makes from ``tensor``, once per tensor (pointer, version, ``key``): the entry keeps a weak reference to the tensor, so
+    a new tensor that reuses a freed address is not served the old one's table, and entries of freed tensors are dropped."""
+    entry = _capture.lookup_inputs(store, (_tkey(tensor), key), lambda: (weakref.ref(tensor), build()), limit=64,
+                                   valid=lambda e: e[0]() is tensor, alive=lambda e: e[0]() is not None)
+    return entry[1]
+
+
+def _tkey(t):
+    """A tensor's identity for a cache key: storage address, in-place version, shape, dtype, device."""
+    return (t.data_ptr(), t._version, tuple(t.shape), t.dtype, t.device)
+
+
 def _kv_pack(weights):
-    """The cross-attention mode's operands: Wm [256, 128] = [to_scale; to_bias] bf16, the scale bias and the LN weight (fp32), Wk, Wv (bf16)."""
-    gamma, w_scale, b_scale, w_bias = weights[len(WEIGHTS):]
-    wk, wv = weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]
-    return torch.cat([w_scale, w_bias]).to(BF), b_scale.float(), gamma.float(), wk.to(BF), wv.to(BF)
+    """The cross-attention mode's operands: Wm [256, 128] = [to_scale; to_bias] bf16, the scale bias and the LN weight (fp32), Wk, Wv (bf16).
+    Packed once per set of weights (pointer and version), scoped to the CUDA-graph capture like every weight pack."""
+    def build():
+        gamma, w_scale, b_scale, w_bias = weights[len(WEIGHTS):]
+        wk, wv = weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]
+        return torch.cat([w_scale, w_bias]).to(BF), b_scale.float(), gamma.float(), wk.to(BF), wv.to(BF)
+
+    tail = weights[len(WEIGHTS):] + [weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]]
+    return _capture.lookup(_KV, tuple((t.data_ptr(), t._version) for t in tail), build, limit=16)
+
+
+def _cond_tables(cond, c2_fn, n, weights, wc, cross, save):
+    """The conditioning tables of a call: mod [rows, 768] (cond_fwd) and, in the cross-attention mode, cn (the LN of the conditioning) and the
+    key / value modulation mkv [rows, 256]. They depend on the conditioning tensor and the weights only -- the same at every block call that
+    reads one conditioning (a sampler's steps), so an inference call (``save`` False) takes them from the hoist: made once per conditioning
+    tensor (pointer, version) and weights, scoped to the CUDA-graph capture (``kernels._capture.lookup_inputs``)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    def build():
+        c2 = c2_fn()
+        mod = rows.cond_fwd(c2, *wc)
+        if not cross:
+            return mod, None, None
+        wm, _, gkv, _, _ = _kv_pack(weights)
+        cn = local.cond_ln(c2, gkv)
+        return mod, cn, cn @ wm.t()
+
+    if save or not _hoisting():
+        return build()
+    return _hoisted(_HOIST_COND, cond, (tuple((w.data_ptr(), w._version) for w in weights), n), build)
+
+
+def _pair_bias(pair, n, weights, save):
+    """The windowed pair bias LN(z) Wb of the trunked pair, once per pair tensor in an inference call (it depends on the pair and two weights)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    def build():
+        return local.pair_bias_fwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS])
+
+    if save or not _hoisting():
+        return build()
+    g, wb = weights[_GAMMA], weights[_WBIAS]
+    return _hoisted(_HOIST_BIAS, pair, ((g.data_ptr(), g._version, wb.data_ptr(), wb._version), n), build)
 
 
 def _trunk(pair, n):
@@ -178,16 +252,13 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         cross = len(weights) > len(WEIGHTS)
         wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)])
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
-        c2 = _padded(cond, n).reshape(m, DC_).contiguous()
-        mod = rows.cond_fwd(c2, *wc)
+        mod, cn, mkv = _cond_tables(cond, lambda: _padded(cond, n).reshape(m, DC_).contiguous(), n, weights, wc, cross, save)
         q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save or cross)
         if cross:       # keys and values from a second AdaLN of x1 (pre_fwd's own k / v are not used)
-            wm, bs, gkv, wk, wv = _kv_pack(weights)
-            cn = local.cond_ln(c2, gkv)
-            mkv = cn @ wm.t()
+            _, bs, _, wk, wv = _kv_pack(weights)
             xkv = local.kv_fwd(x1, mkv, bs)
             k, v = xkv @ wk.t(), xkv @ wv.t()
-        bias = local.pair_bias_fwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS])
+        bias = _pair_bias(pair, n, weights, save)
         o, lse = local.attn_fwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n))
         out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save)
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)

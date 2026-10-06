@@ -96,6 +96,17 @@ graph; the window definition is checked against a per-atom loop on CPU (`tests/n
 dbias are bit-identical to the previous `mma.sync` kernels; the forward's row sum is now taken in fp32 (it was the sum of the bf16 P),
 which moves O by 1.2e-3 relative (bf16 rounding level; relative error against fp64 1.77e-3 as before).
 
+## Per-item hoist (inference)
+
+The conditioning tables (AdaLN modulation; in cross mode the conditioning LayerNorm and the K/V modulation GEMM) depend only on the
+conditioning tensor and the weights, and the windowed pair bias only on the pair tensor and its two weights. Across the steps of a
+sampler they do not change, so an inference call (no gradients saved) computes them once per (tensor, in-place version, weights) and
+later calls read the cache; Anthropic's `FastAtomStack` does the same through its `dit_hoist`. A cache entry holds a weak reference to its
+tensor, so a freed-and-reused address never serves stale tables. With `kernels._capture.static_inputs()` (or
+`MINIWORLD_STATIC_CONDITIONING=1`) a CUDA-graph capture serves from the eager entries and a replay launches none of these kernels: one
+inference call goes from 11 to 6 kernels. Off by default; training never uses it. Tests: `tests/integrations/test_b200_local_dit_gpu.py`
+(`-k hoist or static_inputs`).
+
 ## Not covered
 
 B > 1, QK-norm, fp32 / fp16, other GPUs. The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and

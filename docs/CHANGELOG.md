@@ -16,6 +16,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   DiT inference block replayed in a graph went from 84 us to 200 us (58 kernels instead of 12), the bias-only DiT, AttentionPairBias and
   atom DiT inference likewise. Default unchanged (scoped); the benchmark harness sets it for `mode=inference`. Test:
   `tests/integrations/test_b200_pack_cache_capture_gpu.py` (`-k static`).
+- `kernels._capture.static_inputs()` / `MINIWORLD_STATIC_CONDITIONING=1` and the AF3 (block-local) atom DiT hoist: in inference, the per-item
+  conditioning tables (AdaLN modulation, cross-mode conditioning LayerNorm and K/V modulation GEMM) and the windowed pair bias are computed
+  once per (tensor, in-place version, weights) and reused by later calls; under `static_inputs()` a CUDA-graph capture serves from the eager
+  entries and a replay launches none of those kernels (inference call 11 -> 6 kernels). Entries hold a weak reference to the tensor, so a
+  reused address never serves stale tables. Off by default and never applied when gradients are saved (training). Tests:
+  `tests/integrations/test_b200_local_dit_gpu.py` (`-k hoist or static_inputs`).
 - fp32 master parameters (AMP `bf16-mixed`: fp32 parameters over bf16 activations) on every B200 training path, at the speed of bf16
   parameters: TriMul, Transition (D 64-512), AttentionPairBias, OuterProductMean, local and SWA atom DiT, token pair init (PWA,
   TriangleAttention and the token / bias-only DiT already were). The integrations cast the parameters for the kernels inside their

@@ -5358,6 +5358,8 @@ def main(cfg: DictConfig) -> None:
         from miniworld_engine.kernels import _capture
 
         _capture.set_static_weights(True)
+        # and the conditioning / pair tensors are the sampler's per-item inputs: hoisted tables are served, not recomputed, in a replay
+        _capture.set_static_inputs(True)
 
     gpu_name = torch.cuda.get_device_name(0)
     results_dir = target_dir(conf.level, conf.target) / "artifacts" / gpu_name

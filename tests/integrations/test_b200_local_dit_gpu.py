@@ -161,3 +161,153 @@ def test_calls_it_does_not_serve_keep_the_module_path(monkeypatch):
     with torch.no_grad():
         eng(s.float().bfloat16(), c, z, ok)
     assert calls == ["infer"]
+
+
+# ------------------------------------------------------------------------------------------------------ hoisted per-item tables
+def _kernel_names(fn):
+    from torch.profiler import ProfilerActivity, profile
+
+    fn()
+    torch.cuda.synchronize()
+    for _ in range(3):  # the profiler can drop the first records of a window in a long process: open it with a trivial kernel
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            torch.ones(1, device="cuda").add_(1)
+            fn()
+            torch.cuda.synchronize()
+        names = [e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA]
+        if any("local_attn_fwd" in n for n in names):                # the block's own kernel: the window recorded the call
+            return names
+    return names
+
+
+def _bf(*ts):
+    return [t.to(torch.bfloat16).contiguous() for t in ts]
+
+
+# the per-item kernels of a cross-attention inference call: conditioning modulation, the LN of the conditioning, the windowed pair bias
+TABLE_KERNELS = ("atom_cond_fwd", "local_cond_ln", "local_bias_fwd")
+
+
+def _count(names, *needles):
+    return sum(any(n in name for n in needles) for name in names)
+
+
+@pytest.mark.parametrize("cross", [False, True])
+def test_hoisted_tables_are_made_once_per_conditioning_and_pair(cross):
+    """The second inference call with the same conditioning / pair launches neither the conditioning tables nor the pair bias, and returns
+    the first call's result bit for bit."""
+    _, eng = _block(cross=cross)
+    single, cond, pair = _bf(*_inputs(5, 1024))
+    local_dit._HOIST_COND.clear()
+    local_dit._HOIST_BIAS.clear()
+    with torch.no_grad():
+        first = eng(single, cond, pair)
+        names = _kernel_names(lambda: eng(single, cond, pair))
+        second = eng(single, cond, pair)
+    assert torch.equal(first, second)
+    assert _count(names, *TABLE_KERNELS) == 0, names
+    assert _count(names, "local_attn_fwd") == 1 and _count(names, "atom_pre_fwd", "atom_post_fwd") == 2, "the block's own kernels must still run"
+
+
+def test_hoist_off_recomputes_every_call(monkeypatch):
+    monkeypatch.setenv("MINIWORLD_LOCAL_DIT_HOIST", "0")
+    _, eng = _block()
+    single, cond, pair = _bf(*_inputs(3, 256))
+    with torch.no_grad():
+        names = _kernel_names(lambda: eng(single, cond, pair))
+    assert _count(names, "atom_cond_fwd") == 1 and _count(names, "local_bias_fwd") == 1, names
+
+
+@pytest.mark.parametrize("cross", [False, True])
+def test_in_place_update_of_conditioning_or_pair_is_seen(cross):
+    """An in-place write bumps the tensor's version: the next call remakes the tables and agrees with a call on a fresh copy."""
+    _, eng = _block(cross=cross)
+    single, cond, pair = _bf(*_inputs(3, 384))
+    with torch.no_grad():
+        eng(single, cond, pair)
+        cond.mul_(1.7).add_(0.3)
+        pair.mul_(0.6).sub_(0.1)
+        got = eng(single, cond, pair)
+        want = eng(single.clone(), cond.clone(), pair.clone())          # new tensors: nothing cached for them
+    assert torch.equal(got, want)
+    other = _bf(*_inputs(3, 384, seed=7))
+    with torch.no_grad():
+        assert not torch.equal(eng(single, *other[1:]), got), "different conditioning / pair must change the result"
+
+
+@pytest.mark.parametrize("static", [False, True])
+def test_graph_replays_and_static_inputs(static):
+    """Default: a capture packs the tables once and every replay remakes them (so an in-place update between replays is seen).
+    ``static_inputs()``: the capture serves from the eager entries and a replay launches none of those kernels."""
+    from miniworld_engine.kernels import _capture
+
+    _, eng = _block(cross=True)
+    single, cond, pair = _bf(*_inputs(4, 384))
+    local_dit._HOIST_COND.clear()
+    local_dit._HOIST_BIAS.clear()
+    with torch.no_grad():
+        eng(single, cond, pair)
+        eng(single, cond, pair)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side), _capture.static_inputs(static):
+            eng(single, cond, pair)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(graph), _capture.static_inputs(static):
+            out = eng(single, cond, pair)
+        graph.replay()
+        torch.cuda.synchronize()
+        from tests.cuda_graph_nodes import graph_kernels
+
+        names = graph_kernels(graph)                     # the replay's launches, from the graph (profiling replays is unreliable)
+        n_tables = _count(names, *TABLE_KERNELS)
+        if static:
+            assert n_tables == 0, names
+        else:
+            assert n_tables == 3, names
+            cond.mul_(1.4)                                   # between replays: the scoped hoist remakes the tables
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.equal(out, eng(single.clone(), cond.clone(), pair.clone()))
+
+
+def test_a_new_tensor_at_a_freed_address_is_not_served_the_old_tables(monkeypatch):
+    """Activations' addresses are reused as soon as they are freed. A new conditioning / pair at the address of a dead one, with the same shape
+    and the same in-place version, must get its own tables -- not the dead tensor's."""
+    import gc
+
+    _, eng = _block(cross=True)
+    single, cond, pair = _bf(*_inputs(3, 256))
+    other = _bf(*_inputs(3, 256, seed=9))
+    local_dit._HOIST_COND.clear()
+    local_dit._HOIST_BIAS.clear()
+    with torch.no_grad():
+        eng(single, cond, pair)
+        addresses = (cond.data_ptr(), pair.data_ptr())
+        del cond, pair
+        gc.collect()
+        cond2, pair2 = other[1].clone(), other[2].clone()           # clone: version 0, as the dead tensors
+        if (cond2.data_ptr(), pair2.data_ptr()) != addresses:
+            pytest.skip("the allocator did not hand the freed addresses to the new tensors")
+        assert (cond2._version, pair2._version) == (0, 0)
+        got = eng(single, cond2, pair2)
+        with monkeypatch.context() as m:
+            m.setenv("MINIWORLD_LOCAL_DIT_HOIST", "0")
+            want = eng(single, cond2, pair2)                         # no hoist: the tables made from these tensors
+    assert torch.equal(got, want)
+
+
+def test_entries_of_freed_tensors_are_dropped():
+    import gc
+
+    _, eng = _block(cross=True)
+    local_dit._HOIST_COND.clear()
+    local_dit._HOIST_BIAS.clear()
+    with torch.no_grad():
+        for seed in range(8):
+            single, cond, pair = _bf(*_inputs(3, 256, seed=seed))
+            eng(single, cond, pair)
+            del single, cond, pair
+            gc.collect()
+    assert len(local_dit._HOIST_COND) <= 1 and len(local_dit._HOIST_BIAS) <= 1, (len(local_dit._HOIST_COND), len(local_dit._HOIST_BIAS))
