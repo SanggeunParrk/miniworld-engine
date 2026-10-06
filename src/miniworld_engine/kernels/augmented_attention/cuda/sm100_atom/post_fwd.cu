@@ -237,6 +237,131 @@ void atom_post_fwd_2stage_sm90(const __nv_bfloat16* __restrict__ a,
      }
  }
 }
+// Explicit packed candidate: preserve every BF16 rounding point of B200's
+// gate, AdaLN, SwiGLU and residual, using Hopper packed arithmetic.
+DEVI uint32_t post_mul2(uint32_t a,uint32_t b) {
+  uint32_t r;asm("mul.rn.bf16x2 %0,%1,%2;":"=r"(r):"r"(a),"r"(b));return r;
+}
+DEVI uint32_t post_add2(uint32_t a,uint32_t b) {
+  uint32_t r;asm("add.rn.bf16x2 %0,%1,%2;":"=r"(r):"r"(a),"r"(b));return r;
+}
+extern "C" __global__ __launch_bounds__(160, 1)
+void atom_post_fwd_2stage_packed_sm90(const __nv_bfloat16* __restrict__ a,
+ const __nv_bfloat16* __restrict__ o,const __nv_bfloat16* __restrict__ sg,
+ const __nv_bfloat16* __restrict__ mod,const __grid_constant__ CUtensorMap mwo,
+ const __grid_constant__ CUtensorMap mwu,const __grid_constant__ CUtensorMap mwd,
+ __nv_bfloat16* __restrict__ out,__nv_bfloat16* __restrict__ us,
+ __nv_bfloat16* __restrict__ as,__nv_bfloat16* __restrict__ xs,__nv_bfloat16* __restrict__ ts,
+ int M,float eps,int save) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int NST=2,W=0,TEMP=NST*32768,H=TEMP+16384,BAR=H+32768;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ const int t=threadIdx.x,lane=t&31,warp=t>>5,nt=(M+63)/64;
+ const int tiles=blockIdx.x<nt?(nt-int(blockIdx.x)+int(gridDim.x)-1)/int(gridDim.x):0;
+ if(t==0){for(int j=0;j<4;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128) {
+   if(t==128) {
+     for(int it=0;it<tiles;++it)for(int p=0;p<7;++p) {
+       int g=it*7+p,st=g%NST;
+       if(g>=NST)bwait(bars+NST+st,((g/NST)-1)&1);
+       expect(bars+st,32768);
+       const CUtensorMap* w=p==0?&mwo:p<5?&mwu:&mwd;
+       int r=p==0?0:p<5?128*(p==1?0:p==2?2:p==3?1:3):0;
+       int c=p>=5?128*(p-5):0;
+       for(int b=0;b<2;++b)load2(sm+W+st*32768+b*16384,w,bars+st,c+64*b,r);
+     }
+   }
+   return;
+ }
+ const int r0=warp*16+lane/4,cq=2*(lane&3);
+ auto done=[&](int st){bsync();if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+NST+st)):"memory");};
+ for(int it=0;it<tiles;++it) {
+   const int row=64*(int(blockIdx.x)+it*int(gridDim.x));
+   uint32_t fa[32],a2[32];float acc[64];
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       const int r=row+r0+8*rr,c=8*i+cq;uint32_t ov=0,gv=0;
+        if(r<M){ov=*reinterpret_cast<const uint32_t*>(o+size_t(r)*128+c);gv=*reinterpret_cast<const uint32_t*>(sg+size_t(r)*128+c);}
+        fa[4*(i>>1)+2*(i&1)+rr]=post_mul2(ov,gv);
+     }
+   const int g0=it*7,st0=g0%NST;bwait(bars+st0,(g0/NST)&1);matmul128(fa,sm+W+st0*32768,acc);done(st0);
+   float mu[2]={0.f,0.f},vv[2]={0.f,0.f};
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       const int r=row+r0+8*rr,c=8*i+cq;uint32_t av=0,sc=0;
+        if(r<M){av=*reinterpret_cast<const uint32_t*>(a+size_t(r)*128+c);sc=*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+256+c);}
+        const uint32_t uu=pack(acc[4*i+2*rr],acc[4*i+2*rr+1]);
+        const uint32_t aa=post_add2(av,post_mul2(sc,uu));const float2 af=unpack(aa);
+       a2[4*(i>>1)+2*(i&1)+rr]=aa;acc[4*i+2*rr]=af.x;acc[4*i+2*rr+1]=af.y;mu[rr]+=af.x+af.y;
+       if(save&&r<M){*reinterpret_cast<uint32_t*>(us+size_t(r)*128+c)=uu;*reinterpret_cast<uint32_t*>(as+size_t(r)*128+c)=aa;}
+     }
+   mu[0]=sum4(mu[0])/128.f;mu[1]=sum4(mu[1])/128.f;
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){float x=acc[4*i+2*rr]-mu[rr],y=acc[4*i+2*rr+1]-mu[rr];vv[rr]+=x*x+y*y;}
+   vv[0]=rsqrtf(sum4(vv[0])/128.f+eps);vv[1]=rsqrtf(sum4(vv[1])/128.f+eps);
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       const int r=row+r0+8*rr,c=8*i+cq;uint32_t sc=0,bi=0;
+        if(r<M){sc=*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+384+c);bi=*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+512+c);}
+        const uint32_t xn=pack((acc[4*i+2*rr]-mu[rr])*vv[rr],(acc[4*i+2*rr+1]-mu[rr])*vv[rr]);
+        const uint32_t x=post_add2(post_mul2(xn,sc),bi);
+       fa[4*(i>>1)+2*(i&1)+rr]=x;
+       if(save&&r<M)*reinterpret_cast<uint32_t*>(xs+size_t(r)*128+c)=x;
+     }
+   for(int p=1;p<5;++p) {
+     const int g=g0+p,st=g%NST;bwait(bars+st,(g/NST)&1);matmul128(fa,sm+W+st*32768,acc);done(st);
+     #pragma unroll
+     for(int i=0;i<16;++i)
+       #pragma unroll
+       for(int rr=0;rr<2;++rr) {
+         const int pos=off(r0+8*rr,8*i+cq);
+         if(p&1)*reinterpret_cast<uint32_t*>(sm+TEMP+pos)=pack(acc[4*i+2*rr],acc[4*i+2*rr+1]);
+         else {
+           const float2 aa=unpack(*reinterpret_cast<uint32_t*>(sm+TEMP+pos));
+           const uint32_t silu=pack(aa.x*sig(aa.x),aa.y*sig(aa.y));
+            const uint32_t bb=pack(acc[4*i+2*rr],acc[4*i+2*rr+1]);
+            *reinterpret_cast<uint32_t*>(sm+H+((p-2)/2)*16384+pos)=post_mul2(silu,bb);
+         }
+       }
+   }
+   for(int p=5;p<7;++p) {
+     #pragma unroll
+     for(int i=0;i<16;++i)
+       #pragma unroll
+       for(int rr=0;rr<2;++rr)fa[4*(i>>1)+2*(i&1)+rr]=*reinterpret_cast<uint32_t*>(sm+H+(p-5)*16384+off(r0+8*rr,8*i+cq));
+     const int g=g0+p,st=g%NST;bwait(bars+st,(g/NST)&1);
+     const uint8_t* w=sm+W+st*32768;fence();
+     #pragma unroll
+     for(int kk=0;kk<8;++kk) {
+       const uint64_t d=desc(w+(kk>>2)*16384+(kk&3)*32);
+       if(p==5&&kk==0)mma_rs_n128_first(fa[0],fa[1],fa[2],fa[3],d,acc);
+       else mma_rs_n128(fa[4*kk],fa[4*kk+1],fa[4*kk+2],fa[4*kk+3],d,acc,1);
+     }
+     commit();wait();done(st);
+   }
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr) {
+       const int r=row+r0+8*rr,c=8*i+cq;
+       if(r<M) {
+         const uint32_t av=a2[4*(i>>1)+2*(i&1)+rr];
+          const uint32_t st=*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+640+c);
+          const uint32_t tt=pack(acc[4*i+2*rr],acc[4*i+2*rr+1]);
+          *reinterpret_cast<uint32_t*>(out+size_t(r)*128+c)=post_add2(av,post_mul2(st,tt));
+          if(save)*reinterpret_cast<uint32_t*>(ts+size_t(r)*128+c)=tt;
+       }
+     }
+ }
+}
 #else
 // post_fwd.cu — the atom DiT block's attention output + ConditionedTransition on sm_100a (per row of M = A N; the bf16 module's rounding
 // points; so / s2 / bi2 / st from cond_fwd's mod and sg = rn(sigmoid(g)) from pre_fwd, the gates already as rn(sigmoid)):
