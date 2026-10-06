@@ -207,11 +207,14 @@ def _kernels_ready(index: int) -> bool:
     )
 
     try:
-        for name in _ROW_KERNELS:
+        hopper = rows._hopper(index)
+        for name in (("cond", "pre", "post", "pack") if hopper else _ROW_KERNELS):
             rows.atom_kernel(name, index)
-        for name in local.KERNELS:
+        for name in (("fwd", "pb_f", "cond_ln", "kv_f", "kv_pack") if hopper else local.KERNELS):
             local._load(name, index)
     except Exception as exc:  # a toolchain or driver problem keeps the module path
+        if rows._hopper(index):
+            raise RuntimeError("Opt-in Hopper local DiT kernel build failed") from exc
         _FAILED = True
         warnings.warn(f"sm_100a local atom DiT kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
         return False
@@ -287,7 +290,11 @@ def serves(module, single, cond, pair, mask) -> bool:
     a, tr = module.attention, module.transition
     if a._backend != KernelBackend.TRITON or a.use_qk_norm:
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
+    hopper = cap == (9, 0) and os.environ.get("MINIWORLD_LOCAL_DIT_H100", "0") == "1"
+    if hopper and torch.is_grad_enabled():
+        return False  # prototype inference only; existing training remains unchanged
+    if not (cap == (10, 0) or hopper):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF) and not fp32:
         return False
