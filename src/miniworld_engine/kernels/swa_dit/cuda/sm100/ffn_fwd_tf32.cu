@@ -3,7 +3,7 @@
 //   gated = sigmoid(g) o;  att = gated Wo^T;  q1 = q + gate_a att;  y = RMS(q1) (1 + scale_f) + shift_f;
 //   a | b = y Wu^T;  h = silu(a) b;  ffn = h Wd^T;  out = q1 + gate_f ffn
 // optionally saving q1, att, y, ffn (fp32, unrounded) for the backward -- the meanings of the bf16 ffn_fwd2 saves. The MMA operands
-// gated, y, h are rounded to TF32 by cvt.rna in the kernel, the weights by the host (tf32_fwd._round_tf32, cached per weight version).
+// gated, y, h are rounded to TF32 by cvt.rna in the kernel, the weights by wprep_tf32.cu (cached per weight version).
 //
 // Why not the bf16 design (ffn_fwd2: Wu and Wd resident in TMEM as the A operand, Wo in shared memory, 32-row transposed tiles): in fp32
 // the three weights are 448 KB -- Wu and Wd alone would need 768 TMEM columns. So the activations are the A operand, in TMEM (written by
@@ -12,10 +12,15 @@
 // chunk j (N = 64: the host packs Wu's rows as [Wu[32 j ..]; Wu[256 + 32 j ..]] per chunk, dispatch._pack_ffn's wab), h written over
 // a, then ffn += h Wd[:, 32 j ..]^T; the a | b accumulator is double-buffered so chunk j + 1's up-projection runs under chunk j's SwiGLU.
 //
-// Tiles: SP = min(A, 16) augments x AT = 128 / SP atoms of one batch element (<= 128 rows), the bf16 kernels' tiling; g, o, q arrive by
-// 4-D TMA boxes per 32-channel k-block through a ring (G0 O0 G1 O1 G2 O2 G3 O3 q0 q1 q2 q3 per tile: 12 k-blocks, ring of 8 -- the
-// next tile's g / o load while this tile's q1 .. out phases run); the modulation (gate_a, shift_f, scale_f, gate_f) is read straight
-// from global memory (rows shared by the SP augments stay in L1). Outputs leave by plain 16-B global stores (64 B per thread and unit).
+// Tiles: SP = min(A, 16) augments x AT = 128 / SP atoms of one batch element (<= 128 rows), the bf16 kernels' tiling. Everything a
+// tile reads arrives by TMA through one ring of 8 k-blocks, in the order the row threads consume it (28 per tile):
+//   G0 O0 G1 O1 G2 O2 G3 O3 | q0 q1 q2 q3 | ga0-3 | sh0-3 | sc0-3 | gf0-3
+// g, o, q as 4-D boxes [32 channels, AT atoms, 1, SP augments]; the modulation columns gate_a | shift_f | scale_f | gate_f as 2-D
+// boxes [32 channels, AT rows] of mod [B S, 6C] (row at of the box serves every augment of atom at). Each group is loaded while the
+// previous one is consumed: q / gate_a under phase A, shift_f / scale_f once phase B has released q / gate_a, gate_f under phase D,
+// the next tile's g / o under phase D / E. (Round 3: the modulation used to be read with 16-B global loads, one row per lane -- 32
+// sectors per warp load, an L1 of ~24 KB next to 232 KB of shared memory -- and those loads were ~45% of the row threads' stall
+// samples, Nsight Compute.) Outputs leave by plain 16-B global stores (64 B per thread and unit).
 // Warps: 0 TMA producer of the activation ring (lane 0); 1 TMEM allocator + MMA issuer (whole warp waits, elect_one() issues); 3 TMA
 // producer of the weight ring (lane 0); 4-11 row threads, two warpgroups, thread = tile row r = TMEM lane r:
 //   A  gated: k-block by k-block, warpgroup wg takes channels 16 wg .. 16 wg + 15 of each      -> TMEM T_A
@@ -49,7 +54,9 @@ DEVI void umma_ts_tf32(uint32_t d_tmem, uint32_t a_tmem, uint64_t b, uint32_t id
                :: "r"(d_tmem), "r"(a_tmem), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
 }
 DEVI uint32_t tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
-DEVI float sigm32(float x) { return __frcp_rn(1.f + __expf(-x)); }
+// sigmoid in fp32 with the approximate reciprocal (rcp.approx, ~1 ulp): its only uses (gated, h) are rounded to TF32 right after, so
+// the IEEE reciprocal (__frcp_rn: a refinement sequence per element, 48 K sigmoids per tile) bought nothing
+DEVI float sigm32(float x) { return rcpf(1.f + ex2f(-1.4426950408889634f * x)); }
 DEVI float4 u2f4(uint4 u) { return make_float4(__uint_as_float(u.x), __uint_as_float(u.y), __uint_as_float(u.z), __uint_as_float(u.w)); }
 DEVI float4 ldg4(const float* p) { return u2f4(ldg128(p)); }
 DEVI void stg16w(float* p, const uint32_t (&v)[16]) {                       // 64 contiguous bytes
@@ -57,11 +64,12 @@ DEVI void stg16w(float* p, const uint32_t (&v)[16]) {                       // 6
   for (int k = 0; k < 4; ++k) stg128(p + 4 * k, make_uint4(v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]));
 }
 
-constexpr int C = 128, MODW = 6 * C;
+constexpr int C = 128;
 constexpr int KB = 128 * 128;                                              // activation k-block: [128 rows][32 fp32], SW128 (16 KB)
 constexpr int WB = 64 * 128;                                               // weight slot: [64 output rows][32 fp32], SW128 (8 KB)
 constexpr int NA = 8, NW = 12;
-constexpr int NAK = 12, NWK = 56;                                          // activation k-blocks / weight slots per tile
+constexpr int NAK = 28, NWK = 56;                                          // ring k-blocks / weight slots per tile
+constexpr int K_Q = 8, K_GA = 12, K_SH = 16, K_SC = 20, K_GF = 24;         // ring order within a tile (G / O at 0 .. 7)
 constexpr int O_A = 0, O_W = NA * KB, O_RED = O_W + NW * WB, O_BAR = O_RED + 2 * 2 * 128 * 4;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
@@ -92,8 +100,9 @@ DEVI void wslot(int k, int& which, int& c0, int& c1) {
 extern "C" __global__ void __launch_bounds__(384, 1)
 swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_constant__ CUtensorMap mo, const __grid_constant__ CUtensorMap mq,
                        const __grid_constant__ CUtensorMap mwo, const __grid_constant__ CUtensorMap mwab, const __grid_constant__ CUtensorMap mwd,
+                       const __grid_constant__ CUtensorMap mmod,
                        int S, int A, int Bn, int SP, int AT, int nab, int nag, int ntile, float eps, int save,
-                       const float* __restrict__ MOD, float* __restrict__ OUT, float* __restrict__ Q1s, float* __restrict__ ATTs,
+                       float* __restrict__ OUT, float* __restrict__ Q1s, float* __restrict__ ATTs,
                        float* __restrict__ Ys, float* __restrict__ FFs) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
@@ -121,24 +130,31 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
   pdl_launch();
 
   if (warp == 0) {
-    // ------------------------------------------------------------------------------------------------ TMA producer: g / o / q k-blocks
+    // ------------------------------------------------------------------------------------------------ TMA producer: the activation ring
     if (lane == 0) {
-      pdl_wait();                                                          // g / o / q come from the previous kernels
-      const uint32_t abytes = (uint32_t)(SP * AT * 128);
+      pdl_wait();                                                          // g / o / q / mod come from the previous kernels
+      const uint32_t abytes = (uint32_t)(SP * AT * 128), mbytes = (uint32_t)(AT * 128);   // full boxes (out of range: zero-filled)
       for (int T = 0; T < ntT; ++T) {
         int b, a0, s0; coords(T, b, a0, s0);
         for (int k = 0; k < NAK; ++k) {
           const int i = NAK * T + k, slot = i % NA;
           if (i >= NA) mbar_wait(&B.aempty[slot], ((i / NA) - 1) & 1);
-          mbar_expect_tx(&B.afull[slot], abytes);
-          const CUtensorMap* m = k < 8 ? ((k & 1) ? &mo : &mg) : &mq;
-          tma_load_4d(su + O_A + slot * KB, m, &B.afull[slot], 32 * (k < 8 ? k >> 1 : k - 8), s0, b, a0);
+          const uint32_t dst = su + O_A + slot * KB;
+          if (k < K_GA) {
+            mbar_expect_tx(&B.afull[slot], abytes);
+            const CUtensorMap* m = k < K_Q ? ((k & 1) ? &mo : &mg) : &mq;
+            tma_load_4d(dst, m, &B.afull[slot], 32 * (k < K_Q ? k >> 1 : k - K_Q), s0, b, a0);
+          } else {                                                         // mod columns 256 (gate_a), 384, 512, 640 (gate_f) + 32 kb
+            mbar_expect_tx(&B.afull[slot], mbytes);
+            tma_load_2d(dst, &mmod, &B.afull[slot], 2 * C + C * ((k - K_GA) >> 2) + 32 * ((k - K_GA) & 3), b * S + s0);
+          }
         }
       }
     }
   } else if (warp == 3) {
     // ------------------------------------------------------------------------------------------------ TMA producer: weight ring
     if (lane == 0) {
+      pdl_wait();                                                          // Wo / Wab / Wd: the weight-form kernel runs in the chain
       int j = 0;
       for (int T = 0; T < ntT; ++T)
         for (int k = 0; k < NWK; ++k, ++j) {
@@ -237,12 +253,13 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
       const int n = (a0 + sp) * Bn + b, s = s0 + at;
       const bool ok = rowok && a0 + sp < A && s < S;
       const bool sv = save && ok;
-      const float* mp = MOD + (size_t)(b * S + min(s, S - 1)) * MODW;      // (a row past S: a clamped modulation row, nothing stored)
       const size_t ro = ((size_t)n * S + s) * C;
       const int ia = NAK * T;
       auto aslot = [&](int k) { return su + O_A + ((ia + k) % NA) * KB; };
       auto await_ = [&](int k) { mbar_wait(&B.afull[(ia + k) % NA], ((ia + k) / NA) & 1); };
       auto arel = [&](int k) { if (lane == 0) mbar_arrive(&B.aempty[(ia + k) % NA]); };
+      // the modulation k-block of ring position k, 16-B chunk q of this row's atom (row at of the [AT][32] box)
+      auto mod4 = [&](int k, int q) { return u2f4(lds128(aslot(k) + sw128((uint32_t)at, (uint32_t)q))); };
       // ---- A: gated = sigmoid(g) o -> T_A (TF32), k-block kb, channels 32 kb + 16 wg .. + 15 (16-B chunks 4 wg .. 4 wg + 3)
       //      (T_A held y(T - 1): every a | b MMA of tile T - 1 has completed -- phase D waited on chunk 7's)
 #pragma unroll 1
@@ -271,8 +288,10 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
       // ---- B: q1 = q + gate_a att -> T_Q1 (q1 / att saves), this warpgroup's channels 64 wg .. 64 wg + 63
       mbar_wait(&B.attfull, T & 1);
       tc_fence_after();
-      await_(8 + 2 * wg);
-      await_(9 + 2 * wg);
+      await_(K_Q + 2 * wg);
+      await_(K_Q + 1 + 2 * wg);
+      await_(K_GA + 2 * wg);
+      await_(K_GA + 1 + 2 * wg);
       float ss0 = 0.f, ss1 = 0.f;
 #pragma unroll 1
       for (int u = 0; u < 4; ++u) {
@@ -281,7 +300,7 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
         tmem_ld16(trow + T_ATT + c0, av);
         float4 qv[4], ga[4];
 #pragma unroll
-        for (int e = 0; e < 4; ++e) { qv[e] = u2f4(lds128(aslot(8 + kb) + sw128(r, q0 + e))); ga[e] = ldg4(mp + 2 * C + c0 + 4 * e); }
+        for (int e = 0; e < 4; ++e) { qv[e] = u2f4(lds128(aslot(K_Q + kb) + sw128(r, q0 + e))); ga[e] = mod4(K_GA + kb, q0 + e); }
         tmem_wait_ld();
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -296,23 +315,28 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
         if (sv) { stg16w(ATTs + ro + c0, av); stg16w(Q1s + ro + c0, q1r); }
       }
       __syncwarp();
-      // every warp releases all four q k-blocks (the slots' count is 8): a warpgroup's arrival on the two it does not read cannot land
-      // in the slots' previous phase, since attfull (all 8 warps past phase A) orders it after every release of those slots' last use
-      for (int k = 8; k < 12; ++k) arel(k);
+      // every warp releases all four q and gate_a k-blocks (the slots' count is 8): a warpgroup's arrival on the two of each it does
+      // not read cannot land in the slots' previous phase, since attfull (all 8 warps past phase A) orders it after every release of
+      // those slots' last use (G / O of this tile)
+      for (int k = K_Q; k < K_SH; ++k) arel(k);
       float* rd = red + (T & 1) * 256;
       rd[wg * 128 + r] = ss0 + ss1;
       tmem_wait_st();
       named_bar_sync(1, 256);
       const float rstd = rsqrtf((rd[r] + rd[128 + r]) * (1.f / C) + eps);
+      await_(K_SH + 2 * wg);
+      await_(K_SH + 1 + 2 * wg);
+      await_(K_SC + 2 * wg);
+      await_(K_SC + 1 + 2 * wg);
       // ---- y = q1 rstd (1 + scale_f) + shift_f -> T_A (TF32; the att MMAs, gated's only readers, are done), the y save
 #pragma unroll 1
       for (int u = 0; u < 4; ++u) {
-        const int c0 = 64 * wg + 16 * u;
+        const int c0 = 64 * wg + 16 * u, kb = c0 >> 5, q0 = (c0 & 31) >> 2;
         uint32_t qv[16], yr[16];
         tmem_ld16(trow + T_Q1 + c0, qv);
         float4 sh[4], sc[4];
 #pragma unroll
-        for (int e = 0; e < 4; ++e) { sh[e] = ldg4(mp + 3 * C + c0 + 4 * e); sc[e] = ldg4(mp + 4 * C + c0 + 4 * e); }
+        for (int e = 0; e < 4; ++e) { sh[e] = mod4(K_SH + kb, q0 + e); sc[e] = mod4(K_SC + kb, q0 + e); }
         tmem_wait_ld();
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -331,6 +355,9 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.yfull);
+      // shift_f / scale_f read: every warp releases all eight (their previous use, q / gate_a, was released by all 8 warps before the
+      // named barrier above)
+      for (int k = K_SH; k < K_GF; ++k) arel(k);
       // ---- D: h = silu(a) b per hidden chunk, hidden units 16 wg .. of the chunk, written over a (TF32)
 #pragma unroll 1
       for (int j = 0; j < 8; ++j) {
@@ -353,17 +380,19 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
         if (lane == 0) mbar_arrive(&B.hfull[jb]);
       }
       // ---- E: out = q1 + gate_f ffn (the ffn save)
+      await_(K_GF + 2 * wg);
+      await_(K_GF + 1 + 2 * wg);
       mbar_wait(&B.ffull, T & 1);
       tc_fence_after();
 #pragma unroll 1
       for (int u = 0; u < 4; ++u) {
-        const int c0 = 64 * wg + 16 * u;
+        const int c0 = 64 * wg + 16 * u, kb = c0 >> 5, q0 = (c0 & 31) >> 2;
         uint32_t fv[16], qv[16];
         tmem_ld16(trow + T_ATT + c0, fv);
         tmem_ld16(trow + T_Q1 + c0, qv);
         float4 gf[4];
 #pragma unroll
-        for (int e = 0; e < 4; ++e) gf[e] = ldg4(mp + 5 * C + c0 + 4 * e);
+        for (int e = 0; e < 4; ++e) gf[e] = mod4(K_GF + kb, q0 + e);
         tmem_wait_ld();
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -378,6 +407,9 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.ffree);                               // T_ATT read out: tile T + 1's att may accumulate
+      // gate_f read: every warp releases all four (their previous use, shift_f, was released by all 8 warps after phase y, and ffull
+      // -- every hidden chunk's h from all 8 warps -- orders this after it)
+      for (int k = K_GF; k < NAK; ++k) arel(k);
     }
   }
   tc_fence_before();

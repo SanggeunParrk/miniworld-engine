@@ -2,6 +2,8 @@
 tensor-core MMAs (``tcgen05.mma kind::tf32``, fp32 accumulation), every elementwise step in fp32. No Triton, no PyTorch kernels
 besides the cached weight rounding.
 
+    weights     [Wqkv; Wg], Wo, Wab, Wd rounded to TF32 (one launch)     wprep_tf32.cu     (swa_wprep_tf32_sm100; Wmod:
+                                                                                         swa_round_tf32_sm100)
     modulation  silu(c) Wmod^T                                         mod_fwd_tf32.cu   (swa_mod_fwd_tf32_sm100)
     qkvg        RMS-adaLN, q | k | v | gate projections, head RMS, RoPE qkvg_fwd_tf32.cu  (swa_qkvg_fwd_tf32_sm100)
     attention   window attention |i - j| <= 64, fp32 softmax, lse      attn_fwd_tf32.cu  (swa_attn_fwd_tf32_sm100)
@@ -10,8 +12,9 @@ besides the cached weight rounding.
 
 The same equations as the Triton fp32 path (``triton/forward_fp32.py``) with two differences of precision, both toward fp32: the window
 attention runs on TF32 Q / K / V / P (the Triton path rounds them to bf16, as FlashAttention-4 does), and every GEMM is single-pass
-TF32 with operands ROUNDED to the nearest TF32 (the kernels round their activation operands with ``cvt.rna``; :func:`_round_tf32`
-rounds the weights once per weight version) -- the tensor core alone would truncate the low 13 mantissa bits, a bias toward zero that
+TF32 with operands ROUNDED to the nearest TF32 (the kernels round their activation operands with ``cvt.rna``; ``wprep_tf32.cu``
+rounds the weights once per weight version -- once per replay inside a CUDA graph unless the weights are declared static,
+``kernels._capture``) -- the tensor core alone would truncate the low 13 mantissa bits, a bias toward zero that
 does not average out over K (that truncation is why the Triton path needs "tf32x3" for its FFN GEMMs).
 
 Saved for the backward (``save``), all fp32: Qh, Kh, Vh head-major [N, 4, S, 32] (after head RMS + RoPE, TF32-valued: exactly the
@@ -47,16 +50,17 @@ _dir = Path(__file__).parent
 
 #: cubin name -> (source stem, extra nvcc flags)
 CUBINS = {
+    "wprep_tf32": ("wprep_tf32", ()),
     "mod_fwd_tf32": ("mod_fwd_tf32", ()),
     "qkvg_fwd_tf32": ("qkvg_fwd_tf32", ()),
     "attn_fwd_tf32": ("attn_fwd_tf32", ()),
     "ffn_fwd_tf32": ("ffn_fwd_tf32", ()),
 }
 #: dynamic shared memory per kernel (the sources' SMEM / SMEM_BYTES)
-SMEM = {"mod_fwd_tf32": 8 * 16384 + 64, "qkvg_fwd_tf32": 8 * 16384 + 12 * 8192 + 512,
+SMEM = {"wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
         "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 12 * 8192 + 2048 + 512}
 #: kernel function per cubin
-FUNCS = {"mod_fwd_tf32": "swa_mod_fwd_tf32_sm100", "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
+FUNCS = {"wprep_tf32": "swa_wprep_tf32_sm100", "mod_fwd_tf32": "swa_mod_fwd_tf32_sm100", "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
          "attn_fwd_tf32": "swa_attn_fwd_tf32_sm100", "ffn_fwd_tf32": "swa_ffn_fwd_tf32_sm100"}
 
 
@@ -86,11 +90,11 @@ def cubin(name: str) -> str:
     return str(out)
 
 
-def _load(name: str):
-    """The kernel of cubin ``name``, loaded in the current device's context."""
+def _load(name: str, func: str | None = None):
+    """The kernel of cubin ``name`` (its FUNCS entry, or ``func`` of the same cubin), loaded in the current device's context."""
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    return driver.Kernel(cubin(name), FUNCS[name], SMEM[name], pdl=PDL)
+    return driver.Kernel(cubin(name), func or FUNCS[name], SMEM[name], pdl=PDL)
 
 
 def _f32map(t, dims, strides, box, swizzle=128):
@@ -109,9 +113,65 @@ def _rows_map(t, A, B, S, SP, AT):
     return _f32map(t, [C, S, B, A], [C * 4, S * C * 4, B * S * C * 4], [32, AT, 1, SP])
 
 
+def _mod_map(mod, AT):
+    """mod [B S, 6C] fp32 -> 2-D TMA map, box (32 columns, AT rows), 128-B swizzle: one modulation k-block of a tile's atoms."""
+    return _f32map(mod, [6 * C, mod.shape[0]], 6 * C * 4, [32, AT])
+
+
+def _rope_map(t, AT):
+    """cos / sin [B S, D/2] fp32 -> 2-D TMA map, box (D/2 = 16, AT rows), 64-B swizzle (qkvg_fwd_tf32's sw64)."""
+    return _f32map(t, [D // 2, t.shape[0]], D // 2 * 4, [D // 2, AT], swizzle=64)
+
+
 # --------------------------------------------------------------------------------------------------- kernels (host side)
+#: the packed weight forms of wprep_tf32.cu: W [512, 128] | WO [128, 128] | WAB [512, 128] | WD [128, 256] (fp32 elements)
+WPACK = (4 * C * C, C * C, 2 * NHID * C, C * NHID)
+
+
+class WPrepTf32:
+    """The weight forms in one launch each (wprep_tf32.cu): the block's four (:meth:`block`) and a plain rounding (:meth:`round`)."""
+
+    def __init__(self):
+        self.kb = _load("wprep_tf32")
+        self.kr = _load("wprep_tf32", "swa_round_tf32_sm100")
+
+    def block(self, wqkv, wg, wo, wu, wd):
+        """[Wqkv; Wg] [512, C], Wo [C, C], Wab [2 NHID, C] (rows per 32-unit hidden chunk j: [Wu[32 j ..]; Wu[NHID + 32 j ..]]),
+        Wd [C, NHID], all TF32-rounded fp32: views of one packed buffer."""
+        wqkv, wg, wo, wu, wd = (w.float().contiguous() for w in (wqkv, wg, wo, wu, wd))
+        out = torch.empty(sum(WPACK), device=wqkv.device, dtype=torch.float32)
+        self.kb(((sum(WPACK) // 4 + 255) // 256, 1, 1), (256, 1, 1), wqkv, wg, wo, wu, wd, out)
+        o = (0, WPACK[0], WPACK[0] + WPACK[1], WPACK[0] + WPACK[1] + WPACK[2], sum(WPACK))
+        return (out[o[0]:o[1]].view(4 * C, C), out[o[1]:o[2]].view(C, C), out[o[2]:o[3]].view(2 * NHID, C),
+                out[o[3]:o[4]].view(C, NHID))
+
+    def round(self, w):
+        """w rounded to TF32 (fp32, same shape); numel a multiple of 4."""
+        w = w.float().contiguous()
+        out = torch.empty_like(w)
+        n4 = w.numel() // 4
+        assert n4 * 4 == w.numel()
+        self.kr(((n4 + 255) // 256, 1, 1), (256, 1, 1), w, out, int(n4))
+        return out
+
+
+def mod_groups(R: int, nsm: int) -> int:
+    """NG, the channel groups of mod_fwd_tf32's items (6 / NG blocks of 128 channels each): the least work on the busiest CTA,
+    ceil(items / CTAs) x (6 / NG + 1/2) -- a channel block's MMAs + stores, plus an item's c load and silu (each group recomputes its
+    rows' silu) -- ties to the smaller NG."""
+    ntile = (R + 127) // 128
+    best = None
+    for ng in (1, 2, 3, 6):
+        items = ntile * ng
+        cost = -(-items // min(nsm, items)) * (6 // ng + 0.5)
+        if best is None or cost < best[0]:
+            best = (cost, ng)
+    return best[1]
+
+
 class ModFwdTf32:
-    """silu(c) Wmod^T: c [R, C] fp32 contiguous, Wmod [6C, C] fp32 (TF32-rounded) -> [R, 6C] fp32."""
+    """silu(c) Wmod^T: c [R, C] fp32 contiguous, Wmod [6C, C] fp32 (TF32-rounded) -> [R, 6C] fp32. Persistent: grid <= #SMs over
+    (128-row tile, channel group) items (:func:`mod_groups`)."""
 
     def __init__(self):
         self.k = _load("mod_fwd_tf32")
@@ -121,9 +181,12 @@ class ModFwdTf32:
         out = torch.empty(R, 6 * C, device=c.device, dtype=torch.float32) if out is None else out
         maps = (_f32map(c, [C, R], C * 4, [32, 128]), _f32map(wmod, [C, 6 * C], C * 4, [32, 128]),
                 _f32map(out, [6 * C, R], 6 * C * 4, [32, 128]))
+        ntile = (R + 127) // 128
+        ng = mod_groups(R, _sm.nsm())
+        grid = (min(_sm.nsm(), ntile * ng), 1, 1)
 
         def run():
-            self.k(((R + 127) // 128, 6, 1), (128, 1, 1), *maps)
+            self.k(grid, (512, 1, 1), *maps, int(ntile), int(ng))
         run.keep = maps
         return run, out
 
@@ -143,7 +206,9 @@ class QkvgFwdTf32:
         Qh, Kh, Vh = (torch.empty(N, H, S, D, device=dev, dtype=f32) for _ in range(3))
         G = torch.empty(N * S, C, device=dev, dtype=f32)
         X, PQ, PK = ((torch.empty(N * S, C, device=dev, dtype=f32) for _ in range(3)) if save else (G, G, G))
-        maps = (_rows_map(q, A, B, S, SP, AT), _f32map(W, [C, 4 * C], C * 4, [32, 64]))
+        assert mod.is_contiguous() and cos.is_contiguous() and sin.is_contiguous()
+        maps = (_rows_map(q, A, B, S, SP, AT), _f32map(W, [C, 4 * C], C * 4, [32, 64]), _mod_map(mod, AT), _rope_map(cos, AT),
+                _rope_map(sin, AT))
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
         NG = 1                                                             # projection groups: spread small problems over the SMs
@@ -153,8 +218,8 @@ class QkvgFwdTf32:
 
         def run():
             self.k(grid, (384, 1, 1), *maps, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile), int(NG),
-                   float(EPS), float(EPS), int(save), mod, cos, sin, Qh, Kh, Vh, G, X, PQ, PK)
-        run.keep = (maps, W)
+                   float(EPS), float(EPS), int(save), Qh, Kh, Vh, G, X, PQ, PK)
+        run.keep = (maps, W, mod, cos, sin)
         return run, (Qh, Kh, Vh, G, X, PQ, PK)
 
 
@@ -198,15 +263,15 @@ class FfnFwdTf32:
         Q1, Att, Y, Ff = ((torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(4)) if save else (out, out, out, out))
         maps = (_rows_map(g, A, B, S, SP, AT), _rows_map(o, A, B, S, SP, AT), _rows_map(q, A, B, S, SP, AT),
                 _f32map(wo, [C, C], C * 4, [32, 64]), _f32map(wab, [C, 2 * NHID], C * 4, [32, 64]),
-                _f32map(wd, [NHID, C], NHID * 4, [32, 64]))
+                _f32map(wd, [NHID, C], NHID * 4, [32, 64]), _mod_map(mod, AT))
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
         grid = (min(_sm.nsm(), ntile), 1, 1)
 
         def run():
             self.k(grid, (384, 1, 1), *maps, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile), float(EPS),
-                   int(save), mod, out, Q1, Att, Y, Ff)
-        run.keep = maps
+                   int(save), out, Q1, Att, Y, Ff)
+        run.keep = (maps, mod)
         return run, (out, Q1, Att, Y, Ff)
 
 
@@ -214,12 +279,13 @@ class _Kernels:
     """Every TF32 forward kernel, loaded on one device."""
 
     def __init__(self) -> None:
-        self.mod, self.qkvg, self.attn, self.ffn = ModFwdTf32(), QkvgFwdTf32(), AttnFwdTf32(), FfnFwdTf32()
+        self.prep, self.mod, self.qkvg, self.attn, self.ffn = WPrepTf32(), ModFwdTf32(), QkvgFwdTf32(), AttnFwdTf32(), FfnFwdTf32()
 
     def stats(self) -> dict[str, tuple[int, int]]:
         """kernel -> (registers per thread, local memory bytes per thread: > 0 means spills)."""
-        return {name: (k.k.regs, k.k.lmem) for name, k in
-                (("mod_fwd_tf32", self.mod), ("qkvg_fwd_tf32", self.qkvg), ("attn_fwd_tf32", self.attn), ("ffn_fwd_tf32", self.ffn))}
+        return {name: (k.regs, k.lmem) for name, k in
+                (("wprep_tf32", self.prep.kb), ("round_tf32", self.prep.kr), ("mod_fwd_tf32", self.mod.k), ("qkvg_fwd_tf32", self.qkvg.k),
+                 ("attn_fwd_tf32", self.attn.k), ("ffn_fwd_tf32", self.ffn.k))}
 
 
 @functools.lru_cache(maxsize=16)
@@ -255,18 +321,15 @@ def _round_tf32(t: torch.Tensor) -> torch.Tensor:
     return ((i + 0x1000) & -0x2000).view(torch.float32)
 
 
-def _tf32_w_qkvg(wqkv, wg):
-    return _round_tf32(torch.cat([wqkv, wg]))
+def _tf32_block_forms(wqkv, wg, wo, wu, wd):
+    """(W = [Wqkv; Wg], WO, WAB, WD), TF32-rounded, in one launch (wprep_tf32.cu); WAB's rows per 32-unit hidden chunk j are
+    [Wu[32 j .. 32 j + 31]; Wu[NHID + 32 j ..]] (dispatch._pack_ffn's wab)."""
+    return kernels_tf32(_index(wqkv)).prep.block(wqkv, wg, wo, wu, wd)
 
 
-def _tf32_w(w):
-    return _round_tf32(w)
-
-
-def _tf32_wab(wu):
-    """rows per 32-unit hidden chunk j: [Wu[32 j .. 32 j + 31]; Wu[NHID + 32 j ..]] (dispatch._pack_ffn's wab), TF32-rounded."""
-    nh = wu.shape[0] // 2
-    return _round_tf32(wu.reshape(2, nh // 32, 32, wu.shape[1]).permute(1, 0, 2, 3).reshape(2 * nh, wu.shape[1]))
+def _tf32_wmod(wmod):
+    """Wmod rounded to TF32, in one launch."""
+    return kernels_tf32(_index(wmod)).prep.round(wmod)
 
 
 # --------------------------------------------------------------------------------------------------- the block
@@ -280,11 +343,9 @@ def block_fwd_tf32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, hal
     A = N // B
     with torch.cuda.device(q.device):
         K = kernels_tf32(_index(q))
-        # the weight forms first: their (cache-miss) torch kernels must finish before the PDL chain starts
-        W = _sm._cached(_tf32_w_qkvg, wqkv, wg)
-        WO = _sm._cached(_tf32_w, wo)
-        WAB = _sm._cached(_tf32_wab, wu)
-        WD = _sm._cached(_tf32_w, wd)
+        # the weight forms: one wprep launch on a cache miss (every replay inside a capture, unless the weights are static), the
+        # head of the PDL chain -- qkvg / ffn read them after their griddepcontrol.wait
+        W, WO, WAB, WD = _sm._cached(_tf32_block_forms, wqkv, wg, wo, wu, wd)
         run, (Qh, Kh, Vh, G, X, PQ, PK) = K.qkvg.bind(q, mod, cos, sin, W, A, B, save=save)
         run()
         O = torch.empty(N * S, C, device=q.device, dtype=torch.float32)
@@ -302,6 +363,6 @@ def mod_fwd_tf32(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
     """silu(c) Wmod^T [R, 6C] fp32 on TF32 tensor cores; c [R, C] fp32 contiguous, Wmod [6C, C] fp32."""
     with torch.cuda.device(c.device):
         K = kernels_tf32(_index(c))
-        run, out = K.mod.bind(c, _sm._cached(_tf32_w, wmod))
+        run, out = K.mod.bind(c, _sm._cached(_tf32_wmod, wmod))
         run()
     return out

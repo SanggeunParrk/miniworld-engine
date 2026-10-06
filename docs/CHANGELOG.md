@@ -10,6 +10,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 SWA atom DiT forward, faster: the rounded weight forms in one kernel (`wprep_tf32.cu`), `mod_fwd_tf32` as a persistent
+  store stream, and the per-row modulation / RoPE values of `qkvg_fwd_tf32` / `ffn_fwd_tf32` through TMA boxes. Inference, one block,
+  5 samples: 1.37-1.86x Anthropic's fused block with TF32 GEMMs (modulation in the call; 1.43-2.03x precomputed) at 1024-6144 atoms,
+  4x its accuracy. Page: `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`.
 - B200 token DiT: fp32 (TF32) at every head layout (16 x 48, 24 x 32, 12 x 64, 16 x 64); `DiTBlock.forward` serves [A, B, L]
   masks with shared rows on the fused path (they used to take the per-op path in bf16 and fp32); the fused training op pads odd A
   and L % 128 != 0 instead of refusing. Tests: `tests/integrations/test_b200_token_dit_tf32_layouts_gpu.py`; page:

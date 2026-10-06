@@ -313,10 +313,10 @@ four M128 N64 K8 MMAs).
 
 | kernel | role | tiles, threads | shared memory | TMEM (512 columns) |
 |---|---|---|---|---|
-| `mod_fwd_tf32` | silu(c) Wmod^T, [R, 768] fp32 | CTA per (128 rows, 128 outputs), 128 threads; 16 SS MMAs M128 N128 K8 | c 64 KB (silu in place, then the out staging) + Wmod block 64 KB = 128 KB | accumulator 128 |
-| `qkvg_fwd_tf32` | RMS-adaLN, q / k / v / gate projections, head RMS, RoPE | persistent; items (tile of SP = min(A, 16) augments x 128 / SP atoms, projection group); NG = 1 / 2 / 4 groups split the four projections when tiles are few (A = 1: 8 tiles at S = 1024); warp 0 q TMA, 1 MMA, 3 weight TMA, 4-11 row threads (thread = row, two warpgroups split columns / heads) | q ring 8 x 16 KB (two tiles) + weight ring 12 x 8 KB = 224 KB | x[2] 2 x 128 + acc[2] 2 x 128 |
+| `mod_fwd_tf32` | silu(c) Wmod^T, [R, 768] fp32 | persistent (<= #SMs) over items (128-row tile, group of 6 / NG channel blocks; NG = 1 / 2 / 3 / 6 picked so that small R fills the GPU and large R computes each row's silu once or a few times); 512 threads: 0 c TMA, 1 MMA, 2 Wmod TMA, 4-7 epilogue, 8-15 silu (a 128-B row per step, ex2 / rcp approx) | c tiles 2 x 64 KB (silu in place) + Wmod ring 4 x 16 KB + out staging 2 x 16 KB = 224.5 KB | acc[2] 2 x 128 |
+| `qkvg_fwd_tf32` | RMS-adaLN, q / k / v / gate projections, head RMS, RoPE | persistent; items (tile of SP = min(A, 16) augments x 128 / SP atoms, projection group); NG = 1 / 2 / 4 groups split the four projections when tiles are few (A = 1: 8 tiles at S = 1024); warp 0 q TMA, 1 MMA, 3 weight TMA, 4-11 row threads (thread = row, two warpgroups split columns / heads) | ring 8 x 16 KB carrying q, shift_a / scale_a (TMA boxes of the modulation) + weight ring 10 x 8 KB + cos / sin 16 KB (64-B swizzle) = 224 KB | x[2] 2 x 128 + acc[2] 2 x 128 |
 | `attn_fwd_tf32` | window attention, fp32 softmax, lse | persistent; items (sample, 128 queries, head); S = q K^T as 4 SS MMAs M128 N256 K8; P in place over S (fp32, one column per element); PV 2 x 16 TS MMAs M128 N32 K8 with V MN-major (128-B swizzle, 32-B atoms); warpgroup kb = key block kb | item stage (q 16 + K 32 + V 32 KB) x 2 = 160 KB + 2 KB row exchange | S / P 256 (single) + O[2] 2 x 32 |
-| `ffn_fwd_tf32` | gated out-projection, residual, RMS-adaLN, SwiGLU (8 chunks of 32 hidden units), residual | persistent; tiles as qkvg; warp 0 g / o / q TMA, 1 MMA, 3 weight TMA, 4-11 row threads | g / o / q ring 8 x 16 KB + weight ring 12 x 8 KB + 2 KB = 226.5 KB | gated / y 128, att / ffn 128, q1 128, a / b [2] 2 x 64 (h over a) |
+| `ffn_fwd_tf32` | gated out-projection, residual, RMS-adaLN, SwiGLU (8 chunks of 32 hidden units), residual | persistent; tiles as qkvg; warp 0 g / o / q TMA, 1 MMA, 3 weight TMA, 4-11 row threads | ring 8 x 16 KB carrying g, o, q and the four modulation columns (gate_a, shift_f, scale_f, gate_f; TMA boxes) + weight ring 12 x 8 KB + 2 KB = 226.5 KB | gated / y 128, att / ffn 128, q1 128, a / b [2] 2 x 64 (h over a) |
 
 Every kernel keeps the shared-memory base 1024-B aligned (dynamic only), issues MMAs from a whole warp with `elect_one()`, and is
 designed for <= 128 registers per thread (launch bound 384 x 1). The single S / P buffer of the attention and the shared a / b buffer
@@ -327,7 +327,35 @@ Tests: `tests/integrations/test_b200_swa_dit_tf32_gpu.py` (`-k fwd`: the output 
 A = 1 / 5 / 48, S = 1024 / 4096 -- no worse than Triton; every training save against its fp64 meaning; the kernels that ran, by the
 profiler; spills; the fake; CUDA-graph capture; `test_bwd_*`: forward + backward with `tf32_bwd`).
 
-**Measurements pending**: nothing in this section has been timed yet (2026-10-06); the kernels have not run at the table shapes.
+`swa_wprep_tf32_sm100` (`wprep_tf32.cu`) builds the four rounded weight forms ([Wqkv; Wg], Wo, the chunked Wu, Wd) in one launch
+and `swa_round_tf32_sm100` rounds Wmod: inside a CUDA graph the weight cache is scoped to the capture, so the forms are rebuilt in
+every replay unless the caller declares static weights -- as torch ops that was ten small kernels per block call, ~15-25 us.
+
+### Measurements (2026-10-06)
+
+One block, 5 samples, inference, CUDA-graph replay (min of 9 x 60), B200; the bench script is `t6_fp32.py`. Anthropic = its ESMFold2
+fused block (`ef2_atom._fused_block`) on fp32 activations with TF32 GEMMs (`gemm="tf32"`), and with its shipped fast tier (bf16
+GEMMs, fp32 residual stream). Accuracy against an IEEE fp32 PyTorch block: ours 4.1e-4, Anthropic tf32 1.6e-3, Anthropic bf16 2.6e-3.
+
+| atoms | modulation in the call: ours / Anthropic tf32 / bf16 (us) | x tf32 | modulation precomputed: ours / Anthropic tf32 / bf16 | x tf32 | x bf16 |
+|---|---|---|---|---|---|
+| 1024 | 57.4 / 78.7 / 55.4 | 1.37 | 48.9 / 69.7 / 45.2 | 1.43 | 0.92 |
+| 2048 | 73.9 / 127.3 / 70.9 | 1.72 | 59.9 / 110.7 / 56.3 | 1.85 | 0.94 |
+| 3072 | 86.4 / 148.0 / 84.6 | 1.71 | 69.4 / 127.0 / 67.7 | 1.83 | 0.98 |
+| 4096 | 135.3 / 210.9 / 125.4 | 1.56 | 113.7 / 190.5 / 105.7 | 1.68 | 0.93 |
+| 6144 | 152.7 / 283.8 / 161.5 | 1.86 | 126.7 / 257.7 / 135.3 | 2.03 | 1.07 |
+
+Per kernel (us per launch, 20 back to back in a graph) at 1024 / 2048 / 3072 / 4096 / 6144 atoms: mod 7.9 / 11.5 / 14.7 / 19.2 / 24.6
+(Anthropic's silu + Linear 10.4 / 15.3 / 18.5 / 22.6 / 30.4), qkvg 13.3 / 20.4 / 20.4 / 37.1 / 40.7, attn 9.4 / 12.9 / 16.7 / 20.5 / 28.0,
+ffn 21.2 / 21.6 / 21.9 / 42.6 / 47.6, weight forms 2.2. The step at 4096 atoms (qkvg, ffn) is the second wave: 5 x 4096 rows = 160
+tiles of 128 rows over 148 SMs. Against PyTorch compiled fp32 (TF32 on), bench harness, L 128-768: inference 2.2-14x, training
+2.4-15x (the training numbers predate the forward work above).
+
+How it got there (in this order): the weight forms as one kernel (above); `mod_fwd_tf32` rebuilt as a persistent, warp-specialised
+store stream (it was one serial CTA per tile, 27-141 us); its silu on 8 warps with whole-row loads and approximate reciprocals; the
+FFN sigmoids with `rcp.approx`; and -- found with Nsight Compute: SM 7 % busy, the row threads stalled on `long_scoreboard` -- the
+per-row modulation and RoPE values brought in by TMA boxes through the existing rings instead of strided 16-B global loads per
+thread (each warp load touched 32 sectors with a ~24 KB L1).
 
 ## What was tried and not kept
 
