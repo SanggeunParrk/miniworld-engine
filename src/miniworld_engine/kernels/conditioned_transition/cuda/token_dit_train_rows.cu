@@ -1139,7 +1139,11 @@ void cond_prep90(at::Tensor c,at::Tensor chat,at::Tensor cbf,at::Tensor cst,doub
  TORCH_CHECK(c.dim()==4&&c.size(1)==1&&c.size(3)==DC&&c.stride(2)==DC&&c.stride(3)==1,"native cond stride");
  const at::cuda::CUDAGuard g(c.device());
  TDT_DISPATCH(chat.scalar_type(),AT,[&]{TDT_DISPATCH(c.scalar_type(),CT,[&]{
- cond_prep_k<CT,AT><<<blocks(M),NTC,0,S()>>>(CP<CT>(c),P<AT>(chat),P<AT>(cbf),P<float2>(cst),M,(float)eps,Crows);
+ const CT* src=CP<CT>(c);AT* normalized=P<AT>(chat);AT* raw=P<AT>(cbf);
+ float2* stats=P<float2>(cst);int rows=M,source_rows=Crows;float epsilon=eps;
+ cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,cond_prep_k<CT,AT>));
+ void* args[]={&src,&normalized,&raw,&stats,&rows,&epsilon,&source_rows};
+ C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(blocks(M)),dim3(NTC),args,0,S()));
  });});C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void cond_bwd90(at::Tensor dchat,at::Tensor dcg,at::Tensor c,at::Tensor cst,at::Tensor dc) {
@@ -1160,7 +1164,79 @@ std::vector<at::Tensor> train_keymask90(c10::optional<at::Tensor> mask,at::Tenso
 
 }  // namespace
 
+// The original caller's ExpandBackward/AccumulateGrad nodes retain their edges.
+// Node-scoped dispatch hooks use these kernels for their two CUDA operations.
+template <typename T>
+__global__ void caller_sum90_k(const T* in, T* out, int64_t period, int samples) {
+  for (int64_t i=(int64_t)blockIdx.x*blockDim.x+threadIdx.x; i<period;
+       i+=(int64_t)gridDim.x*blockDim.x) {
+    float value=0.f;
+    for (int a=0; a<samples; ++a) value += float(in[(int64_t)a*period+i]);
+    out[i]=T(value);
+  }
+}
+template <typename T>
+__global__ void caller_add90_k(T* dst, const T* src, int64_t n) {
+  for (int64_t i=(int64_t)blockIdx.x*blockDim.x+threadIdx.x; i<n;
+       i+=(int64_t)gridDim.x*blockDim.x) dst[i]=T(float(dst[i])+float(src[i]));
+}
+template <typename T>
+void caller_sum90_launch(at::Tensor input, at::Tensor out) {
+  const T* src=reinterpret_cast<const T*>(input.data_ptr());
+  T* dst=reinterpret_cast<T*>(out.data_ptr());
+  int64_t period=out.numel(); int samples=input.size(0);
+  cudaKernel_t kernel;
+  C10_CUDA_CHECK(cudaGetKernel(&kernel,caller_sum90_k<T>));
+  void* args[]={&src,&dst,&period,&samples};
+  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+      dim3(std::min<int64_t>(512,(period+255)/256)),dim3(256),args,0,S()));
+}
+template <typename T>
+void caller_add90_launch(at::Tensor dst_tensor, at::Tensor src_tensor) {
+  T* dst=reinterpret_cast<T*>(dst_tensor.data_ptr());
+  const T* src=reinterpret_cast<const T*>(src_tensor.data_ptr());
+  int64_t n=dst_tensor.numel(); cudaKernel_t kernel;
+  C10_CUDA_CHECK(cudaGetKernel(&kernel,caller_add90_k<T>));
+  void* args[]={&dst,&src,&n};
+  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+      dim3(std::min<int64_t>(512,(n+255)/256)),dim3(256),args,0,S()));
+}
+at::Tensor caller_sum90(at::Tensor input) {
+  TORCH_CHECK(input.is_cuda() && input.is_contiguous() && input.dim()>=1 && input.size(0)>0,
+              "native caller sum requires a contiguous CUDA gradient with a sample axis");
+  TORCH_CHECK(input.scalar_type()==at::kFloat || input.scalar_type()==at::kBFloat16,
+              "native caller sum supports FP32/BF16");
+  at::cuda::CUDAGuard guard(input.device());
+  auto sizes=input.sizes().vec();sizes[0]=1;
+  auto out=at::empty(sizes,input.options());
+  if(out.numel()) {
+    if(input.scalar_type()==at::kFloat) caller_sum90_launch<float>(input,out);
+    else caller_sum90_launch<bf>(input,out);
+  }
+  return out;
+}
+void caller_add90(at::Tensor dst, at::Tensor src) {
+  TORCH_CHECK(dst.is_cuda() && src.device()==dst.device() && src.scalar_type()==dst.scalar_type()
+              && dst.sizes()==src.sizes() && dst.is_contiguous() && src.is_contiguous(),
+              "native caller add requires matching contiguous CUDA gradients");
+  TORCH_CHECK(dst.scalar_type()==at::kFloat || dst.scalar_type()==at::kBFloat16,
+              "native caller add supports FP32/BF16");
+  at::cuda::CUDAGuard guard(dst.device());
+  if(dst.numel()) {
+    if(dst.scalar_type()==at::kFloat) caller_add90_launch<float>(dst,src);
+    else caller_add90_launch<bf>(dst,src);
+  }
+}
+void caller_zero90(at::Tensor out) {
+  TORCH_CHECK(out.is_cuda() && out.is_contiguous(), "native caller zero requires contiguous CUDA storage");
+  at::cuda::CUDAGuard guard(out.device());
+  if(out.numel()) C10_CUDA_CHECK(cudaMemsetAsync(out.data_ptr(),0,out.nbytes(),S()));
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("caller_zero90", &caller_zero90);
+  m.def("caller_sum90", &caller_sum90);
+  m.def("caller_add90", &caller_add90);
   m.def("train_pack90", &train_pack90);
   m.def("train_alloc90", &train_alloc90);
   m.def("train_stage90", &train_stage90);

@@ -1158,9 +1158,9 @@ class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, *params):
         ctx.shared_cond = cond.shape[0] == 1 and single.shape[0] != 1
-        if ctx.shared_cond:
-            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
-            cond = ext().repeat90(cond, single.shape[0])
+        from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+        if ctx.shared_cond or (h100_enabled(single.device) and cond.stride(0) == 0):
+            cond = _repeat_shared(cond, single.shape[0])
         out, *saved = _fwd(single, cond, pair, mask, list(params))
         ctx.save_for_backward(single, cond, pair, *params, *saved)
         ctx.meta = (mask, len(params))

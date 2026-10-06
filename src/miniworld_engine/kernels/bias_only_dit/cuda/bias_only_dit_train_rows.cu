@@ -1301,7 +1301,12 @@ at::Tensor repeat90(at::Tensor input,int64_t samples){
  TORCH_CHECK(input.is_contiguous()&&input.scalar_type()==at::kBFloat16,"repeat source");
  at::cuda::CUDAGuard guard(input.device());auto sizes=input.sizes().vec();sizes[0]=samples;
  auto out=at::empty(sizes,input.options());int64_t n=out.numel();
- repeat90_kernel<<<std::min<int64_t>(512,(n+255)/256),256,0,S()>>>(reinterpret_cast<bf*>(input.data_ptr()),reinterpret_cast<bf*>(out.data_ptr()),n,input.numel());
+ const bf* src=reinterpret_cast<const bf*>(input.data_ptr());bf* dst=reinterpret_cast<bf*>(out.data_ptr());
+ int64_t period=input.numel();cudaKernel_t kernel;
+ C10_CUDA_CHECK(cudaGetKernel(&kernel,repeat90_kernel));
+ void* args[]={&src,&dst,&n,&period};
+ C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+     dim3(std::min<int64_t>(512,(n+255)/256)),dim3(256),args,0,S()));
  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 __global__ void shared_grad90_kernel(const bf*in,bf*out,int64_t period,int samples){
