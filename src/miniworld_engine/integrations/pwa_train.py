@@ -38,11 +38,20 @@ from miniworld_engine import settings
 H, C, D, DZ = 8, 32, 64, 128
 HC = H * C
 _EXT: dict[str, Any] = {}
+_NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar("pwa_native_training", default=False)
 
 
-def native_aux_enabled() -> bool:
-    """Experimental H100 CUDA preparation and deterministic reduction path."""
-    return os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "0") == "1"
+def _h100_training_default(msa: torch.Tensor) -> bool:
+    """The six required training shapes with full native accuracy qualification."""
+    return (msa.device.type == "cuda" and torch.cuda.get_device_capability(msa.device) == (9, 0)
+            and msa.ndim == 4 and msa.shape[0] == 1 and msa.shape[3] == D
+            and msa.shape[1] in (1024, 2048, 4096) and msa.shape[2] in (384, 768))
+
+
+def native_aux_enabled(msa: torch.Tensor | None = None) -> bool:
+    """Qualified training defaults; explicit AUX=0 preserves the legacy path."""
+    default = _h100_training_default(msa) if msa is not None else _NATIVE_TRAINING_SCOPE.get()
+    return os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "1" if default else "0") == "1"
 
 
 def native_inference_enabled(device: torch.device) -> bool:
@@ -115,7 +124,7 @@ def refusal(
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         n, s = msa.shape[2], msa.shape[1]
-        native = native_aux_enabled() or (not torch.is_grad_enabled() and native_inference_enabled(msa.device))
+        native = native_aux_enabled(msa) or (not torch.is_grad_enabled() and native_inference_enabled(msa.device))
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > 1024):
             return f"the CUDA-only H100 path needs positive S and N <= 1024, got N={n}, S={s}"
         if n % 128 or s % 2:
@@ -561,7 +570,11 @@ class _PwaMath(torch.autograd.Function):
         # x * mask / (1 - p); applied to the bf16 update inside the kernel's residual epilogue
         dmask, dscale = None, 1.0
         if p_drop > 0:
-            dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
+            if not sm100 and native_aux_enabled():
+                from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
+                dmask = extension("pack").drop_keep(m, N, D, float(p_drop))
+            else:
+                dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
         if sm100:
             o = torch.bmm(

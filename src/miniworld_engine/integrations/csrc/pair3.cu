@@ -4,6 +4,7 @@
 // quad shuffles), and the projection is eight m16n8k16 mma with Wb^T as the B operand.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
 
@@ -356,6 +357,7 @@ torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w,
 std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::Tensor dw, torch::Tensor ln_w, double eps, torch::Tensor wb) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, 128] bf16");
   const int N = (int)z.size(0);
+  if (key.has_value()) TORCH_CHECK(key->is_cuda() && key->device() == z.device() && key->scalar_type() == at::kBool && key->is_contiguous() && key->numel() == N, "key: contiguous CUDA bool [N]");
   TORCH_CHECK(N % GJ == 0 && N <= 1024, "N must be a multiple of 16 (and <= 1024)");
   TORCH_CHECK(w16.scalar_type() == torch::kBFloat16 && w16.is_contiguous() && w16.sizes() == torch::IntArrayRef({H, N, N}), "w16: [8, N, N] bf16");
   auto dwc = dw.contiguous();
@@ -374,6 +376,65 @@ std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::
       reinterpret_cast<__nv_bfloat16*>(dz.data_ptr<at::BFloat16>()), pwb.data_ptr<float>(), pln.data_ptr<float>(), N, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dz, pwb.sum(0), pln.sum(0)};
+}
+
+// Accuracy-first FP32 beta residual: the pair softmax is invariant to a
+// constant logit shift, so its tiny numerical gradient must follow the oracle's
+// exact FP32 ordering. These copies preserve values; the GEMMs remain cuBLAS.
+__global__ void pwa_shadow_pack_kernel(const float* x,float* y,long n,int S,int N) {
+  long i=(long)blockIdx.x*256+threadIdx.x;
+  if(i<n){
+    int c=i%32,s=(i/32)%S,q=(i/(32L*S))%N,h=i/(32L*S*N);
+    y[i]=x[((long)s*N+q)*256+h*32+c];
+  }
+}
+torch::Tensor pwa_shadow_pack(torch::Tensor x,int64_t S,int64_t N) {
+  TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&x.scalar_type()==at::kFloat&&x.numel()==S*N*256,"PWA shadow rows FP32 [S,N,256]");
+  auto y=torch::empty({8,N,S*32},x.options());
+  pwa_shadow_pack_kernel<<<(x.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),y.data_ptr<float>(),x.numel(),S,N);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+// Preserve every FP32 value while grouping adjacent MSA and token rows into
+// one tile.  The scalar layout copy above jumps across the entire MSA tensor
+// between warps; this producer reads complete 256-channel rows and reorders
+// them in shared memory before writing the head-major contraction operand.
+__global__ void pwa_shadow_pack_tiled_kernel(const float* x,float* y,int S,int N) {
+  extern __shared__ float tile[];
+  const int s0=blockIdx.x*8,n0=blockIdx.y*8;
+  for(int i=threadIdx.x;i<8*8*256;i+=blockDim.x){
+    int c=i%256,n=(i/256)%8,s=i/(8*256);
+    tile[i]=x[((long)(s0+s)*N+n0+n)*256+c];
+  }
+  __syncthreads();
+  for(int i=threadIdx.x;i<8*8*256;i+=blockDim.x){
+    int c=i%32,s=(i/32)%8,n=(i/(32*8))%8,h=i/(32*8*8);
+    y[(((long)h*N+n0+n)*S+s0+s)*32+c]=tile[(s*8+n)*256+h*32+c];
+  }
+}
+torch::Tensor pwa_shadow_pack_tiled(torch::Tensor x,int64_t S,int64_t N) {
+  c10::cuda::CUDAGuard guard(x.device());
+  TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&x.scalar_type()==at::kFloat&&x.numel()==S*N*256
+    &&S>0&&N>0&&S%8==0&&N%8==0,"PWA tiled shadow rows FP32 [S,N,256], multiples of 8");
+  auto y=torch::empty({8,N,S*32},x.options());
+  constexpr int smem=8*8*256*sizeof(float);
+  C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_shadow_pack_tiled_kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
+  pwa_shadow_pack_tiled_kernel<<<dim3(S/8,N/8),256,smem,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),y.data_ptr<float>(),S,N);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+__global__ void pwa_shadow_dropout_kernel(const float* x,const __nv_bfloat16* keep,float* y,long n,int stride,float scale) {
+  long i=(long)blockIdx.x*256+threadIdx.x;
+  if(i<n)y[i]=__fmul_rn(__fmul_rn(x[i],scale),__bfloat162float(keep[i%stride]));
+}
+torch::Tensor pwa_shadow_dropout(torch::Tensor x,torch::Tensor keep,double probability) {
+  TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&x.scalar_type()==at::kFloat&&keep.is_cuda()&&keep.device()==x.device()
+    &&keep.is_contiguous()&&keep.scalar_type()==at::kBFloat16&&keep.numel()>0&&x.numel()%keep.numel()==0,"PWA shadow dropout layout");
+  TORCH_CHECK(probability>=0.&&probability<1.,"PWA shadow dropout probability");
+  auto y=torch::empty_like(x);
+  // Probe 22580 verified the oracle's double-scalar reciprocal ordering:
+  // convert to FP32 after division, not before (one ULP different at p=.15).
+  const float scale=static_cast<float>(1.0/(1.0-probability));
+  pwa_shadow_dropout_kernel<<<(x.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),reinterpret_cast<const __nv_bfloat16*>(keep.data_ptr()),y.data_ptr<float>(),x.numel(),keep.numel(),scale);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
