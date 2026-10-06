@@ -190,6 +190,11 @@ def cuda_training_aux_enabled():
     return os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_CUDA") == "1"
 
 
+def cuda_training_fused_prepare_enabled():
+    return (cuda_training_aux_enabled()
+            and os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP") == "1")
+
+
 @torch.compile(fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
 def _normalize_into_compiled(dst, x, g, b):
     dst.copy_(F.layer_norm(x.float(), (x.shape[-1],), g, b, 1e-5).to(x.dtype))

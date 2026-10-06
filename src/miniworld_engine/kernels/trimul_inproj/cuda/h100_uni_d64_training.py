@@ -127,9 +127,10 @@ def _prepare(leaves, mask):
 
 
 def _run_forward(leaves, mask, ds, outgoing, save):
-    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
+    prepared = len(leaves) == 12
+    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves[:11]
     n = x.shape[1]
-    w1, maskf = _prepare(leaves, mask)
+    w1, maskf = (leaves[11], mask) if prepared else _prepare(leaves, mask)
     ab = x.new_empty((2 * HIDDEN, n, n))
     tri = x.new_empty((HIDDEN, n, n))
     stats = torch.empty((4, n * n), device=x.device, dtype=torch.float32)
@@ -137,13 +138,18 @@ def _run_forward(leaves, mask, ds, outgoing, save):
     _front(x, w1, maskf, gi, bi, ab)
     _triangle(ab, tri, outgoing)
     _output(x, tri, wg, wp, gi, bi, go, bo, ds.reshape(n, WIDTH), y, stats)
-    return [y, ab, tri, stats, w1, maskf] if save else y
+    if not save:
+        return y
+    return [y, ab, tri, stats] if prepared else [y, ab, tri, stats, w1, maskf]
 
 
 def _forward_fake(leaves, mask, ds, outgoing):
     """Output plus saved ab, tri, LN statistics [mean_in, rstd_in, mean_out, rstd_out], weight pack, FP32 mask."""
     x = leaves[0]
     n = x.shape[1]
+    if len(leaves) == 12:
+        return [torch.empty_like(x), x.new_empty((2*HIDDEN,n,n)), x.new_empty((HIDDEN,n,n)),
+                x.new_empty((4,n*n),dtype=torch.float32)]
     return [torch.empty_like(x), x.new_empty((2 * HIDDEN, n, n)), x.new_empty((HIDDEN, n, n)),
             x.new_empty((4, n * n), dtype=torch.float32), x.new_empty((4 * HIDDEN, WIDTH)),
             x.new_empty((n, n), dtype=torch.float32)]
@@ -236,6 +242,17 @@ class _Training(torch.autograd.Function):
     def forward(ctx, outgoing, *args):
         leaves = list(args[:11])
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
+        if T.cuda_training_fused_prepare_enabled():
+            from ._h100_pack import fused_training_prepare
+            packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
+            weights = [*leaves[1:5], gate, output]
+            prepared = [leaves[0], *weights, *leaves[7:], packed]
+            y, ab, tri, stats = forward(prepared, maskf, args[12], outgoing)
+            saved = [ab, tri, stats, packed, maskf]
+            ctx.outgoing = outgoing
+            ctx.saved_count = len(saved)
+            ctx.save_for_backward(*args, *saved, *weights)
+            return y
         if T.cuda_training_aux_enabled():
             from ._h100_pack import cast_weights
             weights = cast_weights(leaves[1:7])
@@ -266,6 +283,11 @@ def single_trimul(outgoing, *args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
+        if T.cuda_training_fused_prepare_enabled():
+            from ._h100_pack import fused_training_prepare
+            packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
+            prepared = [leaves[0], *leaves[1:5], gate, output, *leaves[7:], packed]
+            return forward_nograd(prepared, maskf, args[12], outgoing)
         if T.cuda_training_aux_enabled():
             from ._h100_pack import cast_weights
             leaves = [leaves[0], *cast_weights(leaves[1:7]), *leaves[7:]]
