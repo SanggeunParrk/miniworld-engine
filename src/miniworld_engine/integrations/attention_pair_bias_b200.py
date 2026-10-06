@@ -300,7 +300,7 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         shape = (leaves[-1].shape[0], single.shape[-1])
         qualified = single.shape[1] in (384, 768) and shape in (
             (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
-        fused_beta = qualified and os.environ.get("MINIWORLD_APB_H100_SHADOW_BETA_MM", "0") == "1"
+        fused_beta = qualified and os.environ.get("MINIWORLD_APB_H100_SHADOW_BETA_MM", "1" if qualified else "0") == "1"
         shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "1" if qualified else "0") == "1"
         convert = E.exact_fp32_inputs_grouped if shadow_io else E.exact_fp32_inputs
         pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "2" if qualified else "0"))
