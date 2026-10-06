@@ -453,10 +453,19 @@ TMN_DEVI void k3w_body(const K3Params& p) {
         if (it < nvalid) {
           uint4 w4;
           if (!ZF32) {                                    // out = bf16(z + o) (o already bf16): the module's residual add in z's dtype
+#if TMN_K3W_NATIVE_RESIDUAL
+            // Native BF16x2 addition keeps the reference's BF16 residual
+            // rounding while removing unpack/add/repack from the vector pass.
+            w4.x = math::residual_bf16x2(zr.x, ov.x);
+            w4.y = math::residual_bf16x2(zr.y, ov.y);
+            w4.z = math::residual_bf16x2(zr.z, ov.z);
+            w4.w = math::residual_bf16x2(zr.w, ov.w);
+#else
             w4.x = pack_bf16(bf16lo(zr.x) + bf16lo(ov.x), bf16hi(zr.x) + bf16hi(ov.x));
             w4.y = pack_bf16(bf16lo(zr.y) + bf16lo(ov.y), bf16hi(zr.y) + bf16hi(ov.y));
             w4.z = pack_bf16(bf16lo(zr.z) + bf16lo(ov.z), bf16hi(zr.z) + bf16hi(ov.z));
             w4.w = pack_bf16(bf16lo(zr.w) + bf16lo(ov.w), bf16hi(zr.w) + bf16hi(ov.w));
+#endif
           } else {                                        // out = fp32(z) + o
             w4.x = __float_as_uint(__uint_as_float(zr.x) + __uint_as_float(ov.x));
             w4.y = __float_as_uint(__uint_as_float(zr.y) + __uint_as_float(ov.y));
