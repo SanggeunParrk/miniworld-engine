@@ -135,6 +135,10 @@ _ALL_TRUE: dict = {}
 
 
 def update(module, single, cond, pair, mask):
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+    if h100_enabled(single.device):
+        from .bias_only_dit_train import h100_infer
+        return h100_infer(module, single, cond, pair, mask)
     if mask is None:                     # one all-true mask per (L, device), so the P cache key stays stable
         k = (single.shape[2], single.device)
         mask = _ALL_TRUE.get(k)

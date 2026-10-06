@@ -1,3 +1,256 @@
+// Hopper prototype: same PV+gate, dP+softmax-backward, and expand+SwiGLU boundaries as B200.
+// The B200 implementation below is retained unchanged.
+#ifdef MINIWORLD_BO_SM90
+#include "tmn_kernels.cuh"
+using namespace tmn; using namespace tmn::sm90;
+#include "wgmma_n.cuh"
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+
+namespace bo90 {
+using bf=__nv_bfloat16;
+TMN_DEVI void mma64(float (&d)[32], uint64_t a, uint64_t b) {
+  asm volatile("wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, 1, 1, 1, 0, 0;\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b));
+}
+TMN_DEVI void mma64mn(float (&d)[32], uint64_t a, uint64_t b) {
+  asm volatile("wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, 1, 1, 1, 0, 1;\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b));
+}
+TMN_DEVI uint64_t ds(uint32_t p){ return smem_desc(p,16,1024,1); }
+using Encode=CUresult (*)(CUtensorMap*,CUtensorMapDataType,cuuint32_t,void*,const cuuint64_t*,const cuuint64_t*,const cuuint32_t*,const cuuint32_t*,CUtensorMapInterleave,CUtensorMapSwizzle,CUtensorMapL2promotion,CUtensorMapFloatOOBfill);
+CUtensorMap map(at::Tensor t,int bc,int br){
+ static Encode enc=[] { void*p=nullptr; cudaDriverEntryPointQueryResult q{}; TORCH_CHECK(cudaGetDriverEntryPoint("cuTensorMapEncodeTiled",&p,cudaEnableDefault,&q)==cudaSuccess&&p,"TMA encoder"); return reinterpret_cast<Encode>(p); }();
+ CUtensorMap m{}; const cuuint64_t dims[2]={(cuuint64_t)t.size(1),(cuuint64_t)t.size(0)},str[1]={(cuuint64_t)t.stride(0)*2}; const cuuint32_t box[2]={(unsigned)bc,(unsigned)br},e[2]={1,1};
+ TORCH_CHECK(enc(&m,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,t.data_ptr(),dims,str,box,e,CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_L2_256B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)==CUDA_SUCCESS,"TMA encode"); return m;
+}
+template<bool DPB,bool GATE>
+__global__ __launch_bounds__(128,2) void core(const __grid_constant__ CUtensorMap ma,const __grid_constant__ CUtensorMap mb,
+ const bf* p,const bf* g,const float* dd,bf*out,int L,int A,int H,int DH,int gs,int os) {
+ __shared__ __align__(1024) unsigned char sm[24576];
+ __shared__ uint64_t bar;
+ int tid=threadIdx.x,warp=tid/32,lane=tid%32,mt=L/64;
+ if(tid==0){mbar_init(&bar,1);fence_barrier_init();}
+ __syncthreads();
+ int nt=DPB?mt:A,items=H*mt*nt; unsigned phase=0;
+ for(int item=blockIdx.x;item<items;item+=gridDim.x){
+   int n=item%nt,head=(item/nt)/mt,m0=((item/nt)%mt)*64;
+   float acc[32]={};
+   int steps=DPB?A:L/64;
+   for(int kb=0;kb<steps;++kb){
+     if(tid==0){
+       mbar_arrive_expect_tx(&bar,16384);
+       if constexpr(DPB){tma_load_2d(sm,&ma,&bar,head*DH,kb*L+m0); tma_load_2d(sm+8192,&mb,&bar,head*DH,kb*L+n*64);}
+       else {tma_load_2d(sm,&ma,&bar,kb*64,head*L+m0);tma_load_2d(sm+8192,&mb,&bar,head*DH,n*L+kb*64);}
+     }
+     mbar_wait(&bar,phase++&1); __syncthreads();
+     if constexpr(!DPB){
+       for(int e=tid;e<4096;e+=128){int r=e/64,c=e%64;*reinterpret_cast<bf*>(sm+16384+swz128((uint32_t)c,(uint32_t)(r*2)))=*reinterpret_cast<bf*>(sm+8192+swz128((uint32_t)r,(uint32_t)(c*2)));}
+       fence_proxy_async(); __syncthreads();
+     }
+     fence_regs(acc);wgmma_fence();
+     for(int k=0;k<(DPB?DH/16:4);++k)mma64(acc,ds(smem_u32(sm)+k*32),ds(smem_u32(sm)+(DPB?8192:16384)+k*32));
+     wgmma_commit();wgmma_wait<0>();fence_regs(acc); __syncthreads();
+   }
+   int r0=16*warp+(lane>>2),c0=2*(lane&3);
+   #pragma unroll
+   for(int j=0;j<8;++j)for(int rb=0;rb<2;++rb){
+     int r=m0+r0+rb*8,c=j*8+c0;
+     #pragma unroll
+     for(int q=0;q<2;++q){
+       float v=acc[j*4+rb*2+q];
+       if constexpr(DPB){float d=0;for(int a=0;a<A;++a)d+=dd[(a*H+head)*L+r];int ix=(head*L+r)*L+n*64+c+q;out[ix]=__float2bfloat16_rn(__bfloat162float(p[ix])*(v-d));}
+       else if(c+q<DH){int row=n*L+r,col=head*DH+c+q;if constexpr(GATE)v/=1.f+__expf(-__bfloat162float(g[row*gs+col]));out[row*os+col]=__float2bfloat16_rn(v);}
+     }
+   }
+   __syncthreads();
+ }
+}
+template<bool GATE, bool DIRECT=false>
+__global__ __launch_bounds__(256,1) void pv_grouped(const __grid_constant__ CUtensorMap mp,const __grid_constant__ CUtensorMap mv,
+ const bf*g,bf*out,int L,int A,int H,int DH,int gs,int os,int SG) {
+ const int RAW=DIRECT?L*128:98304,TRANS=RAW+3*8192,BARS=TRANS+(DIRECT?0:3*8192);
+ extern __shared__ __align__(1024) unsigned char sm[];
+ uint64_t*pb=reinterpret_cast<uint64_t*>(sm+BARS),*full=pb+1,*empty=full+3;
+ int tid=threadIdx.x,wtid=tid&127,warp=wtid/32,lane=tid%32,mt=L/64,ng=(A+SG-1)/SG;
+ if(!tid){mbar_init(pb,1);for(int s=0;s<3;++s){mbar_init(full+s,1);mbar_init(empty+s,1);}fence_barrier_init();}
+ __syncthreads();unsigned it=0,pi=0;
+ for(int item=blockIdx.x;item<H*mt*ng;item+=gridDim.x){
+   int group=item%ng,head=item/(ng*mt),m0=((item/ng)%mt)*64,a0=group*SG,ns=min(SG,A-a0),KB=L/64;
+   if(!tid){mbar_arrive_expect_tx(pb,L*128);for(int kb=0;kb<KB;++kb)tma_load_2d(sm+kb*8192,&mp,pb,kb*64,head*L+m0);}
+   mbar_wait(pb,pi++&1);__syncthreads();
+   if(tid<128){
+     if(!tid)for(int a=0;a<ns;++a)for(int kb=0;kb<KB;++kb,++it){
+       int s=it%3;if(it>=3)mbar_wait(empty+s,((it/3)-1)&1);
+       mbar_arrive_expect_tx(full+s,8192);tma_load_2d(sm+RAW+s*8192,&mv,full+s,head*DH,(a0+a)*L+kb*64);
+     }
+   }else{
+     for(int a=0;a<ns;++a){
+       float acc[32]={};
+       int prev=-1;
+       for(int kb=0;kb<KB;++kb,++it){
+         int s=it%3;mbar_wait(full+s,(it/3)&1);named_bar_sync(1,128);
+         if constexpr(!DIRECT){
+         for(int e=wtid;e<4096;e+=128){int r=e/64,c=e%64;*reinterpret_cast<bf*>(sm+TRANS+s*8192+swz128((uint32_t)c,(uint32_t)(r*2)))=*reinterpret_cast<bf*>(sm+RAW+s*8192+swz128((uint32_t)r,(uint32_t)(c*2)));}
+         fence_proxy_async();named_bar_sync(1,128);
+         }
+         fence_regs(acc);wgmma_fence();
+         #pragma unroll
+         for(int k=0;k<4;++k){
+           if constexpr(DIRECT)mma64mn(acc,ds(smem_u32(sm)+kb*8192+k*32),ds(smem_u32(sm)+RAW+s*8192+k*2048));
+           else mma64(acc,ds(smem_u32(sm)+kb*8192+k*32),ds(smem_u32(sm)+TRANS+s*8192+k*32));
+         }
+         wgmma_commit();
+         if constexpr(DIRECT){if(prev>=0){wgmma_wait<1>();fence_regs(acc);if(!wtid)mbar_arrive(empty+prev);}prev=s;}
+         else {wgmma_wait<0>();fence_regs(acc);named_bar_sync(1,128);if(!wtid)mbar_arrive(empty+s);}
+       }
+       if constexpr(DIRECT){wgmma_wait<0>();fence_regs(acc);if(!wtid)mbar_arrive(empty+prev);}
+       int r0=m0+16*warp+(lane>>2),c0=2*(lane&3);
+       #pragma unroll
+       for(int j=0;j<8;++j)for(int rb=0;rb<2;++rb)for(int q=0;q<2;++q){
+         int c=j*8+c0+q;if(c<DH){int row=(a0+a)*L+r0+rb*8,col=head*DH+c;float v=acc[j*4+rb*2+q];if constexpr(GATE)v/=1.f+__expf(-__bfloat162float(g[row*gs+col]));out[row*os+col]=__float2bfloat16_rn(v);}
+       }
+     }
+   }
+   __syncthreads();
+ }
+}
+void grouped_pv(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at::Tensor> gate,int64_t H,int64_t DH,int64_t SG){
+ at::cuda::CUDAGuard guard(v.device());cudaSetDevice(v.get_device());int L=v.size(0)/A;
+ TORCH_CHECK(L%128==0&&L<=768&&SG>0,"grouped PV shape");constexpr int smem=98304+6*8192+1024;
+ auto ma=map(p,64,64),mb=map(v,64,64);int grid=std::min<int>(132,H*(L/64)*((A+SG-1)/SG));
+ if(gate){cudaFuncSetAttribute(pv_grouped<true>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);pv_grouped<true><<<grid,256,smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(bf*)gate->data_ptr(),(bf*)out.data_ptr(),L,A,H,DH,gate->stride(0),out.stride(0),SG);}
+ else{cudaFuncSetAttribute(pv_grouped<false>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);pv_grouped<false><<<grid,256,smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,nullptr,(bf*)out.data_ptr(),L,A,H,DH,0,out.stride(0),SG);}
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void grouped_pv_pipeline(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at::Tensor> gate,int64_t H,int64_t DH,int64_t SG){
+ at::cuda::CUDAGuard guard(v.device());cudaSetDevice(v.get_device());int L=v.size(0)/A;
+ TORCH_CHECK(L%128==0&&L<=768&&SG>0,"grouped PV shape");int smem=L*128+3*8192+1024;
+ auto ma=map(p,64,64),mb=map(v,64,64);int grid=std::min<int>(264,H*(L/64)*((A+SG-1)/SG));
+ if(gate){cudaFuncSetAttribute(pv_grouped<true,true>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);pv_grouped<true,true><<<grid,256,smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(bf*)gate->data_ptr(),(bf*)out.data_ptr(),L,A,H,DH,gate->stride(0),out.stride(0),SG);}
+ else{cudaFuncSetAttribute(pv_grouped<false,true>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);pv_grouped<false,true><<<grid,256,smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,nullptr,(bf*)out.data_ptr(),L,A,H,DH,0,out.stride(0),SG);}
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+__global__ __launch_bounds__(256,2) void dpb_pipe(const __grid_constant__ CUtensorMap md,const __grid_constant__ CUtensorMap mv,
+ const bf*p,const float*dd,bf*out,int L,int A,int H,int DH){
+ extern __shared__ __align__(1024) unsigned char sm[];uint64_t*full=reinterpret_cast<uint64_t*>(sm+3*16384),*empty=full+3;
+ int tid=threadIdx.x,wtid=tid&127,warp=wtid/32,lane=tid%32,mt=L/64;
+ if(!tid){for(int s=0;s<3;++s){mbar_init(full+s,1);mbar_init(empty+s,1);}fence_barrier_init();}
+ __syncthreads();unsigned it=0;
+ if(tid<128){
+   if(!tid)for(int item=blockIdx.x;item<H*mt*mt;item+=gridDim.x){
+     int n0=(item%mt)*64,m0=((item/mt)%mt)*64,head=item/(mt*mt);
+     for(int a=0;a<A;++a,++it){int s=it%3;if(it>=3)mbar_wait(empty+s,((it/3)-1)&1);mbar_arrive_expect_tx(full+s,16384);tma_load_2d(sm+s*16384,&md,full+s,head*DH,a*L+m0);tma_load_2d(sm+s*16384+8192,&mv,full+s,head*DH,a*L+n0);}
+   }
+   return;
+ }
+ for(int item=blockIdx.x;item<H*mt*mt;item+=gridDim.x){
+   int n0=(item%mt)*64,m0=((item/mt)%mt)*64,head=item/(mt*mt),prev=-1;float acc[32]={};
+   for(int a=0;a<A;++a,++it){
+     int s=it%3;mbar_wait(full+s,(it/3)&1);fence_regs(acc);wgmma_fence();
+     for(int k=0;k<DH/16;++k)mma64(acc,ds(smem_u32(sm)+s*16384+k*32),ds(smem_u32(sm)+s*16384+8192+k*32));
+     wgmma_commit();if(prev>=0){wgmma_wait<1>();fence_regs(acc);if(!wtid)mbar_arrive(empty+prev);}prev=s;
+   }
+   wgmma_wait<0>();fence_regs(acc);if(!wtid)mbar_arrive(empty+prev);
+   int r0=m0+16*warp+(lane>>2),c0=n0+2*(lane&3);float d0=0,d1=0;
+   for(int a=0;a<A;++a){d0+=dd[(a*H+head)*L+r0];d1+=dd[(a*H+head)*L+r0+8];}
+   #pragma unroll
+   for(int j=0;j<8;++j)for(int rb=0;rb<2;++rb){
+     int e=j*4+rb*2,ix=(head*L+r0+rb*8)*L+c0+8*j;float d=rb?d1:d0;
+     *reinterpret_cast<__nv_bfloat162*>(out+ix)=__floats2bfloat162_rn(__bfloat162float(p[ix])*(acc[e]-d),__bfloat162float(p[ix+1])*(acc[e+1]-d));
+   }
+ }
+}
+void dpb_pipeline(at::Tensor d,at::Tensor v,at::Tensor p,at::Tensor dd,at::Tensor out,int64_t A,int64_t H,int64_t DH){
+ at::cuda::CUDAGuard guard(d.device());cudaSetDevice(d.get_device());int L=d.size(0)/A;
+ constexpr int smem=3*16384+1024;cudaFuncSetAttribute(dpb_pipe,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
+ dpb_pipe<<<std::min<int>(264,H*(L/64)*(L/64)),256,smem,at::cuda::getCurrentCUDAStream()>>>(map(d,64,64),map(v,64,64),(bf*)p.data_ptr(),dd.data_ptr<float>(),(bf*)out.data_ptr(),L,A,H,DH);C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+__global__ __launch_bounds__(384,1) void expand_pipe(const __grid_constant__ CUtensorMap mx,const __grid_constant__ CUtensorMap mw,bf*ab,bf*h,int M,int K,int H){
+ constexpr int ST=32768,NST=3;extern __shared__ __align__(1024) unsigned char sm[];
+ uint64_t*full=reinterpret_cast<uint64_t*>(sm+NST*ST),*empty=full+NST;
+ int tid=threadIdx.x,wg=tid/128,wtid=tid%128,warp=wtid/32,lane=tid%32,mt=M/128;
+ if(!tid){for(int s=0;s<NST;++s){mbar_init(full+s,1);mbar_init(empty+s,2);}fence_barrier_init();}
+ __syncthreads();unsigned it=0;
+ if(!wg){
+   setmaxnreg_dec<32>();
+   if(!tid)for(int item=blockIdx.x;item<mt*(H/64);item+=gridDim.x){
+     int m0=(item%mt)*128,n0=(item/mt)*64;
+     for(int k=0;k<K;k+=64,++it){int s=it%NST;if(it>=NST)mbar_wait(empty+s,((it/NST)-1)&1);mbar_arrive_expect_tx(full+s,ST);tma_load_2d(sm+s*ST,&mx,full+s,k,m0);tma_load_2d(sm+s*ST+16384,&mw,full+s,k,n0);tma_load_2d(sm+s*ST+24576,&mw,full+s,k,H+n0);}
+   }
+   return;
+ }
+ setmaxnreg_inc<96>();int cw=wg-1;
+ for(int item=blockIdx.x;item<mt*(H/64);item+=gridDim.x){
+   int m0=(item%mt)*128+cw*64,n0=(item/mt)*64,prev=-1;float acc[64]={};
+   for(int k=0;k<K;k+=64,++it){
+     int s=it%NST;mbar_wait(full+s,(it/NST)&1);fence_regs(acc);wgmma_fence();
+     #pragma unroll
+     for(int ks=0;ks<4;++ks)mma_n128(acc,ds(smem_u32(sm)+s*ST+cw*8192+ks*32),ds(smem_u32(sm)+s*ST+16384+ks*32));
+     wgmma_commit();if(prev>=0){wgmma_wait<1>();fence_regs(acc);if(!wtid)mbar_arrive(empty+prev);}prev=s;
+   }
+   wgmma_wait<0>();fence_regs(acc);if(!wtid)mbar_arrive(empty+prev);
+   int r0=m0+16*warp+(lane>>2),c0=n0+2*(lane&3);
+   #pragma unroll
+   for(int j=0;j<8;++j)for(int rb=0;rb<2;++rb){
+      int e=j*4+rb*2,r=r0+rb*8,c=c0+j*8;float a0=acc[e],a1=acc[e+1],b0=acc[e+32],b1=acc[e+33];
+      *reinterpret_cast<__nv_bfloat162*>(ab+r*2*H+c)=__floats2bfloat162_rn(a0,a1);
+      *reinterpret_cast<__nv_bfloat162*>(ab+r*2*H+H+c)=__floats2bfloat162_rn(b0,b1);
+      *reinterpret_cast<__nv_bfloat162*>(h+r*H+c)=__floats2bfloat162_rn(a0/(1.f+__expf(-a0))*b0,a1/(1.f+__expf(-a1))*b1);
+   }
+ }
+}
+void swiglu_pipeline(at::Tensor x,at::Tensor w,at::Tensor ab,at::Tensor h){
+ at::cuda::CUDAGuard guard(x.device());cudaSetDevice(x.get_device());int M=x.size(0),K=x.size(1),H=h.size(1);
+ TORCH_CHECK(M%128==0&&K%64==0&&H%64==0,"SwiGLU pipeline shape");constexpr int smem=3*32768+1024;
+ cudaFuncSetAttribute(expand_pipe,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
+ expand_pipe<<<std::min(264,(M/128)*(H/64)),384,smem,at::cuda::getCurrentCUDAStream()>>>(map(x,64,128),map(w,64,64),(bf*)ab.data_ptr(),(bf*)h.data_ptr(),M,K,H);C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+void pv(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at::Tensor> gate,int64_t H,int64_t DH){
+ at::cuda::CUDAGuard guard(v.device());cudaSetDevice(v.get_device());
+ int L=v.size(0)/A; TORCH_CHECK(L%128==0&&v.scalar_type()==at::kBFloat16,"PV shape/dtype");
+ auto ma=map(p,64,64),mb=map(v,64,64);int grid=std::min<int>(132,H*(L/64)*A);
+ if(gate)core<false,true><<<grid,128,0,at::cuda::getCurrentCUDAStream()>>>(ma,mb,nullptr,(bf*)gate->data_ptr(),nullptr,(bf*)out.data_ptr(),L,A,H,DH,gate->stride(0),out.stride(0));
+ else core<false,false><<<grid,128,0,at::cuda::getCurrentCUDAStream()>>>(ma,mb,nullptr,nullptr,nullptr,(bf*)out.data_ptr(),L,A,H,DH,0,out.stride(0));
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+void dpb(at::Tensor d,at::Tensor v,at::Tensor p,at::Tensor dd,at::Tensor out,int64_t A,int64_t H,int64_t DH){
+ at::cuda::CUDAGuard guard(d.device());cudaSetDevice(d.get_device());int L=d.size(0)/A;
+ auto ma=map(d,64,64),mb=map(v,64,64);int grid=std::min<int>(132,H*(L/64)*(L/64));
+ core<true,false><<<grid,128,0,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(bf*)p.data_ptr(),nullptr,dd.data_ptr<float>(),(bf*)out.data_ptr(),L,A,H,DH,0,0);C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+__global__ __launch_bounds__(128,2) void expand(const __grid_constant__ CUtensorMap mx,const __grid_constant__ CUtensorMap mw,bf*ab,bf*h,int M,int K,int H){
+ __shared__ __align__(1024) unsigned char sm[24576];__shared__ uint64_t bar;
+ int tid=threadIdx.x,warp=tid/32,lane=tid%32,mt=M/64;
+ if(!tid){mbar_init(&bar,1);fence_barrier_init();}__syncthreads();unsigned phase=0;
+ for(int item=blockIdx.x;item<mt*(H/64);item+=gridDim.x){
+   int m0=(item%mt)*64,n0=(item/mt)*64;float acc[64]={};
+   for(int k=0;k<K;k+=64){
+     if(!tid){mbar_arrive_expect_tx(&bar,24576);tma_load_2d(sm,&mx,&bar,k,m0);tma_load_2d(sm+8192,&mw,&bar,k,n0);tma_load_2d(sm+16384,&mw,&bar,k,H+n0);}
+     mbar_wait(&bar,phase++&1);__syncthreads();fence_regs(acc);wgmma_fence();
+     #pragma unroll
+     for(int ks=0;ks<4;++ks)mma_n128(acc,ds(smem_u32(sm)+ks*32),ds(smem_u32(sm)+8192+ks*32));
+     wgmma_commit();wgmma_wait<0>();fence_regs(acc);__syncthreads();
+   }
+   int r0=m0+16*warp+(lane>>2),c0=2*(lane&3);
+   #pragma unroll
+   for(int j=0;j<8;++j)for(int rb=0;rb<2;++rb)for(int q=0;q<2;++q){
+      int e=j*4+rb*2+q,r=r0+rb*8,c=n0+j*8+c0+q;float a=acc[e],b=acc[e+32];
+      ab[r*2*H+c]=__float2bfloat16_rn(a);ab[r*2*H+H+c]=__float2bfloat16_rn(b);
+      h[r*H+c]=__float2bfloat16_rn(a/(1.f+__expf(-a))*b);
+   } __syncthreads();
+ }
+}
+void swiglu(at::Tensor x,at::Tensor w,at::Tensor ab,at::Tensor h){
+ at::cuda::CUDAGuard guard(x.device());cudaSetDevice(x.get_device());int M=x.size(0),K=x.size(1),H=h.size(1);
+ TORCH_CHECK(M%64==0&&K%64==0&&H%64==0,"SwiGLU shape");
+ expand<<<std::min(132,(M/64)*(H/64)),128,0,at::cuda::getCurrentCUDAStream()>>>(map(x,64,64),map(w,64,64),(bf*)ab.data_ptr(),(bf*)h.data_ptr(),M,K,H);C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv",&bo90::grouped_pv);m.def("dpb",&bo90::dpb);m.def("swiglu",&bo90::swiglu);m.def("grouped_pv_pipeline",&bo90::grouped_pv_pipeline);m.def("dpb_pipeline",&bo90::dpb_pipeline);m.def("swiglu_pipeline",&bo90::swiglu_pipeline);}
+#else
 // pv_gate_inf.cu -- the bias-only token DiT's INFERENCE attention core, sm_100a:
 //
 //   a[s] = sigmoid(g[s]) * (P_h v[s]_h)      for every head h and sample s
@@ -269,3 +522,4 @@ bo_pv_gate_inf_sm100(const __grid_constant__ CUtensorMap mp, const __grid_consta
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
+#endif // MINIWORLD_BO_SM90
