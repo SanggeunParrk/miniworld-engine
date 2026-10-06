@@ -90,7 +90,8 @@ def uni_d256_training(x, outgoing):
     explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
                 and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1")
     return explicit or (outgoing and x.ndim == 4
-            and tuple(x.shape[:3]) == (1, 384, 384))
+            and tuple(x.shape[:3]) == (1, 384, 384)
+            and os.environ.get("MINIWORLD_TRIMUL_H100_D256_UNI_GRAPH_WORKSPACE_CANDIDATE") == "1")
 
 
 @contextmanager
