@@ -10,6 +10,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 path of the AF3 local atom DiT (`integrations/local_dit.py` ops `local_dit_block_{fwd,bwd}_tf32`; kernels
+  `sm100_atom_local/*_tf32.cu`, `sm100_atom/gemm_tf32.cu`, `rows_tf32.cu`): inference and training with fp32 activations and
+  parameters on TF32 MMA (operands rounded to nearest); fp32 calls no longer fall back to the module path. Tests:
+  `tests/integrations/test_b200_local_dit_tf32_gpu.py`; page: `docs/gpus/b200/local_dit/local_dit.md`.
 - B200 fp32 SWA atom DiT on TF32 sm_100a kernels (`kernels/swa_dit/cuda/sm100/*_tf32.cu`, `tf32_fwd.py`, `tf32_bwd.py`): forward,
   backward and the hoisted modulation, fp32 activations with TF32 MMA on round-to-nearest operands (attention operands fp32, not
   bf16). Replaces the Triton fp32 path on B200 (`MINIWORLD_SWA_DIT_TF32=0` keeps it); compiles under `torch.compile(fullgraph=True)`.

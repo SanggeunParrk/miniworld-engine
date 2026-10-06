@@ -11,6 +11,12 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lattn_dkv.cu   dK, dV and dbias (key-centric: 16 keys see exactly 4 query windows = 128 queries; dbias is summed over the samples).
   lcross.cu      the row kernels of the cross-attention mode (keys / values from a second AdaLN): LN of the conditioning, the K / V AdaLN
                  and its backward, the extra gradient through AdaLN 1.
+
+The fp32 path (fp32 activations; ``KERNELS_TF32``, loaded by ``_load32`` and only when an fp32 call is served) has its own twins:
+  lattn_fwd_tf32.cu, lattn_dq_tf32.cu, lattn_dkv_tf32.cu   the three attention kernels on tcgen05 kind::tf32 (fp32 operands, P / dS fp32
+                 in place over S in TMEM, MN-major operands in the 32-B-atom swizzle), fp32 O / dQ / dK / dV into column blocks of the
+                 caller's [A N, 512] tensors.
+  lbias_tf32.cu  the pair bias and its backward on an fp32 pair.
 """
 
 from __future__ import annotations
@@ -236,3 +242,107 @@ def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5):
     d = _dev(c)
     _load("cln_b", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), c, dcn, gamma.float().contiguous(), dc, dgamma, int(M), float(eps))
     return dc
+
+
+# ------------------------------------------------------------------------------------------------ fp32 path (TF32 tensor cores)
+SOURCES_TF32 = ("lattn_fwd_tf32", "lattn_dq_tf32", "lattn_dkv_tf32", "lbias_tf32")
+
+#: (stem, function, dynamic smem bytes) of every fp32-path kernel (the smem sizes are static_asserted in the sources)
+KERNELS_TF32 = {
+    "fwd32": ("lattn_fwd_tf32", "local_attn_fwd_tf32", 172288),
+    "dq32": ("lattn_dq_tf32", "local_attn_dq_tf32", 227584),
+    "dkv32": ("lattn_dkv_tf32", "local_attn_dkv_tf32", 209152),
+    "pb_f32": ("lbias_tf32", "local_bias_fwd_f32", 0),
+    "pb_b32": ("lbias_tf32", "local_bias_bwd_f32", 0),
+    "pb_fin32": ("lbias_tf32", "local_bias_fin_f32", 0),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _load32(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    stem, func, smem = KERNELS_TF32[name]
+    with torch.cuda.device(device_index):
+        return driver.Kernel(cubin(stem), func, smem)
+
+
+def _rows32(t, n, swizzle=128):
+    """TMA map of an fp32 [A, N, 128] view (rows ``t.stride(1)`` elements apart, e.g. a column block of [A, N, 512]): boxes of n rows x one
+    head (32 fp32 = 128 B). swizzle 128: the K-major operand layout; "128a32": the 128-B swizzle with 32-B atoms, the MN-major one."""
+    A, N, _ = t.shape
+    assert t.stride(2) == 1 and t.dtype == torch.float32
+    return _tmap(t, (DM, N, A), (t.stride(1) * 4, t.stride(0) * 4), (DH, n, 1), swizzle, "f32")
+
+
+def _out32(t):
+    """TMA store map of a contiguous fp32 [A N, C] tensor viewed [A, N, C]: boxes of 32 rows x 16 columns (64 B, 64-B swizzle)."""
+    A, N, C = t.shape
+    return _tmap(t, (C, N, A), (C * 4, N * C * 4), (16, 32, 1), 64, "f32")
+
+
+def attn_fwd32(q, k, v, bias, kmask=None):
+    """The fp32 path: q, k, v fp32 [A, N, 128] views (unit column stride, any row stride); bias [4, nwin, 32, 128] fp32; kmask [N] or None
+    -> O [A, N, 128] fp32, LSE [A, 4, N] fp32 (log2). tcgen05 kind::tf32: a CTA per (128-query chunk, head) and sample range."""
+    A, N, _ = q.shape
+    nwin = nwindows(N)
+    d = _dev(q)
+    o = torch.empty(A, N, DM, device=q.device, dtype=torch.float32)
+    lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
+    km = None if kmask is None else kmask.to(torch.uint8).contiguous()
+    nq = (N + 127) // 128
+    sp = max(1, min(A, nsm(d) // (nq * NH)))
+    _load32("fwd32", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows32(q, 128), _rows32(k, 224), _rows32(v, 224, "128a32"), _out32(o),
+                        bias, km, lse, int(N), int(A), int(nwin), int(sp))
+    return o, lse
+
+
+def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
+    """The fp32 path's backward: dQ, dK, dV (fp32) into the column blocks ``cols`` = (q, k, v) of dp [A N, C] and dbias [4, nwin, 32, 128]
+    fp32 (summed over the samples). q, k, v fp32 [A, N, 128] views, do [A, N, 128] fp32, lse / dd [A, 4, N] fp32 (log2 units / D)."""
+    A, N, _ = q.shape
+    nwin = nwindows(N)
+    d = _dev(q)
+    ldd = dp.stride(0)
+    km = None if kmask is None else kmask.to(torch.uint8).contiguous()
+    dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
+    out = _out32(dp.view(A, N, dp.shape[1]))
+    qcol, kcol, vcol = cols
+    nq = (N + 127) // 128
+    sp = max(1, min(A, nsm(d) // (nq * NH)))                         # split the samples when there are few chunks
+    _load32("dq32", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows32(q, 128), _rows32(k, 224), _rows32(v, 224), _rows32(k, 224, "128a32"),
+                       _rows32(do, 128), _vec(lse, 128), _vec(dd, 128), out, bias, km, int(qcol), int(N), int(A), int(nwin), int(sp))
+    nk = (N + 112 + 127) // 128
+    sp = 2 if 2 * nk * NH <= nsm(d) and A > 1 else 1                  # two sample halves add into dbias exactly (0 + a + b)
+    _load32("dkv32", d)((nk * NH * sp, 1, 1), (544, 1, 1), _rows32(q, 224), _rows32(q, 224, "128a32"), _rows32(k, 128), _rows32(v, 128),
+                        _rows32(do, 224), _rows32(do, 224, "128a32"), _vec(lse, 224), _vec(dd, 224), out, bias, km, dp, dbias, int(ldd),
+                        int(kcol), int(vcol), int(N), int(A), int(nwin), int(sp))
+    return dbias
+
+
+def pair_bias_fwd32(z, gamma, wb, eps=1e-5):
+    """z [nwin, 32, 128, 16] fp32 -> bias [4, nwin, 32, 128] fp32."""
+    z = z.contiguous()
+    nwin = z.shape[0]
+    rows = z.numel() // DP
+    wb, gamma, bf = _params(wb, gamma)
+    out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
+    d = _dev(z)
+    _load32("pb_f32", d)((min(4 * nsm(d), (rows + 255) // 256), 1, 1), (256, 1, 1), z, wb, gamma, out, int(rows), float(eps), bf)
+    return out
+
+
+def pair_bias_bwd32(z, gamma, wb, dbias, eps=1e-5):
+    """dbias [4, nwin, 32, 128] fp32 -> dz [nwin, 32, 128, 16] fp32, dgamma [16], dWb [4, 16] (fp32)."""
+    z = z.contiguous()
+    rows = z.numel() // DP
+    wb, gamma, bf = _params(wb, gamma)
+    dz = torch.empty_like(z)
+    d = _dev(z)
+    nb = min(nsm(d), (rows + 255) // 256)
+    part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
+    dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
+    dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
+    _load32("pb_b32", d)((nb, 1, 1), (256, 1, 1), z, wb, gamma, dbias.contiguous(), dz, part, int(rows), float(eps), bf)
+    _load32("pb_fin32", d)((1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf)
+    return dz, dgamma, dwb

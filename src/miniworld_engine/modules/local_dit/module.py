@@ -11,7 +11,7 @@ only the attention differs. With ``cross_attention=True`` (AF3's / Protenix's at
 AdaLN of the already normalised atoms, ``attention.ada_ln_kv`` (four more parameters). ``single`` and ``cond`` carry the augmentation axis ``[A, B, N, d]``, the pair does not.
 
 The reference path below is plain PyTorch (the window gather by ``unfold``); on a B200 ``integrations/local_dit`` serves bf16 calls
-with the sm_100a kernels of ``kernels/augmented_attention/cuda/sm100_atom_local``.
+with the sm_100a kernels of ``kernels/augmented_attention/cuda/sm100_atom_local``, and fp32 calls (fp32 parameters) with their TF32 twins.
 """
 
 from __future__ import annotations

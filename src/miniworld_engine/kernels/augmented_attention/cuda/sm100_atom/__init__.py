@@ -24,6 +24,12 @@ The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers):
   cond_bwd.cu     the conditioning projections' dgrad and the two cond LayerNorm backwards -> d cond.
 The weight gradients are cuBLAS GEMMs on the activations these kernels write.
 
+The fp32 path (fp32 activations, ``KERNELS_TF32``, loaded by ``atom_kernel32`` only when an fp32 call is served; used by the local
+atom block, ``integrations/local_dit``):
+  gemm_tf32.cu    every projection and activation-gradient product as one tcgen05 kind::tf32 GEMM launch with the block's epilogues
+                  (bias + sigmoid blocks, gated residual, SwiGLU).
+  rows_tf32.cu    the row-wise stages around them (LayerNorms, AdaLN and their backward, gates, SwiGLU backward, D), fp32 CUDA cores.
+
 The cubins are built on first use by the newest nvcc here that knows sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``:
 the experiment's measurements are 13.1 builds; 12.9's ptxas gives slightly longer code) and cached under
 ``MINIWORLD_ENGINE_JIT_ROOT`` keyed by the sources and the flags. They launch through the CUDA driver
@@ -344,3 +350,200 @@ def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):
     d = _dev(c)
     atom_kernel("condb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, g1, g2, DG, int(ntile), float(eps))
     return dc, cn1, cn2
+
+
+# --------------------------------------------------------------------------------------------------- fp32 path (TF32 tensor cores)
+SOURCES_TF32 = ("gemm_tf32", "rows_tf32")
+F32 = torch.float32
+
+
+@functools.lru_cache(maxsize=None)
+def cubin_tf32(stem: str) -> str:
+    """``cubin`` for the fp32-path sources, which include ``../sm100/sm100.cuh`` (the kind::tf32 helpers): that header is hashed."""
+    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+
+    nvcc, rel, host = kernel_toolchain()
+    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}")
+    h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
+    for f in (_dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
+        h.update(f.read_bytes())
+    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    out = root / "atom_dit_sm100_tf32" / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(f".{os.getpid()}.tmp")
+        res = subprocess.run([nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)], capture_output=True, text=True,
+                             timeout=900, check=False)
+        if res.returncode != 0:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}")
+        os.replace(tmp, out)
+    return str(out)
+
+
+#: (stem, function, dynamic smem) of every fp32-path kernel (gemm_tf32's size is static_asserted in the source)
+KERNELS_TF32 = {
+    "gemm": ("gemm_tf32", "atom_gemm_tf32", 213248),
+    "ln": ("rows_tf32", "f32_ln_aff", 0),
+    "adaln": ("rows_tf32", "f32_adaln", 0),
+    "gate": ("rows_tf32", "f32_gate", 0),
+    "tail_b": ("rows_tf32", "f32_tail_bwd", 0),
+    "swiglu_b": ("rows_tf32", "f32_swiglu_bwd", 0),
+    "adaln_b": ("rows_tf32", "f32_adaln_bwd", 0),
+    "gate_b": ("rows_tf32", "f32_gate_bwd", 0),
+    "ln_b": ("rows_tf32", "f32_ln_bwd", 0),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def atom_kernel32(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    stem, func, smem = KERNELS_TF32[name]
+    with torch.cuda.device(device_index):
+        return driver.Kernel(cubin_tf32(stem), func, smem)
+
+
+def load_all32(device_index: int) -> None:
+    """Build and load every fp32-path kernel on the device (raises on any failure)."""
+    for name in KERNELS_TF32:
+        atom_kernel32(name, device_index)
+
+
+_TMAPS32: dict = {}
+
+
+def _tm32(t, box, swizzle=128):
+    """TMA map of a row-major fp32 [rows, cols] tensor (unit column stride, any row stride), cached by everything it encodes (address,
+    geometry, box, swizzle; encoding one costs ~5-10 us of host time). The cache does not hold the tensor."""
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    assert t.dtype == F32 and t.dim() == 2 and t.stride(1) == 1, (t.dtype, t.shape, t.stride())
+    rows, cols = t.shape
+    key = (t.data_ptr(), cols, rows, t.stride(0), tuple(box), swizzle)
+    m = _TMAPS32.get(key)
+    if m is None:
+        if len(_TMAPS32) >= 512:
+            _TMAPS32.clear()
+        m = driver.TensorMap(t, [cols, rows], t.stride(0) * 4, list(box), swizzle=swizzle, dtype="f32")
+        m.keep = None
+        _TMAPS32[key] = m
+    return m
+
+
+#: gemm32 epilogues
+STORE, RESID_GATE, SWIGLU = 0, 1, 2
+
+
+def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol0=0, bias=None, sigmask=0, rndmask=0, mode=STORE,
+           res=None, gate=None, out2=None):
+    """The fp32 path's TF32 product (``gemm_tf32.cu``): acc = a[:, a_col0 : a_col0 + k] @ w[b_row0 : b_row0 + n, b_col0 : b_col0 + k]^T.
+
+    STORE       out[:, ocol0 + j] = acc[:, j] (+ bias[b_row0 + j]), sigmoid on the 128-column blocks (b_row0 + j) // 128 set in sigmask,
+                rounded to tf32 (RNA) on the blocks set in rndmask (columns that only feed later MMAs)
+    RESID_GATE  out[:, j] = res[:, j] + gate[:, j] * acc[:, j]; out2 (optional) = acc
+    SWIGLU      w is the interleaved [Wa_0; Wb_0; Wa_1; Wb_1] pack (n = 512): out [M, 256] = silu(a) * b; out2 (optional) = acc [M, 512]
+    a, w, out, out2 are fp32 [rows, cols] with unit column stride (out allocated [M, n] (SWIGLU: [M, n / 2]) when None); res and gate
+    fp32 [M, >= n] views. M is a multiple of 128, k of 32, n of 128 (SWIGLU: 512). The kernel rounds the A slices to tf32 (RNA) in shared
+    memory before the MMAs; w must already be tf32-rounded (``round_tf32``): kind::tf32 truncates whatever it is given."""
+    M = a.shape[0]
+    k = a.shape[1] - a_col0 if k is None else k
+    n = w.shape[0] - b_row0 if n is None else n
+    nt = 256 if (mode == SWIGLU or n % 256 == 0) else 128
+    assert M % 128 == 0 and k % 32 == 0 and n % nt == 0, (M, k, n, nt)
+    assert mode != SWIGLU or n == 512
+    if out is None:
+        out = torch.empty(M, n // 2 if mode == SWIGLU else n, device=a.device, dtype=F32)
+    ma, mb = _tm32(a, (32, 128)), _tm32(w, (32, nt))
+    mo = _tm32(out, (32, 32))
+    mo2 = mo if out2 is None else _tm32(out2, (32, 32))
+    tiles = (M // 128) * (n // nt)
+    d = _dev(a)
+    atom_kernel32("gemm", d)((min(nsm(d), tiles), 1, 1), (512, 1, 1), ma, mb, mo, mo2, bias, res, gate, int(M), int(n), int(k), int(nt),
+                             int(a_col0), int(b_row0), int(b_col0), int(ocol0), int(sigmask), int(mode), int(out2 is not None),
+                             int(res.stride(0)) if res is not None else 0, int(gate.stride(0)) if gate is not None else 0, int(rndmask))
+    return out
+
+
+def round_tf32(t):
+    """t (fp32) rounded to tf32, to nearest with ties away from zero (cvt.rna.tf32.f32): add half a tf32 ulp to the magnitude bits, drop
+    the low 13. For the weight operands of gemm32, once per pack (kind::tf32 MMAs truncate)."""
+    i = t.detach().float().contiguous().view(torch.int32)
+    return ((i + 0x1000) & -0x2000).view(torch.float32)
+
+
+def _rowgrid(M):
+    return ((M + 7) // 8, 1, 1)
+
+
+def _new(t, cols=DM):
+    return torch.empty(t.shape[0], cols, device=t.device, dtype=F32)
+
+
+def ln32(c, g1, g2, g3=None, eps=1e-5):
+    """cn_k = LN(c) * g_k  (c [M, 128] fp32; g3 optional) -> (cn1, cn2, cn3 or None)."""
+    o1, o2 = _new(c), _new(c)
+    o3 = _new(c) if g3 is not None else None
+    atom_kernel32("ln", _dev(c))(_rowgrid(c.shape[0]), (256, 1, 1), c, g1, o1, g2, o2, g3, o3, int(c.shape[0]), float(eps))
+    return o1, o2, o3
+
+
+def adaln32(a, scale, shift, eps=1e-5):
+    """LN(a) * scale + shift: a [M, 128] fp32, scale / shift fp32 [M, 128] views (the stored sigmoid scale)."""
+    out = _new(a)
+    atom_kernel32("adaln", _dev(a))(_rowgrid(a.shape[0]), (256, 1, 1), a, scale, int(scale.stride(0)), shift, int(shift.stride(0)), out,
+                                    int(a.shape[0]), float(eps))
+    return out
+
+
+def gate32(g, o):
+    """sigmoid(g) * o: g a fp32 [M, 128] view, o [M, 128]."""
+    out = _new(o)
+    atom_kernel32("gate", _dev(o))(_rowgrid(o.shape[0]), (256, 1, 1), g, int(g.stride(0)), o, out, int(o.shape[0]))
+    return out
+
+
+def tail_bwd32(dy, t, st, dst):
+    """-> dt = dy * st; dst (a view, written) = dy * t * st (1 - st)."""
+    dt = _new(dy)
+    atom_kernel32("tail_b", _dev(dy))(_rowgrid(dy.shape[0]), (256, 1, 1), dy, t, st, int(st.stride(0)), dt, dst, int(dst.stride(0)),
+                                      int(dy.shape[0]))
+    return dt
+
+
+def swiglu_bwd32(dh, u):
+    """dh [M, 256], u [M, 512] (interleaved [a_0 | b_0 | a_1 | b_1]) -> d[a | b] [M, 512] (same layout), h = silu(a) b [M, 256]."""
+    dab, hh = _new(u, 4 * DM), _new(u, 2 * DM)
+    atom_kernel32("swiglu_b", _dev(u))(_rowgrid(u.shape[0]), (256, 1, 1), dh, u, dab, hh, int(u.shape[0]))
+    return dab, hh
+
+
+def adaln_bwd32(a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5):
+    """AdaLN backward: -> da = dres + LN backward of dx * scale; dscale (view) = dx LN(a) scale (1 - scale), dshift (view) = dx. With y:
+    also d so (view) = da y so (1 - so) and the returned dyo = da so (the attention output gate upstream of a1 = a + so y)."""
+    M = a.shape[0]
+    da = _new(a)
+    dyo = _new(a) if y is not None else None
+    atom_kernel32("adaln_b", _dev(a))(_rowgrid(M), (256, 1, 1), a, scale, int(scale.stride(0)), dx, dres, da, dscale, int(dscale.stride(0)),
+                                      dshift, int(dshift.stride(0)), y, so, int(so.stride(0)) if so is not None else 0, dso,
+                                      int(dso.stride(0)) if dso is not None else 0, dyo, int(M), float(eps))
+    return da, dyo
+
+
+def gate_bwd32(dgated, g, o, dg, A, n):
+    """dgated [M, 128], g a view, o [M, 128] -> dO [M, 128], D [A, 4, n]; dg (view, written) = dgated o s (1 - s)."""
+    M = o.shape[0]
+    do = _new(o)
+    D = torch.empty(A, NH, n, device=o.device, dtype=F32)
+    atom_kernel32("gate_b", _dev(o))(_rowgrid(M), (256, 1, 1), dgated, g, int(g.stride(0)), o, do, dg, int(dg.stride(0)), D, int(M), int(n))
+    return do, D
+
+
+def ln_bwd32(c, dc, dcn1, g1, dcn2, g2, dcn3=None, g3=None, eps=1e-5):
+    """dc [M, 128] += the LayerNorm backward of dcn_k * g_k (k = 1, 2, 3); -> dg [384] fp32 = [dg1 | dg2 | dg3] (sum_rows dcn_k LN(c))."""
+    M = c.shape[0]
+    d = _dev(c)
+    dg = torch.zeros(3 * DM, device=c.device, dtype=F32)
+    atom_kernel32("ln_b", d)((max(1, min(4 * nsm(d), (M + 7) // 8)), 1, 1), (256, 1, 1), c, dc, dcn1, g1, dcn2, g2, dcn3, g3, dg, int(M),
+                             float(eps))
+    return dg
