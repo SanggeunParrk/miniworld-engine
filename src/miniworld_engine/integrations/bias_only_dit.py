@@ -134,9 +134,19 @@ def _infer(
 _ALL_TRUE: dict = {}
 
 
+@opaque(fake=_fake, name="bias_only_dit_h100_infer_savefree")
+def _h100_savefree(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor,
+                   mask: torch.Tensor | None, weights: list[torch.Tensor]) -> torch.Tensor:
+    from miniworld_engine.kernels.bias_only_dit.cuda.runner import h100_inference
+    return h100_inference(single, cond, pair, mask, weights)
+
+
 def update(module, single, cond, pair, mask):
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
     if h100_enabled(single.device):
+        if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_INFER", "0") == "1":
+            return _h100_savefree(single, cond, pair, mask,
+                                 [module.get_parameter(n) for n in WEIGHTS])
         from .bias_only_dit_train import h100_infer
         return h100_infer(module, single, cond, pair, mask)
     if mask is None:                     # one all-true mask per (L, device), so the P cache key stays stable
