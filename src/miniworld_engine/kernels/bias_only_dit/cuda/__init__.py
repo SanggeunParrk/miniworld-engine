@@ -32,6 +32,35 @@ H, DH = 16, 48                                         # the default heads x wid
 LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
 
+def h100_enabled(device) -> bool:
+    """Unqualified Hopper prototype, explicitly opt-in until module gates pass."""
+    return (os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100", "0") == "1"
+            and torch.cuda.get_device_capability(device) == (9, 0))
+
+
+def _h100_group(samples, length, heads, width, sms):
+    """P bytes are reused across the group; at most two resident CTAs are scheduled."""
+    residents = 2 if length * 128 + 3 * 8192 + 1024 <= 232448 // 2 else 1
+    return min((g for g in _GROUPS if g <= samples), key=lambda g:
+               -(-heads * (length // 64) * -(-samples // g) // (sms * residents))
+               * length * (64 + width * g))
+
+
+@functools.lru_cache(maxsize=None)
+def h100_ext():
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    ensure_cuda_home()
+    k = _dir.parent.parent
+    return load_extension(
+        name="bias_only_dit_sm90a", sources=[str(_dir / "pv_gate_inf.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a"),
+                           "--expt-relaxed-constexpr", "-DMINIWORLD_BO_SM90=1",
+                           f"-I{k / 'transition' / 'cuda' / 'anthropic_v5'}",
+                           f"-I{k / 'transition' / 'cuda' / 'wide' / 'kernels'}",
+                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__"],
+        extra_cflags=["-std=c++17"], verbose=False)
+
+
 def _head_defs(nh: int, dh: int) -> tuple[str, ...]:
     """Compile definitions of the sm_100a cubins for a head layout (none for the default, so its cubins keep their keys)."""
     assert (nh, dh) in LAYOUTS, (nh, dh)
@@ -43,12 +72,13 @@ def _ext():
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
+    hopper = h100_enabled(torch.cuda.current_device())
     return load_extension(
-        name="bias_only_dit_rows_cuda",
+        name="bias_only_dit_rows_cuda" + ("_sm90a" if hopper else ""),
         sources=[str(_dir / "bias_only_dit_rows.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                            "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes("80", "90", "100", ptx=("100",))],
+                           *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",)))],
         extra_cflags=["-std=c++17"], verbose=False)
 
 
@@ -148,7 +178,7 @@ def core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import tf32_ready
         return tf32_ready(device_index, h, d // h, False)
     return (dtype is torch.bfloat16 and d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
-            and torch.cuda.get_device_capability(device_index) == (10, 0))
+            and (torch.cuda.get_device_capability(device_index) == (10, 0) or h100_enabled(device_index)))
 
 
 def _descriptors(*maps):
@@ -279,6 +309,16 @@ class PvGateCore:
 
     def __call__(self, v, P, out, S, g=None):
         """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
+        if h100_enabled(self.device_index):
+            sg = int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PV_GROUP", "0"))
+            if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "0") == "1":
+                sg = min(S, sg) if sg else _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
+                h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)
+            elif sg > 0:
+                h100_ext().grouped_pv(v, P, out, S, g, self.nh, self.dh, min(S, sg))
+            else:
+                h100_ext().pv(v, P, out, S, g, self.nh, self.dh)
+            return out
         L = v.shape[0] // S
         vb, early = _pv_vb(L, S, self.dh), self.early()                     # both read per call (the A/B switches): in the key
         key = (v.data_ptr(), v.stride(0), None if g is None else (g.data_ptr(), g.stride(0)), P.data_ptr(), out.data_ptr(),
@@ -385,6 +425,11 @@ class DpbKernel:
         return _Launch(k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A)
 
     def __call__(self, do, v, P, dd, out, A):
+        if h100_enabled(self.device_index):
+            op = (h100_ext().dpb_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "0") == "1"
+                  else h100_ext().dpb)
+            op(do, v, P, dd, out, A, self.nh, self.dh)
+            return out
         L = do.shape[0] // A
         hp = 2 if self.dh == 32 else 1
         pair = dpb_pair_on(L, self.nh, hp, self.nsm) and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
@@ -467,6 +512,10 @@ class GemmSwigluAB:
     SMEM = 4 * 32768 + 32768 + 4 * 16384 + 512
 
     def __init__(self, device_index: int, K: int = 768):
+        self.device_index = device_index
+        if h100_enabled(device_index):
+            self.K, self.H = K, 2 * K
+            return
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
         from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
         self._tm, self.K, self.H = sm100._tm, K, 2 * K
@@ -485,6 +534,11 @@ class GemmSwigluAB:
         return _Launch(self.k, grid, (512, 1, 1), *maps, 1, tiles)
 
     def __call__(self, x, w, ab, h):
+        if h100_enabled(self.device_index):
+            op = (h100_ext().swiglu_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "0") == "1"
+                  else h100_ext().swiglu)
+            op(x, w, ab, h)
+            return h
         M, K, H = x.shape[0], self.K, self.H
         assert x.shape == (M, K) and w.shape == (2 * H, K) and ab.shape == (M, 2 * H) and h.shape == (M, H)
         assert all(t.is_contiguous() and t.dtype is torch.bfloat16 for t in (x, w, ab, h))

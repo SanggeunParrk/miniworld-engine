@@ -1266,9 +1266,65 @@ void swiglu_bwd(at::Tensor dh, at::Tensor ab, at::Tensor dab) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Hopper live-weight preparation. Every element is read again on graph replay.
+struct Pack90 {
+  const void* ptr[8]; const float* scale[8]; int fp32[8]; int width[8];
+  int64_t end[8]; int count;
+};
+template<class T> __global__ void pack90_kernel(Pack90 p,T*out,int64_t n) {
+ for(int64_t i=(int64_t)blockIdx.x*blockDim.x+threadIdx.x;i<n;i+=(int64_t)blockDim.x*gridDim.x){
+  int s=0;while(i>=p.end[s])++s;int64_t j=i-(s?p.end[s-1]:0);
+  float v=p.fp32[s]?reinterpret_cast<const float*>(p.ptr[s])[j]:__bfloat162float(reinterpret_cast<const bf*>(p.ptr[s])[j]);
+  if(p.scale[s])v*=p.scale[s][j%p.width[s]];
+  out[i]=static_cast<T>(v);
+ }
+}
+at::Tensor pack90(std::vector<at::Tensor> inputs,std::vector<at::Tensor> scales,bool fp32) {
+ TORCH_CHECK(!inputs.empty()&&inputs.size()<=8,"native pack supports 1..8 tensors");
+ at::cuda::CUDAGuard guard(inputs[0].device());Pack90 p{};int64_t n=0;
+ TORCH_CHECK(scales.empty()||scales.size()==inputs.size(),"pack scale count");
+ for(int i=0;i<(int)inputs.size();++i){
+   auto&t=inputs[i];TORCH_CHECK(t.is_contiguous()&&(t.scalar_type()==at::kFloat||t.scalar_type()==at::kBFloat16),"pack source");
+   TORCH_CHECK(t.device()==inputs[0].device(),"pack device");
+   p.ptr[i]=t.data_ptr();p.fp32[i]=t.scalar_type()==at::kFloat;p.end[i]=n+=t.numel();p.width[i]=t.size(-1);
+   if(!scales.empty()){TORCH_CHECK(scales[i].scalar_type()==at::kFloat&&scales[i].is_contiguous()&&scales[i].numel()==p.width[i],"pack scale");p.scale[i]=scales[i].data_ptr<float>();}
+ }
+ p.count=inputs.size();auto out=at::empty({n},inputs[0].options().dtype(fp32?at::kFloat:at::kBFloat16));
+ int grid=std::min<int64_t>(512,(n+255)/256);
+ if(fp32)pack90_kernel<<<grid,256,0,S()>>>(p,out.data_ptr<float>(),n);
+ else pack90_kernel<<<grid,256,0,S()>>>(p,reinterpret_cast<bf*>(out.data_ptr()),n);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+__global__ void repeat90_kernel(const bf*in,bf*out,int64_t n,int64_t period){
+ for(int64_t i=(int64_t)blockIdx.x*blockDim.x+threadIdx.x;i<n;i+=(int64_t)blockDim.x*gridDim.x)out[i]=in[i%period];
+}
+at::Tensor repeat90(at::Tensor input,int64_t samples){
+ TORCH_CHECK(input.is_contiguous()&&input.scalar_type()==at::kBFloat16,"repeat source");
+ at::cuda::CUDAGuard guard(input.device());auto sizes=input.sizes().vec();sizes[0]=samples;
+ auto out=at::empty(sizes,input.options());int64_t n=out.numel();
+ repeat90_kernel<<<std::min<int64_t>(512,(n+255)/256),256,0,S()>>>(reinterpret_cast<bf*>(input.data_ptr()),reinterpret_cast<bf*>(out.data_ptr()),n,input.numel());
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+__global__ void shared_grad90_kernel(const bf*in,bf*out,int64_t period,int samples){
+ for(int64_t i=(int64_t)blockIdx.x*blockDim.x+threadIdx.x;i<period;i+=(int64_t)blockDim.x*gridDim.x){
+  float sum=0.f;for(int a=0;a<samples;++a)sum+=__bfloat162float(in[(int64_t)a*period+i]);
+  out[i]=__float2bfloat16_rn(sum);
+ }
+}
+at::Tensor shared_grad90(at::Tensor input){
+ TORCH_CHECK(input.is_contiguous()&&input.scalar_type()==at::kBFloat16,"shared gradient source");
+ at::cuda::CUDAGuard guard(input.device());auto sizes=input.sizes().vec();int samples=sizes[0];sizes[0]=1;
+ auto out=at::empty(sizes,input.options());int64_t period=out.numel();
+ shared_grad90_kernel<<<std::min<int64_t>(512,(period+255)/256),256,0,S()>>>(reinterpret_cast<bf*>(input.data_ptr()),reinterpret_cast<bf*>(out.data_ptr()),period,samples);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("pack90", &pack90);
+  m.def("repeat90", &repeat90);
+  m.def("shared_grad90", &shared_grad90);
   m.def("cond_ln_cuda", &cond_ln);
   m.def("swiglu_cuda", &swiglu);
   m.def("pair_bias_cuda", &pair_bias);

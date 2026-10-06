@@ -85,7 +85,9 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     if settings.current().engine_backend == "triton":
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+    if not (single.is_cuda and (torch.cuda.get_device_capability(single.device) == (10, 0)
+                              or h100_enabled(single.device))):
         return False
     dt = single.dtype
     src = pair if bias is None else bias                 # the pair, or the block's hoisted bias
@@ -445,7 +447,14 @@ def _split_grads(bufs, params, skip=()):
             out.append(None)
             continue
         g = bufs[b][lo:hi] if shape is None else bufs[b][lo:hi].view(shape)
-        out.append(g if g.dtype == p.dtype else g.to(p.dtype))
+        if g.dtype != p.dtype:
+            from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+            if h100_enabled(p.device):
+                from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+                g = ext().pack90([g], [], p.dtype is torch.float32).view(p.shape)
+            else:
+                g = g.to(p.dtype)
+        out.append(g)
     return out
 
 
@@ -641,6 +650,10 @@ def _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved,
 class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, *params):
+        ctx.shared_cond = cond.shape[0] == 1 and single.shape[0] != 1
+        if ctx.shared_cond:
+            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+            cond = ext().repeat90(cond, single.shape[0])
         out, *saved = _fwd(single, cond, pair, mask, list(params))
         ctx.save_for_backward(single, cond, pair, *params, *saved)
         ctx.meta = (mask, len(params))
@@ -653,6 +666,9 @@ class _Block(torch.autograd.Function):
         single, cond, pair = vals[:3]
         params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
         dx, dc, dpair, *bufs = _bwd(single, cond, pair, mask, params, saved, dout.contiguous())
+        if ctx.shared_cond:
+            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+            dc = ext().shared_grad90(dc)
         pg = _split_grads(bufs, params)
         return (dx, dc, dpair, None, *(g if ctx.needs_input_grad[4 + i] else None for i, g in enumerate(pg)))
 
