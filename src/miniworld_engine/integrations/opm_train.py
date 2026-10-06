@@ -30,6 +30,11 @@ CM, CH, CZ = 64, 32, 128
 _EXT: dict[str, Any] = {}
 
 
+def native_aux_enabled() -> bool:
+    """Default H100 CUDA prologue/packing; explicit zero keeps the historical diagnostic path."""
+    return os.environ.get("MINIWORLD_OPM_H100_CUDA_ONLY", "1") == "1"
+
+
 def wanted(implementation) -> bool:
     from miniworld_engine import settings
     from miniworld_engine.modules.exceptions import ImplementationType
@@ -92,7 +97,7 @@ def _ext(device=None):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM)."""
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
-    key = "sm100" if sm100 else "mod"
+    key = "sm100" if sm100 else ("mod_native" if native_aux_enabled() else "mod")
     if key in _EXT:
         return _EXT[key]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -105,9 +110,10 @@ def _ext(device=None):
                          extra_include_paths=[str(csrc / "sm100")],
                          extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a"], extra_cflags=["-O3"])
     else:
-        build = root / "opm_epilogue"
+        suffix = "_native" if native_aux_enabled() else ""
+        build = root / ("opm_epilogue" + suffix)
         build.mkdir(parents=True, exist_ok=True)
-        _EXT[key] = load(name="miniworld_opm_epilogue", sources=[str(csrc / "opm_epilogue.cu")], build_directory=str(build),
+        _EXT[key] = load(name="miniworld_opm_epilogue" + suffix, sources=[str(csrc / "opm_epilogue.cu")], build_directory=str(build),
                          extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_cflags=["-O3"])
     return _EXT[key]
 
@@ -219,6 +225,17 @@ class _OpmMath(torch.autograd.Function):
             ctx.eps = eps
             return z
         bf = torch.bfloat16
+        if native_aux_enabled():
+            m = msa[0]
+            packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
+            a2, bt, stats, mask16, norm = ext.opm_native_prologue(m, mask[0], packed, float(eps), save_stats)
+            o = torch.mm(a2, bt.t())
+            n = m.shape[1]
+            z = ext.opm_epilogue(o, norm, packed[4], packed[5], n, n, residual)
+            ctx.save_o = bool(save_o)
+            ctx.save_for_backward(m, mask16, norm, a2, bt, stats, lnw, lnb, wa, wb, wo, bo, *((o,) if save_o else ()))
+            ctx.eps = eps
+            return z
         m = msa[0].contiguous(); mask16 = mask[0].to(bf).contiguous()
         _s, n = m.shape[0], m.shape[1]
         a2, bt, stats = fused_prologue(m, mask16, lnw.detach().float().contiguous(), lnb.detach().float().contiguous(), eps,
@@ -255,6 +272,20 @@ class _OpmMath(torch.autograd.Function):
                                                             wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous())
             return (dm, None, dgam.to(lnw.dtype), dbet.to(lnb.dtype), dWa.to(wa.dtype), dWb.to(wb.dtype),
                     dWo.to(wo.dtype), dbo.to(bo.dtype), None, None)
+        if native_aux_enabled():
+            if dz.dtype != bf or not dz.is_contiguous():
+                raise ValueError("native OPM requires contiguous BF16 upstream gradients")
+            packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
+            dO, dzp, dbo = ext.opm_dgrad(dz[0], norm, packed[6], n, n)
+            dA = torch.mm(bt.t(), dO.t())
+            dB = torch.mm(a2.t(), dO)
+            if o is None:
+                o = torch.mm(a2, bt.t())
+            dWo = ext.opm_dwo(dzp, o, n, n)
+            dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(
+                dA, dB, m, stats, mask16, packed[0], packed[1], float(ctx.eps), packed[7], n, s, True, packed[2:4])
+            grads = ext.opm_native_cast_grads([dgam, dbet, dWa, dWb, dWo, dbo], [lnw, lnb, wa, wb, wo, bo])
+            return (dm, None, *grads, None, None)
         bw = wo.detach().t().contiguous().to(bf)                                     # Wo^T [CH*CH, CZ]: wgmma wants k = z contiguous
         dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, bw, n, n)             # (dz / norm) . Wo in the grouped layout; dbo falls out
         dA = torch.mm(bt.t(), dO.t())                                                # [s, (i,c)]: the prologue backward wants a row's channels contiguous
@@ -357,4 +388,3 @@ def _inference_op(args: list[torch.Tensor], eps: float) -> torch.Tensor:
                               residual=args[8] if args[8].numel() else None, save_stats=False)[0]
     return _OpmMath.forward(_SavedContext(), *args[:8], eps, False,
                             residual=args[8] if args[8].numel() else None, save_stats=False)
-
