@@ -584,7 +584,9 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
         gate = E.exact_mm(xn, wg.t())
         du = K.shadow_dropout(df, kept[4], float(p_drop)) if p_drop else df
         dog = E.exact_mm(du.view(S * L, D), wo)
-        do = pack(E.exact_point(dog, gate, 1.0, 1), S, L)
+        do = (E.exact_point_pack(dog, gate, S, L)
+              if os.environ.get("MINIWORLD_PWA_H100_SHADOW_POINT_PACK", "0") == "1"
+              else pack(E.exact_point(dog, gate, 1.0, 1), S, L))
         mask = args[2].view(L) if args[2].numel() else None
         bias = E.exact_mask_bias(E.exact_mm(zn, wb.t()), mask, L)
         prob = E.exact_soft(bias, bias, False)
