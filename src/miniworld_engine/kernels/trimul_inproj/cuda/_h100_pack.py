@@ -128,3 +128,31 @@ def training_unit_scale(pair):
     out = torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
     _launch("mw_aux_unit_scale", ((out.numel()+255)//256, 1, 1), [out, out.numel()])
     return out
+
+
+def fused_training_prepare(leaves, mask):
+    """One live CUDA launch for D64 K1 packing, output weights and pair mask."""
+    x, *weights = leaves[:7]
+    length, width = x.shape[1], x.shape[-1]
+    hidden = weights[0].shape[0]
+    if width != 64 or hidden not in (64, 128):
+        raise ValueError("fused training preparation requires D64/H64 or H128")
+    if any(w.dtype not in (torch.bfloat16, torch.float32) for w in weights):
+        raise ValueError("fused training preparation requires BF16/FP32 matrices")
+    absent = mask is None or mask.numel() == 0
+    if not absent and (not mask.is_contiguous() or mask.dtype not in
+                       (torch.bool, torch.bfloat16, torch.float32)
+                       or mask.numel() not in (length, length * length)):
+        raise ValueError("native TriMul mask requires contiguous token or square pair data")
+    kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
+    token = int(not absent and mask.numel() == length)
+    packed = torch.empty((4*hidden, width), device=x.device, dtype=torch.bfloat16)
+    gate = torch.empty((width, width), device=x.device, dtype=torch.bfloat16)
+    output = torch.empty((width, hidden), device=x.device, dtype=torch.bfloat16)
+    pair_mask = torch.empty((length, length), device=x.device, dtype=torch.float32)
+    p = T._launch_module().Struct([
+        *weights, packed, gate, output, None if absent else mask, pair_mask,
+        *(w.stride(0) for w in weights), *(w.stride(1) for w in weights),
+        *(int(w.dtype == torch.float32) for w in weights), hidden, length, kind, token])
+    _launch("mw_aux_d64_training_prepare", ((max(length*length,4*hidden*width)+255)//256,1,1), [p])
+    return packed, pair_mask, gate, output

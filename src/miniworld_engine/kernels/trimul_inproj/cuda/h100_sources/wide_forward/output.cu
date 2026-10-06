@@ -123,6 +123,26 @@ extern "C" __global__ void mw_aux_unit_scale(bf* scale,int count) {
   int i=blockIdx.x*256+threadIdx.x;
   if(i<count)scale[i]=__float2bfloat16_rn(1.f);
 }
+struct AuxD64TrainPrepare {
+  const void* w[6]; bf *packed,*gate,*output; const void* mask; float* pair;
+  int s0[6],s1[6],fp32[6],hidden,length,mask_kind,token;
+};
+extern "C" __global__ void mw_aux_d64_training_prepare(AuxD64TrainPrepare p) {
+  const int i=blockIdx.x*256+threadIdx.x;
+  if(i<4*p.hidden*64) {
+    const int row=i/64,col=i%64,source=(row/64)*32+row%32;
+    const int leaf=2*(source>=p.hidden)+(row%64<32),r=source%p.hidden;
+    p.packed[i]=__float2bfloat16_rn(aux_read(p.w[leaf],r*p.s0[leaf]+col*p.s1[leaf],p.fp32[leaf]));
+  }
+  if(i<64*64)
+    p.gate[i]=__float2bfloat16_rn(aux_read(p.w[4],(i/64)*p.s0[4]+(i%64)*p.s1[4],p.fp32[4]));
+  if(i<64*p.hidden)
+    p.output[i]=__float2bfloat16_rn(aux_read(p.w[5],(i/p.hidden)*p.s0[5]+(i%p.hidden)*p.s1[5],p.fp32[5]));
+  if(i<p.length*p.length)
+    p.pair[i]=p.mask_kind==0?1.f:p.token?
+      float(aux_mask_read(p.mask,i/p.length,p.mask_kind)!=0.f&&aux_mask_read(p.mask,i%p.length,p.mask_kind)!=0.f):
+      aux_mask_read(p.mask,i,p.mask_kind);
+}
 #else
 // SPDX-License-Identifier: Apache-2.0
 // MiniWorld wide training forward. Uses the engine's TMA/WGMMA primitives.
