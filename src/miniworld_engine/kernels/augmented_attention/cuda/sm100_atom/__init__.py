@@ -154,9 +154,9 @@ def empty_uniform_enabled(device_index: int) -> bool:
     return _hopper(device_index) and os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM", "0") == "1"
 
 
-def empty_uniform_hopper(keys, src, dst, n, *, value_gradient=False):
+def empty_uniform_hopper(keys, src, dst, n, *, value_gradient=False, force=False):
     """Live-mask uniform-mean epilogue; src is dense [A*N,128] BF16."""
-    if keys is None or not empty_uniform_enabled(_dev(src)):
+    if keys is None or not (force or empty_uniform_enabled(_dev(src))):
         return
     if (src.dtype != torch.bfloat16 or dst.dtype != torch.bfloat16
             or not src.is_contiguous() or not dst.is_contiguous()):
