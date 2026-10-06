@@ -6,7 +6,7 @@ TF32 tensor cores for fp32) and the CUDA row kernels; the GEMMs are cuBLAS as on
 Inference only: weight packs and pair bias are cached by tensor pointer / version within the current capture scope.
 A capture records their construction once, so each replay recomputes them from the current weights and pair.
 The conditioning may be shared by the samples or per sample. QK-norm runs on H100 and B200 with the CUDA row kernels
-(one in-place pass after the projection; the logit scale folds into the q norm's weight). Unsupported calls keep the module path.
+(one in-place pass after the projection; the logit scale folds into the q norm's weight). Hopper FP32 inference rejects unsupported calls; the other modes retain their existing dispatch.
 
 Precision: the runner's, i.e. single's dtype (bf16, or fp32 on TF32 tensor cores at every head layout of LAYOUTS on B200); the
 step runs with autocast off.
@@ -63,7 +63,46 @@ _TUNING: dict = {}
 _RUNNERS: dict = {}
 
 
+
+def _native_fp32_inference(module, single) -> bool:
+    """The qualified Hopper FP32 inference family, independent of BF16 experiments."""
+    from miniworld_engine.modules.dispatch import KernelBackend
+    return (not torch.is_grad_enabled() and module.attention._backend == KernelBackend.TRITON
+            and module.attention.to_bias.weight.shape[1] == 128
+            and single.is_cuda and single.dtype is torch.float32
+            and torch.cuda.get_device_capability(single.device) == (9, 0))
+
+
+def _check_native_fp32(module, single, cond, pair, compute_dtype):
+    """Reject unsupported Hopper FP32 calls instead of entering a portable fallback."""
+    if settings.current().engine_backend == "triton":
+        raise ValueError("Hopper FP32 token inference requires the native CUDA backend")
+    if compute_dtype not in (None, torch.float32):
+        raise ValueError("Hopper FP32 token inference requires FP32 compute operands")
+    if (single.ndim != 4 or single.shape[0] < 1 or single.shape[1] != 1
+            or single.shape[2] not in (128, 256, 384, 512, 640, 768) or single.shape[3] != 768):
+        raise ValueError("Hopper FP32 token inference requires [A,1,L,768] at the six 128..768 buckets")
+    A, _, L, _ = single.shape
+    if (cond.ndim != 4 or cond.shape[0] not in (1, A) or tuple(cond.shape[1:]) != (1, L, 384)
+            or tuple(pair.shape) != (1, L, L, 128)
+            or cond.dtype is not torch.float32 or pair.dtype is not torch.float32
+            or cond.device != single.device or pair.device != single.device):
+        raise ValueError("Hopper FP32 token inference requires matching FP32 conditioning/pair operands")
+    a = module.attention
+    if a.n_head != 16 or tuple(module.transition.expand_a.weight.shape) != (1536, 768):
+        raise ValueError("Hopper FP32 token inference requires 16x48 heads and a 1536-wide transition")
+    norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair,
+             module.transition.ada_ln_in.ln_in, module.transition.ada_ln_in.ln_cond)
+    if any(norm.eps != 1e-5 for norm in norms):
+        raise ValueError("Hopper FP32 token inference requires LayerNorm eps=1e-5")
+    if any(p.dtype is not torch.float32 or p.device != single.device for p in module.parameters()):
+        raise ValueError("Hopper FP32 token inference requires FP32 parameters on the input device")
+
+
 def serves(module, single, cond, pair, compute_dtype=None):
+    if _native_fp32_inference(module, single):
+        _check_native_fp32(module, single, cond, pair, compute_dtype)
+        return True
     if torch.is_grad_enabled() or settings.current().engine_backend == "triton":
         return False
     a = module.attention
@@ -149,7 +188,7 @@ def _infer(
     heads: int,
 ) -> torch.Tensor:
     """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise)."""
-    if (os.environ.get("MINIWORLD_TOKEN_DIT_H100_CANDIDATE") == "1"
+    if ((single.dtype is torch.float32 or os.environ.get("MINIWORLD_TOKEN_DIT_H100_CANDIDATE") == "1")
             and torch.cuda.get_device_capability(single.device) == (9, 0)):
         from miniworld_engine.kernels.conditioned_transition import cuda
         from miniworld_engine.integrations.token_dit_train import _tf32
@@ -217,6 +256,9 @@ _ALL_TRUE: dict = {}
 
 
 def update(module, single, cond, pair, mask):
+    if _native_fp32_inference(module, single) and mask is not None:
+        if mask.dtype is not torch.bool or mask.device != single.device or tuple(mask.shape) != (1, single.shape[2]):
+            raise ValueError("Hopper FP32 token inference requires a boolean [1,L] key mask")
     if mask is None:                     # one all-true mask per (L, device), so the pair-bias cache key stays stable
         k = (single.shape[2], single.device)
         mask = _ALL_TRUE.get(k)
