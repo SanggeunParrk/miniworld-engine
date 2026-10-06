@@ -414,7 +414,7 @@ namespace {
 struct TokenPack {
   const void* src[25]; bool fp32[25];
   void* dst[13]; int size[13]; int blocks[13];
-  int D, DC, H, HH; float qs; bool qk;
+  int D, DC, H, HH; float qs; bool qk; bool out_fp32;
 };
 __device__ float pack_read(const TokenPack& p,int j,int i) {
   return p.fp32[j] ? static_cast<const float*>(p.src[j])[i]
@@ -484,10 +484,135 @@ std::vector<at::Tensor> token_pack(std::vector<at::Tensor> weights,int64_t heads
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
 }
+
+__device__ __forceinline__ float4 pack_read4(const TokenPack& p, int j, int i) {
+  return p.fp32[j] ? tdr::V4<float>::load(static_cast<const float*>(p.src[j]) + i)
+                  : tdr::V4<__nv_bfloat16>::load(static_cast<const __nv_bfloat16*>(p.src[j]) + i);
+}
+__device__ __forceinline__ float4 pack_mul4(float4 a, float4 b) {
+  return make_float4(a.x*b.x,a.y*b.y,a.z*b.z,a.w*b.w);
+}
+__device__ __forceinline__ float4 pack_scale4(float4 a,float b) {
+  return make_float4(a.x*b,a.y*b,a.z*b,a.w*b);
+}
+__global__ void token_pack_vector_kernel(TokenPack p) {
+  int block=blockIdx.x, out=0;
+  for(;out<13;++out) {if(block<p.blocks[out])break;block-=p.blocks[out];}
+  if(out==13)return;
+  const int i=(block*256+threadIdx.x)*4;
+  if(i>=p.size[out])return;
+  constexpr int D=768,DC=384;
+  float4 v=make_float4(0.f,0.f,0.f,0.f);
+  if(out==0) {
+    const int s=i/(D*DC),j=i%(D*DC),c=i%DC;
+    const int w=s==0?7:s==1?9:s==2?15:17;
+    v=pack_mul4(pack_read4(p,w,j),pack_read4(p,s<2?6:14,c));
+  } else if(out==1) {
+    const int s=i/D;
+    if(s==0||s==2)v=pack_read4(p,s==0?8:16,i%D);
+  } else if(out==2)v=pack_read4(p,i/(D*DC)==0?10:18,i%(D*DC));
+  else if(out==3)v=pack_read4(p,i/D==0?11:19,i%D);
+  else if(out==4)v=pack_scale4(pack_mul4(pack_read4(p,13,i),pack_read4(p,12,i%128)),1.4426950408889634f);
+  else if(out==5) {
+    const int s=i/(D*D),w=s==0?0:s==1?2:s==2?(p.out_fp32?4:3):(p.out_fp32?3:4);
+    v=pack_read4(p,w,i%(D*D));if(s==0&&!p.qk)v=pack_scale4(v,p.qs);
+  } else if(out==6) {if(i<D)v=pack_scale4(pack_read4(p,1,i),p.qk?1.f:p.qs);}
+  else if(out==7)v=pack_read4(p,5,i);
+  else if(out==8)v=pack_read4(p,i/(p.HH*D)==0?20:21,i%(p.HH*D));
+  else if(out==9)v=pack_read4(p,22,i);
+  else if(out==10)v=pack_scale4(pack_read4(p,23,i),p.qs);
+  else if(out==11)v=pack_read4(p,24,i);
+  else {
+    const int row=i/D,col=i%D,g=row/256,r=row%256;
+    v=pack_read4(p,r<128?20:21,(g*128+r%128)*D+col);
+  }
+  if(p.out_fp32||out==10||out==11)tdr::V4<float>::store(static_cast<float*>(p.dst[out])+i,v);
+  else tdr::V4<__nv_bfloat16>::store(static_cast<__nv_bfloat16*>(p.dst[out])+i,v);
+}
+
+std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_t heads,bool qk,double qs,bool out_fp32) {
+  TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
+  const at::cuda::CUDAGuard guard(weights[0].device());
+  const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
+  TORCH_CHECK(D==768 && DC==384 && heads==16 && HH%128==0,"Hopper token pack requires 768/384, 16 heads, hidden multiple of 128");
+  TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;p.out_fp32=out_fp32;
+  for(int j=0;j<(int)weights.size();++j) {
+    const auto& t=weights[j];
+    TORCH_CHECK(t.device()==weights[0].device() && t.is_contiguous()
+      && (t.scalar_type()==at::kFloat || t.scalar_type()==at::kBFloat16),"token pack leaf dtype/device/layout");
+    p.src[j]=t.data_ptr();p.fp32[j]=t.scalar_type()==at::kFloat;
+  }
+  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},{out_fp32?2*HH:0,D},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{out_fp32?0:2*HH,D}};
+  std::vector<at::Tensor> outputs;int blocks=0;
+  for(int j=0;j<13;++j) {
+    if((j==7 && p.fp32[5]==out_fp32) || (j==9 && p.fp32[22]==out_fp32)) {
+      outputs.push_back(weights[j==7?5:22]);
+      continue;
+    }
+    outputs.push_back(at::empty(shapes[j],weights[0].options().dtype(out_fp32 || j==10 || j==11?at::kFloat:at::kBFloat16)));
+    TORCH_CHECK(outputs.back().numel()<=2147483647,"token pack requires 32-bit buffer offsets");
+    p.dst[j]=outputs.back().data_ptr();p.size[j]=outputs.back().numel();p.blocks[j]=(p.size[j]+1023)/1024;blocks+=p.blocks[j];
+  }
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,token_pack_vector_kernel));
+  void* args[]={&p};
+  C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
+}
+
+
+
+std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t heads,bool qk,bool fp32) {
+ TORCH_CHECK(weights.size()==(qk?25:23)&&heads==16,"native inference pack layout");
+ const at::cuda::CUDAGuard guard(weights[0].device());
+ const int D=768,DC=384,HH=weights[20].size(0);
+ std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},
+  {fp32?2*HH:0,D},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{fp32?0:2*HH,D}};
+ std::vector<at::Tensor> out;
+ for(int o=0;o<13;++o){
+  const int a=o==7?5:o==9?22:-1;
+  if(a>=0&&(weights[a].scalar_type()==at::kFloat)==fp32)out.push_back(weights[a]);
+  else out.push_back(at::empty(shapes[o],weights[0].options().dtype(fp32||o==10||o==11?at::kFloat:at::kBFloat16)));
+ }
+ return out;
+}
+void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,int64_t heads,bool qk,double qs,bool fp32,int begin,int end) {
+ TORCH_CHECK(out.size()==13&&weights.size()==(qk?25:23)&&0<=begin&&begin<end&&end<=13,"native inference pack stage");
+ const at::cuda::CUDAGuard guard(weights[0].device());
+ TokenPack p{};p.D=768;p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;
+ for(int j=0;j<(int)weights.size();++j){
+  TORCH_CHECK(weights[j].device()==weights[0].device()&&weights[j].is_contiguous()
+    &&(weights[j].scalar_type()==at::kFloat||weights[j].scalar_type()==at::kBFloat16),"native inference pack leaf");
+  p.src[j]=weights[j].data_ptr();p.fp32[j]=weights[j].scalar_type()==at::kFloat;
+ }
+ int blocks=0;
+ for(int o=begin;o<end;++o){
+  const int a=o==7?5:o==9?22:-1;if(a>=0&&p.fp32[a]==fp32)continue;
+  p.dst[o]=out[o].data_ptr();p.size[o]=out[o].numel();p.blocks[o]=(p.size[o]+1023)/1024;blocks+=p.blocks[o];
+ }
+ token_pack_vector_kernel<<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+__global__ void token_mask90_k(float* bias,const bool* mask,int64_t N,int L) {
+ long i=(long)blockIdx.x*256+threadIdx.x;if(i>=N)return;
+ int k=i%L,p=(k&~7)+4*(k&1)+((k&7)>>1);
+ if(!mask[p])bias[i]=-1e30f;
+}
+void token_mask90(at::Tensor bias,at::Tensor mask) {
+ TORCH_CHECK(bias.is_cuda()&&bias.is_contiguous()&&bias.scalar_type()==at::kFloat&&mask.is_cuda()&&mask.scalar_type()==at::kBool&&mask.is_contiguous(),"native token FP32 mask");
+ const at::cuda::CUDAGuard guard(bias.device());
+ token_mask90_k<<<(bias.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(bias.data_ptr<float>(),mask.data_ptr<bool>(),bias.numel(),mask.numel());
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("token_pack", &token_pack);
+  m.def("token_pack_vector", &token_pack_vector);
+  m.def("token_alloc90", &token_alloc90);
+  m.def("token_stage90", &token_stage90);
+  m.def("token_mask90", &token_mask90);
   m.def("adaln_rows_cuda", &adaln_rows);
   m.def("resgate_adaln_rows_cuda", &resgate_adaln_rows);
   m.def("gate_rows_cuda", &gate_rows);

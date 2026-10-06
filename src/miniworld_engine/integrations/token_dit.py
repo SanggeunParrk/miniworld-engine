@@ -152,7 +152,9 @@ def _infer(
     if (os.environ.get("MINIWORLD_TOKEN_DIT_H100_CANDIDATE") == "1"
             and torch.cuda.get_device_capability(single.device) == (9, 0)):
         from miniworld_engine.kernels.conditioned_transition import cuda
-        return cuda.token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads)
+        from miniworld_engine.integrations.token_dit_train import _tf32
+        with _tf32(single.dtype is torch.float32):
+            return cuda.token_inference(single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads)
     from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
         FusedTokenDiT,
     )

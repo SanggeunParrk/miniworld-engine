@@ -22,6 +22,10 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
+#ifndef DB_PER_SAMPLE
+#define DB_PER_SAMPLE 0
+#endif
+
 #ifndef STAGES
 #define STAGES 2
 #endif
@@ -272,6 +276,10 @@ constexpr int BQ_ST = 2 * TCH + 2 * TCH + 2 * VCH;                  // dqb stage
 TMN_DEVI void named_sync(int id, int n) { asm volatile("bar.sync %0, %1;" :: "r"(id), "r"(n) : "memory"); }
 TMN_DEVI void bulk_reduce_add_2d(const CUtensorMap* map, uint32_t src, int c0, int c1) {
   asm volatile("cp.reduce.async.bulk.tensor.2d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3}], [%1];"
+               :: "l"(map), "r"(src), "r"(c0), "r"(c1) : "memory");
+}
+TMN_DEVI void token_store_2d(const CUtensorMap* map, uint32_t src, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group [%0, {%2, %3}], [%1];"
                :: "l"(map), "r"(src), "r"(c0), "r"(c1) : "memory");
 }
 TMN_DEVI void bulk_commit() { asm volatile("cp.async.bulk.commit_group;" ::: "memory"); }
@@ -570,7 +578,10 @@ attn_tf32_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     fence_proxy_async();
     named_sync(1 + wg, 128);
     if (wt == 0) {
-      bulk_reduce_add_2d(&mdb, smem_u32(xs), n * BN, head * L + m0 + wg * 64);
+      if constexpr (DB_PER_SAMPLE)
+        token_store_2d(&mdb, smem_u32(xs), n * BN, (samp * 16 + head) * L + m0 + wg * 64);
+      else
+        bulk_reduce_add_2d(&mdb, smem_u32(xs), n * BN, head * L + m0 + wg * 64);
       bulk_commit();
     }
     wgmma_wait<0>();
@@ -735,13 +746,18 @@ void attn_tf32_dqb(torch::Tensor q, torch::Tensor dob, torch::Tensor k, torch::T
   for (auto* t : {&q, &dob, &k, &v, &kt, &bp, &lse, &dd, &DQ, &dbp}) check_f32(*t, "operand");
   const uint64_t rows = (uint64_t)A * L;
   TORCH_CHECK(q.size(1) == DM && q.size(0) == (int64_t)rows && kt.size(0) == DM && kt.size(1) == (int64_t)rows
-              && dbp.sizes() == bp.sizes() && L % QM == 0, "shapes");
+              && L % QM == 0, "shapes");
+  if constexpr (DB_PER_SAMPLE) {
+    TORCH_CHECK(dbp.sizes() == at::IntArrayRef({A, 16, L, L}), "per-sample dbias [A,16,L,L]");
+  } else {
+    TORCH_CHECK(dbp.sizes() == bp.sizes(), "summed dbias [16,L,L]");
+  }
   const bool hasm = kmp.has_value() && kmp->defined();
   const at::cuda::CUDAGuard guard(q.device());
   const auto mq = map2d(q.data_ptr<float>(), rows, DM, DM, QM), mdo = map2d(dob.data_ptr<float>(), rows, DM, DM, QM),
              mkp = map_kperm(k.data_ptr<float>(), rows, DM, DM), mvp = map_kperm(v.data_ptr<float>(), rows, DM, DM),
              mkt = map2d(kt.data_ptr<float>(), DM, rows, rows, DH);
-  const cuuint64_t ddims[2] = {(cuuint64_t)L, (cuuint64_t)16 * L}, dstr[1] = {(cuuint64_t)L * 4};
+  const cuuint64_t ddims[2] = {(cuuint64_t)L, (cuuint64_t)(DB_PER_SAMPLE ? A : 1) * 16 * L}, dstr[1] = {(cuuint64_t)L * 4};
   const cuuint32_t dbox[2] = {64, 64};
   const auto mdb = encode(dbp.data_ptr<float>(), 2, ddims, dstr, dbox, CU_TENSOR_MAP_SWIZZLE_NONE);
   const size_t smem = 1024 + 4 * QCH + STAGES * BQ_ST + NWG * 64 * 64 * 4 + 256;

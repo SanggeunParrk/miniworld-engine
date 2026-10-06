@@ -164,17 +164,37 @@ def _key_mask(mask, A, L, perm=None):
 
 _PACKS: dict = {}
 
+def _native_rpb():
+    return int(os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_RPB", "2"))
+
+
+def _native90(dev):
+    return os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "0") == "1" and _sm90(dev)
+
+
 
 def _pack(P, qk, dev, at):
     """The block's weights in the kernels' layouts (GEMM operands in ``at``, folded cond / pair LayerNorm weights, fp32 bias
     vectors). Rebuilt only when a parameter changes -- an optimizer step bumps ``_version`` -- so a training step pays
     it once per block, not once per forward. Scoped to the CUDA-graph capture (``kernels._capture``): an eager pack is never
     reused inside a capture, whose replays would otherwise run on the weights of capture time after every optimizer step."""
-    key = tuple((t.data_ptr(), t._version) for t in P.values())
+    native = _native90(dev)
+    key = (native, *((t.data_ptr(), t._version) for t in P.values()))
     slot = _capture.scoped((next(iter(P.values())).data_ptr(), at))
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
+    if native:
+        from miniworld_engine.integrations.token_dit import WEIGHTS, QK_WEIGHTS
+        from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
+        names = WEIGHTS + (QK_WEIGHTS if qk else ())
+        keys = ("w1", "w2", "Wraw", "Wn", "Wg", "bs1", "bs2", "bg1", "bg2", "Wqkvg", "bqkvg",
+                "nq", "nk", "wp", "Wb", "Wf", "Wf_at", "Wf_l2", "Wo", "Wab", "Wsq")
+        W = dict(zip(keys, ext(rpb=_native_rpb()).train_pack90([P[n] for n in names], qk, at is torch.float32), strict=True))
+        if slot is not None:
+            _capture.prune(_PACKS)
+            _PACKS[slot] = (key, W)
+        return W
     g = lambda n: P[n]
     D = g("attention.to_out.weight").shape[0]
     DH = D // g("attention.to_bias.weight").shape[0]
@@ -269,7 +289,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     A, _, L, D = single.shape
     DH = D // H
-    T = ext(D, DH)
+    T = ext(D, DH, rpb=_native_rpb() if _native90(single.device) else 8)
     names = _names_for(qk)
     P = dict(zip(names, params, strict=False))
     M, R, dev = A * L, L * L, single.device
@@ -280,7 +300,10 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     own_c = _own_cond(cond, fp32)
     chat = torch.empty(M, DC, device=dev, dtype=at); cbf = None if own_c else torch.empty_like(chat)
     cst = torch.empty(M, 2, device=dev)
-    T.cond_prep(c2, chat, cbf, cst, EPS)
+    if native:
+        T.cond_prep90(cond, chat, cbf, cst, EPS)
+    else:
+        T.cond_prep(c2, chat, cbf, cst, EPS)
     W = _pack(P, qk, dev, at)
     Wn, Wg = W["Wn"], W["Wg"]
     G = torch.mm(chat, Wn.t())                                                  # [M, 4D] s1 | sh1 | s2 | sh2
@@ -360,6 +383,42 @@ def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
     return dq, dk, dv, db_p[..., inv]
 
 
+def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+    dq, dk, dv = (torch.empty_like(qs, dtype=torch.float32) for _ in range(3))
+    db = torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
+    km, kmp = T.train_keymask90(mask, qs, A, L, fp32)
+    if fp32:
+        def tr(t):
+            out = t.new_empty((t.shape[1], t.shape[0]))
+            T.transpose(t, out)
+            return out
+        bt, lp, dp = T.train_tf32_bwd_layout90(bias, lse, dd)
+        core = sm90._ext("attn_tf32", ("DB_PER_SAMPLE=1",))
+        core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, db)
+        core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
+    else:
+        sm90._ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(qs, k, v, dob, bias, km, lse, dd, dq)
+        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1",)).attn_dkv(qs, k, v, dob, bias, km, lse, dd, dk, dv, db)
+    return dq, dk, dv, T.train_db_reduce90(db, fp32)
+
+def _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk):
+    from miniworld_engine.integrations.token_dit import WEIGHTS, QK_WEIGHTS
+    canonical = WEIGHTS + (QK_WEIGHTS if qk else ())
+    P = dict(zip(names, params, strict=True))
+    # The placeholders are not read by entries whose deterministic reduction is fused into the writer.
+    src = [dWqkvg[:D], allp, dWqkvg[D:2*D], dWqkvg[2*D:3*D], dWqkvg[3*D:], dWo,
+           W["w1"], dWn[:D], allp, dWn[D:2*D], dWg[:D], allp, W["wp"], dWf,
+           W["w2"], dWn[2*D:3*D], allp, dWn[3*D:], dWg[D:], allp,
+           dWab[:2*D], dWab[2*D:], dWsq]
+    if qk:
+        src.extend([allp, allp])
+    out = T.train_final90([P[n] for n in canonical], src, dWn, W["Wraw"], W["w1"], W["w2"], allp, dWf, W["Wb"], W["wp"],
+                          os.environ.get("MINIWORLD_TOKEN_DIT_H100_GRAD_REDUCE", "0") == "1")
+    result = dict(zip(canonical, out, strict=True))
+    return [result[n] for n in names]
+
+
 def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads):
     return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
 
@@ -378,7 +437,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     D = single.shape[-1]
     DH = D // H
-    T = ext(D, DH)
+    T = ext(D, DH, rpb=_native_rpb() if _native90(single.device) else 8)
     h100 = _sm90(single.device)
     if not (qk or h100):                       # the forward's q / k / v: column views of qkvg (see _fwd_body)
         saved = [*saved[:10], *(saved[8][:, i * D:(i + 1) * D] for i in range(3)), *saved[10:]]   # after qkvg (8), rqk (9)
@@ -393,7 +452,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
-    c2, p2 = cond.reshape(M, DC).contiguous(), pair.reshape(R, DP)
+    native = _native90(dev)
+    c2, p2 = (None if native else cond.reshape(M, DC).contiguous()), pair.reshape(R, DP)
     dout = dout.reshape(M, D).to(sdt).contiguous()
     # per-block column sums: bg2 bs2 bg1 bs1 bq | dwq dwk (per head); rows: the row kernels' block count (T.part_rows)
     allp = torch.empty(T.part_rows(M, fp32), 7 * D, device=dev)
@@ -425,14 +485,24 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dWqkvg = _mm32(dqkvg.t(), xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
-    sums = allp.sum(0) if qk else allp[:, :5 * D].sum(0)                        # one reduction for every column sum
-    pb = sums[:5 * D].view(5, D)
-    dwqk = sums[5 * D:].view(2, H, DH).sum(1).reshape(-1) if qk else torch.zeros(2 * DH, device=dev)
+    if not native:
+        sums = allp.sum(0) if qk else allp[:, :5 * D].sum(0)
+        pb = sums[:5 * D].view(5, D)
+        dwqk = sums[5 * D:].view(2, H, DH).sum(1).reshape(-1) if qk else torch.zeros(2 * DH, device=dev)
     dchat = torch.mm(dG, Wn)
     dWn = _mm32(dG.t(), chat)
     dcg = torch.mm(dGg, Wg)
     dWg = _mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
     dc = torch.empty(M, DC, device=dev, dtype=cdt)
+    if native:
+        T.cond_bwd90(dchat, dcg, cond, cst, dc)
+        dbv = DB.view(H, R)
+        dWf = _mm32(dbv, ph)
+        dph = _mm32(dbv.t(), W["Wf_at"])
+        dpair = torch.empty(R, DP, device=dev, dtype=pdtype)
+        T.pair_ln_bwd(dph, p2, pst, dpair)
+        outs = _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk)
+        return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP), *outs]
     T.cond_bwd(dchat, dcg, c2, cst, dc)
     dWu = torch.empty_like(dWn); dw12 = torch.zeros(2, DC, device=dev)
     Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D:(i + 1) * D] for i in range(4))
