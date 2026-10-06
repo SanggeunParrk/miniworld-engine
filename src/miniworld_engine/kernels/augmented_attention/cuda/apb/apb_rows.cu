@@ -24,11 +24,16 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/Context.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cstdlib>
+#ifdef APB_H100_FP32_SHADOW
+#include <ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h>
+#include <ATen/native/transformers/cuda/mem_eff_attention/kernel_backward.h>
+#endif
 
 #include "../../../conditioned_transition/cuda/token_dit_common.cuh"
 
@@ -1062,7 +1067,417 @@ std::vector<at::Tensor> cast_grads(std::vector<at::Tensor> grads, std::vector<bo
 
 }  // namespace
 
+// Accuracy-first FP32 residual path for Hopper APB's LN beta gradient.
+// Fixed arithmetic/reduction order; no ATen compute or reference calls. The
+// materialized FP32 buffers intentionally trade speed for exact oracle rounding.
+// Arithmetic order audited against PyTorch cf30153c4c131c8164ee7798e5022d810682e2cb.
+namespace apb_exact {
+torch::Tensor exact_mm(torch::Tensor a,torch::Tensor b,c10::optional<torch::Tensor> bias) {
+ c10::cuda::CUDAGuard device(a.device());
+ TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&a.device()==b.device()&&a.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat,"exact cuBLAS FP32 operands");
+ TORCH_CHECK(a.dim()==b.dim()&&a.dim()>=2&&a.dim()<=4&&a.size(-1)==b.size(-2),"exact cuBLAS matrix geometry");
+ int M=a.size(-2),K=a.size(-1),N=b.size(-1);
+ TORCH_CHECK((a.stride(-1)==1||a.stride(-2)==1)&&(b.stride(-1)==1||b.stride(-2)==1),"exact cuBLAS dense matrix views");
+ if(a.dim()==4)TORCH_CHECK(a.size(0)==1&&b.size(0)==1,"exact cuBLAS leading batch must be one");
+ int batches=a.dim()>2?a.size(-3):1;
+ if(a.dim()>2)TORCH_CHECK(b.size(-3)==batches,"exact cuBLAS batch mismatch");
+ auto shape=a.sizes().vec();shape.back()=N;auto y=torch::empty(shape,a.options());
+ auto op_a=a.stride(-1)==1?CUBLAS_OP_N:CUBLAS_OP_T;
+ auto op_b=b.stride(-1)==1?CUBLAS_OP_N:CUBLAS_OP_T;
+ int lda=a.stride(-1)==1?a.stride(-2):a.stride(-1);
+ int ldb=b.stride(-1)==1?b.stride(-2):b.stride(-1);
+ float one=1.f,zero=0.f;
+ auto checked=[](cublasStatus_t status){TORCH_CHECK(status==CUBLAS_STATUS_SUCCESS,"exact cuBLAS failure: ",int(status));};
+ if(!bias){
+  // Thread-local guard configures this thread's cuBLAS handle, without changing
+  // the caller's global TF32 policy or another module's precision.
+  at::NoTF32Guard ieee;
+  auto handle=at::cuda::getCurrentCUDABlasHandle();
+  if(a.dim()==2)checked(cublasSgemm(handle,op_b,op_a,N,M,K,&one,b.data_ptr<float>(),ldb,a.data_ptr<float>(),lda,&zero,y.data_ptr<float>(),N));
+  else checked(cublasSgemmStridedBatched(handle,op_b,op_a,N,M,K,&one,b.data_ptr<float>(),ldb,b.stride(-3),a.data_ptr<float>(),lda,a.stride(-3),&zero,y.data_ptr<float>(),N,(long long)M*N,batches));
+  return y;
+ }
+ TORCH_CHECK(a.dim()==2&&bias->is_cuda()&&bias->device()==a.device()&&bias->is_contiguous()&&bias->scalar_type()==at::kFloat&&bias->numel()==N,"exact cuBLAS bias");
+ // cuBLASLt has an explicit compute type; its bias epilogue does not honor
+ // NoTF32Guard. Match the FP32 reference's fused bias and heuristic policy.
+ struct Descriptors{
+  cublasLtMatmulDesc_t operation=nullptr;cublasLtMatrixLayout_t lhs=nullptr,rhs=nullptr,out=nullptr;cublasLtMatmulPreference_t preference=nullptr;
+  ~Descriptors(){if(preference)cublasLtMatmulPreferenceDestroy(preference);if(out)cublasLtMatrixLayoutDestroy(out);if(rhs)cublasLtMatrixLayoutDestroy(rhs);if(lhs)cublasLtMatrixLayoutDestroy(lhs);if(operation)cublasLtMatmulDescDestroy(operation);}
+ } d;
+ checked(cublasLtMatmulDescCreate(&d.operation,CUBLAS_COMPUTE_32F,CUDA_R_32F));
+ checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_TRANSA,&op_b,sizeof(op_b)));
+ checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_TRANSB,&op_a,sizeof(op_a)));
+ cublasLtEpilogue_t epilogue=CUBLASLT_EPILOGUE_BIAS;const float* bias_ptr=bias->data_ptr<float>();
+ checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_EPILOGUE,&epilogue,sizeof(epilogue)));
+ checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_BIAS_POINTER,&bias_ptr,sizeof(bias_ptr)));
+ checked(cublasLtMatrixLayoutCreate(&d.lhs,CUDA_R_32F,op_b==CUBLAS_OP_N?N:K,op_b==CUBLAS_OP_N?K:N,ldb));
+ checked(cublasLtMatrixLayoutCreate(&d.rhs,CUDA_R_32F,op_a==CUBLAS_OP_N?K:M,op_a==CUBLAS_OP_N?M:K,lda));
+ checked(cublasLtMatrixLayoutCreate(&d.out,CUDA_R_32F,N,M,N));
+ checked(cublasLtMatmulPreferenceCreate(&d.preference));
+ size_t workspace_bytes=at::cuda::getCUDABlasLtWorkspaceSize();void* workspace=at::cuda::getCUDABlasLtWorkspace();
+ checked(cublasLtMatmulPreferenceSetAttribute(d.preference,CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,&workspace_bytes,sizeof(workspace_bytes)));
+ const void* ptrs[]={b.data_ptr(),a.data_ptr(),y.data_ptr(),bias_ptr};
+ cublasLtMatmulPreferenceAttributes_t attrs[]={CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES};
+ for(int i=0;i<4;i++){uint32_t alignment=256;while(reinterpret_cast<uintptr_t>(ptrs[i])%alignment)alignment>>=1;checked(cublasLtMatmulPreferenceSetAttribute(d.preference,attrs[i],&alignment,sizeof(alignment)));}
+ cublasLtMatmulHeuristicResult_t algo{};int found=0;auto handle=at::cuda::getCurrentCUDABlasLtHandle();
+ checked(cublasLtMatmulAlgoGetHeuristic(handle,d.operation,d.lhs,d.rhs,d.out,d.out,d.preference,1,&algo,&found));
+ TORCH_CHECK(found==1,"exact FP32 cuBLASLt bias geometry unavailable");
+ checked(cublasLtMatmul(handle,d.operation,&one,b.data_ptr(),d.lhs,a.data_ptr(),d.rhs,&zero,y.data_ptr(),d.out,y.data_ptr(),d.out,&algo.algo,workspace,workspace_bytes,at::cuda::getCurrentCUDAStream()));
+ return y;
+}
+struct Stats { float mean, m2, count; };
+__device__ Stats merge(Stats a,Stats b) {
+ float n=a.count+b.count;
+ if(n==0.f)return {0.f,0.f,0.f};
+ float inv=1.f/n, delta=a.mean-b.mean, wa=a.count*inv, wb=b.count*inv;
+ return {wb*b.mean+wa*a.mean,b.m2+a.m2+delta*delta*b.count*wa,n};
+}
+__global__ void ln_k(const float* x,const float* g,const float* b,float* y,int N,float eps) {
+ __shared__ float s[12];int t=threadIdx.x,l=t&31,w=t>>5;
+ Stats a{0.f,0.f,0.f};
+ for(int base=4*t;base<N;base+=512) {
+  #pragma unroll
+  for(int j=0;j<4;j++){
+   float v=x[(long)blockIdx.x*N+base+j], d=v-a.mean, n=a.count+1.f;
+   float m=a.mean+d*(1.f/n);a={m,a.m2+d*(v-m),n};
+  }
+ }
+ for(int o=16;o;o>>=1){
+  Stats b{__shfl_down_sync(0xffffffff,a.mean,o),__shfl_down_sync(0xffffffff,a.m2,o),__shfl_down_sync(0xffffffff,a.count,o)};
+  a=merge(a,b);
+ }
+ for(int o=2;o;o>>=1){
+  if(l==0&&w>=o&&w<2*o){s[2*(w-o)]=a.mean;s[2*(w-o)+1]=a.m2;s[4+w-o]=a.count;}
+  __syncthreads();
+  if(l==0&&w<o)a=merge(a,{s[2*w],s[2*w+1],s[4+w]});
+  __syncthreads();
+ }
+ if(t==0){s[0]=a.mean;s[1]=rsqrtf(a.m2/(float)N+eps);}
+ __syncthreads();
+ for(int c=t;c<N;c+=128)y[(long)blockIdx.x*N+c]=g[c]*(s[1]*(x[(long)blockIdx.x*N+c]-s[0]))+b[c];
+}
+torch::Tensor ln(torch::Tensor x,torch::Tensor g,torch::Tensor b,double eps){
+ c10::cuda::CUDAGuard guard(x.device());
+ TORCH_CHECK(x.is_contiguous()&&x.scalar_type()==at::kFloat&&g.is_contiguous()&&b.is_contiguous()&&g.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat,"APB exact LN layout/dtype");
+ int N=x.size(-1);TORCH_CHECK((N==64||N==128||N==384||N==512)&&g.numel()==N&&b.numel()==N,"APB exact LN width");auto y=torch::empty_like(x);int M=x.numel()/N;
+ ln_k<<<M,128,0,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),g.data_ptr<float>(),b.data_ptr<float>(),y.data_ptr<float>(),N,eps);C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+template<int LOG,bool BACK> __global__ void soft_k(const float* x,const float* p,float* y,int L,int M) {
+ constexpr int I=(1<<LOG)/32;int r=blockIdx.x*4+threadIdx.x/32,l=threadIdx.x&31;
+ if(r>=M)return;
+ float a[I],q[I],s=0.f,v=-INFINITY;
+ #pragma unroll
+ for(int j=0;j<I;j++){int c=l+32*j;a[j]=c<L?x[(long)r*L+c]:(BACK?0.f:-INFINITY);
+ if constexpr(BACK){q[j]=c<L?p[(long)r*L+c]:0.f;a[j]=a[j]*q[j];}else{v=v>a[j]?v:a[j];}}
+ if constexpr(!BACK)for(int o=16;o;o>>=1){float z=__shfl_xor_sync(0xffffffff,v,o);v=v>z?v:z;}
+ #pragma unroll
+ for(int j=0;j<I;j++){if constexpr(!BACK)a[j]=expf(a[j]-v);s+=a[j];}
+ for(int o=16;o;o>>=1)s+=__shfl_xor_sync(0xffffffff,s,o);
+ #pragma unroll
+ for(int j=0;j<I;j++)if(l+32*j<L){if constexpr(BACK)y[(long)r*L+l+32*j]=a[j]-q[j]*s;else y[(long)r*L+l+32*j]=a[j]/s;}
+}
+
+template<int LOG> __global__ void soft_bwd_k(const float* x,const float* p,float* y,int L,int M){
+ constexpr int N=(1<<LOG)/32;
+ const int lane=threadIdx.x%32;
+ const int row=blockIdx.x*4+threadIdx.x/32;
+ if(row>=M)return;
+ float vals[N],prob[N],sum=0.f;
+ #pragma unroll
+ for(int j=0;j<N;j++){
+  int col=lane+j*32;
+  prob[j]=col<L?p[(long)row*L+col]:0.f;
+  vals[j]=col<L?__fmul_rn(x[(long)row*L+col],prob[j]):0.f;
+  sum=__fadd_rn(sum,vals[j]);
+ }
+ #pragma unroll
+ for(int delta=16;delta>0;delta/=2){
+  sum=__fadd_rn(sum,__shfl_xor_sync(0xffffffffu,sum,delta));
+ }
+ #pragma unroll
+ for(int j=0;j<N;j++){
+  int col=lane+j*32;
+  if(col<L)y[(long)row*L+col]=fmaf(-prob[j],sum,vals[j]);
+ }
+}
+
+torch::Tensor soft(torch::Tensor x,torch::Tensor p,bool back){
+ c10::cuda::CUDAGuard guard(x.device());
+ TORCH_CHECK(x.is_contiguous()&&p.is_contiguous()&&x.scalar_type()==at::kFloat&&p.scalar_type()==at::kFloat&&x.sizes()==p.sizes(),"APB exact softmax layout/dtype");
+ auto y=torch::empty_like(x);int L=x.size(-1),M=x.numel()/L;
+ TORCH_CHECK(L>=128&&L<=768&&L%128==0,"APB exact softmax bucket");
+ auto stream=at::cuda::getCurrentCUDAStream();
+ #define LAUNCH(LG,B) soft_k<LG,B><<<(M+3)/4,128,0,stream>>>(x.data_ptr<float>(),p.data_ptr<float>(),y.data_ptr<float>(),L,M)
+ #define BWD(LG) soft_bwd_k<LG><<<(M+3)/4,128,0,stream>>>(x.data_ptr<float>(),p.data_ptr<float>(),y.data_ptr<float>(),L,M)
+ if(back){if(L<=128){BWD(7);}else if(L<=256){BWD(8);}else if(L<=512){BWD(9);}else{BWD(10);}}
+ #undef BWD
+ else{if(L<=128){LAUNCH(7,false);}else if(L<=256){LAUNCH(8,false);}else if(L<=512){LAUNCH(9,false);}else{LAUNCH(10,false);}}
+ #undef LAUNCH
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+__global__ void beta_small(const float* x,float* y,int M){
+ __shared__ float s[32][33];int c=blockIdx.x*32+threadIdx.x,l=threadIdx.x,w=threadIdx.y;float v=0.f;
+ for(int r=w*8;r<M;r+=256){
+  #pragma unroll
+  for(int j=0;j<8;j++)v+=x[(long)(r+j)*128+c];
+ }
+ s[w][l]=v;__syncthreads();v=s[l][w];
+ for(int o=16;o;o>>=1)v+=__shfl_xor_sync(0xffffffff,v,o);
+ if(l==0)y[blockIdx.x*32+w]=v;
+}
+__global__ void beta_parts(const float* x,float* y,int M,int P){
+ int c=blockIdx.x*32+threadIdx.x;float v=0.f;
+ for(int r=blockIdx.y*32;r<M;r+=32*P){
+  #pragma unroll
+  for(int j=0;j<32;j++)v+=x[(long)(r+j)*128+c];
+ }
+ y[(long)blockIdx.y*128+c]=v;
+}
+__global__ void beta_reduce_parts(const float* x,float* y,int P,int C){
+ __shared__ float s[4][128];int lane=threadIdx.x,w=threadIdx.y;
+ #pragma unroll
+ for(int j=0;j<4;j++){
+  int c=lane*4+j;float v[4]={0.f,0.f,0.f,0.f};int step=4*C;
+  for(int r=w+blockIdx.x*4;r<P;r+=step*4){
+   #pragma unroll
+   for(int i=0;i<4;i++)if(r+i*step<P)v[i]+=x[(long)(r+i*step)*128+c];
+  }
+  float z=((v[0]+v[1])+v[2])+v[3];s[w][c]=z;
+ }
+ __syncthreads();
+ for(int o=2;o;o>>=1){if(w<o){
+  #pragma unroll
+  for(int j=0;j<4;j++){int c=lane*4+j;s[w][c]+=s[w+o][c];}
+ }__syncthreads();}
+ if(w==0){
+  #pragma unroll
+  for(int j=0;j<4;j++){int c=lane*4+j;y[blockIdx.x*128+c]=s[0][c];}
+ }
+}
+__global__ void beta_final(const float* x,float* y,int C){
+ __shared__ float s[4][128];int l=threadIdx.x,w=threadIdx.y;
+ #pragma unroll
+ for(int j=0;j<4;j++){int c=l*4+j;float z=0.f;for(int r=w;r<C;r+=4)z+=x[r*128+c];s[w][c]=z;}
+ __syncthreads();
+ for(int o=2;o;o>>=1){if(w<o){
+  #pragma unroll
+  for(int j=0;j<4;j++){int c=l*4+j;s[w][c]+=s[w+o][c];}
+ }__syncthreads();}
+ if(w==0){
+  #pragma unroll
+  for(int j=0;j<4;j++){int c=l*4+j;y[c]=s[0][c];}
+ }
+}
+torch::Tensor beta(torch::Tensor x){
+ c10::cuda::CUDAGuard guard(x.device());
+ TORCH_CHECK(x.is_contiguous()&&x.scalar_type()==at::kFloat&&x.size(-1)==128&&x.numel()%16384==0,"APB exact beta layout");
+ int M=x.numel()/128;auto y=torch::empty({128},x.options());auto stream=at::cuda::getCurrentCUDAStream();
+ if(M<=65536)beta_small<<<4,dim3(32,32),0,stream>>>(x.data_ptr<float>(),y.data_ptr<float>(),M);
+ else{int P=std::min(8192,M/32),C=(P+63)/64;auto p=torch::empty({P,128},x.options()),q=torch::empty({C,128},x.options());
+ beta_parts<<<dim3(4,P),32,0,stream>>>(x.data_ptr<float>(),p.data_ptr<float>(),M,P);
+ beta_reduce_parts<<<C,dim3(32,4),0,stream>>>(p.data_ptr<float>(),q.data_ptr<float>(),P,C);
+ beta_final<<<1,dim3(32,4),0,stream>>>(q.data_ptr<float>(),y.data_ptr<float>(),C);}
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
+__global__ void fp32_copy_k(const __nv_bfloat16* x,float* y,long n){
+ long i=(long)blockIdx.x*256+threadIdx.x;if(i<n)y[i]=__bfloat162float(x[i]);
+}
+std::vector<torch::Tensor> fp32_inputs(std::vector<torch::Tensor> inputs){
+ TORCH_CHECK(inputs.size()>0,"APB exact inputs empty");
+ c10::cuda::CUDAGuard guard(inputs[0].device());std::vector<torch::Tensor> out;
+ for(const auto& t:inputs){
+  TORCH_CHECK(t.is_cuda()&&t.device()==inputs[0].device()&&t.is_contiguous(),"APB exact inputs must be contiguous on one CUDA device");
+  TORCH_CHECK(t.scalar_type()==at::kFloat||t.scalar_type()==at::kBFloat16,"APB exact input dtype");
+  if(t.scalar_type()==at::kFloat)out.push_back(t);
+  else{
+   auto y=torch::empty(t.sizes(),t.options().dtype(at::kFloat));
+   fp32_copy_k<<<(t.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(t.data_ptr()),y.data_ptr<float>(),t.numel());out.push_back(y);
+  }
+ }
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+__global__ void point_k(const float* x,const float* z,float* y,long n,float scale,int op){
+ long i=(long)blockIdx.x*256+threadIdx.x;
+ if(i<n)y[i]=op==0?x[i]*scale:x[i]*(1.f/(1.f+expf(-z[i])));
+}
+torch::Tensor point(torch::Tensor x,torch::Tensor z,double scale,int op){
+ c10::cuda::CUDAGuard guard(x.device());
+ TORCH_CHECK(x.is_contiguous()&&x.scalar_type()==at::kFloat,"APB exact point input");
+ TORCH_CHECK(op==0||(z.is_contiguous()&&z.scalar_type()==at::kFloat&&z.numel()==x.numel()),"APB exact gate");
+ auto y=torch::empty_like(x);
+ point_k<<<(x.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),z.data_ptr<float>(),y.data_ptr<float>(),x.numel(),scale,op);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+__global__ void bias_add_k(float* s,const float* bias,const bool* mask,int L,int H){
+ long i=(long)blockIdx.x*256+threadIdx.x,n=(long)H*L*L;
+ if(i<n){int h=i/(L*L),r=i%(L*L);float b=mask&&!mask[r%L]?-3.4028234663852886e38f:bias[(long)r*H+h];s[i]+=b;}
+}
+void bias_add(torch::Tensor scores,torch::Tensor bias,c10::optional<torch::Tensor> mask){
+ c10::cuda::CUDAGuard guard(scores.device());int L=scores.size(-1),H=scores.numel()/L/L;
+ TORCH_CHECK(scores.is_contiguous()&&bias.is_contiguous()&&scores.scalar_type()==at::kFloat&&bias.scalar_type()==at::kFloat,"APB exact bias layout");
+ if(mask)TORCH_CHECK(mask->is_contiguous()&&mask->scalar_type()==at::kBool&&mask->numel()==L,"APB exact mask");
+ bias_add_k<<<(scores.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(scores.data_ptr<float>(),bias.data_ptr<float>(),mask?mask->data_ptr<bool>():nullptr,L,H);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+__global__ void db_transpose_k(const float* x,float* y,const bool* mask,int L,int H){
+ long i=(long)blockIdx.x*256+threadIdx.x,n=(long)L*L*H;
+ if(i<n){int h=i%H,r=i/H;y[i]=mask&&!mask[r%L]?0.f:x[(long)h*L*L+r];}
+}
+torch::Tensor db_transpose(torch::Tensor x,c10::optional<torch::Tensor> mask){
+ c10::cuda::CUDAGuard guard(x.device());int L=x.size(-1),H=x.numel()/L/L;auto y=torch::empty({L*L,H},x.options());
+ TORCH_CHECK(x.is_contiguous()&&x.scalar_type()==at::kFloat,"APB exact dBias layout");
+ if(mask)TORCH_CHECK(mask->is_contiguous()&&mask->scalar_type()==at::kBool&&mask->numel()==L,"APB exact dBias mask");
+ db_transpose_k<<<(x.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(),y.data_ptr<float>(),mask?mask->data_ptr<bool>():nullptr,L,H);C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
+}
+
+#ifdef APB_H100_FP32_SHADOW
+// Diagnostic project-owned host wrappers instantiate installed BSD-licensed PyTorch
+// memory-efficient CUTLASS templates (torch git cf30153c), using CUTLASS 4.2 headers.
+// No ATen attention/softmax operator is called.
+namespace apb_shadow_cutlass {
+using F=PyTorchMemEffAttention::AttentionKernel<float,cutlass::arch::Sm80,true,64,64,64,true,true>;
+template<int K> using B=PyTorchMemEffAttention::AttentionBackwardKernel<cutlass::arch::Sm80,float,true,false,false,64,64,K>;
+template<typename K>
+__global__ __launch_bounds__(K::kNumThreads,K::kMinBlocksPerSm)
+void forward_entry(typename K::Params p) {
+ if(!p.advance_to_block())return;
+ // The installed template normalizes output using s_prime, then its LSE
+ // epilogue mutates s_prime without a CTA barrier. Keep those statistics
+ // read-only until every output warp has finished (racecheck 22545).
+ auto* lse=p.logsumexp_ptr;p.logsumexp_ptr=nullptr;
+ K::attention_kernel(p);
+ __syncthreads();
+ extern __shared__ char smem_buffer[];
+ auto& shared=*reinterpret_cast<typename K::SharedStorage*>(smem_buffer);
+ int t=threadIdx.x+blockDim.x*threadIdx.y;
+ if(lse&&t<K::kQueriesPerBlock&&t<p.num_queries){
+  float s=shared.s_prime[t],m=shared.mi[t];
+  s=s==0.f?1.f:s;
+  m=m==-cutlass::platform::numeric_limits<float>::infinity()?0.f:m;
+  constexpr float log2e=1.4426950408889634074f;
+  lse[t]=float(m/log2e)+cutlass::fast_log(float(s));
+ }
+}
+template<typename K>
+__global__ __launch_bounds__(K::kNumThreads,K::kMinBlocksPerSm)
+void backward_entry(typename K::Params p) { if(p.advance_to_block())K::attention_kernel(p); }
+std::vector<torch::Tensor> fwd(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor b) {
+ c10::cuda::CUDAGuard guard(q.device());
+ int L=q.size(0),H=q.size(1),D=q.size(2),W=H*D;
+ TORCH_CHECK(q.dim()==3 && k.sizes()==q.sizes() && v.sizes()==q.sizes()
+   && b.sizes()==torch::IntArrayRef({H,L,L}),"APB shadow shapes");
+ for(const auto& t:{q,k,v,b})TORCH_CHECK(t.is_cuda()&&t.device()==q.device()&&t.is_contiguous()&&t.scalar_type()==at::kFloat,"APB shadow CUDA FP32 contiguous");
+ TORCH_CHECK(q.scalar_type()==at::kFloat && L%64==0 && D<=64,"shadow FP32 geometry");
+ auto o=torch::empty_like(q);auto lse=torch::empty({H,L},q.options());
+ F::Params p;
+ p.query_ptr=q.data_ptr<float>();p.key_ptr=k.data_ptr<float>();p.value_ptr=v.data_ptr<float>();
+ p.attn_bias_ptr=b.data_ptr<float>();p.output_ptr=o.data_ptr<float>();p.logsumexp_ptr=lse.data_ptr<float>();
+ p.head_dim=D;p.head_dim_value=D;p.num_queries=L;p.num_keys=L;p.num_keys_absolute=L;
+ p.scale=static_cast<float>(1.0/std::sqrt(double(D)));p.num_heads=H;p.num_batches=1;
+ p.q_strideM=p.k_strideM=p.v_strideM=p.o_strideM=W;
+ p.q_strideH=p.k_strideH=p.v_strideH=D;
+ p.q_strideB=p.k_strideB=p.v_strideB=L*W;
+ p.bias_strideM=L;p.bias_strideH=L*L;p.bias_strideB=H*L*L;
+ F::check_supported(p);
+ constexpr int smem=sizeof(F::SharedStorage);
+ auto fn=forward_entry<F>;
+ C10_CUDA_CHECK(cudaFuncSetAttribute(fn,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
+ void* args[]={&p};
+ C10_CUDA_CHECK(cudaLaunchKernel((const void*)fn,p.getBlocksGrid(),p.getThreadsGrid(),args,smem,at::cuda::getCurrentCUDAStream()));
+ return {o,lse};
+}
+template<int K> torch::Tensor bwd_t(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor b,torch::Tensor o,torch::Tensor lse,torch::Tensor go,torch::Tensor delta) {
+ using Kernel=B<K>;typename Kernel::Params p;
+ int L=q.size(0),H=q.size(1),D=q.size(2),W=H*D;
+ auto gq=torch::empty_like(q),gk=torch::empty_like(k),gv=torch::empty_like(v),gb=torch::empty_like(b);
+ p.query_ptr=q.data_ptr<float>();p.key_ptr=k.data_ptr<float>();p.value_ptr=v.data_ptr<float>();p.bias_ptr=b.data_ptr<float>();
+ p.output_ptr=o.data_ptr<float>();p.logsumexp_ptr=lse.data_ptr<float>();p.grad_output_ptr=go.data_ptr<float>();p.delta_ptr=delta.data_ptr<float>();
+ p.grad_query_ptr=gq.data_ptr<float>();p.grad_key_ptr=gk.data_ptr<float>();p.grad_value_ptr=gv.data_ptr<float>();p.grad_bias_ptr=gb.data_ptr<float>();
+ p.head_dim=D;p.head_dim_value=D;p.num_queries=L;p.num_keys=L;p.num_heads=H;p.num_batches=1;p.scale=static_cast<float>(1.0/std::sqrt(double(D)));
+ p.q_strideM=p.k_strideM=p.v_strideM=p.gO_strideM=W;
+ p.q_strideH=p.k_strideH=p.v_strideH=p.o_strideH=p.gO_strideH=p.gQ_strideH=p.gK_strideH=p.gV_strideH=D;
+ p.q_strideB=p.k_strideB=p.v_strideB=p.o_strideB=p.gO_strideB=p.gQ_strideB=p.gK_strideB=p.gV_strideB=L*W;
+ p.bias_strideM=p.gB_strideM=L;p.bias_strideH=p.gB_strideH=L*L;p.bias_strideB=p.gB_strideB=H*L*L;
+ p.lse_strideH=p.delta_strideH=L;p.lse_strideB=p.delta_strideB=H*L;
+ // Each key tile writes disjoint dBias entries. Match the reference's key
+ // parallelism; only its discarded dQ workspace uses cross-CTA accumulation.
+ // The returned dBias and fixed-order beta reduction remain deterministic.
+ p.num_splits_key=std::min((L+63)/64,std::max(1,200/H));
+ auto ws=torch::empty({p.workspace_size()},q.options().dtype(at::kByte));
+ if(ws.numel())p.workspace=reinterpret_cast<float*>(ws.data_ptr());
+ if(p.should_zero_workspace())C10_CUDA_CHECK(cudaMemsetAsync(ws.data_ptr(),0,ws.numel(),at::cuda::getCurrentCUDAStream()));
+ Kernel::check_supported(p);constexpr int smem=sizeof(typename Kernel::SharedStorage);
+ auto fn=backward_entry<Kernel>;
+ C10_CUDA_CHECK(cudaFuncSetAttribute(fn,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
+ void* args[]={&p};C10_CUDA_CHECK(cudaLaunchKernel((const void*)fn,p.getBlocksGrid(),p.getThreadsGrid(),args,smem,at::cuda::getCurrentCUDAStream()));
+ return gb;
+}
+torch::Tensor bwd(torch::Tensor q,torch::Tensor k,torch::Tensor v,torch::Tensor b,torch::Tensor o,torch::Tensor lse,torch::Tensor go,torch::Tensor delta) {
+ c10::cuda::CUDAGuard guard(q.device());
+ TORCH_CHECK(q.dim()==3&&q.size(0)%64==0,"APB shadow backward geometry");
+ int L=q.size(0),H=q.size(1),D=q.size(2);
+ TORCH_CHECK((D==16||D==24||D==32||D==48)&&k.sizes()==q.sizes()&&v.sizes()==q.sizes()&&o.sizes()==q.sizes()&&go.sizes()==q.sizes()
+   &&b.sizes()==torch::IntArrayRef({H,L,L})&&lse.sizes()==torch::IntArrayRef({H,L})&&delta.sizes()==lse.sizes(),"APB shadow backward shapes");
+ for(const auto& t:{q,k,v,b,o,lse,go,delta})TORCH_CHECK(t.is_cuda()&&t.device()==q.device()&&t.is_contiguous()&&t.scalar_type()==at::kFloat,"APB shadow backward FP32 contiguous");
+ return q.size(2)<=32?bwd_t<32>(q,k,v,b,o,lse,go,delta):bwd_t<64>(q,k,v,b,o,lse,go,delta);
+}
+
+__global__ void delta_k(const float* go,const float* o,float* dst,int L,int H,int D) {
+ int row=blockIdx.x*4+threadIdx.y,lane=threadIdx.x;
+ if(row>=L*H)return;
+ int bw=D<32?16:32;
+ float a=0.f,b=0.f;
+ if(lane<bw) {
+  a=__fmul_rn(go[(long)row*D+lane],o[(long)row*D+lane]);
+  if(lane+bw<D)b=__fmul_rn(go[(long)row*D+lane+bw],o[(long)row*D+lane+bw]);
+ }
+ float val=__fadd_rn(a,b);
+ for(int off=bw/2;off;off/=2)val=__fadd_rn(val,__shfl_down_sync(0xffffffff,val,off));
+ if(lane==0)dst[(row%H)*L+row/H]=val;
+}
+torch::Tensor delta(torch::Tensor go,torch::Tensor o) {
+ c10::cuda::CUDAGuard guard(go.device());int L=go.size(0),H=go.size(1),D=go.size(2);
+ TORCH_CHECK(D==16||D==24||D==32||D==48,"APB shadow delta geometry");
+ auto y=torch::empty({H,L},go.options());
+ delta_k<<<(L*H+3)/4,dim3(32,4),0,at::cuda::getCurrentCUDAStream()>>>(go.data_ptr<float>(),o.data_ptr<float>(),y.data_ptr<float>(),L,H,D);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
+__global__ void mask_bias_k(const float* src,const bool* mask,float* dst,int L,int H) {
+ long i=(long)blockIdx.x*256+threadIdx.x,n=(long)H*L*L;
+ if(i<n){int h=i/(L*L),ij=i%(L*L);dst[i]=mask&&!mask[ij%L]?-3.4028234663852886e38f:src[(long)ij*H+h];}
+}
+torch::Tensor mask_bias(torch::Tensor bias,c10::optional<torch::Tensor> mask,int64_t L) {
+ c10::cuda::CUDAGuard guard(bias.device());int H=bias.size(1);
+ TORCH_CHECK(bias.is_contiguous()&&bias.scalar_type()==at::kFloat&&bias.size(0)==L*L,"APB shadow pair projection");
+ if(mask)TORCH_CHECK(mask->is_contiguous()&&mask->scalar_type()==at::kBool&&mask->numel()==L,"APB shadow mask");
+ auto y=torch::empty({H,L,L},bias.options());
+ mask_bias_k<<<(y.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(bias.data_ptr<float>(),mask?mask->data_ptr<bool>():nullptr,y.data_ptr<float>(),L,H);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
+}
+
+}
+
+#endif
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+#ifdef APB_H100_FP32_SHADOW
+  m.def("exact_attention_fwd", &apb_shadow_cutlass::fwd);
+  m.def("exact_attention_db", &apb_shadow_cutlass::bwd);
+  m.def("exact_delta", &apb_shadow_cutlass::delta);
+  m.def("exact_mask_bias", &apb_shadow_cutlass::mask_bias);
+#endif
+  m.def("exact_ln", &apb_exact::ln);
+  m.def("exact_mm", &apb_exact::exact_mm, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
+  m.def("exact_soft", &apb_exact::soft);
+  m.def("exact_beta", &apb_exact::beta);
+  m.def("exact_fp32_inputs", &apb_exact::fp32_inputs);
+  m.def("exact_point", &apb_exact::point);
+  m.def("exact_bias_add", &apb_exact::bias_add);
+  m.def("exact_db_transpose", &apb_exact::db_transpose);
   m.def("cast_leaves", &cast_leaves);
   m.def("cast_grads", &cast_grads);
   m.def("zero_acc", &zero_acc);

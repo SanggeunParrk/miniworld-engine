@@ -6,6 +6,7 @@ never at import; ``integrations/attention_pair_bias_b200.py`` drives them."""
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 
 import torch
@@ -37,10 +38,19 @@ def _ext(arch: str):
     from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
+    includes, shadow_flags = [], []
+    if arch == "90a":
+        root = os.environ.get("CUTLASS_PATH")
+        if not root or not (Path(root) / "include/cutlass/cutlass.h").is_file():
+            raise RuntimeError("H100 APB requires CUTLASS_PATH pointing to CUTLASS 4.2 headers")
+        includes = [str(Path(root) / "include")]
+        shadow_flags = ["-DAPB_H100_FP32_SHADOW=1"]
     return load_extension(
         name=f"apb_rows_cuda_sm{arch}",
         sources=[str(_dir / "apb_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        extra_include_paths=includes,
+        extra_ldflags=["-lcublas", "-lcublasLt"],
+        extra_cuda_cflags=[*host_flags(), *shadow_flags, "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                            "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
                            *gencodes(arch, ptx=() if arch == "90a" else ("100",))],
         extra_cflags=["-std=c++17"], verbose=False)
