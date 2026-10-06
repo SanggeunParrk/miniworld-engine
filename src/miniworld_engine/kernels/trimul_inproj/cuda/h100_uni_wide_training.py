@@ -32,19 +32,21 @@ def supports(width, length) -> bool:
 
 
 # --------------------------------------------------------------------------- forward
-def _front(x, w1, ab, mask, gi, bi, xn, pre):
+def _front(x, w1, ab, mask, gi, bi, xn, pre, hidden=None):
     n, D = x.shape[1], x.shape[-1]
-    a, b, slots, sk, minb = _K1[D]
+    hidden = D if hidden is None else hidden
+    cfg = _K1[D] if D in _K1 else {128: (2, 64, 2, 2, 1), 512: (1, 64, 2, 8, 1)}[D]
+    a, b, slots, sk, minb = cfg
     defines = W._defines(MW_MINB=minb, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, TMN_WSKIP=1,
-                         TMN_MASK_TEMPLATE=1, FRONT_CZ=D, FRONT_CH=D, FRONT_SLOTS=slots, FRONT_SK=sk)
-    smem = W._k1_smem(D, _K1[D], a * b // 64 * 4096)
+                         TMN_MASK_TEMPLATE=1, FRONT_CZ=D, FRONT_CH=hidden, FRONT_BI=a, FRONT_SLOTS=slots, FRONT_SK=sk)
+    smem = W._k1_smem(D, cfg, a * b // 64 * 4096)
     k = W._kernel("front_pre_d384.cu", "mw_wide_front_pre_overlap", "forward", defines, smem)
     tj = (n + b - 1) // b
     tiles = ((n + a - 1) // a) * tj
     fields = [
         W._map(x, [64, b, a], [D, n, n], [D * 2, n * D * 2]),
-        W._map(w1, [64, 64], [D, 4 * D], [D * 2]),
-        W._map(ab, [64, 1, 32], [n, n, 2 * D], [n * 2, n * n * 2]),
+        W._map(w1, [64, 64], [D, 4 * hidden], [D * 2]),
+        W._map(ab, [64, 1, 32], [n, n, 2 * hidden], [n * 2, n * n * 2]),
         mask, gi, bi, ab, None, xn,
         W._map(pre, [64, 64], [pre.shape[1], pre.shape[0]], [pre.shape[1] * 2]),
         n, n, tj, tiles, 1, n, 1, 1e-5, n * D, D, 0, 0,
@@ -281,6 +283,9 @@ class _Training(torch.autograd.Function):
 
 def single_trimul(outgoing, *args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
+    import os
+    if os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1":
+        return native_buckets(False, outgoing, *args)
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
         if any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
@@ -289,3 +294,165 @@ def single_trimul(outgoing, *args):
             leaves = [leaves[0], *weights, *leaves[7:]]
         return forward_nograd(leaves, *args[11:], outgoing)
     return _Training.apply(outgoing, *args)
+
+
+# Native coverage candidate. Keep the selected legacy plans above as frozen
+# comparison paths. This extends their Hopper K1 and fused contraction/gate
+# algorithm to all buckets; auxiliary reductions are deterministic hand CUDA.
+# The output-side wide decomposition still materializes norm/proj/gate and is
+# not a claim of B200 K3 fusion or of a latency win.
+def _native_saved(x, hidden):
+    n, d = x.shape[1], x.shape[-1]
+    m = n*n
+    return [x.new_empty((2*hidden,n,n)), x.new_empty((hidden,n,n)), torch.empty_like(x),
+            x.new_empty((m,hidden)), x.new_empty((m,d)), x.new_empty((m,d)),
+            x.new_empty((m,),dtype=torch.float32), x.new_empty((m,),dtype=torch.float32),
+            x.new_empty((4*hidden,m)), x.new_empty((n,n))]
+
+
+def _native_forward_fake(leaves, mask, ds, bidirectional, outgoing):
+    return [torch.empty_like(leaves[0]), *_native_saved(leaves[0], leaves[1].shape[0]),
+            *(w.new_empty((0,)) if w.dtype == torch.bfloat16 and (i < 4 or w.is_contiguous())
+              else torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
+              for i,w in enumerate(leaves[1:7]))]
+
+
+@opaque(fake=_native_forward_fake, name="trimul_h100_native_buckets_forward")
+def native_forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
+                   bidirectional: bool, outgoing: bool) -> list[torch.Tensor]:
+    from ._h100_pack import cast_weights, owned_bf16_mask, pack_into_cuda
+    x, _, _, _, _, _, _, gi, bi, go, bo = leaves
+    n, d, h = x.shape[1], x.shape[-1], leaves[1].shape[0]
+    if (d not in (128,256,384,512) or n not in (128,256,384,512,640,768)
+            or h != d*(2 if bidirectional else 1)):
+        raise ValueError("native TriMul buckets require D128/256/384/512 and L128..768")
+    matrices = leaves[1:7]
+    expected = [(h, d)] * 4 + [(d, d), (d, h)]
+    if (x.dtype != torch.bfloat16 or not x.is_contiguous()
+            or matrices[0].dtype not in (torch.bfloat16, torch.float32)
+            or any(w.dtype != matrices[0].dtype or w.device != x.device
+                   or not (w.is_contiguous() or (i < 4 and w.t().is_contiguous()))
+                   or tuple(w.shape) != shape
+                   for i, (w, shape) in enumerate(zip(matrices, expected, strict=True)))
+            or any(w.dtype != torch.float32 or w.device != x.device or not w.is_contiguous()
+                   for w in (gi, bi, go, bo))
+            or ds.device != x.device or ds.dtype != torch.bfloat16
+            or not ds.is_contiguous() or ds.numel() != n*d):
+        raise ValueError("native TriMul requires contiguous BF16 activations/dropout scale, "
+                         "uniform dense BF16/FP32 matrices and FP32 norm affine on the same device")
+    with T.native_context(x.device):
+        weights = cast_weights(leaves[1:7])
+        wl,wlg,wr,wrg,wg,wp = weights
+        saved = _native_saved(x,h)
+        ab,tri,xn,norm,proj,gate,mu,rs,pre,_ = saved
+        pmask = owned_bf16_mask(mask,n,x.device)
+        saved[-1] = pmask
+        w1 = x.new_empty((4*h,d))
+        pack_into_cuda(w1,wl,wlg,wr,wrg)
+        _front(x,w1,ab,pmask,gi,bi,xn,pre,hidden=h)
+        left,right = ab[:h],ab[h:]
+        if bidirectional:
+            torch.bmm(left[:d],right[:d].transpose(-1,-2),out=tri[:d])
+            torch.bmm(left[d:].transpose(-1,-2),right[d:],out=tri[d:])
+        else:
+            _triangle(ab,tri,outgoing)
+        _output_norm(tri,norm,go,bo,mu,rs)
+        torch.mm(norm,wp.t(),out=proj)
+        torch.mm(xn.reshape(n*n,d),wg.t(),out=gate)
+        y = torch.empty_like(x)
+        defines = W._defines(MW_MINB=1,MW_K1_STREAM=0,TMN_SIGMOID_TANH=1,WIDTH=d,GROUPS=1,KCHUNK=1)
+        k = W._kernel("output_dense.cu","mw_wide_dense_output_epi","forward",defines)
+        W._launch(k,1056,256,0,W._params(f"native_epilogue{d}",[proj,gate,x,ds,y,n*n*d,n*d]))
+        # Custom ops may not return input aliases. BF16 weights are saved by the
+        # caller itself; only owned master casts need to cross this boundary.
+        return [y,*saved,*(w if w is not src else w.new_empty((0,))
+                           for w,src in zip(weights,leaves[1:7],strict=True))]
+
+
+def _native_contract_gp(dt, ab, pre, mask, gp, bidirectional, outgoing):
+    h,n = dt.shape[:2]
+    d = h//2 if bidirectional else h
+    direction = 0 if bidirectional else 1 if outgoing else 2
+    defines = W._defines(WIDTH=d,GP_DIR=direction,GP_GENERIC_LENGTH=1)
+    smem = 98304+128
+    k = W._kernel("contract_gp_d384_l384.cu","mw_wide_staged_epilogue_gp","upstream",defines,smem)
+    left,right = ab[:h],ab[h:]
+    if bidirectional:
+        a = (dt[:d],dt[:d],right[d:],left[d:])
+        b = (right[:d],left[:d],dt[d:],dt[d:])
+    else:
+        a = (dt,dt,right,left)
+        b = (right,left,dt,dt)
+    def plane(t,channels):
+        return W._map(t,[64,64],[n,channels*n],[n*2])
+    maps = [plane(t,d) for t in (*a,*b)]
+    tail = [plane(pre,4*h),plane(mask,1),*[plane(g,h) for g in gp]]
+    params = [*maps,pre,mask,*gp,None,None,*tail,n]
+    W._launch(k,(4 if bidirectional else 2)*d*(n//128)**2,256,smem,
+              W._params(f"native_contract{d}_{direction}",params))
+
+
+def _native_backward_fake(leaves, ds, saved, dy, bidirectional, outgoing, master):
+    x,d,h = leaves[0],leaves[0].shape[-1],leaves[1].shape[0]
+    dtype = torch.float32 if master else x.dtype
+    return [torch.empty_like(x),x.new_empty((d+4*h,d),dtype=dtype),
+            torch.empty_like(leaves[6],dtype=dtype),*(torch.empty_like(t) for t in leaves[7:])]
+
+
+@opaque(fake=_native_backward_fake, name="trimul_h100_native_buckets_backward")
+def native_backward(leaves: list[torch.Tensor], ds: torch.Tensor,
+                    saved: list[torch.Tensor], dy: torch.Tensor,
+                    bidirectional: bool, outgoing: bool, master: bool) -> list[torch.Tensor]:
+    from ._h100_pack import deterministic_ln_backward, stack_backward_weights
+    x,wl,wlg,wr,wrg,wg,wp,gi,bi,go,bo = leaves
+    n,d,h = x.shape[1],x.shape[-1],wl.shape[0]
+    m=n*n
+    ab,tri,xn,norm,proj,gate,mu,rs,pre,pmask = saved
+    with T.native_context(x.device):
+        if not dy.is_contiguous():
+            raise ValueError("native TriMul backward requires contiguous output gradients")
+        dp = x.new_empty((m,d))
+        dxin = x.new_empty((d+4*h,m))
+        gp = list(dxin[d:].view(4,h,m).unbind())
+        _gate(proj,gate,dy,ds.reshape(n,d),dp,dxin[:d])
+        dn = torch.mm(dp,wp)
+        dwp = torch.mm(dp.t(),norm,**({"out_dtype":torch.float32} if master else {}))
+        dt,dgo,dbo = deterministic_ln_backward(tri,dn,go,planes=True,stats=(mu,rs))
+        _native_contract_gp(dt,ab,pre,pmask,gp,bidirectional,outgoing)
+        dws = torch.mm(dxin,xn.reshape(m,d),**({"out_dtype":torch.float32} if master else {}))
+        wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
+        dxn = torch.mm(dxin.t(),wcat)
+        dx,dgi,dbi = deterministic_ln_backward(x,dxn,gi,residual=dy)
+        return [dx,dws,dwp,dgi,dbi,dgo,dbo]
+
+
+class _NativeBuckets(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx,bidirectional,outgoing,*args):
+        leaves=list(args[:11]);mask,ds=args[11:]
+        out=native_forward(leaves,mask,ds,bidirectional,outgoing)
+        weights=[cast if cast.numel() else src for cast,src in zip(out[-6:],leaves[1:7],strict=True)]
+        ctx.master=leaves[1].dtype==torch.float32
+        ctx.bidirectional,ctx.outgoing=bidirectional,outgoing
+        ctx.save_for_backward(*args,*out[1:-6],*weights)
+        return out[0]
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx,dy):
+        vals=ctx.saved_tensors
+        leaves=[vals[0],*vals[-6:],*vals[7:11]]
+        dx,dws,dwp,*affine=native_backward(leaves,vals[12],list(vals[13:-6]),dy,
+                                          ctx.bidirectional,ctx.outgoing,ctx.master)
+        d,h=vals[0].shape[-1],vals[1].shape[0]
+        dwg=dws[:d];dwl,dwlg,dwr,dwrg=dws[d:].split(h)
+        from ._h100_pack import preserve_parameter_layout
+        grads = preserve_parameter_layout([dwl,dwlg,dwr,dwrg,dwg,dwp], vals[1:7])
+        return (None,None,dx,*grads,*affine,None,None)
+
+
+def native_buckets(bidirectional,outgoing,*args):
+    """Opt-in all-bucket native training implementation; no fallback or autotuning."""
+    if not torch.is_grad_enabled():
+        return native_forward(list(args[:11]),args[11],args[12],bidirectional,outgoing)[0]
+    return _NativeBuckets.apply(bidirectional,outgoing,*args)

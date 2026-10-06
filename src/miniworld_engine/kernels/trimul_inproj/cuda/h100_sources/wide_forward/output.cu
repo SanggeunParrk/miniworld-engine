@@ -38,6 +38,19 @@ struct AuxPack {
   bf* dst; const void* w[4]; int rows,cols;
   int s0[4],s1[4],fp32[4];
 };
+// Autograd steals a dense gradient only when it has its parameter's layout.
+// D128 front matrices are column-major leaves; keep this copy in owned CUDA.
+struct AuxGradLayout {
+  const void* src[6]; void* dst[6];
+  int rows[6],cols[6],s0[6],s1[6],fp32[6];
+};
+extern "C" __global__ void mw_aux_grad_layout(AuxGradLayout p) {
+  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
+  if(i>=p.rows[leaf]*p.cols[leaf])return;
+  int j=(i/p.cols[leaf])*p.s0[leaf]+(i%p.cols[leaf])*p.s1[leaf];
+  if(p.fp32[leaf])static_cast<unsigned int*>(p.dst[leaf])[j]=static_cast<const unsigned int*>(p.src[leaf])[i];
+  else static_cast<unsigned short*>(p.dst[leaf])[j]=static_cast<const unsigned short*>(p.src[leaf])[i];
+}
 extern "C" __global__ void mw_aux_pack(AuxPack p) {
   int i=blockIdx.x*256+threadIdx.x;
   if(i>=4*p.rows*p.cols)return;
@@ -142,6 +155,67 @@ extern "C" __global__ void mw_aux_d64_training_prepare(AuxD64TrainPrepare p) {
     p.pair[i]=p.mask_kind==0?1.f:p.token?
       float(aux_mask_read(p.mask,i/p.length,p.mask_kind)!=0.f&&aux_mask_read(p.mask,i%p.length,p.mask_kind)!=0.f):
       aux_mask_read(p.mask,i,p.mask_kind);
+}
+// Deterministic normalization backward shared by the general Hopper training
+// buckets. Two bounded reductions replace atomic affine updates. The output
+// operand stays channel-major; no full-size transpose or affine partial exists.
+extern "C" __global__ void mw_aux_ln_backward(const bf* x,const bf* dy,
+    const float* gamma,const bf* residual,bf* dx,float* mean,float* rstd,
+    int rows,int width,int planes,int saved_stats) {
+  int row=blockIdx.x; float mu=0.f,rs=0.f;
+  if(saved_stats){mu=mean[row];rs=rstd[row];}
+  else {
+    float v=0.f;
+    for(int c=threadIdx.x;c<width;c+=256)v+=__bfloat162float(x[row*width+c]);
+    mu=aux_sum(v)/width;v=0.f;
+    for(int c=threadIdx.x;c<width;c+=256){float z=__bfloat162float(x[row*width+c])-mu;v+=z*z;}
+    rs=rsqrtf(aux_sum(v)/width+1e-5f);
+    if(!threadIdx.x){mean[row]=mu;rstd[row]=rs;}
+  }
+  float s1=0.f,s2=0.f;
+  for(int c=threadIdx.x;c<width;c+=256){
+    int i=planes?c*rows+row:row*width+c;
+    float z=(__bfloat162float(x[i])-mu)*rs,dd=__bfloat162float(dy[row*width+c])*gamma[c];
+    s1+=dd;s2+=dd*z;
+  }
+  s1=aux_sum(s1)/width;s2=aux_sum(s2)/width;
+  for(int c=threadIdx.x;c<width;c+=256){
+    int i=planes?c*rows+row:row*width+c;
+    float z=(__bfloat162float(x[i])-mu)*rs,dd=__bfloat162float(dy[row*width+c])*gamma[c];
+    float v=rs*(dd-s1-z*s2);
+    if(residual)v+=__bfloat162float(residual[row*width+c]);
+    dx[i]=__float2bfloat16_rn(v);
+  }
+}
+extern "C" __global__ void mw_aux_ln_affine_partial(const bf* x,const bf* dy,
+    const float* mean,const float* rstd,float* partial,int rows,int width,int planes){
+  const int c=blockIdx.x,start=blockIdx.y*4096,end=min(start+4096,rows);
+  float dg=0.f,db=0.f;
+  for(int r=start+threadIdx.x;r<end;r+=256){
+    float v=__bfloat162float(dy[r*width+c]);
+    float z=(__bfloat162float(x[planes?c*rows+r:r*width+c])-mean[r])*rstd[r];
+    dg+=v*z;db+=v;
+  }
+  dg=aux_sum(dg);db=aux_sum(db);
+  if(!threadIdx.x){partial[(blockIdx.y*2)*width+c]=dg;partial[(blockIdx.y*2+1)*width+c]=db;}
+}
+extern "C" __global__ void mw_aux_ln_affine_finish(const float* partial,float* dg,float* db,int width,int blocks){
+  int c=blockIdx.x*256+threadIdx.x;if(c>=width)return;
+  float g=0.f,b=0.f;
+  for(int k=0;k<blocks;++k){g+=partial[2*k*width+c];b+=partial[(2*k+1)*width+c];}
+  dg[c]=g;db[c]=b;
+}
+struct AuxStack {const bf* w[5];bf* dst;int rows[5],s0[5],s1[5],width;};
+extern "C" __global__ void mw_aux_stack(AuxStack p){
+  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
+  if(i>=p.rows[leaf]*p.width)return;
+  int offset=0;for(int k=0;k<leaf;++k)offset+=p.rows[k]*p.width;
+  p.dst[offset+i]=p.w[leaf][(i/p.width)*p.s0[leaf]+(i%p.width)*p.s1[leaf]];
+}
+extern "C" __global__ void mw_aux_owned_mask(const void* src,bf* dst,int n,int kind,int token){
+  int i=blockIdx.x*256+threadIdx.x;if(i>=n*n)return;
+  float v=kind==0?1.f:token?float(aux_mask_read(src,i/n,kind)!=0.f&&aux_mask_read(src,i%n,kind)!=0.f):aux_mask_read(src,i,kind);
+  dst[i]=__float2bfloat16_rn(v);
 }
 #else
 // SPDX-License-Identifier: Apache-2.0

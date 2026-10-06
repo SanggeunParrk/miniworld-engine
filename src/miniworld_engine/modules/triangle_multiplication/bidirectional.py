@@ -143,12 +143,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if (torch.is_grad_enabled() or _ds is not None) and _h100.serves(self, pair):
             return _h100.update(self, pair, mask, _ds)
         if (torch.is_grad_enabled() or _ds is not None) and _h100.requires_cuda_training(self, pair):
-            raise ValueError("native H100 D64 TriMul training requires B1 BF16 buckets L128..768")
+            raise ValueError("native H100 TriMul training requires a supported B1 BF16 bucket and FP32 norm affine")
 
         if _h100.serves_inference(self, pair, bidirectional=True, dropscale=_ds):
             return _h100.update_inference(self, pair, mask, bidirectional=True)
         if _ds is None and _h100.requires_cuda_inference(self, pair):
-            raise ValueError("H100 bidirectional TriMul D64/D128 inference requires the native CUDA bucket/dtype contract")
+            raise ValueError("H100 bidirectional TriMul inference requires the native CUDA bucket/dtype contract")
 
         # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
         # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
