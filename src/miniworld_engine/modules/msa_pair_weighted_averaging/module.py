@@ -94,6 +94,11 @@ class MSAPairWeightedAveraging(nn.Module):
                 if torch.is_grad_enabled() or (self.training and self.drop_msa.p_drop > 0):
                     return _pwa_train.pair_weighted_averaging(self, msa, pair, mask)
                 return _pwa_train.pair_weighted_averaging_inference(self, msa, pair, mask)
+            cuda_required = _pwa_train.native_aux_enabled() or (
+                not torch.is_grad_enabled() and not (self.training and self.drop_msa.p_drop > 0)
+                and _pwa_train.native_inference_enabled(msa.device))
+            if cuda_required and self.implementation == ImplementationType.MINIWORLD:
+                raise ValueError(f"H100 CUDA PWA does not support this call: {_pwa_train.refusal(msa, pair, *_dims)}")
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused cell where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):

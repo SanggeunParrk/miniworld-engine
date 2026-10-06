@@ -376,7 +376,16 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
     float a = dga[i], c = dbe[i];
     a += __shfl_xor_sync(0xffffffffu, a, 4); a += __shfl_xor_sync(0xffffffffu, a, 8); a += __shfl_xor_sync(0xffffffffu, a, 16);
     c += __shfl_xor_sync(0xffffffffu, c, 4); c += __shfl_xor_sync(0xffffffffu, c, 8); c += __shfl_xor_sync(0xffffffffu, c, 16);
-    if (lane < 4) { const int col = wgi * 32 + (i >> 1) * 8 + cq + (i & 1); atomicAdd(dln + col, a); atomicAdd(dln + 64 + col, c); }
+    if (lane < 4) {
+      const int col = wgi * 32 + (i >> 1) * 8 + cq + (i & 1);
+#if MW_PWA_CUDA_AUX
+      if constexpr (PARTIAL) {
+        const int off=(blockIdx.x*4+(warp&3))*128;
+        dln[off+col]=a; dln[off+64+col]=c;
+      } else
+#endif
+      { atomicAdd(dln + col, a); atomicAdd(dln + 64 + col, c); }
+    }
   }
 }
 
@@ -404,6 +413,13 @@ CUtensorMap map2d(const torch::Tensor& t, long rows, long cols, int box_cols, in
 }
 }  // namespace
 
+#if MW_PWA_CUDA_AUX
+__global__ void pwa_dgv_reduce(const float* src,float* dst,int rows,int cols) {
+  int col=blockIdx.x*blockDim.x+threadIdx.x;
+  if(col<cols){float v=0;for(int r=0;r<rows;++r)v+=src[(long)r*cols+col];dst[col]=v;}
+}
+#endif
+
 template <int NST, bool PARTIAL>
 void launch_t(const torch::Tensor& lnw, double eps, int ntile, int grid, float* dW, float* dln, const CUtensorMap& dgmap, const CUtensorMap& ymap,
               const CUtensorMap& xmap, const CUtensorMap& domap, const CUtensorMap& dmmap, const CUtensorMap& wmap) {
@@ -427,7 +443,13 @@ std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Te
   TORCH_CHECK(wgvT.scalar_type() == torch::kBFloat16 && wgvT.is_contiguous() && wgvT.dim() == 2 && wgvT.size(0) == D && wgvT.size(1) == KD, "wgvT: [64, 512] bf16");
   TORCH_CHECK(lnw.scalar_type() == torch::kFloat && lnw.is_contiguous() && lnw.numel() == D, "lnw: fp32[64]");
   auto dm = torch::empty_like(x);
+#if MW_PWA_CUDA_AUX
+  C10_CUDA_CHECK(cudaSetDevice(x.get_device()));
+  auto dln = torch::empty({2 * D}, x.options().dtype(torch::kFloat));
+  if(!partial)C10_CUDA_CHECK(cudaMemsetAsync(dln.data_ptr(),0,dln.nbytes(),at::cuda::getCurrentCUDAStream()));
+#else
   auto dln = torch::zeros({2 * D}, x.options().dtype(torch::kFloat));
+#endif
   CUtensorMap dgmap = map2d(dgv, M, KD, 64, BM, "dgv"), ymap = map2d(y, M, D, 64, BM, "y"), xmap = map2d(x, M, D, 64, BM, "x"),
               domap = map2d(dout, M, D, 64, BM, "dout"), dmmap = map2d(dm, M, D, 64, BM, "dm"), wmap = map2d(wgvT, D, KD, 64, D, "wgvT");
   static int sms = 0;
@@ -436,6 +458,10 @@ std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Te
   const int grid = (int)std::min<long>(ntile, (long)sms * blocks_per_sm);
   auto dW = partial ? torch::empty({grid, KD, D}, x.options().dtype(torch::kFloat)) : torch::zeros({KD, D}, x.options().dtype(torch::kFloat));
   float* dWp = dW.data_ptr<float>(); float* dlp = dln.data_ptr<float>();
+#if MW_PWA_CUDA_AUX
+  auto pln=partial?torch::empty({grid*4,2*D},dln.options()):dln;
+  dlp=pln.data_ptr<float>();
+#endif
   switch (nst * 2 + (partial ? 1 : 0)) {
     case 16: launch_t<8, false>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
     case 17: launch_t<8, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
@@ -445,7 +471,16 @@ std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Te
     case 9: launch_t<4, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
     default: TORCH_CHECK(false, "nst must be 4, 8 or 12");
   }
+#if MW_PWA_CUDA_AUX
+  if(partial) {
+    auto result=torch::empty({KD,D},dW.options());
+    pwa_dgv_reduce<<<(KD*D+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(dW.data_ptr<float>(),result.data_ptr<float>(),grid,KD*D);
+    pwa_dgv_reduce<<<1,256,0,at::cuda::getCurrentCUDAStream()>>>(pln.data_ptr<float>(),dln.data_ptr<float>(),grid*4,2*D);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();dW=result;
+  }
+#else
   if (partial) dW = dW.sum(0);
+#endif
   return {dm, dW, dln.narrow(0, 0, D), dln.narrow(0, D, D)};
 }
 

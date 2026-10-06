@@ -12,7 +12,15 @@ constexpr int DZ = 128, H = 8, NWARP = 8, THREADS = NWARP * 32, GJ = 16;
 constexpr int TILEB = GJ * DZ * 2;                        // one [16][128] bf16 tile = 4 KiB
 
 __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ float bf16r(float x) { return __bfloat162float(__float2bfloat16(x)); }
+__device__ __forceinline__ float bf16r(float x) {
+#if MW_PWA_CUDA_AUX && !MW_PWA_ROUND_LOGITS
+  // The fused projection feeds FP32 softmax directly, like the engine's fused
+  // reference. An extra BF16 logit rounding amplified dmsa error at L384.
+  return x;
+#else
+  return __bfloat162float(__float2bfloat16(x));
+#endif
+}
 __device__ __forceinline__ uint32_t pack2(float a, float b) { const __nv_bfloat162 h = __float22bfloat162_rn(make_float2(a, b)); return *reinterpret_cast<const uint32_t*>(&h); }
 __device__ __forceinline__ float2 unpack2(uint32_t u) { return __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u)); }
 __device__ __forceinline__ float qsum(float v) { v += __shfl_xor_sync(0xffffffffu, v, 1); v += __shfl_xor_sync(0xffffffffu, v, 2); return v; }
@@ -287,11 +295,31 @@ __global__ void __launch_bounds__(THREADS, 2) pair_bwd_kernel(const __nv_bfloat1
   }
   cp_wait<0>();
   // ---- block reductions: M^T (as acc[h][d]) ----
+#if MW_PWA_CUDA_AUX
+  // The input ring is dead after every warp drains its cp.async pipeline.
+  // Reuse it for fixed-order warp partials instead of unordered shared atomics.
+  __syncthreads();
+  float* warp_partials = reinterpret_cast<float*>(tiles);
+#pragma unroll
+  for (int mt = 0; mt < 8; ++mt) {
+    float* p = warp_partials + warp * H * DZ;
+    p[(2*q)*DZ+16*mt+r]=cm[mt][0]; p[(2*q+1)*DZ+16*mt+r]=cm[mt][1];
+    p[(2*q)*DZ+16*mt+r+8]=cm[mt][2]; p[(2*q+1)*DZ+16*mt+r+8]=cm[mt][3];
+  }
+  __syncthreads();
+  for(int k=tid;k<H*DZ;k+=THREADS) {
+    float value=0.f;
+#pragma unroll
+    for(int w=0;w<NWARP;++w)value+=warp_partials[w*H*DZ+k];
+    acc[k]=value;
+  }
+#else
 #pragma unroll
   for (int mt = 0; mt < 8; ++mt) {
     atomicAdd(acc + (2 * q) * DZ + 16 * mt + r, cm[mt][0]); atomicAdd(acc + (2 * q + 1) * DZ + 16 * mt + r, cm[mt][1]);
     atomicAdd(acc + (2 * q) * DZ + 16 * mt + r + 8, cm[mt][2]); atomicAdd(acc + (2 * q + 1) * DZ + 16 * mt + r + 8, cm[mt][3]);
   }
+#endif
   __syncthreads();
   // dWb[h][d] = gamma[d] M[h][d];  dgamma[d] = sum_h Wb[h][d] M[h][d]
   for (int k = tid; k < H * DZ; k += THREADS) { const int d = k % DZ; PWB[(long)i * H * DZ + k] = sg[d] * acc[k]; }
