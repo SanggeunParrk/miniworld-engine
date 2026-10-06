@@ -63,7 +63,7 @@ def pack_into_cuda(dst, wl, wlg, wr, wrg):
     p = T._launch_module().Struct([
         dst, *quad, r, d, *(w.stride(0) for w in quad), *(w.stride(1) for w in quad),
         *(int(w.dtype == torch.float32) for w in quad)])
-    vector = (d == 256 and T.preserve_d256_training()
+    vector = (T.preserve_training(d)
               and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad))
     _launch("mw_aux_pack_vec" if vector else "mw_aux_pack",
@@ -104,11 +104,16 @@ def dense_native(value, dtype=None):
     return out
 
 
-def zeros_native(shape, *, device, dtype=torch.float32):
-    out = torch.empty(shape,device=device,dtype=dtype)
+def zero_native_(out):
+    """Initialize an owned numeric workspace without an ATen fill kernel."""
     size = out.numel()*out.element_size()
-    _launch("mw_aux_zero_bytes", (min(512,(size+255)//256),1,1), [out,size])
+    if size:
+        _launch("mw_aux_zero_bytes", (min(512,(size+255)//256),1,1), [out,size])
     return out
+
+
+def zeros_native(shape, *, device, dtype=torch.float32):
+    return zero_native_(torch.empty(shape,device=device,dtype=dtype))
 
 
 def dense_copy_into(dst, src):
@@ -289,7 +294,7 @@ def stack_backward_weights(weights):
     p = T._launch_module().Struct([
         *weights, out, *(w.shape[0] for w in weights),
         *(w.stride(0) for w in weights), *(w.stride(1) for w in weights), width])
-    vector = (width == 256 and T.preserve_d256_training()
+    vector = (T.preserve_training(width)
               and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in weights))
     count = max(w.numel() for w in weights) // (8 if vector else 1)

@@ -6,10 +6,15 @@
 #include "tmn_kernels.cuh"
 #include <cooperative_groups.h>
 using namespace tmn;using namespace tmn::sm90;using bf=__nv_bfloat16;
-constexpr int PAIR_SUMS=69888;
 constexpr int H=2*WIDTH,NT=128,ROWS=LN_ROWS,SB=ROWS*H*2;
 struct Params {CUtensorMap tri,dt,dnmap;const bf* dn;const float *mu,*rs,*gamma;float *dg,*db;int M;};
+#ifdef LN_STATS_OFFSET
+constexpr int STATS=LN_STATS_OFFSET;
+constexpr int PAIR_SUMS=STATS+ROWS*8;
+#else
 constexpr int STATS=69760;
+constexpr int PAIR_SUMS=69888;
+#endif
 TMN_DEVI void load_stats(const Params& p,uint8_t* dst,uint64_t* bar,int row){
  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1],%2,[%3];"::"r"(smem_u32(dst)),"l"(p.mu+row),"n"(ROWS*4),"r"(smem_u32(bar)):"memory");
  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1],%2,[%3];"::"r"(smem_u32(dst+ROWS*4)),"l"(p.rs+row),"n"(ROWS*4),"r"(smem_u32(bar)):"memory");
@@ -50,7 +55,11 @@ template<int C,int NT> TMN_DEVI void aggregate_ln(float (&gg)[C/32],float (&bb)[
  for(int c=tid;c<C;c+=NT){float g=0,b=0;
   #pragma unroll
   for(int w=0;w<NT/32;++w){g+=sm[w*C+c];b+=sm[(NT/32+w)*C+c];}
+  #if MW_LN_PARTIALS
+  dg[blockIdx.x*C+c]=g;db[blockIdx.x*C+c]=b;
+  #else
   atomicAdd(dg+c,g);atomicAdd(db+c,b);
+  #endif
  }
  __syncthreads();
 }
@@ -114,6 +123,12 @@ tma_load_3d(sm,&p.tri,bar,row,0,0);tma_load_3d(sm+SB,&p.dnmap,bar,0,row,0);
  #pragma unroll
  for(int q=0;q<H/64;++q){int c=lane+half*(H/2)+q*32;acc[pair*H+c]=gg[q];acc[(2+pair)*H+c]=bb[q];}
  __syncthreads();
- for(int c=tid;c<H;c+=NT){atomicAdd(p.dg+c,acc[c]+acc[H+c]);atomicAdd(p.db+c,acc[2*H+c]+acc[3*H+c]);}
+ for(int c=tid;c<H;c+=NT){
+  #if MW_LN_PARTIALS
+  p.dg[blockIdx.x*H+c]=acc[c]+acc[H+c];p.db[blockIdx.x*H+c]=acc[2*H+c]+acc[3*H+c];
+  #else
+  atomicAdd(p.dg+c,acc[c]+acc[H+c]);atomicAdd(p.db+c,acc[2*H+c]+acc[3*H+c]);
+  #endif
+ }
 
 }
