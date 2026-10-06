@@ -629,7 +629,16 @@ void launch_glue3(int N, int S, int ntile, int grid, float* dWo, const CUtensorM
 }
 
 // glue from the saved o: (do head-major [H][N][S*C], dgp (into dgv[..., :HC] when given, else [S][N][HC]), dWo fp32 [D][HC])
+#if MW_PWA_CUDA_AUX
+__global__ void pwa_glue_reduce(const float* src,float* dst,int rows) {
+  int col=blockIdx.x*blockDim.x+threadIdx.x;
+  if(col<D*HC){float v=0;for(int r=0;r<rows;++r)v+=src[(long)r*D*HC+col];dst[col]=v;}
+}
+#endif
 std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Tensor dout, torch::Tensor wgw, torch::Tensor wot, c10::optional<torch::Tensor> dgv, int64_t nst, int64_t blocks_per_sm, c10::optional<torch::Tensor> drop_mask, double drop_scale) {
+#if MW_PWA_CUDA_AUX
+  C10_CUDA_CHECK(cudaSetDevice(o.get_device()));
+#endif
   TORCH_CHECK(o.is_cuda() && o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 3 && o.size(2) == HC, "o: [S, N, HC] bf16");
   const int S = (int)o.size(0), N = (int)o.size(1);
   TORCH_CHECK(N % 128 == 0 && S % BS == 0, "N must be a multiple of 128 and S even");
@@ -664,7 +673,13 @@ std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Te
   if (nst == 3) launch_glue3<3>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
   else if (nst == 2) launch_glue3<2>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
   else TORCH_CHECK(false, "nst must be 2 or 3 (the double-buffered staging leaves room for at most three o-stage slots)");
+#if MW_PWA_CUDA_AUX
+  auto result=torch::empty({D,HC},dWo.options());
+  pwa_glue_reduce<<<D*HC/256,256,0,at::cuda::getCurrentCUDAStream()>>>(dWo.data_ptr<float>(),result.data_ptr<float>(),grid);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return {d_o,dgp,result};
+#else
   return {d_o, dgp, dWo.sum(0)};
+#endif
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
