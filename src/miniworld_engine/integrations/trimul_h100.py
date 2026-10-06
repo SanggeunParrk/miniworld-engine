@@ -11,7 +11,12 @@ from miniworld_engine.modules.exceptions import ImplementationType
 TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 #: Widths with a single-direction CUDA training path (D64: port of the bidirectional D64 kernels; D128: B1/B7;
 #: D256/384: the wide sources at hidden D).$
-SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384)
+SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384, 512)
+
+
+def _native_buckets_enabled():
+    import os
+    return os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
 
 
 def serves(module, pair: torch.Tensor) -> bool:
@@ -34,7 +39,7 @@ def serves(module, pair: torch.Tensor) -> bool:
         or pair.shape[0] != 1
         or pair.shape[1] != pair.shape[2]
         or pair.shape[1] not in ((128, 256, 384, 512, 640, 768)
-                                if pair.shape[-1] == 64 and _native_training_enabled()
+                                if _native_buckets_enabled() or (pair.shape[-1] == 64 and _native_training_enabled())
                                 else (384, 768))
     ):
         return False
@@ -70,12 +75,33 @@ def update(
     dropscale: torch.Tensor | None,
     *, bidirectional: bool = True,
 ) -> torch.Tensor:
+    out = _update(module, pair, mask, dropscale, bidirectional=bidirectional)
+    if _native_buckets_enabled() or (pair.shape[-1] == 64 and _native_training_enabled()):
+        from .token_dit_train import _native_caller_output
+        out = _native_caller_output(out, pair, *module.parameters(), force=True)
+    return out
+
+
+def _update(module, pair, mask, dropscale, *, bidirectional=True):
     """Use native FP32 master gradients where qualified; preserve cast-based fallbacks."""
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_training import (
         bidirectional_trimul,
     )
 
     n, d = pair.shape[1], pair.shape[-1]
+    if _native_buckets_enabled() and d != 64:
+        from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import native_buckets, single_trimul
+        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
+        empty_mask = torch.empty(0,device=pair.device,dtype=torch.bool) if mask is None else mask
+        scale = training_unit_scale(pair) if dropscale is None else dropscale.reshape(n,d)
+        args = (pair, module.to_left.weight, module.to_left_gate.weight,
+                module.to_right.weight, module.to_right_gate.weight,
+                module.to_gate.weight, module.to_out.weight,
+                module.ln_pair.weight, module.ln_pair.bias,
+                module.ln_out.weight, module.ln_out.bias, empty_mask, scale)
+        if not bidirectional:
+            return single_trimul(module.outgoing, *args)
+        return native_buckets(True, True, *args)
     # Bidirectional D128 takes the token mask [n]: its front K1 and B7 form m[i] & m[j] themselves.
     # The other paths read a bf16 pair mask in forward and backward, so it is built once here.
     token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2)
@@ -153,7 +179,7 @@ def _native_training_enabled():
 
 def native_training_dropout(module, pair, probability):
     """Share the hand-CUDA Philox primitive; preserve PyTorch RNG progression."""
-    if pair.shape[-1] != 64 or not _native_training_enabled() or not serves(module, pair):
+    if not (_native_buckets_enabled() or (pair.shape[-1] == 64 and _native_training_enabled())) or not serves(module, pair):
         return None
     from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
     return extension("pack").drop_scale(pair, probability).reshape(
@@ -161,11 +187,10 @@ def native_training_dropout(module, pair, probability):
 
 
 def requires_cuda_training(module, pair):
-    """The explicit D64 candidate never silently substitutes a Triton shape."""
-    return (_native_training_enabled()
+    """Selected native training never silently substitutes a Triton shape."""
+    return ((_native_buckets_enabled() or (_native_training_enabled() and pair.shape[-1] == 64))
             and module.implementation == ImplementationType.MINIWORLD
-            and settings.current().engine_backend != "triton"
-            and pair.is_cuda and pair.shape[-1] == 64
+            and pair.is_cuda
             and torch.cuda.get_device_capability(pair.device) == (9, 0))
 
 
@@ -218,9 +243,11 @@ def serves_inference(
 
 def requires_cuda_inference(module, pair):
     """Promoted inference buckets refuse instead of silently using Triton."""
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import cuda_aux_enabled
+    native = cuda_aux_enabled()
     return (module.implementation == ImplementationType.MINIWORLD
-            and (settings.current().engine_backend != "triton" or _native_residual_bucket(module, pair))
-            and pair.is_cuda and (pair.shape[-1] in (64, 128) or _native_residual_bucket(module, pair))
+            and (native or settings.current().engine_backend != "triton" or _native_residual_bucket(module, pair))
+            and pair.is_cuda and (native or pair.shape[-1] in (64, 128) or _native_residual_bucket(module, pair))
             and torch.cuda.get_device_capability(pair.device) == (9, 0)
             and not torch.is_grad_enabled())
 
@@ -230,11 +257,12 @@ def update_inference(module, pair, mask, *, bidirectional):
 
     n = pair.shape[1]
     native_residual = not bidirectional and _native_residual_bucket(module, pair)
-    if native_residual and mask is not None and (
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
+    if (native_residual or runtime.cuda_aux_enabled()) and mask is not None and (
         mask.device != pair.device or mask.dtype != torch.bool
         or tuple(mask.shape) != (1, n) or not mask.is_contiguous()
     ):
-        raise ValueError("H100 D384/L512 TriMul requires a contiguous boolean [1,L] mask")
+        raise ValueError("H100 native TriMul inference requires a contiguous boolean [1,L] mask")
     # K1 forms the pair mask m[i] & m[j] from the token mask itself: no [n, n] tensor per call.
     token = None if mask is None else mask.reshape(n)
     if token is not None and token.dtype != torch.bool:
@@ -249,7 +277,6 @@ def update_inference(module, pair, mask, *, bidirectional):
     )
     # K1 packs the first four matrices with live stride-aware CUDA operations.
     # Preserve native column-major parameters instead of copying them first.
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
     if pair.shape[-1] in (64, 128) or native_residual or runtime.cuda_aux_enabled():
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
         matrices = cast_weights(weights)
@@ -297,7 +324,8 @@ def _wide_inference_ok(module, pair: torch.Tensor) -> bool:
 
 def serves_single(module, pair: torch.Tensor) -> bool:
     """Qualified single-direction native training contract; inference is separate."""
-    return pair.shape[-1] in SINGLE_TRAINING_WIDTHS and serves(module, pair)
+    return (pair.shape[-1] in SINGLE_TRAINING_WIDTHS
+            and (pair.shape[-1] != 512 or _native_buckets_enabled()) and serves(module, pair))
 
 
 def _uni_wide_inference_ok(module, pair: torch.Tensor) -> bool:
