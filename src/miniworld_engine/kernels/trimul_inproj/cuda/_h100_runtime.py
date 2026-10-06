@@ -97,16 +97,24 @@ def preserve_d256_training():
 
 def preserve_wide_training(width):
     """Opt-in D384/D512 native glue around the selected Hopper compute kernels."""
+    scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
     return (width in (384, 512)
-            and os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") == "1")
+            and (scoped or (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+                           and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") == "1")))
 
 
 def uni_training(x, outgoing):
-    return (uni_d256_training(x, outgoing)
-            or (preserve_wide_training(x.shape[-1]) and x.ndim == 4
-                and x.shape[0] == 1 and x.shape[1] == x.shape[2]
-                and x.shape[1] in (384, 768)))
+    if uni_d256_training(x, outgoing):
+        return True
+    bucket = (x.ndim == 4 and x.shape[0] == 1 and x.shape[1] == x.shape[2]
+              and x.shape[1] in (384, 768))
+    if preserve_wide_training(x.shape[-1]) and bucket:
+        return True
+    # D512 outgoing: both required lengths passed the historical latency bar,
+    # IEEE all-gradient/live-graph gates, and project-kernel racecheck.
+    return (outgoing and x.shape[-1] == 512 and bucket
+            and os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") != "0"
+            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") != "0")
 
 
 def preserve_training(width):
@@ -264,10 +272,12 @@ def k3_smem(cfg):
     )
 
 
-def pack_into(dst, wl, wlg, wr, wrg):
-    # Read live weights on the current stream, including during graph replay.
-    # This op already runs inside the opaque native boundary: a second compiled
-    # Python function adds dispatch overhead without enabling further fusion.
+def pack_into(dst, wl, wlg, wr, wrg, backward_stack=None, gate=None):
+    # Read live weights once on the current stream, including graph replay.
+    # An optional saved stack retains the backward layout from the same launch.
+    if backward_stack is not None:
+        from ._h100_pack import pack_training_pair
+        return pack_training_pair(dst, backward_stack, (gate,wl,wlg,wr,wrg))
     from ._h100_pack import pack_into as pack
 
     pack(dst, wl, wlg, wr, wrg)
@@ -295,10 +305,10 @@ def _normalize_into_compiled(dst, x, g, b):
     dst.copy_(F.layer_norm(x.float(), (x.shape[-1],), g, b, 1e-5).to(x.dtype))
 
 
-def normalize_into(dst, x, g, b):
+def normalize_into(dst, x, g, b, warp=False):
     if cuda_aux_enabled():
         from ._h100_pack import normalize_into as native
-        return native(dst, x, g, b)
+        return native(dst, x, g, b, warp=warp)
     return _normalize_into_compiled(dst, x, g, b)
 
 
