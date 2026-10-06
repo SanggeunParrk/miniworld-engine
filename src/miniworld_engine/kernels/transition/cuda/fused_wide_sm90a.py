@@ -79,7 +79,7 @@ def fused_d384_enabled(d: int) -> bool:
 def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split_fwd: bool = False,
          fused_d384: bool = False, multicast: bool = False, affine_parallel: bool = False,
          gate_multicast: bool = False, gate_k64: int = 0, gate_full_stage: bool = False,
-         dxln_full_row: bool = False):
+         dxln_full_row: bool = False, gate_saved_tma: bool = False):
     """Build the extension for one channel width and SM count (both in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid)."""
     ensure_cuda_home()
@@ -106,6 +106,8 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
         revision += "_gate_full_stage_v1"
     if dxln_full_row:
         revision += "_dxln_full_row_xsm_v1"
+    if gate_saved_tma:
+        revision += "_saved_ab_tma_ring_v1"
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
@@ -149,7 +151,9 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False):
                 and os.environ.get("MINIWORLD_TRANSITION_H100_GATE_MULTICAST", "0") == "1",
                 gate_k64, gate_full_stage,
                 x.shape[-1] == 256 and native_aux_enabled(256)
-                and os.environ.get("MINIWORLD_TRANSITION_H100_DXLN_FULL_ROW", "0") == "1")
+                and os.environ.get("MINIWORLD_TRANSITION_H100_DXLN_FULL_ROW", "0") == "1",
+                x.shape[-1] == 512 and save_ab
+                and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_TMA", "0") == "1")
 
 
 @functools.lru_cache(maxsize=8)
