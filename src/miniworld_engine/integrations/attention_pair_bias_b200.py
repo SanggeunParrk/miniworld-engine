@@ -292,8 +292,8 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
 
     This intentionally recreates the FP32 numerical path: beta's mathematical
     gradient is zero, but the required oracle contains reduction roundoff.
-    The full FP32 pair normalization and attention probabilities are temporary
-    workspaces. This is slower and does not retain the B200 tensor lifetimes.
+    Qualified pair producers keep normalization in shared memory, but the
+    extra FP32 projections and attention still exceed the B200 tensor lifetimes.
     """
     E = _rows().ext()
     with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
@@ -306,6 +306,11 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "2" if qualified else "0"))
         if pair_ln not in (0, 1, 2):
             raise ValueError("H100 shadow pair LN mode must be 0, 1, or 2")
+        pair_project_default = qualified and shape[0] in (8, 12, 16) and pair_ln == 2
+        fused_pair_project = os.environ.get(
+            "MINIWORLD_APB_H100_SHADOW_PAIR_PROJECT", "1" if pair_project_default else "0") == "1"
+        if fused_pair_project and not (qualified and shape[0] in (8, 12, 16) and pair_ln == 2):
+            raise ValueError("H100 exact LN pair projection requires a qualified H8/H12/H16 training shape and pair LN mode 2")
         if pair_ln:
             values = convert([single, dy, *leaves])
             x, dy32 = values[:2]
@@ -318,16 +323,18 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         L, D = single.shape[1:]
         H, dh = wb.shape[0], D // wb.shape[0]
         xa = E.exact_ln(x, lnw, lnb, eps_s).view(L, D)
-        # This experiment removes only the FP32 pair-input copy. The normalized
-        # pair and later projection/dBias/dLN still materialize; B200's fused
-        # pair producer/consumer lifetimes are not yet restored.
-        za = (E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2) if pair_ln
-              else E.exact_ln(z, lnpw, lnpb, eps_p)).view(L * L, DP)
+        # Preserve the accurate D2 producer when explicitly selected or for
+        # H24. The fused producer keeps its normalized pair tile on chip and
+        # writes masked head-major bias directly for the other required shapes.
+        za = None if fused_pair_project else (
+            E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2) if pair_ln
+            else E.exact_ln(z, lnpw, lnpb, eps_p)).view(L * L, DP)
         q = E.exact_mm(xa, wq.t(), bq)
         k = E.exact_mm(xa, wk.t())
         v = E.exact_mm(xa, wv.t())
         gate = E.exact_mm(xa, wg.t())
-        bias = E.exact_mm(za, wb.t())
+        bias = (E.exact_ln_pair_project(pair, lnpw, lnpb, wb, mask, eps_p) if fused_pair_project
+                else E.exact_mm(za, wb.t()))
         dog = E.exact_mm(dy32.view(L, D), wo)
         do_rows = E.exact_point(dog, gate, 1.0, 1).view(L, H, dh)
         if mask is not None:
@@ -336,8 +343,9 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
             # project CUDA launches of the installed C++ templates, including
             # the FP32 rounded product/reduction used for its delta tensor.
             qh, kh, vh = (t.view(L, H, dh) for t in (q, k, v))
-            bm = (E.exact_transpose_tiled(bias, mask, L, False) if shadow_io
-                  else E.exact_mask_bias(bias, mask, L))
+            bm = bias if fused_pair_project else (
+                E.exact_transpose_tiled(bias, mask, L, False) if shadow_io
+                else E.exact_mask_bias(bias, mask, L))
             out32, lse32 = E.exact_attention_fwd(qh, kh, vh, bm)
             delta32 = E.exact_delta(do_rows, out32)
             ds = (E.exact_attention_db_only(qh, kh, vh, bm, lse32, do_rows, delta32)
