@@ -4,7 +4,9 @@
 // LayerNorms are two-pass in fp32 (mean, then the variance of the centred values), eps as given. "scale" operands are the stored
 // sigmoids s (the conditioning tables keep sigmoid(pre)), so the pre-activation gradients are d s * s (1 - s). Strided operands (column
 // blocks of the [M, 768] conditioning table, of the [M, 512] q | k | v | g projection) come with their row stride.
-//   f32_ln_aff      cn_k = LN(c) * g_k for up to three weights (the conditioning LayerNorms: AdaLN 1, AdaLN 2, the cross mode's K / V AdaLN)
+// Every kernel executes griddepcontrol.wait before its first global access (programmatic dependent launch; a no-op when launched without it).
+//   f32_ln_aff      cn_k = LN(c) * g_k for up to three weights (the conditioning LayerNorms: AdaLN 1, AdaLN 2, the cross mode's K / V AdaLN),
+//                   rows ld apart; optionally a copy of c (oc): the [cn1 | cn2 | c | cnkv] operand of the grouped conditioning GEMM
 //   f32_adaln       x = LN(a) * scale + shift (AdaLN 1, AdaLN 2, the K / V AdaLN)
 //   f32_gate        gated = sigmoid(g) * o
 //   f32_tail_bwd    dt = dy * st, d st_pre = dy * t * st (1 - st)                                    (the transition's output gate)
@@ -31,7 +33,7 @@ DEVI void ld4(const float* p, float (&x)[4]) {
   x[0] = v.x; x[1] = v.y; x[2] = v.z; x[3] = v.w;
 }
 DEVI void st4(float* p, const float (&x)[4]) { *reinterpret_cast<float4*>(p) = make_float4(x[0], x[1], x[2], x[3]); }
-DEVI float sigf(float x) { return 1.f / (1.f + __expf(-x)); }
+DEVI float sigf(float x) { return rcpf(1.f + __expf(-x)); }       // rcp.approx: the IEEE division was a hot spot (fused_tf32)
 DEVI float rna_tf32(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
 // x -> (x - mean) * rstd over the warp's 128 channels; returns rstd
 DEVI float norm128(float (&x)[4], float eps) {
@@ -56,16 +58,19 @@ DEVI void red4(float* p, float a, float b, float c, float d) {
 }
 
 #define ROW_OF_WARP                                                       \
+  pdl_wait();                                                             \
+  pdl_launch();                                                           \
   const int row = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31; \
   if (row >= M) return;                                                   \
   const int ch = 4 * lane;
 
 extern "C" __global__ void __launch_bounds__(256)
 f32_ln_aff(const float* __restrict__ c, const float* __restrict__ g1, float* __restrict__ o1, const float* __restrict__ g2,
-           float* __restrict__ o2, const float* __restrict__ g3, float* __restrict__ o3, int M, float eps) {
+           float* __restrict__ o2, const float* __restrict__ g3, float* __restrict__ o3, float* __restrict__ oc, int ld, int M, float eps) {
   ROW_OF_WARP
   float x[4], g[4], y[4];
   ld4(c + (size_t)row * C + ch, x);
+  if (oc != nullptr) st4(oc + (size_t)row * ld + ch, x);
   norm128(x, eps);
   const float* gs[3] = {g1, g2, g3};
   float* os[3] = {o1, o2, o3};
@@ -75,7 +80,7 @@ f32_ln_aff(const float* __restrict__ c, const float* __restrict__ g1, float* __r
     ld4(gs[k] + ch, g);
 #pragma unroll
     for (int i = 0; i < 4; ++i) y[i] = x[i] * g[i];
-    st4(os[k] + (size_t)row * C + ch, y);
+    st4(os[k] + (size_t)row * ld + ch, y);
   }
 }
 
@@ -208,6 +213,8 @@ f32_ln_bwd(const float* __restrict__ c, float* __restrict__ dc, const float* __r
            const float* __restrict__ dcn2, const float* __restrict__ g2, const float* __restrict__ dcn3, const float* __restrict__ g3,
            float* __restrict__ dg, int M, float eps) {
   __shared__ float red[8][3 * C];
+  pdl_wait();
+  pdl_launch();
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, ch = 4 * lane;
   const int nk = dcn3 != nullptr ? 3 : 2;
   const float* dcns[3] = {dcn1, dcn2, dcn3};

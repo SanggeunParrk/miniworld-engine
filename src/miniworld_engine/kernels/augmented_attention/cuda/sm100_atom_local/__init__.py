@@ -258,13 +258,22 @@ KERNELS_TF32 = {
 }
 
 
+#: the fp32-path kernels that execute griddepcontrol.wait before any global access (programmatic dependent launch, ``sm100_atom.PDL32``)
+_PDL_TF32 = ("fwd32",)
+
+
 @functools.lru_cache(maxsize=None)
 def _load32(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     stem, func, smem = KERNELS_TF32[name]
+    pdl = name in _PDL_TF32
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem), func, smem)
+        k = driver.Kernel(cubin(stem), func, smem, pdl=pdl and sm100_atom.PDL32[0])
+    if pdl:
+        sm100_atom._PDL32_LOADED.append(k)
+    return k
 
 
 def _rows32(t, n, swizzle=128):

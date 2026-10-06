@@ -36,7 +36,14 @@ SwiGLU epilogues -- and the ``sm100_atom_local`` ``*_tf32`` attention kernels), 
 saved activations and gradients fp32 (``sm100_atom`` ``rows_tf32.cu``, ``sm100_atom_local`` ``lbias_tf32.cu``); the weight gradients are
 cuBLAS with TF32 forced on and restored. Two more opaque ops (``local_dit_block_fwd_tf32`` / ``_bwd_tf32``), the same hoist (fp32 tables
 under their own keys), the same padding. The kernels load separately from the bf16 ones: a failure warns once and keeps the module path for
-fp32 calls only. ``MINIWORLD_LOCAL_DIT_TF32=0`` keeps fp32 calls on the module path.
+fp32 calls only. ``MINIWORLD_LOCAL_DIT_TF32=0`` keeps fp32 calls on the module path. The fp32 weight pack is one flat buffer (one cat and an
+in-place tf32 rounding: three kernels when a graph replay repacks; the backward's transposes are packed separately, by training calls only),
+and ``static_inputs()`` covers it (a static capture replays no packing kernel). An inference call's conditioning tables are one LayerNorm
+launch and one grouped GEMM, and its block is three kernels: ``atom_pre_tf32`` (AdaLN 1, the K / V AdaLN, the four projections),
+the attention, ``atom_post_tf32`` (gate, Wo, both gated residuals, AdaLN 2, SwiGLU, Ws) -- the unfused kernels' arithmetic with the
+activations kept on chip (``MINIWORLD_LOCAL_DIT_TF32_FUSED=0``: the unfused kernels; training always runs them, they save the
+activations). The fp32 kernels launch with programmatic dependent launch (``sm100_atom.PDL32``, ``MINIWORLD_TF32_PDL=0``
+turns it off).
 """
 
 from __future__ import annotations
@@ -144,6 +151,27 @@ def _kernels32_ready(index: int) -> bool:
                       stacklevel=2)
         return False
     _LOADED32.add(index)
+    return True
+
+
+_FUSED32_FAILED = False
+
+
+def _fused32_ready(device) -> bool:
+    """The fused inference kernels of the fp32 path (``sm100_atom`` ``fused_tf32.cu``: AdaLNs + projections, and gate + Wo + AdaLN 2 +
+    SwiGLU + Ws with both residuals): two launches in place of eight. ``MINIWORLD_LOCAL_DIT_TF32_FUSED=0`` keeps the unfused kernels; a
+    build or load failure warns once and keeps them too (the rest of the fp32 path is unaffected)."""
+    global _FUSED32_FAILED
+    if _FUSED32_FAILED or os.environ.get("MINIWORLD_LOCAL_DIT_TF32_FUSED", "1") == "0":
+        return False
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+
+    try:
+        rows.load_fused32(device.index if device.index is not None else torch.cuda.current_device())
+    except Exception as exc:  # a toolchain or driver problem keeps the unfused kernels
+        _FUSED32_FAILED = True
+        warnings.warn(f"sm_100a fused fp32 atom kernels unavailable, keeping the unfused fp32 kernels: {exc!r}", RuntimeWarning, stacklevel=2)
+        return False
     return True
 
 
@@ -468,72 +496,134 @@ def _tf32():
         torch.backends.cuda.matmul.allow_tf32 = old
 
 
-def _pack32(weights):
-    """The fp32 path's weight operands: the forward packs (K-major [n, k] for gemm32) and the backward's transposed ones, every matrix
-    rounded to tf32 (RNA) once here -- a kind::tf32 MMA truncates its operands; the biases and LayerNorm weights stay fp32."""
-    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import round_tf32
+_ZEROS32: dict = {}
 
+
+def _zeros32(device):
+    """A persistent fp32 zero vector [128] per device (the zero bias blocks of the packs). Made eagerly and kept; inside a CUDA-graph capture
+    with none kept yet, a fresh one (its memset is recorded, and it is not kept: its contents exist only once the graph replays)."""
+    z = _ZEROS32.get(device)
+    if z is None:
+        z = torch.zeros(DS_, device=device, dtype=F32)
+        if not torch.cuda.is_current_stream_capturing():
+            _ZEROS32[device] = z
+    return z
+
+
+def _pack32(weights):
+    """The fp32 path's forward weight operands (K-major [n, k] for gemm32), in ONE flat fp32 buffer: one ``torch.cat`` of the parameters and
+    an in-place tf32 rounding (RNA) of its matrix part -- a kind::tf32 MMA truncates its operands; the biases and LayerNorm weights stay
+    fp32. Three kernels per pack (a CUDA-graph replay that repacks runs only these; the previous per-tensor packing recorded ~30 small
+    kernels per block). Matrix rows, in order: wmod [768] (+ wm [256] right after it in the cross mode: ``wcond`` = [wmod; wm] is one
+    operand), wp [512], wu [512], wo [128], ws [128 x 256]; then bmod [768], bm [256] (cross), bp [512], g1, g2, gkv (cross) [128 each].
+    The backward's transposed operands are ``_pack32_bwd``'s (training only)."""
     cross = len(weights) > len(WEIGHTS)
     w = dict(zip((*WEIGHTS, *CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]), weights, strict=True))
 
-    def cat(*names):
-        return torch.cat([w[name].detach().float() for name in names]).contiguous()
-
-    def vec(name):
-        return w[name].detach().float().contiguous()
+    def m(name):
+        return w[name].detach().float().reshape(-1)
 
     with torch.no_grad():
-        z = torch.zeros(DS_, device=weights[0].device, dtype=F32)
-        wmod = cat("attention.ada_ln_in.to_scale.weight", "attention.ada_ln_in.to_bias.weight", "transition.ada_ln_in.to_scale.weight",
-                   "transition.ada_ln_in.to_bias.weight", "attention.to_scale.weight", "transition.to_scale.weight")
-        bmod = torch.cat([vec("attention.ada_ln_in.to_scale.bias"), z, vec("transition.ada_ln_in.to_scale.bias"), z,
-                          vec("attention.to_scale.bias"), vec("transition.to_scale.bias")]).contiguous()
+        z = _zeros32(weights[0].device)
+        wa, wb = w["transition.expand_a.weight"].detach().float(), w["transition.expand_b.weight"].detach().float()
         proj = ("query", "gate", "key", "value") if cross else ("query", "key", "value", "gate")
-        wp = cat(*(f"attention.to_{p}.weight" for p in proj))
-        bp = torch.cat([vec("attention.to_query.bias"), z, z, z]).contiguous()
-        wa, wb = vec("transition.expand_a.weight"), vec("transition.expand_b.weight")
-        wu = torch.cat([wa[:DS_], wb[:DS_], wa[DS_:], wb[DS_:]]).contiguous()
-        wo, ws = cat("attention.to_out.weight"), cat("transition.squeeze.weight")
-
-        wmod, wp, wu, wo, ws = (round_tf32(t) for t in (wmod, wp, wu, wo, ws))
-
-        def tr(t):
-            return t.t().contiguous()
-
-        pk = SimpleNamespace(wmod=wmod, bmod=bmod, g1=vec("attention.ada_ln_in.ln_cond.weight"), g2=vec("transition.ada_ln_in.ln_cond.weight"),
-                             wp=wp, bp=bp, wo=wo, wu=wu, ws=ws, wmodT=tr(wmod), wpT=tr(wp), woT=tr(wo), wuT=tr(wu), wsT=tr(ws), gkv=None)
+        mats = [m("attention.ada_ln_in.to_scale.weight"), m("attention.ada_ln_in.to_bias.weight"), m("transition.ada_ln_in.to_scale.weight"),
+                m("transition.ada_ln_in.to_bias.weight"), m("attention.to_scale.weight"), m("transition.to_scale.weight")]
         if cross:
-            pk.wm = round_tf32(cat("attention.ada_ln_kv.to_scale.weight", "attention.ada_ln_kv.to_bias.weight"))
-            pk.bm = torch.cat([vec("attention.ada_ln_kv.to_scale.bias"), z]).contiguous()
-            pk.gkv = vec("attention.ada_ln_kv.ln_cond.weight")
-            pk.wmT = tr(pk.wm)
+            mats += [m("attention.ada_ln_kv.to_scale.weight"), m("attention.ada_ln_kv.to_bias.weight")]
+        mats += [m(f"attention.to_{p}.weight") for p in proj]
+        mats += [wa[:DS_].reshape(-1), wb[:DS_].reshape(-1), wa[DS_:].reshape(-1), wb[DS_:].reshape(-1)]
+        mats += [m("attention.to_out.weight"), m("transition.squeeze.weight")]
+        vecs = [m("attention.ada_ln_in.to_scale.bias"), z, m("transition.ada_ln_in.to_scale.bias"), z, m("attention.to_scale.bias"),
+                m("transition.to_scale.bias")]
+        if cross:
+            vecs += [m("attention.ada_ln_kv.to_scale.bias"), z]
+        vecs += [m("attention.to_query.bias"), z, z, z, m("attention.ada_ln_in.ln_cond.weight"), m("transition.ada_ln_in.ln_cond.weight")]
+        if cross:
+            vecs.append(m("attention.ada_ln_kv.ln_cond.weight"))
+        flat = torch.cat(mats + vecs)
+        nmat = sum(t.numel() for t in mats)
+        flat[:nmat].view(torch.int32).add_(0x1000).bitwise_and_(-0x2000)      # RNA to tf32: half an ulp into the magnitude, drop 13 bits
+
+        off = [0]
+
+        def take(rows, cols=DS_):
+            t = flat[off[0]:off[0] + rows * cols].view(rows, cols)
+            off[0] += rows * cols
+            return t
+
+        rc = 8 if cross else 6
+        wcond = take(rc * DS_)
+        wp, wu, wo, ws = take(4 * DS_), take(4 * DS_), take(DS_), take(DS_, 2 * DS_)
+        bcond = flat[off[0]:off[0] + rc * DS_]
+        off[0] += rc * DS_
+        bp = flat[off[0]:off[0] + 4 * DS_]
+        off[0] += 4 * DS_
+        g1, g2 = flat[off[0]:off[0] + DS_], flat[off[0] + DS_:off[0] + 2 * DS_]
+        off[0] += 2 * DS_
+        pk = SimpleNamespace(wmod=wcond[:6 * DS_], bmod=bcond[:6 * DS_], g1=g1, g2=g2, wp=wp, bp=bp, wo=wo, wu=wu, ws=ws, gkv=None,
+                             wcond=wcond, bcond=bcond, flat=flat)
+        if cross:
+            pk.wm, pk.bm, pk.gkv = wcond[6 * DS_:], bcond[6 * DS_:], flat[off[0]:off[0] + DS_]
+            off[0] += DS_
+        assert off[0] == flat.numel(), (off[0], flat.numel())
     return pk
 
 
+def _pack32_bwd(weights):
+    """The backward's operands: the forward pack and its matrices transposed (wmodT [128, 768], wpT [128, 512], woT, wuT [128, 512],
+    wsT [256, 128], wmT [128, 256]), all tf32-rounded (they are transposes of the rounded forward pack)."""
+    pk = _weights32(weights)
+
+    def tr(t):
+        return t.t().contiguous()
+
+    with torch.no_grad():
+        bk = SimpleNamespace(**vars(pk))
+        bk.wmodT, bk.wpT, bk.woT, bk.wuT, bk.wsT = tr(pk.wmod), tr(pk.wp), tr(pk.wo), tr(pk.wu), tr(pk.ws)
+        bk.wmT = tr(pk.wm) if pk.gkv is not None else None
+    return bk
+
+
 _PACKS32: dict = {}
+_PACKS32B: dict = {}
 
 
-def _weights32(weights):
-    """``_pack32``, reused while every weight's tensor object and version are unchanged; scoped to the CUDA-graph capture
-    (``kernels._capture``) as the bf16 packs are."""
+def _cached32(store, weights, build):
+    """``build(weights)``, reused while every weight's tensor object and version are unchanged; scoped to the CUDA-graph capture
+    (``kernels._capture``) as the bf16 packs are -- except under ``kernels._capture.static_inputs()``, whose contract (the weights AND the
+    conditioning / pair keep their contents between replays) covers the weights: a capture then serves from, and fills, the eager entry and a
+    replay runs no packing kernel (``static_weights()`` has the same effect through ``scoped``)."""
     try:
         versions = tuple(w._version for w in weights)
     except RuntimeError:  # inference tensors carry no version counter: nothing could invalidate an entry
-        return _pack32(weights)
-    key = _capture.scoped(("tf32", *(id(w) for w in weights)))
+        return build(weights)
+    raw = ("tf32", *(id(w) for w in weights))
+    key = (None, raw) if _capture._STATIC_INPUTS[0] else _capture.scoped(raw)
     if key is None:
-        return _pack32(weights)
-    hit = _PACKS32.get(key)
+        return build(weights)
+    hit = store.get(key)
     if hit is not None:
         refs, seen, pack = hit
         if seen == versions and all(r() is w for r, w in zip(refs, weights, strict=True)):
             return pack
-    _capture.prune(_PACKS32)
-    if len(_PACKS32) >= 64:  # a model's worth of blocks; drop the oldest
-        _PACKS32.pop(next(iter(_PACKS32)))
-    pack = _pack32(weights)
-    _PACKS32[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
+    if not _capture._STATIC_INPUTS[0]:
+        _capture.prune(store)
+    if len(store) >= 64:  # a model's worth of blocks; drop the oldest
+        store.pop(next(iter(store)))
+    pack = build(weights)
+    store[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
     return pack
+
+
+def _weights32(weights):
+    """The forward pack (``_pack32``), cached (``_cached32``)."""
+    return _cached32(_PACKS32, weights, _pack32)
+
+
+def _weights32_bwd(weights):
+    """The backward pack (``_pack32_bwd``), cached (``_cached32``)."""
+    return _cached32(_PACKS32B, weights, _pack32_bwd)
 
 
 def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
@@ -543,13 +633,19 @@ def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
 
     def build():
         c2 = c2_fn()
+        if not save:                                                 # inference: two launches, the tables only
+            # cat = [cn1 | cn2 | c | cnkv] (one LayerNorm launch), then ONE grouped GEMM: column group g (256 wide) of [mod | mkv] reads
+            # cat's 128-column block g against wcond's rows 256 g .. -- mod and mkv are column views of one [M, 1024] (768) table
+            rc = 8 if cross else 6
+            cat = torch.empty(c2.shape[0], rc // 2 * DS_, device=c2.device, dtype=F32)
+            rows.ln32(c2, pk.g1, pk.g2, pk.gkv if cross else None, out=cat)
+            tab = rows.gemm32(cat, pk.wcond, k=DS_, a_grp=2 * DS_, bias=pk.bcond, sigmask=_SIG_MOD | (0b1000000 if cross else 0))
+            return tab[:, :6 * DS_], None, None, None, (tab[:, 6 * DS_:] if cross else None)
         cn1, cn2, cnkv = rows.ln32(c2, pk.g1, pk.g2, pk.gkv if cross else None)
         mod = torch.empty(c2.shape[0], 6 * DS_, device=c2.device, dtype=F32)
         for i, x in enumerate((cn1, cn2, c2)):
             rows.gemm32(x, pk.wmod, mod, n=2 * DS_, b_row0=2 * DS_ * i, ocol0=2 * DS_ * i, bias=pk.bmod, sigmask=_SIG_MOD)
         mkv = rows.gemm32(cnkv, pk.wm, bias=pk.bm, sigmask=1) if cross else None
-        if not save:                                                 # inference keeps the tables only
-            cn1 = cn2 = cnkv = None
         return mod, cn1, cn2, cnkv, mkv
 
     if save or not _hoisting():
@@ -609,6 +705,14 @@ def _block_fwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, m
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         mod, cn1, cn2, cnkv, mkv = _cond_tables32(cond, lambda: _padded(cond, n).reshape(m, DC_).contiguous(), n, weights, pk, cross,
                                                   save)
+        if not save and _fused32_ready(dev):                         # inference: pre (AdaLNs + projections), attention, post (the rest)
+            p = rows.pre32(s2, mod[:, _S1], mod[:, _B1], pk.wp, pk.bp[:DS_], _P_RND[cross], mks=mkv[:, :DS_] if cross else None,
+                           mkb=mkv[:, DS_:] if cross else None)
+            bias = _pair_bias32(pair, n, weights, save)
+            p3 = p.view(a, n, 4 * DS_)
+            o, _ = local.attn_fwd32(p3[..., qc:qc + DS_], p3[..., kc:kc + DS_], p3[..., vc:vc + DS_], bias, _keys(mask, n0, n))
+            out = rows.post32(o.view(m, DS_), p[:, gc:gc + DS_], s2, mod[:, _SO], mod[:, _S2], mod[:, _B2], mod[:, _ST], pk.wo, pk.wu, pk.ws)
+            return [_unpadded(out.view(a, 1, n, DS_), single.shape)]
         x1 = rows.adaln32(s2, mod[:, _S1], mod[:, _B1])                                      # AdaLN 1
         p = torch.empty(m, 4 * DS_, device=dev, dtype=F32)
         xkv = None
@@ -657,7 +761,7 @@ def _block_bwd32(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pai
     m = a * n
     dev = single.device
     with torch.cuda.device(dev):
-        pk = _weights32(weights)
+        pk = _weights32_bwd(weights)
         qc, kc, vc, gc = _P_COLS[cross]
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         c2 = _padded(cond, n).reshape(m, DC_).contiguous()

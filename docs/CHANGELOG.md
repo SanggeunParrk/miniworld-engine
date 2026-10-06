@@ -10,6 +10,9 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 AF3 local atom DiT inference, faster: three fused kernels per hoisted inference call (`atom_pre_tf32`,
+  attention, `atom_post_tf32`), the weight pack in 3 launches, the conditioning tables in 2, PDL. 3 blocks, 5 samples: 1.59-1.98x
+  Anthropic's FastAtomStack fp32 per call, 1.14-1.39x with hoisted tables, at 1024-6144 atoms. Page: `docs/gpus/b200/local_dit/local_dit.md`.
 - B200 fp32 SWA atom DiT forward, faster: the rounded weight forms in one kernel (`wprep_tf32.cu`), `mod_fwd_tf32` as a persistent
   store stream, and the per-row modulation / RoPE values of `qkvg_fwd_tf32` / `ffn_fwd_tf32` through TMA boxes. Inference, one block,
   5 samples: 1.37-1.86x Anthropic's fused block with TF32 GEMMs (modulation in the call; 1.43-2.03x precomputed) at 1024-6144 atoms,

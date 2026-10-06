@@ -150,7 +150,44 @@ kernels, 7 GEMMs (cross: 10), dq + dkv, pair-bias backward, the cuBLAS weight gr
 Tests: `tests/integrations/test_b200_local_dit_tf32_gpu.py` (output and every gradient against an fp64 block, no worse than the fp32
 module path with TF32 on -- `ef < 1.5 em + 1e-3` -- and loosely bounded by the IEEE module path; cross / non-cross, masks, N not a multiple
 of 32 / 128; eager, `torch.compile`, CUDA graph for inference and for a whole training step; the TF32 kernels ran and no Triton / bf16
-kernel; no kernel spills (`lmem == 0`, <= 128 registers); the fp32 hoist). Measurements: not yet taken.
+kernel; no kernel spills (`lmem == 0`; <= 128 registers, `atom_post_tf32` <= 168); the fp32 hoist; fused vs unfused inference).
+
+### Fused inference kernels (`sm100_atom/fused_tf32.cu`)
+
+An inference call (no saves) runs the block as three kernels: `atom_pre_tf32` (AdaLN 1 and, in cross mode, the K / V AdaLN from the exact
+x1, written rounded into swizzled shared-memory A tiles, then x1 [Wq; Wg] and xkv [Wk; Wv] into TMEM; epilogue: q bias, q / k / v
+rounding, TMA store), `local_attn_fwd_tf32`, and `atom_post_tf32` (gate, Wo, a1 = s + so y, AdaLN 2, SwiGLU in two 128-column halves,
+h Ws, out = a1 + st t; y stays in TMEM). Persistent 128-row units; the row warps keep 4 rows of loads in flight per phase and run the
+LayerNorm reductions of those rows interleaved; sigmoids use `rcp.approx`. The units of the last, partial wave are split in two (pre: two
+256-column halves, post: two 64-row halves) when that shortens the makespan (`sm100_atom._nfull`: all halves when 2 x tiles <= SMs, else
+only the tail beyond whole waves); measured, a half unit costs 0.7-0.8 of a full one, so splitting every unit loses past one wave.
+`atom_post_tf32` is capped at 168 registers (384 threads, one CTA per SM: the 128 cap kept its unit-loop state on the stack).
+`MINIWORLD_LOCAL_DIT_TF32_FUSED=0` keeps the unfused kernels; training always uses them (they save the activations). Fused and unfused
+agree to < 2e-6.
+
+What it took, in order (per block, 5 samples, us): the weight pack rebuilt in every graph replay (~30 small kernels -> one flat buffer, 3
+launches; none under `static_inputs()`), the conditioning tables in 2 launches instead of 5, PDL between the fp32 kernels, the fusion (first
+slower: one serial global round trip per row; fixed by batching the row loads), the IEEE-division sigmoid (23 % of post's stall samples),
+the serial LayerNorm shuffle chains, the `__ldg` bias loads, and the last-wave split at 4096 atoms (160 tiles on 148 SMs).
+
+### Measurements (2026-10-06)
+
+Against Anthropic's AF3 atom transformer (Protenix v1 kit `protenix_fpf_ditfast.atom_fast.FastAtomStack`, fp32 activations, TF32 cuBLAS,
+its own fused attention / row kernels and per-item hoist), the same Protenix AtomTransformer weights, 3 cross-attention blocks, 5 samples,
+CUDA-graph replay (min of 9 x 60), B200. "hoisted": Anthropic's `dit_hoist` on / ours under `kernels._capture.static_inputs()`.
+
+| atoms | per call: Anthropic / ours (us) | x | hoisted: Anthropic / ours | x |
+|---|---|---|---|---|
+| 1024 | 402.4 / 203.0 | 1.98 | 185.4 / 136.5 | 1.36 |
+| 2048 | 523.4 / 280.2 | 1.87 | 254.7 / 194.5 | 1.31 |
+| 3072 | 624.4 / 329.8 | 1.89 | 313.3 / 225.2 | 1.39 |
+| 4096 | 754.0 / 465.9 | 1.62 | 386.0 / 337.8 | 1.14 |
+| 6144 | 1017.8 / 638.2 | 1.59 | 544.7 / 456.2 | 1.19 |
+
+Accuracy: ours 1.36e-4 against the fp64 engine block (the engine's IEEE fp32 module path is 1.6e-7 from it); Protenix's AtomTransformer
+in IEEE fp32 is 1.06e-3 from that block and Anthropic 1.09e-3 (1.9e-4 from Protenix fp32) -- a definition difference between Protenix's
+block and the engine's, not precision (Protenix's own kernels switched off change nothing). Against the PyTorch compiled fp32 module path
+(bench harness, TF32 on, one block, L 128-768): inference 1.5-2.1x, training 1.25-1.49x (the training numbers predate the work above).
 
 ## Not covered
 

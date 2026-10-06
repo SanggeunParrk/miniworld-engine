@@ -66,6 +66,8 @@ local_attn_fwd_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
     fence_barrier_init();
   }
   if (warp == 0) tmem_alloc(smem_u32(tptr), 512);
+  pdl_wait();                                                        // programmatic dependent launch: no global access before this
+  pdl_launch();
   const int qd = warp & 3, qt = warp >> 2;
   const int wq = 4 * jc + qd;                                        // this quadrant's window; lane = query of it
   float bl[32];                                                      // bias row (log2 units) of this thread's 32 band cells

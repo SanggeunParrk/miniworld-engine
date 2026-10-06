@@ -11,6 +11,10 @@
 //                         a1 = a + so * (gated Wo^T) and out = a1 + st * (h Ws^T)
 //   2  SwiGLU over an interleaved [Wa_0; Wb_0; Wa_1; Wb_1] pack (NT = 256: tile t = [a | b] of hidden columns 128 t ..):
 //                         out[:, 128 t + j] = silu(acc[:, j]) * acc[:, 128 + j]  (+ the raw [a | b] into out2 when save2)
+// Grouped A (a_grp > 0): the output columns [g a_grp, (g + 1) a_grp) read the A columns a_col0 + g K .. + K -- several products with their
+// own A blocks against consecutive B row blocks in one launch (the conditioning tables: [cn1 | cn2 | c | cnkv] against [Wmod; Wm]).
+// Programmatic dependent launch: every thread executes griddepcontrol.wait after the smem / TMEM setup and before its first global access
+// (TMA loads, epilogue reads of bias / res / gate, stores), then lets the next kernel be scheduled.
 // Operand rounding: a kind::tf32 MMA reads an fp32 operand by dropping its low 13 mantissa bits (truncation: a one-sided error that
 // accumulates coherently -- 1.6e-3 relative at the block output, 5x the cuBLAS TF32 path, which rounds). So every operand is rounded to
 // nearest (cvt.rna.tf32) before the MMA reads it: the B operands (weights) in the host pack, the A operands here, in shared memory, by
@@ -36,7 +40,7 @@ struct Bars {
   uint32_t tmem;
 };
 DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); }
-DEVI float sigf(float x) { return 1.f / (1.f + __expf(-x)); }
+DEVI float sigf(float x) { return rcpf(1.f + __expf(-x)); }       // rcp.approx: the IEEE division was a hot spot (fused_tf32)
 DEVI uint32_t rna_tf32(uint32_t x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(__uint_as_float(x))); return r; }
 
 // one 32-row x 32-column fp32 chunk (v: this lane's row) -> staging buffer (nst & 1) of the warp -> TMA store at (col, row0)
@@ -68,7 +72,7 @@ extern "C" __global__ void __launch_bounds__(512, 1)
 atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mo,
                const __grid_constant__ CUtensorMap mo2, const float* __restrict__ bias, const float* __restrict__ res,
                const float* __restrict__ gate, int M, int N, int K, int NT, int a_col0, int b_row0, int b_col0, int ocol0, int sigmask,
-               int mode, int save2, int res_ld, int gate_ld, int rndmask) {
+               int mode, int save2, int res_ld, int gate_ld, int rndmask, int a_grp) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -91,6 +95,8 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+  pdl_wait();                                                        // the previous kernel's outputs are complete and visible
+  pdl_launch();                                                      // the next kernel may be scheduled (it waits the same way)
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ TMA producer
@@ -100,12 +106,13 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
       for (int i = 0; i < my; ++i) {
         int m0, n0;
         tile_of(i, m0, n0);
+        const int ac = a_col0 + (a_grp > 0 ? (n0 / a_grp) * K : 0);   // grouped A: this tile's A column block
         for (int ks = 0; ks < nk; ++ks, ++g) {
           const int s = g % ST;
           if (g >= ST) mbar_wait(&B.empty[s], ((g / ST) - 1) & 1);
           const uint32_t st = su + s * STB;
           mbar_expect_tx(&B.full[s], tx);
-          tma_load_2d(st, &ma, &B.full[s], a_col0 + 32 * ks, m0);
+          tma_load_2d(st, &ma, &B.full[s], ac + 32 * ks, m0);
           tma_load_2d(st + A_BYTES, &mb, &B.full[s], b_col0 + 32 * ks, b_row0 + n0);
         }
       }
@@ -186,9 +193,13 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
           float v[32];
           ld_chunk(tacc + 32 * c, v);
           const int nb = b_row0 + n0 + 32 * c;
-          if (bias != nullptr) {
+          if (bias != nullptr) {                                     // 8 vector loads (32 scalar ones were a sixth of the samples)
+            const float4* bp = reinterpret_cast<const float4*>(bias + nb);
 #pragma unroll
-            for (int j = 0; j < 32; ++j) v[j] += __ldg(bias + nb + j);
+            for (int q = 0; q < 8; ++q) {
+              const float4 b = __ldg(bp + q);
+              v[4 * q] += b.x; v[4 * q + 1] += b.y; v[4 * q + 2] += b.z; v[4 * q + 3] += b.w;
+            }
           }
           if (mode == 0) {
             if ((sigmask >> (nb >> 7)) & 1) {

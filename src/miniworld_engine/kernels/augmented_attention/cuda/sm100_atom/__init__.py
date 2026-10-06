@@ -394,6 +394,20 @@ KERNELS_TF32 = {
     "ln_b": ("rows_tf32", "f32_ln_bwd", 0),
 }
 
+#: Programmatic dependent launch for the fp32 path's kernels (``MINIWORLD_TF32_PDL``, default on). Every one of them executes
+#: ``griddepcontrol.wait`` before its first global-memory access (after its smem / TMEM setup), so it may be scheduled while the previous
+#: kernel drains: the launch latency and the setup overlap the previous kernel's tail. ``set_pdl32`` flips the loaded kernels (A/B timing).
+PDL32 = [os.environ.get("MINIWORLD_TF32_PDL", "1") != "0"]
+_PDL32_LOADED: list = []
+
+
+def set_pdl32(on: bool) -> bool:
+    """Turn programmatic dependent launch of the loaded (and later loaded) fp32-path kernels on or off; returns the previous setting."""
+    prev, PDL32[0] = PDL32[0], bool(on)
+    for k in _PDL32_LOADED:
+        k.pdl = PDL32[0]
+    return prev
+
 
 @functools.lru_cache(maxsize=None)
 def atom_kernel32(name: str, device_index: int):
@@ -401,7 +415,87 @@ def atom_kernel32(name: str, device_index: int):
 
     stem, func, smem = KERNELS_TF32[name]
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin_tf32(stem), func, smem)
+        k = driver.Kernel(cubin_tf32(stem), func, smem, pdl=PDL32[0])
+    _PDL32_LOADED.append(k)
+    return k
+
+
+#: the fused inference kernels of the fp32 path (``fused_tf32.cu``; loaded apart from KERNELS_TF32 so a failure costs the fusion only)
+KERNELS_FUSED32 = {
+    "pre": ("fused_tf32", "atom_pre_tf32", 229632),
+    "post": ("fused_tf32", "atom_post_tf32", 229632),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def fused_kernel32(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    stem, func, smem = KERNELS_FUSED32[name]
+    with torch.cuda.device(device_index):
+        k = driver.Kernel(cubin_tf32(stem), func, smem, pdl=PDL32[0])
+    _PDL32_LOADED.append(k)
+    return k
+
+
+def load_fused32(device_index: int) -> None:
+    for name in KERNELS_FUSED32:
+        fused_kernel32(name, device_index)
+
+
+def _nfull(tiles, nsm_):
+    """How many of the fused kernels' 128-row tiles run as full units; the rest run as two half units each (``fused_tf32.cu``). A CTA's unit
+    is a serial latency chain (ncu: ~5 % issue utilisation), so the time is ~ the waves of units over the SMs times a unit's cost; a half unit
+    costs 0.7-0.8 of a full one (round 5, 3072 / 6144 atoms). So: every tile split when the halves fit one wave; otherwise the tail beyond the
+    whole waves split when ITS halves fit one wave (4096 atoms on 148 SMs: 148 full + 24 halves, 1.75 waves instead of 2); else none.
+    MINIWORLD_TF32_FUSED_UNITS=full / half forces either."""
+    mode = os.environ.get("MINIWORLD_TF32_FUSED_UNITS", "auto")
+    if mode in ("full", "half"):
+        return tiles if mode == "full" else 0
+    if 2 * tiles <= nsm_:
+        return 0
+    full = tiles // nsm_ * nsm_
+    tail = tiles - full
+    return full if 0 < tail and 2 * tail <= nsm_ else tiles
+
+
+def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None):
+    """Fused AdaLN 1 (+ the cross mode's K / V AdaLN, when mks / mkb are given) and the four input projections (``atom_pre_tf32``):
+    s [M, 128] fp32 contiguous, s1 / b1 (and mks / mkb) fp32 [M, 128] views with a common row stride each, wp the tf32-rounded [512, 128]
+    pack ([q; g; k; v] with mks, else [q; k; v; g]), bq [128] -> P [M, 512] fp32 (the blocks in rndmask tf32-rounded). ``nfull`` (default
+    ``_nfull``): the 128-row tiles run whole; the others as two 128 x 256 column halves."""
+    M = s.shape[0]
+    assert M % 128 == 0 and s.is_contiguous() and s.shape[1] == DM and tuple(wp.shape) == (4 * DM, DM), (s.shape, wp.shape)
+    assert s1.stride(1) == b1.stride(1) == 1 and s1.stride(0) == b1.stride(0)
+    cross = mks is not None
+    if cross:
+        assert mks.stride(1) == mkb.stride(1) == 1 and mks.stride(0) == mkb.stride(0)
+    p = torch.empty(M, 4 * DM, device=s.device, dtype=F32)
+    d = _dev(s)
+    tiles = M // 128
+    nfull = _nfull(tiles, nsm(d)) if nfull is None else int(nfull)
+    units = nfull + 2 * (tiles - nfull)
+    fused_kernel32("pre", d)((min(nsm(d), units), 1, 1), (384, 1, 1), _tm32(wp, (32, 256)), _tm32(p, (32, 32)), s, s1, b1,
+                             int(s1.stride(0)), mks, mkb, int(mks.stride(0)) if cross else 0, bq, int(cross), int(rndmask), int(M), float(eps),
+                             int(nfull))
+    return p
+
+
+def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None):
+    """Fused gate, out projection + gated residual, AdaLN 2, SwiGLU, squeeze + gated residual (``atom_post_tf32``): o, s [M, 128] fp32
+    contiguous, g a [M, 128] view, so / s2 / b2 / st [M, 128] views with one row stride, wo / wu / ws the tf32-rounded packs -> out [M, 128].
+    ``nfull`` (default ``_nfull``): the 128-row tiles run whole; the others as two 64-row halves."""
+    M = s.shape[0]
+    assert M % 128 == 0 and s.is_contiguous() and o.is_contiguous() and o.shape == s.shape, (o.shape, s.shape)
+    assert g.stride(1) == 1 and all(t.stride(1) == 1 and t.stride(0) == so.stride(0) for t in (s2, b2, st))
+    out = torch.empty(M, DM, device=s.device, dtype=F32)
+    d = _dev(s)
+    tiles = M // 128
+    nfull = _nfull(tiles, nsm(d)) if nfull is None else int(nfull)
+    units = nfull + 2 * (tiles - nfull)
+    fused_kernel32("post", d)((min(nsm(d), units), 1, 1), (384, 1, 1), _tm32(wo, (32, 128)), _tm32(wu, (32, 256)), _tm32(ws, (32, 128)),
+                              o, g, int(g.stride(0)), s, so, s2, b2, st, int(so.stride(0)), out, int(M), float(eps), int(nfull))
+    return out
 
 
 def load_all32(device_index: int) -> None:
@@ -436,8 +530,11 @@ STORE, RESID_GATE, SWIGLU = 0, 1, 2
 
 
 def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol0=0, bias=None, sigmask=0, rndmask=0, mode=STORE,
-           res=None, gate=None, out2=None):
+           res=None, gate=None, out2=None, a_grp=0):
     """The fp32 path's TF32 product (``gemm_tf32.cu``): acc = a[:, a_col0 : a_col0 + k] @ w[b_row0 : b_row0 + n, b_col0 : b_col0 + k]^T.
+
+    ``a_grp`` > 0 makes it a grouped product: output columns [g a_grp, (g + 1) a_grp) read the A columns a_col0 + g k .. (several small
+    products with their own A blocks and consecutive B row blocks in one launch -- the conditioning tables).
 
     STORE       out[:, ocol0 + j] = acc[:, j] (+ bias[b_row0 + j]), sigmoid on the 128-column blocks (b_row0 + j) // 128 set in sigmask,
                 rounded to tf32 (RNA) on the blocks set in rndmask (columns that only feed later MMAs)
@@ -449,19 +546,23 @@ def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol
     M = a.shape[0]
     k = a.shape[1] - a_col0 if k is None else k
     n = w.shape[0] - b_row0 if n is None else n
-    nt = 256 if (mode == SWIGLU or n % 256 == 0) else 128
+    d = _dev(a)
+    # 256-column tiles halve the A traffic, but at small M they leave most SMs idle: 128 when the 256-wide tiling has fewer than one wave
+    wide = mode == SWIGLU or (n % 256 == 0 and (M // 128) * (n // 256) >= nsm(d))
+    nt = 256 if wide else 128
     assert M % 128 == 0 and k % 32 == 0 and n % nt == 0, (M, k, n, nt)
     assert mode != SWIGLU or n == 512
+    assert a_grp == 0 or (a_grp % nt == 0 and n % a_grp == 0), (a_grp, nt, n)
     if out is None:
         out = torch.empty(M, n // 2 if mode == SWIGLU else n, device=a.device, dtype=F32)
     ma, mb = _tm32(a, (32, 128)), _tm32(w, (32, nt))
     mo = _tm32(out, (32, 32))
     mo2 = mo if out2 is None else _tm32(out2, (32, 32))
     tiles = (M // 128) * (n // nt)
-    d = _dev(a)
     atom_kernel32("gemm", d)((min(nsm(d), tiles), 1, 1), (512, 1, 1), ma, mb, mo, mo2, bias, res, gate, int(M), int(n), int(k), int(nt),
                              int(a_col0), int(b_row0), int(b_col0), int(ocol0), int(sigmask), int(mode), int(out2 is not None),
-                             int(res.stride(0)) if res is not None else 0, int(gate.stride(0)) if gate is not None else 0, int(rndmask))
+                             int(res.stride(0)) if res is not None else 0, int(gate.stride(0)) if gate is not None else 0, int(rndmask),
+                             int(a_grp))
     return out
 
 
@@ -480,11 +581,21 @@ def _new(t, cols=DM):
     return torch.empty(t.shape[0], cols, device=t.device, dtype=F32)
 
 
-def ln32(c, g1, g2, g3=None, eps=1e-5):
-    """cn_k = LN(c) * g_k  (c [M, 128] fp32; g3 optional) -> (cn1, cn2, cn3 or None)."""
-    o1, o2 = _new(c), _new(c)
-    o3 = _new(c) if g3 is not None else None
-    atom_kernel32("ln", _dev(c))(_rowgrid(c.shape[0]), (256, 1, 1), c, g1, o1, g2, o2, g3, o3, int(c.shape[0]), float(eps))
+def ln32(c, g1, g2, g3=None, eps=1e-5, out=None):
+    """cn_k = LN(c) * g_k  (c [M, 128] fp32; g3 optional) -> (cn1, cn2, cn3 or None). With ``out`` (fp32 [M, 384] or, with g3, [M, 512],
+    unit column stride): one table [cn1 | cn2 | c | cn3] instead (c copied), the operand of the grouped conditioning GEMM; returns its
+    column views."""
+    M = c.shape[0]
+    if out is None:
+        o1, o2 = _new(c), _new(c)
+        o3 = _new(c) if g3 is not None else None
+        oc, ld = None, DM
+    else:
+        assert out.dtype == F32 and out.stride(1) == 1 and out.shape == (M, (4 if g3 is not None else 3) * DM), (out.shape, out.stride())
+        o1, o2, oc = out[:, :DM], out[:, DM:2 * DM], out[:, 2 * DM:3 * DM]
+        o3 = out[:, 3 * DM:] if g3 is not None else None
+        ld = out.stride(0)
+    atom_kernel32("ln", _dev(c))(_rowgrid(M), (256, 1, 1), c, g1, o1, g2, o2, g3, o3, oc, int(ld), int(M), float(eps))
     return o1, o2, o3
 
 
