@@ -91,7 +91,7 @@ def _ext(width: int, ctas: int, d64_repl: int = 16, save_ab: bool = False, split
     if split_fwd:
         revision += "_split_fwd_v1"
     if fused_d384:
-        revision += "_fused_d384_v2"
+        revision += "_fused_d384_v3_converged"
     if multicast:
         revision += "_multicast_v1"
     return load_extension(
