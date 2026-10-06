@@ -692,7 +692,8 @@ class _Block(torch.autograd.Function):
         single, cond, pair = vals[:3]
         params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
         dx, dc, dpair, *pg = _bwd(single, cond, pair, mask, params, saved, dout.contiguous(), qk, eq, ek, fp32, heads)
-        if _native90(single.device):
+        if (_native90(single.device)
+                and os.environ.get("MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE", "1") != "0"):
             _activate_native_caller(force=True)
         return (dx, dc, dpair, None, None, None, None, None, None, *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)))
 
@@ -707,7 +708,9 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     fp32 = operand_dtype(single, compute_dtype) is torch.float32
     out = _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
                        *[module.get_parameter(n) for n in _names_for(qk)])
-    if _native90(single.device):
+    # Flag 0 reconstructs the legacy caller for comparisons; the CUDA core is unchanged.
+    if (_native90(single.device)
+            and os.environ.get("MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE", "1") != "0"):
         # The result's edges now strongly own leaf AccumulateGrad nodes.
         # Installing before apply can attach hooks to a temporary weak owner.
         _native_caller_hooks(single, cond, pair, *module.parameters(), force=True)
