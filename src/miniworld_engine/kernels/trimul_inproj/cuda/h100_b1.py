@@ -146,7 +146,9 @@ class Plan(T.CooperativePlan):
         )
         self.partw = torch.empty((count, 49152), device=x.device)
         self.partln = torch.empty((count, 512), device=x.device)
-        self.counts = torch.zeros(2 + count, device=x.device, dtype=torch.int32)
+        from ._h100_pack import zeros_native
+        zeros = zeros_native if T.preserve_d128_training() else torch.zeros
+        self.counts = zeros(2 + count, device=x.device, dtype=torch.int32)
         self.bind(dy, xhat, rstd)
 
     def bind(self, dy, xhat, rstd):
@@ -155,7 +157,8 @@ class Plan(T.CooperativePlan):
         n = d["n"]
         m = n * n
         L = T._launch_module()
-        self.wpt = d["wp"].t().contiguous()
+        from ._h100_pack import dense_native
+        self.wpt = dense_native(d["wp"].t()) if T.preserve_d128_training() else d["wp"].t().contiguous()
         self.wgt = d["wt"][4]
         es = xhat.element_size()
         tm = lambda t, box, dims, strides: L.tensor_map(
