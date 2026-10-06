@@ -456,7 +456,9 @@ def saved_like(x):
              x.new_empty((M, H)), x.new_empty((M, D)), x.new_empty((M, D)),
              x.new_empty((M,), **f32), x.new_empty((M,), **f32)]
     if D == 256:
-        return saved + [x.new_empty((8 * D, D))]
+        from ._h100_pack import fused_d256_glue
+        return saved + [x.new_empty((8 * D, D))] + (
+            [x.new_empty((9*D,D))] if fused_d256_glue(D,n) else [])
     saved.append(x.new_empty((8 * D, M)))
     if D == 512:
         saved += [x.new_empty((max(1, M * H // 4096),), dtype=torch.int64),
@@ -578,7 +580,11 @@ def forward(leaves, mask, ds):
     saved = saved_like(x)
     ab, tri, xn, norm, proj, gate, mu, rs = saved[:8]
     w1 = saved[8] if D == 256 else x.new_empty((8 * D, D))
-    pack_into(w1, wl, wlg, wr, wrg)
+    if D==256 and len(saved)>9:
+        from ._h100_pack import pack_training_pair
+        pack_training_pair(w1,saved[9],(wg,wl,wlg,wr,wrg))
+    else:
+        pack_into(w1, wl, wlg, wr, wrg)
     stats = x.new_empty((M, 2), dtype=torch.float32) if D == 256 else None
     _front(x, w1, ab, mask, gi, bi, xn, stats, None if D == 256 else saved[8])
     workspace = _workspace(x)
@@ -614,14 +620,17 @@ def _gate(cell, proj, gate, dy, ds, dp, prefix, affine):
     _launch(k, _sms() * 4, 128, smem, _params(key, fields))
 
 
-def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo):
+def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     """Output-LN backward: dt from dn; dgamma/dbeta sums. L384 kernels do not zero them."""
     D, n = cell
     M, H = n * n, 2 * D
+    native = D == 256 and T.preserve_d256_training()
     rows = 32 if D == 256 or (D, n) == (384, 768) else 16
     minblocks = 3 if D == 256 else 2
     defines = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
                        LN_MINBLOCKS=minblocks)
+    if native:
+        defines += _defines(MW_LN_PARTIALS=1)
     source = f"output_ln_d{D}_l{n}.cu"
     tail = [dn, mu, rs, go, dgo, dbo, M]
     if n == 384:
@@ -633,7 +642,16 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo):
         smem = {256: 67968, 384: 101760, 512: 70528}[D]
         k = _kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
         # Qualified grids (SMs x the replaced cooperative kernel's residency, D256 doubled).
-        _launch(k, _sms() * {256: 6, 384: 2, 512: 3}[D], 128, smem, _params(source, [*maps, *tail]))
+        grid = _sms() * {256: 6, 384: 2, 512: 3}[D]
+        if native:
+            pg, pb = [torch.empty((grid,H),device=tri.device,dtype=torch.float32) for _ in range(2)]
+            tail[-3:-1] = [pg,pb]
+        _launch(k, grid, 128, smem, _params(source, [*maps, *tail]))
+        if native:
+            if defer:
+                return pg,pb,dgo,dbo
+            from ._h100_pack import finish_affine_partials
+            finish_affine_partials(pg,pb,dgo,dbo)
         return
     swizzle = "64B" if rows == 32 else "32B"
     maps = [_map(t, [rows, 64], [M, H], [M * 2], swizzle) for t in (tri, dt)]
@@ -643,7 +661,13 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo):
     smem = buffers * rows * H * 2 + 128 + H * 4 + rows * 8
     k = _kernel(source, "mw_wide_stats_ln", "upstream", defines, smem)
     grid = _resident_grid(source, "mw_wide_stats_ln", "upstream", defines, threads, smem)
-    _launch_cooperative(k, grid, threads, smem, _params(source, [*maps, *tail]))
+    if native:
+        pg, pb = [torch.empty((grid,H),device=tri.device,dtype=torch.float32) for _ in range(2)]
+        tail[-3:-1] = [pg,pb]
+    (_launch if native else _launch_cooperative)(k, grid, threads, smem, _params(source, [*maps, *tail]))
+    if native:
+        from ._h100_pack import finish_affine_partials
+        finish_affine_partials(pg,pb,dgo,dbo)
 
 
 def _contract_gp(cell, dt, ab, pre, mask, gp):
@@ -721,11 +745,14 @@ def _source_d256(cell, xn, w1, dl, dr, gp, mask, partial):
     _launch(k, 32 * splits, 256, smem, _params(f"source_d256_{n}", fields))
 
 
-def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative, master=False):
+def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative, master=False, defer=False):
     """Input-LN backward and residual into dx; reduce input (and gate) weight partials."""
     D, n = cell
     M = n * n
+    native = D == 256 and T.preserve_d256_training()
     defines = _defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, MASTER_FP32=int(master))
+    if native:
+        defines += _defines(MW_LN_PARTIALS=1)
     smem = max(3 * 16 * D * 2 + 128, 2 * 4 * D * 4) + D * 4
     maps = [_map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
     fields = [*maps, gi, dgi, dbi, partial, *dw]
@@ -739,6 +766,17 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
     else:
         source, entry = "input_reduce_l768.cu", "mw_wide_cached_input"
     k = _kernel(source, entry, "upstream", defines, smem)
+    if native:
+        grid = (_resident_grid(source, entry, "upstream", defines, 128, smem)
+                if cooperative else _sms()*6)
+        pg, pb = [torch.empty((grid,D),device=x.device,dtype=torch.float32) for _ in range(2)]
+        fields[5:7] = [pg,pb]
+        _launch(k,grid,128,smem,_params(source,fields))
+        if defer:
+            return pg,pb,dgi,dbi
+        from ._h100_pack import finish_affine_partials
+        finish_affine_partials(pg,pb,dgi,dbi)
+        return
     if cooperative:
         grid = _resident_grid(source, entry, "upstream", defines, 128, smem)
         _launch_cooperative(k, grid, 128, smem, _params(source, fields))
@@ -827,6 +865,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     ds = ds.reshape(n, D)
     dy = dy.contiguous()
     ab, tri, xn, norm, proj, gate, mu, rs = saved[:8]
+    fused_glue = D==256 and len(saved)>9
     f32 = dict(device=x.device, dtype=torch.float32)
     dx = torch.empty_like(x)
     dp = x.new_empty((M, D))
@@ -853,7 +892,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     _gate(cell, proj, gate, dy, ds, dp, dxin[:D], affine)
     _lt(cell, "dn", dp, wp, dn, workspace)
     if D == 256 and n == 384:
-        _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo)
+        out_affine = _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=fused_glue)
         dl, dr = torch.empty_like(tri), torch.empty_like(tri)
         _contract_d256(cell, dt, ab, dl, dr)
         # Output weight gradients overlap the source kernel on a side stream.
@@ -892,7 +931,13 @@ def backward(leaves, mask, ds, saved, dy, master=False):
         _contract_gp(cell, dt, ab, pre, mask, gp)
         if cell != (512, 768):
             _split_input_dw(cell, dxin, xn, partial, workspace, joint)
-    torch.cat((wg, wl, wlg, wr, wrg), out=wcat)
+    if fused_glue:
+        wcat = saved[9]
+    elif D == 256 and T.preserve_d256_training():
+        from ._h100_pack import stack_backward_weights
+        wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
+    else:
+        torch.cat((wg, wl, wlg, wr, wrg), out=wcat)
     if cell == (512, 768):
         # The joint input/gate dW overlaps the dX GEMM; both only read dxin.
         side = _side_stream()
@@ -904,8 +949,11 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     if cell == (512, 768):
         main.wait_stream(side)  # the input reduction reads the side stream's partials
     joint = cell in ((384, 384), (512, 768))
-    _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg if joint else None,
-              cooperative=n == 768, master=master)
+    in_affine = _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg if joint else None,
+              cooperative=n == 768, master=master, defer=fused_glue)
+    if fused_glue:
+        from ._h100_pack import finish_affine_pair
+        finish_affine_pair(out_affine,in_affine)
     if cell == (256, 384):
         main.wait_stream(side)  # dWproj/dWgate join at the end, as qualified
     del side_workspace

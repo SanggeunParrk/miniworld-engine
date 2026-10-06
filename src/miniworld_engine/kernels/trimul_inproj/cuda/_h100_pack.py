@@ -63,7 +63,11 @@ def pack_into_cuda(dst, wl, wlg, wr, wrg):
     p = T._launch_module().Struct([
         dst, *quad, r, d, *(w.stride(0) for w in quad), *(w.stride(1) for w in quad),
         *(int(w.dtype == torch.float32) for w in quad)])
-    _launch("mw_aux_pack", ((4*r*d+255)//256, 1, 1), [p])
+    vector = (d == 256 and T.preserve_d256_training()
+              and os.environ.get("MINIWORLD_TRIMUL_H100_FAST_GLUE") == "1"
+              and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad))
+    _launch("mw_aux_pack_vec" if vector else "mw_aux_pack",
+            (((4*r*d//8 if vector else 4*r*d)+255)//256, 1, 1), [p])
 
 
 def pack_into(dst, wl, wlg, wr, wrg):
@@ -105,6 +109,47 @@ def zeros_native(shape, *, device, dtype=torch.float32):
     size = out.numel()*out.element_size()
     _launch("mw_aux_zero_bytes", (min(512,(size+255)//256),1,1), [out,size])
     return out
+
+
+def dense_copy_into(dst, src):
+    if (dst.ndim != 2 or src.shape != dst.shape or not dst.is_contiguous()
+            or dst.dtype not in (torch.bfloat16, torch.float32)
+            or src.dtype not in (torch.bfloat16, torch.float32)):
+        raise ValueError("native dense copy requires matching dense matrices")
+    _launch("mw_aux_dense_copy", ((src.numel()+255)//256,1,1),
+            [src,dst,*src.shape,*src.stride(),int(src.dtype==torch.float32),int(dst.dtype==torch.float32)])
+
+
+def finish_affine_partials(pg, pb, dg, db):
+    blocks, width = pg.shape
+    parallel = os.environ.get("MINIWORLD_TRIMUL_H100_FAST_GLUE") == "1"
+    columns = 4 if parallel else 32
+    _aux_unit().kernel("mw_aux_affine_cta_finish_parallel" if parallel
+                       else "mw_aux_affine_cta_finish").launch(
+        ((width+columns-1)//columns,1,1), (128,1,1), [pg,pb,dg,db,width,blocks])
+
+
+def fused_d256_glue(width, length):
+    return (width == 256 and length == 384 and T.preserve_d256_training()
+            and os.environ.get("MINIWORLD_TRIMUL_H100_FUSED_GLUE") == "1")
+
+
+def pack_training_pair(dst, stack, weights):
+    """Read live matrices once, retaining both forward and backward layouts."""
+    wg, wl, wlg, wr, wrg = weights
+    if any(w.dtype != torch.bfloat16 or not w.is_contiguous() for w in weights):
+        raise ValueError("fused D256 packing requires dense BF16 working matrices")
+    r, d = wl.shape
+    _launch("mw_aux_pack_training_pair", (((wg.numel()+4*r*d)//8+255)//256,1,1),
+            [dst,stack,wg,wl,wlg,wr,wrg,r,d])
+
+
+def finish_affine_pair(first, second):
+    """Both LayerNorm affine outputs share one fixed-order finishing launch."""
+    args = [*first,*second,first[0].shape[1],first[0].shape[0],
+            second[0].shape[1],second[0].shape[0]]
+    count = (first[0].shape[1]+second[0].shape[1])//4
+    _aux_unit().kernel("mw_aux_affine_pair_finish").launch((count,1,1),(128,1,1),args)
 
 
 def native_training_grads(grads, leaves):
@@ -243,7 +288,11 @@ def stack_backward_weights(weights):
     p = T._launch_module().Struct([
         *weights, out, *(w.shape[0] for w in weights),
         *(w.stride(0) for w in weights), *(w.stride(1) for w in weights), width])
-    _launch("mw_aux_stack", ((max(w.numel() for w in weights)+255)//256, 5, 1), [p])
+    vector = (width == 256 and T.preserve_d256_training()
+              and os.environ.get("MINIWORLD_TRIMUL_H100_FAST_GLUE") == "1"
+              and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in weights))
+    count = max(w.numel() for w in weights) // (8 if vector else 1)
+    _launch("mw_aux_stack_vec" if vector else "mw_aux_stack", ((count+255)//256, 5, 1), [p])
     return out
 
 

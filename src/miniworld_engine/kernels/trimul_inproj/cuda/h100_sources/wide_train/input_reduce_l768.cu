@@ -24,7 +24,11 @@ template<int C,int NT> TMN_DEVI void aggregate_ln(float (&gg)[C/32],float (&bb)[
  for(int c=tid;c<C;c+=NT){float g=0,b=0;
   #pragma unroll
   for(int w=0;w<NT/32;++w){g+=sm[w*C+c];b+=sm[(NT/32+w)*C+c];}
+  #if MW_LN_PARTIALS
+  dg[blockIdx.x*C+c]=g;db[blockIdx.x*C+c]=b;
+  #else
   atomicAdd(dg+c,g);atomicAdd(db+c,b);
+  #endif
  }
  __syncthreads();
 }
@@ -36,10 +40,15 @@ extern "C" __global__ __launch_bounds__(NT,INPUT_MINBLOCKS)
 void mw_wide_cached_input(__grid_constant__ const Params p){
  extern __shared__ __align__(1024) uint8_t sm[];auto bar=reinterpret_cast<uint64_t*>(sm+3*SB);
  int tid=threadIdx.x,lane=tid%32,warp=tid/32;
+ #if !MW_LN_PARTIALS
  for(int c=blockIdx.x*NT+tid;c<D;c+=gridDim.x*NT){p.dg[c]=0;p.db[c]=0;}
+ #endif
  if(tid==0){mbar_init(bar,1);fence_barrier_init();}
  for(int c=tid;c<D;c+=NT)reinterpret_cast<float*>(sm+3*SB+128)[c]=p.gamma[c];
- __syncthreads();cooperative_groups::this_grid().sync();
+ __syncthreads();
+ #if !MW_LN_PARTIALS
+ cooperative_groups::this_grid().sync();
+ #endif
  float gg[D/32]={},bb[D/32]={};int phase=0;
  for(int row=blockIdx.x*ROWS;row<p.M;row+=gridDim.x*ROWS){
   if(tid==0){mbar_arrive_expect_tx(bar,3*SB);

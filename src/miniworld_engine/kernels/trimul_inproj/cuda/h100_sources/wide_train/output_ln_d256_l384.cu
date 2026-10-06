@@ -53,7 +53,11 @@ template<int C,int NT> TMN_DEVI void aggregate_ln(float (&gg)[C/32],float (&bb)[
  for(int c=tid;c<C;c+=NT){float g=0,b=0;
   #pragma unroll
   for(int w=0;w<NT/32;++w){g+=sm[w*C+c];b+=sm[(NT/32+w)*C+c];}
+  #if MW_LN_PARTIALS
+  dg[blockIdx.x*C+c]=g;db[blockIdx.x*C+c]=b;
+  #else
   atomicAdd(dg+c,g);atomicAdd(db+c,b);
+  #endif
  }
  __syncthreads();
 }

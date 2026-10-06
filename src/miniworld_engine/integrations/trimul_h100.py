@@ -89,8 +89,8 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     )
 
     n, d = pair.shape[1], pair.shape[-1]
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import preserve_d128_training
-    preserve = d == 128 and preserve_d128_training()
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import preserve_training
+    preserve = preserve_training(d)
     if _native_buckets_enabled() and d != 64 and not preserve:
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import native_buckets, single_trimul
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
