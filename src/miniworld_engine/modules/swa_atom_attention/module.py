@@ -633,10 +633,13 @@ def build_3d_rope(
     )
 
     pos_f32 = ref_pos.float()
-    spatial_freqs = torch.einsum("bna,k->bnak", pos_f32, spatial_inv_freq)
-    spatial_freqs = spatial_freqs.reshape(b, n, n_spatial_total)
+    # einsum is an autocast op: under bf16 autocast (train.precision: bf16-mixed) it would take fp32 angles to bf16 --
+    # a rotation by coordinates of tens of angstroms rounded to 8 bits, and cos/sin the fused SWA kernels refuse as non-fp32.
+    with torch.autocast(device_type=device.type, enabled=False):
+        spatial_freqs = torch.einsum("bna,k->bnak", pos_f32, spatial_inv_freq)
+        spatial_freqs = spatial_freqs.reshape(b, n, n_spatial_total)
 
-    uid_freqs = torch.einsum("bn,k->bnk", ref_space_uid.float(), uid_inv_freq)
+        uid_freqs = torch.einsum("bn,k->bnk", ref_space_uid.float(), uid_inv_freq)
 
     n_active = n_spatial_total + n_uid_pairs
     if n_active > half_dim:
