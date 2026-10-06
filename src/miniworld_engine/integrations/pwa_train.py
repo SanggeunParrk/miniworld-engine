@@ -533,11 +533,20 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
         # selection at S4096/L768 as well as the original separate point/pack.
         io_default = qualified and (args[0].shape[1:3] != (4096, 768) or point_pack)
         native_io = os.environ.get("MINIWORLD_PWA_H100_SHADOW_IO", "1" if io_default else "0") == "1"
+        # Only these cells beat both the same-allocation point-pack incumbent
+        # and every recorded accurate historical best. The remaining shapes
+        # retain point-pack with the separate exact pair producer/consumer.
+        pair_default = qualified and native_io and args[0].shape[1:3] in ((1024, 384), (1024, 768), (2048, 768))
+        pair_fusion = os.environ.get(
+            "MINIWORLD_PWA_H100_SHADOW_PAIR_FUSION", "1" if pair_default else "0") == "1"
+        if pair_fusion and not (qualified and native_io):
+            raise NotImplementedError("PWA exact pair fusion requires a qualified H100 training shape and SHADOW_IO=1")
         if native_io:
             df, lmw, lmb, wv, wg, lzw, lzb, wb, wo = E.exact_fp32_inputs_grouped([dy, *args[3:]])
             S, L = args[0].shape[1:3]
             xn = E.exact_ln_bf16(args[0], lmw, lmb, eps_m, True).view(S * L, D)
-            zn = E.exact_ln_bf16(args[1], lzw, lzb, eps_z, True).view(L * L, DZ)
+            if not pair_fusion:
+                zn = E.exact_ln_bf16(args[1], lzw, lzb, eps_z, True).view(L * L, DZ)
             # The tiled transpose is retained for diagnosis: it was slower
             # than the original CUDA copy on the required H100 shapes.
             pack = K.shadow_pack_tiled if os.environ.get("MINIWORLD_PWA_H100_SHADOW_PACK_TILED", "0") == "1" else K.shadow_pack
@@ -555,12 +564,21 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
               if point_pack
               else pack(E.exact_point(dog, gate, 1.0, 1), S, L))
         mask = args[2].view(L) if args[2].numel() else None
-        bias = E.exact_mask_bias(E.exact_mm(zn, wb.t()), mask, L)
+        if pair_fusion:
+            # Keep exact pair normalization on chip through projection. The
+            # masked producer also writes the final head-major bias layout.
+            bias = E.exact_ln_pair_project(args[1], lzw, lzb, wb, mask, eps_z)
+            if mask is None:
+                bias = E.exact_mask_bias(bias, None, L)
+        else:
+            bias = E.exact_mask_bias(E.exact_mm(zn, wb.t()), mask, L)
         prob = E.exact_soft(bias, bias, False)
         dw = E.exact_mm(do, value.transpose(1, 2))
         ds = E.exact_soft(dw, prob, True)
         db = E.exact_db_transpose(ds, mask)
-        return E.exact_beta(E.exact_mm(db, wb))
+        # The paired consumer retains the incumbent FP32 FMA and reduction
+        # order without materializing the L*L*128 layer-norm gradient.
+        return E.exact_beta_mm(db, wb) if pair_fusion else E.exact_beta(E.exact_mm(db, wb))
 
 
 @opaque(fake=_backward_fake,name="pwa_h100_bwd")
