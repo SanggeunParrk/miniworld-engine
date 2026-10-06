@@ -43,12 +43,12 @@ DW_REPL = 8
 
 
 def native_aux_enabled(d: int = 128) -> bool:
-    """Live CUDA preparation for the validated D128/D384 inference paths.
+    """Live CUDA preparation for D64 and the validated D128/D384 inference paths.
 
     An explicit zero retains the frozen pre-sweep path for paired measurements.
     Other widths remain experimental until their complete shape set wins.
     """
-    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1" if d in (128, 384) else "0") == "1"
+    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1" if d in (64, 128, 384) else "0") == "1"
 
 
 @functools.lru_cache(maxsize=1)
@@ -103,11 +103,14 @@ def _sm_count(device: torch.device | int | None = None) -> int:
 
 def _ext(ctas: int, dw_repl: int, save: bool):
     warp_store = os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE", "0") == "1"
-    return _build_ext(ctas, dw_repl, save, warp_store)
+    early_release = os.environ.get("MINIWORLD_TRANSITION_H100_DW_EARLY_RELEASE", "0") == "1"
+    dw_overlap = early_release or os.environ.get("MINIWORLD_TRANSITION_H100_DW_OVERLAP", "0") == "1"
+    return _build_ext(ctas, dw_repl, save, warp_store, dw_overlap, early_release)
 
 
-@functools.lru_cache(maxsize=16)
-def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool):
+@functools.lru_cache(maxsize=32)
+def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool, dw_overlap: bool = False,
+               early_release: bool = False):
     """Build for a given SM count. ``ctas`` is in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid.
 

@@ -37,6 +37,12 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef NCTA
 #define NCTA 132
 #endif
+#ifndef MW_DW_OVERLAP
+#define MW_DW_OVERLAP 0
+#endif
+#ifndef MW_DW_EARLY_RELEASE
+#define MW_DW_EARLY_RELEASE 0
+#endif
 constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 constexpr int NDW = 8 * DW_REPL, NDX = NCTA - NDW;
 static_assert(NDX > 0, "no DX CTAs left");
@@ -151,7 +157,31 @@ TMN_DEVI void weight_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg
 #pragma unroll
     for (int ks = 0; ks < 8; ++ks) mma128<0, 0>(AB, dk128(inu + W_XN + wg * 8192, ks), dk128(su + W_WAB, ks), ks > 0);
     wgmma_commit();
+#if !MW_DW_EARLY_RELEASE
     wgmma_wait<1>(); fence_regs(acc);
+#endif
+#if MW_DW_OVERLAP
+    // The previous tile's two DW groups precede this tile's DH and AB.
+    // wait<1> retires DW and DH while AB remains in flight. Release only
+    // those retired readers, then prefetch into the previous input slot.
+    if (i >= 1) {
+#if MW_DW_EARLY_RELEASE
+      // Only prior DW reads must retire for this slot to be reusable.
+      // Let both current DH and AB continue while the next TMA loads issue.
+      wgmma_wait<2>();
+#endif
+      fence_regs(accW1); fence_regs(accW2);
+      const int previous = (i - 1) & 1;
+      if (wtid == 0) { mbar_arrive(hdb_free); mbar_arrive(in_free + previous); }
+      if (tid == 0 && i + 1 < n_local) {
+        mbar_wait(in_free + previous, ((i - 1) >> 1) & 1);
+        issue_in(i + 1);
+      }
+    }
+#endif
+#if MW_DW_EARLY_RELEASE
+    wgmma_wait<1>(); fence_regs(acc);
+#endif
     uint32_t dhp[16];
 #pragma unroll
     for (int e = 0; e < 16; ++e) dhp[e] = pack_bf16(acc[2 * e], acc[2 * e + 1]);
@@ -189,10 +219,16 @@ TMN_DEVI void weight_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg
 #pragma unroll
     for (int ks = 0; ks < 8; ++ks) mma64<1, 1>(accW2, dmn(hdbu, ks, 16), dmn(inu + wg * 16384, ks, 16), 1);
     wgmma_commit();
+#if !MW_DW_OVERLAP
     wgmma_wait<0>(); fence_regs(accW1); fence_regs(accW2);
     if (wtid == 0) { mbar_arrive(hdb_free); mbar_arrive(in_free + buf); }
     if (tid == 0 && i + 2 < n_local) { mbar_wait(in_free + buf, (i >> 1) & 1); issue_in(i + 2); }
+#endif
   }
+#if MW_DW_OVERLAP
+  // No next tile will retire the final pair of DW groups.
+  wgmma_wait<0>(); fence_regs(accW1); fence_regs(accW2);
+#endif
   // ---- fp32 partials of this CTA
   float* base = p.partw + (size_t)cta * 3 * HS * D_;
   const int r0 = 16 * warp + (lane >> 2);
