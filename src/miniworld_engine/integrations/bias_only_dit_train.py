@@ -13,9 +13,10 @@ operands, fp32 accumulation, weight gradients in the parameter's dtype), the exp
 
 fp32 (the TF32 recipe): single, cond and pair fp32, the block's weights fp32, no CUDA autocast -> the same composition with every
 activation, saved tensor and gradient fp32: cuBLAS GEMMs forced to TF32 tensor cores; the fp32 rows and the pair bias / its
-backward in exact fp32 (``bias_only_dit_f32_rows.cu``); the attention core ``pv_gate_tf32`` (forward and dV) and the bias gradient
-``dpb_tf32`` on kind::tf32 MMAs (``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those warns once and keeps the module
-path.
+backward in exact fp32 (``bias_only_dit_f32_rows.cu``); the attention core ``pv_gate_tf32`` (forward and dV) on kind::tf32 MMAs
+(``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those warns once and keeps the module path. The bias gradient runs as a
+TF32 batched GEMM (``_dbias32``) until a new kernel replaces ``dpb_tf32.cu``, removed for giving different results on identical
+reruns at L >= 640.
 
 ``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32 inputs, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
@@ -394,8 +395,18 @@ def _op32(kind, dev, nh, dh):
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
     if (kind, idx, nh, dh) not in _OPS32:
         from miniworld_engine.kernels.bias_only_dit.cuda import tf32
-        _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32, "dpb": tf32.DpbKernelTF32}[kind](idx, nh=nh, dh=dh)
+        _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32}[kind](idx, nh=nh, dh=dh)
     return _OPS32[(kind, idx, nh, dh)]
+
+
+def _dbias32(do: torch.Tensor, v: torch.Tensor, P: torch.Tensor, dd: torch.Tensor, out: torch.Tensor, A: int) -> torch.Tensor:
+    """dbias [H, L, L] = P o (sum_a do v^T - D), D[h, i] = sum_a dd[a, h, i] (masked keys have P = 0): one TF32 batched GEMM per head
+    over the A samples' channels, fixed order. Stands in for the removed ``dpb_tf32.cu`` until its replacement lands."""
+    H, L, _ = P.shape
+    dh = do.shape[1] // H
+    a = do.reshape(A, L, H, dh).permute(2, 1, 0, 3).reshape(H, L, A * dh)
+    b = v.reshape(A, L, H, dh).permute(2, 0, 3, 1).reshape(H, A * dh, L)
+    return torch.mul(P, torch.bmm(a, b).sub_(dd.sum(0).unsqueeze(-1)), out=out)
 
 
 def _fwd32_fake(single, cond, pair, mask, params):
@@ -482,7 +493,7 @@ def _bwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
         _op32("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)            # dv = P^T do
         dbias = e(H * L, L)
-        _op32("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)   # P o (dP - D); masked keys get P = 0
+        _dbias32(do, vg[:, :DA], P, dd, dbias.view(H, L, L), A)                         # P o (dP - D); masked keys get P = 0
         dxa = torch.mm(dvg, Wvg)
         dWvg = torch.mm(dvg.t(), xa)
         dx = e(M, D)

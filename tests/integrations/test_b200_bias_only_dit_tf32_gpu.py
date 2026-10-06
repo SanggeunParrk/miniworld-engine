@@ -241,8 +241,7 @@ def test_training_kernels_ran_graph_capture_compile_and_steady_memory(n_head, d_
 
     eager = run(fast)
     names = kernel_names(lambda: run(fast))
-    for k in ("bo_pv_gate_tf32_sm100", "bo_dpb_tf32_sm100"):
-        assert any(k in n for n in names), (k, names)
+    assert any("bo_pv_gate_tf32_sm100" in n for n in names), names
     assert not any("triton" in n.lower() for n in names), [n for n in names if "triton" in n.lower()]
     assert not any("bo_pv_gate_inf_sm100" in n or "bo_dpb_sm100" in n for n in names)
     # the bound launches reuse their argument blocks and the activations are allocated afresh each step: nothing may pile up
@@ -384,7 +383,8 @@ def test_training_kernels_match_fp64(L, n_head, d_head):
     T.PvGateCoreTF32(dev, nh=H, dh=DH)(do, Pt.view(H * L, L), dv, A)
     assert relative(dv, torch.einsum("hij,aihd->ajhd", P.double(), dh).reshape(M, DA)) < 3e-3
     dbias = torch.empty(H * L, L, device="cuda")
-    T.DpbKernelTF32(dev, nh=H, dh=DH)(do, v, P.view(H * L, L), dd, dbias, A)
+    from miniworld_engine.integrations.bias_only_dit_train import _dbias32
+    _dbias32(do, v, P, dd, dbias.view(H, L, L), A)
     want = P.double() * (torch.einsum("aihd,ajhd->hij", dh, vh) - dd.double().sum(0)[:, :, None])
     assert relative(dbias.view(H, L, L), want) < 3e-3
     # the gate backward rows

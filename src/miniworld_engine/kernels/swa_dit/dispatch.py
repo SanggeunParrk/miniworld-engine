@@ -26,11 +26,12 @@ B200 (sm_100a), bf16, the served widths (``cuda/sm100.supported``): every stage 
 ``MINIWORLD_SWA_DIT_SM100=0`` keeps the Triton path; a build or load failure warns once and keeps it too.
 
 fp32 stages, B200 (sm_100a) at the served widths with S a multiple of 128 (``cuda/sm100/tf32_fwd.supported_tf32``): every stage on
-the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32_fwd.block_fwd_tf32`` and ``tf32_bwd.block_bwd_tf32``
-(``_tf32``), the window attention included (TF32 Q / K / V / P, fp32 softmax). A training forward (``save``) takes them only when the
-TF32 backward loads too: its saves (heads and O in fp32) are what only that backward reads, so the backward follows the saved heads'
-dtype. ``MINIWORLD_SWA_DIT_TF32=0`` (or ``MINIWORLD_SWA_DIT_SM100=0`` / ``engine_backend="triton"``) keeps the Triton fp32 path, and so
-does a build or load failure (warned once). The hoisted modulation has the same split (``swa_dit_mod_{fwd,bwd}_tf32``).
+the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32_fwd.block_fwd_tf32`` (``_tf32``), the window
+attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference. A training forward (``save``) would take them only with a TF32
+backward, and there is none at the moment (``_tf32_bwd_ready``: the first one was removed for giving different gradients on identical
+steps), so fp32 training runs the Triton fp32 path. ``MINIWORLD_SWA_DIT_TF32=0`` (or ``MINIWORLD_SWA_DIT_SM100=0`` /
+``engine_backend="triton"``) keeps the Triton fp32 path for inference too, and so does a build or load failure (warned once). The
+hoisted modulation has the same split (``swa_dit_mod_fwd_tf32`` without a gradient).
 
 fp32 stages elsewhere (q fp32; Triton): ``triton/forward_fp32.py`` and ``triton/backward_fp32.py`` for qkvg, out-projection + FFN and
 their backwards, around the SAME window-attention kernels on bf16 operands (what FlashAttention-4 runs in the per-op fp32 path).
@@ -122,7 +123,6 @@ def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
 
 
 _TF32_FAILED = False
-_TF32_BWD_FAILED = False
 
 
 def _tf32_off() -> bool:
@@ -137,24 +137,11 @@ def _device_index(device: torch.device) -> int:
 
 @device_constant
 def _tf32_bwd_ready(device: torch.device) -> bool:
-    """Whether the sm_100a TF32 backward (``cuda/sm100/tf32_bwd``) serves fp32 calls on ``device``: the switches, B200, and its
-    kernels build and load (import, build and load happen here, once; a failure warns once and keeps the Triton fp32 path for
-    training). A constant to the compiled graph (``device_constant``): Dynamo never traces the build."""
-    global _TF32_BWD_FAILED
-    if _TF32_BWD_FAILED or device.type != "cuda" or _tf32_off() or not tf32_fwd.is_b200(device):
-        return False
-    try:
-        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
-
-        load = getattr(tf32_bwd, "kernels_tf32", None) or getattr(tf32_bwd, "kernels", None)
-        if load is not None:
-            load(_device_index(device))
-    except Exception as exc:  # a missing module, a toolchain or a driver problem keeps the Triton path
-        _TF32_BWD_FAILED = True
-        warnings.warn(f"sm_100a TF32 SWA atom DiT backward unavailable, keeping the Triton fp32 path for training: {exc!r}",
-                      RuntimeWarning, stacklevel=2)
-        return False
-    return True
+    """Whether an sm_100a TF32 backward serves fp32 training calls on ``device``. None does: the first one (``cuda/sm100/tf32_bwd``)
+    gave different gradients for identical steps and faulted on poisoned memory, so it was removed; until its replacement lands, an
+    fp32 training call (forward with saves, the hoisted modulation with a gradient) keeps the Triton fp32 path. Inference keeps the
+    TF32 forward kernels."""
+    return False
 
 
 @device_constant
@@ -379,12 +366,8 @@ def swa_dit_block_bwd(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos:
         return sm100.block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att,
                                y, ffn, B, half_window)
     if q.dtype == torch.float32:
-        if qh.dtype == torch.float32:                      # saved by the TF32 forward, which ran only with the TF32 backward loaded
-            from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
-
-            dq, dmod, *dw = tf32_bwd.block_bwd_tf32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1,
-                                                    x, pq, pk, att, y, ffn, B, half_window)
-            return [dq.reshape(q.shape), dmod, *dw]
+        if qh.dtype == torch.float32:                      # fp32 heads: saves of a TF32 training forward, which no backward serves
+            raise RuntimeError("swa_dit_block: fp32 saves of the TF32 forward have no backward (_tf32_bwd_ready is False)")
         return _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x,
                                         pq, pk, att, y, ffn, B, half_window, eps)
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
@@ -551,33 +534,3 @@ def swa_dit_mod_fwd_tf32(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
     from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
 
     return tf32_fwd.mod_fwd_tf32(c, wmod)
-
-
-def _swa_dit_mod_bwd_tf32_fake(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
-    """Shapes of the outputs: dc like c (fp32), dWmod fp32 in Wmod's shape."""
-    return [torch.empty_like(c), torch.empty(wmod.shape, dtype=torch.float32, device=wmod.device)]
-
-
-@opaque(fake=_swa_dit_mod_bwd_tf32_fake, name="swa_dit_mod_bwd_tf32")
-def swa_dit_mod_bwd_tf32(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
-    """[dc, dWmod] (fp32) of :func:`swa_dit_mod_fwd_tf32` from g = d mod [R, 6C] fp32 (``tf32_bwd.mod_bwd_tf32``)."""
-    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
-
-    dc, dw = tf32_bwd.mod_bwd_tf32(g, c, wmod)
-    return [dc, dw]
-
-
-class SWADiTModulationTf32(torch.autograd.Function):
-    """``swa_dit_hoist_modulation`` on the sm_100a TF32 kernels: silu(c) Wmod^T (mod_fwd_tf32) and its backward (tf32_bwd.mod_bwd_tf32);
-    c [R, C] fp32 contiguous with R a multiple of 128, Wmod [6C, C] fp32. ``interface`` takes it only when the backward loads."""
-
-    @staticmethod
-    def forward(ctx, c, wmod):
-        ctx.save_for_backward(c, wmod)
-        return swa_dit_mod_fwd_tf32(c, wmod)
-
-    @staticmethod
-    def backward(ctx, g):
-        c, wmod = ctx.saved_tensors
-        dc, dw = swa_dit_mod_bwd_tf32(g.contiguous(), c, wmod)
-        return dc, dw

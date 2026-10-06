@@ -8,6 +8,15 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Removed
+
+- B200 fp32 SWA atom DiT backward (`kernels/swa_dit/cuda/sm100/tf32_bwd.py` and its `*_bwd_tf32.cu`, `attn_dq_tf32.cu`,
+  `attn_dkv_tf32.cu`, `bwd_prep_tf32.cu`, `mod_bwd_tf32.cu`): identical training steps gave different gradients (a 2-row x 32-column
+  dP fragment of `qkvg_bwd_tf32`, ~2e-2 on dq / dWqkv), and it faulted on poisoned memory. fp32 training takes the Triton fp32 path
+  until a new backward lands; inference keeps the TF32 forward.
+- B200 fp32 bias-only DiT `dpb_tf32.cu`: identical reruns gave different dbias at L 640 / 768. The fp32 training op computes dbias as
+  a TF32 batched GEMM until a new kernel lands.
+
 ### Added
 
 - B200 fp32 token DiT training, faster: the pair-bias projection and its gradients on TF32 tensor cores, narrow weight

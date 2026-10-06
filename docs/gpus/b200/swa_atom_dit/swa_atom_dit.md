@@ -285,6 +285,12 @@ weights an optimizer step changed (`tests/integrations/test_swa_dit_pack_cache.p
 
 ## fp32 (TF32) path (2026-10-06)
 
+**Backward removed (2026-10-06).** The TF32 backward (`tf32_bwd.py` and its kernels) gave different gradients for identical
+training steps in MiniWorld's call pattern (B = 1, 48 augments, ragged rows; a 2-row x 32-column dP fragment of `qkvg_bwd_tf32` came
+out different, ~2e-2 on dq / dWqkv) and faulted on poisoned memory. It is gone: `dispatch._tf32_bwd_ready` is False, so an fp32
+training call (forward with saves, the hoisted modulation with a gradient) runs the Triton fp32 path until a new backward lands.
+What follows describes the forward, which inference keeps; the backward parts are history.
+
 The fp32 block (MiniWorld's fp32 atom transformer: fp32 parameters, no autocast) on B200 runs every stage on hand-written sm_100a
 kernels with TF32 tensor-core MMAs (`tcgen05.mma kind::tf32`, fp32 accumulation in TMEM) instead of the Triton fp32 kernels
 (`triton/forward_fp32.py`, `backward_fp32.py`). Residual stream, modulation, RoPE tables, softmax and every elementwise step stay

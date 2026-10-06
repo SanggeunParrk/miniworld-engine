@@ -208,7 +208,7 @@ Status (2026-10-06): written, **not yet built or measured on B200** -- the kerne
 **Gate.** `serves()` takes fp32 when single, cond and pair are fp32, the block's weights are fp32 (`to_value.weight`) and CUDA
 autocast is off (under autocast the module path keeps its casts, as before), and `tf32_ready` (a `device_constant`) has built the
 fp32 kernels: the fp32 row extension, the bf16 row extensions whose dtype-generic passes the fp32 path shares, the attention core
-(and for training the ungated core and `dpb_tf32`). A failed build warns once and keeps the module path for the process.
+(and for training the ungated core). A failed build warns once and keeps the module path for the process.
 `MINIWORLD_BIAS_ONLY_DIT_TF32=0` turns the fp32 path off.
 
 **Recipe.** Every activation, saved tensor, table and gradient fp32; the residual stream fp32. General GEMMs are cuBLAS on TF32
@@ -221,7 +221,7 @@ extension's dtype-generic `unfold` / `finalize`.
 |---|---|---|---|
 | pair bias `LN(pair) Wf^T` | `pair_bias` (f32 rows) per block | `pair_bias` + row stats | `pair_bias_bwd`: d pair, dWf partials |
 | softmax | `softmax_rows` (f32) | `softmax_t` (P and P^T, f32) | -- |
-| attention | **`pv_gate_tf32`** (gated) | **`pv_gate_tf32`** (gated) | `gate_bwd` rows, **`pv_gate_tf32`** ungated on P^T (dV), **`dpb_tf32`** |
+| attention | **`pv_gate_tf32`** (gated) | **`pv_gate_tf32`** (gated) | `gate_bwd` rows, **`pv_gate_tf32`** ungated on P^T (dV), `_dbias32` (TF32 bmm, see F2) |
 | conditioning | `ln_rows` (fp32 in / out) + 2 cuBLAS TF32 GEMMs | `cond_ln` + 2 GEMMs | `cond_bwd`, `unfold`, `finalize` |
 | rows | `adaln_in_rows`, `resgate_*_rows` (dtype-generic), `swiglu` (f32) | `adaln_a`, `res_adaln_b`, `swiglu`, `res_c` | `res_c_bwd`, `swiglu_bwd`, `res_adaln_b_bwd`, `adaln_a_bwd` |
 | v\|g, out, expand, squeeze | cuBLAS TF32 | cuBLAS TF32 | cuBLAS TF32 (data and weight gradients) |
@@ -248,14 +248,12 @@ Warps: 0 TMA producer, 1 MMA (whole warp waits, `elect_one()` issues), 2 TMEM al
 `__launch_bounds__(256, 2)` caps the registers at 128 (shared memory keeps one CTA per SM). SG per call: the fewest bytes into the
 busiest SM (`pick_group_tf32`: rounds x (P once + SG v tiles + their g / a)); `MINIWORLD_BIAS_ONLY_DIT_SG` forces one.
 
-### F2 · `dpb_tf32.cu` (dbias = P o (sum_a dO v^T - D))
+### F2 · bias gradient (dbias = P o (sum_a dO v^T - D))
 
-As `dpb_sm100.cu` with fp32 operands: per sample the dO tile [128 i][DH] and the key tile [NJ j][DH], both K-major (channels 0-31
-one SW128 box, 32..DH-1 a SW64 box for DH 48 / SW128 for DH 64, as `attn_inf_tf32`'s q / k tiles), one M 128 x N NJ x K DH product
-(K = 8 per MMA); accumulators double-buffered (2 NJ <= 512 columns); P streams in [128][32] fp32 pieces (two-slot ring, its own
-producer warp); each epilogue warp stages its 32 rows x 32 keys of dbias (fp32 SW128, 4 KB, two per warp) for TMA stores.
-Shared memory 32 KB P ring + 32 KB staging + NST >= 2 stages of (128 + NJ)(128 + 4 (DH - 32)) bytes; NJ in {128, 192, 256} by
-the bf16 kernel's cost model where two stages fit (12 / 16 x 64: NJ <= 192).
+`dpb_tf32.cu` was removed on 2026-10-06: identical reruns gave different dbias at L 640 / 768 for every head layout (L 384 was
+bit-identical), and 16 x 64 at L 640 missed the fp64 bound (8.4e-3 > 3e-3). Until a new kernel replaces it, `_dbias32` in
+`integrations/bias_only_dit_train.py` computes dbias as one TF32 batched GEMM per head over the samples' channels, then the
+elementwise P o (. - D).
 
 ### F3 · fp32 rows (`bias_only_dit_f32_rows.cu`)
 
