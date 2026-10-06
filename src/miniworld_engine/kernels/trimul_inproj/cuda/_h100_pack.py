@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 import torch
 from . import _h100_runtime as T
+from miniworld_engine.kernels._compile import opaque
 
 
 @triton.jit
@@ -124,13 +125,34 @@ def training_pair_mask(mask, length, device):
     return out
 
 
-def training_unit_scale(pair):
+def _training_unit_scale_fake(pair):
+    return torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
+
+
+@opaque(fake=_training_unit_scale_fake, name="trimul_h100_training_unit_scale")
+def _training_unit_scale(pair: torch.Tensor) -> torch.Tensor:
     out = torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
     _launch("mw_aux_unit_scale", ((out.numel()+255)//256, 1, 1), [out, out.numel()])
     return out
 
 
-def fused_training_prepare(leaves, mask):
+def training_unit_scale(pair):
+    # The pair supplies shape/device only; the constant scale has no derivative.
+    with torch.no_grad():
+        return _training_unit_scale(pair)
+
+
+def _fused_training_prepare_fake(leaves, mask):
+    x, weight = leaves[:2]
+    length, width, hidden = x.shape[1], x.shape[-1], weight.shape[0]
+    return (x.new_empty((4*hidden, width)),
+            x.new_empty((length, length), dtype=torch.float32),
+            x.new_empty((width, width)), x.new_empty((width, hidden)))
+
+
+@opaque(fake=_fused_training_prepare_fake, name="trimul_h100_d64_training_prepare")
+def fused_training_prepare(leaves: list[torch.Tensor], mask: torch.Tensor | None
+                           ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """One live CUDA launch for D64 K1 packing, output weights and pair mask."""
     x, *weights = leaves[:7]
     length, width = x.shape[1], x.shape[-1]
