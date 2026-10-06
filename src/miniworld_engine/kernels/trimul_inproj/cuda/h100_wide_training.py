@@ -555,8 +555,13 @@ def _output_norm(cell, tri, norm, go, bo, mu, rs, delta):
         return
     # D512: packed normalization, recording rows where it differs from the scalar form.
     patches, count, changed = delta
-    count.zero_()
-    changed.zero_()
+    if T.preserve_wide_training(D):
+        from ._h100_pack import zero_native_
+        zero_native_(count)
+        zero_native_(changed)
+    else:
+        count.zero_()
+        changed.zero_()
     k = _kernel("delta_norm_d512.cu", "mw_wide_lowreg_delta_norm", fw, defines, smem)
     grid = _resident_grid("delta_norm_d512.cu", "mw_wide_lowreg_delta_norm", fw, defines, 128, smem)
     _launch(k, grid, 128, smem, _params("delta_norm", [
@@ -624,7 +629,7 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     """Output-LN backward: dt from dn; dgamma/dbeta sums. L384 kernels do not zero them."""
     D, n = cell
     M, H = n * n, 2 * D
-    native = D == 256 and T.preserve_d256_training()
+    native = T.preserve_training(D)
     rows = 32 if D == 256 or (D, n) == (384, 768) else 16
     minblocks = 3 if D == 256 else 2
     defines = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
@@ -749,7 +754,7 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
     """Input-LN backward and residual into dx; reduce input (and gate) weight partials."""
     D, n = cell
     M = n * n
-    native = D == 256 and T.preserve_d256_training()
+    native = T.preserve_training(D)
     defines = _defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, MASTER_FP32=int(master))
     if native:
         defines += _defines(MW_LN_PARTIALS=1)
@@ -768,7 +773,7 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
     k = _kernel(source, entry, "upstream", defines, smem)
     if native:
         grid = (_resident_grid(source, entry, "upstream", defines, 128, smem)
-                if cooperative else _sms()*6)
+                if cooperative else _sms()*{256: 6, 384: 5, 512: 4}[D])
         pg, pb = [torch.empty((grid,D),device=x.device,dtype=torch.float32) for _ in range(2)]
         fields[5:7] = [pg,pb]
         _launch(k,grid,128,smem,_params(source,fields))
@@ -820,7 +825,11 @@ def _delta_projection(cell, saved, wp, proj, go, bo, workspace, donor):
     _launch(fallback, grid, 128, smem, _params("delta_fallback", [
         *maps, go, bo, mu, rs, M, count, capacity]))
     rows_capacity = M // 64
-    seen = torch.zeros(M + 1, device=norm.device, dtype=torch.int32)
+    if T.preserve_wide_training(D):
+        from ._h100_pack import zeros_native
+        seen = zeros_native(M + 1, device=norm.device, dtype=torch.int32)
+    else:
+        seen = torch.zeros(M + 1, device=norm.device, dtype=torch.int32)
     rows = torch.empty(rows_capacity, device=norm.device, dtype=torch.int32)
     compact = norm.new_empty((rows_capacity, H))
     projected = norm.new_empty((rows_capacity, D))
@@ -933,7 +942,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
             _split_input_dw(cell, dxin, xn, partial, workspace, joint)
     if fused_glue:
         wcat = saved[9]
-    elif D == 256 and T.preserve_d256_training():
+    elif T.preserve_training(D):
         from ._h100_pack import stack_backward_weights
         wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
     else:

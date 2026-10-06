@@ -99,16 +99,25 @@ TMN_DEVI void affine(const Params& p,uint8_t* sm,uint64_t* bar){
  for(int c=tid;c<H;c+=128){float g=0,b=0;
   #pragma unroll
   for(int w=0;w<4;++w){g+=acc[w*H+c];b+=acc[(4+w)*H+c];}
+  #if MW_LN_PARTIALS
+  p.dg[blockIdx.x*H+c]=g;p.db[blockIdx.x*H+c]=b;
+  #else
   atomicAdd(p.dg+c,g);atomicAdd(p.db+c,b);
+  #endif
  }
 }
 extern "C" __global__ __launch_bounds__(256,2)
 void mw_wide_stats_ln(__grid_constant__ const Params p){
  extern __shared__ __align__(1024) uint8_t sm[];auto bar=reinterpret_cast<uint64_t*>(sm+BAR);int tid=threadIdx.x;
+ #if !MW_LN_PARTIALS
  for(int c=blockIdx.x*256+tid;c<H;c+=gridDim.x*256){p.dg[c]=0;p.db[c]=0;}
+ #endif
  for(int c=tid;c<H;c+=256)reinterpret_cast<float*>(sm+BAR+128)[c]=p.gamma[c];
  if(tid==0){for(int i=0;i<7;++i)mbar_init(bar+i,1);fence_barrier_init();}
- __syncthreads();cooperative_groups::this_grid().sync();
+ __syncthreads();
+ #if !MW_LN_PARTIALS
+ cooperative_groups::this_grid().sync();
+ #endif
  if(tid<128){setmaxnreg_inc<144>();normalizer(p,sm,bar);}
  else{setmaxnreg_dec<112>();affine(p,sm,bar);}
 }

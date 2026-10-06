@@ -22,7 +22,7 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as W
 
-WIDTHS = (256, 384)
+WIDTHS = (256, 384, 512)
 # front K1 tiles: (BI, BJ, ring slots, K chunks per slot, min blocks per SM)
 _K1 = {256: (2, 64, 4, 4, 1), 384: (2, 64, 2, 6, 1)}
 
@@ -95,11 +95,11 @@ def _run_forward(leaves, mask, ds, outgoing, save):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     n, D = x.shape[1], x.shape[-1]
     if not supports(D, n):
-        raise ValueError(f"single-direction wide TriMul training covers D256/384 at L384/768, not {(D, n)}")
+        raise ValueError(f"single-direction wide TriMul training covers D256/384/512 at L384/768, not {(D, n)}")
     M = n * n
     saved = saved_like(x)
     ab, tri, xn, norm, proj, gate, mu, rs, pre, pmask = saved[:10]
-    if D == 256 and T.preserve_d256_training():
+    if T.preserve_training(D):
         from ._h100_pack import dense_copy_into
         dense_copy_into(pmask,mask.reshape(n,n))
     else:
@@ -125,13 +125,13 @@ def _run_forward(leaves, mask, ds, outgoing, save):
 def _forward_fake(leaves, mask, ds, outgoing):
     """y like x, then the saved set (``saved_like``)."""
     x = leaves[0]
-    return [torch.empty_like(x), *saved_like(x, T.uni_d256_training(x, outgoing))]
+    return [torch.empty_like(x), *saved_like(x, T.uni_training(x, outgoing))]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_uni_wide_train_fwd")
 def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> list[torch.Tensor]:
     """Training forward; returns ``[y, *saved]`` (all freshly allocated)."""
-    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_d256_training(leaves[0], outgoing)):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)):
         return _run_forward(leaves, mask, ds, outgoing, True)
 
 
@@ -143,7 +143,7 @@ def _forward_nograd_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_nograd_fake, name="trimul_h100_uni_wide_dropout_nograd")
 def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> torch.Tensor:
     """Training-mode (dropout) forward without autograd."""
-    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_d256_training(leaves[0], outgoing)):
+    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)):
         return _run_forward(leaves, mask, ds, outgoing, False)
 
 
@@ -162,16 +162,16 @@ def _gate(proj, gate, dy, ds, dp, prefix):
 
 #: Output-LN backward per H: (source family, rows per tile, min blocks per SM). The "d256" source
 #: single-buffers its tiles, the "d384" source double-buffers them.
-OUT_LN = {256: ("d256", 32, 3), 384: ("d384", 16, 2)}
+OUT_LN = {256: ("d256", 32, 3), 384: ("d384", 16, 2), 512: ("d512", 16, 2)}
 
 
 def _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     """Output-LN backward (dgo / dbo accumulate: zeroed by the caller)."""
     H, n = tri.shape[0], tri.shape[1]
     M = n * n
-    native = H == 256 and T.preserve_d256_training()
+    native = T.preserve_training(H)
     family, rows, minblocks = OUT_LN[H]
-    buffers = 2 if family == "d256" else 4
+    buffers = 2 if family in ("d256", "d512") else 4
     defines_ = dict(MW_MINB=1, MW_K1_STREAM=0, WIDTH=H // 2, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
                     LN_MINBLOCKS=minblocks)
     sb = rows * H * 2
@@ -179,7 +179,7 @@ def _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     defines = W._defines(**defines_, LN_STATS_OFFSET=stats)
     if native:
         defines += W._defines(MW_LN_PARTIALS=1)
-    smem = stats + rows * 8 * (buffers // 2)
+    smem = stats + rows * 8 * (buffers // 2) + (640 if family == "d512" else 0)
     source = f"output_ln_{family}_l384.cu"
     swizzle = "64B" if rows == 32 else "32B"
     maps = [W._map(t, [rows, 64, H // 64], [M, 64, H // 64], [M * 2, M * 128], swizzle) for t in (tri, dt)]
@@ -224,7 +224,7 @@ def _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=False):
     """Input-LN backward + identity residual (dgi / dbi accumulate: zeroed by the caller)."""
     n, D = x.shape[1], x.shape[-1]
     M = n * n
-    native = D == 256 and T.preserve_d256_training()
+    native = T.preserve_training(D)
     defines = W._defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, INPUT_NO_REDUCE=1)
     if native:
         defines += W._defines(MW_LN_PARTIALS=1)
@@ -232,7 +232,7 @@ def _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=False):
     source = f"input_ln_d{D}_l384.cu"
     k = W._kernel(source, "mw_independent_input_ln", "upstream", defines, smem)
     maps = [W._map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
-    grid = W._sms() * {256: 6, 384: 5}[D]
+    grid = W._sms() * {256: 6, 384: 5, 512: 4}[D]
     if native:
         pg,pb=[torch.empty((grid,D),device=x.device,dtype=torch.float32) for _ in range(2)]
     else:
@@ -262,7 +262,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     dn = torch.mm(dp, wp)
     dwp = torch.mm(dp.t(), norm, **({"out_dtype": torch.float32} if master else {}))
     dt = torch.empty_like(tri)
-    affine_alloc = torch.empty if D == 256 and T.preserve_d256_training() else torch.zeros
+    affine_alloc = torch.empty if T.preserve_training(D) else torch.zeros
     dgo, dbo = affine_alloc(D, **f32), affine_alloc(D, **f32)
     out_affine = _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=fused_glue)
     _contract_gp(dt, ab, pre, pmask, gp, outgoing)
@@ -271,7 +271,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     dws = torch.mm(dxin, xn2, **({"out_dtype": torch.float32} if master else {}))
     if fused_glue:
         wcat = saved[10]
-    elif D == 256 and T.preserve_d256_training():
+    elif T.preserve_training(D):
         from ._h100_pack import stack_backward_weights
         wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
     else:
@@ -307,7 +307,7 @@ class _Training(torch.autograd.Function):
     def forward(ctx, outgoing, *args):
         leaves = list(args[:11])
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
-        native = T.uni_d256_training(leaves[0], outgoing)
+        native = T.uni_training(leaves[0], outgoing)
         ctx.native = native
         if native:
             from ._h100_pack import cast_training_weights
@@ -343,7 +343,7 @@ class _Training(torch.autograd.Function):
 def single_trimul(outgoing, *args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
     import os
-    native = T.uni_d256_training(args[0], outgoing)
+    native = T.uni_training(args[0], outgoing)
     if os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1" and not native:
         return native_buckets(False, outgoing, *args)
     if not torch.is_grad_enabled():
