@@ -147,12 +147,7 @@ void wide_fused_d384_kernel(const __grid_constant__ CUtensorMap mx,const __grid_
    mbar_wait(done,i&1);if(i+1<count)loadx(i+1,xl);
   }
   }
-  __syncthreads();
-#if MW_FUSED_D384_MC
-  asm volatile("barrier.cluster.arrive.release.aligned; barrier.cluster.wait.acquire.aligned;":::"memory");
-#endif
-  return;
- }
+ } else {
  setmaxnreg_inc<248>();
  int seq=0;
  for(int i=0;i<count;++i){
@@ -258,6 +253,9 @@ void wide_fused_d384_kernel(const __grid_constant__ CUtensorMap mx,const __grid_
   }
  }
  if(!wt)tma_store_wait_all();
+ }
+ // This barrier must be a single converged instruction for both warpgroups.
+ // Separate branch-local __syncthreads instructions are invalid to synccheck.
  __syncthreads();
 #if MW_FUSED_D384_MC
  // Neither CTA can retire while its peer still accesses its shared barriers.
