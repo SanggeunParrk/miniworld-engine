@@ -71,6 +71,27 @@ extern "C" __global__ void mw_aux_pack(AuxPack p) {
   int leaf=2*(source>=p.rows)+(row%64<32),r=source%p.rows;
   p.dst[i]=__float2bfloat16_rn(aux_read(p.w[leaf],r*p.s0[leaf]+col*p.s1[leaf],p.fp32[leaf]));
 }
+extern "C" __global__ void mw_aux_pack_vec(AuxPack p) {
+  int i=blockIdx.x*256+threadIdx.x,cols=p.cols/8;
+  if(i>=4*p.rows*cols)return;
+  int row=i/cols,col=i%cols,source=(row/64)*32+row%32;
+  int leaf=2*(source>=p.rows)+(row%64<32),r=source%p.rows;
+  reinterpret_cast<uint4*>(p.dst)[i]=reinterpret_cast<const uint4*>(p.w[leaf])[r*cols+col];
+}
+extern "C" __global__ void mw_aux_pack_training_pair(bf* packed,bf* stacked,
+    const bf* wg,const bf* wl,const bf* wlg,const bf* wr,const bf* wrg,int rows,int width){
+  const int i=blockIdx.x*256+threadIdx.x,cols=width/8,gate=width*cols;
+  if(i<gate){reinterpret_cast<uint4*>(stacked)[i]=reinterpret_cast<const uint4*>(wg)[i];return;}
+  const int q=i-gate;
+  if(q>=4*rows*cols)return;
+  const int leaf=q/(rows*cols),r=(q/cols)%rows,c=q%cols;
+  const bf* src=leaf==0?wl:leaf==1?wlg:leaf==2?wr:wrg;
+  const uint4 value=reinterpret_cast<const uint4*>(src)[r*cols+c];
+  reinterpret_cast<uint4*>(stacked)[i]=value;
+  const int source=(leaf/2)*rows+r;
+  const int outrow=(source/32)*64+source%32+(leaf%2?0:32);
+  reinterpret_cast<uint4*>(packed)[outrow*cols+c]=value;
+}
 extern "C" __global__ void mw_aux_norm(const bf* x,const float* g,const float* b,
                                         bf* y,float* stats,int width) {
   int row=blockIdx.x; float sum=0.f;
@@ -219,11 +240,71 @@ extern "C" __global__ void mw_aux_ln_affine_finish(const float* partial,float* d
   dg[c]=g;db[c]=b;
 }
 struct AuxStack {const bf* w[5];bf* dst;int rows[5],s0[5],s1[5],width;};
+// Fixed CTA-index reduction of the selected TMA LayerNorm kernels' affine sums.
+extern "C" __global__ void mw_aux_affine_cta_finish(const float* pg,const float* pb,
+    float* dg,float* db,int width,int blocks){
+  const int lane=threadIdx.x%32,warp=threadIdx.x/32,c=blockIdx.x*32+lane;
+  __shared__ float sums[2][4][32];
+  float g=0.f,b=0.f;
+  if(c<width)for(int k=warp;k<blocks;k+=4){g+=pg[k*width+c];b+=pb[k*width+c];}
+  sums[0][warp][lane]=g;sums[1][warp][lane]=b;__syncthreads();
+  if(warp==0&&c<width){
+    g=0.f;b=0.f;
+    #pragma unroll
+    for(int w=0;w<4;++w){g+=sums[0][w][lane];b+=sums[1][w][lane];}
+    dg[c]=g;db[c]=b;
+  }
+}
 extern "C" __global__ void mw_aux_stack(AuxStack p){
   int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
   if(i>=p.rows[leaf]*p.width)return;
   int offset=0;for(int k=0;k<leaf;++k)offset+=p.rows[k]*p.width;
   p.dst[offset+i]=p.w[leaf][(i/p.width)*p.s0[leaf]+(i%p.width)*p.s1[leaf]];
+}
+extern "C" __global__ void mw_aux_stack_vec(AuxStack p){
+  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
+  if(i>=p.rows[leaf]*(p.width/8))return;
+  int offset=0;for(int k=0;k<leaf;++k)offset+=p.rows[k]*(p.width/8);
+  reinterpret_cast<uint4*>(p.dst)[offset+i]=reinterpret_cast<const uint4*>(p.w[leaf])[i];
+}
+extern "C" __global__ void mw_aux_affine_cta_finish_parallel(const float* pg,const float* pb,
+    float* dg,float* db,int width,int blocks){
+  const int tid=threadIdx.x,lane=tid%32,warp=tid/32,c=blockIdx.x*4+(tid%4);
+  __shared__ float sums[2][4][4];
+  float g=0.f,b=0.f;
+  if(c<width)for(int k=tid/4;k<blocks;k+=32){g+=pg[k*width+c];b+=pb[k*width+c];}
+  #pragma unroll
+  for(int off=16;off>=4;off/=2){g+=__shfl_down_sync(0xffffffff,g,off);b+=__shfl_down_sync(0xffffffff,b,off);}
+  if(lane<4){sums[0][warp][lane]=g;sums[1][warp][lane]=b;}
+  __syncthreads();
+  if(tid<4&&c<width){
+    g=0.f;b=0.f;
+    #pragma unroll
+    for(int w=0;w<4;++w){g+=sums[0][w][tid];b+=sums[1][w][tid];}
+    dg[c]=g;db[c]=b;
+  }
+}
+extern "C" __global__ void mw_aux_affine_pair_finish(
+    const float* pg0,const float* pb0,float* dg0,float* db0,
+    const float* pg1,const float* pb1,float* dg1,float* db1,
+    int width0,int blocks0,int width1,int blocks1){
+  const bool second=int(blockIdx.x)>=width0/4;
+  const int width=second?width1:width0,blocks=second?blocks1:blocks0;
+  const float* pg=second?pg1:pg0;const float* pb=second?pb1:pb0;
+  float* dg=second?dg1:dg0;float* db=second?db1:db0;
+  const int tid=threadIdx.x,lane=tid%32,warp=tid/32;
+  const int c=(int(blockIdx.x)-(second?width0/4:0))*4+tid%4;
+  __shared__ float sums[2][4][4];float g=0.f,b=0.f;
+  for(int k=tid/4;k<blocks;k+=32){g+=pg[k*width+c];b+=pb[k*width+c];}
+  #pragma unroll
+  for(int off=16;off>=4;off/=2){g+=__shfl_down_sync(0xffffffff,g,off);b+=__shfl_down_sync(0xffffffff,b,off);}
+  if(lane<4){sums[0][warp][lane]=g;sums[1][warp][lane]=b;}
+  __syncthreads();
+  if(tid<4){g=0.f;b=0.f;
+    #pragma unroll
+    for(int w=0;w<4;++w){g+=sums[0][w][tid];b+=sums[1][w][tid];}
+    dg[c]=g;db[c]=b;
+  }
 }
 extern "C" __global__ void mw_aux_owned_mask(const void* src,bf* dst,int n,int kind,int token){
   int i=blockIdx.x*256+threadIdx.x;if(i>=n*n)return;
