@@ -6,6 +6,105 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <curand_kernel.h>
+#include <ATen/ops/fill_native.h>
+#include <torch/library.h>
+#include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+
+// PyTorch's graph replay updates Philox seed/offset scalars with aten::fill_.
+// Keep its generator, counter reservation and stream ordering unchanged, but
+// use our CUDA writer for the two scalars owned by a graph containing this op.
+// All other tensors go directly to the original native fill implementation.
+// CUDA graph user objects bound the pointer registration to graph/exec lifetime;
+// a destroyed graph cannot leave an allocator address registered indefinitely.
+namespace {
+struct GraphRngRegistry {
+  std::mutex mutex;
+  std::unordered_map<void*, size_t> references;
+};
+GraphRngRegistry& graph_rng_registry() {
+  // CUDA may run user-object destructors during runtime shutdown. Keep this
+  // small host registry alive until process exit instead of destructing early.
+  static auto* registry = new GraphRngRegistry;
+  return *registry;
+}
+struct GraphRngPointers {
+  void* seed;
+  void* offset;
+  GraphRngPointers(void* s, void* o) : seed(s), offset(o) {
+    auto& r = graph_rng_registry();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    ++r.references[seed]; ++r.references[offset];
+  }
+  ~GraphRngPointers() {
+    auto& r = graph_rng_registry();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    for (auto* pointer : {seed, offset}) {
+      auto it = r.references.find(pointer);
+      if (it != r.references.end() && --it->second == 0) r.references.erase(it);
+    }
+  }
+};
+__global__ void graph_rng_scalar_write(int64_t* destination, int64_t value) {
+  *destination = value;
+}
+at::Tensor& graph_rng_fill(at::Tensor& tensor, const at::Scalar& value) {
+  bool owned = false;
+  if (tensor.is_cuda() && tensor.scalar_type() == at::kLong && tensor.numel() == 1) {
+    auto& r = graph_rng_registry();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    owned = r.references.count(tensor.data_ptr()) != 0;
+  }
+  if (!owned) return at::native::fill_(tensor, value);
+  c10::cuda::CUDAGuard guard(tensor.device());
+  auto* destination = tensor.data_ptr<int64_t>();
+  int64_t scalar = value.toLong();
+  cudaKernel_t kernel;
+  C10_CUDA_CHECK(cudaGetKernel(&kernel, graph_rng_scalar_write));
+  void* args[] = {&destination, &scalar};
+  C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel, dim3(1), dim3(1), args, 0,
+                                at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return tensor;
+}
+void enable_graph_rng_writer() {
+  static auto registration = [] {
+    auto library = std::make_unique<torch::Library>(
+        torch::Library::IMPL, "aten", c10::DispatchKey::CUDA, __FILE__, __LINE__);
+    library->impl("fill_.Scalar", &graph_rng_fill);
+    return library;
+  }();
+}
+void CUDART_CB release_graph_rng_pointers(void* pointers) {
+  delete static_cast<GraphRngPointers*>(pointers);
+}
+void register_graph_rng(const at::PhiloxCudaState& state) {
+  if (!state.captured_) return;
+  cudaStreamCaptureStatus status;
+  cudaGraph_t graph = nullptr;
+  C10_CUDA_CHECK(cudaStreamGetCaptureInfo(at::cuda::getCurrentCUDAStream(),
+                                        &status, nullptr, &graph, nullptr, nullptr));
+  TORCH_CHECK(status == cudaStreamCaptureStatusActive && graph,
+              "Philox graph state requires an active graph");
+  auto pointers = std::make_unique<GraphRngPointers>(state.seed_.ptr, state.offset_.ptr);
+  cudaUserObject_t object;
+  C10_CUDA_CHECK(cudaUserObjectCreate(&object, pointers.get(), release_graph_rng_pointers,
+                                    1, cudaUserObjectNoDestructorSync));
+  pointers.release();
+  auto retained = cudaGraphRetainUserObject(graph, object, 1, cudaGraphUserObjectMove);
+  if (retained != cudaSuccess) {
+    C10_CUDA_CHECK(cudaUserObjectRelease(object, 1));
+    C10_CUDA_CHECK(retained);
+  }
+}
+size_t graph_rng_pointer_count() {
+  auto& r = graph_rng_registry();
+  std::lock_guard<std::mutex> lock(r.mutex);
+  return r.references.size();
+}
+}  // namespace
 struct Pack {void const* ptr[6];bool fp32[6];};
 __global__ void pack_parameters(Pack p,__nv_bfloat16* wall,__nv_bfloat16* wo,int C,int H) {
   int64_t idx=int64_t(blockIdx.x)*256+threadIdx.x,n=int64_t(4*C+64)*C;
@@ -115,6 +214,9 @@ torch::Tensor drop_scale(torch::Tensor pair,double probability) {
   TORCH_CHECK(pair.is_cuda() && pair.scalar_type()==torch::kBFloat16 && pair.dim()==4
     && pair.size(1)==pair.size(2) && probability>0. && probability<1.,"BF16 square pair and 0<p<1 required");
   c10::cuda::CUDAGuard guard(pair.device());
+  const char* native_rng_env = std::getenv("MINIWORLD_TRIATTN_H100_NATIVE_RNG");
+  const bool native_graph_rng = !native_rng_env || std::string(native_rng_env) != "0";
+  if (native_graph_rng) enable_graph_rng_writer();
   auto out=torch::empty({pair.size(0),pair.size(1),pair.size(3)},pair.options());
   int64_t n=out.numel();auto* prop=at::cuda::getCurrentDeviceProperties();
   int blocks=std::min<int64_t>((n+255)/256,prop->multiProcessorCount*(prop->maxThreadsPerMultiProcessor/256));
@@ -122,10 +224,11 @@ torch::Tensor drop_scale(torch::Tensor pair,double probability) {
   auto* gen=at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState state;
   {std::lock_guard<std::mutex> lock(gen->mutex_);state=gen->philox_cuda_state(increment);}
+  if (native_graph_rng) register_graph_rng(state);
   auto* dst=(__nv_bfloat16*)out.data_ptr();float p=probability,inverse=1.f/(1.f-p);
   cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,drop_scale_kernel));
   void* args[]={&dst,&n,&state,&p,&inverse};
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("pack",&pack);m.def("finish",&finish);m.def("reduce_partials",&reduce_partials);m.def("drop_scale",&drop_scale);}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("pack",&pack);m.def("finish",&finish);m.def("reduce_partials",&reduce_partials);m.def("drop_scale",&drop_scale);m.def("graph_rng_pointer_count",&graph_rng_pointer_count);}
