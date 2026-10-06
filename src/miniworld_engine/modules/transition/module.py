@@ -110,12 +110,28 @@ class Transition(nn.Module):
 
         The raw op without the residual is available through ``ops.transition``.
         """
+        if self._requires_h100_cuda(x):
+            matrices = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight)
+            if (x.dtype != torch.bfloat16 or not x.is_contiguous() or x.numel() == 0
+                    or any(p.dtype != torch.float32 or not p.is_contiguous()
+                           for p in (self.ln_in.weight, self.ln_in.bias))
+                    or matrices[0].dtype not in (torch.bfloat16, torch.float32)
+                    or any(p.dtype != matrices[0].dtype for p in matrices)):
+                raise ValueError("H100 CUDA Transition requires contiguous BF16 activations, FP32 norm affine, "
+                                 "and matching BF16 or FP32 projection weights")
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
         # TRITON / CUDA / CUEQUIVARIANCE(->PYTORCH above): one residual-fused path, which
         # picks the hand-CUDA kernel where it applies and the Triton kernel everywhere else.
         return self._residual_forward(x)
+
+    def _requires_h100_cuda(self, x: torch.Tensor) -> bool:
+        from miniworld_engine.kernels.transition.cuda.fused_sm90a import native_aux_enabled
+
+        return (self.implementation == ImplementationType.MINIWORLD and _fused_sm90a_enabled()
+                and x.is_cuda and native_aux_enabled(self.d_hidden)
+                and torch.cuda.get_device_capability(x.device) == (9, 0))
 
     def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Residual-fused Transition: LN, expand-SwiGLU, squeeze with the residual folded into
@@ -162,6 +178,10 @@ class Transition(nn.Module):
                                 (fused_wide_sm90a, fused_wide_sm90a.transition_wide_sm90a)):
                 if kern.available(x, pa, ps):
                     return entry(x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
+
+            if self._requires_h100_cuda(x):
+                raise ValueError("H100 CUDA Transition requires a supported n=4 width, whole 128-row tiles, "
+                                 "and a successful native build")
 
         wa = self.expand_a.weight.to(x.dtype)
         wb = self.expand_b.weight.to(x.dtype)
