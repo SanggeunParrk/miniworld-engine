@@ -164,19 +164,19 @@ def test_calls_it_does_not_serve_keep_the_module_path(monkeypatch):
 
 
 # ------------------------------------------------------------------------------------------------------ hoisted per-item tables
-def _kernel_names(fn):
-    from torch.profiler import ProfilerActivity, profile
+def _kernel_names(fn, monkeypatch):
+    """The kernel launches of one eager call of ``fn``, counted at the launch functions the integration calls (one name per launch).
+    Not the profiler: in a long pytest process it drops the records of these driver-API launches (all of them, at times)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
 
-    fn()
-    torch.cuda.synchronize()
-    for _ in range(3):  # the profiler can drop the first records of a window in a long process: open it with a trivial kernel
-        with profile(activities=[ProfilerActivity.CUDA]) as prof:
-            torch.ones(1, device="cuda").add_(1)
-            fn()
-            torch.cuda.synchronize()
-        names = [e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA]
-        if any("local_attn_fwd" in n for n in names):                # the block's own kernel: the window recorded the call
-            return names
+    names: list[str] = []
+    with monkeypatch.context() as m:
+        for mod, fns in ((rows, ("cond_fwd", "pre_fwd", "post_fwd")), (local, ("cond_ln", "pair_bias_fwd", "attn_fwd"))):
+            for name in fns:
+                orig = getattr(mod, name)
+                m.setattr(mod, name, (lambda o, n: lambda *a, **k: names.append(n) or o(*a, **k))(orig, name))
+        fn()
     return names
 
 
@@ -184,16 +184,22 @@ def _bf(*ts):
     return [t.to(torch.bfloat16).contiguous() for t in ts]
 
 
-# the per-item kernels of a cross-attention inference call: conditioning modulation, the LN of the conditioning, the windowed pair bias
+# the per-item launches of a cross-attention inference call: conditioning modulation, the LN of the conditioning, the windowed pair bias --
+# as launch functions (eager calls) and as kernel names (a captured graph's nodes)
+TABLE_LAUNCHES = ("cond_fwd", "cond_ln", "pair_bias_fwd")
 TABLE_KERNELS = ("atom_cond_fwd", "local_cond_ln", "local_bias_fwd")
 
 
 def _count(names, *needles):
+    return sum(any(n == name for n in needles) for name in names)
+
+
+def _count_kernels(names, *needles):
     return sum(any(n in name for n in needles) for name in names)
 
 
 @pytest.mark.parametrize("cross", [False, True])
-def test_hoisted_tables_are_made_once_per_conditioning_and_pair(cross):
+def test_hoisted_tables_are_made_once_per_conditioning_and_pair(cross, monkeypatch):
     """The second inference call with the same conditioning / pair launches neither the conditioning tables nor the pair bias, and returns
     the first call's result bit for bit."""
     _, eng = _block(cross=cross)
@@ -201,12 +207,14 @@ def test_hoisted_tables_are_made_once_per_conditioning_and_pair(cross):
     local_dit._HOIST_COND.clear()
     local_dit._HOIST_BIAS.clear()
     with torch.no_grad():
+        first_names = _kernel_names(lambda: eng(single, cond, pair), monkeypatch)
         first = eng(single, cond, pair)
-        names = _kernel_names(lambda: eng(single, cond, pair))
+        names = _kernel_names(lambda: eng(single, cond, pair), monkeypatch)
         second = eng(single, cond, pair)
     assert torch.equal(first, second)
-    assert _count(names, *TABLE_KERNELS) == 0, names
-    assert _count(names, "local_attn_fwd") == 1 and _count(names, "atom_pre_fwd", "atom_post_fwd") == 2, "the block's own kernels must still run"
+    assert _count(first_names, *TABLE_LAUNCHES) == (3 if cross else 2), first_names
+    assert _count(names, *TABLE_LAUNCHES) == 0, names
+    assert _count(names, "attn_fwd") == 1 and _count(names, "pre_fwd", "post_fwd") == 2, "the block's own kernels must still run"
 
 
 def test_hoist_off_recomputes_every_call(monkeypatch):
@@ -214,8 +222,9 @@ def test_hoist_off_recomputes_every_call(monkeypatch):
     _, eng = _block()
     single, cond, pair = _bf(*_inputs(3, 256))
     with torch.no_grad():
-        names = _kernel_names(lambda: eng(single, cond, pair))
-    assert _count(names, "atom_cond_fwd") == 1 and _count(names, "local_bias_fwd") == 1, names
+        eng(single, cond, pair)
+        names = _kernel_names(lambda: eng(single, cond, pair), monkeypatch)
+    assert _count(names, "cond_fwd") == 1 and _count(names, "pair_bias_fwd") == 1, names
 
 
 @pytest.mark.parametrize("cross", [False, True])
@@ -261,7 +270,7 @@ def test_graph_replays_and_static_inputs(static):
         from tests.cuda_graph_nodes import graph_kernels
 
         names = graph_kernels(graph)                     # the replay's launches, from the graph (profiling replays is unreliable)
-        n_tables = _count(names, *TABLE_KERNELS)
+        n_tables = _count_kernels(names, *TABLE_KERNELS)
         if static:
             assert n_tables == 0, names
         else:
