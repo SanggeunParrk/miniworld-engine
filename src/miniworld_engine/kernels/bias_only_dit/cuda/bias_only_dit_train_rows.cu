@@ -1324,9 +1324,92 @@ at::Tensor shared_grad90(at::Tensor input){
  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 
+// Preserve the pair-LN scale gradient through the FP32 bias/softmax chain.
+// Restricted to the H16 DH64 training layout; required H16 DH48 keeps its existing path.
+namespace bias_shadow90 {
+__global__ void pair_shadow(const bf* p,const float2* st,const float* wb,const float* wp,float* z,float* score,int R) {
+ __shared__ float zh[16][128];
+ int t=threadIdx.x,base=blockIdx.x*16;
+ for(int i=t;i<2048;i+=256) {
+  int row=base+i/128,c=i%128;float2 s=st[row];
+  float v=__fmul_rn(__bfloat162float(p[row*128+c])-s.x,s.y);
+  z[row*128+c]=v;zh[i/128][c]=__fmul_rn(v,wp[c]);
+ }
+ __syncthreads();int r=t/16,h=t%16;float v=0.f;
+ #pragma unroll
+ for(int c=0;c<128;++c)v=fmaf(zh[r][c],wb[h*128+c],v);
+ score[h*R+base+r]=v;
+}
+__global__ void head_pack(const bf* d,const bf* v,float* dh,float* vh,int M,int L,int DA,int stride) {
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=M*DA)return;
+ int row=i/DA,col=i%DA,h=col/(DA/16),k=col%(DA/16),a=row/L,l=row%L;
+ long dst=((long)h*L+l)*(M/L)*(DA/16)+a*(DA/16)+k;
+ dh[dst]=__bfloat162float(d[i]);vh[dst]=__bfloat162float(v[row*stride+col]);
+}
+__device__ float sumwarp(float x){for(int d=16;d;d>>=1)x+=__shfl_xor_sync(0xffffffff,x,d);return x;}
+__device__ float maxwarp(float x){for(int d=16;d;d>>=1)x=fmaxf(x,__shfl_xor_sync(0xffffffff,x,d));return x;}
+__global__ void soft_grad(const float* score,const float* dp,const bool* mask,float* db,int L) {
+ __shared__ float scratch[8],mx,den,delta;
+ int t=threadIdx.x,row=blockIdx.x,lane=t%32,w=t/32;
+ float vals[3],p[3],m=-3.402823466e38f;
+ #pragma unroll
+ for(int k=0;k<3;++k){int j=t+k*256;vals[k]=j<L&&(!mask||mask[j])?score[(long)row*L+j]:-3.402823466e38f;m=fmaxf(m,vals[k]);}
+ m=maxwarp(m);if(lane==0)scratch[w]=m;__syncthreads();
+ if(w==0){m=maxwarp(lane<8?scratch[lane]:-3.402823466e38f);if(lane==0)mx=m;}__syncthreads();
+ float s=0.f;
+ #pragma unroll
+ for(int k=0;k<3;++k){int j=t+k*256;p[k]=j<L?expf(vals[k]-mx):0.f;s+=p[k];}
+ s=sumwarp(s);if(lane==0)scratch[w]=s;__syncthreads();
+ if(w==0){s=sumwarp(lane<8?scratch[lane]:0.f);if(lane==0)den=s;}__syncthreads();
+ float d=0.f;
+ #pragma unroll
+ for(int k=0;k<3;++k){int j=t+k*256;p[k]/=den;if(j<L)d+=__fmul_rn(p[k],dp[(long)row*L+j]);}
+ d=sumwarp(d);if(lane==0)scratch[w]=d;__syncthreads();
+ if(w==0){d=sumwarp(lane<8?scratch[lane]:0.f);if(lane==0)delta=d;}__syncthreads();
+ #pragma unroll
+ for(int k=0;k<3;++k){int j=t+k*256;if(j<L)db[(long)row*L+j]=(!mask||mask[j])?__fmul_rn(p[k],dp[(long)row*L+j]-delta):0.f;}
+}
+template<class T> __global__ void finish_gamma(const float* dw,const float* wb,T* norm) {
+ int c=threadIdx.x;float acc=0.f;for(int h=0;h<16;++h)acc+=__fmul_rn(dw[h*128+c],wb[h*128+c]);
+ if constexpr(std::is_same_v<T,float>)norm[768+c]=acc;else norm[768+c]=__float2bfloat16_rn(acc);
+}
+std::vector<torch::Tensor> prepare(torch::Tensor p,torch::Tensor st,torch::Tensor wb,torch::Tensor wp,torch::Tensor d,torch::Tensor v,int64_t L) {
+ at::cuda::CUDAGuard guard(p.device());
+ int R=p.numel()/128,M=d.size(0),DA=d.size(1);
+ TORCH_CHECK(p.is_contiguous()&&p.scalar_type()==torch::kBFloat16&&p.size(-1)==128,
+             "gamma shadow: contiguous BF16 pair width128");
+ TORCH_CHECK((L==384||L==768)&&R==L*L&&DA==1024&&M%L==0&&d.is_contiguous(),
+             "gamma shadow: H16 DH64 required training buckets");
+ TORCH_CHECK(st.is_contiguous()&&st.scalar_type()==torch::kFloat32&&st.numel()==2*R&&
+             wb.is_contiguous()&&wb.scalar_type()==torch::kFloat32&&wb.numel()==16*128&&
+             wp.is_contiguous()&&wp.scalar_type()==torch::kFloat32&&wp.numel()==128,
+             "gamma shadow: FP32 statistics and live norm/bias weights");
+ auto opt=p.options().dtype(torch::kFloat32);
+ auto z=torch::empty({R,128},opt),score=torch::empty({16,L,L},opt),dh=torch::empty({16,L,M/L*(DA/16)},opt),vh=torch::empty_like(dh);
+ auto stream=at::cuda::getCurrentCUDAStream();
+ pair_shadow<<<R/16,256,0,stream>>>((bf*)p.data_ptr(),(float2*)st.data_ptr(),wb.data_ptr<float>(),wp.data_ptr<float>(),z.data_ptr<float>(),score.data_ptr<float>(),R);
+ head_pack<<<(M*DA+255)/256,256,0,stream>>>((bf*)d.data_ptr(),(bf*)v.data_ptr(),dh.data_ptr<float>(),vh.data_ptr<float>(),M,L,DA,v.stride(0));
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return {z,score,dh,vh};
+}
+torch::Tensor backward_bias(torch::Tensor score,torch::Tensor dp,torch::Tensor mask) {
+ int L=score.size(2);auto db=torch::empty_like(score);auto stream=at::cuda::getCurrentCUDAStream();
+ soft_grad<<<16*L,256,0,stream>>>(score.data_ptr<float>(),dp.data_ptr<float>(),mask.numel()?mask.data_ptr<bool>():nullptr,db.data_ptr<float>(),L);
+ C10_CUDA_KERNEL_LAUNCH_CHECK();return db;
+}
+void finish(torch::Tensor dw,torch::Tensor wb,torch::Tensor norm) {
+ auto stream=at::cuda::getCurrentCUDAStream();
+ if(norm.scalar_type()==torch::kFloat32)finish_gamma<float><<<1,128,0,stream>>>(dw.data_ptr<float>(),wb.data_ptr<float>(),norm.data_ptr<float>());
+ else finish_gamma<bf><<<1,128,0,stream>>>(dw.data_ptr<float>(),wb.data_ptr<float>(),(bf*)norm.data_ptr());
+ C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+}  // namespace bias_shadow90
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("gamma_shadow_prepare90", &bias_shadow90::prepare);
+  m.def("gamma_shadow_bias90", &bias_shadow90::backward_bias);
+  m.def("gamma_shadow_finish90", &bias_shadow90::finish);
   m.def("pack90", &pack90);
   m.def("repeat90", &repeat90);
   m.def("shared_grad90", &shared_grad90);

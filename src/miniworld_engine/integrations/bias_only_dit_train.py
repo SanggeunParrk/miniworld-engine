@@ -551,6 +551,18 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
     # the step's last kernel: bias sums, cond-LN weights, ln_pair / to_bias from their partials, in the parameters' dtype
     BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pwf, nwf, Wb, wp, flat[_U:], norms)
+    if (C.h100_enabled(dev) and H == 16 and DA == 1024 and L in (384, 768)
+            and os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_SHADOW_GAMMA", "0") == "1"):
+        # Reuse the exact cuBLAS helper; the small gamma gradient is sensitive
+        # to folding and BF16 rounding along the pair-bias chain.
+        from miniworld_engine.kernels.augmented_attention.cuda.apb import ext as apb_ext
+        exact = apb_ext()
+        zh, score, do_heads, v_heads = BT.gamma_shadow_prepare90(p2, pst, Wb, wp, do, vg[:, :DA], L)
+        dprob = exact.exact_mm(do_heads, v_heads.transpose(1, 2))
+        key_mask = mask if mask is not None else torch.empty(0, device=dev, dtype=torch.bool)
+        db32 = BT.gamma_shadow_bias90(score, dprob, key_mask)
+        dw32 = exact.exact_mm(db32.view(H, R), zh)
+        BT.gamma_shadow_finish90(dw32, Wb, norms)
     return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
 
 
@@ -673,7 +685,7 @@ class _Block(torch.autograd.Function):
         from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
         if h100_enabled(single.device):
             from .token_dit_train import _activate_native_caller
-            _activate_native_caller()
+            _activate_native_caller(force=True)
         return (dx, dc, dpair, None, *(g if ctx.needs_input_grad[4 + i] else None for i, g in enumerate(pg)))
 
 
