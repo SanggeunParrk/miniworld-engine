@@ -1,10 +1,22 @@
 // D >= 384 backward, gate stage WITHOUT the h store (settings.transition_wide_save_h=1: h comes from the forward): dh = dy Ws, [a|b] = xn [Wa;Wb]^T and the SwiGLU backward in one kernel, writing only
 // [dA|dB] [M][2H]. 128 rows x 128 hidden tile, 32-wide K slabs, 4 stages, two-pass epilogue, slab released as its MMAs retire.
 // See kernels/gate_gemm2.cu.
+#if MW_GATE_K64 && !MW_SAVE_AB
+#define TBK 64
+#define NSTAGE 2
+#else
 #define TBK 32
 #define NSTAGE 4
+#endif
 #define STG_HALF 1
+#if MW_GATE_K64 == 2 && !MW_SAVE_AB
+#define WAIT0 0
+#else
 #define WAIT0 1
+#endif
+#if MW_GATE_MULTICAST && !MW_SAVE_AB
+#define MCW 1
+#endif
 #define NO_H 1                                            // h is the forward's saved activation: not stored again
 #if MW_SAVE_AB
 #define MW_GATE_SAVED 1

@@ -101,8 +101,13 @@ def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-@functools.lru_cache(maxsize=8)
 def _ext(ctas: int, dw_repl: int, save: bool):
+    warp_store = os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE", "0") == "1"
+    return _build_ext(ctas, dw_repl, save, warp_store)
+
+
+@functools.lru_cache(maxsize=16)
+def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool):
     """Build for a given SM count. ``ctas`` is in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid.
 

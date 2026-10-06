@@ -388,6 +388,30 @@ template<typename T> __device__ T master_value(float v) { return v; }
 template<> __device__ __nv_bfloat16 master_value(float v) { return __float2bfloat16_rn(v); }
 template<typename T> __global__ void reduce_partials(const float* __restrict__ ws, T* __restrict__ dWa, T* __restrict__ dWb, T* __restrict__ dWs,
                                      const float* __restrict__ dgbw, float* __restrict__ dgam, float* __restrict__ dbeta) {
+#if MW_D64_AFFINE_PARALLEL
+  // Keep one reduction launch, but distribute the long affine sum across
+  // eight warps instead of leaving only64 threads on a serial544-row chain.
+  constexpr int WB=(3*NSL*HS*D_+255)/256;
+  if(blockIdx.x>=WB){
+    __shared__ float pg[8][32],pb[8][32];
+    int lane=threadIdx.x&31,warp=threadIdx.x>>5,c=(blockIdx.x-WB)*32+lane;
+    float g=0.f,b=0.f;
+    if(c<D_){
+      for(int r=warp;r<NDX*8;r+=8){
+        g=__fadd_rn(g,dgbw[(size_t)r*128+c]);
+        b=__fadd_rn(b,dgbw[(size_t)r*128+64+c]);
+      }
+    }
+    pg[warp][lane]=g;pb[warp][lane]=b;__syncthreads();
+    if(warp==0 && c<D_){
+      g=0.f;b=0.f;
+      #pragma unroll
+      for(int w=0;w<8;++w){g=__fadd_rn(g,pg[w][lane]);b=__fadd_rn(b,pb[w][lane]);}
+      dgam[c]=g;dbeta[c]=b;
+    }
+    return;
+  }
+#endif
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= 3 * NSL * HS * D_) {
     const int c = idx - 3 * NSL * HS * D_;

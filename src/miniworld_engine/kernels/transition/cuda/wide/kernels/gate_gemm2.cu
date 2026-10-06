@@ -69,6 +69,9 @@ TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int 
 }
 
 extern "C" __global__ void __launch_bounds__(384, 1)
+#if MCW
+__cluster_dims__(2, 1, 1)
+#endif
 gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUtensorMap mDY, const __grid_constant__ CUtensorMap mW1,
           const __grid_constant__ CUtensorMap mWS, const __grid_constant__ CUtensorMap mH, const __grid_constant__ CUtensorMap mDAB,
           int M, int K, int H
@@ -84,6 +87,10 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + F_BAR);
   uint64_t* empty = full + NSTAGE;
+#if MCW
+  uint64_t* ready = empty + NSTAGE;
+  static_assert(3 * NSTAGE * sizeof(uint64_t) <= 128, "cluster pipeline barrier area");
+#endif
   const int NT = H / THB, KB = K / TBK;
 #if MCW
   const uint32_t rank = cluster_rank(), peer = rank ^ 1u;
@@ -95,7 +102,12 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
 #define TILE_M0(t) (((t) / NT) * TBM)
 #endif
   if (tid == 0) {
-    for (int s = 0; s < NSTAGE; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, 2 * (1 + MCW)); }
+    for (int s = 0; s < NSTAGE; ++s) {
+      mbar_init(full + s, 1); mbar_init(empty + s, 2 * (1 + MCW));
+#if MCW
+      mbar_init(ready + s, 2);
+#endif
+    }
     fence_barrier_init();
   }
   __syncthreads();
@@ -113,6 +125,12 @@ gate_gemm(const __grid_constant__ CUtensorMap mXN, const __grid_constant__ CUten
           if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
           uint8_t* st = sm + s * F_STAGE;
           mbar_arrive_expect_tx(full + s, F_STAGE);
+#if MCW
+          // Both destinations must install this transaction expectation before
+          // either producer sends multicast weights to the peer's barrier.
+          mbar_arrive(ready + s); mbar_arrive_peer(ready + s, peer);
+          mbar_wait(ready + s, (it / NSTAGE) & 1u);
+#endif
           for (int h = 0; h < 2; ++h) {
 #if !MW_GATE_SAVED
             tma_load_2d(st + F_XN + h * B64, &mXN, full + s, kb * TBK, m0 + 64 * h);
