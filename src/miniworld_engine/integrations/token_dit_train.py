@@ -173,6 +173,34 @@ def _native90(dev):
     return os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "1") == "1" and _sm90(dev)
 
 
+def _empty_uniform90(dev, A=None, L=None):
+    default = "1" if A == 5 and L in (384, 768) else "0"
+    return _native90(dev) and os.environ.get("MINIWORLD_TOKEN_DIT_H100_EMPTY_UNIFORM", default) == "1"
+
+
+def _owned_gemms90(single):
+    """GEMMs whose captured scratch belongs to this graph, never a framework handle."""
+    default = "1" if single.shape[0] == 5 and single.shape[2] in (384, 768) else "0"
+    if not (_native90(single.device)
+            and os.environ.get("MINIWORLD_TOKEN_DIT_H100_OWNED_GEMMS", default) == "1"):
+        return torch.mm, _mm32, torch.addmm
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+
+    backend = owned_gemm_ext()
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+
+    def mm(a, b):
+        return backend.owned_mm(a, b, tf32, False)
+
+    def mm32(a, b):
+        return backend.owned_mm(a, b, tf32, True)
+
+    def addmm(bias, a, b):
+        return backend.owned_addmm(bias, a, b, tf32)
+
+    return mm, mm32, addmm
+
+
 _NATIVE_CALLER_TASKS: set[int] = set()
 
 
@@ -439,13 +467,15 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
+    mm, mm32, addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     A, _, L, D = single.shape
     DH = D // H
-    T = ext(D, DH, rpb=_native_rpb() if _native90(single.device) else 8)
+    T = ext(D, DH, rpb=_native_rpb() if _native90(single.device) else 8,
+            empty_uniform=_empty_uniform90(single.device, single.shape[0], single.shape[2]))
     names = _names_for(qk)
     P = dict(zip(names, params, strict=False))
     M, R, dev = A * L, L * L, single.device
@@ -474,7 +504,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
     if pipeline:
         torch.cuda.current_stream(dev).wait_event(W["_pack_ready"])
-    qkvg = torch.addmm(bqkvg, xa, Wqkvg.t())
+    qkvg = addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
     if qk:                                     # fp32: v is not copied, the core reads it as a column view of qkvg
@@ -501,7 +531,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     og = torch.empty(M, D, device=dev, dtype=at)
     T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
-    y = torch.mm(og, Wo.t())
+    y = mm(og, Wo.t())
     x1 = torch.empty_like(x); xt = torch.empty(M, D, device=dev, dtype=at); x1st = torch.empty(M, 2, device=dev)
     T.res_adaln_b(x, y, Gg, bg1, G, bs2, x1, xt, x1st, EPS)
     Wab = W["Wab"]
@@ -511,10 +541,10 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
         ab = torch.empty(M, 4 * D, device=dev, dtype=at)
         gsw(xt, Wab, h, ab)
     else:
-        ab = torch.mm(xt, Wab.t())                                              # [M, 2 * 2D] a | b
+        ab = mm(xt, Wab.t())                                              # [M, 2 * 2D] a | b
         rows.swiglu_rows(ab, h)
     Wsq = W["Wsq"]
-    z = torch.mm(h, Wsq.t())
+    z = mm(h, Wsq.t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     T.res_c(x1, z, Gg, bg2, out)
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
@@ -550,18 +580,19 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     dq, dk, dv = (torch.empty_like(qs, dtype=torch.float32) for _ in range(3))
     db = torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
     km, kmp = T.train_keymask90(mask, qs, A, L, fp32)
+    empty_defs = ("TOKEN_EMPTY_UNIFORM=1",) if _empty_uniform90(qs.device, A, L) else ()
     if fp32:
         def tr(t):
             out = t.new_empty((t.shape[1], t.shape[0]))
             T.transpose(t, out)
             return out
         bt, lp, dp = T.train_tf32_bwd_layout90(bias, lse, dd)
-        core = sm90._ext("attn_tf32", ("DB_PER_SAMPLE=1",))
+        core = sm90._ext("attn_tf32", ("DB_PER_SAMPLE=1", *empty_defs))
         core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, db)
         core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
     else:
-        sm90._ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(qs, k, v, dob, bias, km, lse, dd, dq)
-        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1",)).attn_dkv(qs, k, v, dob, bias, km, lse, dd, dk, dv, db)
+        sm90._ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *empty_defs)).attn_dq(qs, k, v, dob, bias, km, lse, dd, dq)
+        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *empty_defs)).attn_dkv(qs, k, v, dob, bias, km, lse, dd, dk, dv, db)
     return dq, dk, dv, T.train_db_reduce90(db, fp32)
 
 def _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk):
@@ -594,12 +625,14 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H):
+    mm, mm32, addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
     D = single.shape[-1]
     DH = D // H
-    T = ext(D, DH, rpb=_native_rpb() if _native90(single.device) else 8)
+    T = ext(D, DH, rpb=_native_rpb() if _native90(single.device) else 8,
+            empty_uniform=_empty_uniform90(single.device, single.shape[0], single.shape[2]))
     h100 = _sm90(single.device)
     if not (qk or h100):                       # the forward's q / k / v: column views of qkvg (see _fwd_body)
         saved = [*saved[:10], *(saved[8][:, i * D:(i + 1) * D] for i in range(3)), *saved[10:]]   # after qkvg (8), rqk (9)
@@ -626,7 +659,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dG = torch.empty(M, 4 * D, device=dev, dtype=at); dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
     dz = torch.empty(M, D, device=dev, dtype=at)
     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
-    dh = torch.mm(dz, Wsq)                                                      # [M, 2D]
+    dh = mm(dz, Wsq)                                                      # [M, 2D]
     dab = torch.empty_like(ab); h = torch.empty_like(dh)
     T.swiglu_bwd(dh, ab, dab, h)
     dWsq = _mm32(dz.t(), h)
@@ -635,8 +668,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dWab = _mm32(dab.t(), xt)
     dx1 = torch.empty(M, D, device=dev); dy = torch.empty(M, D, device=dev, dtype=at)
     T.res_adaln_b_bwd(dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2])
-    dog = torch.mm(dy, Wo)
-    dWo = _mm32(dy.t(), og)
+    dog = mm(dy, Wo)
+    dWo = mm32(dy.t(), og)
     dob = torch.empty(M, D, device=dev, dtype=at); dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
     T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
@@ -661,8 +694,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     if native:
         T.cond_bwd90(dchat, dcg, cond, cst, dc)
         dbv = DB.view(H, R)
-        dWf = _mm32(dbv, ph)
-        dph = _mm32(dbv.t(), W["Wf_at"])
+        dWf = mm32(dbv, ph)
+        dph = mm32(dbv.t(), W["Wf_at"])
         dpair = torch.empty(R, DP, device=dev, dtype=pdtype)
         T.pair_ln_bwd(dph, p2, pst, dpair)
         outs = _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk)
