@@ -350,7 +350,8 @@ class _WideTransitionSM90A(torch.autograd.Function):
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, rstd, c1, gf, wa, wb, ws, h, adt == torch.float32, a, b)
-        if native_aux_enabled(flat.shape[-1]):
+        if native_aux_enabled(flat.shape[-1]) and any(
+                dw.dtype != dt for dw, dt in zip((dwa, dwb, dws), (adt, bwdt, sdt))):
             dwa, dwb, dws = _native_ext().cast([dwa, dwb, dws],
                                              [dt == torch.float32 for dt in (adt, bwdt, sdt)], False)
         return (dx.reshape(ctx.shape), dgam.to(gdt), dbeta.to(bdt), dwa.to(adt), dwb.to(bwdt), dws.to(sdt), None)
