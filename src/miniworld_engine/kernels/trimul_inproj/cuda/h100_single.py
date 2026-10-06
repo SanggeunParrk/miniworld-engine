@@ -187,14 +187,14 @@ def forward(
 ) -> list[torch.Tensor]:
     """One-direction D128 training forward on one stream: [y, planes, contraction, x_n, packed W1]."""
     x = leaves[0]
-    with torch.cuda.device(x.device):
+    with torch.cuda.device(x.device), T.preserved_d128_context(T.d128_training(x, outgoing)):
         T._launch_module()._make_context_current(x.device.index)
         plan = Plan(*leaves, mask, ds, x, outgoing=outgoing)
         y = plan.forward()
         return [y, plan.ab, plan.tri, plan.xn.reshape_as(x), plan.w1]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False):
+def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False, native=False):
     """dx like x, the packed front-weight gradient [4, 128, 128], then one gradient like each remaining leaf."""
     return [
         torch.empty_like(leaves[0]),
@@ -212,10 +212,11 @@ def backward(
     dy: torch.Tensor,
     outgoing: bool,
     master: bool = False,
+    native: bool = False,
 ) -> list[torch.Tensor]:
     """Backward of ``forward`` from its saved tensors: dx, the packed front-weight gradient, then the other leaves' gradients."""
     x = leaves[0]
-    with torch.cuda.device(x.device):
+    with torch.cuda.device(x.device), T.preserved_d128_context(native):
         T._launch_module()._make_context_current(x.device.index)
         plan = Plan(*leaves, mask, ds, dy.contiguous(), saved=saved, outgoing=outgoing, master=master)
         return list(plan.backward())
@@ -226,12 +227,13 @@ class _Training(torch.autograd.Function):
     def forward(ctx, outgoing, *args):
         leaves = list(args[:11])
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
-        if T.preserve_d128_training():
+        ctx.native = T.d128_training(leaves[0], outgoing)
+        if ctx.native:
             from ._h100_pack import cast_training_weights
             weights = cast_training_weights(leaves[1:7])
         else:
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
-        if ctx.master and not T.preserve_d128_training():
+        if ctx.master and not ctx.native:
             torch._foreach_copy_(weights, leaves[1:7])
         leaves = [leaves[0], *weights, *leaves[7:]]
         y, *saved = forward(leaves, args[11], args[12], outgoing)
@@ -245,9 +247,9 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         v = ctx.saved_tensors
         leaves = [v[0], *v[-6:], *v[7:11]]
-        grads = backward(leaves, v[11], v[12], list(v[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master)
+        grads = backward(leaves, v[11], v[12], list(v[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master, ctx.native)
         grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
-        if T.preserve_d128_training():
+        if ctx.native:
             from ._h100_pack import native_training_grads
             grads = native_training_grads(grads,list(v[:11]))
         else:

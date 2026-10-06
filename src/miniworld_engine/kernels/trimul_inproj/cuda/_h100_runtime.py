@@ -8,10 +8,66 @@ from pathlib import Path
 from functools import lru_cache, wraps
 from contextlib import contextmanager
 import ctypes, fcntl, hashlib, os, shutil, subprocess, json
+import threading
 import torch
 import torch.nn.functional as F
 
 SOURCES = Path(__file__).with_name("h100_sources")
+_d256_scope = threading.local()
+_d128_scope = threading.local()
+
+
+def d128_training(x, outgoing=True, bidirectional=False):
+    """Preserved L384 B1/B7 defaults; L768 remains an explicit candidate."""
+    if x.shape[-1] != 128:
+        return False
+    if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
+            or os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "0"):
+        return False
+    explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+                and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1")
+    return explicit or ((outgoing or bidirectional) and x.ndim == 4
+                        and tuple(x.shape[:3]) == (1, 384, 384))
+
+
+@contextmanager
+def preserved_d128_context(enabled):
+    previous = getattr(_d128_scope, "enabled", False)
+    _d128_scope.enabled = previous or enabled
+    try:
+        yield
+    finally:
+        _d128_scope.enabled = previous
+
+
+def uni_d256_training(x, outgoing):
+    """Qualified outgoing L384 default; explicit zero keeps the old diagnostic path."""
+    if x.shape[-1] != 256:
+        return False
+    if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
+            or os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "0"):
+        return False
+    explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+                and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1")
+    return explicit or (outgoing and x.ndim == 4
+            and tuple(x.shape[:3]) == (1, 384, 384))
+
+
+@contextmanager
+def preserved_d256_context(enabled):
+    """Native launch-local policy, restored even if a build or launch raises."""
+    previous = getattr(_d256_scope, "enabled", False)
+    _d256_scope.enabled = previous or enabled
+    try:
+        yield
+    finally:
+        _d256_scope.enabled = previous
+
+
+def d256_glue_enabled(name, selected=False):
+    scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
+    default = "1" if selected or scoped else "0"
+    return os.environ.get(name, default) == "1"
 
 
 def _upstream():
@@ -26,14 +82,17 @@ def _launch_module():
 
 def preserve_d128_training():
     """Opt-in native glue around the existing, selected D128 B1/B7 kernels."""
-    return (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1")
+    scoped = False if torch.compiler.is_compiling() else getattr(_d128_scope, "enabled", False)
+    return (scoped or (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+                      and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1"))
 
 
 def preserve_d256_training():
     """Keep selected wide CUDA plans; use deterministic native auxiliary work."""
-    return (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1")
+    scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
+    return (scoped
+            or (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+                and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1"))
 
 
 def preserve_training(width):
@@ -200,7 +259,10 @@ def pack_into(dst, wl, wlg, wr, wrg):
 
 
 def cuda_aux_enabled():
-    return os.environ.get("MINIWORLD_TRIMUL_H100_CUDA_AUX") == "1"
+    scoped = False if torch.compiler.is_compiling() else (
+        getattr(_d256_scope, "enabled", False) or getattr(_d128_scope, "enabled", False))
+    return (scoped
+            or os.environ.get("MINIWORLD_TRIMUL_H100_CUDA_AUX") == "1")
 
 
 def cuda_training_aux_enabled():
