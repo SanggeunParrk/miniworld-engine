@@ -30,6 +30,8 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cstdlib>
+#include <map>
+#include <memory>
 #ifdef APB_H100_FP32_SHADOW
 #include <ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h>
 #include <ATen/native/transformers/cuda/mem_eff_attention/kernel_backward.h>
@@ -1072,7 +1074,14 @@ std::vector<at::Tensor> cast_grads(std::vector<at::Tensor> grads, std::vector<bo
 // materialized FP32 buffers intentionally trade speed for exact oracle rounding.
 // Arithmetic order audited against PyTorch cf30153c4c131c8164ee7798e5022d810682e2cb.
 namespace apb_exact {
-torch::Tensor exact_mm(torch::Tensor a,torch::Tensor b,c10::optional<torch::Tensor> bias) {
+// cuBLAS capture nodes keep a pointer to scratch. Give the APB shadow graph
+// its own allocation so destroying another graph cannot invalidate that pointer.
+struct OwnedSgemmHandle {
+ cublasHandle_t value;
+ OwnedSgemmHandle(){TORCH_CHECK(cublasCreate(&value)==CUBLAS_STATUS_SUCCESS,"APB owned SGEMM handle");}
+ ~OwnedSgemmHandle(){cublasDestroy(value);}
+};
+torch::Tensor exact_mm_impl(torch::Tensor a,torch::Tensor b,c10::optional<torch::Tensor> bias,bool graph_owned) {
  c10::cuda::CUDAGuard device(a.device());
  TORCH_CHECK(a.is_cuda()&&b.is_cuda()&&a.device()==b.device()&&a.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat,"exact cuBLAS FP32 operands");
  TORCH_CHECK(a.dim()==b.dim()&&a.dim()>=2&&a.dim()<=4&&a.size(-1)==b.size(-2),"exact cuBLAS matrix geometry");
@@ -1093,6 +1102,24 @@ torch::Tensor exact_mm(torch::Tensor a,torch::Tensor b,c10::optional<torch::Tens
   // the caller's global TF32 policy or another module's precision.
   at::NoTF32Guard ieee;
   auto handle=at::cuda::getCurrentCUDABlasHandle();
+  torch::Tensor owned_workspace;
+  if(graph_owned){
+   // Copy the incumbent handle's precision and atomics policy under NoTF32Guard;
+   // retain the exact SGEMM APIs, argument order, leading dimensions and strides.
+   cublasMath_t math_mode;cublasAtomicsMode_t atomics_mode;
+   checked(cublasGetMathMode(handle,&math_mode));
+   checked(cublasGetAtomicsMode(handle,&atomics_mode));
+   static thread_local std::map<int,std::unique_ptr<OwnedSgemmHandle>> handles;
+   auto& owned=handles[a.get_device()];if(!owned)owned=std::make_unique<OwnedSgemmHandle>();
+   handle=owned->value;
+   checked(cublasSetStream(handle,at::cuda::getCurrentCUDAStream()));
+   checked(cublasSetMathMode(handle,math_mode));
+   checked(cublasSetAtomicsMode(handle,atomics_mode));
+   checked(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));
+   size_t bytes=at::cuda::getChosenWorkspaceSize();
+   owned_workspace=torch::empty({int64_t(bytes)},a.options().dtype(at::kByte));
+   checked(cublasSetWorkspace(handle,owned_workspace.data_ptr(),bytes));
+  }
   if(a.dim()==2)checked(cublasSgemm(handle,op_b,op_a,N,M,K,&one,b.data_ptr<float>(),ldb,a.data_ptr<float>(),lda,&zero,y.data_ptr<float>(),N));
   else checked(cublasSgemmStridedBatched(handle,op_b,op_a,N,M,K,&one,b.data_ptr<float>(),ldb,b.stride(-3),a.data_ptr<float>(),lda,a.stride(-3),&zero,y.data_ptr<float>(),N,(long long)M*N,batches));
   return y;
@@ -1124,6 +1151,12 @@ torch::Tensor exact_mm(torch::Tensor a,torch::Tensor b,c10::optional<torch::Tens
  TORCH_CHECK(found==1,"exact FP32 cuBLASLt bias geometry unavailable");
  checked(cublasLtMatmul(handle,d.operation,&one,b.data_ptr(),d.lhs,a.data_ptr(),d.rhs,&zero,y.data_ptr(),d.out,y.data_ptr(),d.out,&algo.algo,workspace,workspace_bytes,at::cuda::getCurrentCUDAStream()));
  return y;
+}
+torch::Tensor exact_mm(torch::Tensor a,torch::Tensor b,c10::optional<torch::Tensor> bias) {
+ return exact_mm_impl(a,b,bias,false);
+}
+torch::Tensor exact_mm_owned(torch::Tensor a,torch::Tensor b,c10::optional<torch::Tensor> bias) {
+ return exact_mm_impl(a,b,bias,true);
 }
 struct Stats { float mean, m2, count; };
 __device__ Stats merge(Stats a,Stats b) {
@@ -1814,6 +1847,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("exact_ln_pair_project", &apb_exact::ln_pair_project);
   m.def("exact_ln_bf16", &apb_exact::ln_bf16, py::arg("x"), py::arg("g"), py::arg("b"), py::arg("eps"), py::arg("warp_rows") = false);
   m.def("exact_mm", &apb_exact::exact_mm, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
+  m.def("exact_mm_owned", &apb_exact::exact_mm_owned, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
   m.def("exact_soft", &apb_exact::soft);
   m.def("exact_beta", &apb_exact::beta);
   m.def("exact_beta_mm", &apb_exact::beta_mm);

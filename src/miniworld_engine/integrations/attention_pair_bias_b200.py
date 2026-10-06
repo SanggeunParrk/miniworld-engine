@@ -300,6 +300,12 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         shape = (leaves[-1].shape[0], single.shape[-1])
         qualified = single.shape[1] in (384, 768) and shape in (
             (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
+        # These four training cells passed lifecycle, accuracy and paired/history
+        # no-regression gates. Other cells keep explicit access to owned scratch.
+        owned_sgemm_default = qualified and shape in ((12, 384), (16, 384))
+        mm = E.exact_mm_owned if os.environ.get(
+            "MINIWORLD_APB_H100_OWNED_SGEMM", "1" if owned_sgemm_default else "0"
+        ) == "1" else E.exact_mm
         fused_beta = qualified and os.environ.get("MINIWORLD_APB_H100_SHADOW_BETA_MM", "1" if qualified else "0") == "1"
         shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "1" if qualified else "0") == "1"
         convert = E.exact_fp32_inputs_grouped if shadow_io else E.exact_fp32_inputs
@@ -329,13 +335,13 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         za = None if fused_pair_project else (
             E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2) if pair_ln
             else E.exact_ln(z, lnpw, lnpb, eps_p)).view(L * L, DP)
-        q = E.exact_mm(xa, wq.t(), bq)
-        k = E.exact_mm(xa, wk.t())
-        v = E.exact_mm(xa, wv.t())
-        gate = E.exact_mm(xa, wg.t())
+        q = mm(xa, wq.t(), bq)
+        k = mm(xa, wk.t())
+        v = mm(xa, wv.t())
+        gate = mm(xa, wg.t())
         bias = (E.exact_ln_pair_project(pair, lnpw, lnpb, wb, mask, eps_p) if fused_pair_project
-                else E.exact_mm(za, wb.t()))
-        dog = E.exact_mm(dy32.view(L, D), wo)
+                else mm(za, wb.t()))
+        dog = mm(dy32.view(L, D), wo)
         do_rows = E.exact_point(dog, gate, 1.0, 1).view(L, H, dh)
         if mask is not None:
             # masked_fill makes the oracle's bias contiguous and selects its
@@ -353,22 +359,22 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
                   else E.exact_attention_db(qh, kh, vh, bm, out32, lse32, do_rows, delta32))
             db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
                   else E.exact_db_transpose(ds, mask))
-            return E.exact_beta_mm(db, wb) if fused_beta else E.exact_beta(E.exact_mm(db, wb))
+            return E.exact_beta_mm(db, wb) if fused_beta else E.exact_beta(mm(db, wb))
         scale = math.sqrt(1.0 / math.sqrt(dh))
         qs = E.exact_point(q, q, scale, 0).view(1, L, H, dh).transpose(1, 2)
         ks = E.exact_point(k, k, scale, 0).view(1, L, H, dh).transpose(1, 2)
-        scores = E.exact_mm(qs, ks.transpose(-2, -1))
+        scores = mm(qs, ks.transpose(-2, -1))
         E.exact_bias_add(scores, bias, mask)
         probs = E.exact_soft(scores, scores, False)
         do = do_rows.view(1, L, H, dh).transpose(1, 2)
         vh = v.view(1, L, H, dh).transpose(1, 2)
-        dp = E.exact_mm(do, vh.transpose(-2, -1))
+        dp = mm(do, vh.transpose(-2, -1))
         ds = E.exact_soft(dp, probs, True)
         db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
                   else E.exact_db_transpose(ds, mask))
         if fused_beta:
             return E.exact_beta_mm(db, wb)
-        dln = E.exact_mm(db, wb)
+        dln = mm(db, wb)
         return E.exact_beta(dln)
 
 
