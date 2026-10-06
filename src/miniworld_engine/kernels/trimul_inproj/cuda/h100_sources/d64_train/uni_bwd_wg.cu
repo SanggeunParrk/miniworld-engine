@@ -593,6 +593,36 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w(const __grid_cons
         sts32(s + XS + off, pack(o[0], o[1]));
       }
       // ---- dgamma / dbeta_in: reduce-scatter over the 8 row groups, then this warp's private sums
+#if UNI_AFFINE_SPLIT
+      // Reduce the two affine quantities separately, keeping only 16 values live.
+#pragma unroll
+      for (int quantity = 0; quantity < 2; ++quantity) {
+        float v[16];
+#pragma unroll
+        for (int i = 0; i < 16; ++i) v[i] = quantity ? d[i] : d[i] * xh[i];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          const bool up = lane & 16;
+          const float keep = up ? v[8+i] : v[i], send = up ? v[i] : v[8+i];
+          v[i] = keep + __shfl_xor_sync(0xffffffffu, send, 16);
+        }
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const bool up = lane & 8;
+          const float keep = up ? v[4+i] : v[i], send = up ? v[i] : v[4+i];
+          v[i] = keep + __shfl_xor_sync(0xffffffffu, send, 8);
+        }
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+          const bool up = lane & 4;
+          const float keep = up ? v[2+i] : v[i], send = up ? v[i] : v[2+i];
+          v[i] = keep + __shfl_xor_sync(0xffffffffu, send, 4);
+        }
+        const int base = quantity * 64 + 8 * (4 * ((lane >> 4) & 1) + 2 * ((lane >> 3) & 1) + ((lane >> 2) & 1)) + 2 * q;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) sRedW[base+i] += v[i];
+      }
+#else
       float v[32];
 #pragma unroll
       for (int i = 0; i < 16; ++i) { v[i] = d[i] * xh[i]; v[16 + i] = d[i]; }
@@ -621,6 +651,7 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w(const __grid_cons
         const int a = base + 8 * (i >> 1) + (i & 1);
         sRedW[a] += v[i];
       }
+#endif
     }
     PF(7);
     fence_async();

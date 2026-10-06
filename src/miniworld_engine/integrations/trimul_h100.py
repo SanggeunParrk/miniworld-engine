@@ -20,17 +20,23 @@ def _native_buckets_enabled():
 
 
 def _selected_uni_d256(module, pair):
-    """Qualified outgoing D256/L384 and D512/L384,768 native defaults."""
+    """Qualified outgoing D256/D384 L384 and D512 L384,768 native defaults."""
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import uni_training
     return (getattr(module, "outgoing", False) and uni_training(pair, True))
 
 
+def _selected_d64_training(module, pair):
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import d64_training
+    return d64_training(pair, getattr(module, "outgoing", False),
+                        not hasattr(module, "outgoing"))
+
+
 def _selected_native_training(module, pair):
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import d128_training
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import d128_training, bidi_training
     return (_selected_uni_d256(module, pair)
+            or (not hasattr(module, "outgoing") and bidi_training(pair))
             or d128_training(pair, getattr(module, "outgoing", False),
                              not hasattr(module, "outgoing")))
-
 
 def serves(module, pair: torch.Tensor) -> bool:
     """Check the mathematical and resource contract before touching CUDA builders."""
@@ -88,8 +94,10 @@ def update(
     dropscale: torch.Tensor | None,
     *, bidirectional: bool = True,
 ) -> torch.Tensor:
-    out = _update(module, pair, mask, dropscale, bidirectional=bidirectional)
-    if _native_buckets_enabled() or _selected_native_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled()):
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import preserved_d64_context
+    with preserved_d64_context(_selected_d64_training(module, pair)):
+        out = _update(module, pair, mask, dropscale, bidirectional=bidirectional)
+    if _native_buckets_enabled() or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled()):
         from .token_dit_train import _native_caller_output
         out = _native_caller_output(out, pair, *module.parameters(), force=True)
     return out
@@ -198,7 +206,7 @@ def _native_training_enabled():
 
 def native_training_dropout(module, pair, probability):
     """Share the hand-CUDA Philox primitive; preserve PyTorch RNG progression."""
-    if not (_native_buckets_enabled() or _selected_native_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled())) or not serves(module, pair):
+    if not (_native_buckets_enabled() or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled())) or not serves(module, pair):
         return None
     from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
     return extension("pack").drop_scale(pair, probability).reshape(
@@ -207,7 +215,7 @@ def native_training_dropout(module, pair, probability):
 
 def requires_cuda_training(module, pair):
     """Selected native training never silently substitutes a Triton shape."""
-    return ((_native_buckets_enabled() or _selected_native_training(module, pair) or (_native_training_enabled() and pair.shape[-1] == 64))
+    return ((_native_buckets_enabled() or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (_native_training_enabled() and pair.shape[-1] == 64))
             and module.implementation == ImplementationType.MINIWORLD
             and pair.is_cuda
             and torch.cuda.get_device_capability(pair.device) == (9, 0))
