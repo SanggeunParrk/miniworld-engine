@@ -323,8 +323,8 @@ One block, A48 B1, fp32, B200, CUDA-graph replay of forward + backward (`autogra
 
 | S | Triton fp32 (eager) | now (graph) |
 |---|---|---|
-| 4096 | 6.80 ms | 1.95 ms |
-| 8192 | 13.18 ms | 3.65 ms |
+| 4096 | 6.80 ms | 1.87 ms |
+| 8192 | 13.18 ms | 3.58 ms |
 
 Kernels at S 4096 (profiler time; every kernel has 0 spilled bytes, `spill_stats`):
 
@@ -337,7 +337,7 @@ Kernels at S 4096 (profiler time; every kernel has 0 spilled bytes, `spill_stats
 | bwd out-projection | `oproj_bwd_fused_tf32` | 0.16 | datt, dgated = datt Wo (TMEM, Wo^T resident), dO, dG, gated, Dv |
 | bwd attention | `attn_dq_tf32` + `attn_dkv_tf32` | 0.17 + 0.20 | query- / key-major passes (warps: producer, S issuer, dQ or dV / dK issuer, row threads, epilogue warpgroup); the epilogues give dpq / dpk / dpv straight into dP |
 | bwd qkvg | cuBLAS dx = dP [Wqkv; Wg] -> `adaln_bwd_tf32` | 0.08 + 0.09 | |
-| bwd weights | five cuBLAS TF32 GEMMs over TF32-valued operands | 0.29 | |
+| bwd weights | `dw_tf32` (split-K over row slices, TMA ring, MN-major operands, accumulators in TMEM) + `dw_reduce_tf32` (fixed slice order) | 0.24 | the four problems dP^T x, datt^T gated, dab^T y, dffn^T hh in one launch; CTAs split 44 / 28 / 44 / 32 by bytes; ~6.7 TB/s |
 | weight forms | `wprep_tf32` (forward), `wprep_bwd_tf32` | ~0.005 | one launch each |
 
 What made the difference (measured, in this order of size): (1) **outputs through a shared-memory staging tile and a TMA store** instead of per-thread
@@ -367,11 +367,11 @@ accurate as the per-op path" test passes.
 
 Status: the SWA / TF32 test files (`test_b200_swa_dit_tf32_gpu`, `test_b200_swa_dit_gpu`, `test_swa_dit_fused_gpu`, `test_swa_dit_kernels`,
 `test_swa_dit_fused_dispatch`, `test_swa_graph_gpu`, `test_swa_dit_pack_cache`) give 98 passed, 20 skipped, 0 failed (the 7 GPU files after the
-attention-backward restructuring: 116 passed, 8 skipped). Unit tests with fp64 references for the new kernels: `test_b200_swa_dit_tf32_kernels_gpu`. Open:
+attention-backward restructuring and the weight-gradient kernel: 116 passed, 8 skipped). Unit tests with fp64 references for the new kernels: `test_b200_swa_dit_tf32_kernels_gpu`. Open:
 the `ffn_fwd` tile chain (a tile is 25 us: A 3, att 1, B 3, y 4, SwiGLU 9.5 -- eight chunks, each ~1.5 us because chunk j + 2's a | b MMAs wait for
 chunk j's down-projection to release its TMEM buffer; TMEM is full, so a deeper pipeline needs 16-unit chunks), tile-level ping-pong for
 `ffn_bwd_gate` (TMEM holds one tile), a one-pass dQ + dK + dV attention backward (the dS^T tile in fp32 and the K MN-major copy do not fit shared
-memory), a custom weight-gradient GEMM (cuBLAS 0.29 ms against ~0.23 ms of operand traffic), GEMM + epilogue fusion of dy / dx (at most 0.02 ms per side:
+memory), GEMM + epilogue fusion of dy / dx (at most 0.02 ms per side:
 both kernels are memory-bound). A diagram of the kernel chain and of one
 kernel's warp roles is in the session notes, not yet in the repository.
 
