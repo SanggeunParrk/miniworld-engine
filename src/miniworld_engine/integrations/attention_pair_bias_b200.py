@@ -281,28 +281,31 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 
 
 
-def _beta_shadow_fake(single, pair, mask, leaves, eps_s, eps_p, dy):
-    return torch.empty((DP,), device=single.device, dtype=torch.float32)
+def _beta_shadow_fake(single, pair, mask, leaves, eps_s, eps_p, dy, exact_dwb):
+    return (torch.empty((DP,), device=single.device, dtype=torch.float32),
+            torch.empty(leaves[-1].shape, device=single.device, dtype=torch.float32))
 
 
 @opaque(fake=_beta_shadow_fake, name="apb_h100_beta_fp32_shadow")
 def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
-                 leaves: list[torch.Tensor], eps_s: float, eps_p: float, dy: torch.Tensor) -> torch.Tensor:
-    """Accuracy-first beta residual with native CUDA arithmetic and cuBLAS.
+                 leaves: list[torch.Tensor], eps_s: float, eps_p: float, dy: torch.Tensor, exact_dwb: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    """Accuracy-first pair-affine gradients with native CUDA and cuBLAS.
 
     This intentionally recreates the FP32 numerical path: beta's mathematical
     gradient is zero, but the required oracle contains reduction roundoff.
-    Qualified pair producers keep normalization in shared memory, but the
-    extra FP32 projections and attention still exceed the B200 tensor lifetimes.
+    The exact weight gradient also retains that residual when pair gamma is
+    zero. Its head-major operand matches the reference Linear backward layout.
+    This materializes pair normalization for dWb and exceeds B200 lifetimes.
     """
     E = _rows().ext()
     with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
         shape = (leaves[-1].shape[0], single.shape[-1])
         qualified = single.shape[1] in (384, 768) and shape in (
             (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
-        # These four training cells passed lifecycle, accuracy and paired/history
-        # no-regression gates. Other cells keep explicit access to owned scratch.
-        owned_sgemm_default = qualified and shape in ((12, 384), (16, 384))
+        # The exact pair-weight gradient needs graph-owned scratch. Explicitly
+        # disabling that repair retains the earlier ownership choices for
+        # diagnostic comparisons; those old gradients are not qualified.
+        owned_sgemm_default = qualified and (exact_dwb or shape in ((12, 384), (16, 384)))
         mm = E.exact_mm_owned if os.environ.get(
             "MINIWORLD_APB_H100_OWNED_SGEMM", "1" if owned_sgemm_default else "0"
         ) == "1" else E.exact_mm
@@ -335,6 +338,16 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         za = None if fused_pair_project else (
             E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2) if pair_ln
             else E.exact_ln(z, lnpw, lnpb, eps_p)).view(L * L, DP)
+        def finish(db):
+            beta = E.exact_beta_mm(db, wb) if fused_beta else E.exact_beta(mm(db, wb))
+            if not exact_dwb:
+                return beta, torch.empty_like(wb)
+            norm = za
+            if norm is None:
+                norm = E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2).view(L*L, DP)
+            db_head = E.exact_transpose_tiled(db, None, L, False).view(H, L*L)
+            dwb = E.exact_mm_owned(db_head, norm)
+            return beta, dwb
         q = mm(xa, wq.t(), bq)
         k = mm(xa, wk.t())
         v = mm(xa, wv.t())
@@ -359,7 +372,7 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
                   else E.exact_attention_db(qh, kh, vh, bm, out32, lse32, do_rows, delta32))
             db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
                   else E.exact_db_transpose(ds, mask))
-            return E.exact_beta_mm(db, wb) if fused_beta else E.exact_beta(mm(db, wb))
+            return finish(db)
         scale = math.sqrt(1.0 / math.sqrt(dh))
         qs = E.exact_point(q, q, scale, 0).view(1, L, H, dh).transpose(1, 2)
         ks = E.exact_point(k, k, scale, 0).view(1, L, H, dh).transpose(1, 2)
@@ -372,10 +385,7 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         ds = E.exact_soft(dp, probs, True)
         db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
                   else E.exact_db_transpose(ds, mask))
-        if fused_beta:
-            return E.exact_beta_mm(db, wb)
-        dln = mm(db, wb)
-        return E.exact_beta(dln)
+        return finish(db)
 
 
 class _Training(torch.autograd.Function):
@@ -385,6 +395,13 @@ class _Training(torch.autograd.Function):
         params = leaves
         ctx.beta_shadow = (torch.cuda.get_device_capability(single.device) == (9, 0)
                            and os.environ.get("MINIWORLD_APB_H100_BETA_SHADOW", "1") == "1")
+        # Resolve the repair during forward; environment changes before
+        # backward cannot change the captured gradient policy.
+        qualified_exact_dwb = single.shape[1] in (384, 768) and (
+            leaves[-1].shape[0], single.shape[-1]) in (
+                (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
+        ctx.exact_dwb = ctx.beta_shadow and os.environ.get(
+            "MINIWORLD_APB_H100_EXACT_DWB", "1" if qualified_exact_dwb else "0") == "1"
         leaves = _kernel_leaves(leaves)
         y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
         ctx.eps = (eps_s, eps_p)
@@ -400,7 +417,10 @@ class _Training(torch.autograd.Function):
         dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
         if ctx.beta_shadow:
             params = list(v[14 + ctx.saved_count:])
-            grads[9] = _beta_shadow(single, pair, mask, params, *ctx.eps, dy)
+            dbeta, dwb = _beta_shadow(single, pair, mask, params, *ctx.eps, dy, ctx.exact_dwb)
+            grads[9] = dbeta
+            if ctx.exact_dwb:
+                grads[10] = dwb
         if torch.cuda.get_device_capability(single.device) == (9, 0):
             grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
             from .token_dit_train import _activate_native_caller
