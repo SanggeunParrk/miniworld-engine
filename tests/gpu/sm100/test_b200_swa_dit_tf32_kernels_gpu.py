@@ -48,7 +48,7 @@ def _round(t):
 def test_no_register_spills():
     k = _kernels()
     objs = {"ffn_bwd_gate": k.ffn_gate.k, "adaln_bwd": k.adaln.k, "oproj_bwd_fused": k.oproj_fused.k, "attn_dq": k.attn.kq,
-            "attn_dkv": k.attn.kk, "mod_silu": k.mod.ks, "mod_dsilu": k.mod.kd}
+            "attn_dkv": k.attn.kk, "mod_silu": k.mod.ks, "mod_dsilu": k.mod.kd, "dw": k.dw.kd, "dw_reduce": k.dw.kr}
     for name, kern in objs.items():
         assert kern.lmem == 0, f"{name} spills {kern.lmem} B of local memory per thread at {kern.regs} registers"
     for name, (regs, lmem) in F.kernels_tf32(torch.cuda.current_device()).stats().items():
@@ -272,3 +272,26 @@ def test_modulation_backward():
     w64 = wmod.double().requires_grad_()
     (torch.nn.functional.silu(c64) @ w64.t() * g.double()).sum().backward()
     assert _rel(dc, c64.grad) < TOL and _rel(dw, w64.grad) < TOL
+
+
+# ------------------------------------------------------------------------------------------------------------ weight gradients
+@pytest.mark.parametrize("a,b,s", SHAPES)
+def test_weight_gradients(a, b, s):
+    """dw_tf32: the four split-K weight-gradient problems (dWqkvg = dP^T x, dWo, dWu, dWd) against fp64, NaN-poisoned outputs, repeat identical."""
+    r = _gen(31 + a)
+    m = a * b * s
+    dp, dab, hh = (_round(r(m, w)) for w in (4 * C, 2 * NH, NH))
+    x, datt, gated, y, dffn = (_round(r(m, C)) for _ in range(5))
+    run, outs = _kernels().dw.bind(dp, x, datt, gated, dab, y, dffn, hh)
+    refs = [p.double().t() @ q.double() for p, q in ((dp, x), (datt, gated), (dab, y), (dffn, hh))]
+    for o in outs:
+        o.fill_(float("nan"))
+    run()
+    first = [o.clone() for o in outs]
+    for o in outs:
+        o.fill_(float("nan"))
+    run()
+    for o, f, ref in zip(outs, first, refs):
+        assert o.shape == ref.shape and torch.isfinite(o).all()
+        assert _rel(o, ref) < 1e-4
+        assert torch.equal(o, f), "the fixed-order slice reduction is bit-reproducible"
