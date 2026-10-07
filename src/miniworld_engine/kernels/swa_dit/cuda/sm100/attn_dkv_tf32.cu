@@ -9,12 +9,14 @@
 // dV += P^T dO and dK += dS^T q (dO / q with the queries as K) must sit in the 128-B swizzle with 32-B atoms for kind::tf32 (TMA "128a32",
 // UMMA layout type 1; the plain swizzle multiplies to zeros), so dO and q come in twice (K-major for S^T / dP^T, MN-major for dV / dK).
 // Items (sample, 128-key tile, head): the window's <= 8 32-query blocks [j0 - 64, j0 + 192) stream through a ring with their LSE / D (bulk
-// copies). The two compute warpgroups take alternate blocks (one key row per thread); ONE MMA warp issues every MMA in block order, so the
-// shared dK / dV accumulators sum in a fixed order (deterministic). Per block: S^T / dP^T (SS, M = 128 keys, N = 32, K = 32; double-buffered
+// copies). The two compute warpgroups take alternate blocks (one key row per thread); two MMA warps issue the MMAs: one the S^T / dP^T of every block (SS),
+// one the dV / dK accumulation (TS) in block order, so the shared dK / dV accumulators sum in a fixed order (deterministic); a warp of its own for
+// each keeps the waits of one from queueing behind the issue of the other (dK/dV pair 0.588 -> 0.559 ms; with dQ's split 0.491 ms). Per block: S^T / dP^T (SS, M = 128 keys, N = 32, K = 32; double-buffered
 // per warpgroup) -> P^T, dS^T (rounded to TF32) into TMEM -> dV += P^T dO, dK += dS^T q (TS, A from TMEM, M = 128, N = 32, K = 32).
 // Epilogue: warpgroup 0 runs dK (scaled) through unrope + the head RMS backward (qkvg_bwd: dpk), warpgroup 1 rounds dV to TF32 (dpv); both
 // are stored into dP [M, 4C] (columns C + 32 h / 2 C + 32 h), one 128-B row per thread
 // via a shared-memory tile and a TMA store; the K / V slot is released after the item's last S^T / dP^T reads (two item slots).
+// Warps: 0 TMA producer, 1 S^T / dP^T issuer, 2-3 qkvg tail, 4-11 row threads, 12 dV / dK issuer (416 threads).
 // Shared memory: K | V item slots 2 x 32 KB | 7 block stages x 17 KB (q | dO | q MN | dO MN | LSE | D) | dK / dV staging 2 x 16 KB | barriers.
 // TMEM: warpgroup w at 192 w: S^T[b] at + 64 b, dP^T[b] at + 64 b + 32, P^T at + 128, dS^T at + 160;  dK at 384, dV at 416.
 // SPDX-License-Identifier: Apache-2.0
@@ -100,7 +102,7 @@ DEVI void head_bwd(float (&d)[32], const float* __restrict__ P, const float* __r
   for (int e = 0; e < 32; ++e) d[e] = __uint_as_float(tf::rna(r * (u[e] - p[e] * r * t)));
 }
 
-extern "C" __global__ void __launch_bounds__(384, 1)
+extern "C" __global__ void __launch_bounds__(416, 1)
 swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mqm,
                         const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                         const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdom,
@@ -138,7 +140,7 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
 
   if (tid == 0) {
     for (int s = 0; s < QR; ++s) { mbar_init(&B.it_full[s], 1); mbar_init(&B.it_empty[s], 1); }
-    for (int s = 0; s < ST; ++s) { mbar_init(&B.bl_full[s], 1); mbar_init(&B.bl_empty[s], 1); }
+    for (int s = 0; s < ST; ++s) { mbar_init(&B.bl_full[s], 1); mbar_init(&B.bl_empty[s], 2); /* 2: the S^T / dP^T issuer and the dV / dK issuer */ }
     for (int w = 0; w < 2; ++w) {
       for (int b = 0; b < 2; ++b) { mbar_init(&B.s_full[w][b], 1); mbar_init(&B.s_free[w][b], 4); }
       mbar_init(&B.p_full[w], 4); mbar_init(&B.p_free[w], 1);
@@ -197,24 +199,23 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
         for (int k = 0; k < 4; ++k)
           tf::mma_ss(d + 32, desc_k128(kv + TKV) + (uint64_t)(k * 2), desc_k128(st + TQ) + (uint64_t)(k * 2), I_S, k > 0 ? 1u : 0u);
         tc_commit(&B.s_full[w][bs]);
+        tc_commit(&B.bl_empty[s]);
         if (qb == hi - 1) tc_commit(&B.it_empty[is]);                      // the item's last read of K / V
       }
       __syncwarp();
     };
-    int nli = 0, nqb = 0, nlo = 0, nhi = 0;                                // the block after the current one (S^T / dP^T look-ahead)
-    auto adv = [&]() {
-      if (++nqb == nhi) { if (++nli < my_items) { int n, j0, h, sq; item_of(nli, n, j0, h, nlo, nhi, sq); nqb = nlo; } }
-    };
-    if (my_items > 0) {
-      int n, j0, h, sq; item_of(0, n, j0, h, nlo, nhi, sq); nqb = nlo;
-      issue_s(0, 0, nqb, nlo, nhi);
-      adv();
+    int G = 0;
+    for (int li = 0; li < my_items; ++li) {
+      int n, j0, h, lo, hi, sq; item_of(li, n, j0, h, lo, hi, sq);
+      for (int qb = lo; qb < hi; ++qb, ++G) issue_s(G, li, qb, lo, hi);
     }
+  } else if (warp == 12) {
+    // ------------------------------------------------------------------------------------------------ MMA issuer of dV / dK (block G -> warpgroup G & 1)
+    // a warp of its own: the S^T / dP^T issuer's waits and the dV / dK issue no longer queue behind each other
     int G = 0;
     for (int li = 0; li < my_items; ++li) {
       int n, j0, h, lo, hi, sq; item_of(li, n, j0, h, lo, hi, sq);
       for (int qb = lo; qb < hi; ++qb, ++G) {
-        if (nli < my_items) { issue_s(G + 1, nli, nqb, nlo, nhi); adv(); }
         const int s = G % ST, w = G & 1, gw = G >> 1;
         mbar_wait(&B.p_full[w], gw & 1);                                   // P^T / dS^T of block G are in TMEM
         if (qb == lo && li >= 1) mbar_wait(&B.acc_free, (li - 1) & 1);     // the previous item's dK / dV have been read out
@@ -267,7 +268,7 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       }
     }
     if (t == 0) tma_store_wait0();
-  } else if (warp >= 4) {
+  } else if (warp >= 4 && warp < 12) {
     // ------------------------------------------------------------------------------------------------ P^T / dS^T, one key row per thread
     const int w = (warp - 4) >> 2, lq = warp & 3, r = lq * 32 + lane;
     const uint32_t trow = tmem + ((uint32_t)(lq * 32) << 16);

@@ -165,8 +165,8 @@ class AttnBwdTf32:
         scale = float(D ** -0.5)
 
         def run():
-            self.kq(grid, (384, 1, 1), *mq, lse, dv, seqused, pq, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS))
-            self.kk(grid, (384, 1, 1), *mk, lse, dv, seqused, pk, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS))
+            self.kq(grid, (416, 1, 1), *mq, lse, dv, seqused, pq, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS))
+            self.kk(grid, (416, 1, 1), *mk, lse, dv, seqused, pk, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS))
         run.keep = (mq, mk, mdp, qh, kh, vh, do, lse, dv, seqused, pq, pk, cos, sin, dp)
         return run
 
