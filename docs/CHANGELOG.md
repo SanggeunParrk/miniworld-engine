@@ -18,6 +18,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 bias-only DiT inference, pair tail: `bo_tail2_tf32` runs the tail as a cluster of 8 = two row tiles x four column
+  groups, each column group's two CTAs one `tcgen05.mma.cta_group::2` pair (M = 256, each CTA loads half of each weight tile), so
+  A = 5 L640 / L768 finish in one round of clusters instead of two. Selected only where it saves a round;
+  `MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0` keeps the CL 8 / CL 6 tail. Whole step at L640 / L768: 139.3 / 145.5 -> 122.9 / 127.4 us.
 - B200 fp32 bias-only DiT inference as three kernels per block, now the default fp32 inference step: `bo_front_tf32` (LN + AdaLN +
   the v|g GEMM), `pv_gate_tf32 -DPDL_INF`, `bo_tail_tf32` (out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM,
   residual + gate), chained by programmatic dependent launch, behind conditioning tables hoisted once per conditioning tensor.

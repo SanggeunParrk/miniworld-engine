@@ -267,16 +267,18 @@ class FusedBiasOnlyDiT:
 
     def _buffers3(self, S, L, dev):
         """v|g, a, the residual ping-pong of a multi-block stack, and the clusters' operand-exchange scratch (xa, xt [M, 768] rows, h
-        [M 48, 32] blocked k-block-major: written and read within one kernel, L2-resident)."""
+        [M 48, 32] blocked k-block-major: written and read within one kernel, L2-resident; xt / h padded to whole tile pairs for the
+        pair tail, whose missing odd tile writes its own padding rows)."""
         key = ("inf3", S, L, dev)
         if key not in self._buf:
             M, f = S * L, torch.float32
             e = lambda n: torch.empty(M, n, device=dev, dtype=f)                                 # noqa: E731
             # the scratch rows padded by 128 B: their natural strides (3 / 6 KB) are multiples of 2 KB, so a TMA box's 128 rows
             # would fall on the same address bits above the line (round-4 experiment against L2 slice camping; harmless otherwise)
-            pad = lambda n: torch.empty(M, n + 32, device=dev, dtype=f)[:, :n]                   # noqa: E731
+            pad = lambda n, rows=M: torch.empty(rows, n + 32, device=dev, dtype=f)[:, :n]       # noqa: E731
+            Mp = _tf32().tail_rows(M, _tf32().TAIL_PAIR)
             self._buf[key] = dict(vg=e(2 * self.da), a=e(self.da), x=[e(self.d) for _ in range(2 if self.nb > 1 else 0)],
-                                  xa=pad(self.d), xt=pad(self.d), h=torch.empty(M * 2 * self.d // 32, 32, device=dev, dtype=f))
+                                  xa=pad(self.d), xt=pad(self.d, Mp), h=torch.empty(Mp * 2 * self.d // 32, 32, device=dev, dtype=f))
         return self._buf[key]
 
     def _step3(self, single, cond, P, out_dtype=None):
@@ -288,7 +290,9 @@ class FusedBiasOnlyDiT:
         T = tab.shape[0]
         _, _, packs = self._pack3()
         front, core, tail = self._ops3(dev)
-        tcl = tail.cluster(M // 128)                                  # 8, or 6 where it fits the tiles in fewer rounds
+        tcl = tail.cluster(M // 128)                                  # 8, or 6 / the pair tail where it takes fewer rounds
+        pair = tcl == _tf32().TAIL_PAIR
+        wk, Mt = (8 if pair else tcl), _tf32().tail_rows(M, tcl)     # the pair tail: the CL 8 packs, scratch of whole tile pairs
         buf = self._buffers3(S, L, dev)
         x = single.reshape(M, D).float().contiguous()
         out = torch.empty(M, D, device=dev, dtype=torch.float32)
@@ -298,7 +302,7 @@ class FusedBiasOnlyDiT:
             tb = tab[:, b]
             front(x, tb, p["wvg"], vg, T, xa=buf["xa"])
             core(vg[:, :DA], P[b * H:(b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])     # sigmoid(g) * (P v), TF32-rounded
-            tail(a, x, tb, p["wo"][tcl], p["wab"], p["wsq"][tcl], y, T, xt=buf["xt"], h=buf["h"], cl=tcl)
+            tail(a, x, tb, p["wo"][wk], p["wab"], p["wsq"][wk], y, T, xt=buf["xt"][:Mt], h=buf["h"][:Mt * 48], cl=tcl)
             x = y
         res = out.view(S, 1, L, D)
         return res if out_dtype in (None, torch.float32) else res.to(out_dtype)

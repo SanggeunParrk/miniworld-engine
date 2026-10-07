@@ -320,7 +320,10 @@ def front_smem(cl: int, da: int) -> int:
 
 def tail_smem(cl: int) -> int:
     """bo_tail_tf32.cu's SMEM_BYTES -- CL 8: a 6-stage A ring of 16 KB, five 24-KB W slots, statistics 8 + 2 KB, barriers; CL 6: the
-    A ring, three 32-KB W slots, statistics 6 + 2 KB, 16 KB of h transpose tiles, barriers."""
+    A ring, three 32-KB W slots, statistics 6 + 2 KB, 16 KB of h transpose tiles, barriers. ``TAIL_PAIR`` (bo_tail2_tf32.cu): the A
+    ring, four 24-KB W slots, statistics 4 + 2 KB, 16 KB of h transpose tiles, barriers."""
+    if cl == TAIL_PAIR:
+        return 6 * 16384 + 4 * 24576 + 4096 + 2048 + 16384 + 512
     if cl == 8:
         return 6 * 16384 + 5 * 24576 + 8192 + 2048 + 512
     assert cl == 6, cl
@@ -328,6 +331,18 @@ def tail_smem(cl: int) -> int:
 
 
 TAIL_CLUSTERS = (8, 6)
+#: the pair tail's "cluster" code (bo_tail2_tf32.cu): 4 CTAs per row tile, two tiles per cluster of 8 (round 10, A/B switch below)
+TAIL_PAIR = 4
+
+
+def tail_pair_on() -> bool:
+    """The pair tail where it saves a round (the default); MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0 (read per call) keeps CL 8 / CL 6."""
+    return os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA", "1") != "0"
+
+
+def tail_rows(M: int, cl: int) -> int:
+    """Rows of the tail's XT / H scratch: M, or M padded to whole tile pairs for the pair tail."""
+    return -(-M // 256) * 256 if cl == TAIL_PAIR else M
 
 
 def pack_pairs(w: torch.Tensor, cl: int = 8) -> torch.Tensor:
@@ -527,8 +542,10 @@ class TailTF32:
     = ``pack_pairs(., cl)`` of Wo [768, DA] / Wsq [768, 1536] for the cluster size used, wab [3072, 768] = [Wa; Wb], all fp32
     TF32-rounded contiguous; out [M, 768] fp32 contiguous (not x); the cluster's operand-exchange scratch: xt [M, 768] fp32 rows (row
     stride any multiple of 4) and h [M 48, 32] fp32 contiguous, BLOCKED k-block-major (k-block kb of row tile t at rows (48 t + kb)
-    128). A cluster of 8 or 6 CTAs per 128-row tile (``cluster``). ``trace`` as ``FrontTF32``. Bound launches cached per (a, x,
-    table, weights, scratch, M, T, cluster); out by address per call."""
+    128). A cluster of 8 or 6 CTAs per 128-row tile (``cluster``), or ``TAIL_PAIR``: ``bo_tail2_tf32.cu``, clusters of 8 holding two
+    tiles x 4 column groups as tcgen05 cta_group::2 pairs -- then wo / wsq are the CL 8 packs and the scratch has ``tail_rows(M,
+    TAIL_PAIR)`` rows (whole tile pairs). ``trace`` as ``FrontTF32``. Bound launches cached per (a, x, table, weights, scratch, M,
+    T, cluster); out by address per call."""
 
     def __init__(self, device_index: int, da: int, trace: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -537,6 +554,10 @@ class TailTF32:
         self.runs = _Runs()
 
     def kernel(self, cl: int = 8):
+        if cl == TAIL_PAIR:
+            return self._sm100._sm100_kernel("bo_tail2_tf32", "bo_tail2_tf32_sm100", self.device_index, pdl=True, src_dir=str(_dir),
+                                             defs=(f"DATT={self.da}", *(("TRACE",) if self.trace else ())), cluster=8,
+                                             smem=tail_smem(TAIL_PAIR))
         return self._sm100._sm100_kernel("bo_tail_tf32", "bo_tail_tf32_sm100", self.device_index, pdl=True, src_dir=str(_dir),
                                          defs=(f"CL={cl}", f"DATT={self.da}", *(("TRACE",) if self.trace else ())),
                                          cluster=cl, smem=tail_smem(cl))
@@ -544,14 +565,22 @@ class TailTF32:
     def cluster(self, n_tiles: int) -> int:
         """8 or 6 CTAs per row tile: the fewest rounds of resident clusters, a CL 6 CTA costing ~1.4 x a CL 8 one (4/3 of the
         products, xt streamed twice). A = 5: CL 6 at L512 only (20 tiles: one round of 22 against two of 15).
-        MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL=8 / 6 forces one."""
+        Unless MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0, the pair tail (``TAIL_PAIR``) where it takes fewer rounds than both (A = 5: L640 /
+        L768, 25 / 30 tiles in one round of clusters of two tiles). MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL=8 / 6 / 4 forces one."""
         forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL")
         if forced:
-            assert int(forced) in TAIL_CLUSTERS, forced
+            assert int(forced) in (*TAIL_CLUSTERS, TAIL_PAIR), forced
             return int(forced)
-        return pick_cluster(n_tiles, {8: (max_clusters(self.kernel(8), 8), 1.0), 6: (max_clusters(self.kernel(6), 6), 1.4)})
+        n8, n6 = max_clusters(self.kernel(8), 8), max_clusters(self.kernel(6), 6)
+        if tail_pair_on():
+            rounds = min(-(-n_tiles // max(n8, 1)), -(-n_tiles // max(n6, 1)))
+            if -(-n_tiles // max(2 * max_clusters(self.kernel(TAIL_PAIR), 8), 1)) < rounds:
+                return TAIL_PAIR
+        return pick_cluster(n_tiles, {8: (n8, 1.0), 6: (n6, 1.4)})
 
     def _bind(self, a, x, tab, wo, wab, wsq, xt, h, M, T, cl):
+        if cl == TAIL_PAIR:
+            return self._bind_pair(a, x, tab, wo, wab, wsq, xt, h, M, T)
         tm, da, f, nc = self._tm, self.da, dict(dtype="f32"), 768 // cl
         maps = [tm(a, [da, M], da * 4, [32, 128], **f), tm(x, [768, M], 768 * 4, [32, 128], **f),
                 tm(tab, [6 * 768, T], tab.stride(0) * 4, [32, 128], **f), tm(wo, [32, wo.shape[0]], 32 * 4, [32, 2 * nc], **f),
@@ -562,13 +591,28 @@ class TailTF32:
         return _LaunchPDL(self.kernel(cl), ((M // 128) * cl, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
                           int(xt.stride(0)), int(T), 1e-5)
 
+    def _bind_pair(self, a, x, tab, wo, wab, wsq, xt, h, M, T):
+        """bo_tail2_tf32.cu: clusters of 8 = two row tiles x 4 column groups; each CTA's W boxes are its half (96 rows of the CL 8
+        packs, 128 rows of Wa or Wb); the scratch covers whole tile pairs."""
+        tm, da, f, tiles = self._tm, self.da, dict(dtype="f32"), M // 128
+        Mp = tail_rows(M, TAIL_PAIR)
+        maps = [tm(a, [da, M], da * 4, [32, 128], **f), tm(x, [768, M], 768 * 4, [32, 128], **f),
+                tm(tab, [6 * 768, T], tab.stride(0) * 4, [32, 128], **f), tm(wo, [32, wo.shape[0]], 32 * 4, [32, 192], **f),
+                tm(wab, [768, 3072], 768 * 4, [32, 128], **f), tm(wsq, [32, wsq.shape[0]], 32 * 4, [32, 192], **f),
+                tm(xt, [768, Mp], xt.stride(0) * 4, [32, 128], **f),
+                tm(h, [32, Mp * 48], 128, [32, 256], **f)]               # two h k-blocks per box
+        return _LaunchPDL(self.kernel(TAIL_PAIR), ((Mp // 256) * 8, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
+                          int(xt.stride(0)), int(T), int(tiles), 1e-5)
+
     def __call__(self, a, x, tab, wo, wab, wsq, out, T, xt, h, cl=None):
-        """wo / wsq: the pair-packed forms (``pack_pairs(., cl)``) for ``cl`` (default: ``cluster(M / 128)``)."""
+        """wo / wsq: the pair-packed forms (``pack_pairs(., cl)``; the pair tail: ``pack_pairs(., 8)``) for ``cl`` (default:
+        ``cluster(M / 128)``); xt / h with ``tail_rows(M, cl)`` rows."""
         M, da = x.shape[0], self.da
         cl = cl or self.cluster(M // 128)
+        Mp = tail_rows(M, cl)
         _check_rows(xt, 768, "xt")
-        assert xt.shape[0] == M
-        assert h.is_contiguous() and h.shape == (M * 48, 32) and h.dtype is torch.float32, h.shape     # blocked k-block-major
+        assert xt.shape[0] == Mp, (xt.shape, Mp)
+        assert h.is_contiguous() and h.shape == (Mp * 48, 32) and h.dtype is torch.float32, h.shape     # blocked k-block-major
         assert a.is_contiguous() and a.shape == (M, da) and a.dtype is torch.float32
         assert x.is_contiguous() and x.shape == (M, 768) and x.dtype is torch.float32 and M % 128 == 0 and T % 128 == 0
         assert out.is_contiguous() and out.shape == (M, 768) and out.dtype is torch.float32 and out.data_ptr() != x.data_ptr()
@@ -661,5 +705,5 @@ def tf32_ready(index: int, nh: int, dh: int, train: bool) -> bool:
 
 
 __all__ = ["Dpb32", "FrontTF32", "GemmGluTF32", "PvGateCoreTF32", "TailTF32", "clear_trace", "front_cluster", "glu_op", "inf3_on",
-           "inf3_ready", "max_clusters", "pack_pairs", "pick_cluster", "read_trace", "tail_smem",
+           "inf3_ready", "max_clusters", "pack_pairs", "pick_cluster", "read_trace", "tail_pair_on", "tail_rows", "tail_smem",
            "pick_group_tf32", "pv_batched", "pv_groups", "round_tf32", "rows32", "tf32_gemms", "tf32_ready"]

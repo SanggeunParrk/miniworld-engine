@@ -322,19 +322,19 @@ measured (`bo32_train_breakdown.py --wgrad-probe`).
 
 ### F5 · three-kernel fp32 inference step (the default)
 
-Status (2026-10-07): the served fp32 inference step (round 9). `MINIWORLD_BIAS_ONLY_DIT_INF3=0` (read per call) keeps the 12-launch
+Status (2026-10-07): the served fp32 inference step (round 10: the pair tail at L640 / L768). `MINIWORLD_BIAS_ONLY_DIT_INF3=0` (read per call) keeps the 12-launch
 cuBLAS + rows step below, which a failed build of the three kernels also falls back to; the tests cover both.
 
 | L, us (A = 5, 16 x 48, per-sample conditioning; whole-step graph replay) | 12-launch step | three-kernel step | ratio | floor | SoL |
 |---|---|---|---|---|---|
 | 128 | 69.8 | 62.0 | 0.89x | 10.4 | 17% |
-| 256 | 92.0 | 69.2 | 0.75x | 21.2 | 31% |
+| 256 | 92.0 | 68.7 | 0.75x | 21.2 | 31% |
 | 384 | 118.9 | 75.9 | 0.64x | 32.2 | 42% |
-| 512 | 139.4 | 100.7 | 0.72x | 43.5 | 43% |
-| 640 | 176.5 | 138.7 | 0.79x | 55.1 | 40% |
-| 768 | 198.7 | 144.8 | 0.73x | 67.1 | 46% |
+| 512 | 140.0 | 100.8 | 0.72x | 43.5 | 43% |
+| 640 | 186.8 | 122.8 | 0.66x | 55.1 | 45% |
+| 768 | 196.6 | 128.3 | 0.65x | 67.1 | 52% |
 
-(`bench_scripts/bo32_infer_breakdown.py --allow-dirty --both`; floor = the sum of the launches' speed-of-light floors, max(FLOP /
+(`bench_scripts/bo32_infer_breakdown.py --allow-dirty --both`; round 10, the pair tail at L640 / L768; floor = the sum of the launches' speed-of-light floors, max(FLOP /
 720 TF/s, unavoidable bytes / 7 TB/s).)
 
 **Final design.**
@@ -373,10 +373,31 @@ are 96 KB at CL 8, 128 KB at CL 6; 512 B are free).
 Round 7's switch A/B deleted row-major H (1-4 us slower than blocked), blocked XT with paired xt loads (~2 us) and the weight
 prefetch into L2 (4-14 us).
 
+**Round 10 (the default where it saves a round; `MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0` turns it off): the pair tail `bo_tail2_tf32`.** Estimate from the
+round-9 trace (CL 8, L768, tile 45.0 us): halving the weights at the CL 8 geometry buys little -- y and z already run near the N = 96
+MMA's own time per k-block (0.237 us against periods of 0.25), only a | b is intake-bound (0.594 against 0.497 of tensor time) --
+about 2.4 us per tile, 3 % of the step, and a cluster of 16 (two CL 8 tiles) would fit 7 times, not 15 (one GPC has fewer than 16
+free SMs), i.e. three rounds at L768. What pays is the geometry `cta_group::2` makes affordable: a cluster of 8 = two row tiles x 4
+column groups, each column group's two CTAs a pair (rank 2 g + s; the leader s = 0 issues M = 256, B split by N: y / z N = 192 with
+96 weight rows per CTA -- the CL 8 packs, indexed by cluster rank -- and a | b N = 256 per pass, the leader's half a, the peer's b).
+Per CTA twice the columns (NC 192, NH 384, three a | b passes of 128 hidden units with xt re-streamed, TMEM Y 192 + a | b 256, Z over
+a | b) at half of each weight: ~4.8 MB of TMA in, ~59-68 us per tile pair -- but 30 tiles are ONE round of 15 clusters (two at CL 8,
+tail 84-86 us at L640 / L768). Selected only where it takes fewer rounds than CL 8 and CL 6 (A = 5: L640, L768). Pair barriers
+(count 2 on the leader: p4done, abfree, zfree), the leader's multicast commits (aempty, wempty, ydone, abdone, zdone), and per-slot
+phase bookkeeping so that both CTAs' rings stay in lockstep; a missing odd tile reads the last tile's inputs and writes only its
+own padding rows of XT / H. Trace (`bo32_inf3_trace.py --kernel tail --tail-cl 4`): the P2 / P4 ring boxes (twelve each: twice
+CL 8's) and the P6 bubble between the a | b passes. Measured (A/B in one process, whole step, us; 152 registers, no spill):
+
+| L | 384 | 512 | 640 | 768 |
+|---|---|---|---|---|
+| CL 8 / CL 6 tail | 74.5 | 100.5 | 139.3 | 145.5 |
+| pair tail where selected | 74.6 | 100.8 | 122.9 | 127.4 |
+
+Trace at L768: a tile pair takes 77.6 us (the CL 8 tile 45.4, two rounds), above the 59-68 estimate: y 9.6, P2 / P4 5.7 + 7.0, the
+three a | b passes 9.8 / 9.5 / 9.4 with a P6 bubble of 2.7 / 2.9 us between them, h 1.0 wait, z 14.0, P8 3.5. The pair weight loads
+carry no L2 hint (`tma_load_2d_2sm` has none).
+
 **Next.**
-- `cta_group::2` weight sharing in the tail: two row tiles per CTA pair, each CTA loading half of every weight box (B split by N).
-  The tail is TMA-intake-bound (~3.8 MB per CTA and tile at ~110 GB/s, 2.06 MB of it weights); halving the weight intake is the
-  lever toward the occupancy ceiling.
 - `pv_gate_tf32` sample groups: with batched N the 48-wide head builds SG 1 / 2 / 4, so S = 5 runs as 2 + 2 + 1 and P streams three
   times per (head, query tile); SG = 5 (unbatched, 480 TMEM columns) or a 4 + 1 batched pair of MMAs would stream it once.
 
