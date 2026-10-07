@@ -49,31 +49,38 @@ _dir = Path(__file__).parent
 
 #: cubin name -> (source stem, extra nvcc flags)
 CUBINS = {
+    # forward
     "wprep_tf32": ("wprep_tf32", ()),
     "mod_fwd_tf32": ("mod_fwd_tf32", ()),
     "qkvg_fwd_tf32": ("qkvg_fwd_tf32", ()),
     "attn_fwd_tf32": ("attn_fwd_tf32", ()),
     "ffn_fwd_tf32": ("ffn_fwd_tf32", ()),
+    # backward (host side: tf32_bwd.py)
+    "wprep_bwd_tf32": ("wprep_bwd_tf32", ()),
     "ffn_bwd_gate_tf32": ("ffn_bwd_gate_tf32", ()),
     "adaln_bwd_tf32": ("adaln_bwd_tf32", ()),
-    "oproj_bwd_tf32": ("oproj_bwd_tf32", ()),
-    "mod_bwd_tf32": ("mod_bwd_tf32", ()),
+    "oproj_bwd_fused_tf32": ("oproj_bwd_fused_tf32", ()),
     "attn_dq_tf32": ("attn_dq_tf32", ()),
     "attn_dkv_tf32": ("attn_dkv_tf32", ()),
+    "mod_bwd_tf32": ("mod_bwd_tf32", ()),
 }
 #: dynamic shared memory per kernel (the sources' SMEM / SMEM_BYTES)
-SMEM = {"wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
-        "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 8 * 8192 + 2048 + 4 * 8192 + 512,
-        "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512, "adaln_bwd_tf32": 0, "oproj_bwd_tf32": 0, "mod_bwd_tf32": 0,
-        "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512, "attn_dkv_tf32": 2 * 32768 + 7 * 17408 + 2 * 16384 + 64 * 16 + 512}
+SMEM = {
+    "wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
+    "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 8 * 8192 + 2048 + 4 * 8192 + 512,
+    "wprep_bwd_tf32": 0, "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512, "adaln_bwd_tf32": 0,
+    "oproj_bwd_fused_tf32": 4 * 16384 + 8 * 16384 + 2 * 16384 + 512,
+    "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512, "attn_dkv_tf32": 2 * 32768 + 7 * 17408 + 2 * 16384 + 64 * 16 + 512,
+    "mod_bwd_tf32": 0,
+}
 #: kernel function per cubin
-FUNCS = {"wprep_tf32": "swa_wprep_tf32_sm100", "mod_fwd_tf32": "swa_mod_fwd_tf32_sm100", "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
-         "attn_fwd_tf32": "swa_attn_fwd_tf32_sm100", "ffn_fwd_tf32": "swa_ffn_fwd_tf32_sm100",
-         "ffn_bwd_gate_tf32": "swa_ffn_bwd_gate_tf32_sm100",
-         "adaln_bwd_tf32": "swa_adaln_bwd_tf32_sm100",
-         "oproj_bwd_tf32": "swa_oproj_bwd_prep_tf32_sm100",
-         "mod_bwd_tf32": "swa_mod_silu_tf32_sm100",
-         "attn_dq_tf32": "swa_attn_dq_tf32_sm100", "attn_dkv_tf32": "swa_attn_dkv_tf32_sm100"}
+FUNCS = {
+    "wprep_tf32": "swa_wprep_tf32_sm100", "mod_fwd_tf32": "swa_mod_fwd_tf32_sm100", "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
+    "attn_fwd_tf32": "swa_attn_fwd_tf32_sm100", "ffn_fwd_tf32": "swa_ffn_fwd_tf32_sm100",
+    "wprep_bwd_tf32": "swa_wprep_bwd_tf32_sm100", "ffn_bwd_gate_tf32": "swa_ffn_bwd_gate_tf32_sm100",
+    "adaln_bwd_tf32": "swa_adaln_bwd_tf32_sm100", "oproj_bwd_fused_tf32": "swa_oproj_bwd_fused_tf32_sm100",
+    "attn_dq_tf32": "swa_attn_dq_tf32_sm100", "attn_dkv_tf32": "swa_attn_dkv_tf32_sm100", "mod_bwd_tf32": "swa_mod_silu_tf32_sm100",
+}
 
 
 # --------------------------------------------------------------------------------------------------- build / load
