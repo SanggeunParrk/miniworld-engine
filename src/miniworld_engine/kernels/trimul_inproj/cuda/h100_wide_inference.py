@@ -29,6 +29,27 @@ WIDTHS = (256, 384, 512)
 LENGTHS = (384, 768)
 
 
+def native_inference_bucket(width, length):
+    """Validated BIDI candidate; existing-test gate remains open, default off."""
+    return (os.environ.get("MINIWORLD_TRIMUL_H100_BIDI512_INFER_CANDIDATE", "0") == "1"
+            and width == 512 and length == 384
+            and all(os.environ.get(name) != "0" for name in (
+                "MINIWORLD_TRIMUL_H100_CUDA_AUX",
+                "MINIWORLD_TRIMUL_H100_INFER_OWNED_BLAS",
+                "MINIWORLD_TRIMUL_H100_INFER_FAST_AUX")))
+
+
+def _owned_blas_enabled(width, length):
+    return os.environ.get("MINIWORLD_TRIMUL_H100_INFER_OWNED_BLAS",
+                          "1" if native_inference_bucket(width, length) else "0") == "1"
+
+
+def _fast_aux_enabled(width, length):
+    return os.environ.get("MINIWORLD_TRIMUL_H100_INFER_FAST_AUX",
+                          "1" if native_inference_bucket(width, length) else "0") == "1"
+
+
+
 def supports(width: int, length: int) -> bool:
     lengths = (128, 256, 384, 512, 640, 768) if T.cuda_aux_enabled() else LENGTHS
     return width in WIDTHS and length in lengths
@@ -159,6 +180,8 @@ def _run(x, weights, mask):
     wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = weights
     _, N, _, D = x.shape
     H, M = 2 * D, N * N
+    native_aux = T.cuda_aux_enabled() or native_inference_bucket(D, N)
+    fast_aux = _fast_aux_enabled(D, N)
     sel = _selection(D, N)
     cfg, normalize, gfold = tuple(sel["k1"]), sel["normalize"], sel.get("gfold", False)
     bn, stages = sel["k3s"]
@@ -174,7 +197,11 @@ def _run(x, weights, mask):
         wq_maps = [_map(t, [64, 32], [D, 2 * D], [D * 2]) for t in quad]
     else:
         w = x.new_empty((8 * D, D))
-        T.pack_into(w, wl, wlg, wr, wrg)
+        if native_aux:
+            from ._h100_pack import pack_into_cuda
+            pack_into_cuda(w, wl, wlg, wr, wrg)
+        else:
+            T.pack_into(w, wl, wlg, wr, wrg)
         w_map = _map(w, [64, 64], [D, 8 * D], [D * 2])
         wq_maps = [launch.TensorMap(b"\0" * 128)] * 4
     ab = x.new_empty((4 * D, N, N))
@@ -182,13 +209,17 @@ def _run(x, weights, mask):
     xn = torch.empty_like(x) if not (gfold and normalize) else None
     if not normalize:
         if gfold:
-            if T.cuda_aux_enabled():
+            if native_aux:
                 from ._h100_pack import normalize_into
-                normalize_into(xn, x, gi, bi, xs)
+                normalize_into(xn, x, gi, bi, xs, warp=fast_aux)
             else:
                 _normalize_stats_into(xn, xs, x, gi, bi)
         else:
-            T.normalize_into(xn, x, gi, bi)
+            if native_aux:
+                from ._h100_pack import normalize_into
+                normalize_into(xn, x, gi, bi, warp=fast_aux)
+            else:
+                T.normalize_into(xn, x, gi, bi)
     k1, smem1 = _compile("k1", D, cfg, normalize, gfold and normalize, mask is not None)
     a, b, _, _, mb = cfg[:5]
     tj = (N + b - 1) // b
@@ -204,15 +235,20 @@ def _run(x, weights, mask):
 
     # Outgoing and incoming contractions into tri = [out | in].
     tri = x.new_empty((H, N, N))
-    torch.bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
-    torch.bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
+    if _owned_blas_enabled(D, N):
+        from ._h100_pack import owned_bmm
+        owned_bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
+        owned_bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
+    else:
+        torch.bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
+        torch.bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
 
     # K3: folded output LN + projection, gate, residual.
     y = torch.empty_like(x)
     uv = torch.empty((4, D), device=x.device, dtype=torch.float32)
     wpf = x.new_empty((D, H))
     wgf = x.new_empty((D, D)) if gfold else wg
-    if T.cuda_aux_enabled():
+    if native_aux:
         from ._h100_pack import fold_into
         fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gfold)
     else:
