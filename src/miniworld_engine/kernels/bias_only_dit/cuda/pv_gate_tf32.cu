@@ -32,6 +32,10 @@
 // shared memory keeps one CTA per SM).
 // Work item = (head, 128-query tile, group of SG samples), the group fastest (consecutive CTAs share the P tile in L2).
 // L a multiple of 128 (query tiles; 32-key chunks).
+// -DPDL_INF (only the three-kernel inference step builds it, MINIWORLD_BIAS_ONLY_DIT_INF3=1: K2 between bo_front_tf32 and bo_tail_tf32):
+// programmatic dependent launch -- launch_dependents after setup, griddepcontrol.wait before the producer reads v and before the
+// epilogue reads g or stores a -- and the gated output rounded to the nearest TF32 (cvt.rna), since a is bo_tail_tf32's MMA operand.
+// Without it the cubin is the training path's / the default inference path's, unchanged.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -83,6 +87,12 @@ constexpr uint32_t I_PVB = idesc_tf32(QM, SG * NW, 0, 1);                    // 
 #endif
 
 DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); }
+#ifdef PDL_INF
+DEVI uint32_t tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
+#define GATED(o, g) tf32r(__uint_as_float(o) * sigmoid_kit(__uint_as_float(g)))
+#else
+#define GATED(o, g) __float_as_uint(__uint_as_float(o) * sigmoid_kit(__uint_as_float(g)))
+#endif
 // byte address of 16-byte chunk q (4 fp32 channels) of staging row r
 DEVI uint32_t xchunk(uint32_t xa, uint32_t r, int q) {
   if (q < 8) return xa + sw128(r, (uint32_t)q);
@@ -128,10 +138,16 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+#ifdef PDL_INF
+  pdl_launch();
+#endif
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ TMA producer
     if (lane == 0) {
+#ifdef PDL_INF
+      pdl_wait();                                                 // v: bo_front_tf32's output
+#endif
       int g = 0;
       for (int li = 0; li < my; ++li) {
         int a0, ns, m0, h; item_of(li, a0, ns, m0, h);
@@ -206,6 +222,9 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
 #endif
       if (++pk == ns) { pk = 0; ++pli; }
     };
+#ifdef PDL_INF
+    pdl_wait();                                                   // g: bo_front_tf32's output; a: still read by the previous bo_tail_tf32
+#endif
     if (r == 0) for (int x = 0; x < NX - 1; ++x) load_next_g(x);
     int t = 0;
     for (int li = 0; li < my; ++li) {
@@ -237,10 +256,7 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
             const int c = 4 * (q0 + e);
-            gw[e] = make_uint4(__float_as_uint(__uint_as_float(ov[c + 0]) * sigmoid_kit(__uint_as_float(gw[e].x))),
-                               __float_as_uint(__uint_as_float(ov[c + 1]) * sigmoid_kit(__uint_as_float(gw[e].y))),
-                               __float_as_uint(__uint_as_float(ov[c + 2]) * sigmoid_kit(__uint_as_float(gw[e].z))),
-                               __float_as_uint(__uint_as_float(ov[c + 3]) * sigmoid_kit(__uint_as_float(gw[e].w))));
+            gw[e] = make_uint4(GATED(ov[c + 0], gw[e].x), GATED(ov[c + 1], gw[e].y), GATED(ov[c + 2], gw[e].z), GATED(ov[c + 3], gw[e].w));
           }
 #else
 #pragma unroll

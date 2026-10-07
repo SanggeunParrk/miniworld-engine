@@ -23,6 +23,18 @@ fp32 (``dtype=torch.float32``, the TF32 recipe): the same schedule with every ac
 expand GEMM is cuBLAS + the fp32 SwiGLU rows; the conditioning tables and the opt-in fused kernels (cond tables, GEMM + residual +
 AdaLN) stay bf16-only -- the fp32 step runs the default composition.
 
+fp32, three kernels per block (the default; MINIWORLD_BIAS_ONLY_DIT_INF3=0 keeps the composition above; read per call, so both
+steps run in one process): the
+conditioning tables of every block are HOISTED out of the step -- [T, nb, 6, 768] = (gate1, gate2, s1, s2, sh1, sh2) with the four
+sigmoids applied, made by the LayerNorm rows + two cuBLAS TF32 GEMMs + one cat + one sigmoid once per conditioning tensor
+(``_tables3``: ``kernels._capture.lookup_inputs``, keyed on the tensor's address / version / layout with a weak reference; inside a
+CUDA-graph capture scoped to the capture, i.e. remade by every replay, unless ``static_inputs()`` declares the conditioning fixed --
+then a replay runs none of those kernels) -- and each block is ``bo_front_tf32`` (LN + AdaLN + the v|g GEMM) -> ``pv_gate_tf32
+-DPDL_INF`` -> ``bo_tail_tf32`` (out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM, residual + gate), chained by
+programmatic dependent launch, on weights rounded to the nearest TF32 once per pack (``_pack3``). A failed build warns once and keeps
+the composition above. Front and tail exchange their GEMM operands inside each cluster through L2 scratch (stores, one release,
+TMA-fed GEMM; ``_buffers3``).
+
 Tried and not kept: splitting the samples over two or three CUDA streams (each chain leaves SMs idle at these sizes, but the
 core and cuBLAS's kernels each fill an SM's shared memory, so the chains did not overlap: L384 70 -> 80 us), and the
 output-gate table GEMM on a side stream (no change).
@@ -31,6 +43,7 @@ output-gate table GEMM on a side stream (no change).
 from __future__ import annotations
 
 import os
+import weakref
 
 import torch
 
@@ -98,6 +111,8 @@ class FusedBiasOnlyDiT:
         self.dtype = dtype
         self._buf: dict = {}
         self._ops: dict = {}
+        self._tab3: dict = {}                                   # hoisted conditioning tables of the three-kernel step
+        self._p3 = None                                         # its TF32-rounded weight pack
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -179,7 +194,114 @@ class FusedBiasOnlyDiT:
         if not self.fp32:
             return self._step(single, cond, P, out_dtype)
         with _tf32().tf32_gemms():
+            if self._inf3_ok(single.device):
+                return self._step3(single, cond, P, out_dtype)
             return self._step(single, cond, P, out_dtype)
+
+    # ------------------------------------------------------------------ fp32, three kernels per block (default; INF3=0: off)
+    def _inf3_ok(self, device) -> bool:
+        T = _tf32()
+        if not (self.fp32 and T.inf3_on() and self.d == 768 and self.da in (768, 1024)):
+            return False
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        return T.inf3_ready(idx, self.h, self.da // self.h)
+
+    def _pack3(self):
+        """The three-kernel step's weights, once per runner (i.e. per weight version): per block [Wv; Wg], Wo, [Wa; Wb], Wsq rounded to
+        the nearest TF32; the AdaLN table weights reordered so that one GEMM gives (s1, s2, sh1, sh2) per block."""
+        if self._p3 is None:
+            rnd, pairs = _tf32().round_tf32, _tf32().pack_pairs
+            nb, D, dc = self.nb, self.d, self.dc
+            # (s1, sh1, s2, sh2) -> (s1, s2, sh1, sh2) by slices + cat: device ops only (a Python index list would make a host index
+            # tensor, which a CUDA-graph capture refuses to copy -- the pack runs inside a capture whenever the weights are not static)
+            w4, b4 = self.w1.view(nb, 4, D, dc), self.b1.view(nb, 4, D)
+            w1 = torch.cat([w4[:, 0:1], w4[:, 2:3], w4[:, 1:2], w4[:, 3:4]], 1).reshape(nb * 4 * D, dc).contiguous()
+            b1 = torch.cat([b4[:, 0:1], b4[:, 2:3], b4[:, 1:2], b4[:, 3:4]], 1).reshape(nb * 4 * D).contiguous()
+            # Wo / Wsq pair-packed per tail cluster size (8 / 6): the tail loads two k-blocks of a CTA's output rows as one TMA box
+            tcl = _tf32().TAIL_CLUSTERS
+            blocks = []
+            for p in self.per:
+                wo, ws = rnd(p["wo"]), rnd(p["ws"])
+                blocks.append(dict(wvg=rnd(p["wvg"]), wab=rnd(p["wab"]), wo={cl: pairs(wo, cl) for cl in tcl},
+                                   wsq={cl: pairs(ws, cl) for cl in tcl}))
+            self._p3 = (w1, b1, blocks)
+        return self._p3
+
+    def _tables3(self, cond, S, L):
+        """The hoisted conditioning tables [T, nb, 6, 768] fp32 (T = L when the samples share one conditioning, else S L): per block
+        sigmoid(gate1), sigmoid(gate2), sigmoid(s1), sigmoid(s2), sh1, sh2 -- made once per conditioning tensor (address, in-place
+        version, layout; a weak reference guards against a freed address reused by another tensor) and reused by every later step
+        that passes it unchanged. ``kernels._capture.lookup_inputs`` scopes the entries to a CUDA-graph capture (a replay remakes
+        them) unless ``static_inputs()`` is on."""
+        from miniworld_engine.kernels import _capture
+
+        nb, D = self.nb, self.d
+        shared = cond.shape[0] == 1 or cond.stride(0) == 0
+        w1, b1, _ = self._pack3()
+
+        def build():
+            c = (cond[0, 0] if shared else cond.reshape(S * L, self.dc)).float()
+            T = c.shape[0]
+            cn = torch.empty(T, self.dc, device=c.device, dtype=torch.float32)
+            C.ln_rows(c, cn, EPS)
+            g1 = torch.addmm(b1, cn, w1.t()).view(T, nb, 4, D)          # s1, s2, sh1, sh2
+            g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)  # gate1, gate2
+            tab = torch.cat([g2, g1], 2)                                 # gate1, gate2, s1, s2, sh1, sh2
+            tab[:, :, :4].sigmoid_()
+            return tab
+
+        key = ("tab3", cond.data_ptr(), cond._version, tuple(cond.shape), cond.stride(), cond.dtype, cond.device, S, L)
+        entry = _capture.lookup_inputs(self._tab3, key, lambda: (weakref.ref(cond), build()), limit=16,
+                                       valid=lambda e: e[0]() is cond, alive=lambda e: e[0]() is not None)
+        return entry[1]
+
+    def _ops3(self, device):
+        """(front, core, tail) of the three-kernel step."""
+        T = _tf32()
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        key = ("inf3", idx)
+        if key not in self._ops:
+            self._ops[key] = (T.FrontTF32(idx, self.da), T.PvGateCoreTF32(idx, nh=self.h, dh=self.da // self.h, pdl=True),
+                              T.TailTF32(idx, self.da))
+        return self._ops[key]
+
+    def _buffers3(self, S, L, dev):
+        """v|g, a, the residual ping-pong of a multi-block stack, and the clusters' operand-exchange scratch (xa, xt [M, 768] rows, h
+        [M 48, 32] blocked k-block-major: written and read within one kernel, L2-resident)."""
+        key = ("inf3", S, L, dev)
+        if key not in self._buf:
+            M, f = S * L, torch.float32
+            e = lambda n: torch.empty(M, n, device=dev, dtype=f)                                 # noqa: E731
+            # the scratch rows padded by 128 B: their natural strides (3 / 6 KB) are multiples of 2 KB, so a TMA box's 128 rows
+            # would fall on the same address bits above the line (round-4 experiment against L2 slice camping; harmless otherwise)
+            pad = lambda n: torch.empty(M, n + 32, device=dev, dtype=f)[:, :n]                   # noqa: E731
+            self._buf[key] = dict(vg=e(2 * self.da), a=e(self.da), x=[e(self.d) for _ in range(2 if self.nb > 1 else 0)],
+                                  xa=pad(self.d), xt=pad(self.d), h=torch.empty(M * 2 * self.d // 32, 32, device=dev, dtype=f))
+        return self._buf[key]
+
+    def _step3(self, single, cond, P, out_dtype=None):
+        """The fp32 step as three kernels per block: front (LN + AdaLN + v|g GEMM) -> core -> tail (everything after the core)."""
+        S, B, L, D = single.shape
+        assert B == 1 and L % 128 == 0 and D == self.d
+        M, H, DA, dev = S * L, self.h, self.da, single.device
+        tab = self._tables3(cond, S, L)
+        T = tab.shape[0]
+        _, _, packs = self._pack3()
+        front, core, tail = self._ops3(dev)
+        tcl = tail.cluster(M // 128)                                  # 8, or 6 where it fits the tiles in fewer rounds
+        buf = self._buffers3(S, L, dev)
+        x = single.reshape(M, D).float().contiguous()
+        out = torch.empty(M, D, device=dev, dtype=torch.float32)
+        vg, a = buf["vg"], buf["a"]
+        for b, p in enumerate(packs):
+            y = out if b + 1 == self.nb else buf["x"][b % 2]
+            tb = tab[:, b]
+            front(x, tb, p["wvg"], vg, T, xa=buf["xa"])
+            core(vg[:, :DA], P[b * H:(b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])     # sigmoid(g) * (P v), TF32-rounded
+            tail(a, x, tb, p["wo"][tcl], p["wab"], p["wsq"][tcl], y, T, xt=buf["xt"], h=buf["h"], cl=tcl)
+            x = y
+        res = out.view(S, 1, L, D)
+        return res if out_dtype in (None, torch.float32) else res.to(out_dtype)
 
     def _step(self, single, cond, P, out_dtype=None):
         S, B, L, D = single.shape

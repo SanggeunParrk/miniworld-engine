@@ -41,7 +41,10 @@ under autocast or with bf16 weights -- runs the module's PyTorch composition. Ea
 **Switches** (default on): `MINIWORLD_BIAS_ONLY_DIT` (inference), `MINIWORLD_BIAS_ONLY_DIT_TRAIN` (training),
 `MINIWORLD_BIAS_ONLY_DIT_CORE` (the sm_100a core). Experiment knobs: `MINIWORLD_BIAS_ONLY_DIT_SG` (samples per core work item),
 `MINIWORLD_BIAS_ONLY_DIT_PV_VB` (keys per v tile), `MINIWORLD_BIAS_ONLY_DIT_RESLN` / `_COND` (inference GEMM-epilogue experiments,
-off: slower, see below), `MINIWORLD_BO_ROWS_BLOCKS_PER_SM` (cap on the training row kernels' resident blocks).
+off: slower, see below), `MINIWORLD_BO_ROWS_BLOCKS_PER_SM` (cap on the training row kernels' resident blocks),
+`MINIWORLD_BIAS_ONLY_DIT_INF3` (fp32 inference as three kernels per block, default on; 0: the 12-launch step:
+[F5](#f5--three-kernel-fp32-inference-step-the-default)) with `MINIWORLD_BIAS_ONLY_DIT_INF3_CL` (4 / 6 / 8: force the front
+kernel's cluster) and `_INF3_TAIL_CL` (8 / 6: the tail's).
 
 **cache build ✓** everywhere: nothing on these paths autotunes. The row kernels have fixed launch shapes (grids sized from the
 occupancy API), the sm_100a kernels are cubins built on first use into `MINIWORLD_ENGINE_JIT_ROOT` (keyed by source and
@@ -316,6 +319,221 @@ measured (`bo32_train_breakdown.py --wgrad-probe`).
 `bench_scripts/bo32_train_breakdown.py --ab VAR=VAL ...` times the whole step against each switch in alternation in one process
 (single whole-step runs differ by ~50 us at L768 on this power-capped card). The row extension reports every kernel's registers and local memory (`func_attrs`); the tests hold the new ones to
 <= 128 registers without spills, as the cubins' (`Kernel.regs`, `.lmem`).
+
+### F5 · three-kernel fp32 inference step (the default)
+
+Status (2026-10-07): the served fp32 inference step (round 9). `MINIWORLD_BIAS_ONLY_DIT_INF3=0` (read per call) keeps the 12-launch
+cuBLAS + rows step below, which a failed build of the three kernels also falls back to; the tests cover both.
+
+| L, us (A = 5, 16 x 48, per-sample conditioning; whole-step graph replay) | 12-launch step | three-kernel step | ratio | floor | SoL |
+|---|---|---|---|---|---|
+| 128 | 69.8 | 62.0 | 0.89x | 10.4 | 17% |
+| 256 | 92.0 | 69.2 | 0.75x | 21.2 | 31% |
+| 384 | 118.9 | 75.9 | 0.64x | 32.2 | 42% |
+| 512 | 139.4 | 100.7 | 0.72x | 43.5 | 43% |
+| 640 | 176.5 | 138.7 | 0.79x | 55.1 | 40% |
+| 768 | 198.7 | 144.8 | 0.73x | 67.1 | 46% |
+
+(`bench_scripts/bo32_infer_breakdown.py --allow-dirty --both`; floor = the sum of the launches' speed-of-light floors, max(FLOP /
+720 TF/s, unavoidable bytes / 7 TB/s).)
+
+**Final design.**
+- K1 `bo_front_tf32`: cluster of 8, 6 or 4 CTAs per 128-row tile (the fewest rounds of resident clusters, then the largest
+  cluster); LN statistics all-reduced through DSMEM; the own xa k-blocks staged in the A ring (the GEMM takes them first) and
+  exchanged through L2 scratch -- by TMA store at CL 8, by `st.global` from the registers at CL 4 / 6 -- then one release.
+- K2 `pv_gate_tf32 -DPDL_INF`: the default core plus PDL and a rounded to TF32.
+- K3 `bo_tail_tf32`: cluster of 8 (6 where it saves a round: A = 5, L512); one A ring carrying a, x / gate1, s2 / sh2, xt, h, gate2;
+  xt exchanged by `st.global` at CL 8 (TMA store at CL 6), CL 8 h by `st.global`, CL 6 h by `st.global` through transpose tiles;
+  H blocked k-block-major with z's L2 h blocks two per box.
+- PDL: `launch_dependents` after each kernel's setup, `griddepcontrol.wait` before reading a predecessor's output or writing a
+  buffer an earlier kernel may read; only the weights load before the wait.
+
+**Occupancy ceiling.** At L384-768 the step is bound by how many clusters fit: the tail (231936 B of shared memory per CTA) runs
+at most 15 clusters of 8 = 120 of 148 SMs (22 of 6 = 132 at L512), so even with every CTA at its own floor the step reaches about
+120 / 148 = 81 % of the speed-of-light floor there. Round 7 / 9 sit at ~40-45 %.
+
+**Round 9 A/B** (round 8's changes one at a time against round 7 restored; whole step, us, minus = faster):
+
+| switch | L256 | L384 | L512 | L640 | L768 | kept |
+|---|---|---|---|---|---|---|
+| tail xt / h exchange by `st.global` | -1.7 | -2.2 | +0.9 | -3.0 | -3.7 | CL 8 only (CL 6 L512 tile 60.5 -> 61.7 us) |
+| front xa exchange by `st.global` | +0.3 | +1.2 | -1.7 | -0.7 | -0.4 | CL 4 / 6 only (front CL 4 L768 25.1 -> 24.5 us) |
+| front first xa loads under the statistics exchange | -0.6 | -0.8 | +0.4 | -0.5 | -0.7 | no (later statistics, within noise) |
+| core: P's first chunks before the PDL wait | -0.9 | -0.6 | -0.2 | +0.2 | -0.4 | no (within noise) |
+| tail CL 8: z's own h blocks under P6 | +0.3 | -0.5 | +0.5 | +0.4 | +0.8 | no |
+| `launch_dependents` as the first instruction | -0.4 | +0.3 | +0.2 | 0 | +0.2 | no |
+
+Base (round 7 restored): 63.6 / 71.1 / 76.7 / 102.2 / 144.3 / 150.2 us at L128-768.
+
+Round 8 (all of these at once, plus x / gate1 / s2 / sh2 loaded by per-thread `ld.global` into a TMEM stash while y ran) was slower
+at every L >= 256: the per-thread loads collapsed the y GEMM's TMA intake (CL 8, L768: a period 0.25 -> 0.96 us, Wo 0.57 -> 2.4 us
+per pair, the tile 46.3 -> 66.7 us). P2's inputs stay in the A ring; a dedicated shared-memory area does not fit (x + gate1 alone
+are 96 KB at CL 8, 128 KB at CL 6; 512 B are free).
+
+Round 7's switch A/B deleted row-major H (1-4 us slower than blocked), blocked XT with paired xt loads (~2 us) and the weight
+prefetch into L2 (4-14 us).
+
+**Next.**
+- `cta_group::2` weight sharing in the tail: two row tiles per CTA pair, each CTA loading half of every weight box (B split by N).
+  The tail is TMA-intake-bound (~3.8 MB per CTA and tile at ~110 GB/s, 2.06 MB of it weights); halving the weight intake is the
+  lever toward the occupancy ceiling.
+- `pv_gate_tf32` sample groups: with batched N the 48-wide head builds SG 1 / 2 / 4, so S = 5 runs as 2 + 2 + 1 and P streams three
+  times per (head, query tile); SG = 5 (unbatched, 480 TMEM columns) or a 4 + 1 batched pair of MMAs would stream it once.
+
+Earlier rounds, in short. Round 6: H blocked k-block-major ([tile][48][128][32], each k-block one contiguous 16 KB instead of 128
+lines 6 KB apart) and z's L2 h blocks loaded two per 32-KB box into adjacent ring slots (L768 tail tile 50.3 -> 46.2 us; z's H stall
+7.6 -> 3.7 us); the trace stamps when the producer sees each slot free, so `bo32_inf3_trace.py` prints the tensor core's time per
+block. Round 7: the CL 6 blocked-H store faulted (its per-warp shared-memory tile was named like the row-tile index); rewritten with
+distinct names (`rtile`, `wtile`). Round 1's kernels and the exchange switch are deleted. `bo32_infer_breakdown.py --ab VAR=VAL[,VAR=VAL]`
+(VAR one of `MINIWORLD_BIAS_ONLY_DIT_INF3_CL`, `_INF3_TAIL_CL`) runs the step with that setting in the same process.
+
+| L (A = 5, 16 x 48), us | 12-launch step | round 1 (DSMEM) | round 2 (L2) | round 3 | round 4 | round 4: front / core / tail alone |
+|---|---|---|---|---|---|---|
+| 128 | 69.8 | 129.1 | 76.0 | 68.8 | 65.6 | 16.4 / 5.1 / 43.7 |
+| 256 | 92.3 | 139.0 | 88.5 | 77.9 | 72.2 | |
+| 384 | 119.0 | 145.2 | 95.2 | 84.1 | 79.7 | 17.2 / 9.1 / 46.5 |
+| 512 | 140.9 | 239.5 | 162.5 | 150.6 | 141.8 | 25.8 / 15.4 / 90.0 (two rounds) |
+| 640 | 178.9 | 246.1 | 168.3 | 155.6 | 147.5 | |
+| 768 | 192.5 | 252.4 | 172.1 | 160.2 | 153.3 | 30.5 / 21.7 / 93.5 (two rounds) |
+
+**Why.** The 12-launch fp32 step (`MINIWORLD_BIAS_ONLY_DIT_INF3=0`) is 12 launches per call (`cond_ln`, two table GEMMs, `adaln_in`, v|g GEMM, `pv_gate_tf32`, out GEMM,
+`res_adaln`, expand GEMM, `swiglu`, squeeze GEMM, `res_out`). At L768 (A = 5, 16 x 48) the step is 197 us against a ~67 us floor: 33 us
+of launch gaps between nodes, the GEMMs at 50-70 % of their floor (M = 3840 rows underfill 148 SMs), every activation through HBM
+between them. The SWA atom DiT's fp32 forward is three kernels per block with the modulation hoisted; this is the same shape.
+
+**Data flow (per block, per call).**
+
+| | what | kernel | in | out |
+|---|---|---|---|---|
+| hoist (once per conditioning tensor) | LN(c), the AdaLN / gate tables, sigmoids applied | `ln_rows` + 2 cuBLAS TF32 GEMMs + cat + sigmoid | c | tab [T, nb, 6, 768] = gate1, gate2, s1, s2, sh1, sh2 |
+| hoist (once per pair, mask) | P = softmax(pair bias) | `pair_bias`, `softmax_rows` (unchanged) | pair | P [nb H, L, L] |
+| K1 | xa = LN(x) s1 + sh1 (TF32), v \| g = xa [Wv; Wg]^T | `bo_front_tf32` | x, tab, Wvg | vg [M, 2 DA] (v TF32-rounded) |
+| K2 | a = sigmoid(g) (P v) | `pv_gate_tf32 -DPDL_INF` (the default core + PDL + a rounded to TF32) | vg, P | a [M, DA] |
+| K3 | y = a Wo^T, x1 = x + gate1 y, xt = LN(x1) s2 + sh2, h = silu(xt Wa^T)(xt Wb^T), out = x1 + gate2 h Wsq^T | `bo_tail_tf32` | a, x, tab, Wo, Wab, Wsq | out [M, 768] |
+
+No x copy is written (K3 reads the block input again for the residual). The weights are rounded to the nearest TF32 once per pack
+(`runner._pack3`), every activation operand by `cvt.rna` where it is produced (xa, v, a, xt, h); fp32 accumulation; fp32 residual.
+The three kernels launch with programmatic dependent launch: each calls `griddepcontrol.launch_dependents` after setup and `griddepcontrol.wait` before it reads the previous kernel's output or writes a buffer an earlier kernel may still read;
+the weights are loaded before the wait (packed once, never written in a step).
+
+**Hoist and capture rules.** The tables are made once per conditioning tensor (address, in-place version, shape, strides, dtype, and a
+weak reference so that a freed address reused by another tensor misses) through `kernels._capture.lookup_inputs`, the local DiT's
+rule: eager calls share the eager entry; inside a CUDA-graph capture the entry is scoped to the capture (recorded, so every replay
+remakes the tables from the conditioning as it is then) unless `static_inputs()` / `MINIWORLD_STATIC_CONDITIONING=1` declares the
+conditioning fixed -- then a capture serves from the eager entries and the step graph is exactly the three kernels (the bench
+harness's inference mode, which also sets `static_weights`). P keeps its existing cache (`_capture.scoped`), the weight pack its own.
+
+**Why clusters.** d = 768 and the hidden size is 1536 (a | b 3072): a 128-row tile is 384 KB of fp32 activations (shared memory is
+227 KB), a | b alone is 3072 accumulator columns (TMEM is 512), and the LayerNorm needs whole rows; with at most 30 row tiles (A = 5,
+L768) a tile-per-CTA design would use 30 of 148 SMs. So a CLUSTER of CTAs owns a row tile and splits its output columns; the row
+statistics are all-reduced through DSMEM (1 KB per CTA, Chan's combination), and the next GEMM's full-K A operand is exchanged.
+
+**The operand exchange, three rounds.**
+- Round 1, DSMEM push ring: each owner pushed its 16-KB k-blocks into a 4-slot ring in every CTA (`cp.async.bulk.shared::cluster`),
+  flow-controlled by tcgen05.commit multicasts. Front ~34 us and tail ~93 us per wave at EVERY L: the `%globaltimer` trace showed
+  3.4-3.9 us from push to the last consumer's rfull per block and a ~1-1.2 us period -- serial round trips, not work. Deleted.
+- Round 2, L2: every CTA TMA-stores its own k-blocks to an L2-resident scratch (XA / XT [M, 768], H [M, 1536]), waits for completion
+  (`cp.async.bulk.wait_group 0`, `fence.proxy.async.global`), and arrives on every cluster CTA's ready barrier; each A producer waits
+  once (acquire.cluster) and streams the full-K operand by TMA through a 6-stage ring: a plain TMA-fed GEMM. Tail 50 us per wave.
+- Round 3 (from the round-2 trace at L768, one cluster: y 7.4, P2 to 15.0, xtready 18-21.8, abdone 32-36, hready 40-41, zdone 58):
+  * ONE release (`fence.acq_rel.cluster`) and CL **relaxed** remote arrivals per exchange: round 2's CL `arrive.release.cluster`
+    cost ~0.5 us each -- the ready signal came 2-4.7 us after the stores, and the CTAs saw it up to 4 us apart (skew that every later
+    phase inherited);
+  * P2 reads only x and gate1 (6 boxes: they fill the 6-slot ring as the last a blocks retire); s2 / sh2 follow (read in P4; xt is
+    staged over s2's slot) and gate2 comes after the h blocks (read in P8) -- round 2 queued 15 boxes through 6 slots for P2: ~8 us
+    of serial TMA round trips with the MMA idle;
+  * P2, P4, P6 each end in ONE named barrier (round 2: one per 32-column block);
+  * Wo / Wsq pair-packed (`tf32.pack_pairs`, at pack time): two k-blocks of a CTA's 96 rows are one 24-KB TMA box (round 2: two
+    12-KB boxes; the z phase ran ~0.35 us per k-block against ~0.23 at the box-size-limited intake);
+  * front: the next k-block's x (statistics) and x / s1 / sh1 (xa) loads issued under the current one (round 2: 4.7 + 7 us at CL 4,
+    one L2 latency per block).
+
+- Round 4 (from the round-3 trace, tail ~56-58 us per tile: y 7.1, P2 -> xtready seen ~7, a | b 14.4-14.8 at a 0.59 us period,
+  h stores -> hready ~5, z 20.3 at a 0.42 us period per k-block against 0.24 for y's same-shaped GEMM):
+  * own blocks first: each CTA's xt (3) / h (6) / xa (3 or 6) k-blocks are staged exactly in the ring slots of the first positions of
+    their GEMM's sequence; the epilogue (row workers) arrives on those `afull` itself, the producer skips them and waits for the
+    ready barrier only before the peers' blocks. The GEMMs start under the stores and the signal (~1.4 / ~2.3 us per exchange);
+    the W streams follow the same k-block order (own first; Wsq stays pair-aligned since 6 c is even);
+  * L2 policies: the weights load with evict_last, the single-use x / table boxes with evict_first. At L768 the per-sample tables
+    alone are ~70 MB per step (plus a, x, scratch, P, v|g): nothing kept the 21 MB of weights in L2 between replays, the likeliest
+    reason the z phase (Wsq) runs at 0.42 us per k-block when y (Wo, same shape) runs at 0.24;
+  * the scratch rows (XA, XT, H) padded by 128 B (3 / 6 KB strides are multiples of 2 KB: a box's 128 rows share their address
+    bits above the line -- a test against L2 slice camping);
+  * the P2 boxes released per 32-column block, so s2 / sh2 load under the rest of P2;
+  * front: every statistics load issued at once (CL 8 keeps them for the xa pass, which then loads only s1 / sh1);
+  * trace: every A / W load's issue time (events 256 + i, 384 + wj), so `bo32_inf3_trace.py` prints each stream's issue -> seen
+    latency and which input the MMA waits for; `--plain N` runs the normal kernels for ncu; the script also reports how many
+    clusters of 4 / 6 / 8 fit (cuOccupancyMaxActiveClusters).
+
+- Round 5 (from round 4's trace and ncu, tail L768 ~51 us per tile, z at 0.357 us per k-block):
+  * the z phase is not tensor-bound: its own, locally staged h blocks run at 0.23 us per k-block, y's same-shaped GEMM at 0.248.
+    Round 4's issue -> seen (Wab 1.8 us = 5 x 0.32, Wsq 3.3 us = 5 x 0.77) is ring depth x period on both W streams -- what a full
+    ring shows whether or not it limits -- so the trace now also stamps when the MMA warp BEGINS each wait: the per-stream stall
+    (seen - wait begin) names the input the MMAs wait for;
+  * every weight box of the next phase is prefetched into L2 one phase ahead (`cp.async.bulk.prefetch.tensor ... L2::cache_hint`,
+    evict_last): Wvg at the front's start, Wab while y runs, Wsq while a | b runs. ncu with cold caches read all 16.5 MB of the
+    tail's weights from DRAM (87 MB = a + x + 4 table columns + weights);
+  * cluster sizes from the driver's occupancy (cuOccupancyMaxActiveClusters: 15 of 8, 22 of 6, 33 of 4 at ~227 KB): the fewest
+    rounds x per-CTA time. New CL 6 tail (NC 128, NH 256; a | b in two 128-unit passes over xt re-streamed from L2, TMEM
+    Y 128 + A 128 + B 128 + Z 128 = 512; h to H by st.global through transpose tiles; W slots 3 x 32 KB) and CL 6 front (NV 256, 768
+    attention channels): A = 5, L512 (20 tiles) runs both in ONE round of 120 CTAs instead of two rounds of CL 8 (tail) / 80 CTAs of
+    CL 4 (front). L640 / L768 keep CL 8 (tail) / CL 4 (front).
+
+**K1 `bo_front_tf32`** (cluster CL = 8, 6 or 4: the fewest rounds of resident clusters, then the largest; `_INF3_CL` forces one). CTA c
+owns input columns [c 768/CL, ..) (3 or 6 k-blocks) and v | g columns [c NV, ..) (NV = 2 DA / CL). Row workers (warps 4-11; a lane per
+16-byte chunk, four whole 128-byte row segments per warp load, so x / s1 / sh1 come straight from global/L2, coalesced) compute per
+k-block (mean, M2), merge (Chan), exchange, combine, build the own xa k-blocks in ring slots, TMA-store them to XA (CL 4 / 6: st.global), release. A producer
+(warp 3) streams the 24 xa k-blocks; W producer (warp 0) [WROWS][32] slots (WROWS 192 or 256); MMA (warp 1) 4 x M128 K8 kind::tf32 per
+W slot. Epilogue: TMEM 32x32b (ld fused with its wait) -> per-warp 32 x 32 transpose tile (XOR-swizzled 16-byte chunks) ->
+`st.global.v4`, 4 whole 128-byte rows per instruction; v rounded to TF32, g not.
+
+**K3 `bo_tail_tf32`** (cluster of 8; 6 where it saves a round, `_INF3_TAIL_CL` forces one). CTA c owns output columns [96 c, 96 c +
+96) of y, x1, xt, z, out and hidden units [192 c, 192 c + 192) of a, b, h. One A-ring sequence: a k-blocks (P1 y) | x, gate1 (P2: x1 =
+x + gate1 y over y in TMEM, row statistics) | s2, sh2 (P4: xt, staged in the slots of the own xt positions, to XT by st.global
+(CL 6: TMA store), xtready) | xt k-blocks
+(P5 a | b; the own ones first) | h k-blocks (P7 z, after P6 staged the own h in their slots and stored it to H, hready;
+the others two per box; h to H by st.global) | gate2 (P8: out = x1 + gate2 z -> per-warp [32][64 B] transpose tile -> `st.global.v4`). Warps: 0 A
+producer, 1 MMA, 2 TMEM + W producer, 4-11 epilogue (thread = TMEM lane = row; warpgroup hh takes columns 16 hh .. 16 hh + 15 of every
+k-block). TMEM: Y [0, 96) | A [96, 288) | B [288, 480), Z = [96, 192) (z starts after h_0..h_2 were read out; without the alias 576 >
+512 columns).
+
+**Budget per CTA and 128-row tile** (A = 5; 720 TF/s and 148 SMs -> 4.86 TF/s per SM; TMA intake ~123 GB/s per SM for >= 16 KB
+boxes, measured):
+
+| | K1 CL = 8 | K1 CL = 4 | K3 (CL = 8) |
+|---|---|---|---|
+| used at (A = 5) | L <= 384 (<= 18 tiles) | L >= 512 | all |
+| shared memory | 230912 B (DA 1024: 206336): A ring 6 x 16 KB, W 5 x 24 KB / 3 x 32 KB, stats 9 KB | 226816 B (202240) | 231936 B: A ring 6 x 16 KB, W 5 x 24 KB, stats 10 KB |
+| TMEM columns | 256 (acc 192 / 256) | 512 (acc 384 / 512) | 512 (Y 96, A 192, B 192; Z over A) |
+| DSMEM | 8 KB of statistics | 4 KB | 8 KB |
+| TMA in | xa 384 KB + W 0.58 / 0.79 MB; rows 192 KB | xa 384 KB + W 1.18 / 1.57 MB; rows 384 KB | W 2.06 MB, a 0.38, boxes 0.24, xt 0.38, h 0.77 MB |
+| L2 scratch out | 48 KB | 96 KB | xt 48 KB + h 96 KB |
+| FLOP | 37.7 / 50.3 MFLOP | 75.5 / 100.7 MFLOP | 132 / 138 MFLOP |
+| MMA floor | 7.8 / 10.4 us | 15.5 / 20.7 us | 27.2 / 28.5 us |
+| measured round 2 (one CTA, L384 / L768) | 17-20 us | 32 us | 57-59 us |
+| expected round 3 | ~13 us | ~22 us | ~40 us |
+
+Round-3 tail estimate from the round-2 trace: y 5.6 + P2 ~1 + P3 / P4 ~1.5 + xt store / signal ~1.5 + a | b 13.4 + P6 ~1.5 + h store /
+signal ~1.5 + z ~11.5 (24-KB W boxes) + P8 ~1 -> ~40 us. Step estimates (front + core + tail + ~2 us): L128 ~13 + 5 + 40 = 58 (default
+69.8), L384 ~13 + 9 + 40 = 62 (119.0), L512 ~22 + 15 + 80 = 117 (140.8), L768 ~22 + 22 + 80 = 124 (194.4).
+
+**Waves.** From L512 the tail is 160-240 CTAs (20-30 tiles x 8) for 148 SMs, i.e. two rounds of at most ~18 resident clusters
+(`bo32_inf3_trace.py` prints the real number). Looping clusters persistently over tiles does not change that (20 tiles over at most 18
+clusters is still two rounds). 64-row tiles for the remainder do not help: an M = 64 tcgen05 MMA does half the work in the same issue
+slot, so a 64-row tile costs about what a 128-row one does. Two tiles in flight per cluster does not fit TMEM (Y + A + B = 480 of 512
+columns per tile). What does fit is a cluster of 6 (NC = 128, NH = 256) with a | b in two passes over xt (re-streamed from L2):
+TMEM Y 128 + a | b 256 + Z 128 = 512 exactly, W slots of 32 KB (3 of them beside the 6-slot A ring), ~176 MFLOP and ~5 MB of TMA in
+per CTA -> ~45-48 us; at L512, 20 tiles x 6 = 120 CTAs, one round if 20 clusters of 6 are resident (8 GPCs x 3 if every GPC has 18
+SMs), i.e. tail ~48 us instead of 2 x ~40. Not written yet: it is a second tail kernel; worth it only for 19-24 tiles (A = 5: L512;
+L640 is 25 tiles = 150 CTAs, over 148).
+
+**Tests** (`tests/integrations/test_b200_bias_only_dit_tf32_gpu.py`, `test_inf3_*`, `test_front_kernel_*`, `test_tail_kernel_*`): the
+block against fp64 at the default step's bounds for every head layout x L 128..768 x S 1 / 5 x shared / per-sample conditioning x
+masked / unmasked; every front (4 / 6 / 8) and tail (8 / 6) cluster forced; K1 and K3 alone against fp64 (3e-3), their scratch fully written and TF32-valued, and
+bit-identical reruns; reruns from scratch over a NaN-poisoned allocator bit-identical; the captured step exactly the three kernels under
+static weights / inputs and bit-identical to the eager call, the hoists recorded otherwise; the tables following an in-place change of
+the conditioning; two blocks against two one-block steps; no local memory in any of the cubins (front / tail <= 168 registers, the
+PDL core <= 128). `bench_scripts/bo32_inf3_trace.py`: the `-DTRACE` builds' per-role timeline of one cluster.
 
 ### fp32 training: speed of light per launch (16 x 48, A = 48)
 

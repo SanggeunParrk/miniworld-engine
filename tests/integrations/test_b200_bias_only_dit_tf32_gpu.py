@@ -109,12 +109,15 @@ def no_module_path():
 
 
 # ------------------------------------------------------------------------------------------------------------ inference
+# The served fp32 inference step is the three-kernel one (test_inf3_* below); these two pin MINIWORLD_BIAS_ONLY_DIT_INF3=0, the
+# 12-launch cuBLAS + rows step that stays selectable (and that a failed three-kernel build falls back to).
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize("L", [128, 384, 768])
 @pytest.mark.parametrize("S", [1, 5])
 @pytest.mark.parametrize("shared", [True, False])
 @pytest.mark.parametrize("masked", [False, True])
-def test_inference_within_the_pytorch_tf32_error(L, S, shared, masked, n_head, d_head):
+def test_inference_within_the_pytorch_tf32_error(monkeypatch, L, S, shared, masked, n_head, d_head):
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", "0")
     ref, fast, ref64 = blocks(n_head=n_head, d_head=d_head)
     for m in (ref, fast, ref64):
         m.eval()
@@ -136,7 +139,10 @@ def test_inference_within_the_pytorch_tf32_error(L, S, shared, masked, n_head, d
         assert relative(g, w) < 1e-2
 
 
-def test_inference_graph_compile_and_caches():
+@pytest.mark.parametrize("inf3_env", ["0", "1"])
+def test_inference_graph_compile_and_caches(monkeypatch, inf3_env):
+    """Eager / torch.compile / CUDA graph and the caches, for the 12-launch step (INF3=0) and the served three-kernel step."""
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", inf3_env)
     _, fast, _ = blocks(seed=5)
     fast.eval()
     L, S = 256, 5
@@ -149,6 +155,11 @@ def test_inference_graph_compile_and_caches():
         assert any("bo_pv_gate_tf32_sm100" in n for n in names), names
         assert not any("bo_pv_gate_inf_sm100" in n for n in names)
         assert not any("triton" in n.lower() for n in names), [n for n in names if "triton" in n.lower()]
+        rows = [n for n in names if any(r in n for r in DEFAULT_ROWS)]
+        if inf3_env == "1":                                                  # front -> core -> tail, none of the 12-launch rows
+            assert all(any(k in n for n in names) for k in INF3_NAMES) and not rows, names
+        else:                                                                # no front / tail kernel
+            assert not any(k in n for n in names for k in INF3_NAMES[::2]), names
         compiled = torch.compile(fast, fullgraph=True, options={"triton.cudagraphs": False})
         assert relative(compiled(x, c, p), eager) < 1e-5
         # a captured step replays to the eager output (cuBLAS may pick another algorithm under capture: not bit-exact)
@@ -542,3 +553,320 @@ def test_training_kernels_match_fp64(L, n_head, d_head):
     assert relative(dg, da.double() * ao.double() * (1 - s)) < 1e-6
     assert relative(dd2, (da.double() * ao.double()).view(A, L, H, DH).sum(-1).permute(0, 2, 1)) < 1e-6
     bo_ext()                                                     # the shared finalize / unfold extension builds
+
+
+# ------------------------------------------------------------------------------------------------------------ three-kernel inference step
+# the served fp32 inference step (MINIWORLD_BIAS_ONLY_DIT_INF3=0 turns it off): bo_front_tf32 -> pv_gate_tf32 (-DPDL_INF) ->
+# bo_tail_tf32 per block, the conditioning tables hoisted
+INF3_L = [128, 256, 384, 512, 640, 768]
+INF3_NAMES = ("bo_front_tf32_sm100", "bo_pv_gate_tf32_sm100", "bo_tail_tf32_sm100")
+#: the 12-launch step's row kernels, which the three-kernel step must not launch
+DEFAULT_ROWS = ("adaln_in_rows", "resgate_adaln_rows", "resgate_out_rows", "swiglu_k")
+
+
+@pytest.fixture
+def inf3(monkeypatch):
+    """The step on (explicitly, though it is the default), and a spy that the runner really took it (a failed build would fall
+    back silently)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import runner as RN
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", "1")
+    calls = []
+    orig = RN.FusedBiasOnlyDiT._step3
+
+    def spy(self, *a, **k):
+        calls.append(1)
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(RN.FusedBiasOnlyDiT, "_step3", spy)
+    return calls
+
+
+def _tables(T, nb=2, seed=0):
+    """Random hoisted tables [T, nb, 6, 768] in the step's layout (gate1, gate2, s1, s2 through a sigmoid; sh1, sh2 raw)."""
+    torch.manual_seed(seed)
+    tab = torch.randn(T, nb, 6, 768, device="cuda")
+    tab[:, :, :4] = torch.sigmoid(tab[:, :, :4] + 1.0)
+    return tab
+
+
+def _ln64(x):
+    x = x.double()
+    return (x - x.mean(-1, keepdim=True)) / torch.sqrt(x.var(-1, unbiased=False, keepdim=True) + 1e-5)
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize("L", INF3_L)
+@pytest.mark.parametrize("S", [1, 5])
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize("masked", [False, True])
+def test_inf3_within_the_pytorch_tf32_error(inf3, L, S, shared, masked, n_head, d_head):
+    """The three-kernel step against the fp64 module at the default inference step's bounds; every head layout, L 128..768 (both
+    front clusters: 8 up to 18 row tiles, 4 above), masked / unmasked, shared / per-sample conditioning."""
+    ref, fast, ref64 = blocks(n_head=n_head, d_head=d_head)
+    for m in (ref, fast, ref64):
+        m.eval()
+    x = torch.randn(S, 1, L, 768, device="cuda")
+    c = torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384) if shared else torch.randn(S, 1, L, 384, device="cuda")
+    p = torch.randn(1, L, L, 128, device="cuda")
+    mask = (torch.rand(1, L, device="cuda") > 0.2) if masked else None
+    with torch.no_grad():
+        want = ref64(x.double(), c.double(), p.double(), mask)
+        assert INF.serves(fast, x, c, p, mask)
+        with no_module_path():
+            got = fast(x, c, p, mask)
+        with tf32(True):
+            base = ref(x, c, p, mask)
+    assert inf3, "the three-kernel step did not run"
+    assert got.dtype is torch.float32
+    for g, b, w in ((got, base, want), (got - x, base - x, want - x.double())):
+        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (relative(g, w), relative(b, w))
+        assert relative(g, w) < 1e-2
+
+
+@pytest.mark.parametrize("tail_cl", ["8", "6"])
+@pytest.mark.parametrize("cl", ["4", "6", "8"])
+@pytest.mark.parametrize(("n_head", "d_head"), [(16, 48), (16, 64)])
+@pytest.mark.parametrize("L", [384, 512, 768])
+def test_inf3_every_cluster_size(inf3, monkeypatch, cl, tail_cl, n_head, d_head, L):
+    """Every front cluster size (8 / 6 / 4; 6 only for 768 attention channels) and both tail cluster sizes (8, and 6 with its two
+    a | b passes) forced at shapes where the default would pick another (A = 5: front 8 at L384, 6 at L512, 4 at L768; tail 6 at L512)."""
+    if cl == "6" and d_head == 64:
+        pytest.skip("front CL 6 splits 1536 v|g columns: 768 attention channels only")
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_CL", cl)
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL", tail_cl)
+    ref, fast, ref64 = blocks(seed=17, n_head=n_head, d_head=d_head)
+    for m in (ref, fast, ref64):
+        m.eval()
+    S = 5
+    x, c = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda")
+    p, mask = torch.randn(1, L, L, 128, device="cuda"), torch.rand(1, L, device="cuda") > 0.2
+    with torch.no_grad():
+        want = ref64(x.double(), c.double(), p.double(), mask)
+        with no_module_path():
+            got = fast(x, c, p, mask)
+        with tf32(True):
+            base = ref(x, c, p, mask)
+    assert inf3
+    assert relative(got - x, want - x.double()) <= 1.5 * relative(base - x, want - x.double()) + 1e-3
+
+
+@pytest.mark.parametrize("da", [768, 1024])
+@pytest.mark.parametrize("cl", [4, 6, 8])
+@pytest.mark.parametrize(("M", "T"), [(128, 128), (640, 128), (1920, 1920), (3840, 768)])
+def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
+    if cl == 6 and da == 1024:
+        pytest.skip("front CL 6: 768 attention channels only")
+    """bo_front_tf32.cu alone: v | g = (LN(x) s1 + sh1) [Wv; Wg]^T against fp64 (TF32 products: 3e-3), on a table slice with a
+    multi-block row stride; v leaves rounded to TF32 (it is the core's MMA operand), g as accumulated."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_CL", str(cl))
+    torch.manual_seed(M + da + cl)
+    x = 1.5 * torch.randn(M, 768, device="cuda") + 0.3
+    tab = _tables(T, seed=M)
+    w = T32.round_tf32(torch.randn(2 * da, 768, device="cuda") / 768 ** 0.5)
+    vg = torch.full((M, 2 * da), float("nan"), device="cuda")
+    xa = torch.full((M, 768), float("nan"), device="cuda")
+    front = T32.FrontTF32(torch.cuda.current_device(), da)
+    k = front.kernel(cl)
+    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    front(x, tab[:, 1], w, vg, T, xa=xa)
+    tok = torch.arange(M, device="cuda") % T
+    t64 = tab[:, 1].double()[tok]
+    xa64 = _ln64(x) * t64[:, 2] + t64[:, 4]
+    want = xa64 @ w.double().t()
+    assert torch.isfinite(vg).all()
+    assert relative(vg, want) < 3e-3, relative(vg, want)
+    assert torch.equal(vg[:, :da], T32.round_tf32(vg[:, :da]))
+    assert torch.isfinite(xa).all() and torch.equal(xa, T32.round_tf32(xa))     # the exchange scratch: every block written, TF32
+    assert relative(xa, xa64) < 2e-3
+    again = torch.empty_like(vg)
+    front(x, tab[:, 1], w, again, T, xa=xa)
+    assert torch.equal(again, vg)
+
+
+@pytest.mark.parametrize("cl", [8, 6])
+@pytest.mark.parametrize("da", [768, 1024])
+@pytest.mark.parametrize(("M", "T"), [(128, 128), (640, 128), (1920, 1920), (3840, 768)])
+def test_tail_kernel_matches_fp64(cl, da, M, T):
+    """bo_tail_tf32.cu alone: out = x1 + gate2 (silu(xt Wa^T) (xt Wb^T)) Wsq^T, x1 = x + gate1 a Wo^T, xt = LN(x1) s2 + sh2, against
+    fp64 -- the block update out - x within 3e-3 (TF32 products) -- and bit-identical on a rerun."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    torch.manual_seed(M + da)
+    dev = torch.cuda.current_device()
+    a = T32.round_tf32(torch.randn(M, da, device="cuda"))
+    x = 1.5 * torch.randn(M, 768, device="cuda") + 0.3
+    tab = _tables(T, seed=M + 1)
+    wo = T32.round_tf32(torch.randn(768, da, device="cuda") / da ** 0.5)
+    wab = T32.round_tf32(torch.randn(3072, 768, device="cuda") / 768 ** 0.5)
+    wsq = T32.round_tf32(torch.randn(768, 1536, device="cuda") / 1536 ** 0.5)
+    tail = T32.TailTF32(dev, da)
+    nc = 768 // cl
+    wop, wsqp = T32.pack_pairs(wo, cl), T32.pack_pairs(wsq, cl)
+    k0 = torch.arange(32, device="cuda")
+    assert torch.equal(wop.view(cl, -1, 2, nc, 32)[3, 5, 1, 7], wo[nc * 3 + 7, 64 * 5 + 32 + k0])   # P[((c p) 2 + h) NC + n, k]
+    k = tail.kernel(cl)
+    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    out = torch.full((M, 768), float("nan"), device="cuda")
+    xt = torch.full((M, 768), float("nan"), device="cuda")              # row-major
+    hs = torch.full((M * 48, 32), float("nan"), device="cuda")          # blocked k-block-major
+    tail(a, x, tab[:, 0], wop, wab, wsqp, out, T, xt=xt, h=hs, cl=cl)
+    tok = torch.arange(M, device="cuda") % T
+    t64 = tab[:, 0].double()[tok]
+    x1 = x.double() + t64[:, 0] * (a.double() @ wo.double().t())
+    xt64 = _ln64(x1) * t64[:, 3] + t64[:, 5]
+    ab = xt64 @ wab.double().t()
+    h = torch.nn.functional.silu(ab[:, :1536]) * ab[:, 1536:]
+    want = x1 + t64[:, 1] * (h @ wsq.double().t())
+    assert torch.isfinite(out).all()
+    assert relative(out - x, want - x.double()) < 3e-3, relative(out - x, want - x.double())
+    assert torch.isfinite(xt).all() and torch.isfinite(hs).all()          # the exchange scratch: every block written
+    rows = lambda t, nk: t.view(M // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(M, 32 * nk)   # noqa: E731  blocked -> rows
+    assert relative(xt, xt64) < 2e-3 and relative(rows(hs, 48), h) < 3e-3
+    again = torch.empty_like(out)
+    tail(a, x, tab[:, 0], wop, wab, wsqp, again, T, xt=xt, h=hs, cl=cl)
+    assert torch.equal(again, out)
+
+
+def _poison(mb=512):
+    """Fill the caching allocator's next blocks with NaN: a buffer the step reads before writing would show it."""
+    junk = torch.full((mb << 18,), float("nan"), device="cuda")
+    torch.cuda.synchronize()
+    del junk
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize("L", [128, 384, 640, 768])
+@pytest.mark.parametrize("shared", [True, False])
+def test_inf3_bit_identical_reruns_with_a_poisoned_allocator(inf3, n_head, d_head, L, shared):
+    """Three reruns from scratch (the runner's buffers, tables, bound launches and P dropped; the allocator's free memory filled with
+    NaN before each): finite and bit-identical -- fixed-order reductions, no atomics, nothing read before it is written."""
+    _, fast, _ = blocks(seed=9, n_head=n_head, d_head=d_head)
+    fast.eval()
+    S = 5
+    x = torch.randn(S, 1, L, 768, device="cuda")
+    c = torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384) if shared else torch.randn(S, 1, L, 384, device="cuda")
+    p, mask = torch.randn(1, L, L, 128, device="cuda"), torch.rand(1, L, device="cuda") > 0.2
+    outs = []
+    for _ in range(3):
+        INF._RUNNERS.clear()
+        _poison()
+        with torch.no_grad():
+            outs.append(fast(x, c, p, mask).clone())
+        torch.cuda.synchronize()
+    assert len(inf3) == 3
+    assert torch.isfinite(outs[0]).all()
+    for o in outs[1:]:
+        assert torch.equal(o, outs[0])
+
+
+@pytest.mark.parametrize("static", [True, False])
+@pytest.mark.parametrize(("n_head", "d_head"), [(16, 48), (16, 64)])
+def test_inf3_graph_is_three_kernels_and_replays(inf3, static, n_head, d_head):
+    """The captured step: with the weights and the conditioning declared static (the bench harness's inference mode) exactly the three
+    kernels, replaying bit-identically to the eager call and following a new single copied in; without, the hoists (weight pack, P,
+    conditioning tables) are recorded too and the three kernels close the graph. The default step's row kernels never appear."""
+    from miniworld_engine.kernels import _capture
+    from tests.cuda_graph_nodes import graph_kernels
+    _, fast, _ = blocks(seed=5, n_head=n_head, d_head=d_head)
+    fast.eval()
+    L, S = 384, 5
+    x, c, p = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda"), torch.randn(1, L, L, 128, device="cuda")
+    xs, cs, ps = x.clone(), c.clone(), p.clone()
+    ctx = contextlib.ExitStack()
+    if static:
+        ctx.enter_context(_capture.static_weights())
+        ctx.enter_context(_capture.static_inputs())
+    with ctx, torch.no_grad():
+        eager = fast(x, c, p)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(2):
+                fast(xs, cs, ps)
+        torch.cuda.current_stream().wait_stream(side)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(graph):
+            out = fast(xs, cs, ps)
+        names = graph_kernels(graph)
+        graph.replay()
+        torch.cuda.synchronize()
+        if static:
+            assert len(names) == 3 and all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
+            assert torch.equal(out, eager)
+        else:
+            assert all(k in n for k, n in zip(INF3_NAMES, names[-3:], strict=True)), names
+            assert sum(any(k in n for k in INF3_NAMES) for n in names) == 3, names
+            assert relative(out, eager) < 1e-5
+        assert not any(r in n for n in names for r in DEFAULT_ROWS), names
+        x2 = torch.randn_like(x)
+        xs.copy_(x2)
+        graph.replay()
+        torch.cuda.synchronize()
+        new = fast(x2, c, p)
+        if static:
+            assert torch.equal(out, new)
+        else:
+            assert relative(out, new) < 1e-5
+
+
+def test_inf3_tables_follow_the_conditioning(inf3):
+    """The hoisted tables are keyed on the conditioning tensor's version: an in-place change is seen by the next call; a later call
+    with the same tensor launches none of the table kernels."""
+    from tests.cuda_graph_nodes import launched_kernels
+    ref, fast, _ = blocks(seed=21)
+    for m in (ref, fast):
+        m.eval()
+    L, S = 256, 5
+    x, c, p = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda"), torch.randn(1, L, L, 128, device="cuda")
+    with torch.no_grad(), tf32(True):
+        first = fast(x, c, p)
+        c.mul_(0.5).add_(0.3)
+        second = fast(x, c, p)
+        assert not torch.equal(first, second)
+        assert relative(second, ref(x, c, p)) < 1e-2
+    from miniworld_engine.kernels import _capture
+    with torch.no_grad(), _capture.static_weights(), _capture.static_inputs():
+        fast(x, c, p)
+        names = launched_kernels(lambda: fast(x, c, p))
+    assert len(names) == 3 and all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
+
+
+def test_inf3_two_blocks_match_two_single_block_steps(inf3, monkeypatch):
+    """FusedBiasOnlyDiT over two blocks (the ping-pong residual buffers, per-block table slices) against the 12-launch step's runner and
+    against two single-block three-kernel runners."""
+    from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
+    b1, b2 = blocks(seed=31)[1], blocks(seed=32)[1]
+    L, S = 384, 5
+    x, c, p = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda"), torch.randn(1, L, L, 128, device="cuda")
+    with torch.no_grad():
+        two = FusedBiasOnlyDiT([b1, b2], dtype=torch.float32)
+        P = two.hoist(p.contiguous())
+        got = two.step(x, c, P)
+        r1, r2 = FusedBiasOnlyDiT([b1], dtype=torch.float32), FusedBiasOnlyDiT([b2], dtype=torch.float32)
+        seq = r2.step(r1.step(x, c, r1.hoist(p.contiguous())), c, r2.hoist(p.contiguous()))
+    assert len(inf3) == 3
+    assert torch.isfinite(got).all()
+    assert relative(got, seq) < 1e-3
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", "0")              # the same runner, the 12-launch step
+    with torch.no_grad():
+        default = two.step(x, c, P)
+    assert len(inf3) == 3
+    assert relative(got, default) < 1e-2
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+def test_inf3_kernels_do_not_spill(n_head, d_head):
+    """No local memory in any three-kernel-step cubin: every front and tail cluster for the layout's width (__launch_bounds__(384,
+    1): up to 168 registers), the PDL core for every sample group (<= 128 registers, its __launch_bounds__(256, 2)). The bar is the
+    served cubins: the -DTRACE builds (bench_scripts/bo32_inf3_trace.py only) may spill a few bytes for the %globaltimer stamps
+    (front CL 4: 4 B), which this does not check."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    dev, da = torch.cuda.current_device(), n_head * d_head
+    front, tail = T32.FrontTF32(dev, da), T32.TailTF32(dev, da)
+    for k in [front.kernel(cl) for cl in front.clusters()] + [tail.kernel(cl) for cl in T32.TAIL_CLUSTERS]:
+        assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    core = T32.PvGateCoreTF32(dev, nh=n_head, dh=d_head, pdl=True)
+    for sg in T32.pv_groups(d_head):
+        k = core.kernel(sg, True)
+        assert k.lmem == 0 and k.regs <= 128, (sg, k.regs, k.lmem)

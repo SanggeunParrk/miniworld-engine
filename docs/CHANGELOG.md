@@ -18,6 +18,15 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 fp32 bias-only DiT inference as three kernels per block, now the default fp32 inference step: `bo_front_tf32` (LN + AdaLN +
+  the v|g GEMM), `pv_gate_tf32 -DPDL_INF`, `bo_tail_tf32` (out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM,
+  residual + gate), chained by programmatic dependent launch, behind conditioning tables hoisted once per conditioning tensor.
+  Front and tail run as CTA clusters (8 / 6 / 4 CTAs per 128-row tile) that all-reduce the LayerNorm statistics through DSMEM and
+  exchange their GEMM operands through L2 scratch. `MINIWORLD_BIAS_ONLY_DIT_INF3=0` keeps the 12-launch cuBLAS + rows step (also the
+  fallback when the kernels fail to build); `_INF3_CL` / `_INF3_TAIL_CL` force a cluster size. One block, A = 5, 16 x 48 (whole-step graph
+  replay): 69.8 / 92.0 / 118.9 / 139.4 / 176.5 / 198.7 -> 62.0 / 69.2 / 75.9 / 100.7 / 138.7 / 144.8 us at L128-768
+  (0.64-0.79x at L256-768). Tests: `tests/integrations/test_b200_bias_only_dit_tf32_gpu.py` (`test_inf3_*`,
+  `test_front_kernel_*`, `test_tail_kernel_*`); page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (F5).
 - B200 fp32 bias-only DiT training, faster: `dpb32_sm100.cu` (the fp32 port of the bf16 `dpb_sm100.cu`) for the bias gradient; the
   pair bias and its backward on TF32 `mma.sync`; the dh GEMM with the SwiGLU backward in its epilogue (`gemm_glu_tf32.cu`); the six
   weight gradients as batched row chunks; one-launch weight pack; `res_adaln_b` at three blocks per SM; `softmax_t` 16 rows per block;

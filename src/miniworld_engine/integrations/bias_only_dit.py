@@ -7,7 +7,10 @@ pair and mask (keyed on the tensors' pointer and version) -- they depend on noth
 
 fp32 (single, cond and pair fp32, the block's weights fp32, no CUDA autocast) runs the same schedule in fp32 on TF32 tensor
 cores (``kernels/bias_only_dit/cuda/tf32.py``: the ``pv_gate_tf32`` core, the fp32 rows and pair bias, cuBLAS forced to TF32);
-the fp32 kernels build on first use and a failed build warns once and keeps the module path.
+the fp32 kernels build on first use and a failed build warns once and keeps the module path. The fp32 step runs as three kernels
+per block -- ``bo_front_tf32`` (LN + AdaLN + v|g GEMM), ``pv_gate_tf32``, ``bo_tail_tf32`` (everything after the core) -- behind
+conditioning tables hoisted once per conditioning tensor (``runner._tables3``; ``kernels._capture.lookup_inputs`` rules);
+MINIWORLD_BIAS_ONLY_DIT_INF3=0 (read per call) keeps the 12-launch cuBLAS + rows step.
 
 ``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128, a key mask [1, L] or
