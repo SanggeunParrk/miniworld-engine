@@ -314,6 +314,45 @@ out different, ~2e-2 on dq / dWqkv) and faulted on poisoned memory. It is gone: 
 training call (forward with saves, the hoisted modulation with a gradient) runs the Triton fp32 path until a new backward lands.
 What follows describes the forward, which inference keeps; the backward parts are history.
 
+**Backward rebuilt (2026-10-07).** A new fp32 backward on the TF32 kernels replaces the removed one; the
+Triton fp32 path stays for `MINIWORLD_SWA_DIT_TF32=0`. `_tf32_bwd_ready` is True again, the training forward takes the TF32 forward
+kernels, and `tf32_bwd.block_bwd_tf32` / `mod_bwd_tf32` (dispatched from `swa_dit_block_bwd` / `SWADiTModulationTf32`) serve its saves.
+Written from the bf16 kernels' stage split, not patched from the removed code.
+
+One block, A48 B1, fp32, CUDA events (20 iterations), B200; the first row is the Triton fp32 path before this work:
+
+| S | | forward (ms) | backward (ms) | forward + backward (ms) |
+|---|---|---|---|---|
+| 4096 | Triton fp32 | 1.69 | 5.11 | 6.80 |
+| 4096 | now | 0.84 | 1.81 | 2.65 |
+| 8192 | Triton fp32 | 3.33 | 9.84 | 13.18 |
+| 8192 | now | 1.63 | 3.40 | 5.03 |
+
+| stage | kernels (`cuda/sm100`) | notes |
+|---|---|---|
+| FFN | `ffn_bwd_gate_tf32` -> cuBLAS TF32 dy = [dA dB] Wu -> `adaln_bwd_tf32` | gate: y and dffn are TMEM A operands, Wab / Wd^T stream through a smem ring (32-unit hidden chunks, double-buffered a / b / dh accumulators); outputs (dffn, h, dA, dB) leave by TMA stores from SW64-swizzled staging tiles (direct 64-B row stores cost 2.9x) |
+| out-projection | `oproj_bwd_tf32` prep -> cuBLAS dgated = datt Wo -> `oproj_bwd_tf32` post | dO is bf16 for the Triton attention backward for now (fp32 once it is CUDA); Dv from the rounded dO |
+| window attention | `attn_dq_tf32` + `attn_dkv_tf32` (separate query-major dQ and key-major dK / dV passes, TF32 Q / K / V / dO / P, K and Q / dO also loaded MN-major in the 128-B swizzle with 32-B atoms for the dS K / dS^T Q / P^T dO products) | one MMA warp issues every MMA in block order: fixed summation order, no atomics; 0.24 + 0.33 ms at A48 S4096 (the bf16-operand Triton kernels it replaced: 0.31 ms plus 0.07 ms of casts) |
+| qkvg | `qkvg_bwd_prep_tf32` (unrope + head-RMS backward -> dP) -> cuBLAS dx = dP [Wqkv; Wg] -> `adaln_bwd_tf32` | head = eight lanes, RoPE partner four lanes away |
+| modulation | `mod_bwd_tf32` (silu, silu') + two cuBLAS GEMMs | autograd `SWADiTModulationTf32` |
+| weight gradients | five cuBLAS TF32 GEMMs over TF32-valued operands | every kernel above writes its outputs rounded to TF32 (`cvt.rna`) |
+
+Why decoupled GEMM + epilogue instead of one kernel per stage: the fp32 weights and the row tiles do not fit TMEM / shared memory
+together (the bf16 kernels keep W^T in TMEM). The GEMMs run near the memory floor (0.5 GB each in ~0.08 ms); fusing them with their
+epilogues would save the dy / dx round trips (~0.16 ms for the FFN alone) and is the next structural step.
+
+Checks (B200, fp64 reference, random operands): every kernel chain at A = 1 / 3 / 5 / 48, S = 256 .. 4096, B = 1, 2: relative error 2e-4 ..
+5e-4 (TF32), all outputs finite with NaN-poisoned buffers, repeated runs bit-identical. The whole block against the fp64 reference
+(A4 S1024): out 1.3e-4, dq 1.7e-4, dmod 5.2e-4, dWu / dWd 5.2e-4, dWo 6.3e-4, dWg 7e-4, dWqkv 7.7e-4 (4.1e-3 with the bf16-operand attention backward). The attention passes alone (ragged lengths 1, 5, 64, 65, 129, S - 1, ..., NaN-poisoned outputs): 2.0-2.9e-4. Each
+dmod column is written by exactly one kernel with plain stores: no atomics, and two identical backward passes agree to 0.0.
+
+Single-pass TF32 on rounded operands is less accurate than the Triton FFN's 3xTF32 (dWu 5.3e-4 vs 3.3e-4); the "as accurate as the per-op
+path" test passes. Lessons: a TMA ring must be filled in the order the row threads consume it (y, dq2, gate_f per k-block; any other order
+deadlocks); kernels launched with PDL must call `griddepcontrol.wait` before reading; load the cubins after a torch CUDA call (autograd's
+backward thread has no current context).
+
+Status: the SWA / TF32 test files (`test_b200_swa_dit_tf32_gpu`, `test_b200_swa_dit_gpu`, `test_swa_dit_fused_gpu`, `test_swa_dit_kernels`, `test_swa_dit_fused_dispatch`, `test_swa_graph_gpu`, `test_swa_dit_pack_cache`) give 98 passed, 20 skipped, 0 failed, including the `test_bwd_*` and fullgraph training tests that need `tf32_bwd.block_bwd_tf32` / `mod_bwd_tf32`. No Triton kernel is left in the TF32 backward. Open: the attention passes are the slowest part (0.57 ms, ~1.5x the Triton kernels they replaced: 32-key blocks waste half of the window's MMAs and exponentials), the gate kernel (0.22 ms vs 0.134 without its stores), the forward kernels (~2.5x off their memory floor), and dedicated unit tests for the new kernels (the fp64 checks above ran as scripts).
+
 The fp32 block (MiniWorld's fp32 atom transformer: fp32 parameters, no autocast) on B200 runs every stage on hand-written sm_100a
 kernels with TF32 tensor-core MMAs (`tcgen05.mma kind::tf32`, fp32 accumulation in TMEM) instead of the Triton fp32 kernels
 (`triton/forward_fp32.py`, `backward_fp32.py`). Residual stream, modulation, RoPE tables, softmax and every elementwise step stay

@@ -25,7 +25,9 @@ from miniworld_engine.kernels.swa_dit.dispatch import (
     swa_dit_mod_bwd_sm90,
     swa_dit_mod_bwd_sm100,
     swa_dit_mod_fwd_sm90,
+    swa_dit_mod_bwd_tf32,
     swa_dit_mod_fwd_sm100,
+    swa_dit_mod_fwd_tf32,
 )
 from miniworld_engine.kernels.swa_dit.interface import FP32_EPS
 
@@ -149,4 +151,20 @@ class SWADiTModulationSm90(torch.autograd.Function):
     def backward(ctx, g):
         c, a, wmod = ctx.saved_tensors
         dc, dw = swa_dit_mod_bwd_sm90(g.contiguous(), c, a, wmod)
+        return dc, dw
+
+
+class SWADiTModulationTf32(torch.autograd.Function):
+    """``swa_dit_hoist_modulation`` on the TF32 kernels (fp32 c [R, C] contiguous, Wmod [6C, C] fp32): silu(c) Wmod^T (mod_fwd_tf32) and
+    its backward (``swa_dit_mod_bwd_tf32``: dc, dWmod, fp32)."""
+
+    @staticmethod
+    def forward(ctx, c, wmod):
+        ctx.save_for_backward(c, wmod)
+        return swa_dit_mod_fwd_tf32(c, wmod)
+
+    @staticmethod
+    def backward(ctx, g):
+        c, wmod = ctx.saved_tensors
+        dc, dw = swa_dit_mod_bwd_tf32(g.contiguous(), c, wmod)
         return dc, dw

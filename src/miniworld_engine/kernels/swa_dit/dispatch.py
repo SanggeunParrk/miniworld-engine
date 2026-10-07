@@ -496,11 +496,9 @@ def _device_index(device: torch.device) -> int:
 
 @device_constant
 def _tf32_bwd_ready(device: torch.device) -> bool:
-    """Whether an sm_100a TF32 backward serves fp32 training calls on ``device``. None does: the first one (``cuda/sm100/tf32_bwd``)
-    gave different gradients for identical steps and faulted on poisoned memory, so it was removed; until its replacement lands, an
-    fp32 training call (forward with saves, the hoisted modulation with a gradient) keeps the Triton fp32 path. Inference keeps the
-    TF32 forward kernels."""
-    return False
+    """Whether an fp32 training call (forward with saves, the hoisted modulation with a gradient) may run the TF32 kernels on
+    ``device``: the backward of those saves is ``_swa_dit_bwd_tf32_launch`` (``cuda/sm100/tf32_bwd``)."""
+    return True
 
 
 @device_constant
@@ -1043,41 +1041,13 @@ def swa_dit_block_bwd(
             half_window,
         )
     if q.dtype == torch.float32:
-        if (
-            qh.dtype == torch.float32
-        ):  # fp32 heads: saves of a TF32 training forward, which no backward serves
-            raise RuntimeError(
-                "swa_dit_block: fp32 saves of the TF32 forward have no backward (_tf32_bwd_ready is False)"
-            )
-        return _swa_dit_bwd_fp32_launch(
-            dy,
-            q,
-            mod,
-            cos,
-            sin,
-            seqused,
-            wqkv,
-            wg,
-            wo,
-            wu,
-            wd,
-            qh,
-            kh,
-            vh,
-            g,
-            o,
-            lse,
-            q1,
-            x,
-            pq,
-            pk,
-            att,
-            y,
-            ffn,
-            B,
-            half_window,
-            eps,
-        )
+        if qh.dtype == torch.float32:                      # fp32 heads: the saves of the TF32 training forward
+            from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+            return tf32_bwd.block_bwd_tf32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
+                                           att, y, ffn, B, half_window)
+        return _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x,
+                                        pq, pk, att, y, ffn, B, half_window, eps)
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
     if sm100 is not None:
         return sm100.block_bwd(
@@ -1628,3 +1598,17 @@ def mod_sm90(c: torch.Tensor, wmod: torch.Tensor) -> bool:
     if c.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or c.dtype != wmod.dtype or c.dtype != torch.bfloat16:
         return False
     return _cuda("mod", True, c.device) is not None
+
+
+def _swa_dit_mod_bwd_tf32_fake(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """Shapes of the outputs: dc like c, dWmod in Wmod's shape (both fp32)."""
+    return [torch.empty_like(c), torch.empty(wmod.shape, dtype=torch.float32, device=wmod.device)]
+
+
+@opaque(fake=_swa_dit_mod_bwd_tf32_fake, name="swa_dit_mod_bwd_tf32")
+def swa_dit_mod_bwd_tf32(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+    """[dc, dWmod] (fp32) of :func:`swa_dit_mod_fwd_tf32` from g = d mod [R, 6C] fp32 on the TF32 kernels (``cuda/sm100/tf32_bwd``)."""
+    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+    dc, dw = tf32_bwd.mod_bwd_tf32(g, c, wmod)
+    return [dc, dw]
