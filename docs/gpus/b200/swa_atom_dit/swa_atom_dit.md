@@ -323,8 +323,8 @@ One block, A48 B1, fp32, B200, CUDA-graph replay of forward + backward (`autogra
 
 | S | Triton fp32 (eager) | now (graph) |
 |---|---|---|
-| 4096 | 6.80 ms | 2.13 ms |
-| 8192 | 13.18 ms | 4.02 ms |
+| 4096 | 6.80 ms | 1.95 ms |
+| 8192 | 13.18 ms | 3.65 ms |
 
 Kernels at S 4096 (profiler time; every kernel has 0 spilled bytes, `spill_stats`):
 
@@ -335,7 +335,7 @@ Kernels at S 4096 (profiler time; every kernel has 0 spilled bytes, `spill_stats
 | fwd out-proj + FFN | `ffn_fwd_tf32` | 0.29 | gate, Wo, residual, RMS-adaLN, SwiGLU, Wd, residual; saves |
 | bwd FFN | `ffn_bwd_gate_tf32` -> cuBLAS dy = [dA dB] Wu -> `adaln_bwd_tf32` | 0.22 + 0.08 + 0.09 | dffn, recompute a / b, dh, SwiGLU backward; RMS-adaLN backward, dmod (shift_f, scale_f, gate_f, gate_a) |
 | bwd out-projection | `oproj_bwd_fused_tf32` | 0.16 | datt, dgated = datt Wo (TMEM, Wo^T resident), dO, dG, gated, Dv |
-| bwd attention | `attn_dq_tf32` + `attn_dkv_tf32` | 0.28 + 0.28 | query- / key-major passes; epilogues + tail warps give dpq / dpk / dpv straight into dP |
+| bwd attention | `attn_dq_tf32` + `attn_dkv_tf32` | 0.17 + 0.20 | query- / key-major passes (warps: producer, S issuer, dQ or dV / dK issuer, row threads, epilogue warpgroup); the epilogues give dpq / dpk / dpv straight into dP |
 | bwd qkvg | cuBLAS dx = dP [Wqkv; Wg] -> `adaln_bwd_tf32` | 0.08 + 0.09 | |
 | bwd weights | five cuBLAS TF32 GEMMs over TF32-valued operands | 0.29 | |
 | weight forms | `wprep_tf32` (forward), `wprep_bwd_tf32` | ~0.005 | one launch each |
@@ -345,8 +345,16 @@ What made the difference (measured, in this order of size): (1) **outputs throug
 attn_fwd 0.20 -> 0.15; (2) **register spills**: the first fused out-projection kernel spilled 176 B per thread (0.195 ms; 0.157 ms after the fix)
 -- check `kernels_bwd(...).<kernel>.k.lmem`; (3) the **qkvg backward tail** (unrope + per-head RMS backward) folded into the attention
 epilogues cost 0.14 ms of the 0.69 ms pair, all of it the latency of its global loads, and it blocks the in-order MMA warp's pipeline when the
-compute warpgroups run it (deferring it to the next item changes nothing): warps 2 / 3, idle otherwise, run it now (0.67 -> 0.59 ms).
-Things that did not help: the TMA ring depth of the attention kernels (4 .. 12 stages: same time), L1 prefetch of the tail's loads, software
+compute warpgroups run it (deferring it to the next item changes nothing): warps 2 / 3, idle otherwise, ran it (0.67 -> 0.59 ms); (4) **what the
+attention backward's MMA warp waited for** (2026-10-07, globaltimer trace of one steady-state block): one warp issued S^T / dP^T, waited for the row
+threads and issued dV / dK, ~800 ns per block while the tensor pipe needed ~245 ns (microbenchmark, M128 K8 kind::tf32: TS 16 clk at N32, SS 40 clk
+at N32 -- smem-bound -- 64 clk at N128) and the row threads idled 60 % of the time. Giving the accumulating MMAs a warp of their own (the stage release counts
+both warps' commits): pair 0.588 -> 0.491 ms; dropping the `& 0xffffe000` after `cvt.rna.tf32.f32` (which already clears the 13 low bits) and a
+cheaper window test: 0.460 ms; a dedicated epilogue warpgroup (warps 12-15) reading dK / dV (dQ) from double-buffered TMEM accumulators instead of
+the row threads doing it between items: 0.389 ms (graph 2.13 -> 1.95 ms in all).
+Things that did not help: the TMA ring depth of the attention kernels (4 .. 12 stages: same time), BQ = 64 blocks (with or without the split issuers),
+three compute warpgroups (0.639 ms; spills at 544 threads), skipping masked 4-column groups per warp (slower), integer instead of `cvt.rna` rounding
+(slower), spin / sleep mbarrier waits, L1 prefetch of the tail's loads, software
 pipelining of the FFN chunk loop's TMEM loads; `ffn_fwd` loses nothing measurable when its SwiGLU math, its stores or its whole D phase are
 removed (0.287 -> 0.257 / 0.277 ms) and its tensor pipe is busy 13 % of the time: it is limited by the single tile in flight (row threads and the
 MMA warp take turns), not by arithmetic or memory.
@@ -358,9 +366,13 @@ with plain stores: no atomics. Single-pass TF32 on rounded operands is less accu
 accurate as the per-op path" test passes.
 
 Status: the SWA / TF32 test files (`test_b200_swa_dit_tf32_gpu`, `test_b200_swa_dit_gpu`, `test_swa_dit_fused_gpu`, `test_swa_dit_kernels`,
-`test_swa_dit_fused_dispatch`, `test_swa_graph_gpu`, `test_swa_dit_pack_cache`) give 98 passed, 20 skipped, 0 failed. Open: tile-level ping-pong for
-`ffn_fwd` / `ffn_bwd_gate` / `qkvg_fwd` (TMEM holds one tile), a one-pass dQ + dK + dV attention backward, GEMM + epilogue fusion of dy / dx
-(cuBLAS + a separate kernel), and dedicated unit tests for the new kernels (the fp64 checks above ran as scripts). A diagram of the kernel chain and of one
+`test_swa_dit_fused_dispatch`, `test_swa_graph_gpu`, `test_swa_dit_pack_cache`) give 98 passed, 20 skipped, 0 failed (the 7 GPU files after the
+attention-backward restructuring: 116 passed, 8 skipped). Unit tests with fp64 references for the new kernels: `test_b200_swa_dit_tf32_kernels_gpu`. Open:
+the `ffn_fwd` tile chain (a tile is 25 us: A 3, att 1, B 3, y 4, SwiGLU 9.5 -- eight chunks, each ~1.5 us because chunk j + 2's a | b MMAs wait for
+chunk j's down-projection to release its TMEM buffer; TMEM is full, so a deeper pipeline needs 16-unit chunks), tile-level ping-pong for
+`ffn_bwd_gate` (TMEM holds one tile), a one-pass dQ + dK + dV attention backward (the dS^T tile in fp32 and the K MN-major copy do not fit shared
+memory), a custom weight-gradient GEMM (cuBLAS 0.29 ms against ~0.23 ms of operand traffic), GEMM + epilogue fusion of dy / dx (at most 0.02 ms per side:
+both kernels are memory-bound). A diagram of the kernel chain and of one
 kernel's warp roles is in the session notes, not yet in the repository.
 
 The fp32 block (MiniWorld's fp32 atom transformer: fp32 parameters, no autocast) on B200 runs every stage on hand-written sm_100a
