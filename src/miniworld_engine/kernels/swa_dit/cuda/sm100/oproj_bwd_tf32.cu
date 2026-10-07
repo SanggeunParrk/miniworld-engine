@@ -4,7 +4,8 @@
 //   prep:  datt = dq1 gate_a;  gated = sigmoid(g) o;  d gate_a = sum_aug dq1 att        -> DATT, GATED (TF32-rounded: dgated's and dWo's
 //          operands), dmod column 2C (plain stores: one block per (batch element, atom), eight warps over the augments)
 //   post:  so = sigmoid(g);  dO = dgated so;  dG = dgated o so (1 - so);  Dv[n, h, s] = sum_d dO o   (dO as the attention backward takes
-//          it: TF32-rounded fp32 or bf16; Dv from the rounded dO)
+//          it: TF32-rounded fp32 or bf16; Dv from the rounded dO). dG goes straight into dP [M, 4C] at column 3C (TF32-rounded: dP is the
+//          operand of dx = dP W and of the weight gradients), next to the dpq | dpk | dpv the attention epilogues write
 // One warp per 128-channel row in both (lane = four channels, a head = eight lanes).
 // SPDX-License-Identifier: Apache-2.0
 #include <cuda_bf16.h>
@@ -54,7 +55,7 @@ swa_oproj_bwd_prep_tf32_sm100(const float* __restrict__ DQ1, const float* __rest
 }
 
 template <bool BF>
-__device__ __forceinline__ void post(const float* DGATED, const float* O, const float* G, void* DOUT, float* DG, float* DV, int S, int M) {
+__device__ __forceinline__ void post(const float* DGATED, const float* O, const float* G, void* DOUT, float* DP, float* DV, int S, int M) {
   const int row = (int)blockIdx.x * NWARP + (threadIdx.x >> 5);
   if (row >= M) return;
   const int lane = threadIdx.x & 31, h = lane >> 3, l8 = lane & 7;
@@ -73,17 +74,18 @@ __device__ __forceinline__ void post(const float* DGATED, const float* O, const 
   } else {
     *reinterpret_cast<float4*>(reinterpret_cast<float*>(DOUT) + rc) = make_float4(dox, doy, doz, dow);
   }
-  *reinterpret_cast<float4*>(DG + rc) = make_float4(dg.x * ov.x * sx * (1.f - sx), dg.y * ov.y * sy * (1.f - sy),
-                                                    dg.z * ov.z * sz * (1.f - sz), dg.w * ov.w * sw * (1.f - sw));
+  *reinterpret_cast<uint4*>(DP + (size_t)row * (4 * C) + 3 * C + 4 * lane) =
+      make_uint4(tf32r(dg.x * ov.x * sx * (1.f - sx)), tf32r(dg.y * ov.y * sy * (1.f - sy)), tf32r(dg.z * ov.z * sz * (1.f - sz)),
+                 tf32r(dg.w * ov.w * sw * (1.f - sw)));
   const float dv = sum8(dox * ov.x + doy * ov.y + doz * ov.z + dow * ov.w);
   if (l8 == 0) DV[((size_t)n * H + h) * S + s] = dv;
 }
 
 extern "C" __global__ void __launch_bounds__(NWARP * 32)
-swa_oproj_bwd_post_tf32_sm100(const float* DGATED, const float* O, const float* G, float* DOUT, float* DG, float* DV, int S, int M) {
-  post<false>(DGATED, O, G, DOUT, DG, DV, S, M);
+swa_oproj_bwd_post_tf32_sm100(const float* DGATED, const float* O, const float* G, float* DOUT, float* DP, float* DV, int S, int M) {
+  post<false>(DGATED, O, G, DOUT, DP, DV, S, M);
 }
 extern "C" __global__ void __launch_bounds__(NWARP * 32)
-swa_oproj_bwd_post_bf16o_tf32_sm100(const float* DGATED, const float* O, const float* G, __nv_bfloat16* DOUT, float* DG, float* DV, int S, int M) {
-  post<true>(DGATED, O, G, DOUT, DG, DV, S, M);
+swa_oproj_bwd_post_bf16o_tf32_sm100(const float* DGATED, const float* O, const float* G, __nv_bfloat16* DOUT, float* DP, float* DV, int S, int M) {
+  post<true>(DGATED, O, G, DOUT, DP, DV, S, M);
 }
