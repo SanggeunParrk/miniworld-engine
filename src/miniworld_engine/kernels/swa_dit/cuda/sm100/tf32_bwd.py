@@ -18,9 +18,23 @@ def _round_cols(t: torch.Tensor) -> torch.Tensor:
     return _f._round_tf32(t.float().t().contiguous())
 
 
-def _ffn_bwd_forms(wu, wd):
-    """(WdT [NHID, C], WuT [C, 2 NHID]): Wd^T and Wu^T rounded to TF32, K-major B operands of the FFN backward."""
-    return _round_cols(wd), _round_cols(wu)
+class WprepBwdTf32:
+    """Wd^T [NHID, C] and Wo^T [C, C], TF32-rounded, in one launch (wprep_bwd_tf32.cu): views of one packed buffer."""
+
+    def __init__(self):
+        self.k = _f._load("wprep_bwd_tf32")
+
+    def forms(self, wd, wo):
+        wd, wo = (w.float().contiguous() for w in (wd, wo))
+        out = torch.empty(NHID * C + C * C, device=wd.device, dtype=torch.float32)
+        self.k(((out.numel() + 255) // 256, 1, 1), (256, 1, 1), wd, wo, out)
+        return out[:NHID * C].view(NHID, C), out[NHID * C:].view(C, C)
+
+
+def _bwd_forms(wd, wo):
+    """(WdT [NHID, C], WoT [C, C]): the backward's K-major B operands, one launch; cached per weight version."""
+    with torch.cuda.device(wd.device):
+        return kernels_bwd(_index(wd)).wprep.forms(wd, wo)
 
 
 class FfnBwdGateTf32:
@@ -62,51 +76,45 @@ class AdalnBwdTf32:
     def __init__(self):
         self.k = _f._load("adaln_bwd_tf32")
 
-    def bind(self, x, dy, res, gin, mod, dmod, A, B, eps, out_col):
+    def bind(self, x, dy, res, gin, mod, dmod, A, B, eps, out_col, att=None, att_col=0):
         M = x.numel() // C
         S = M // (A * B)
         out = torch.empty(M, C, device=x.device, dtype=torch.float32)
 
         def run():
             self.k((B * S, 1, 1), (256, 1, 1), x, dy, res, gin if gin is not None else 0, mod, out, dmod, int(S), int(A), int(B),
-                   float(eps), int(out_col))
-        run.keep = (x, dy, res, gin, mod, dmod)
+                   float(eps), int(out_col),
+                   att if att is not None else 0, int(att_col))
+        run.keep = (x, dy, res, gin, mod, dmod, att)
         return run, out
 
 
-class OprojBwdTf32:
-    """The out-projection backward around dgated = datt Wo: :meth:`prep` (dq1, o, g, att, mod -> datt, gated [M, C] TF32-rounded and
-    dmod column 2C) and :meth:`post` (dgated, o, g -> dO [M, C] (fp32 TF32-rounded, or bf16), Dv [N, H, S] fp32, and dG into dP [M, 4C])."""
+class OprojBwdFusedTf32:
+    """The whole out-projection backward in one kernel (oproj_bwd_fused_tf32.cu): dq1, o, g [M, C] fp32, mod [B S, 6C] fp32, Wo^T [C, C] (TF32-
+    rounded, K-major B operand) -> datt, gated, dO [M, C] (TF32-rounded), Dv [N, H, S] fp32, and dG written into dP [M, 4C] at column 3C."""
 
     def __init__(self):
-        self.kp = _f._load("oproj_bwd_tf32", "swa_oproj_bwd_prep_tf32_sm100")
-        self.kf = _f._load("oproj_bwd_tf32", "swa_oproj_bwd_post_tf32_sm100")
-        self.kb = _f._load("oproj_bwd_tf32", "swa_oproj_bwd_post_bf16o_tf32_sm100")
+        self.k = _f._load("oproj_bwd_fused_tf32")
 
-    def prep(self, dq1, o, g, att, mod, dmod, A, B):
+    def bind(self, dq1, o, g, mod, wot, dp, A, B):
         M = dq1.numel() // C
         S = M // (A * B)
-        datt = torch.empty(M, C, device=dq1.device, dtype=torch.float32)
-        gated = torch.empty_like(datt)
+        SP, AT = _f.tiling(A)
+        dev = dq1.device
+        datt, gated, do = (torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(3))
+        dv = torch.empty(M // S, H, S, device=dev, dtype=torch.float32)
+        mdp = _f._f32map(dp, [4 * C, S, B, A], [4 * C * 4, S * 4 * C * 4, B * S * 4 * C * 4], [32, AT, 1, SP])
+        maps = (_f._rows_map(dq1, A, B, S, SP, AT), _f._mod_map(mod, AT), _f._rows_map(o, A, B, S, SP, AT), _f._rows_map(g, A, B, S, SP, AT),
+                _f._f32map(wot, [C, C], C * 4, [32, 128]), _f._out_map(datt, A, B, S, SP, AT), _f._rows_map(gated, A, B, S, SP, AT),
+                _f._rows_map(do, A, B, S, SP, AT), mdp)
+        nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
+        ntile = nab * nag * B
+        grid = (min(_sm.nsm(), ntile), 1, 1)
 
         def run():
-            self.kp((B * S, 1, 1), (256, 1, 1), dq1, o, g, att, mod, datt, gated, dmod, int(S), int(A), int(B))
-        run.keep = (dq1, o, g, att, mod, dmod)
-        return run, (datt, gated)
-
-    def post(self, dgated, o, g, S, bf16_do, dp):
-        """dp [M, 4C] fp32 receives dG (TF32-rounded) at columns 3C .. 4C."""
-        M = dgated.numel() // C
-        N = M // S
-        dev = dgated.device
-        dout = torch.empty(M, C, device=dev, dtype=torch.bfloat16 if bf16_do else torch.float32)
-        dv = torch.empty(N, H, S, device=dev, dtype=torch.float32)
-        k = self.kb if bf16_do else self.kf
-
-        def run():
-            k(((M + 7) // 8, 1, 1), (256, 1, 1), dgated, o, g, dout, dp, dv, int(S), int(M))
-        run.keep = (dgated, o, g, dp)
-        return run, (dout, dv)
+            self.k(grid, (384, 1, 1), *maps, dv, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile))
+        run.keep = (maps, dq1, o, g, mod, wot, dp, datt, gated, do, dv)
+        return run, (datt, gated, do, dv)
 
 
 class ModBwdTf32:
@@ -165,11 +173,12 @@ class AttnBwdTf32:
 
 class _Kernels:
     def __init__(self) -> None:
+        self.wprep = WprepBwdTf32()
         self.mod = ModBwdTf32()
         self.attn = AttnBwdTf32()
         self.ffn_gate = FfnBwdGateTf32()
         self.adaln = AdalnBwdTf32()
-        self.oproj = OprojBwdTf32()
+        self.oproj_fused = OprojBwdFusedTf32()
 
 
 @functools.lru_cache(maxsize=16)
@@ -220,20 +229,18 @@ def block_bwd_tf32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, 
     eps = _f.EPS
     with torch.cuda.device(dev):
         K = kernels_bwd(_index(q))
-        w, wo_t, wab, _ = _sm._cached(_f._tf32_block_forms, wqkv, wg, wo, wu, wd)
-        wdt, _ = _sm._cached(_ffn_bwd_forms, wu, wd)
+        w, _, wab, _ = _sm._cached(_f._tf32_block_forms, wqkv, wg, wo, wu, wd)
+        wdt, wot = _sm._cached(_bwd_forms, wd, wo)
         dmod = torch.empty(B * S, 6 * C, device=dev, dtype=torch.float32)
         # FFN
         dq2 = dy.reshape(M, C)
         run, (dffn, hh, dab) = K.ffn_gate.bind(y, dq2, mod, wab, wdt, A, B)
         run()
-        run, dq1 = K.adaln.bind(q1, mm_tf32(dab, wu), dq2, ffn, mod, dmod, A, B, eps, 3 * C)
+        run, dq1 = K.adaln.bind(q1, mm_tf32(dab, wu), dq2, ffn, mod, dmod, A, B, eps, 3 * C, att, 2 * C)   # + d gate_a = sum_aug dq1 att
         run()
-        # out-projection
-        run, (datt, gated) = K.oproj.prep(dq1, o, g, att, mod, dmod, A, B)
-        run()
+        # out-projection: one kernel (datt, dgated = datt Wo, dO, dG, gated, Dv)
         dP = torch.empty(M, 4 * C, device=dev, dtype=torch.float32)       # [dpq | dpk | dpv | dg]
-        run, (dO, Dv) = K.oproj.post(mm_tf32(datt, wo_t), o, g, S, False, dP)
+        run, (datt, gated, dO, Dv) = K.oproj_fused.bind(dq1, o, g, mod, wot, dP, A, B)
         run()
         # window attention (TF32 kernels, fp32 operands: the forward's saves as they are)
         # (the epilogues run the head-wise tail of the qkvg backward and write dpq | dpk | dpv into dP)
