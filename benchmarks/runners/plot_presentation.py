@@ -1,5 +1,6 @@
 """Presentation figures from the bench.py CSVs of the sweep (jobs named <pass>_<module>_<mode>_<axis>, in the CSV file names).
-main_inference / main_training: every module at L = 384 (speedup over PyTorch, per implementation);
+main_inference / main_training: every module at L = 384 tokens, the atom blocks at 4096 atoms (8 x 512 tokens: the harness runs
+atom targets at 8 x the sequence length), speedup over PyTorch, per implementation;
 sweep_<module>: latency vs L and vs D (or the layout list) for inference and training. Median over passes."""
 import csv, glob, math, os, re, sys
 from collections import defaultdict
@@ -75,8 +76,8 @@ MODS = [
     dict(key="apb", title="Attention pair bias", layouts=["8x384", "12x384", "16x384", "24x384", "16x512"], dlabel="heads × d_single"),
     dict(key="opm", title="Outer product mean"),
     dict(key="pwa", title="MSA pair-weighted avg."),
-    dict(key="ldit", title="AF3 atom DiT (32×128, 3072 atoms)", short="AF3 atom DiT\n(32×128)", atom=True),
-    dict(key="swadit3", title="SWA atom DiT (|i−j| ≤ 64, 3072 atoms)", short="SWA atom DiT\n(window 129)", atom=True),
+    dict(key="ldit", title="AF3 atom DiT (32×128, 4096 atoms)", short="AF3 atom DiT\n(32×128)", atom=True),
+    dict(key="swadit3", title="SWA atom DiT (|i−j| ≤ 64, 4096 atoms)", short="SWA atom DiT\n(window 129)", atom=True),
 ]
 ATOM = []
 
@@ -87,23 +88,27 @@ def jobs_L(mod, mode):
     return names
 
 
-def at384(mod, mode, impl):
+ATOM_MAIN_TOKENS = 512            # 8 x 512 = 4096 atoms: the atom blocks' main-figure point (the harness runs atoms at 8 x tokens)
+
+
+def at_main(mod, mode, impl):
+    """latency (ms) at the main-figure point: L = 384 tokens, or 4096 atoms (512 tokens) for the atom blocks"""
     s = series(jobs_L(mod, mode), impl, "seq")
-    return s.get(384)
+    return s.get(ATOM_MAIN_TOKENS if mod.get("atom") else 384)
 
 
-# ---- main bars (L = 384) ----
+# ---- main bars (L = 384 tokens; atom blocks at 4096 atoms) ----
 def main_fig(mode):
     slots = [i for i in ORDER if not (mode == "training" and i == "anthropic")]
     fig, ax = plt.subplots(figsize=(18, 6.4))
     n = len(MODS); w = 0.8 / len(slots)
     ours_ms = {}
     for gi, mod in enumerate(MODS):
-        base = at384(mod, mode, "pytorch")
+        base = at_main(mod, mode, "pytorch")
         if base is None:
             continue
         for si, impl in enumerate(slots):
-            t = at384(mod, mode, impl)
+            t = at_main(mod, mode, impl)
             if t is None:
                 continue
             x = gi + (si - (len(slots) - 1) / 2) * w
@@ -117,7 +122,7 @@ def main_fig(mode):
     import textwrap
     ax.set_xticklabels([m.get("short") or "\n".join(textwrap.wrap(m["title"], 12, break_long_words=False)) for m in MODS], fontsize=11.5)
     ax.set_ylabel("Speedup over PyTorch (higher is better)")
-    ax.set_title(f"B200 · {mode} · L = 384 tokens (atom blocks: 3072 atoms) · bf16" + ("" if mode == "inference" else " · CUDA graph"), loc="left")
+    ax.set_title(f"B200 · {mode} · L = 384 tokens (atom blocks: 4096 atoms) · bf16" + ("" if mode == "inference" else " · CUDA graph"), loc="left")
     h, l = ax.get_legend_handles_labels()
     uniq = {}
     for a, b in zip(h, l):
@@ -238,9 +243,9 @@ with open(os.path.join(OUT, "summary_L384.csv"), "w", newline="") as fh:
     w = csv.writer(fh); w.writerow(["module", "mode", "implementation", "latency_ms", "speedup_vs_pytorch"])
     for mod in MODS:
         for mode in ("inference", "training"):
-            base = at384(mod, mode, "pytorch")
+            base = at_main(mod, mode, "pytorch")
             for impl in ORDER:
-                t = at384(mod, mode, impl)
+                t = at_main(mod, mode, impl)
                 if t is not None:
                     w.writerow([mod["title"], mode, LAB[impl], f"{t:.4f}", f"{base / t:.2f}" if base else ""])
 
