@@ -66,8 +66,8 @@ CUBINS = {
 }
 #: dynamic shared memory per kernel (the sources' SMEM / SMEM_BYTES)
 SMEM = {
-    "wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
-    "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 8 * 8192 + 2048 + 4 * 8192 + 512,
+    "wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 6 * 8192 + 16384 + 2 * 16384 + 512,
+    "attn_fwd_tf32": 2 * 81920 + 2048 + 2 * 8192 + 256, "ffn_fwd_tf32": 8 * 16384 + 8 * 8192 + 2048 + 4 * 8192 + 512,
     "wprep_bwd_tf32": 0, "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512, "adaln_bwd_tf32": 0,
     "oproj_bwd_fused_tf32": 4 * 16384 + 8 * 16384 + 2 * 16384 + 512,
     "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512, "attn_dkv_tf32": 2 * 32768 + 7 * 17408 + 2 * 16384 + 64 * 16 + 512,
@@ -255,13 +255,12 @@ class QkvgFwdTf32:
             else (G, G, G)
         )
         assert mod.is_contiguous() and cos.is_contiguous() and sin.is_contiguous()
-        maps = (
-            _rows_map(q, A, B, S, SP, AT),
-            _f32map(W, [C, 4 * C], C * 4, [32, 64]),
-            _mod_map(mod, AT),
-            _rope_map(cos, AT),
-            _rope_map(sin, AT),
-        )
+        def head_map(t):                                                   # [A, B, H, S, D] head-major -> 5-D store box (32, AT, 1, 1, SP), 128-B swizzle
+            return _f32map(t, [D, S, H, B, A], [D * 4, S * D * 4, H * S * D * 4, B * H * S * D * 4], [D, AT, 1, 1, SP])
+
+        maps = (_rows_map(q, A, B, S, SP, AT), _f32map(W, [C, 4 * C], C * 4, [32, 64]), _mod_map(mod, AT), _rope_map(cos, AT),
+                _rope_map(sin, AT), head_map(Qh), head_map(Kh), head_map(Vh), _rows_map(G.view(-1, C), A, B, S, SP, AT),
+                _rows_map(PQ, A, B, S, SP, AT), _rows_map(PK, A, B, S, SP, AT))
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
         NG = 1  # projection groups: spread small problems over the SMs
@@ -270,32 +269,9 @@ class QkvgFwdTf32:
         grid = (min(num_sms(), ntile * NG), 1, 1)
 
         def run():
-            self.k(
-                grid,
-                (384, 1, 1),
-                *maps,
-                int(S),
-                int(A),
-                int(B),
-                int(SP),
-                int(AT),
-                int(nab),
-                int(nag),
-                int(ntile),
-                int(NG),
-                float(EPS),
-                float(EPS),
-                int(save),
-                Qh,
-                Kh,
-                Vh,
-                G,
-                X,
-                PQ,
-                PK,
-            )
-
-        run.keep = (maps, W, mod, cos, sin)
+            self.k(grid, (384, 1, 1), *maps, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile), int(NG),
+                   float(EPS), float(EPS), int(save), X)
+        run.keep = (maps, W, mod, cos, sin, Qh, Kh, Vh, G, X, PQ, PK)
         return run, (Qh, Kh, Vh, G, X, PQ, PK)
 
 
@@ -325,22 +301,12 @@ class AttnFwdTf32:
             _f32map(Vh.view(rows, D), [D, rows], D * 4, [D, 256], swizzle="128a32"),
         )  # MN-major PV operand
         items = N * (S // 128) * H
-        grid = (min(num_sms(), items), 1, 1)
+        grid = (min(_sm.nsm(), items), 1, 1)
+        omap = _f32map(O, [C, N * S], C * 4, [16, 128], swizzle=64)         # O [N S, C] rows, store box (16 channels, 128 rows)
 
         def run():
-            self.k(
-                grid,
-                (384, 1, 1),
-                *maps,
-                seqused,
-                O,
-                LSE,
-                int(S),
-                int(N),
-                float(D**-0.5),
-            )
-
-        run.keep = maps
+            self.k(grid, (384, 1, 1), *maps, seqused, omap, LSE, int(S), int(N), float(D ** -0.5))
+        run.keep = (maps, omap, O, LSE)
         return run, O, LSE
 
 
