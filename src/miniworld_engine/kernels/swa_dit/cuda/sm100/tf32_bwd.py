@@ -171,11 +171,12 @@ class AttnBwdTf32:
         q2, k2, v2 = (t.view(rows, D) for t in (qh, kh, vh))
         maps = (self._mat(q2, rows, D, 128), self._mat(do, N * S, C, 128), self._mat(k2, rows, D, 32), self._mat(v2, rows, D, 32),
                 self._mat(k2, rows, D, 32, "128a32"))
+        omap = self._mat(out.view(rows, D), rows, D, 128)
         grid = (min(_sm.nsm(), N * (S // 128) * H), 1, 1)
 
         def run():
-            self.kq(grid, (384, 1, 1), *maps, lse, dv, seqused, out, int(S), int(N), float(D ** -0.5))
-        run.keep = (maps, qh, kh, vh, do, lse, dv, seqused)
+            self.kq(grid, (384, 1, 1), *maps, lse, dv, seqused, omap, int(S), int(N), float(D ** -0.5))
+        run.keep = (maps, omap, qh, kh, vh, do, lse, dv, seqused)
         return run, out
 
     def bind_dkv(self, qh, kh, vh, do, lse, dv, seqused, dk=None, dvo=None):
@@ -187,11 +188,12 @@ class AttnBwdTf32:
         q2, k2, v2 = (t.view(rows, D) for t in (qh, kh, vh))
         maps = (self._mat(q2, rows, D, 32), self._mat(q2, rows, D, 32, "128a32"), self._mat(k2, rows, D, 128), self._mat(v2, rows, D, 128),
                 self._mat(do, N * S, C, 32), self._mat(do, N * S, C, 32, "128a32"))
+        dkmap, dvmap = self._mat(dk.view(rows, D), rows, D, 128), self._mat(dvo.view(rows, D), rows, D, 128)
         grid = (min(_sm.nsm(), N * (S // 128) * H), 1, 1)
 
         def run():
-            self.kk(grid, (384, 1, 1), *maps, lse, dv, seqused, dk, dvo, int(S), int(N), float(D ** -0.5))
-        run.keep = (maps, qh, kh, vh, do, lse, dv, seqused)
+            self.kk(grid, (384, 1, 1), *maps, lse, dv, seqused, dkmap, dvmap, int(S), int(N), float(D ** -0.5))
+        run.keep = (maps, dkmap, dvmap, qh, kh, vh, do, lse, dv, seqused)
         return run, (dk, dvo)
 
     def bind(self, qh, kh, vh, do, lse, dv, seqused):
