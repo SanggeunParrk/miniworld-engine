@@ -17,13 +17,13 @@
 //     128-B swizzle with 32-B atoms (TMA CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B, UMMA layout type 1, SBO 512), the layout a kind::tf32
 //     MN-major operand needs (augmented_attention/cuda/sm100/sm100.cuh; measured there: the plain 128-B swizzle multiplies to zeros).
 //     A K step of 8 keys is 1 KB of V.
-//   shared memory  2 item stages x 80 KB | row max / row sum exchange [2][2][128] fp32 (2 KB) | barriers  -> 166144 B
+//   shared memory  2 item stages x 80 KB | row max / row sum exchange [2][2][128] fp32 (2 KB) | barriers  -> 166144 B + 16 KB of O staging
 //   TMEM (512)     S / P at 0 (256 columns, single: an item's S overwrites the previous item's P only after its PV MMAs completed --
 //                  the MMA warp waits on that commit unless MMA_INORDER=1 relies on in-order tcgen05.mma execution), O[b] at
 //                  256 + 32 b (b = item parity: the epilogue of item li reads O while item li + 1's MMAs run)
 //   threads        warp 0 TMA producer (lane 0), warp 2 TMEM allocator, warp 1 MMA issuer (whole warp waits, elect_one() issues),
 //                  warps 4-11 softmax (warpgroup kb = key block kb); registers: one 32-column chunk (32 fp32) at a time
-// The epilogue stores O (16 of the 32 columns per warpgroup, 64 contiguous bytes per thread) and LSE with plain global stores.
+// The epilogue stores O (16 of the 32 columns per warpgroup) by TMA from a shared-memory tile, and LSE with plain global stores.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -65,7 +65,8 @@ DEVI void tmem_st32(uint32_t taddr, const uint32_t (&r)[32]) {
 constexpr int DH = 32, QM = 128, H = 4, HW = 64, KR = 256;
 constexpr int TQ = QM * 128, TK = KR * 128;                                 // q tile 16 KB, K / V 256-row boxes 32 KB (fp32 rows: 128 B)
 constexpr int IST = TQ + 2 * TK;                                            // q | K | V = 80 KB
-constexpr int O_ST = 0, O_RX = 2 * IST, O_BAR = O_RX + 2 * 2 * 128 * 4;     // stages, then rmax[2][128] | rsum[2][128]
+constexpr int XS = 128 * 64;                                                // O staging tile: [128 rows][16 fp32] (64 B), SW64 (8 KB), one per warpgroup
+constexpr int O_ST = 0, O_RX = 2 * IST, O_XS = O_RX + 2 * 2 * 128 * 4, O_BAR = O_XS + 2 * XS;   // stages, rmax[2][128] | rsum[2][128], staging
 constexpr int SMEM_BYTES = O_BAR + 256;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 static_assert((IST % 1024) == 0 && (TQ % 1024) == 0 && (TK % 1024) == 0, "1 KB alignment of the swizzled tiles");
@@ -80,7 +81,7 @@ struct Bars {
 
 extern "C" __global__ void __launch_bounds__(384, 1)
 swa_attn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
-                        const int* __restrict__ SEQU, float* __restrict__ O, float* __restrict__ LSE, int S, int N, float scale) {
+                        const int* __restrict__ SEQU, const __grid_constant__ CUtensorMap mo, float* __restrict__ LSE, int S, int N, float scale) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -253,14 +254,22 @@ swa_attn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       if (lane == 0) mbar_arrive(&B.t_free[ob]);
       const bool ok = qok && l > 0.f;
       const float inv = ok ? 1.f / l : 0.f;
-      float* dst = O + ((size_t)n * S + i) * (H * DH) + h * DH + 16 * kb;
+      // O leaves by a TMA store from a [128 rows][64 B] SW64 tile per warpgroup (64 B per thread stored directly were 32 half-filled sectors per
+      // instruction); rows i0 .. i0 + 127 of sample n are contiguous in O [N S, 128]
+      const uint32_t xs = su + O_XS + (uint32_t)kb * XS;
+      if (((warp & 3) == 0) && lane == 0) tma_store_wait_read0();          // the previous item's store has read the tile
+      named_bar_sync(2 + kb, 128);
 #pragma unroll
       for (int q = 0; q < 4; ++q)
-        stg128(dst + 4 * q, make_uint4(__float_as_uint(__uint_as_float(ov[4 * q]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 1]) * inv),
-                                       __float_as_uint(__uint_as_float(ov[4 * q + 2]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 3]) * inv)));
+        sts128(xs + sw64(r, q), make_uint4(__float_as_uint(__uint_as_float(ov[4 * q]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 1]) * inv),
+                                           __float_as_uint(__uint_as_float(ov[4 * q + 2]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 3]) * inv)));
+      fence_proxy_async();
+      named_bar_sync(2 + kb, 128);
+      if (((warp & 3) == 0) && lane == 0) { tma_store_2d(&mo, xs, h * DH + 16 * kb, n * S + i0); tma_store_commit(); }
       if (kb == 0) LSE[((size_t)n * H + h) * S + i] = l > 0.f ? (mx * SC + __log2f(l)) * LN2 : 0.f;
     }
   }
+  if (warp >= 4 && (warp & 3) == 0 && lane == 0) tma_store_wait0();
   tc_fence_before();
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
