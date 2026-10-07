@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -117,7 +119,30 @@ class AttentionPairBias(nn.Module):
             query = self.norm_query(query)
             key = self.norm_key(key)
 
-        pair = self.ln_pair(pair)
+        # Explicit repaired PyTorch comparison, separate from the original reference
+        # and cuEquivariance baseline.  Pair-LN beta contributes the same additive
+        # bias at every key, so softmax removes it analytically.  Omitting it BEFORE
+        # BF16 rounding avoids introducing a spurious beta gradient through that
+        # rounding.  Keep beta connected to autograd with its exact zero derivative.
+        # The BF16 guard also leaves the runner's FP32 reference unchanged.
+        repaired_pair_norm = (
+            self.implementation == ImplementationType.PYTORCH
+            and os.environ.get("MINIWORLD_APB_PYTORCH_NULL_BETA", "0") == "1"
+            and pair.dtype == torch.bfloat16
+            and pair.shape[-1] == 128
+            and pair.shape[1] in (384, 768)
+            and (single.shape[-1], self.n_head)
+            in ((384, 8), (384, 12), (384, 16), (384, 24), (512, 16))
+            and self.to_query.weight.shape[0] == single.shape[-1]
+        )
+        if repaired_pair_norm:
+            pair = F.layer_norm(
+                pair.float(), self.ln_pair.normalized_shape,
+                self.ln_pair.weight.float(), self.ln_pair.bias.float() * 0,
+                self.ln_pair.eps,
+            ).to(pair.dtype)
+        else:
+            pair = self.ln_pair(pair)
         bias = _h100_master.linear(pair, self.to_bias, wb) if master else self.to_bias(pair)
         bias = rearrange(bias, "B L L2 H -> B H L L2")
         if mask is not None:
