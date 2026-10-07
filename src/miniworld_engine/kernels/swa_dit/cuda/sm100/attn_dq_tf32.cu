@@ -57,7 +57,7 @@ constexpr uint32_t I_S = tf::idesc(128, BK), I_DQ = tf::idesc(128, DH, 0, 1);
 constexpr float LOG2E = 1.4426950408889634f;
 
 struct Bars {
-  uint64_t it_full[QR], it_empty[QR], bl_full[ST], bl_empty[ST], s_full[2][2], s_free[2][2], d_full[2], d_free[2], q_full, q_free;
+  uint64_t it_full[QR], it_empty[QR], bl_full[ST], bl_empty[ST], s_full[2][2], s_free[2][2], d_full[2], d_free[2], q_full, q_free, tgo, tdone;
   uint32_t tmem;
 };
 
@@ -139,6 +139,7 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
       mbar_init(&B.d_full[w], 4); mbar_init(&B.d_free[w], 1);
     }
     mbar_init(&B.q_full, 1); mbar_init(&B.q_free, 8);
+    mbar_init(&B.tgo, 1); mbar_init(&B.tdone, 1);
     fence_barrier_init();
   }
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
@@ -223,6 +224,39 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
         __syncwarp();
       }
     }
+  } else if (warp == 2 || warp == 3) {
+    // ------------------------------------------------------------------------------------------------ tail warps: the head-wise qkvg backward tail
+    // The compute warpgroups stage the raw (scaled) dQ of an item in a shared-memory tile and arrive on tgo; these 64 threads (warp 2 has only
+    // allocated TMEM, warp 3 does nothing else) run unrope + the per-head RMS backward on it -- the loads of the raw projection and of cos / sin
+    // (latency that stalled the in-order MMA warp's pipeline when the compute warpgroups did this) are theirs -- and store the tile by TMA.
+    pdl_wait();
+    const int t = (warp - 2) * 32 + lane;
+    for (int li = 0; li < my_items; ++li) {
+      int n, i0, h, lo, hi, sq; item_of(li, n, i0, h, lo, hi, sq);
+      mbar_wait(&B.tgo, li & 1);
+      for (int rr = t; rr < 128; rr += 64) {
+        float d[32];
+#pragma unroll
+        for (int q = 0; q < 8; ++q) {
+          const uint4 x = lds128((su + O_X) + sw128((uint32_t)rr, (uint32_t)q));
+          d[4 * q] = __uint_as_float(x.x); d[4 * q + 1] = __uint_as_float(x.y); d[4 * q + 2] = __uint_as_float(x.z); d[4 * q + 3] = __uint_as_float(x.w);
+        }
+        const size_t m = (size_t)n * S + i0 + rr;
+        head_bwd(d, PQS + m * 128 + 32 * h, COS + ((size_t)(n % Bn) * S + i0 + rr) * 16, SIN + ((size_t)(n % Bn) * S + i0 + rr) * 16, eps);
+#pragma unroll
+        for (int q = 0; q < 8; ++q)
+          sts128((su + O_X) + sw128((uint32_t)rr, (uint32_t)q), make_uint4(__float_as_uint(d[4 * q]), __float_as_uint(d[4 * q + 1]), __float_as_uint(d[4 * q + 2]), __float_as_uint(d[4 * q + 3])));
+      }
+      fence_proxy_async();
+      named_bar_sync(6, 64);
+      if (t == 0) {
+        tma_store_2d(&mdp, (su + O_X), 0 + 32 * h, n * S + i0);
+        tma_store_commit();
+        tma_store_wait_read0();                                            // the tile is free again: the next item's epilogue may stage into it
+        mbar_arrive(&B.tdone);
+      }
+    }
+    if (t == 0) tma_store_wait0();
   } else if (warp >= 4) {
     // ------------------------------------------------------------------------------------------------ dS, one query row per thread
     const int w = (warp - 4) >> 2, lq = warp & 3, r = lq * 32 + lane;
@@ -275,36 +309,19 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.q_free);
-      // staged in shared memory ([128][32] tile, SW128, both warpgroups halves); then warpgroup 0 reads each row back whole, runs the head-wise tail
-      // of the qkvg backward on it (unrope + head RMS backward: dpq) and stores dpq into dP [M, 4C] at column 32 h
+      // dQ rows staged raw ([128][32] tile, SW128, both warpgroups' halves); the tail warps run the head-wise tail (unrope + head RMS backward -> dpq)
+      // and store it into dP [M, 4C] at column 32 h
       const uint32_t xs = su + O_X;
-      if (tid == 128) tma_store_wait_read0();                              // the previous item's store has read the tile
-      named_bar_sync(1, 256);
+      if (li >= 1) mbar_wait(&B.tdone, (li - 1) & 1);                      // the tail warps have read and stored the previous item's tile
 #pragma unroll
       for (int q = 0; q < 4; ++q)
         sts128(xs + sw128((uint32_t)r, (uint32_t)(4 * w + q)),
                make_uint4(__float_as_uint(__uint_as_float(v[4 * q]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 1]) * scale),
                           __float_as_uint(__uint_as_float(v[4 * q + 2]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 3]) * scale)));
       named_bar_sync(1, 256);
-      if (w == 0) {
-        float d[32];
-#pragma unroll
-        for (int q = 0; q < 8; ++q) {
-          const uint4 x = lds128(xs + sw128((uint32_t)r, (uint32_t)q));
-          d[4 * q] = __uint_as_float(x.x); d[4 * q + 1] = __uint_as_float(x.y); d[4 * q + 2] = __uint_as_float(x.z); d[4 * q + 3] = __uint_as_float(x.w);
-        }
-        head_bwd(d, PQS + ((size_t)n * S + i) * 128 + 32 * h, COS + ((size_t)(n % Bn) * S + i) * 16, SIN + ((size_t)(n % Bn) * S + i) * 16, eps);
-#pragma unroll
-        for (int q = 0; q < 8; ++q)
-          sts128(xs + sw128((uint32_t)r, (uint32_t)q), make_uint4(__float_as_uint(d[4 * q]), __float_as_uint(d[4 * q + 1]),
-                                                                  __float_as_uint(d[4 * q + 2]), __float_as_uint(d[4 * q + 3])));
-        fence_proxy_async();
-        named_bar_sync(2, 128);
-        if (tid == 128) { tma_store_2d(&mdp, xs, 32 * h, n * S + i0); tma_store_commit(); }
-      }
+      if (tid == 128) mbar_arrive(&B.tgo);
     }
   }
-  if (tid == 128) tma_store_wait0();
   tc_fence_before();
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
