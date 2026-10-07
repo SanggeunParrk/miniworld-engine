@@ -171,6 +171,41 @@ class AttnBwdTf32:
         return run
 
 
+class DwTf32:
+    """The five weight gradients in one launch (dw_tf32.cu) + a deterministic reduction of the split-K partial sums (dw_reduce_tf32):
+    dP [M, 4C], x [M, C], datt, gated [M, C], dab [M, 2 NHID], y [M, C], dffn [M, C], hh [M, NHID] (all row-major fp32) ->
+    dP^T x [4C, C], datt^T gated [C, C], dab^T y [2 NHID, C], dffn^T hh [C, NHID]. A CTA takes a row slice of one problem; the CTAs go to
+    the problems in proportion to their bytes (0.297 | 0.189 | 0.297 | 0.216, measured on B200: 44 / 28 / 44 / 32 of 148)."""
+
+    FRAC = (44 / 148, 28 / 148, 44 / 148, 32 / 148)
+    SHAPES = ((4 * C, C), (C, C), (2 * NHID, C), (C, NHID))
+
+    def __init__(self):
+        self.kd = _f._load("dw_tf32")
+        self.kr = _f._load("dw_reduce_tf32")
+
+    def bind(self, dp, x, datt, gated, dab, y, dffn, hh):
+        M = dp.shape[0]
+        pairs = ((dp, x), (datt, gated), (dab, y), (dffn, hh))
+        for a, b in pairs:
+            assert a.is_contiguous() and b.is_contiguous() and a.shape[0] == M and b.shape[0] == M and M % 16 == 0
+        nsm = _sm.nsm()
+        ns = tuple(max(1, min(round(f * nsm), M // 256)) for f in self.FRAC)
+        dev = dp.device
+        maps = []
+        for a, b in pairs:
+            maps += [AttnBwdTf32._mat(a, M, a.view(M, -1).shape[1], 16, "128a32"), AttnBwdTf32._mat(b, M, b.view(M, -1).shape[1], 16, "128a32")]
+        ws = torch.empty(sum(n * m * k for n, (m, k) in zip(ns, self.SHAPES)), device=dev, dtype=torch.float32)
+        outs = tuple(torch.empty(m, k, device=dev, dtype=torch.float32) for m, k in self.SHAPES)
+        total4 = sum(m * k // 4 for m, k in self.SHAPES)
+
+        def run():
+            self.kd((sum(ns), 1, 1), (256, 1, 1), *maps, ws, int(M), *(int(n) for n in ns))
+            self.kr(((total4 + 255) // 256, 1, 1), (256, 1, 1), ws, *outs, *(int(n) for n in ns))
+        run.keep = (maps, ws, dp, x, datt, gated, dab, y, dffn, hh)
+        return run, outs
+
+
 class _Kernels:
     def __init__(self) -> None:
         self.wprep = WprepBwdTf32()
@@ -179,6 +214,7 @@ class _Kernels:
         self.ffn_gate = FfnBwdGateTf32()
         self.adaln = AdalnBwdTf32()
         self.oproj_fused = OprojBwdFusedTf32()
+        self.dw = DwTf32()
 
 
 @functools.lru_cache(maxsize=16)
@@ -249,6 +285,7 @@ def block_bwd_tf32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, 
         # qkvg
         run, dq = K.adaln.bind(q.reshape(M, C), mm_tf32(dP, w), dq1, None, mod, dmod, A, B, eps, 0)
         run()
-        dwqkvg = mm_tf32(dP.t(), x)                        # dWqkv | dWg as one GEMM over dP (x read once)
-        return [dq.view(N, S, C), dmod, dwqkvg[:3 * C], dwqkvg[3 * C:].clone(), mm_tf32(datt.t(), gated), mm_tf32(dab.t(), y),
-                mm_tf32(dffn.t(), hh)]
+        # the five weight gradients: one launch (dWqkv | dWg is one problem over dP, x read once) + the fixed-order reduction
+        run, (dwqkvg, dwo, dwu, dwd) = K.dw.bind(dP, x.view(M, C), datt, gated.view(M, C), dab, y.view(M, C), dffn, hh)
+        run()
+        return [dq.view(N, S, C), dmod, dwqkvg[:3 * C], dwqkvg[3 * C:].clone(), dwo, dwu, dwd]

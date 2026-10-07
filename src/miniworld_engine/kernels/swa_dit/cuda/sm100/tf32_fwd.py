@@ -63,6 +63,8 @@ CUBINS = {
     "attn_dq_tf32": ("attn_dq_tf32", ()),
     "attn_dkv_tf32": ("attn_dkv_tf32", ()),
     "mod_bwd_tf32": ("mod_bwd_tf32", ()),
+    "dw_tf32": ("dw_tf32", ()),
+    "dw_reduce_tf32": ("dw_tf32", ()),
 }
 #: dynamic shared memory per kernel (the sources' SMEM / SMEM_BYTES)
 SMEM = {
@@ -71,7 +73,7 @@ SMEM = {
     "wprep_bwd_tf32": 0, "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512, "adaln_bwd_tf32": 0,
     "oproj_bwd_fused_tf32": 4 * 16384 + 8 * 16384 + 2 * 16384 + 512,
     "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512, "attn_dkv_tf32": 2 * 32768 + 7 * 17408 + 2 * 16384 + 64 * 16 + 512,
-    "mod_bwd_tf32": 0,
+    "mod_bwd_tf32": 0, "dw_tf32": 5 * 20 * 2048 + 256, "dw_reduce_tf32": 0,
 }
 #: kernel function per cubin
 FUNCS = {
@@ -80,6 +82,7 @@ FUNCS = {
     "wprep_bwd_tf32": "swa_wprep_bwd_tf32_sm100", "ffn_bwd_gate_tf32": "swa_ffn_bwd_gate_tf32_sm100",
     "adaln_bwd_tf32": "swa_adaln_bwd_tf32_sm100", "oproj_bwd_fused_tf32": "swa_oproj_bwd_fused_tf32_sm100",
     "attn_dq_tf32": "swa_attn_dq_tf32_sm100", "attn_dkv_tf32": "swa_attn_dkv_tf32_sm100", "mod_bwd_tf32": "swa_mod_silu_tf32_sm100",
+    "dw_tf32": "swa_dw_tf32_sm100", "dw_reduce_tf32": "swa_dw_reduce_tf32_sm100",
 }
 
 
