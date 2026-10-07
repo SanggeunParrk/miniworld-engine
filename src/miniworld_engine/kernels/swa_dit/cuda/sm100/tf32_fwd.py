@@ -66,7 +66,7 @@ CUBINS = {
 SMEM = {"wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
         "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 12 * 8192 + 2048 + 512,
         "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512, "adaln_bwd_tf32": 0, "qkvg_bwd_prep_tf32": 0, "oproj_bwd_tf32": 0, "mod_bwd_tf32": 0,
-        "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 512, "attn_dkv_tf32": 2 * 32768 + 9 * 17408 + 512}
+        "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512, "attn_dkv_tf32": 2 * 32768 + 7 * 17408 + 2 * 16384 + 64 * 16 + 512}
 #: kernel function per cubin
 FUNCS = {"wprep_tf32": "swa_wprep_tf32_sm100", "mod_fwd_tf32": "swa_mod_fwd_tf32_sm100", "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
          "attn_fwd_tf32": "swa_attn_fwd_tf32_sm100", "ffn_fwd_tf32": "swa_ffn_fwd_tf32_sm100",

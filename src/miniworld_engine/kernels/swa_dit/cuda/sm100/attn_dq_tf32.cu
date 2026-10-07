@@ -13,8 +13,8 @@
 // UMMA layout type 1: the plain swizzle multiplies to zeros). The two compute warpgroups take alternate blocks (one query row per thread);
 // ONE MMA warp issues every MMA in block order, so the shared dQ accumulator sums in a fixed order. Per block: S / dP (SS, M = 128 queries,
 // N = 32 keys, K = 32; double-buffered per warpgroup) -> dS (rounded to TF32) into TMEM -> dQ += dS K (TS, M = 128, N = 32, K = 32 keys).
-// Epilogue: warpgroup w writes columns 16 w .. 16 w + 15 of dQ (scaled, fp32), 64 B per thread straight from registers.
-// Shared memory: q | dO item slots 2 x 32 KB | 12 block stages x 12 KB | barriers. TMEM: warpgroup w at 160 w: S[b] at + 64 b, dP[b] at
+// Epilogue: warpgroup w stages columns 16 w .. 16 w + 15 of dQ (scaled, fp32) in a shared-memory tile that a TMA store writes out.
+// Shared memory: q | dO item slots 2 x 32 KB | 12 block stages x 12 KB | dQ staging 16 KB | barriers. TMEM: warpgroup w at 160 w: S[b] at + 64 b, dP[b] at
 // + 64 b + 32, dS at + 128; dQ at 320.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
@@ -47,7 +47,9 @@ DEVI uint32_t rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r
 constexpr int BK = 32, DH = 32, QM = 128, H = 4, HW = 64, QR = 2;
 constexpr int TQI = QM * 128, IST = 2 * TQI;                               // q (or dO) of the item: [128][32] fp32 = 16 KB; q | dO
 constexpr int TK = BK * 128, BLS = 3 * TK;                                 // a [32 keys][32] tile: 4 KB; K | V | K MN-major
-constexpr int O_IT = 0, O_BL = QR * IST, O_BAR = O_BL + ST * BLS, SMEM_BYTES = O_BAR + 512;
+constexpr int NIT = 64;                                                    // items of a CTA whose (n, tile, h, block range, seqused) sit in a table
+constexpr int XS = QM * 128;                                               // dQ staging tile: [128 rows][32 fp32], SW128 (16 KB)
+constexpr int O_IT = 0, O_BL = QR * IST, O_X = O_BL + ST * BLS, O_TAB = O_X + XS, O_BAR = O_TAB + NIT * 16, SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 constexpr uint32_t T_DQ = 320;
 constexpr uint32_t I_S = tf::idesc(128, BK), I_DQ = tf::idesc(128, DH, 0, 1);
@@ -65,7 +67,7 @@ extern "C" __global__ void __launch_bounds__(384, 1)
 swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mdo,
                        const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                        const __grid_constant__ CUtensorMap mkm, const float* __restrict__ LSE, const float* __restrict__ DD,
-                       const int* __restrict__ SEQU, float* __restrict__ DQO, int S, int N, float scale) {
+                       const int* __restrict__ SEQU, const __grid_constant__ CUtensorMap mdq, int S, int N, float scale) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -74,7 +76,7 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
   const int items = N * mt * H;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   // item li of this CTA: wi = blockIdx + li grid = ((n mt + m) H + h); its key blocks [lo, hi) (one masked block when none is valid)
-  auto item_of = [&](int li, int& n, int& i0, int& h, int& lo, int& hi, int& sq) {
+  auto item_raw = [&](int li, int& n, int& i0, int& h, int& lo, int& hi, int& sq) {
     const int wi = (int)blockIdx.x + li * (int)gridDim.x;
     h = wi % H; const int r = wi / H;
     i0 = (r % mt) * QM; n = r / mt;
@@ -83,6 +85,17 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
     hi = (min(sq, i0 + QM + HW) + BK - 1) / BK;
     if (hi <= lo) hi = lo + 1;
   };
+
+  int4* itab = reinterpret_cast<int4*>(sm + O_TAB);                    // (n, 4 i0 + h, 65536 lo + hi, seqused) of item li < NIT: the
+  auto item_of = [&](int li, int& n, int& i0, int& h, int& lo, int& hi, int& sq) {    // look-ahead of the MMA warp must not wait on a global load
+    if (li >= NIT) { item_raw(li, n, i0, h, lo, hi, sq); return; }
+    const int4 e = itab[li];
+    n = e.x; i0 = e.y >> 2; h = e.y & 3; lo = e.z >> 16; hi = e.z & 0xffff; sq = e.w;
+  };
+  if (tid < my_items && tid < NIT) {
+    int n, i0, h, lo, hi, sq; item_raw(tid, n, i0, h, lo, hi, sq);
+    itab[tid] = make_int4(n, (i0 << 2) | h, (lo << 16) | hi, sq);
+  }
 
   if (tid == 0) {
     for (int s = 0; s < QR; ++s) { mbar_init(&B.it_full[s], 1); mbar_init(&B.it_empty[s], 1); }
@@ -228,13 +241,21 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.q_free);
-      float* out = DQO + rowi * DH + 16 * w;
+      // staged in shared memory ([128][32] tile, SW128, both warpgroups' halves) and stored by TMA
+      const uint32_t xs = su + O_X;
+      if (tid == 128) tma_store_wait_read0();                              // the previous item's store has read the tile
+      named_bar_sync(1, 256);
 #pragma unroll
       for (int q = 0; q < 4; ++q)
-        st4(out + 4 * q, __float_as_uint(__uint_as_float(v[4 * q]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 1]) * scale),
-            __float_as_uint(__uint_as_float(v[4 * q + 2]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 3]) * scale));
+        sts128(xs + sw128((uint32_t)r, (uint32_t)(4 * w + q)),
+               make_uint4(__float_as_uint(__uint_as_float(v[4 * q]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 1]) * scale),
+                          __float_as_uint(__uint_as_float(v[4 * q + 2]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 3]) * scale)));
+      fence_proxy_async();
+      named_bar_sync(1, 256);
+      if (tid == 128) { tma_store_2d(&mdq, xs, 0, (n * H + h) * S + i0); tma_store_commit(); }
     }
   }
+  if (tid == 128) tma_store_wait0();
   tc_fence_before();
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
