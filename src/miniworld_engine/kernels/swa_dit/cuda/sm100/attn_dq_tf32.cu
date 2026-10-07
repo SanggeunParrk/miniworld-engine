@@ -13,7 +13,8 @@
 // UMMA layout type 1: the plain swizzle multiplies to zeros). The two compute warpgroups take alternate blocks (one query row per thread);
 // ONE MMA warp issues every MMA in block order, so the shared dQ accumulator sums in a fixed order. Per block: S / dP (SS, M = 128 queries,
 // N = 32 keys, K = 32; double-buffered per warpgroup) -> dS (rounded to TF32) into TMEM -> dQ += dS K (TS, M = 128, N = 32, K = 32 keys).
-// Epilogue: warpgroup w stages columns 16 w .. 16 w + 15 of dQ (scaled, fp32) in a shared-memory tile that a TMA store writes out.
+// Epilogue: warpgroup w stages columns 16 w .. 16 w + 15 of dQ (scaled) in a shared-memory tile; warpgroup 0 then runs each whole row through
+// unrope + the head RMS backward (qkvg_bwd: dpq) and a TMA store writes it into dP [M, 4C] at column 32 h.
 // Shared memory: q | dO item slots 2 x 32 KB | 12 block stages x 12 KB | dQ staging 16 KB | barriers. TMEM: warpgroup w at 160 w: S[b] at + 64 b, dP[b] at
 // + 64 b + 32, dS at + 128; dQ at 320.
 // SPDX-License-Identifier: Apache-2.0
@@ -59,15 +60,48 @@ struct Bars {
   uint64_t it_full[QR], it_empty[QR], bl_full[ST], bl_empty[ST], s_full[2][2], s_free[2][2], d_full[2], d_free[2], q_full, q_free;
   uint32_t tmem;
 };
-DEVI void st4(float* p, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-  asm volatile("st.global.v4.b32 [%0], {%1, %2, %3, %4};" :: "l"(p), "r"(a), "r"(b), "r"(c), "r"(d) : "memory");
+
+// the head-wise tail of the qkvg backward for one (row, head) held by one thread (the Triton _swa_qkvg_bwd_fp32_kernel's dP):
+//   dp = head_rms_bwd(p, unrope(d)),  head_rms_bwd(p, du) = r (du - yh mean_D(du yh)),  yh = p r,  r = 1 / sqrt(mean_D(p^2) + eps),
+//   unrope = the transpose of the RoPE rotation: dx1 = dy1 c + dy2 s, dx2 = dy2 c - dy1 s (halves d < 16 | d >= 16)
+// p: this row's raw projection (32 fp32 at P), cs / sn: the atom's cos / sin (16 fp32 each); d[32] in place -> TF32-rounded dp
+DEVI void head_bwd(float (&d)[32], const float* __restrict__ P, const float* __restrict__ cs, const float* __restrict__ sn, float eps) {
+  float u[32];
+#pragma unroll
+  for (int k = 0; k < 4; ++k) {
+    const float4 c4 = *reinterpret_cast<const float4*>(cs + 4 * k), s4 = *reinterpret_cast<const float4*>(sn + 4 * k);
+    const float c[4] = {c4.x, c4.y, c4.z, c4.w}, s[4] = {s4.x, s4.y, s4.z, s4.w};
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const float a = d[4 * k + e], b = d[16 + 4 * k + e];
+      u[4 * k + e] = a * c[e] + b * s[e];
+      u[16 + 4 * k + e] = b * c[e] - a * s[e];
+    }
+  }
+  float p[32], ss = 0.f;
+#pragma unroll
+  for (int k = 0; k < 8; ++k) {
+    const float4 q4 = *reinterpret_cast<const float4*>(P + 4 * k);
+    p[4 * k] = q4.x; p[4 * k + 1] = q4.y; p[4 * k + 2] = q4.z; p[4 * k + 3] = q4.w;
+  }
+#pragma unroll
+  for (int e = 0; e < 32; ++e) ss = fmaf(p[e], p[e], ss);
+  const float r = 1.f / sqrtf(ss * (1.f / 32.f) + eps);
+  float t = 0.f;
+#pragma unroll
+  for (int e = 0; e < 32; ++e) t = fmaf(u[e], p[e] * r, t);
+  t *= (1.f / 32.f);
+#pragma unroll
+  for (int e = 0; e < 32; ++e) d[e] = __uint_as_float(tf::rna(r * (u[e] - p[e] * r * t)));
 }
 
 extern "C" __global__ void __launch_bounds__(384, 1)
 swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mdo,
                        const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                        const __grid_constant__ CUtensorMap mkm, const float* __restrict__ LSE, const float* __restrict__ DD,
-                       const int* __restrict__ SEQU, const __grid_constant__ CUtensorMap mdq, int S, int N, float scale) {
+                       const int* __restrict__ SEQU, const float* __restrict__ PQS, const float* __restrict__ COS,
+                       const float* __restrict__ SIN, const __grid_constant__ CUtensorMap mdp, int S, int N, int Bn, float scale,
+                       float eps) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -241,7 +275,8 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.q_free);
-      // staged in shared memory ([128][32] tile, SW128, both warpgroups' halves) and stored by TMA
+      // staged in shared memory ([128][32] tile, SW128, both warpgroups halves); then warpgroup 0 reads each row back whole, runs the head-wise tail
+      // of the qkvg backward on it (unrope + head RMS backward: dpq) and stores dpq into dP [M, 4C] at column 32 h
       const uint32_t xs = su + O_X;
       if (tid == 128) tma_store_wait_read0();                              // the previous item's store has read the tile
       named_bar_sync(1, 256);
@@ -250,9 +285,23 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
         sts128(xs + sw128((uint32_t)r, (uint32_t)(4 * w + q)),
                make_uint4(__float_as_uint(__uint_as_float(v[4 * q]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 1]) * scale),
                           __float_as_uint(__uint_as_float(v[4 * q + 2]) * scale), __float_as_uint(__uint_as_float(v[4 * q + 3]) * scale)));
-      fence_proxy_async();
       named_bar_sync(1, 256);
-      if (tid == 128) { tma_store_2d(&mdq, xs, 0, (n * H + h) * S + i0); tma_store_commit(); }
+      if (w == 0) {
+        float d[32];
+#pragma unroll
+        for (int q = 0; q < 8; ++q) {
+          const uint4 x = lds128(xs + sw128((uint32_t)r, (uint32_t)q));
+          d[4 * q] = __uint_as_float(x.x); d[4 * q + 1] = __uint_as_float(x.y); d[4 * q + 2] = __uint_as_float(x.z); d[4 * q + 3] = __uint_as_float(x.w);
+        }
+        head_bwd(d, PQS + ((size_t)n * S + i) * 128 + 32 * h, COS + ((size_t)(n % Bn) * S + i) * 16, SIN + ((size_t)(n % Bn) * S + i) * 16, eps);
+#pragma unroll
+        for (int q = 0; q < 8; ++q)
+          sts128(xs + sw128((uint32_t)r, (uint32_t)q), make_uint4(__float_as_uint(d[4 * q]), __float_as_uint(d[4 * q + 1]),
+                                                                  __float_as_uint(d[4 * q + 2]), __float_as_uint(d[4 * q + 3])));
+        fence_proxy_async();
+        named_bar_sync(2, 128);
+        if (tid == 128) { tma_store_2d(&mdp, xs, 32 * h, n * S + i0); tma_store_commit(); }
+      }
     }
   }
   if (tid == 128) tma_store_wait0();
