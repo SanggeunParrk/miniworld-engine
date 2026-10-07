@@ -316,14 +316,15 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
         return swa_dit_mod_fwd_sm100(
             c2, _capture.param_forms("swa_mod", (w,), lambda: w.to(c2.dtype))
         )
-    if _mod_tf32(
-        c_base, wmod
-    ):  # B200, fp32, d_cond 128, no gradient: the TF32 mod_fwd_tf32 kernel
+    if _mod_tf32(c_base, wmod):                          # B200, fp32, d_cond 128: the TF32 mod_fwd_tf32 / mod_bwd_tf32 kernels
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationTf32
         from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_tf32
 
-        return swa_dit_mod_fwd_tf32(
-            c_base.reshape(-1, c_base.shape[-1]).contiguous(), wmod.contiguous()
-        )
+        c2 = c_base.reshape(-1, c_base.shape[-1]).contiguous()
+        w = wmod.contiguous()
+        if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
+            return SWADiTModulationTf32.apply(c2, w)
+        return swa_dit_mod_fwd_tf32(c2, w)
     from miniworld_engine.kernels.swa_dit.dispatch import mod_sm90
 
     if mod_sm90(c_base, wmod):                           # H100, bf16 or fp32 (TF32 allowed): the sm_90a mod_fwd / mod_bwd kernels
