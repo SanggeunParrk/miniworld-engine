@@ -295,3 +295,27 @@ def test_weight_gradients(a, b, s):
         assert o.shape == ref.shape and torch.isfinite(o).all()
         assert _rel(o, ref) < 1e-4
         assert torch.equal(o, f), "the fixed-order slice reduction is bit-reproducible"
+
+
+@pytest.mark.parametrize("a,b,s", SHAPES)
+def test_weight_gradients_bf16(a, b, s):
+    """dw_bf16 (the bf16 block's split-K weight-gradient kernel) against fp64 over the same bf16 operands, NaN-poisoned outputs, repeat identical."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm100 as SM
+
+    r = _gen(57 + a)
+    m = a * b * s
+    dp, dab, hh = (r(m, w).bfloat16() for w in (4 * C, 2 * NH, NH))
+    x, datt, gated, y, dffn = (r(m, C).bfloat16() for _ in range(5))
+    run, outs = SM.kernels(torch.cuda.current_device()).dw.bind(dp, x, datt, gated, dab, y, dffn, hh)
+    refs = [p.double().t() @ q.double() for p, q in ((dp, x), (datt, gated), (dab, y), (dffn, hh))]
+    for o in outs:
+        o.fill_(float("nan"))
+    run()
+    first = [o.clone() for o in outs]
+    for o in outs:
+        o.fill_(float("nan"))
+    run()
+    for o, f, ref in zip(outs, first, refs):
+        assert o.shape == ref.shape and torch.isfinite(o).all()
+        assert _rel(o, ref) < 1e-4
+        assert torch.equal(o, f), "the fixed-order slice reduction is bit-reproducible"
