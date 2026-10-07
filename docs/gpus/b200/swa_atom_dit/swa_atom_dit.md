@@ -353,7 +353,7 @@ both warps' commits): pair 0.588 -> 0.491 ms; dropping the `& 0xffffe000` after 
 cheaper window test: 0.460 ms; a dedicated epilogue warpgroup (warps 12-15) reading dK / dV (dQ) from double-buffered TMEM accumulators instead of
 the row threads doing it between items: 0.389 ms (graph 2.13 -> 1.95 ms in all).
 Things that did not help: the TMA ring depth of the attention kernels (4 .. 12 stages: same time), BQ = 64 blocks (with or without the split issuers),
-three compute warpgroups (0.639 ms; spills at 544 threads), skipping masked 4-column groups per warp (slower), integer instead of `cvt.rna` rounding
+three compute warpgroups (0.639 ms; spills at 544 threads), a three-region S / P ring with a PV issuer warp and the epilogue deferred behind the next softmax in `attn_fwd` (kernel 0.153 -> 0.145 ms, graph unchanged: its rows are bound by their own instruction count, ~12 per masked element), skipping masked 4-column groups per warp (slower), integer instead of `cvt.rna` rounding
 (slower), spin / sleep mbarrier waits, L1 prefetch of the tail's loads, software
 pipelining of the FFN chunk loop's TMEM loads; `ffn_fwd` loses nothing measurable when its SwiGLU math, its stores or its whole D phase are
 removed (0.287 -> 0.257 / 0.277 ms) and its tensor pipe is busy 13 % of the time: it is limited by the single tile in flight (row threads and the
