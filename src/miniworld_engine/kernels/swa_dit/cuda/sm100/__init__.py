@@ -42,22 +42,13 @@ _dir = Path(__file__).parent
 
 #: cubin name -> (source stem, extra nvcc flags): the sources' defaults, and the A = 1 - 3 builds (ATM = 32; the FFN single stage)
 CUBINS = {
-    "qkvg_fwd": ("qkvg_fwd", ()),
-    "qkvg_fwd2": ("qkvg_fwd2", ()),
-    "qkvg_fwd2_a1": ("qkvg_fwd2", ("-DATM=32", "-DPDL_EARLY=0")),
-    "ffn_fwd2": ("ffn_fwd2", ()),
-    "ffn_fwd2_a1": ("ffn_fwd2", ("-DATM=32", "-DNSTG=1", "-DPDL_EARLY=0")),
-    "attn_fwd3": ("attn_fwd3", ()),
-    "attn_fwd1h": ("attn_fwd1h", ()),
-    "ffn_bwd_gate": ("ffn_bwd_gate", ()),
-    "ffn_bwd_dy": ("ffn_bwd_dy", ()),
-    "oproj_bwd": ("oproj_bwd", ()),
-    "attn_dq": ("attn_dq", ()),
-    "attn_dkv": ("attn_dkv", ()),
-    "attn_dkvq": ("attn_dkvq", ()),
-    "qkvg_bwd": ("qkvg_bwd", ()),
-    "mod_fwd": ("mod_fwd", ()),
-    "mod_bwd": ("mod_bwd", ()),
+    "qkvg_fwd": ("qkvg_fwd", ()), "qkvg_fwd2": ("qkvg_fwd2", ()), "qkvg_fwd2_a1": ("qkvg_fwd2", ("-DATM=32",)),
+    "ffn_fwd2": ("ffn_fwd2", ()), "ffn_fwd2_a1": ("ffn_fwd2", ("-DATM=32", "-DNSTG=1")),
+    "attn_fwd3": ("attn_fwd3", ()), "attn_fwd1h": ("attn_fwd1h", ()),
+    "ffn_bwd_gate": ("ffn_bwd_gate", ()), "ffn_bwd_dy": ("ffn_bwd_dy", ()), "oproj_bwd": ("oproj_bwd", ()),
+    "attn_dq": ("attn_dq", ()), "attn_dkv": ("attn_dkv", ()), "attn_dkvq": ("attn_dkvq", ()), "qkvg_bwd": ("qkvg_bwd", ()),
+    "mod_fwd": ("mod_fwd", ()), "mod_bwd": ("mod_bwd", ()),
+    "dw_bf16": ("dw_bf16", ()),
 }
 
 
@@ -950,6 +941,42 @@ class ModBwd:
 
 
 # --------------------------------------------------------------------------------------------------- the block
+class DwBf16:
+    """The five weight gradients in one launch (dw_bf16.cu) + a deterministic reduction of the split-K partial sums (dw_reduce_bf16):
+    dP [M, 4C], x, datt, gated, y, dffn [M, C], dab [M, 2 NHID], hh [M, NHID] (bf16, row-major) -> dP^T x [4C, C], datt^T gated [C, C],
+    dab^T y [2 NHID, C], dffn^T hh [C, NHID] in fp32. A CTA takes a row slice of one problem; the CTAs go to the problems in proportion to
+    their bytes (44 / 28 / 44 / 32 of 148 on B200)."""
+
+    FRAC = (44 / 148, 28 / 148, 44 / 148, 32 / 148)
+    SHAPES = ((4 * C, C), (C, C), (2 * NHID, C), (C, NHID))
+
+    def __init__(self):
+        self.kd = _load_swa_sm100_kernel("dw_bf16", "swa_dw_bf16_sm100", 5 * 10 * 4096 + 256)
+        self.kr = _load_swa_sm100_kernel("dw_bf16", "swa_dw_reduce_bf16_sm100", 0)
+
+    def bind(self, dp, x, datt, gated, dab, y, dffn, hh):
+        M = dp.shape[0]
+        pairs = ((dp, x), (datt, gated), (dab, y), (dffn, hh))
+        for a, b in pairs:
+            assert a.is_contiguous() and b.is_contiguous() and a.dtype == torch.bfloat16 and b.dtype == torch.bfloat16
+            assert a.shape[0] == M and b.shape[0] == M and M % 32 == 0
+        ns = tuple(max(1, min(round(f * nsm()), M // 512)) for f in self.FRAC)
+        dev = dp.device
+        maps = []
+        for a, b in pairs:
+            for t in (a, b):
+                maps.append(_map(t, [t.shape[1], M], t.shape[1] * 2, [64, 32], swizzle=128, dtype="bf16"))
+        ws = torch.empty(sum(n * m * k for n, (m, k) in zip(ns, self.SHAPES)), device=dev, dtype=torch.float32)
+        outs = tuple(torch.empty(m, k, device=dev, dtype=torch.float32) for m, k in self.SHAPES)
+        total4 = sum(m * k // 4 for m, k in self.SHAPES)
+
+        def run():
+            self.kd((sum(ns), 1, 1), (256, 1, 1), *maps, ws, int(M), *(int(n) for n in ns))
+            self.kr(((total4 + 255) // 256, 1, 1), (256, 1, 1), ws, *outs, *(int(n) for n in ns))
+        run.keep = (maps, ws, dp, x, datt, gated, dab, y, dffn, hh)
+        return run, outs
+
+
 class _Kernels:
     """Every kernel the block launches, loaded on one device."""
 
@@ -969,6 +996,7 @@ class _Kernels:
             QkvgBwd(),
         )
         self.modf, self.modb = ModFwd(), ModBwd()
+        self.dw = DwBf16()
 
 
 @functools.lru_cache(maxsize=16)
@@ -1244,22 +1272,11 @@ def block_bwd(
             dP=dP,
         )
         run()
-    f32 = (
-        torch.float32
-    )  # the weight gradients keep cuBLAS's fp32 accumulators (an fp32 master)
-    dwqkvg = torch.mm(
-        dP.t(), x, out_dtype=f32
-    )  # dWqkv | dWg as one GEMM over dP (x read once)
+        # the weight gradients (fp32 accumulators, an fp32 master): one split-K launch + the fixed-order reduction
+        run, (dwqkvg, dwo, dwu, dwd) = K.dw.bind(dP, x.view(M, C), datt, gated, dab, y.view(M, C), dffn, hh)
+        run()
     # the op's outputs may not alias each other: dWg (128 x 128) leaves as its own tensor
-    return [
-        dq.view(N, S, C),
-        dmod,
-        dwqkvg[: 3 * C],
-        dwqkvg[3 * C :].clone(),
-        torch.mm(datt.t(), gated, out_dtype=f32),
-        torch.mm(dab.t(), y, out_dtype=f32),
-        torch.mm(dffn.t(), hh, out_dtype=f32),
-    ]
+    return [dq.view(N, S, C), dmod, dwqkvg[:3 * C], dwqkvg[3 * C:].clone(), dwo, dwu, dwd]
 
 
 def mod_fwd(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
