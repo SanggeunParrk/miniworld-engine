@@ -523,6 +523,11 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
     """
     from miniworld_engine.kernels.augmented_attention.cuda import apb
     E = apb.ext()
+    # Preserve the exact SGEMM arithmetic while giving each captured graph its
+    # own scratch. The other required shapes retain their measured dispatch.
+    owned_blas = (args[0].shape[1:3] == (4096, 768)
+                  and os.environ.get("MINIWORLD_PWA_H100_OWNED_BLAS", "0") == "1")
+    mm = E.exact_mm_owned if owned_blas else E.exact_mm
     K = _k()["pair3"]
     with torch.cuda.device(dy.device), torch.autocast("cuda", enabled=False):
         qualified = _h100_training_default(args[0])
@@ -556,10 +561,10 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
             xn = E.exact_ln(x, lmw, lmb, eps_m).view(S * L, D)
             zn = E.exact_ln(z, lzw, lzb, eps_z).view(L * L, DZ)
             pack = K.shadow_pack
-        value = pack(E.exact_mm(xn, wv.t()), S, L)
-        gate = E.exact_mm(xn, wg.t())
+        value = pack(mm(xn, wv.t()), S, L)
+        gate = mm(xn, wg.t())
         du = K.shadow_dropout(df, kept[4], float(p_drop)) if p_drop else df
-        dog = E.exact_mm(du.view(S * L, D), wo)
+        dog = mm(du.view(S * L, D), wo)
         do = (E.exact_point_pack(dog, gate, S, L)
               if point_pack
               else pack(E.exact_point(dog, gate, 1.0, 1), S, L))
@@ -571,14 +576,24 @@ def _h100_beta_shadow(args, kept, dy, eps_m, eps_z, p_drop):
             if mask is None:
                 bias = E.exact_mask_bias(bias, None, L)
         else:
-            bias = E.exact_mask_bias(E.exact_mm(zn, wb.t()), mask, L)
+            bias = E.exact_mask_bias(mm(zn, wb.t()), mask, L)
         prob = E.exact_soft(bias, bias, False)
-        dw = E.exact_mm(do, value.transpose(1, 2))
+        dw = mm(do, value.transpose(1, 2))
         ds = E.exact_soft(dw, prob, True)
         db = E.exact_db_transpose(ds, mask)
         # The paired consumer retains the incumbent FP32 FMA and reduction
         # order without materializing the L*L*128 layer-norm gradient.
-        return E.exact_beta_mm(db, wb) if pair_fusion else E.exact_beta(E.exact_mm(db, wb))
+        beta = E.exact_beta_mm(db, wb) if pair_fusion else E.exact_beta(mm(db, wb))
+        if qualified and os.environ.get("MINIWORLD_PWA_H100_EXACT_DWB", "0") == "1":
+            # Reuse the unrounded softmax derivative for the projection weight
+            # gradient. BF16 dB cancellation is inaccurate when pair gamma is
+            # zero. Match the reference's head-major GEMM operand layout too.
+            if pair_fusion:
+                zn = E.exact_ln_bf16(args[1], lzw, lzb, eps_z, True).view(L * L, DZ)
+            db_head = E.exact_transpose_tiled(db, None, L, False).view(H, L * L)
+            dwb = E.exact_mm_owned(db_head, zn)
+            return beta, dwb
+        return beta
 
 
 @opaque(fake=_backward_fake,name="pwa_h100_bwd")
