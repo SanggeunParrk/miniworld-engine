@@ -395,13 +395,29 @@ std::vector<torch::Tensor> pwa_cast(std::vector<torch::Tensor> src, std::vector<
     args.v[args.count++]={x.data_ptr(),y.data_ptr(),x.numel(),int(x.scalar_type()==torch::kFloat),int(types[k])};
     largest=std::max(largest,x.numel());
   }
-  if(args.count) {pwa_cast_kernel<<<dim3(std::min<long>((largest+255)/256,132),args.count),256,0,at::cuda::getCurrentCUDAStream()>>>(args);C10_CUDA_KERNEL_LAUNCH_CHECK();}
+  if(args.count) {
+    cudaKernel_t kernel;
+    C10_CUDA_CHECK(cudaGetKernel(&kernel, pwa_cast_kernel));
+    void* launch_args[] = {&args};
+    C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+        dim3(std::min<long>((largest+255)/256,132),args.count), dim3(256),
+        launch_args, 0, at::cuda::getCurrentCUDAStream()));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
   return out;
 }
 torch::Tensor pwa_mask(torch::Tensor like, c10::optional<torch::Tensor> mask, int64_t n) {
   if(mask)TORCH_CHECK(mask->is_cuda()&&mask->is_contiguous()&&mask->scalar_type()==torch::kBool&&mask->numel()==n,"contiguous bool token mask");
   auto out=torch::empty({n,n},like.options().dtype(torch::kBFloat16));
-  pwa_mask_kernel<<<std::min<int64_t>((n*n+255)/256,132),256,0,at::cuda::getCurrentCUDAStream()>>>(mask?mask->data_ptr<bool>():nullptr,reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),n);
+  const bool* key = mask ? mask->data_ptr<bool>() : nullptr;
+  auto* result = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
+  int width = static_cast<int>(n);
+  cudaKernel_t kernel;
+  C10_CUDA_CHECK(cudaGetKernel(&kernel, pwa_mask_kernel));
+  void* launch_args[] = {&key, &result, &width};
+  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
+      dim3(std::min<int64_t>((n*n+255)/256,132)), dim3(256),
+      launch_args, 0, at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 torch::Tensor pwa_transpose(torch::Tensor x) {
