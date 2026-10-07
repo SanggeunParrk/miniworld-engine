@@ -11,10 +11,12 @@
 // Items (sample, 128-query tile, head); the window's <= 8 32-key blocks [i0 - 64, i0 + 192) stream through a ring of 12 KB stages
 // (K, V K-major and K MN-major: the MN-major B operand of dQ must sit in the 128-B swizzle with 32-B atoms for kind::tf32, TMA "128a32",
 // UMMA layout type 1: the plain swizzle multiplies to zeros). The two compute warpgroups take alternate blocks (one query row per thread);
-// ONE MMA warp issues every MMA in block order, so the shared dQ accumulator sums in a fixed order. Per block: S / dP (SS, M = 128 queries,
+// two MMA warps issue the MMAs: one the S / dP of every block (SS), one the dQ accumulation (TS)
+// in block order, so the shared dQ accumulator sums in a fixed order. Per block: S / dP (SS, M = 128 queries,
 // N = 32 keys, K = 32; double-buffered per warpgroup) -> dS (rounded to TF32) into TMEM -> dQ += dS K (TS, M = 128, N = 32, K = 32 keys).
 // Epilogue: warpgroup w stages columns 16 w .. 16 w + 15 of dQ (scaled) in a shared-memory tile; warpgroup 0 then runs each whole row through
 // unrope + the head RMS backward (qkvg_bwd: dpq) and a TMA store writes it into dP [M, 4C] at column 32 h.
+// Warps: 0 TMA producer, 1 S / dP issuer, 2-3 qkvg tail, 4-11 row threads, 12 dQ issuer (416 threads).
 // Shared memory: q | dO item slots 2 x 32 KB | 12 block stages x 12 KB | dQ staging 16 KB | barriers. TMEM: warpgroup w at 160 w: S[b] at + 64 b, dP[b] at
 // + 64 b + 32, dS at + 128; dQ at 320.
 // SPDX-License-Identifier: Apache-2.0
@@ -95,7 +97,7 @@ DEVI void head_bwd(float (&d)[32], const float* __restrict__ P, const float* __r
   for (int e = 0; e < 32; ++e) d[e] = __uint_as_float(tf::rna(r * (u[e] - p[e] * r * t)));
 }
 
-extern "C" __global__ void __launch_bounds__(384, 1)
+extern "C" __global__ void __launch_bounds__(416, 1)
 swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mdo,
                        const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                        const __grid_constant__ CUtensorMap mkm, const float* __restrict__ LSE, const float* __restrict__ DD,
@@ -133,7 +135,7 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
 
   if (tid == 0) {
     for (int s = 0; s < QR; ++s) { mbar_init(&B.it_full[s], 1); mbar_init(&B.it_empty[s], 1); }
-    for (int s = 0; s < ST; ++s) { mbar_init(&B.bl_full[s], 1); mbar_init(&B.bl_empty[s], 1); }
+    for (int s = 0; s < ST; ++s) { mbar_init(&B.bl_full[s], 1); mbar_init(&B.bl_empty[s], 2); /* 2: the S / dP issuer and the dQ issuer */ }
     for (int w = 0; w < 2; ++w) {
       for (int b = 0; b < 2; ++b) { mbar_init(&B.s_full[w][b], 1); mbar_init(&B.s_free[w][b], 4); }
       mbar_init(&B.d_full[w], 4); mbar_init(&B.d_free[w], 1);
@@ -189,24 +191,23 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
         for (int k = 0; k < 4; ++k)
           tf::mma_ss(d + 32, desc_k128(it + TQI) + (uint64_t)(k * 2), desc_k128(st + TK) + (uint64_t)(k * 2), I_S, k > 0 ? 1u : 0u);
         tc_commit(&B.s_full[w][bs]);
+        tc_commit(&B.bl_empty[s]);
         if (kb == hi - 1) tc_commit(&B.it_empty[is]);                      // the item's last read of q / dO
       }
       __syncwarp();
     };
-    int nli = 0, nkb = 0, nlo = 0, nhi = 0;                                // the block after the current one (S / dP look-ahead)
-    auto adv = [&]() {
-      if (++nkb == nhi) { if (++nli < my_items) { int n, i0, h, sq; item_of(nli, n, i0, h, nlo, nhi, sq); nkb = nlo; } }
-    };
-    if (my_items > 0) {
-      int n, i0, h, sq; item_of(0, n, i0, h, nlo, nhi, sq); nkb = nlo;
-      issue_s(0, 0, nkb, nlo, nhi);
-      adv();
+    int G = 0;
+    for (int li = 0; li < my_items; ++li) {
+      int n, i0, h, lo, hi, sq; item_of(li, n, i0, h, lo, hi, sq);
+      for (int kb = lo; kb < hi; ++kb, ++G) issue_s(G, li, kb, lo, hi);
     }
+  } else if (warp == 12) {
+    // ------------------------------------------------------------------------------------------------ MMA issuer of dQ (block G -> warpgroup G & 1)
+    // a warp of its own: the S / dP issuer's waits and the dQ issue no longer queue behind each other
     int G = 0;
     for (int li = 0; li < my_items; ++li) {
       int n, i0, h, lo, hi, sq; item_of(li, n, i0, h, lo, hi, sq);
       for (int kb = lo; kb < hi; ++kb, ++G) {
-        if (nli < my_items) { issue_s(G + 1, nli, nkb, nlo, nhi); adv(); }
         const int s = G % ST, w = G & 1, gw = G >> 1;
         mbar_wait(&B.d_full[w], gw & 1);                                   // dS of block G is in TMEM
         if (kb == lo && li >= 1) mbar_wait(&B.q_free, (li - 1) & 1);       // the previous item's dQ has been read out
@@ -257,7 +258,7 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
       }
     }
     if (t == 0) tma_store_wait0();
-  } else if (warp >= 4) {
+  } else if (warp >= 4 && warp < 12) {
     // ------------------------------------------------------------------------------------------------ dS, one query row per thread
     const int w = (warp - 4) >> 2, lq = warp & 3, r = lq * 32 + lane;
     const uint32_t trow = tmem + ((uint32_t)(lq * 32) << 16);
