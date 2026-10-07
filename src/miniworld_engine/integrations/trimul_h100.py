@@ -227,6 +227,17 @@ def _native_residual_bucket(module, pair):
             and module.d_hidden == 384 and getattr(module, "outgoing", False))
 
 
+
+def _native_wide_inference_bucket(module, pair):
+    """One BIDI bucket; engine_backend=triton remains an explicit comparison."""
+    if (settings.current().engine_backend == "triton" or pair.ndim != 4
+            or module.d_hidden != pair.shape[-1]
+            or module.to_left.weight.shape[0] != 2 * pair.shape[-1]):
+        return False
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import native_inference_bucket
+    return native_inference_bucket(pair.shape[-1], pair.shape[1])
+
+
 def serves_inference(
     module, pair: torch.Tensor, *, bidirectional: bool, dropscale=None
 ) -> bool:
@@ -250,7 +261,8 @@ def serves_inference(
         return False
     if torch.cuda.get_device_capability(pair.device) != (9, 0):
         return False
-    if pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair)):
+    if (pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair))
+            or _native_wide_inference_bucket(module, pair)):
         if (pair.shape[1] not in (128, 256, 384, 512, 640, 768)
                 or module.d_hidden != pair.shape[-1] or module.ln_pair.eps != 1e-5
                 or any(p.dtype != torch.float32 for p in (
@@ -271,7 +283,7 @@ def serves_inference(
 def requires_cuda_inference(module, pair):
     """Promoted inference buckets refuse instead of silently using Triton."""
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import cuda_aux_enabled
-    native = cuda_aux_enabled()
+    native = cuda_aux_enabled() or _native_wide_inference_bucket(module, pair)
     return (module.implementation == ImplementationType.MINIWORLD
             and (native or settings.current().engine_backend != "triton" or _native_residual_bucket(module, pair))
             and pair.is_cuda and (native or pair.shape[-1] in (64, 128) or _native_residual_bucket(module, pair))
@@ -285,7 +297,8 @@ def update_inference(module, pair, mask, *, bidirectional):
     n = pair.shape[1]
     native_residual = not bidirectional and _native_residual_bucket(module, pair)
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
-    if (native_residual or runtime.cuda_aux_enabled()) and mask is not None and (
+    native_aux = runtime.cuda_aux_enabled() or _native_wide_inference_bucket(module, pair)
+    if (native_residual or native_aux) and mask is not None and (
         mask.device != pair.device or mask.dtype != torch.bool
         or tuple(mask.shape) != (1, n) or not mask.is_contiguous()
     ):
@@ -304,7 +317,7 @@ def update_inference(module, pair, mask, *, bidirectional):
     )
     # K1 packs the first four matrices with live stride-aware CUDA operations.
     # Preserve native column-major parameters instead of copying them first.
-    if pair.shape[-1] in (64, 128) or native_residual or runtime.cuda_aux_enabled():
+    if pair.shape[-1] in (64, 128) or native_residual or native_aux:
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
         matrices = cast_weights(weights)
     else:
@@ -326,7 +339,7 @@ def update_inference(module, pair, mask, *, bidirectional):
             uni_wide_inference,
         )
 
-        if runtime.cuda_aux_enabled():
+        if native_aux:
             from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import pair_mask
             pm = pair_mask(token, n, pair.device)
         else:
