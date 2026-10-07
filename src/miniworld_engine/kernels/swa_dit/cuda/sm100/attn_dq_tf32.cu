@@ -41,7 +41,8 @@ DEVI void mma_ts(uint32_t d, uint32_t a, uint64_t b, uint32_t id, uint32_t acc) 
   asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::tf32 [%0], [%1], %2, %3, p; }"
                :: "r"(d), "r"(a), "l"(b), "r"(id), "r"(acc) : "memory");
 }
-DEVI uint32_t rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r & 0xffffe000u; }
+// cvt.rna.tf32.f32 leaves the 13 low bits zero (checked on B200)
+DEVI uint32_t rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
 }  // namespace tf
 
 #ifndef ST
@@ -285,9 +286,10 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
         if (lane == 0) mbar_arrive(&B.s_free[w][bs]);
         const int j0 = kb * BK;
         const int clo = max(i - HW - j0, 0), chi = qok ? min(min(i + HW, sq - 1) - j0, BK - 1) : -1;
+        const unsigned wd = (unsigned)max(chi - clo + 1, 0);                // width of the visible columns (0: none)
 #pragma unroll
         for (int c = 0; c < 32; ++c) {
-          const bool ok = c >= clo && c <= chi;
+          const bool ok = (unsigned)(c - clo) < wd;
           const float p = ok ? ex2f(__uint_as_float(sv[c]) * SC - l2) : 0.f;
           dv[c] = tf::rna(ok ? p * (__uint_as_float(dv[c]) - dd) : 0.f);
         }
