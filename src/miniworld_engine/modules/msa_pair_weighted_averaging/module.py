@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -128,7 +130,22 @@ class MSAPairWeightedAveraging(nn.Module):
         value = self.to_value(msa)
         value = rearrange(value, "B M L (H D) -> B M L H D", H=self.n_head)
 
-        pair = self.ln_pair(pair)
+        if (self.implementation == ImplementationType.PYTORCH
+                and pair.dtype == torch.bfloat16
+                and os.environ.get("MINIWORLD_PWA_PYTORCH_NULL_BETA", "0") == "1"):
+            # Explicit repaired comparison path, separate from the original
+            # PyTorch baseline.  W_bias @ beta is constant over every softmax
+            # key row and cancels in real arithmetic.  Remove it BEFORE the
+            # BF16 rounding rather than subtracting a rounded projection.
+            # beta * 0 keeps the parameter connected with an exact zero grad.
+            # The dtype guard preserves the untouched FP32 reference oracle.
+            pair = F.layer_norm(
+                pair.float(), self.ln_pair.normalized_shape,
+                self.ln_pair.weight.float(), self.ln_pair.bias.float() * 0,
+                self.ln_pair.eps,
+            ).to(pair.dtype)
+        else:
+            pair = self.ln_pair(pair)
         bias = self.to_bias(pair)
         bias = rearrange(bias, "B L1 L2 H -> B H L1 L2")
 
