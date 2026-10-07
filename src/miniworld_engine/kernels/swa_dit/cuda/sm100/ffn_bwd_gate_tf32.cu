@@ -37,7 +37,7 @@ DEVI void umma_ts_tf32(uint32_t d_tmem, uint32_t a_tmem, uint64_t b, uint32_t id
                :: "r"(d_tmem), "r"(a_tmem), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
 }
 // x rounded to the nearest TF32 (ties away from zero), low 13 bits cleared
-DEVI uint32_t tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r & 0xffffe000u; }
+DEVI uint32_t tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
 DEVI float sigm32(float x) { return rcpf(1.f + ex2f(-1.4426950408889634f * x)); }
 DEVI float4 u2f4(uint4 u) { return make_float4(__uint_as_float(u.x), __uint_as_float(u.y), __uint_as_float(u.z), __uint_as_float(u.w)); }
 DEVI void stg16w(float* p, const uint32_t (&v)[16]) {                       // 64 contiguous bytes
