@@ -41,7 +41,8 @@ DEVI void mma_ts(uint32_t d, uint32_t a, uint64_t b, uint32_t id, uint32_t acc) 
   asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::tf32 [%0], [%1], %2, %3, p; }"
                :: "r"(d), "r"(a), "l"(b), "r"(id), "r"(acc) : "memory");
 }
-DEVI uint32_t rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r & 0xffffe000u; }
+// cvt.rna.tf32.f32 leaves the 13 low bits zero (checked on B200)
+DEVI uint32_t rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
 }  // namespace tf
 
 #ifndef ST
@@ -293,6 +294,7 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
         if (lane == 0) mbar_arrive(&B.s_free[w][bs]);
         const int i0 = qb * BQ;
         const int clo = max(j - HW - i0, 0), chi = kok ? min(min(j + HW, sq - 1) - i0, BQ - 1) : -1;
+        const unsigned wd = (unsigned)max(chi - clo + 1, 0);                // width of the visible columns (0: none)
         const float4* l4 = reinterpret_cast<const float4*>(sm + (st - su) + 4 * TQ);
         const float4* d4 = reinterpret_cast<const float4*>(sm + (st - su) + 4 * TQ + 128);
 #pragma unroll
@@ -302,7 +304,7 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
             const int c = 4 * q + e;
-            const bool ok = c >= clo && c <= chi;
+            const bool ok = (unsigned)(c - clo) < wd;
             const float p = ok ? ex2f(__uint_as_float(sv[c]) * SC - la[e] * LOG2E) : 0.f;
             const float ds = ok ? p * (__uint_as_float(dv[c]) - da[e]) : 0.f;
             sv[c] = tf::rna(p); dv[c] = tf::rna(ds);
