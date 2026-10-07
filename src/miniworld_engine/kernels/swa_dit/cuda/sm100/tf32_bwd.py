@@ -74,30 +74,9 @@ class AdalnBwdTf32:
         return run, out
 
 
-class QkvgBwdPrepTf32:
-    """pq, pk, dG [M, C] fp32, dQ / dK / dV head-major [N, H, S, D] (all fp32 or all bf16), cos / sin [B S, D/2] -> dP [M, 4C] fp32
-    (TF32-rounded) = [dpq | dpk | dpv | dg]."""
-
-    def __init__(self):
-        self.kf = _f._load("qkvg_bwd_prep_tf32")
-        self.kb = _f._load("qkvg_bwd_prep_tf32", "swa_qkvg_bwd_prep_bf16h_tf32_sm100")
-
-    def bind(self, pq, pk, dqh, dkh, dvh, dg, cos, sin, B, eps):
-        N, _, S, _ = dqh.shape
-        M = N * S
-        dp = torch.empty(M, 4 * C, device=pq.device, dtype=torch.float32)
-        k = self.kf if dqh.dtype == torch.float32 else self.kb
-        assert dkh.dtype == dvh.dtype == dqh.dtype
-
-        def run():
-            k(((M + 7) // 8, 1, 1), (256, 1, 1), pq, pk, dqh, dkh, dvh, dg, cos, sin, dp, int(S), int(B), int(M), float(eps))
-        run.keep = (pq, pk, dqh, dkh, dvh, dg, cos, sin)
-        return run, dp
-
-
 class OprojBwdTf32:
     """The out-projection backward around dgated = datt Wo: :meth:`prep` (dq1, o, g, att, mod -> datt, gated [M, C] TF32-rounded and
-    dmod column 2C) and :meth:`post` (dgated, o, g -> dO [M, C] (fp32 TF32-rounded, or bf16), dG [M, C] fp32, Dv [N, H, S] fp32)."""
+    dmod column 2C) and :meth:`post` (dgated, o, g -> dO [M, C] (fp32 TF32-rounded, or bf16), Dv [N, H, S] fp32, and dG into dP [M, 4C])."""
 
     def __init__(self):
         self.kp = _f._load("oproj_bwd_tf32", "swa_oproj_bwd_prep_tf32_sm100")
@@ -115,19 +94,19 @@ class OprojBwdTf32:
         run.keep = (dq1, o, g, att, mod, dmod)
         return run, (datt, gated)
 
-    def post(self, dgated, o, g, S, bf16_do):
+    def post(self, dgated, o, g, S, bf16_do, dp):
+        """dp [M, 4C] fp32 receives dG (TF32-rounded) at columns 3C .. 4C."""
         M = dgated.numel() // C
         N = M // S
         dev = dgated.device
         dout = torch.empty(M, C, device=dev, dtype=torch.bfloat16 if bf16_do else torch.float32)
-        dg = torch.empty(M, C, device=dev, dtype=torch.float32)
         dv = torch.empty(N, H, S, device=dev, dtype=torch.float32)
         k = self.kb if bf16_do else self.kf
 
         def run():
-            k(((M + 7) // 8, 1, 1), (256, 1, 1), dgated, o, g, dout, dg, dv, int(S), int(M))
-        run.keep = (dgated, o, g)
-        return run, (dout, dg, dv)
+            k(((M + 7) // 8, 1, 1), (256, 1, 1), dgated, o, g, dout, dp, dv, int(S), int(M))
+        run.keep = (dgated, o, g, dp)
+        return run, (dout, dv)
 
 
 class ModBwdTf32:
@@ -151,9 +130,10 @@ class ModBwdTf32:
 
 
 class AttnBwdTf32:
-    """Window-attention backward (attn_dq_tf32.cu, attn_dkv_tf32.cu): Qh, Kh, Vh head-major [N, H, S, D] fp32 (TF32-valued), dO [N S, C] fp32
-    (TF32-valued), lse and Dv [N, H, S] fp32, seqused [N] int32 -> dQh, dKh, dVh [N, H, S, D] fp32 (dV rounded to TF32). :meth:`bind_dq` /
-    :meth:`bind_dkv` are the two passes; :meth:`bind` runs both."""
+    """Window-attention backward with the head-wise tail of the qkvg backward in its epilogues (attn_dq_tf32.cu, attn_dkv_tf32.cu): Qh, Kh, Vh
+    head-major [N, H, S, D] fp32 (TF32-valued), dO [N S, C] fp32 (TF32-valued), lse and Dv [N, H, S] fp32, seqused [N] int32, the raw
+    projections pq / pk [N S, C] and cos / sin [B S, D/2] -> dpq | dpk | dpv written into dP [N S, 4C] columns 0 .. 3C (TF32-rounded; dpq: the
+    dQ pass, dpk and dpv: the dK / dV pass; column 3C .. 4C is dG, written by the out-projection kernel)."""
 
     def __init__(self):
         self.kq = _f._load("attn_dq_tf32")
@@ -163,48 +143,24 @@ class AttnBwdTf32:
     def _mat(t, rows, cols, box_rows, swizzle=128):
         return _f._f32map(t, [cols, rows], cols * 4, [32, box_rows], swizzle=swizzle)
 
-    def bind_dq(self, qh, kh, vh, do, lse, dv, seqused, out=None):
+    def bind(self, qh, kh, vh, do, lse, dv, seqused, pq, pk, cos, sin, dp, B):
         N, _, S, _ = qh.shape
-        assert S % 128 == 0
+        assert S % 128 == 0 and dp.shape == (N * S, 4 * C)
         rows = N * H * S
-        out = torch.empty(N, H, S, D, device=qh.device, dtype=torch.float32) if out is None else out
         q2, k2, v2 = (t.view(rows, D) for t in (qh, kh, vh))
-        maps = (self._mat(q2, rows, D, 128), self._mat(do, N * S, C, 128), self._mat(k2, rows, D, 32), self._mat(v2, rows, D, 32),
-                self._mat(k2, rows, D, 32, "128a32"))
-        omap = self._mat(out.view(rows, D), rows, D, 128)
+        mdp = self._mat(dp, N * S, 4 * C, 128)
+        mq = (self._mat(q2, rows, D, 128), self._mat(do, N * S, C, 128), self._mat(k2, rows, D, 32), self._mat(v2, rows, D, 32),
+              self._mat(k2, rows, D, 32, "128a32"))
+        mk = (self._mat(q2, rows, D, 32), self._mat(q2, rows, D, 32, "128a32"), self._mat(k2, rows, D, 128), self._mat(v2, rows, D, 128),
+              self._mat(do, N * S, C, 32), self._mat(do, N * S, C, 32, "128a32"))
         grid = (min(_sm.nsm(), N * (S // 128) * H), 1, 1)
+        scale = float(D ** -0.5)
 
         def run():
-            self.kq(grid, (384, 1, 1), *maps, lse, dv, seqused, omap, int(S), int(N), float(D ** -0.5))
-        run.keep = (maps, omap, qh, kh, vh, do, lse, dv, seqused)
-        return run, out
-
-    def bind_dkv(self, qh, kh, vh, do, lse, dv, seqused, dk=None, dvo=None):
-        N, _, S, _ = qh.shape
-        assert S % 128 == 0
-        rows = N * H * S
-        dk = torch.empty(N, H, S, D, device=qh.device, dtype=torch.float32) if dk is None else dk
-        dvo = torch.empty_like(dk) if dvo is None else dvo
-        q2, k2, v2 = (t.view(rows, D) for t in (qh, kh, vh))
-        maps = (self._mat(q2, rows, D, 32), self._mat(q2, rows, D, 32, "128a32"), self._mat(k2, rows, D, 128), self._mat(v2, rows, D, 128),
-                self._mat(do, N * S, C, 32), self._mat(do, N * S, C, 32, "128a32"))
-        dkmap, dvmap = self._mat(dk.view(rows, D), rows, D, 128), self._mat(dvo.view(rows, D), rows, D, 128)
-        grid = (min(_sm.nsm(), N * (S // 128) * H), 1, 1)
-
-        def run():
-            self.kk(grid, (384, 1, 1), *maps, lse, dv, seqused, dkmap, dvmap, int(S), int(N), float(D ** -0.5))
-        run.keep = (maps, dkmap, dvmap, qh, kh, vh, do, lse, dv, seqused)
-        return run, (dk, dvo)
-
-    def bind(self, qh, kh, vh, do, lse, dv, seqused):
-        rq, dq = self.bind_dq(qh, kh, vh, do, lse, dv, seqused)
-        rk, (dk, dvo) = self.bind_dkv(qh, kh, vh, do, lse, dv, seqused)
-
-        def run():
-            rq()
-            rk()
-        run.keep = (rq, rk)
-        return run, (dq, dk, dvo)
+            self.kq(grid, (384, 1, 1), *mq, lse, dv, seqused, pq, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS))
+            self.kk(grid, (384, 1, 1), *mk, lse, dv, seqused, pk, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS))
+        run.keep = (mq, mk, mdp, qh, kh, vh, do, lse, dv, seqused, pq, pk, cos, sin, dp)
+        return run
 
 
 class _Kernels:
@@ -213,7 +169,6 @@ class _Kernels:
         self.attn = AttnBwdTf32()
         self.ffn_gate = FfnBwdGateTf32()
         self.adaln = AdalnBwdTf32()
-        self.qkvg_prep = QkvgBwdPrepTf32()
         self.oproj = OprojBwdTf32()
 
 
@@ -277,14 +232,14 @@ def block_bwd_tf32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, 
         # out-projection
         run, (datt, gated) = K.oproj.prep(dq1, o, g, att, mod, dmod, A, B)
         run()
-        run, (dO, dG, Dv) = K.oproj.post(mm_tf32(datt, wo_t), o, g, S, False)
+        dP = torch.empty(M, 4 * C, device=dev, dtype=torch.float32)       # [dpq | dpk | dpv | dg]
+        run, (dO, Dv) = K.oproj.post(mm_tf32(datt, wo_t), o, g, S, False, dP)
         run()
         # window attention (TF32 kernels, fp32 operands: the forward's saves as they are)
-        run, (dQh, dKh, dVh) = K.attn.bind(qh, kh, vh, dO, lse, Dv, seqused)
+        # (the epilogues run the head-wise tail of the qkvg backward and write dpq | dpk | dpv into dP)
+        run = K.attn.bind(qh, kh, vh, dO, lse, Dv, seqused, pq, pk, cos, sin, dP, B)
         run()
         # qkvg
-        run, dP = K.qkvg_prep.bind(pq, pk, dQh, dKh, dVh, dG, cos, sin, B, eps)
-        run()
         run, dq = K.adaln.bind(q.reshape(M, C), mm_tf32(dP, w), dq1, None, mod, dmod, A, B, eps, 0)
         run()
         dwqkvg = mm_tf32(dP.t(), x)                        # dWqkv | dWg as one GEMM over dP (x read once)

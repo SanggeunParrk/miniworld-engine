@@ -12,7 +12,8 @@
 // copies). The two compute warpgroups take alternate blocks (one key row per thread); ONE MMA warp issues every MMA in block order, so the
 // shared dK / dV accumulators sum in a fixed order (deterministic). Per block: S^T / dP^T (SS, M = 128 keys, N = 32, K = 32; double-buffered
 // per warpgroup) -> P^T, dS^T (rounded to TF32) into TMEM -> dV += P^T dO, dK += dS^T q (TS, A from TMEM, M = 128, N = 32, K = 32).
-// Epilogue: warpgroup 0 writes dK (scaled, fp32), warpgroup 1 dV (rounded to TF32: a qkvg-backward operand), one 128-B row per thread
+// Epilogue: warpgroup 0 runs dK (scaled) through unrope + the head RMS backward (qkvg_bwd: dpk), warpgroup 1 rounds dV to TF32 (dpv); both
+// are stored into dP [M, 4C] (columns C + 32 h / 2 C + 32 h), one 128-B row per thread
 // via a shared-memory tile and a TMA store; the K / V slot is released after the item's last S^T / dP^T reads (two item slots).
 // Shared memory: K | V item slots 2 x 32 KB | 7 block stages x 17 KB (q | dO | q MN | dO MN | LSE | D) | dK / dV staging 2 x 16 KB | barriers.
 // TMEM: warpgroup w at 192 w: S^T[b] at + 64 b, dP^T[b] at + 64 b + 32, P^T at + 128, dS^T at + 160;  dK at 384, dV at 416.
@@ -64,8 +65,39 @@ DEVI void bulk_g2s(uint32_t dst, const void* src, uint32_t bytes, uint64_t* bar)
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                :: "r"(dst), "l"(src), "r"(bytes), "r"(smem_u32(bar)) : "memory");
 }
-DEVI void st4(float* p, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-  asm volatile("st.global.v4.b32 [%0], {%1, %2, %3, %4};" :: "l"(p), "r"(a), "r"(b), "r"(c), "r"(d) : "memory");
+
+// the head-wise tail of the qkvg backward for one (row, head) held by one thread (the Triton _swa_qkvg_bwd_fp32_kernel's dP):
+//   dp = head_rms_bwd(p, unrope(d)),  head_rms_bwd(p, du) = r (du - yh mean_D(du yh)),  yh = p r,  r = 1 / sqrt(mean_D(p^2) + eps),
+//   unrope = the transpose of the RoPE rotation: dx1 = dy1 c + dy2 s, dx2 = dy2 c - dy1 s (halves d < 16 | d >= 16)
+// p: this row's raw projection (32 fp32 at P), cs / sn: the atom's cos / sin (16 fp32 each); d[32] in place -> TF32-rounded dp
+DEVI void head_bwd(float (&d)[32], const float* __restrict__ P, const float* __restrict__ cs, const float* __restrict__ sn, float eps) {
+  float u[32];
+#pragma unroll
+  for (int k = 0; k < 4; ++k) {
+    const float4 c4 = *reinterpret_cast<const float4*>(cs + 4 * k), s4 = *reinterpret_cast<const float4*>(sn + 4 * k);
+    const float c[4] = {c4.x, c4.y, c4.z, c4.w}, s[4] = {s4.x, s4.y, s4.z, s4.w};
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const float a = d[4 * k + e], b = d[16 + 4 * k + e];
+      u[4 * k + e] = a * c[e] + b * s[e];
+      u[16 + 4 * k + e] = b * c[e] - a * s[e];
+    }
+  }
+  float p[32], ss = 0.f;
+#pragma unroll
+  for (int k = 0; k < 8; ++k) {
+    const float4 q4 = *reinterpret_cast<const float4*>(P + 4 * k);
+    p[4 * k] = q4.x; p[4 * k + 1] = q4.y; p[4 * k + 2] = q4.z; p[4 * k + 3] = q4.w;
+  }
+#pragma unroll
+  for (int e = 0; e < 32; ++e) ss = fmaf(p[e], p[e], ss);
+  const float r = 1.f / sqrtf(ss * (1.f / 32.f) + eps);
+  float t = 0.f;
+#pragma unroll
+  for (int e = 0; e < 32; ++e) t = fmaf(u[e], p[e] * r, t);
+  t *= (1.f / 32.f);
+#pragma unroll
+  for (int e = 0; e < 32; ++e) d[e] = __uint_as_float(tf::rna(r * (u[e] - p[e] * r * t)));
 }
 
 extern "C" __global__ void __launch_bounds__(384, 1)
@@ -73,7 +105,8 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
                         const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                         const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdom,
                         const float* __restrict__ LSE, const float* __restrict__ DD, const int* __restrict__ SEQU,
-                        const __grid_constant__ CUtensorMap mdk, const __grid_constant__ CUtensorMap mdv, int S, int N, float scale) {
+                        const float* __restrict__ PKS, const float* __restrict__ COS, const float* __restrict__ SIN,
+                        const __grid_constant__ CUtensorMap mdp, int S, int N, int Bn, float scale, float eps) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -261,21 +294,28 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.acc_free);
-      // staged in shared memory (one [128][32] tile per warpgroup, SW128) and stored by TMA: a thread's own 128-B row stored directly
-      // touches 32 half-filled sectors per store instruction (0.08 ms of this kernel's 0.35)
+      // dpk (warpgroup 0) / dpv (warpgroup 1): the head-wise tail of the qkvg backward runs here, on the 32 values this thread holds (key row j
+      // of head h), so dK / dV never go to memory: dP [M, 4C] = [dpq | dpk | dpv | dg] takes dpk at column C + 32 h and dpv at 2 C + 32 h
+      float d[32];
+#pragma unroll
+      for (int e = 0; e < 32; ++e) d[e] = w ? __uint_as_float(v[e]) : __uint_as_float(v[e]) * scale;
+      if (w == 0) {
+        head_bwd(d, PKS + ((size_t)n * S + j) * 128 + 32 * h, COS + ((size_t)(n % Bn) * S + j) * 16, SIN + ((size_t)(n % Bn) * S + j) * 16, eps);
+      } else {
+#pragma unroll
+        for (int e = 0; e < 32; ++e) d[e] = __uint_as_float(tf::rna(d[e]));
+      }
+      // staged in shared memory (one [128][32] tile per warpgroup, SW128) and stored by TMA
       const uint32_t xs = su + O_X + w * XS;
       if (r == 0) tma_store_wait_read0();                                  // the previous item's store has read the tile
       named_bar_sync(1 + w, 128);
 #pragma unroll
-      for (int q = 0; q < 8; ++q) {
-        uint32_t o[4];
-#pragma unroll
-        for (int e = 0; e < 4; ++e) o[e] = w ? tf::rna(__uint_as_float(v[4 * q + e])) : __float_as_uint(__uint_as_float(v[4 * q + e]) * scale);
-        sts128(xs + sw128((uint32_t)r, (uint32_t)q), make_uint4(o[0], o[1], o[2], o[3]));
-      }
+      for (int q = 0; q < 8; ++q)
+        sts128(xs + sw128((uint32_t)r, (uint32_t)q), make_uint4(__float_as_uint(d[4 * q]), __float_as_uint(d[4 * q + 1]),
+                                                                __float_as_uint(d[4 * q + 2]), __float_as_uint(d[4 * q + 3])));
       fence_proxy_async();
       named_bar_sync(1 + w, 128);
-      if (r == 0) { tma_store_2d(w ? &mdv : &mdk, xs, 0, (n * H + h) * S + j0); tma_store_commit(); }
+      if (r == 0) { tma_store_2d(&mdp, xs, (w ? 256 : 128) + 32 * h, n * S + j0); tma_store_commit(); }
     }
   }
   if (warp >= 4 && (warp & 3) == 0 && lane == 0) tma_store_wait0();

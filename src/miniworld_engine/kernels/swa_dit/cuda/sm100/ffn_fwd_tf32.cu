@@ -67,10 +67,11 @@ DEVI void stg16w(float* p, const uint32_t (&v)[16]) {                       // 6
 constexpr int C = 128;
 constexpr int KB = 128 * 128;                                              // activation k-block: [128 rows][32 fp32], SW128 (16 KB)
 constexpr int WB = 64 * 128;                                               // weight slot: [64 output rows][32 fp32], SW128 (8 KB)
-constexpr int NA = 8, NW = 12;
+constexpr int NA = 8, NW = 8;
 constexpr int NAK = 28, NWK = 56;                                          // ring k-blocks / weight slots per tile
 constexpr int K_Q = 8, K_GA = 12, K_SH = 16, K_SC = 20, K_GF = 24;         // ring order within a tile (G / O at 0 .. 7)
-constexpr int O_A = 0, O_W = NA * KB, O_RED = O_W + NW * WB, O_BAR = O_RED + 2 * 2 * 128 * 4;
+constexpr int SGB = 128 * 64;                                              // one staged output tile: [128 rows][16 fp32], SW64 (8 KB)
+constexpr int O_A = 0, O_W = NA * KB, O_RED = O_W + NW * WB, O_STG = O_RED + 2 * 2 * 128 * 4, O_BAR = O_STG + 2 * 2 * SGB;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 static_assert((O_W % 1024) == 0 && (O_RED % 1024) == 0, "1 KB alignment of the 128-B-swizzled tiles");
@@ -101,9 +102,10 @@ extern "C" __global__ void __launch_bounds__(384, 1)
 swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_constant__ CUtensorMap mo, const __grid_constant__ CUtensorMap mq,
                        const __grid_constant__ CUtensorMap mwo, const __grid_constant__ CUtensorMap mwab, const __grid_constant__ CUtensorMap mwd,
                        const __grid_constant__ CUtensorMap mmod,
-                       int S, int A, int Bn, int SP, int AT, int nab, int nag, int ntile, float eps, int save,
-                       float* __restrict__ OUT, float* __restrict__ Q1s, float* __restrict__ ATTs,
-                       float* __restrict__ Ys, float* __restrict__ FFs) {
+                       const __grid_constant__ CUtensorMap mout, const __grid_constant__ CUtensorMap mq1s,
+                       const __grid_constant__ CUtensorMap matt, const __grid_constant__ CUtensorMap mys,
+                       const __grid_constant__ CUtensorMap mffs,
+                       int S, int A, int Bn, int SP, int AT, int nab, int nag, int ntile, float eps, int save) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -248,6 +250,16 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
     const int sp = (int)r / AT, at = (int)r % AT;
     const bool rowok = (int)r < SP * AT;
     float* red = reinterpret_cast<float*>(sm + O_RED);                     // [tile parity][warpgroup][128 rows]
+    // outputs: each warpgroup stages its 16 channels of a unit as [128 rows][64 B] tiles (SW64, one row per thread) and one thread stores them
+    // by TMA (a thread's own 64-B pieces stored directly cost far more than the stores themselves, as in ffn_bwd_gate_tf32.cu)
+    const bool elected = (warp & 3) == 0 && lane == 0;
+    const uint32_t stg = su + O_STG + (uint32_t)wg * 2 * SGB;
+    auto stage = [&](int k, const uint32_t (&v)[16]) {
+#pragma unroll
+      for (int q = 0; q < 4; ++q) sts128(stg + k * SGB + sw64(r, q), make_uint4(v[4 * q], v[4 * q + 1], v[4 * q + 2], v[4 * q + 3]));
+    };
+    auto stage_wait = [&]() { if (elected) tma_store_wait_read0(); named_bar_sync(2 + wg, 128); };
+    auto stage_ready = [&]() { fence_proxy_async(); named_bar_sync(2 + wg, 128); };
     for (int T = 0; T < ntT; ++T) {
       int b, a0, s0; coords(T, b, a0, s0);
       const int n = (a0 + sp) * Bn + b, s = s0 + at;
@@ -312,7 +324,13 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
           q1r[4 * e + 2] = __float_as_uint(x2); q1r[4 * e + 3] = __float_as_uint(x3);
         }
         tmem_st16(trow + T_Q1 + c0, q1r);
-        if (sv) { stg16w(ATTs + ro + c0, av); stg16w(Q1s + ro + c0, q1r); }
+        if (save) {
+          stage_wait();
+          stage(0, av);
+          stage(1, q1r);
+          stage_ready();
+          if (elected) { tma_store_4d(&matt, stg, c0, s0, b, a0); tma_store_4d(&mq1s, stg + SGB, c0, s0, b, a0); tma_store_commit(); }
+        }
       }
       __syncwarp();
       // every warp releases all four q and gate_a k-blocks (the slots' count is 8): a warpgroup's arrival on the two of each it does
@@ -349,7 +367,12 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
           yr[4 * e + 0] = tf32r(y0); yr[4 * e + 1] = tf32r(y1); yr[4 * e + 2] = tf32r(y2); yr[4 * e + 3] = tf32r(y3);
         }
         tmem_st16(trow + T_A + c0, yr);
-        if (sv) stg16w(Ys + ro + c0, qv);
+        if (save) {
+          stage_wait();
+          stage(0, qv);
+          stage_ready();
+          if (elected) { tma_store_4d(&mys, stg, c0, s0, b, a0); tma_store_commit(); }
+        }
       }
       tmem_wait_st();
       tc_fence_before();
@@ -401,8 +424,15 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
           qv[4 * e + 2] = __float_as_uint(fmaf(gf[e].z, __uint_as_float(fv[4 * e + 2]), __uint_as_float(qv[4 * e + 2])));
           qv[4 * e + 3] = __float_as_uint(fmaf(gf[e].w, __uint_as_float(fv[4 * e + 3]), __uint_as_float(qv[4 * e + 3])));
         }
-        if (ok) stg16w(OUT + ro + c0, qv);
-        if (sv) stg16w(FFs + ro + c0, fv);
+        stage_wait();
+        stage(0, qv);
+        if (save) stage(1, fv);
+        stage_ready();
+        if (elected) {
+          tma_store_4d(&mout, stg, c0, s0, b, a0);
+          if (save) tma_store_4d(&mffs, stg + SGB, c0, s0, b, a0);
+          tma_store_commit();
+        }
       }
       tc_fence_before();
       __syncwarp();
@@ -412,6 +442,7 @@ swa_ffn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mg, const __grid_cons
       for (int k = K_GF; k < NAK; ++k) arel(k);
     }
   }
+  if (warp >= 4 && (warp & 3) == 0 && lane == 0) tma_store_wait0();
   tc_fence_before();
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }

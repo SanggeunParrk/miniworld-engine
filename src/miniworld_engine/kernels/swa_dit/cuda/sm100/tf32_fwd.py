@@ -56,7 +56,6 @@ CUBINS = {
     "ffn_fwd_tf32": ("ffn_fwd_tf32", ()),
     "ffn_bwd_gate_tf32": ("ffn_bwd_gate_tf32", ()),
     "adaln_bwd_tf32": ("adaln_bwd_tf32", ()),
-    "qkvg_bwd_prep_tf32": ("qkvg_bwd_prep_tf32", ()),
     "oproj_bwd_tf32": ("oproj_bwd_tf32", ()),
     "mod_bwd_tf32": ("mod_bwd_tf32", ()),
     "attn_dq_tf32": ("attn_dq_tf32", ()),
@@ -64,15 +63,14 @@ CUBINS = {
 }
 #: dynamic shared memory per kernel (the sources' SMEM / SMEM_BYTES)
 SMEM = {"wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
-        "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 12 * 8192 + 2048 + 512,
-        "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512, "adaln_bwd_tf32": 0, "qkvg_bwd_prep_tf32": 0, "oproj_bwd_tf32": 0, "mod_bwd_tf32": 0,
+        "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 8 * 8192 + 2048 + 4 * 8192 + 512,
+        "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512, "adaln_bwd_tf32": 0, "oproj_bwd_tf32": 0, "mod_bwd_tf32": 0,
         "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512, "attn_dkv_tf32": 2 * 32768 + 7 * 17408 + 2 * 16384 + 64 * 16 + 512}
 #: kernel function per cubin
 FUNCS = {"wprep_tf32": "swa_wprep_tf32_sm100", "mod_fwd_tf32": "swa_mod_fwd_tf32_sm100", "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
          "attn_fwd_tf32": "swa_attn_fwd_tf32_sm100", "ffn_fwd_tf32": "swa_ffn_fwd_tf32_sm100",
          "ffn_bwd_gate_tf32": "swa_ffn_bwd_gate_tf32_sm100",
          "adaln_bwd_tf32": "swa_adaln_bwd_tf32_sm100",
-         "qkvg_bwd_prep_tf32": "swa_qkvg_bwd_prep_tf32_sm100",
          "oproj_bwd_tf32": "swa_oproj_bwd_prep_tf32_sm100",
          "mod_bwd_tf32": "swa_mod_silu_tf32_sm100",
          "attn_dq_tf32": "swa_attn_dq_tf32_sm100", "attn_dkv_tf32": "swa_attn_dkv_tf32_sm100"}
@@ -118,6 +116,11 @@ def tiling(A: int) -> tuple[int, int]:
 def _rows_map(t, A, B, S, SP, AT):
     """[A, B, S, 128] fp32 rows -> 4-D TMA map, box (32 channels, AT atoms, 1, SP augments), 128-B swizzle (one k-block per load)."""
     return _f32map(t, [C, S, B, A], [C * 4, S * C * 4, B * S * C * 4], [32, AT, 1, SP])
+
+
+def _out_map(t, A, B, S, SP, AT):
+    """[A, B, S, 128] fp32 rows -> 4-D TMA store map, box (16 channels, AT atoms, 1, SP augments), 64-B swizzle (a staged output tile)."""
+    return _f32map(t, [C, S, B, A], [C * 4, S * C * 4, B * S * C * 4], [16, AT, 1, SP], swizzle=64)
 
 
 def _mod_map(mod, AT):
@@ -347,47 +350,19 @@ class FfnFwdTf32:
         SP, AT = tiling(A)
         dev = q.device
         out = torch.empty(M, C, device=dev, dtype=torch.float32)
-        Q1, Att, Y, Ff = (
-            (torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(4))
-            if save
-            else (out, out, out, out)
-        )
-        maps = (
-            _rows_map(g, A, B, S, SP, AT),
-            _rows_map(o, A, B, S, SP, AT),
-            _rows_map(q, A, B, S, SP, AT),
-            _f32map(wo, [C, C], C * 4, [32, 64]),
-            _f32map(wab, [C, 2 * NHID], C * 4, [32, 64]),
-            _f32map(wd, [NHID, C], NHID * 4, [32, 64]),
-            _mod_map(mod, AT),
-        )
+        Q1, Att, Y, Ff = ((torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(4)) if save else (out, out, out, out))
+        maps = (_rows_map(g, A, B, S, SP, AT), _rows_map(o, A, B, S, SP, AT), _rows_map(q, A, B, S, SP, AT),
+                _f32map(wo, [C, C], C * 4, [32, 64]), _f32map(wab, [C, 2 * NHID], C * 4, [32, 64]),
+                _f32map(wd, [NHID, C], NHID * 4, [32, 64]), _mod_map(mod, AT),
+                *(_out_map(t, A, B, S, SP, AT) for t in (out, Q1, Att, Y, Ff)))
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
         grid = (min(num_sms(), ntile), 1, 1)
 
         def run():
-            self.k(
-                grid,
-                (384, 1, 1),
-                *maps,
-                int(S),
-                int(A),
-                int(B),
-                int(SP),
-                int(AT),
-                int(nab),
-                int(nag),
-                int(ntile),
-                float(EPS),
-                int(save),
-                out,
-                Q1,
-                Att,
-                Y,
-                Ff,
-            )
-
-        run.keep = (maps, mod)
+            self.k(grid, (384, 1, 1), *maps, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile), float(EPS),
+                   int(save))
+        run.keep = (maps, mod, out, Q1, Att, Y, Ff)
         return run, (out, Q1, Att, Y, Ff)
 
 
