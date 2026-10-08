@@ -281,20 +281,29 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
         mbar_wait(&B.s_full[w][bs], (gw >> 1) & 1);
         tc_fence_after();
         uint32_t sv[32], dv[32];
-        tmem_ld32(trow + 160 * w + 64 * bs, sv);
-        tmem_ld32(trow + 160 * w + 64 * bs + 32, dv);
-        tmem_wait_ld();
+        const int j0 = kb * BK;
+        // the queries of this warp (32 consecutive) see the keys [iw - HW, iw + 31 + HW]: a block outside is all masked for the whole warp
+        const bool live = (j0 + BK - 1 >= i0 + 32 * lq - HW) && (j0 <= i0 + 32 * lq + 31 + HW);
+        if (live) {
+          tmem_ld32(trow + 160 * w + 64 * bs, sv);
+          tmem_ld32(trow + 160 * w + 64 * bs + 32, dv);
+          tmem_wait_ld();
+        } else {
+#pragma unroll
+          for (int c = 0; c < 32; ++c) { sv[c] = 0u; dv[c] = 0u; }
+        }
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.s_free[w][bs]);
-        const int j0 = kb * BK;
         const int clo = max(i - HW - j0, 0), chi = qok ? min(min(i + HW, sq - 1) - j0, BK - 1) : -1;
         const unsigned wd = (unsigned)max(chi - clo + 1, 0);                // width of the visible columns (0: none)
+        if (live) {
 #pragma unroll
         for (int c = 0; c < 32; ++c) {
           const bool ok = (unsigned)(c - clo) < wd;
           const float p = ok ? ex2f(__uint_as_float(sv[c]) * SC - l2) : 0.f;
           dv[c] = tf::rna(ok ? p * (__uint_as_float(dv[c]) - dd) : 0.f);
+        }
         }
         if (gw >= 1) mbar_wait(&B.d_free[w], (gw - 1) & 1);                // the dQ MMA of this warpgroup's previous block is done
         tc_fence_after();
