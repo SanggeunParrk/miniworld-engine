@@ -61,11 +61,18 @@ class MSAPairWeightedAveraging(nn.Module):
         self.ln_msa = LayerNorm(d_msa, implementation=implementation)
         self.to_value = Linear(d_msa, d_hidden * n_head, bias=False, init="glorot")
 
-        self.ln_pair = LayerNorm(d_pair, implementation=implementation)
+        # No offset: ln_pair feeds only the softmax logits (to_bias has no bias), and an offset beta adds the same Wb_h . beta to
+        # every key's logit of head h, which softmax over keys cancels exactly (AF3 Alg. 10 keeps it only because LayerNorm defaults to one).
+        self.ln_pair = LayerNorm(d_pair, bias=False, implementation=implementation)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
 
         self.to_gate = Linear(d_msa, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_msa, bias=False, init="zero")
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # checkpoints written before the offset was removed carry ln_pair.bias; it had no effect on the output, so dropping it is exact
+        state_dict.pop(prefix + "ln_pair.bias", None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @typecheck
     def forward(
@@ -113,7 +120,7 @@ class MSAPairWeightedAveraging(nn.Module):
                 if p_drop > 0:
                     keep = torch.rand((msa.shape[0], msa.shape[2], msa.shape[3]), device=msa.device, dtype=msa.dtype) > p_drop
                 return triton_pair_weighted_averaging(msa, pair, mask, self.ln_msa.weight, self.ln_msa.bias, self.to_value.weight,
-                                                      self.to_gate.weight, self.ln_pair.weight, self.ln_pair.bias,
+                                                      self.to_gate.weight, self.ln_pair.weight,
                                                       self.to_bias.weight, self.to_out.weight, eps_msa=float(self.ln_msa.eps),
                                                       eps_pair=float(self.ln_pair.eps), keep=keep, p_drop=p_drop)
             if self.implementation == ImplementationType.TRITON:

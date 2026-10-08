@@ -49,14 +49,14 @@ template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.as
 
 // ---------------------------------------------------------------- forward ----------------------------------------------------------------
 __global__ void __launch_bounds__(THREADS, 2) pair_fwd_kernel(const __nv_bfloat16* __restrict__ Z, const __nv_bfloat16* __restrict__ MASK,
-                                                              const float* __restrict__ LNW, const float* __restrict__ LNB, const __nv_bfloat16* __restrict__ WB,
+                                                              const float* __restrict__ LNW, const __nv_bfloat16* __restrict__ WB,
                                                               __nv_bfloat16* __restrict__ W, int N, int NP, float eps) {
   extern __shared__ __align__(128) unsigned char smem[];
   unsigned char* tiles = smem;                                          // [NWARP][2][TILEB]
   float* sb = reinterpret_cast<float*>(smem + NWARP * 2 * TILEB);       // [H][NP] logits
-  float* sg = sb + H * NP;                                              // gamma [DZ], beta [DZ]
+  float* sg = sb + H * NP;                                              // gamma [DZ]
   const int i = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, q = lane & 3, r = lane >> 2;
-  for (int k = tid; k < DZ; k += THREADS) { sg[k] = LNW[k]; sg[DZ + k] = LNB[k]; }
+  for (int k = tid; k < DZ; k += THREADS) sg[k] = LNW[k];
   // B fragments of Wb^T [k = d][n = h]: b0 = (Wb[n][16ks + 2q], +1), b1 = (+8, +9), n = lane / 4
   uint32_t bw[8][2];
 #pragma unroll
@@ -96,19 +96,18 @@ __global__ void __launch_bounds__(THREADS, 2) pair_fwd_kernel(const __nv_bfloat1
       v1 += (x1.x - m1) * (x1.x - m1) + (x1.y - m1) * (x1.y - m1) + (x3.x - m1) * (x3.x - m1) + (x3.y - m1) * (x3.y - m1);
     }
     const float rs0 = 1.f / sqrtf(qsum(v0) * (1.f / DZ) + eps), rs1 = 1.f / sqrtf(qsum(v1) * (1.f / DZ) + eps);
-    // zn = bf16((x - mean) * rstd * gamma + beta) into A fragments, then the projection
+    // zn = bf16((x - mean) * rstd * gamma) into A fragments, then the projection
     float c[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
     for (int ks = 0; ks < 8; ++ks) {
       const int col = 16 * ks + 2 * q;
       const float2 g0 = *reinterpret_cast<const float2*>(sg + col), g1 = *reinterpret_cast<const float2*>(sg + col + 8);
-      const float2 b0 = *reinterpret_cast<const float2*>(sg + DZ + col), b1 = *reinterpret_cast<const float2*>(sg + DZ + col + 8);
       const float2 x0 = unpack2(a[ks][0]), x1 = unpack2(a[ks][1]), x2 = unpack2(a[ks][2]), x3 = unpack2(a[ks][3]);
       uint32_t zn[4];
-      zn[0] = pack2((x0.x - m0) * rs0 * g0.x + b0.x, (x0.y - m0) * rs0 * g0.y + b0.y);
-      zn[1] = pack2((x1.x - m1) * rs1 * g0.x + b0.x, (x1.y - m1) * rs1 * g0.y + b0.y);
-      zn[2] = pack2((x2.x - m0) * rs0 * g1.x + b1.x, (x2.y - m0) * rs0 * g1.y + b1.y);
-      zn[3] = pack2((x3.x - m1) * rs1 * g1.x + b1.x, (x3.y - m1) * rs1 * g1.y + b1.y);
+      zn[0] = pack2((x0.x - m0) * rs0 * g0.x, (x0.y - m0) * rs0 * g0.y);
+      zn[1] = pack2((x1.x - m1) * rs1 * g0.x, (x1.y - m1) * rs1 * g0.y);
+      zn[2] = pack2((x2.x - m0) * rs0 * g1.x, (x2.y - m0) * rs0 * g1.y);
+      zn[3] = pack2((x3.x - m1) * rs1 * g1.x, (x3.y - m1) * rs1 * g1.y);
       mma_bf16(c, zn, bw[ks][0], bw[ks][1]);
     }
     // c0, c1: (row r, heads 2q, 2q+1); c2, c3: (row r+8)
@@ -137,31 +136,30 @@ __global__ void __launch_bounds__(THREADS, 2) pair_fwd_kernel(const __nv_bfloat1
 
 // ---------------------------------------------------------------- backward ----------------------------------------------------------------
 // db = bf16(w (dw - sum_j w dw)); dzn = db . Wb (mma, K = 8 heads padded to 16); dz = LN_bwd(dzn) (registers);
-// dWb^T[d][h] += zn^T . db (mma, A = zn tile read transposed with ldmatrix.trans); dgamma / dbeta partials in registers.
+// dWb^T[d][h] += zn^T . db (mma, A = zn tile read transposed with ldmatrix.trans); dgamma partials in registers.
 // A fragments of the transposed 16x16 sub-tile (d rows 16*mt.., j cols) of a [16 j][128 d] tile
 __device__ __forceinline__ void ldm_at(uint32_t tile, int mt, int lane, uint32_t* a) {
   const int m = lane >> 3, jrow = (lane & 7) + ((m >> 1) << 3), ch = 2 * mt + (m & 1);
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3]) : "r"(tile + tile_off(jrow, ch)));
 }
 __global__ void __launch_bounds__(THREADS, 2) pair_bwd_kernel(const __nv_bfloat16* __restrict__ Z, const __nv_bfloat16* __restrict__ W16, const float* __restrict__ DW,
-                                                              const float* __restrict__ LNW, const float* __restrict__ LNB, const __nv_bfloat16* __restrict__ WB,
+                                                              const float* __restrict__ LNW, const __nv_bfloat16* __restrict__ WB,
                                                               __nv_bfloat16* __restrict__ DZO, float* __restrict__ PWB, float* __restrict__ PLN, int N, float eps) {
   // Per row i.  db = bf16(w (dw - sum_j w dw)); dzn = db . Wb (mma, K = 8 heads padded to 16, computed twice: once for the
   // row sums, once for dz); dz = LN_bwd(dzn).  The parameter gradients come from two per-row reductions instead of
   // per-element accumulators:  M^T[d][h] = sum_j xhat[j][d] db[j][h] (mma, A = the xhat tile read transposed) and
-  // S[h] = sum_j db[j][h]:  dWb[h][d] = gamma[d] M^T[d][h] + beta[d] S[h],  dgamma[d] = sum_h Wb[h][d] M^T[d][h],
-  // dbeta[d] = sum_h Wb[h][d] S[h]  (dzn = db . Wb is linear in db, zn = xhat gamma + beta).
+  // dWb[h][d] = gamma[d] M^T[d][h],  dgamma[d] = sum_h Wb[h][d] M^T[d][h]  (dzn = db . Wb is linear in db, zn = xhat gamma).
   extern __shared__ __align__(128) unsigned char smem[];
   unsigned char* tiles = smem;                                          // [NWARP][3][TILEB]: two x stages + one aux (xhat / dz) tile per warp
-  float* sg = reinterpret_cast<float*>(smem + NWARP * 3 * TILEB);       // gamma [DZ], beta [DZ]
-  float* acc = sg + 2 * DZ;                                             // [H][DZ] M^T (as [h][d]), [DZ] unused, [H] S
-  uint32_t* wbt2 = reinterpret_cast<uint32_t*>(acc + H * DZ + DZ + H);  // [DZ][4]: pack(Wb[2q][d], Wb[2q+1][d])
+  float* sg = reinterpret_cast<float*>(smem + NWARP * 3 * TILEB);       // gamma [DZ]
+  float* acc = sg + DZ;                                                 // [H][DZ] M^T (as [h][d])
+  uint32_t* wbt2 = reinterpret_cast<uint32_t*>(acc + H * DZ);  // [DZ][4]: pack(Wb[2q][d], Wb[2q+1][d])
   __nv_bfloat16* sdb = reinterpret_cast<__nv_bfloat16*>(wbt2 + DZ * 4); // [N][H] db (bf16)
   float* sdw = reinterpret_cast<float*>(tiles);                         // staging of dw / w rows [H][N] fp32 each, aliased on the tile area
   float* sw = sdw + H * N;
   const int i = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, q = lane & 3, r = lane >> 2;
-  for (int k = tid; k < DZ; k += THREADS) { sg[k] = LNW[k]; sg[DZ + k] = LNB[k]; }
-  for (int k = tid; k < H * DZ + DZ + H; k += THREADS) acc[k] = 0.f;
+  for (int k = tid; k < DZ; k += THREADS) sg[k] = LNW[k];
+  for (int k = tid; k < H * DZ; k += THREADS) acc[k] = 0.f;
   for (int k = tid; k < DZ * 4; k += THREADS) { const int d = k >> 2, qq = k & 3; wbt2[k] = pack2(__bfloat162float(WB[(2 * qq) * DZ + d]), __bfloat162float(WB[(2 * qq + 1) * DZ + d])); }
   for (int k0 = 0; k0 < H * N; k0 += 8 * THREADS) {                     // staged in chunks of 8 per thread: all 16 loads in flight before the stores
     float vd[8], vw[8];
@@ -174,15 +172,12 @@ __global__ void __launch_bounds__(THREADS, 2) pair_bwd_kernel(const __nv_bfloat1
     for (int m = 0; m < 8; ++m) { const int k = k0 + m * THREADS + tid; if (k < H * N) { sdw[k] = vd[m]; sw[k] = vw[m]; } }
   }
   __syncthreads();
-  {                                                                     // softmax backward, head `warp`: sdot, db (bf16), S = sum_j db
+  {                                                                     // softmax backward, head `warp`: sdot, db (bf16)
     const int h = warp;
     float sdot = 0.f;
     for (int j = lane; j < N; j += 32) sdot += sw[h * N + j] * sdw[h * N + j];
     sdot = wsum(sdot);
-    float S = 0.f;
-    for (int j = lane; j < N; j += 32) { const __nv_bfloat16 v = __float2bfloat16(sw[h * N + j] * (sdw[h * N + j] - sdot)); sdb[j * H + h] = v; S += __bfloat162float(v); }
-    S = wsum(S);
-    if (lane == 0) acc[H * DZ + DZ + h] = S;
+    for (int j = lane; j < N; j += 32) sdb[j * H + h] = __float2bfloat16(sw[h * N + j] * (sdw[h * N + j] - sdot));
   }
   __syncthreads();                                                      // the staging area becomes the tile ring
   float cm[8][4];                                                        // M^T accumulators: rows d = 16 mt + r / + 8, cols h = 2q, 2q+1
@@ -298,40 +293,39 @@ __global__ void __launch_bounds__(THREADS, 2) pair_bwd_kernel(const __nv_bfloat1
     atomicAdd(acc + (2 * q) * DZ + 16 * mt + r + 8, cm[mt][2]); atomicAdd(acc + (2 * q + 1) * DZ + 16 * mt + r + 8, cm[mt][3]);
   }
   __syncthreads();
-  // dWb[h][d] = gamma[d] M[h][d] + beta[d] S[h];  dgamma[d] = sum_h Wb[h][d] M[h][d];  dbeta[d] = sum_h Wb[h][d] S[h]
-  const float* S = acc + H * DZ + DZ;
-  for (int k = tid; k < H * DZ; k += THREADS) { const int h = k / DZ, d = k - h * DZ; PWB[(long)i * H * DZ + k] = sg[d] * acc[k] + sg[DZ + d] * S[h]; }
+  // dWb[h][d] = gamma[d] M[h][d];  dgamma[d] = sum_h Wb[h][d] M[h][d]
+  for (int k = tid; k < H * DZ; k += THREADS) { const int d = k % DZ; PWB[(long)i * H * DZ + k] = sg[d] * acc[k]; }
   for (int d = tid; d < DZ; d += THREADS) {
-    float pg = 0.f, pb = 0.f;
+    float pg = 0.f;
 #pragma unroll
-    for (int h = 0; h < H; ++h) { const float wv = __bfloat162float(WB[h * DZ + d]); pg += wv * acc[h * DZ + d]; pb += wv * S[h]; }
-    PLN[(long)i * 2 * DZ + d] = pg; PLN[(long)i * 2 * DZ + DZ + d] = pb;
+    for (int h = 0; h < H; ++h) pg += __bfloat162float(WB[h * DZ + d]) * acc[h * DZ + d];
+    PLN[(long)i * DZ + d] = pg;
   }
 }
 }  // namespace
 
-torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w, torch::Tensor ln_b, double eps, torch::Tensor wb) {
+torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w, double eps, torch::Tensor wb) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, 128] bf16");
   const int N = (int)z.size(0);
   TORCH_CHECK(N % GJ == 0 && N <= 1024, "N must be a multiple of 16 (and <= 1024)");
   TORCH_CHECK(mask.scalar_type() == torch::kBFloat16 && mask.is_contiguous() && mask.numel() == (long)N * N, "mask: [N, N] bf16");
-  TORCH_CHECK(ln_w.scalar_type() == torch::kFloat && ln_w.is_contiguous() && ln_w.numel() == DZ && ln_b.scalar_type() == torch::kFloat && ln_b.is_contiguous() && ln_b.numel() == DZ, "LN params fp32[128]");
+  TORCH_CHECK(ln_w.scalar_type() == torch::kFloat && ln_w.is_contiguous() && ln_w.numel() == DZ, "LN scale fp32[128]");
   auto wb16 = wb.to(torch::kBFloat16).contiguous();
   TORCH_CHECK(wb16.dim() == 2 && wb16.size(0) == H && wb16.size(1) == DZ, "wb: [8, 128]");
   auto w = torch::empty({H, N, N}, z.options());
   const int NP = N + 4;
-  const int smem = NWARP * 2 * TILEB + (H * NP + 2 * DZ) * 4;
+  const int smem = NWARP * 2 * TILEB + (H * NP + DZ) * 4;
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + (H * 1028 + 2 * DZ) * 4)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + (H * 1028 + DZ) * 4)); attr = true; }
   pair_fwd_kernel<<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(mask.data_ptr<at::BFloat16>()),
-      ln_w.data_ptr<float>(), ln_b.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
+      ln_w.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
       reinterpret_cast<__nv_bfloat16*>(w.data_ptr<at::BFloat16>()), N, NP, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return w;
 }
 
-std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::Tensor dw, torch::Tensor ln_w, torch::Tensor ln_b, double eps, torch::Tensor wb) {
+std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::Tensor dw, torch::Tensor ln_w, double eps, torch::Tensor wb) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, 128] bf16");
   const int N = (int)z.size(0);
   TORCH_CHECK(N % GJ == 0 && N <= 1024, "N must be a multiple of 16 (and <= 1024)");
@@ -341,21 +335,20 @@ std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::
   auto wb16 = wb.to(torch::kBFloat16).contiguous();
   auto dz = torch::empty_like(z);
   auto pwb = torch::empty({N, H, DZ}, z.options().dtype(torch::kFloat));
-  auto pln = torch::empty({N, 2 * DZ}, z.options().dtype(torch::kFloat));
+  auto pln = torch::empty({N, DZ}, z.options().dtype(torch::kFloat));
   TORCH_CHECK(2 * H * N * 4 <= NWARP * 3 * TILEB, "the w / dw staging must fit in the tile area");
-  const int smem = NWARP * 3 * TILEB + (2 * DZ + H * DZ + DZ + H) * 4 + DZ * 4 * 4 + N * H * 2;
+  const int smem = NWARP * 3 * TILEB + (DZ + H * DZ) * 4 + DZ * 4 * 4 + N * H * 2;
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 3 * TILEB + (2 * DZ + H * DZ + DZ + H) * 4 + DZ * 4 * 4 + 1024 * H * 2)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 3 * TILEB + (DZ + H * DZ) * 4 + DZ * 4 * 4 + 1024 * H * 2)); attr = true; }
   pair_bwd_kernel<<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(w16.data_ptr<at::BFloat16>()), dwc.data_ptr<float>(),
-      ln_w.data_ptr<float>(), ln_b.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
+      ln_w.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
       reinterpret_cast<__nv_bfloat16*>(dz.data_ptr<at::BFloat16>()), pwb.data_ptr<float>(), pln.data_ptr<float>(), N, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto ps = pln.sum(0);
-  return {dz, pwb.sum(0), ps.narrow(0, 0, DZ), ps.narrow(0, DZ, DZ)};
+  return {dz, pwb.sum(0), pln.sum(0)};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
-  mod.def("pair_fwd3", &pair_fwd3, "pair LN -> proj_z -> mask -> softmax (tensor cores)", py::arg("z"), py::arg("mask"), py::arg("ln_w"), py::arg("ln_b"), py::arg("eps"), py::arg("wb"));
-  mod.def("pair_bwd3", &pair_bwd3, "pair backward (tensor cores): (dz, dWb, dgamma, dbeta)", py::arg("z"), py::arg("w16"), py::arg("dw"), py::arg("ln_w"), py::arg("ln_b"), py::arg("eps"), py::arg("wb"));
+  mod.def("pair_fwd3", &pair_fwd3, "pair LN -> proj_z -> mask -> softmax (tensor cores)", py::arg("z"), py::arg("mask"), py::arg("ln_w"), py::arg("eps"), py::arg("wb"));
+  mod.def("pair_bwd3", &pair_bwd3, "pair backward (tensor cores): (dz, dWb, dgamma)", py::arg("z"), py::arg("w16"), py::arg("dw"), py::arg("ln_w"), py::arg("eps"), py::arg("wb"));
 }

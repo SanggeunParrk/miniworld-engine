@@ -115,7 +115,7 @@ def test_pair_weighted_averaging_dropout_matches_its_keep_mask():
     m = _randomise(MSAPairWeightedAveraging(64, 128, 8, 32).to(DEV))
     msa, pair = torch.randn(1, 64, 128, 64, device=DEV), torch.randn(1, 128, 128, 128, device=DEV)
     keep = torch.rand(1, 128, 64, device=DEV) > 0.25
-    w = [m.ln_msa.weight, m.ln_msa.bias, m.to_value.weight, m.to_gate.weight, m.ln_pair.weight, m.ln_pair.bias,
+    w = [m.ln_msa.weight, m.ln_msa.bias, m.to_value.weight, m.to_gate.weight, m.ln_pair.weight,
          m.to_bias.weight, m.to_out.weight]
     got = triton_pair_weighted_averaging(msa.to(BF), pair.to(BF), None, *[t.to(BF) for t in w], keep=keep, p_drop=0.25)
     ref = pair_weighted_averaging_reference(msa, pair, None, *w, keep=keep, p_drop=0.25)

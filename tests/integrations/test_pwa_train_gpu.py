@@ -23,7 +23,7 @@ pytestmark = [
 
 D_MSA, D_PAIR, D_HID, HEADS, L, S = 64, 128, 32, 8, 384, 256
 DEV, DT = "cuda", torch.bfloat16
-PARAMS = ("ln_msa.weight", "ln_msa.bias", "to_value.weight", "to_gate.weight", "ln_pair.weight", "ln_pair.bias",
+PARAMS = ("ln_msa.weight", "ln_msa.bias", "to_value.weight", "to_gate.weight", "ln_pair.weight",
           "to_bias.weight", "to_out.weight")
 
 
@@ -100,9 +100,6 @@ def test_fused_training_path_matches_the_engines_own(module, inputs, mask_key):
     assert rel(dmsa_f.float() - gz.float(), dmsa_e.float() - gz.float()) < 2e-2
     assert rel(dpair_f, dpair_e) < 1e-2
     for n in PARAMS:
-        if n == "ln_pair.bias":                          # a softmax gradient sums to zero over j: dbeta is rounding noise on both sides
-            assert g_f[n].float().norm() < 0.05 * g_e["ln_pair.weight"].float().norm()
-            continue
         assert rel(g_f[n], g_e[n]) < 1e-2, n
 
 
@@ -126,9 +123,9 @@ def test_sm100_is_no_worse_than_the_modules_bf16_statements(module, inputs, mask
             out = mod(msa, pair, inputs[mask_key])
         out.backward(inputs["gz"].to(dt))
         return [out.detach().float(), msa.grad.float() - inputs["gz"].float(), pair.grad.float(),
-                *[mod.get_parameter(n).grad.float() for n in PARAMS if n != "ln_pair.bias"]]
+                *[mod.get_parameter(n).grad.float() for n in PARAMS]]
     r, ours, torch_bf16 = run(ref, True), run(module), run(pyt)
-    for name, a, b, t in zip(["out", "d_msa (update)", "d_pair", *[n for n in PARAMS if n != "ln_pair.bias"]], ours, torch_bf16, r, strict=True):
+    for name, a, b, t in zip(["out", "d_msa (update)", "d_pair", *PARAMS], ours, torch_bf16, r, strict=True):
         assert rel(a, t) <= 1.15 * rel(b, t), (name, rel(a, t), rel(b, t))
     # inference (its own entry point, no saves): the update against fp32
     for mod in (ref, module, pyt):
@@ -182,8 +179,6 @@ def test_fused_dropout_is_the_modules_row_dropout(module, inputs):
         out_e.backward(gz_m)
         assert rel(dpair_f, pair_e.grad) < 1e-2
         for n in PARAMS:
-            if n == "ln_pair.bias":
-                continue
             assert rel(g_f[n], module.get_parameter(n).grad) < 1e-2, n
         # dmsa: ours = residual grad (gz) + update grad; the engine's = gz_m + update grad
         assert rel(dmsa_f.float() - inputs["gz"].float(), msa_e.grad.float() - gz_m.float()) < 2e-2

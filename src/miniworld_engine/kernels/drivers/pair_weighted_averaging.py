@@ -34,7 +34,7 @@ def _inputs(dtype=BF16):
     mask = (torch.rand(1, _L, generator=g) > 0.1).to(dev())
     hc = _NH * _C
     weights = (1.0 + r(_D, scale=0.1), r(_D, scale=0.1), r(hc, _D, scale=_D ** -0.5), r(hc, _D, scale=_D ** -0.5),
-               1.0 + r(_DZ, scale=0.1), r(_DZ, scale=0.1), r(_NH, _DZ, scale=_DZ ** -0.5), r(_D, hc, scale=hc ** -0.5))
+               1.0 + r(_DZ, scale=0.1), r(_NH, _DZ, scale=_DZ ** -0.5), r(_D, hc, scale=hc ** -0.5))
     keep = torch.rand(1, _L, _D, generator=g).to(dev()) > _P_DROP
     return msa, pair, mask, weights, keep
 

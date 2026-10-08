@@ -5,7 +5,7 @@ from __future__ import annotations
 from miniworld_engine.kernels.checks import _f, _fixed, _grads, _no_tf32
 from miniworld_engine.kernels.drivers.pair_weighted_averaging import _P_DROP, _inputs
 
-_NAMES = ("dmsa", "dpair", "dln_msa_weight", "dln_msa_bias", "dw_value", "dw_gate", "dln_pair_weight", "dln_pair_bias", "dw_bias",
+_NAMES = ("dmsa", "dpair", "dln_msa_weight", "dln_msa_bias", "dw_value", "dw_gate", "dln_pair_weight", "dw_bias",
           "dw_out")
 
 
@@ -66,8 +66,6 @@ def pair_weighted_averaging_bwd_layernorm_gemm_dx_dlnw_triton():
 
 
 def pair_weighted_averaging_bwd_layernorm_gemm_softmax_triton():
-    """dln_pair_bias is not scored: it is identically zero. The pair LayerNorm's beta adds beta . Wb_h to every key's logit of
-    head h, and a softmax over keys cannot see a shift shared by all of them, so the exact gradient is 0 and both sides carry
-    only rounding (fp32 ~1e-7, bf16 ~1e-3) -- a relative error against zero measures nothing. dpair, dgamma and dWb carry the
-    same kernel arithmetic and are scored."""
+    """dpair, dgamma and dWb are scored. The pair LayerNorm has no offset (it would shift every key's logit of a head by one
+    constant, which a softmax over keys cancels)."""
     return _backward_pairs("dpair", "dln_pair_weight", "dw_bias")
