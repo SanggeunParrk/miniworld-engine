@@ -9,7 +9,7 @@ operands, fp32 accumulation, weight gradients in the parameter's dtype), the exp
             (softmax_t, the key mask folded in, P^T written beside it); a = sigmoid(g) (P v) per head and sample (pv_gate_inf)
   backward  do = da sigmoid(g), dg = da a (1 - sigmoid(g)), D = sum da a per row and head (gate_bwd_rows: a = sigmoid(g) o, so
             the pre-gate o is never stored); dv = P^T do (pv_gate_inf without the gate, on the transposed P);
-            dbias = P o (sum_a do v^T - D) (dpb_sm100); d pair and dWf = dbias LN(pair) (pair_bias_bwd) -> to_bias / ln_pair
+            dbias = P o (sum_a do v^T - D) (dpb_sm100; dpbx2_sm100 on CTA pairs at L768); d pair and dWf = dbias LN(pair) (pair_bias_bwd) -> to_bias / ln_pair
 
 fp32 (the TF32 recipe): single, cond and pair fp32, the block's weights fp32, no CUDA autocast -> the same composition with every
 activation, saved tensor and gradient fp32: cuBLAS GEMMs forced to TF32 tensor cores (the dxt / dxa data gradients written straight
@@ -20,6 +20,13 @@ and its backward on TF32 mma.sync (``pair_bias_tc`` / ``pair_bias_bwd_tc``; MINI
 ~exact); the weight pack in one launch; the attention core ``pv_gate_tf32`` (forward and dV) and the bias gradient ``dpb32_sm100``
 (the fp32 port of the bf16 ``dpb_sm100``; it replaces ``dpb_tf32.cu``, removed for non-repeatable results) on kind::tf32 MMAs
 (``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those warns once and keeps the module path.
+
+bf16 step (2026-10-08; in-process node A/B, A = 48, 16 x 48, L384 / L768): the weight pack is ONE launch (``pack16`` of the training
+rows: 49.7 / 57.2 -> 9.6 / 11.2 us; MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=0: the torch casts / cats); the dxt / dxa GEMMs write into
+their d-shift columns of dG, so the LayerNorm backward rows read them there instead of copying them (the fp32 path's way: 108.7 /
+208.0 -> 101.8 / 193.6 us for the two rows; MINIWORLD_BIAS_ONLY_DIT_BWD_DG=0: the copies); the bias gradient on CTA pairs where
+256-key tiles divide L (``dpbx2_sm100.cu``, L768 61.2 -> 47.4 us; MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR=0: dpb_sm100). The switches are
+read per call. fp32: the TF32 build of ``dpbx2_sm100.cu`` by the same rule (L768 148.2 -> 104.0 us; MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0: dpb32_sm100).
 
 ``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32 inputs, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
@@ -99,15 +106,35 @@ def _f32(t):
 _PACKS: dict = {}
 
 
+def _pack1() -> bool:
+    """The weight pack as ONE launch (``pack16_cuda``, the same values bit for bit) instead of 19 torch casts / cats / products --
+    a captured training step repacks every replay (the weights change between steps), ~50 us at ~3 us per small kernel. The default;
+    MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=0 (read per call) keeps the torch pack."""
+    return os.environ.get("MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1", "1") != "0"
+
+
+def _dg_direct() -> bool:
+    """The dxt / dxa data gradients written by cuBLAS straight into their d-shift columns of dG (the LayerNorm backward rows then
+    read them there and do not copy them). The default; MINIWORLD_BIAS_ONLY_DIT_BWD_DG=0 (read per call) keeps the copies."""
+    return os.environ.get("MINIWORLD_BIAS_ONLY_DIT_BWD_DG", "1") != "0"
+
+
 def _pack(P, dev):
     """The block's weights in the kernels' layouts; rebuilt only when a parameter changes (an optimizer step bumps
     ``_version``), so a training step pays it once per block. Scoped to the CUDA-graph capture (``kernels._capture``): an
     eager pack is never reused inside a capture, whose replays would otherwise run on the weights of capture time."""
-    key = tuple((t.data_ptr(), t._version) for t in P.values())
+    one = _pack1()
+    key = (tuple((t.data_ptr(), t._version) for t in P.values()), one)
     slot = _capture.scoped(next(iter(P.values())).data_ptr())
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
+    W = _pack_one(P, dev) if one else None
+    if W is not None:
+        if slot is not None:
+            _capture.prune(_PACKS)
+            _PACKS[slot] = (key, W)
+        return W
     g = lambda n: P[n]
     w1, w2 = _f32(g("attention.ada_ln_in.ln_cond.weight")), _f32(g("transition.ada_ln_in.ln_cond.weight"))
     Wraw = torch.cat([_f32(g("attention.ada_ln_in.to_scale.weight")), _f32(g("attention.ada_ln_in.to_bias.weight")),
@@ -128,6 +155,59 @@ def _pack(P, dev):
     if slot is not None:
         _capture.prune(_PACKS)
         _PACKS[slot] = (key, W)
+    return W
+
+
+def _pack_one(P, dev):
+    """``_pack`` in one launch (``bias_only_dit_train_rows.cu`` pack16): the same tensors, bit for bit (a parameter that already has
+    the wanted dtype and layout is used as it is)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    g = lambda n: P[n].detach().contiguous()                                 # noqa: E731
+    e = lambda *shape, dt: torch.empty(*shape, device=dev, dtype=dt)        # noqa: E731
+    src, dst, scale, tr = [], [], [], []
+    none = torch.empty(0, device=dev)
+
+    def seg(s, d, sc=None, t=0):
+        src.append(s); dst.append(d); scale.append(none if sc is None else sc); tr.append(t)
+
+    def as_(t, dt):                                    # the parameter itself when it already is dt, else a packed copy
+        if t.dtype is dt:
+            return t
+        out = e(*t.shape, dt=dt)
+        seg(t, out)
+        return out
+    proj = [g(n) for n in ("attention.ada_ln_in.to_scale.weight", "attention.ada_ln_in.to_bias.weight",
+                           "transition.ada_ln_in.to_scale.weight", "transition.ada_ln_in.to_bias.weight")]
+    lnw = [g("attention.ada_ln_in.ln_cond.weight"), g("transition.ada_ln_in.ln_cond.weight")]
+    Wraw, Wn = e(4 * D, DC, dt=F32), e(4 * D, DC, dt=BF)
+    for i, w in enumerate(proj):
+        seg(w, Wraw[i * D:(i + 1) * D])
+        seg(w, Wn[i * D:(i + 1) * D], lnw[i // 2])                          # cond-LN weights folded
+    out = {}
+    for name, parts in (("Wg", ("attention.to_scale.weight", "transition.to_scale.weight")),
+                        ("Wvg", ("attention.to_value.weight", "attention.to_gate.weight")),
+                        ("Wab", ("transition.expand_a.weight", "transition.expand_b.weight"))):
+        ws = [g(n) for n in parts]
+        buf = e(sum(w.shape[0] for w in ws), ws[0].shape[1], dt=BF)
+        r = 0
+        for w in ws:
+            seg(w, buf[r:r + w.shape[0]])
+            r += w.shape[0]
+        out[name] = buf
+    wp_p, Wb_p = g("attention.ln_pair.weight"), g("attention.to_bias.weight")
+    Wf_bf = e(*Wb_p.shape, dt=BF)
+    seg(Wb_p, Wf_bf, wp_p)                                                   # Wf = Wb diag(wp)
+    Wo_p, Wsq_p = g("attention.to_out.weight"), g("transition.squeeze.weight")
+    W = {
+        "w1": as_(lnw[0], F32), "w2": as_(lnw[1], F32), "Wraw": Wraw, "Wn": Wn, "Wg": out["Wg"],
+        "bs1": as_(g("attention.ada_ln_in.to_scale.bias"), F32), "bs2": as_(g("transition.ada_ln_in.to_scale.bias"), F32),
+        "bg1": as_(g("attention.to_scale.bias"), F32), "bg2": as_(g("transition.to_scale.bias"), F32),
+        "Wvg": out["Wvg"], "wp": as_(wp_p, F32), "Wb": as_(Wb_p, F32), "Wf_bf": Wf_bf,
+        "Wo": as_(Wo_p, BF), "Wab": out["Wab"], "Wsq": as_(Wsq_p, BF),
+    }
+    if any(t.data_ptr() % 16 for t in (*src, *scale)):
+        return None                                    # a parameter view off 16-byte alignment: the torch pack below
+    ext().pack16_cuda(src, dst, scale, tr)
     return W
 
 
@@ -303,7 +383,8 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     dab = torch.empty_like(ab)
     BT.swiglu_bwd_cuda(dh, ab, dab)
     dWsq = wgrad("transition.squeeze.weight", dz, h)
-    dxt = torch.mm(dab, Wab)
+    dg_direct = _dg_direct()
+    dxt = torch.mm(dab, Wab, out=dG[:, 3 * D:]) if dg_direct else torch.mm(dab, Wab)   # d shift2 = dxt: straight into dG
     dWab = wgrad("transition.expand_a.weight", dab, xt)
     dx1 = torch.empty(M, D, device=dev); dy = torch.empty(M, D, device=dev, dtype=BF)
     n12 = BT.res_adaln_b_bwd_cuda(dout, dxt, x, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2])
@@ -316,7 +397,7 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)              # dv = P^T do
     dbias = torch.empty(H * L, L, device=dev, dtype=BF)
     _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)   # P o (dP - D); masked keys get P = 0
-    dxa = torch.mm(dvg, Wvg)
+    dxa = torch.mm(dvg, Wvg, out=dG[:, D:2 * D]) if dg_direct else torch.mm(dvg, Wvg)   # d shift1 = dxa: straight into dG
     dWvg = wgrad("attention.to_value.weight", dvg, xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     n3 = BT.adaln_a_bwd_cuda(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])

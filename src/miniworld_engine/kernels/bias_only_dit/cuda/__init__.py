@@ -10,6 +10,9 @@ The core is a cubin built on first use into ``MINIWORLD_ENGINE_JIT_ROOT`` and la
 ``kernels/augmented_attention/cuda/sm100`` (TMA descriptors, current stream, CUDA-graph capturable); the rows are a
 torch extension. Neither is built at import.
 
+Training: ``dpb_sm100.cu`` and ``dpbx2_sm100.cu`` (the bias gradient; the second on CTA pairs, the default where 256-key tiles divide
+L: ``DpbKernel``), the token DiT's ``gemm_swiglu2_sm100`` with SAVE_AB (the expand GEMM + SwiGLU).
+
 The fp32 path (TF32 tensor cores: ``pv_gate_tf32.cu``, ``dpb32_sm100.cu``, ``gemm_glu_tf32.cu``, ``bias_only_dit_f32_rows.cu``) is
 ``tf32.py``.
 """
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import functools
 import os
+import warnings
 from pathlib import Path
 
 import torch
@@ -300,9 +304,30 @@ def _dpb_smem(nj: int) -> int:
     return o_st + (_SMEM_MAX - o_st - 1024) // stage * stage + 256
 
 
+def _dpbx2_smem() -> int:
+    """dpbx2_sm100.cu's shared memory (mirrors the source): the P ring and the dbias staging, as many 32 KB stages as fit, barriers."""
+    o_st = 2 * 8192 + 4 * 3 * 2048
+    return o_st + (_SMEM_MAX - o_st - 1024) // 32768 * 32768 + 256
+
+
+_DPBX2_FAILED: set = set()
+
+
+def dpb_pair_on(L: int, nh: int = H, hp: int = 1, nsm: int = 148) -> bool:
+    """The bias gradient on CTA pairs (``dpbx2_sm100.cu``: 256-query x 256-key items, a third less TMA intake per product; L768 A = 48,
+    16 x 48: 61.2 -> 47.4 us, in-process A/B) -- the default where 256-key tiles divide L and the pairs' items fill the SM pairs (fewer
+    leave SMs idle that dpb_sm100.cu's 128-query items would use): at L 128-768 that is L768. MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR=0 / 1
+    (read per call) keeps dpb_sm100.cu / takes the pairs wherever 256 divides L."""
+    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR", "")
+    if L % 256 or forced == "0":
+        return False
+    return forced == "1" or (nh // hp) * (L // 256) * (L // 256) >= nsm // 2
+
+
 class DpbKernel:
     """``dpb_sm100.cu``: dbias [nh L, L] = P o (sum_a do v^T - D) per head, D[h, i] = sum_a dd[a, h, i]; do / v [A L, 768]
-    bf16 views, P [nh L, L] bf16, dd [A, nh, L] fp32 (nh x width: one of LAYOUTS)."""
+    bf16 views, P [nh L, L] bf16, dd [A, nh, L] fp32 (nh x width: one of LAYOUTS). Where ``dpb_pair_on(L)``: ``dpbx2_sm100.cu``
+    (the same result on CTA pairs; a failed build warns once and keeps dpb_sm100.cu; ``last`` says which ran)."""
 
     def __init__(self, device_index: int, nh: int = H, dh: int | None = None):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -310,6 +335,7 @@ class DpbKernel:
         self.nh, self.dh = nh, dh or 768 // nh
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
+        self._pair_k = None
 
     def _bind(self, do, v, P, dd, out, A, L):
         nh, dh = self.nh, self.dh
@@ -325,10 +351,38 @@ class DpbKernel:
 
         return _Launch(k, grid, (256, 1, 1), *maps, PTR, L, A)
 
+    def pair_kernel(self):
+        """The cubin of dpbx2_sm100.cu for this layout (built on first use)."""
+        return self._sm100._sm100_kernel("dpbx2_sm100", "bo_dpbx2_sm100", self.device_index, src_dir=str(_dir),
+                                         defs=_head_defs(self.nh, self.dh), cluster=2, smem=_dpbx2_smem())
+
+    def _bind_pair(self, do, v, P, dd, out, A, L):
+        nh, dh = self.nh, self.dh
+        hp = 2 if dh == 32 else 1
+        k = self._pair_k
+        tm, M = self._tm, do.shape[0]
+        mdo, mv = tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]), tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, 128])
+        maps = _descriptors(mdo, mdo, mv, mv, tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64),   # (the TF32 build's narrow-box maps unused)
+                            tm(out, [L, nh * L], L * 2, [32, 32], swizzle=64))
+        items = nh // hp * (L // 256) * (L // 256)
+        return _Launch(k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A)
+
     def __call__(self, do, v, P, dd, out, A):
         L = do.shape[0] // A
-        key = (do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L)
-        self.runs.bind(key, lambda: self._bind(do, v, P, dd, out, A, L))(dd)
+        hp = 2 if self.dh == 32 else 1
+        pair = dpb_pair_on(L, self.nh, hp, self.nsm) and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
+        if pair and self._pair_k is None:
+            try:
+                self._pair_k = self.pair_kernel()
+            except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps dpb_sm100.cu
+                _DPBX2_FAILED.add((self.device_index, self.nh, self.dh))
+                warnings.warn(f"bias-only DiT CTA-pair bias gradient (dpbx2_sm100) unavailable, keeping dpb_sm100: {exc!r}",
+                              RuntimeWarning, stacklevel=2)
+                pair = False
+        self.last = "pair" if pair else "single"
+        key = (pair, do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L)
+        bind = self._bind_pair if pair else self._bind
+        self.runs.bind(key, lambda: bind(do, v, P, dd, out, A, L))(dd)
         return out
 
 
@@ -465,5 +519,5 @@ class CondTables:
         return out
 
 
-__all__ = ["CondTables", "DpbKernel", "GemmSwigluAB", "PvGateCore", "ResLnGemm", "gate_bwd_rows", "transpose_hll", "adaln_in_rows", "core_supported", "ln_rows", "pick_group", "resgate_adaln_rows", "resgate_out_rows", "softmax_t",
+__all__ = ["CondTables", "DpbKernel", "dpb_pair_on", "GemmSwigluAB", "PvGateCore", "ResLnGemm", "gate_bwd_rows", "transpose_hll", "adaln_in_rows", "core_supported", "ln_rows", "pick_group", "resgate_adaln_rows", "resgate_out_rows", "softmax_t",
            "softmax_rows", "swiglu_rows"]

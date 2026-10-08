@@ -1000,3 +1000,82 @@ def test_pair_tail_switch_selects_bo_tail2(inf3, monkeypatch, on, L, pair_L):
     assert inf3 and picked, (len(inf3), picked)
     assert torch.isfinite(out).all()
     assert all((cl == T32.TAIL_PAIR) is want for cl in picked), picked
+
+
+# ------------------------------------------------------------------------------------------------- bias gradient on CTA pairs (TF32)
+# The TF32 build of the bf16 step's dpbx2_sm100.cu: the fp32 default at L768 (MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0 keeps dpb32_sm100);
+# the tests force it on (=1) to cover every L that 256 divides.
+def _dpb32_case(L, A, H, DH, seed):
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    DA, M = H * DH, A * L
+    do = torch.randn(M, DA, device="cuda", generator=g)
+    v = torch.randn(M, 2 * DA, device="cuda", generator=g)[:, :DA]
+    dd = torch.randn(A, H, L, device="cuda", generator=g)
+    P = torch.softmax(2 * torch.randn(H * L, L, device="cuda", generator=g), -1).contiguous()
+    return do, v, dd, P
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+def test_dpb_pair_tf32_kernel_does_not_spill(n_head, d_head):
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    k = T32.Dpb32(torch.cuda.current_device(), nh=n_head, dh=d_head).pair_kernel()
+    assert k.lmem == 0 and k.regs <= 255, (k.regs, k.lmem)
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize(("L", "A"), [(256, 6), (768, 6), (384, 6)])
+def test_dpb_pair_tf32_matches_fp64(monkeypatch, L, A, n_head, d_head):
+    """The TF32 CTA-pair bias gradient where 256 divides L (L384 keeps dpb32_sm100.cu), within 3e-3 of fp64 einsum."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "1")
+    H, DH = n_head, d_head
+    do, v, dd, P = _dpb32_case(L, A, H, DH, seed=L + A)
+    op = T32.Dpb32(torch.cuda.current_device(), nh=H, dh=DH)
+    db = torch.empty(H * L, L, device="cuda")
+    op(do, v, P, dd, db, A)
+    torch.cuda.synchronize()
+    assert op.last == ("pair" if L % 256 == 0 else "single")
+    dh, vh = do.double().view(A, L, H, DH), v.double().reshape(A, L, H, DH)
+    want = P.double().view(H, L, L) * (torch.einsum("aihd,ajhd->hij", dh, vh) - dd.double().sum(0)[:, :, None])
+    assert relative(db.view(H, L, L), want) < 3e-3, relative(db.view(H, L, L), want)
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+def test_dpb_pair_tf32_bit_identical_with_a_poisoned_allocator(monkeypatch, n_head, d_head):
+    """20 runs of the TF32 CTA-pair bias gradient (L768, A48), the allocator's free memory filled with NaN before each, dbias
+    allocated afresh (the bound launch rebuilt every fifth run): finite and bit-identical."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "1")
+    L, A, H, DH = 768, 48, n_head, d_head
+    do, v, dd, P = _dpb32_case(L, A, H, DH, seed=9)
+    first, op = None, None
+    for i in range(20):
+        if i % 5 == 0:
+            op = T32.Dpb32(torch.cuda.current_device(), nh=H, dh=DH)
+        _poison()
+        db = torch.empty(H * L, L, device="cuda")
+        op(do, v, P, dd, db, A)
+        torch.cuda.synchronize()
+        assert op.last == "pair"
+        if first is None:
+            first = db.clone()
+            assert torch.isfinite(first).all()
+        else:
+            assert torch.equal(db, first), i
+
+
+@pytest.mark.parametrize(("L", "A", "masked"), [(768, 3, True), (768, 2, False)])
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+def test_dpb_pair_tf32_step_within_the_pytorch_tf32_error(monkeypatch, L, A, masked, n_head, d_head):
+    """The fp32 step with the TF32 CTA-pair bias gradient: every gradient within the default step's bound against fp64."""
+    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "1")
+    ref, fast, ref64 = blocks(seed=5, n_head=n_head, d_head=d_head)
+    x, c, p, dy, mask = inputs(L, A, masked)
+    want = step(ref64, x, c, p, mask, dy, F64)
+    with no_module_path():
+        got = step(fast, x, c, p, mask, dy, torch.float32)
+    with tf32(True):
+        base = step(ref, x, c, p, mask, dy, torch.float32)
+    names = ["out", "d single", "d cond", "d pair"] + [n for n, _ in fast.named_parameters()]
+    for n, g, b, w in zip(names, got, base, want, strict=True):
+        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (n, relative(g, w), relative(b, w))

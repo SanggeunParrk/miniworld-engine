@@ -257,6 +257,23 @@ _GLU_OPS: dict = {}
 #: dpb32_sm100.cu's layout (NJ = 128: two stages of HP NA (16 KB + 16 KB) beside the P ring and the dbias staging)
 DPB32_NJ = 128
 DPB32_SMEM = (2 * 16384 + 4 * 3 * 4096) + 2 * 65536 + 256
+#: dpbx2_sm100.cu -DTF32 (the bf16 CTA-pair kernel's fp32 build): the same P ring and staging, two stages of NBX (16 KB do + 16 KB half
+#: key tile)
+DPBX2_TF32_SMEM = (2 * 16384 + 4 * 3 * 4096) + 2 * 65536 + 256
+
+
+def dpb32_pair(L: int, nh: int = 16, nsm: int = 148) -> bool:
+    """The fp32 bias gradient on CTA pairs, the TF32 build of ``dpbx2_sm100.cu`` (256-query x 256-key items, half the TMA intake per
+    product; L768 A = 48, 16 x 48: 148.2 -> 104.0 us, in-process A/B) -- the default where 256-key tiles divide L and the pairs' items
+    fill the SM pairs (the bf16 rule, ``dpb_pair_on``): at L 128-768 that is L768. MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0 / 1 (read per
+    call) keeps dpb32_sm100.cu / takes the pairs wherever 256 divides L."""
+    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "")
+    if L % 256 or forced == "0":
+        return False
+    return forced == "1" or nh * (L // 256) * (L // 256) >= nsm // 2
+
+
+_DPBX2_FAILED: set = set()
 
 
 class Dpb32:
@@ -272,15 +289,27 @@ class Dpb32:
         self.hp = 2 if self.dh == 32 else 1
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
+        self._pair_k, self.last = None, "single"
 
     def kernel(self):
         return self._sm100._sm100_kernel("dpb32_sm100", "bo_dpb32_sm100", self.device_index, src_dir=str(_dir),
                                          defs=(f"NJ={DPB32_NJ}", f"NHEAD={self.nh}", f"DHEAD={self.dh}"), smem=DPB32_SMEM)
 
+    def pair_kernel(self):
+        """dpbx2_sm100.cu built -DTF32 (CTA pairs on 256 x 256 items)."""
+        return self._sm100._sm100_kernel("dpbx2_sm100", "bo_dpbx2_sm100", self.device_index, src_dir=str(_dir),
+                                         defs=("TF32", f"NHEAD={self.nh}", f"DHEAD={self.dh}"), cluster=2, smem=DPBX2_TF32_SMEM)
+
     def _bind(self, do, v, P, out, A, L):
         nh, dh, tm, M = self.nh, self.dh, self._tm, do.shape[0]
         DA, f = nh * dh, dict(dtype="f32", swizzle=128)
         box = lambda t, w, rows: tm(t, [DA, M], _f32_rows(t), [w, rows], **f)                 # noqa: E731
+        if self.last == "pair":
+            mdo, mv = box(do, 32, 128), box(v, 32, 128)
+            mdo2, mv2 = (box(do, 16, 128), box(v, 16, 128)) if dh == 48 else (mdo, mv)     # 48-wide heads: 32 + 16 channels
+            maps = _descriptors(mdo, mdo2, mv, mv2, tm(P, [L, nh * L], L * 4, [32, 128], **f), tm(out, [L, nh * L], L * 4, [32, 32], **f))
+            items = nh // self.hp * (L // 256) * (L // 256)
+            return _Launch(self._pair_k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A)
         mdo, mv = box(do, 32, 128), box(v, 32, DPB32_NJ)
         mdo2, mv2 = (box(do, 16, 128), box(v, 16, DPB32_NJ)) if dh == 48 else (mdo, mv)     # 48-wide heads: 32 + 16 channels
         maps = _descriptors(mdo, mdo2, mv, mv2, tm(P, [L, nh * L], L * 4, [32, 128], **f), tm(out, [L, nh * L], L * 4, [32, 32], **f))
@@ -291,7 +320,17 @@ class Dpb32:
         L = do.shape[0] // A
         assert all(t.dtype is torch.float32 for t in (do, v, P, dd, out)) and dd.is_contiguous() and P.is_contiguous()
         assert out.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
-        key = (do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L)
+        pair = dpb32_pair(L, self.nh) and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
+        if pair and self._pair_k is None:
+            try:
+                self._pair_k = self.pair_kernel()
+            except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps dpb32_sm100.cu
+                _DPBX2_FAILED.add((self.device_index, self.nh, self.dh))
+                warnings.warn(f"bias-only DiT fp32 CTA-pair bias gradient (dpbx2_sm100 TF32) unavailable, keeping dpb32_sm100: {exc!r}",
+                              RuntimeWarning, stacklevel=2)
+                pair = False
+        self.last = "pair" if pair else "single"
+        key = (pair, do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L)
         self.runs.bind(key, lambda: self._bind(do, v, P, out, A, L))(dd)
         return out
 
@@ -704,6 +743,6 @@ def tf32_ready(index: int, nh: int, dh: int, train: bool) -> bool:
     return True
 
 
-__all__ = ["Dpb32", "FrontTF32", "GemmGluTF32", "PvGateCoreTF32", "TailTF32", "clear_trace", "front_cluster", "glu_op", "inf3_on",
+__all__ = ["Dpb32", "dpb32_pair", "FrontTF32", "GemmGluTF32", "PvGateCoreTF32", "TailTF32", "clear_trace", "front_cluster", "glu_op", "inf3_on",
            "inf3_ready", "max_clusters", "pack_pairs", "pick_cluster", "read_trace", "tail_pair_on", "tail_rows", "tail_smem",
            "pick_group_tf32", "pv_batched", "pv_groups", "round_tf32", "rows32", "tf32_gemms", "tf32_ready"]

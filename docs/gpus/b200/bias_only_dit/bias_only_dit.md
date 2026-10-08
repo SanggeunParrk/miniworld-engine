@@ -196,6 +196,21 @@ FMA wherever it is needed: 4 B per element less traffic and memory).
   and head (`gate_bwd_rows`, T4; `a = sigmoid(g) o`, so `o` is never stored); `dV = P^T do` (I1 without the gate); `dbias =
   P o (sum_a do v^T - D)` (T3); `dbias` -> d pair and `dWf` (T1); last, `finalize` (T4) writes the small weight gradients.
 
+**Step changes of 2026-10-08 (the defaults; each has a per-call off switch).** Measured per node in ONE process, the previous and the
+new launches captured as CUDA graphs and timed in alternation (9 rounds; `bench_scripts/bo_train_node_ab.py`), A = 48, 16 x 48, us at
+L384 / L768 -- per-node numbers from separate runs drift ~10 % on this power-capped card, whole steps 60-130 us:
+
+| change | before | after | off switch |
+|---|---|---|---|
+| the weight pack (repacked by every captured step: the weights change between steps) as ONE launch, `pack16` in `bias_only_dit_train_rows.cu`, bit-identical to the 19 torch casts / cats / products | 49.7 / 57.2 | 9.6 / 11.2 | `MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=0` |
+| cuBLAS writes `dxt` / `dxa` straight into their d-shift columns of `dG` (the fp32 path's way); `res_adaln_b_bwd` / `adaln_a_bwd` read them there instead of copying them (2 x [M, 768] bf16 writes less) | 108.7 / 208.0 | 101.8 / 193.6 (the two rows) | `MINIWORLD_BIAS_ONLY_DIT_BWD_DG=0` |
+| the bias gradient on CTA pairs, `dpbx2_sm100.cu` (T3), where 256-key tiles divide L and the pairs' items fill the SM pairs (L768) | -- / 61.2 | -- / 47.4 | `MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR=0` (=1 forces it wherever 256 divides L) |
+
+Whole step (bf16, A = 48, 16 x 48, whole-step graph, median of 9 alternating captures): -29.8 us at L384, -37.3 us at L768. Tests:
+`tests/integrations/test_b200_bias_only_dit_train_gpu.py` (every gradient against fp64 at the defaults and with the switches off,
+20 steps bit-identical over a NaN-poisoned allocator, the selection, the pack bit for bit against the torch pack, `dpbx2` against
+fp64 einsum and over 20 poisoned reruns).
+
 ### T1 · pair bias on tensor cores: `pair_bias` / `pair_bias_bwd` (bias = LN(pair) Wf^T and its backward)
 
 `kernels/bias_only_dit/cuda/bias_only_dit_train_rows.cu`, templates on the head count. The R = L^2 pair rows of 128 go through
@@ -235,6 +250,14 @@ into TMEM); the epilogue streams `P` in [128 x 32] pieces and applies `P o (dP -
 (their 64 columns fill the 128-byte row: 16 KB TMA boxes instead of 8, one accumulator per head). An item is bound by its SM's TMA
 intake, so NJ comes from a cost model -- rounds of items over the SMs x (128 + NJ) rows per sample: 16 x 48 L384 NJ 128, L768
 NJ 256; 24 x 32 L768 NJ 192. 69-98 % of its floor (TMA intake per SM).
+
+**CTA pairs (`dpbx2_sm100.cu`, the default at L768).** A cluster of two CTAs takes a 256-query x 256-key item: each CTA loads its own
+128 queries' do tile and HALF of the key tile, the leader issues M 256 x N 256 products (`tcgen05.mma.cta_group::2`, B split by N):
+256 rows per CTA and sample instead of 128 + 256 for the same products. Everything else is `dpb_sm100`'s (the sample K loop, one
+accumulator per head, the P ring, the staging); the file header writes down the barrier protocol (every buffer's filler, consumer
+and release, the proxy fences on both sides). Used where 256 divides L and (heads / heads per item) x (L / 256)^2 >= SMs / 2, i.e.
+L768 at L 128-768 (fewer items leave SMs idle that 128-query items would use). L768: 61.2 -> 47.4 us (in-process A/B). The same
+source builds for fp32 (`-DTF32`, F2).
 
 | (Length, Dimension, dtype) | (384, 768, bf16) | (768, 768, bf16) |
 |---|---|---|
@@ -339,6 +362,12 @@ kernel's 96-byte rows), 4 / 2 `kind::tf32` K steps each; P pieces of 16 KB and d
 NJ = 128 so that two 64 KB stages fit (bf16: NJ up to 384), loaded as one box and multiplied as ONE N = 128 product per K step (bf16
 splits its larger tile into two halves; with fp32's NJ = 128 the halves only re-read the do tile: 38 % of the MMA floor, L768 159 us,
 as first ported). Tests: reruns bit-identical at L 128..768 for every layout, within 3e-3 of fp64, no spills.
+
+The CTA-pair kernel of the bf16 step (`dpbx2_sm100.cu`, T3) builds for fp32 from the same source (`-DTF32`: 32-channel boxes, 48-wide
+heads 32 + 16, `kind::tf32` K steps of 8, P and staging tiles in 128-byte rows; two 64 KB stages): the fp32 default by the bf16
+rule (256 divides L and the pairs' items fill the SM pairs: L768), 148.2 -> 104.0 us at L768 A = 48 in the in-process A/B;
+`MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0` keeps `dpb32_sm100.cu`, `=1` takes the pairs wherever 256 divides L. Tests: within 3e-3 of fp64, 20 poisoned reruns bit-identical, the fp32 step's gradients within the default
+bound.
 
 ### F3 · fp32 rows (`bias_only_dit_f32_rows.cu`)
 
@@ -844,6 +873,7 @@ Training:
 | one exchange for the LayerNorm statistics alone (Chan merge) | no change for adaln_a (25.7 -> 25.1 us); packed loads and four blocks per SM: 23 |
 | `pv_gate_inf` sample groups other than the cost model's pick at A = 48 | the pick (SG 16) was the fastest at L128-768, both 16 x 48 and 24 x 32 (24 x 32: within 4 %) |
 | 24 x 32: one head per `dpb` item; heads padded to 32 in T1's backward | `dpb` 79 us at L768 (head pairs 57); T1 backward +20 % (k8 step and swapped dWf: +12 %) |
+| the bf16 step's dense GEMMs with the row pass that followed them in the epilogue (`gemm_bwd_epi_sm100.cu`, 2026-10-08, deleted): dh = dz Wsq + SwiGLU backward, d(og) = dy Wo + gate backward (bf16 and TF32), the expand GEMM + SwiGLU | in-process A/B, fused - default, L384 / L768: +1.5 / +5.9, +0.6 / +0.3 (fp32 +4.0 / +10.2), -5.8 / -8.4 us (spread 8-23). The traces show why: these GEMMs re-stream their operands per N chunk through L2, and with the epilogue's HBM streams the kernel moves ~8 TB/s through L2 against ~10.8 for cuBLAS's dh GEMM alone -- bound by bytes in flight x latency in 227 KB of shared memory (3 ring stages starved the MMAs, 5 stages with half-size staging starved the epilogue's ~4 us HBM loads). Removing the elementwise pass saves no more than its own bytes, which the shared L2 traffic eats. The first version also raced (one rerun in a few of the TF32 GLU build differed); its rewrite to a written barrier protocol was repeatable |
 | torch glue for the small gradients (sum, mul, casts, zero fills) and autograd copying fp32 LayerNorm-weight gradients from a bf16 buffer | 21 us per step; `finalize` writes every small gradient in its parameter's dtype |
 
 Inference:

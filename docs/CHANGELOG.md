@@ -18,6 +18,17 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 bf16 bias-only DiT training step, three changes (now the defaults): the weight pack in one launch (`pack16`, bit-identical
+  to the torch casts / cats it replaces; a captured training step repacks every replay: 49.7 / 57.2 -> 9.6 / 11.2 us at L384 / L768,
+  `MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=0` keeps the torch pack); `dxt` / `dxa` written by cuBLAS straight into their d-shift columns of
+  `dG` so the LayerNorm backward rows no longer copy them (the two rows 108.7 / 208.0 -> 101.8 / 193.6 us, `_BWD_DG=0`); the bias
+  gradient on CTA pairs `dpbx2_sm100.cu` (`tcgen05.mma.cta_group::2`, 256 x 256 items, a third less TMA intake) at L768 (61.2 ->
+  47.4 us, `_DPB_PAIR=0`; a failed build falls back to `dpb_sm100`). In-process per-node A/B, A = 48, 16 x 48; whole step -29.8 /
+  -37.3 us. The fp32 step takes the TF32 build of `dpbx2_sm100.cu` (`-DTF32`) by the same rule (L768 148.2 -> 104.0 us;
+  `MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0` keeps `dpb32_sm100`). Fused GEMM epilogues
+  for the backward (dh + SwiGLU backward, d(og) + gate backward) and the forward expand were measured and not kept (L2-bound, no
+  gain; page: "What was tried and not kept"). Tests: `tests/integrations/test_b200_bias_only_dit_train_gpu.py`,
+  `test_b200_bias_only_dit_tf32_gpu.py` (`test_dpb_pair_tf32_*`); page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (Training, T3).
 - B200 bf16 bias-only DiT inference as three kernels per block, now the default bf16 inference step: `bo_front_bf16` (LN + AdaLN +
   the v|g GEMM), `pv_gate_inf -DPDL_INF`, `bo_tail_bf16` (out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM,
   residual + gate) or, where it saves a round, the pair tail `bo_tail2_bf16` (`tcgen05.mma.cta_group::2`, two row tiles x four column

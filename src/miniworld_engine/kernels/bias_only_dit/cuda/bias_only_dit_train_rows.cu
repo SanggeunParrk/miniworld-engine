@@ -301,8 +301,8 @@ __global__ void __launch_bounds__(256, MINB) res_c_bwd_k(const OT* __restrict__ 
 }
 
 template <typename XT, typename OT>
-__global__ void __launch_bounds__(256, MINB_BWD) res_adaln_b_bwd_k(const OT* __restrict__ DOUT, const bf* __restrict__ DXT,
-    const XT* __restrict__ X, const float2* __restrict__ X1ST, const bf* __restrict__ G, long sg_, const float* __restrict__ BS2,
+__global__ void __launch_bounds__(256, MINB_BWD) res_adaln_b_bwd_k(const OT* __restrict__ DOUT, const bf* __restrict__ DXT, long sdxt,
+    bool cpy, const XT* __restrict__ X, const float2* __restrict__ X1ST, const bf* __restrict__ G, long sg_, const float* __restrict__ BS2,
     const bf* __restrict__ GG, long sgg, const float* __restrict__ BG1, const bf* __restrict__ Y, float* __restrict__ DX1,
     bf* __restrict__ DY, bf* __restrict__ DG, long sdg, bf* __restrict__ DGG, long sdgg, float* __restrict__ PS2,
     float* __restrict__ PG1, long M) {
@@ -317,7 +317,7 @@ __global__ void __launch_bounds__(256, MINB_BWD) res_adaln_b_bwd_k(const OT* __r
     const float2 st = X1ST[r];
 #pragma unroll
     for (int j = 0; j < 3; ++j) {
-      dxt[j] = V4<bf>::load(DXT + r * D + COL2(j));
+      dxt[j] = V4<bf>::load(DXT + r * sdxt + COL2(j));
       xh[j] = V4<XT>::load(X + r * D + COL2(j));
       s2[j] = V4<bf>::load(G + r * sg_ + 2 * D + COL2(j));
       dout[j] = V4<OT>::load(DOUT + r * D + COL2(j)); g1[j] = V4<bf>::load(GG + r * sgg + COL2(j)); y[j] = V4<bf>::load(Y + r * D + COL2(j));
@@ -332,7 +332,7 @@ __global__ void __launch_bounds__(256, MINB_BWD) res_adaln_b_bwd_k(const OT* __r
 #pragma unroll
     for (int j = 0; j < 3; ++j) {
       s2[j] = sig4(add4(s2[j], V4<float>::load(BS2 + COL2(j))));
-      V4<bf>::store(DG + r * sdg + 3 * D + COL2(j), dxt[j]);
+      if (cpy) V4<bf>::store(DG + r * sdg + 3 * D + COL2(j), dxt[j]);   // d shift2 = dxt (unless the GEMM wrote it there)
       const float4 ds2 = bfround(dsig4(mul4(dxt[j], xh[j]), s2[j]));
       V4<bf>::store(DG + r * sdg + 2 * D + COL2(j), ds2);
       acc_s[slot][COL2(j) / 4] = add4(acc_s[slot][COL2(j) / 4], ds2);
@@ -358,7 +358,8 @@ __global__ void __launch_bounds__(256, MINB_BWD) res_adaln_b_bwd_k(const OT* __r
 }
 
 template <typename XT, typename OT>
-__global__ void __launch_bounds__(256, MINB_BWD) adaln_a_bwd_k(const bf* __restrict__ DXA, const XT* __restrict__ X, const float2* __restrict__ XST,
+__global__ void __launch_bounds__(256, MINB_BWD) adaln_a_bwd_k(const bf* __restrict__ DXA, long sdxa, bool cpy, const XT* __restrict__ X,
+    const float2* __restrict__ XST,
     const bf* __restrict__ G, long sg_, const float* __restrict__ BS1, const float* __restrict__ DX1, OT* __restrict__ DX,
     bf* __restrict__ DG, long sdg, float* __restrict__ PS1, long M) {
   ROWS2_BEGIN
@@ -369,7 +370,7 @@ __global__ void __launch_bounds__(256, MINB_BWD) adaln_a_bwd_k(const bf* __restr
     const float2 st = XST[r];
 #pragma unroll
     for (int j = 0; j < 3; ++j) {
-      dxa[j] = V4<bf>::load(DXA + r * D + COL2(j));
+      dxa[j] = V4<bf>::load(DXA + r * sdxa + COL2(j));
       const float4 x = V4<XT>::load(X + r * D + COL2(j));
       xh[j] = make_float4((x.x - st.x) * st.y, (x.y - st.x) * st.y, (x.z - st.x) * st.y, (x.w - st.x) * st.y);
       s[j] = V4<bf>::load(G + r * sg_ + COL2(j));
@@ -379,7 +380,7 @@ __global__ void __launch_bounds__(256, MINB_BWD) adaln_a_bwd_k(const bf* __restr
 #pragma unroll
     for (int j = 0; j < 3; ++j) {
       s[j] = sig4(add4(s[j], V4<float>::load(BS1 + COL2(j))));
-      V4<bf>::store(DG + r * sdg + D + COL2(j), dxa[j]);
+      if (cpy) V4<bf>::store(DG + r * sdg + D + COL2(j), dxa[j]);       // d shift1 = dxa (unless the GEMM wrote it there)
       const float4 ds1 = bfround(dsig4(mul4(dxa[j], xh[j]), s[j]));
       V4<bf>::store(DG + r * sdg + COL2(j), ds1);
       acc[j] = add4(acc[j], ds1);
@@ -826,6 +827,65 @@ __global__ void __launch_bounds__(512) finalize_k(const float* __restrict__ PART
   }
 }
 
+// ------------------------------------------------------------------------------------------------------------ weight pack
+// The bf16 training step's weight pack (integrations/bias_only_dit_train.py _pack, MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=1) in ONE
+// launch: up to 32 segments, each dst = src (o scale[i % period], broadcast over the rows: the folded LayerNorm weights) with bf16
+// or fp32 on either side and on the scale (fp32 arithmetic, RN to the destination: the torch casts / products bit for bit), or
+// dst = src^T of a [rows, cols] matrix (32 x 32 tiles through shared memory: the K-major weights of the fused backward GEMMs).
+// A captured training step repacks every replay (the weights change between steps); as torch ops that was 19 kernels of ~3 us.
+// One flat grid, each segment its own run of blocks (b0[k] .. b0[k + 1]): a block finds its segment by a scan of the (uniform) table
+// and does PACK_F4 float4 groups or PACK_TILES transpose tiles. ~35 MB move per pack (16 x 48: reads 16.5, writes 18.9 incl. the fp32
+// Wraw 4.7). Measured: one kernel, 10.3 us hot / 20.5 cold either way the grid was laid out (27 x 296 blocks, then a flat grid): the
+// limit was one load in flight per thread, so every thread now issues all its loads first.
+constexpr int PACK_F4 = 2048, PACK_TILES = 4;
+struct Pack16Seg { const void* src; void* dst; const void* scale; int n; int period; int rows; int cols; int sdt, ddt, cdt, tr, b0; };
+struct Pack16Segs { Pack16Seg s[32]; int n; };
+__device__ __forceinline__ float4 ldany4(const void* p, int f32, long i) {
+  return f32 ? V4<float>::load(static_cast<const float*>(p) + i) : V4<bf>::load(static_cast<const bf*>(p) + i);
+}
+__device__ __forceinline__ void stany4(void* p, int f32, long i, float4 v) {
+  if (f32) V4<float>::store(static_cast<float*>(p) + i, v); else V4<bf>::store(static_cast<bf*>(p) + i, v);
+}
+__device__ __forceinline__ float ldany(const void* p, int f32, long i) {
+  return f32 ? static_cast<const float*>(p)[i] : __bfloat162float(static_cast<const bf*>(p)[i]);
+}
+__device__ __forceinline__ void stany(void* p, int f32, long i, float v) {
+  if (f32) static_cast<float*>(p)[i] = v; else static_cast<bf*>(p)[i] = __float2bfloat16_rn(v);
+}
+__global__ void __launch_bounds__(256) pack16_k(const __grid_constant__ Pack16Segs S) {
+  int k = 0;
+  while (k + 1 < S.n && (int)blockIdx.x >= S.s[k + 1].b0) ++k;
+  const Pack16Seg& g = S.s[k];
+  const int lb = (int)blockIdx.x - g.b0;
+  if (g.tr) {                                          // dst [cols, rows] = src [rows, cols]^T
+    __shared__ float t[32][33];
+    const int tx = threadIdx.x % 32, ty = threadIdx.x / 32, tc = g.cols / 32, nt = (g.rows / 32) * tc;
+    for (int kk = lb * PACK_TILES; kk < min(nt, (lb + 1) * PACK_TILES); ++kk) {
+      const int r0 = (kk / tc) * 32, c0 = (kk % tc) * 32;
+      for (int i = ty; i < 32; i += 8) t[i][tx] = ldany(g.src, g.sdt, (long)(r0 + i) * g.cols + c0 + tx);
+      __syncthreads();
+      for (int i = ty; i < 32; i += 8) stany(g.dst, g.ddt, (long)(c0 + i) * g.rows + r0 + tx, t[tx][i]);
+      __syncthreads();
+    }
+    return;
+  }
+  // every load of the thread's PACK_F4 / 256 groups issued before any store (round 2 looped load -> store: one load in flight per
+  // thread, ~3 TB/s hot)
+  constexpr int NV = PACK_F4 / 256;
+  const int i0 = lb * PACK_F4 + threadIdx.x, n4 = g.n / 4;
+  float4 v[NV];
+#pragma unroll
+  for (int j = 0; j < NV; ++j) {
+    const int i = i0 + j * 256;
+    v[j] = i < n4 ? ldany4(g.src, g.sdt, 4L * i) : zero4();
+  }
+#pragma unroll
+  for (int j = 0; j < NV; ++j) {
+    const int i = i0 + j * 256;
+    if (i < n4) stany4(g.dst, g.ddt, 4L * i, g.scale ? mul4(v[j], ldany4(g.scale, g.cdt, (4L * i) % g.period)) : v[j]);
+  }
+}
+
 // ------------------------------------------------------------------------------------------------------------ SwiGLU
 // elementwise over [M, N] with [a | b] rows of 2N, eight bf16 (16 bytes) per thread per tensor
 
@@ -946,11 +1006,14 @@ int64_t res_adaln_b_bwd(at::Tensor dout, at::Tensor dxt, at::Tensor x, at::Tenso
                      at::Tensor pg1) {
   const int64_t M = dout.size(0);
   TORCH_CHECK(ps2.is_contiguous() && pg1.is_contiguous() && ps2.size(0) >= partial_rows(M) && pg1.size(0) >= partial_rows(M), "partials");
+  bf16c(dxt, "dxt"); bf16c(dG, "dG");
+  // dxt may be dG's d-shift2 columns themselves (the GEMM wrote it there): then the copy is not written again
+  const bool cpy = !(dxt.data_ptr() == static_cast<void*>(P<bf>(dG) + 3 * D) && dxt.stride(0) == dG.stride(0));
   unsigned g = 0;
   TDT_DISPATCH(x.scalar_type(), XT, [&] {
     TDT_DISPATCH(dout.scalar_type(), OT, [&] {
       g = grid(res_adaln_b_bwd_k<XT, OT>, M, RPB2);
-      res_adaln_b_bwd_k<XT, OT><<<g, WPB * 32, 0, S()>>>(CP<OT>(dout), CP<bf>(dxt), CP<XT>(x), CP<float2>(x1st), CP<bf>(G), G.stride(0),
+      res_adaln_b_bwd_k<XT, OT><<<g, WPB * 32, 0, S()>>>(CP<OT>(dout), CP<bf>(dxt), dxt.stride(0), cpy, CP<XT>(x), CP<float2>(x1st), CP<bf>(G), G.stride(0),
           CP<float>(bs2), CP<bf>(Gg), Gg.stride(0), CP<float>(bg1), CP<bf>(y), P<float>(dx1), P<bf>(dy), P<bf>(dG), dG.stride(0),
           P<bf>(dGg), dGg.stride(0), P<float>(ps2), P<float>(pg1), M);
     });
@@ -963,11 +1026,13 @@ int64_t adaln_a_bwd(at::Tensor dxa, at::Tensor x, at::Tensor xst, at::Tensor G, 
                  at::Tensor dG, at::Tensor ps1) {
   const int64_t M = dxa.size(0);
   TORCH_CHECK(ps1.is_contiguous() && ps1.size(0) >= partial_rows(M), "partials");
+  bf16c(dxa, "dxa"); bf16c(dG, "dG");
+  const bool cpy = !(dxa.data_ptr() == static_cast<void*>(P<bf>(dG) + D) && dxa.stride(0) == dG.stride(0));   // dxa in dG already
   unsigned g = 0;
   TDT_DISPATCH(x.scalar_type(), XT, [&] {
     TDT_DISPATCH(dx.scalar_type(), OT, [&] {
       g = grid(adaln_a_bwd_k<XT, OT>, M, RPB2);
-      adaln_a_bwd_k<XT, OT><<<g, WPB * 32, 0, S()>>>(CP<bf>(dxa), CP<XT>(x), CP<float2>(xst), CP<bf>(G), G.stride(0), CP<float>(bs1),
+      adaln_a_bwd_k<XT, OT><<<g, WPB * 32, 0, S()>>>(CP<bf>(dxa), dxa.stride(0), cpy, CP<XT>(x), CP<float2>(xst), CP<bf>(G), G.stride(0), CP<float>(bs1),
           CP<float>(dx1), P<OT>(dx), P<bf>(dG), dG.stride(0), P<float>(ps1), M);
     });
   });
@@ -1053,6 +1118,45 @@ int64_t pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf
   return g;
 }
 
+// dst[k] = src[k] (o scale[k][i % scale[k].numel()] when scale[k] is not empty), or dst[k] = src[k]^T when tr[k]; bf16 / fp32 contiguous
+void pack16(std::vector<at::Tensor> src, std::vector<at::Tensor> dst, std::vector<at::Tensor> scale, std::vector<int64_t> tr) {
+  const size_t n = src.size();
+  TORCH_CHECK(n >= 1 && n <= 32 && dst.size() == n && scale.size() == n && tr.size() == n, "pack16: 1..32 segments");
+  auto f32 = [](const at::Tensor& t, const char* w) {
+    TORCH_CHECK(t.is_cuda() && t.is_contiguous() && (t.scalar_type() == at::kFloat || t.scalar_type() == at::kBFloat16)
+                && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0, "pack16 ", w, ": bf16 / fp32 contiguous, 16-byte aligned");
+    return t.scalar_type() == at::kFloat ? 1 : 0;
+  };
+  Pack16Segs segs{};
+  long blocks = 0;
+  for (size_t k = 0; k < n; ++k) {
+    Pack16Seg& g = segs.s[k];
+    g.sdt = f32(src[k], "src"); g.ddt = f32(dst[k], "dst");
+    TORCH_CHECK(src[k].numel() == dst[k].numel() && src[k].numel() % 4 == 0 && src[k].numel() < (1L << 31), "pack16: segment sizes");
+    g.src = src[k].data_ptr(); g.dst = dst[k].data_ptr(); g.n = (int)src[k].numel(); g.tr = tr[k] ? 1 : 0;
+    g.scale = nullptr; g.period = 4; g.cdt = 1;
+    if (g.tr) {
+      TORCH_CHECK(src[k].dim() == 2 && dst[k].dim() == 2 && dst[k].size(0) == src[k].size(1) && dst[k].size(1) == src[k].size(0)
+                  && src[k].size(0) % 32 == 0 && src[k].size(1) % 32 == 0 && scale[k].numel() == 0, "pack16: transpose [r, c] -> [c, r], 32 | r, c");
+      g.rows = (int)src[k].size(0); g.cols = (int)src[k].size(1);
+      g.b0 = (int)blocks;
+      blocks += ((long)(g.rows / 32) * (g.cols / 32) + PACK_TILES - 1) / PACK_TILES;
+    } else {
+      if (scale[k].numel()) {
+        g.cdt = f32(scale[k], "scale");
+        TORCH_CHECK(scale[k].numel() % 4 == 0 && src[k].numel() % scale[k].numel() == 0, "pack16: scale period divides the segment");
+        g.scale = scale[k].data_ptr(); g.period = (int)scale[k].numel();
+      }
+      g.b0 = (int)blocks;
+      blocks += std::max<long>(1, (src[k].numel() / 4 + PACK_F4 - 1) / PACK_F4);
+    }
+  }
+  segs.n = (int)n;
+  const at::cuda::CUDAGuard gd(src[0].device());
+  pack16_k<<<(unsigned)blocks, 256, 0, S()>>>(segs);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void swiglu(at::Tensor ab, at::Tensor h) {
   const int64_t M = h.size(0), N = h.size(1);
   TORCH_CHECK(ab.scalar_type() == at::kBFloat16 && h.scalar_type() == at::kBFloat16 && ab.is_contiguous() && h.is_contiguous()
@@ -1090,4 +1194,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("partial_rows", &partial_rows);
   m.def("pair_bias_bwd_cuda", &pair_bias_bwd);
   m.def("finalize_cuda", &finalize);
+  m.def("pack16_cuda", &pack16);
 }
