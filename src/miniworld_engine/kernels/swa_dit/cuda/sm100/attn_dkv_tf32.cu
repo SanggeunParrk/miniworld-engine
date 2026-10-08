@@ -295,17 +295,26 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
         mbar_wait(&B.s_full[w][bs], (gw >> 1) & 1);
         tc_fence_after();
         uint32_t sv[32], dv[32];
-        tmem_ld32(trow + 192 * w + 64 * bs, sv);
-        tmem_ld32(trow + 192 * w + 64 * bs + 32, dv);
-        tmem_wait_ld();
+        const int i0 = qb * BQ;
+        // the keys of this warp (32 consecutive) see the queries [jw - HW, jw + 31 + HW]: a block outside that range is all masked (P^T = dS^T = 0)
+        // for the whole warp -- 3 of the 8 blocks of an item -- and skips the loads and the exponentials
+        const bool live = (i0 + BQ - 1 >= j0 + 32 * lq - HW) && (i0 <= j0 + 32 * lq + 31 + HW);
+        if (live) {
+          tmem_ld32(trow + 192 * w + 64 * bs, sv);
+          tmem_ld32(trow + 192 * w + 64 * bs + 32, dv);
+          tmem_wait_ld();
+        } else {
+#pragma unroll
+          for (int c = 0; c < 32; ++c) { sv[c] = 0u; dv[c] = 0u; }
+        }
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.s_free[w][bs]);
-        const int i0 = qb * BQ;
         const int clo = max(j - HW - i0, 0), chi = kok ? min(min(j + HW, sq - 1) - i0, BQ - 1) : -1;
         const unsigned wd = (unsigned)max(chi - clo + 1, 0);                // width of the visible columns (0: none)
         const float4* l4 = reinterpret_cast<const float4*>(sm + (st - su) + 4 * TQ);
         const float4* d4 = reinterpret_cast<const float4*>(sm + (st - su) + 4 * TQ + 128);
+        if (live) {
 #pragma unroll
         for (int q = 0; q < 8; ++q) {                                      // 4 queries per step: LSE / D as broadcast 16-B loads
           const float4 lv = l4[q], dd = d4[q];
@@ -318,6 +327,7 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
             const float ds = ok ? p * (__uint_as_float(dv[c]) - da[e]) : 0.f;
             sv[c] = tf::rna(p); dv[c] = tf::rna(ds);
           }
+        }
         }
         if (gw >= 1) mbar_wait(&B.p_free[w], (gw - 1) & 1);                // the dV / dK MMAs of this warpgroup's previous block are done
         tc_fence_after();
