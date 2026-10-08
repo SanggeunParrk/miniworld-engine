@@ -41,18 +41,18 @@ constexpr uint32_t IDESC = idesc_bf16(QM, NJ2), TCOLS = HP * NJ <= 256 ? 256 : 5
 
 struct Bars { uint64_t full[NST], empty[NST], pfull[2], pempty[2], acc, acc_empty; uint32_t tmem; };
 
-extern "C" __global__ void __launch_bounds__(256, 1)
-bo_dpb_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mv,
-             const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mdb,
-             const float* __restrict__ dd, int L, int A) {
+// The kernel's body on a virtual grid (CTA vb of vg): bo_dpb_sm100 below runs it on the real one, bo_pvdpb.cu next to pv dV in one
+// launch (-DBODY_ONLY leaves the kernel out). The maps are the kernel's __grid_constant__ parameters.
+DEVI void dpb_body(const CUtensorMap& mdo, const CUtensorMap& mv, const CUtensorMap& mp, const CUtensorMap& mdb,
+                   const float* __restrict__ dd, int L, int A, const int vb, const int vg) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int mt = L / QM, nj = L / NJ, items = (NH / HP) * mt * nj;
-  const int my = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
+  const int my = (items > vb) ? (items - vb + vg - 1) / vg : 0;
   auto item_of = [&](int li, int& h, int& i0, int& j0) {
-    const int wi = (int)blockIdx.x + li * (int)gridDim.x;
+    const int wi = vb + li * vg;
     j0 = (wi % nj) * NJ;
     const int r = wi / nj;
     i0 = (r % mt) * QM; h = (r / mt) * HP;                       // the item's first head
@@ -191,3 +191,12 @@ bo_dpb_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CU
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, TCOLS); }
 }
+
+#ifndef BODY_ONLY
+extern "C" __global__ void __launch_bounds__(256, 1)
+bo_dpb_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mv,
+             const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mdb,
+             const float* __restrict__ dd, int L, int A) {
+  dpb_body(mdo, mv, mp, mdb, dd, L, A, (int)blockIdx.x, (int)gridDim.x);
+}
+#endif

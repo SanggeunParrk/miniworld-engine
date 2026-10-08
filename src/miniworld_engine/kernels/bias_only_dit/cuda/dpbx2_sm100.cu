@@ -87,11 +87,10 @@ DEVI void umma_pair(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss2
 
 // maps: mdo / mdo2 do [A L rows][channels] (bf16: box [HB, 128]; TF32: 32- / 16-channel boxes of 128 rows); mv / mv2 v likewise (any
 // row stride); mp P [H L, L] box [32, 128]; mdb dbias [H L, L] box [32, 32] (bf16 SW64, fp32 SW128). dd [A, NH, L] fp32.
-extern "C" __global__ void __launch_bounds__(256, 1)
-bo_dpbx2_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdo2,
-               const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mv2,
-               const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mdb,
-               const float* __restrict__ dd, int L, int A) {
+// The kernel's body on a virtual grid (CTA vb of vg, vb even on a cluster's leader): bo_dpbx2_sm100 below runs it on the real one,
+// bo_pvdpb.cu next to pv dV in one launch (-DBODY_ONLY leaves the kernel out). The maps are the kernel's __grid_constant__ parameters.
+DEVI void dpbx2_body(const CUtensorMap& mdo, const CUtensorMap& mdo2, const CUtensorMap& mv, const CUtensorMap& mv2,
+                     const CUtensorMap& mp, const CUtensorMap& mdb, const float* __restrict__ dd, int L, int A, const int vb, const int vg) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -99,7 +98,7 @@ bo_dpbx2_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
   const int crank = (int)cluster_rank();
   const bool leader = crank == 0;
   const int mp2 = L / (2 * QM), nj = L / NJ, items = (NH / HP) * mp2 * nj;   // the host serves L % 256 == 0 only
-  const int npairs = (int)gridDim.x >> 1, pair = (int)blockIdx.x >> 1;
+  const int npairs = vg >> 1, pair = vb >> 1;
   const int my = (items > pair) ? (items - pair + npairs - 1) / npairs : 0;
   auto item_of = [&](int li, int& h, int& i0, int& j0) {      // the item's first head, THIS CTA's query tile, the key tile
     const int wi = pair + li * npairs;
@@ -275,3 +274,13 @@ bo_dpbx2_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
   cluster_sync();
   if (warp == 2) { tc_fence_after(); tmem_dealloc2(tmem, TCOLS); }
 }
+
+#ifndef BODY_ONLY
+extern "C" __global__ void __launch_bounds__(256, 1)
+bo_dpbx2_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdo2,
+               const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mv2,
+               const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mdb,
+               const float* __restrict__ dd, int L, int A) {
+  dpbx2_body(mdo, mdo2, mv, mv2, mp, mdb, dd, L, A, (int)blockIdx.x, (int)gridDim.x);
+}
+#endif

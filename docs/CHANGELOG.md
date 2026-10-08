@@ -18,6 +18,21 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 bf16 bias-only DiT training backward fused from 23 launches per block to 11 (12 at L768), now the default
+  (`MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED=0` keeps the per-step launches; a failed build warns once and does the same):
+  `bo_bwd_tail.cu` (res_c_bwd, the dh GEMM + SwiGLU backward, the dxt GEMM, res_adaln_b_bwd, the d(og) GEMM + gate backward as items
+  over pairs of 128-row tiles on CTA pairs, GEMM items M 256 with `tcgen05.mma.cta_group::2`, three launches chained by programmatic
+  dependent launch; `_BWD_TAIL=off` keeps the seven launches, `_BWD_TAIL_NST` = 3 / 4 / 5 operand stages, default 4),
+  `bo_wgrad.cu` (the six weight gradients and the cond-LN unfold in one launch, one output tile per CTA over all rows), `bo_pvdpb.cu`
+  (pv dV and the bias gradient in one launch where the bias gradient runs on single CTAs; `_BWD_PVDPB=0`; `_BWD_PVPDL=0` launches pv dV
+  without PDL), and `pair_bias_bwd_fin` in `bias_only_dit_train_rows.cu` (pair_bias_bwd + finalize behind a grid barrier;
+  `_BWD_PBFIN=0`). In-process graph node A/B, A = 48, 16 x 48, previous -> fused, us at L384 / L768: tail 270.3 -> 268.8 / 533.4 ->
+  526.9, weight gradients 260.4 -> 236.4 / 483.8 -> 456.5, pv dV + dbias 37.6 -> 35.9 (L384), pair_bias_bwd + finalize +0.3 / +0.5
+  (on: one launch fewer at the same speed). `bo_bwd_mid.cu` (the dxa / dcg GEMMs, adaln_a_bwd, the dchat GEMM + cond_bwd in three
+  launches: 9 per block) is behind `_BWD_MID=1`, off: 141.5 -> 148.9 / 278.5 -> 300.7 us (TMA-intake bound GEMM items, an exposed
+  cond-LN epilogue). The weight pack (`pack16`) gained scaled transposes and 48 segments for the kernels' K-major weights. Tests:
+  `tests/integrations/test_b200_bias_only_dit_train_gpu.py` (`test_fused_backward_*`; the steady-memory test now warms up two steps);
+  page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (Training, T6); traces: `bench_scripts/bo_bwd_trace.py`.
 - B200 bf16 bias-only DiT training step, three changes (now the defaults): the weight pack in one launch (`pack16`, bit-identical
   to the torch casts / cats it replaces; a captured training step repacks every replay: 49.7 / 57.2 -> 9.6 / 11.2 us at L384 / L768,
   `MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=0` keeps the torch pack); `dxt` / `dxa` written by cuBLAS straight into their d-shift columns of

@@ -92,19 +92,20 @@ struct Bars {
   uint32_t tmem;
 };
 
-extern "C" __global__ void __launch_bounds__(256, 1)
-bo_pv_gate_inf_sm100(const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mv,
-                     const __grid_constant__ CUtensorMap mg, const __grid_constant__ CUtensorMap mo, int L, int S) {
+// The kernel's body on a virtual grid (CTA vb of vg): bo_pv_gate_inf_sm100 below runs it on the real one, bo_pvdpb.cu next to the
+// bias gradient's in one launch (-DBODY_ONLY leaves the kernel out). The maps are the kernel's __grid_constant__ parameters.
+DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUtensorMap& mg, const CUtensorMap& mo, int L, int S,
+                       const int vb, const int vg) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int mt = L / QM, nb = L / BN, nc = L / 64, ng = (S + SG - 1) / SG;
   const int items = NH * mt * ng;
-  const int my = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
+  const int my = (items > vb) ? (items - vb + vg - 1) / vg : 0;
   // item li of this CTA -> first sample a0, samples ns, query tile m0, head h (the group fastest)
   auto item_of = [&](int li, int& a0, int& ns, int& m0, int& h) {
-    const int wi = (int)blockIdx.x + li * (int)gridDim.x;
+    const int wi = vb + li * vg;
     a0 = (wi % ng) * SG; ns = min(SG, S - a0);
     const int r = wi / ng;
     m0 = (r % mt) * QM; h = r / mt;
@@ -281,3 +282,11 @@ bo_pv_gate_inf_sm100(const __grid_constant__ CUtensorMap mp, const __grid_consta
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
+
+#ifndef BODY_ONLY
+extern "C" __global__ void __launch_bounds__(256, 1)
+bo_pv_gate_inf_sm100(const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mv,
+                     const __grid_constant__ CUtensorMap mg, const __grid_constant__ CUtensorMap mo, int L, int S) {
+  pv_gate_body(mp, mv, mg, mo, L, S, (int)blockIdx.x, (int)gridDim.x);
+}
+#endif

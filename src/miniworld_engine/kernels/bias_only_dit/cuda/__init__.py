@@ -386,6 +386,60 @@ class DpbKernel:
         return out
 
 
+class PvDpb:
+    """``bo_pvdpb.cu``: pv dV (dvg's dV half = P^T do per head and sample; ``PvGateCore`` without the gate) and the bias gradient
+    (``DpbKernel``'s dpb_sm100.cu) in ONE launch -- the first NPV CTAs run pv dV's body, the rest the bias gradient's, on their own
+    virtual grids, each sized as its own launch would be. Launched as a programmatic dependent. Where ``dpb_pair_on`` (the bias
+    gradient on CTA pairs, dpbx2_sm100.cu: its cta_group::2 MMAs cannot share a function with pv dV's cta_group::1 ones) the call
+    returns False and launches nothing, unless ``single``: then the fused launch with dpb_sm100.cu (the bwdf7 node A/B against pv dV +
+    dpbx2)."""
+
+    def __init__(self, device_index: int, nh: int = H, dh: int | None = None, single: bool = False):
+        import hashlib
+        from miniworld_engine.kernels.augmented_attention.cuda import sm100
+        self._sm100, self._tm, self.device_index, self.single = sm100, sm100._tm, device_index, single
+        self.nh, self.dh = nh, dh or 768 // nh
+        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.runs = _Runs()
+        h = hashlib.sha256()                         # the cubin cache hashes bo_pvdpb.cu only: the included bodies by this define
+        for f in ("pv_gate_inf.cu", "dpb_sm100.cu"):
+            h.update((_dir / f).read_bytes())
+        self._src = f"SRC_HASH={h.hexdigest()[:16]}"
+
+    def kernel(self, sg: int, vb: int, nj: int):
+        """The cubin for SG samples per pv item, VB keys per v tile, NJ-key bias-gradient tiles."""
+        defs = (f"SG={sg}", *(() if vb == 128 else (f"VB={vb}",)), f"NJ={nj}", *_head_defs(self.nh, self.dh), self._src)
+        return self._sm100._sm100_kernel("bo_pvdpb", "bo_pvdpb_sm100", self.device_index, pdl=True, src_dir=str(_dir), defs=defs,
+                                         smem=max(_pv_smem(vb), _dpb_smem(nj)))
+
+    def _bind(self, do, pt, dv, v, P, dbias, A, L):
+        from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
+        nh, dh, tm, M = self.nh, self.dh, self._tm, do.shape[0]
+        hp = 2 if dh == 32 else 1
+        vb, sg = _pv_vb(L, A), pick_group(A, L, self.nsm, nh, dh)
+        nj = _dpb_nj(L, self.nsm, nh // hp, hp)
+        maps = _descriptors(tm(pt, [L, nh * L], L * 2, [64, 128]), tm(do, [nh * dh, M], do.stride(0) * 2, [dh, vb]),
+                            tm(do, [nh * dh, M], do.stride(0) * 2, [dh, 128]), tm(dv, [nh * dh, M], dv.stride(0) * 2, [dh, 128]),
+                            tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]),
+                            tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, nj // 2]),
+                            tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64), tm(dbias, [L, nh * L], L * 2, [32, 32], swizzle=64))
+        npv = min(self.nsm, nh * (L // 128) * -(-A // sg))
+        ndpb = min(self.nsm, nh // hp * (L // 128) * (L // nj))
+        return _LaunchPDL(self.kernel(sg, vb, nj), (npv + ndpb, 1, 1), (256, 1, 1), *maps, PTR, L, A, npv)
+
+    def __call__(self, do, pt, dv, v, P, dd, dbias, A) -> bool:
+        """do [A L, DA] view, pt / P [nh L, L] (P^T, P) contiguous, dv [A L, DA] view (dV out), v [A L, DA] view, dd [A, nh, L] fp32,
+        dbias [nh L, L] out; bf16 but dd. False (nothing launched) where the bias gradient belongs on CTA pairs."""
+        L = do.shape[0] // A
+        hp = 2 if self.dh == 32 else 1
+        if dpb_pair_on(L, self.nh, hp, self.nsm) and not self.single:
+            return False
+        key = (do.data_ptr(), do.stride(0), pt.data_ptr(), dv.data_ptr(), dv.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(),
+               dbias.data_ptr(), A, L)
+        self.runs.bind(key, lambda: self._bind(do, pt, dv, v, P, dbias, A, L))(dd)
+        return True
+
+
 # ------------------------------------------------------------------------------------------------ expand GEMM + SwiGLU (training)
 class GemmSwigluAB:
     """The token DiT's ``gemm_swiglu2_sm100.cu`` built with SAVE_AB: h = silu(a) b and [a | b] = X [Wa; Wb]^T (bf16) from one
@@ -519,5 +573,5 @@ class CondTables:
         return out
 
 
-__all__ = ["CondTables", "DpbKernel", "dpb_pair_on", "GemmSwigluAB", "PvGateCore", "ResLnGemm", "gate_bwd_rows", "transpose_hll", "adaln_in_rows", "core_supported", "ln_rows", "pick_group", "resgate_adaln_rows", "resgate_out_rows", "softmax_t",
+__all__ = ["CondTables", "DpbKernel", "dpb_pair_on", "GemmSwigluAB", "PvDpb", "PvGateCore", "ResLnGemm", "gate_bwd_rows", "transpose_hll", "adaln_in_rows", "core_supported", "ln_rows", "pick_group", "resgate_adaln_rows", "resgate_out_rows", "softmax_t",
            "softmax_rows", "swiglu_rows"]

@@ -298,6 +298,70 @@ shared driver rebuilt ctypes arguments per call, 25-35 us each). The descriptors
 pinned a step's activations per call (7 cudaMallocs per step, 13 GB reserved after a few steps). A step issues in ~0.9 ms of host
 time at L384 against ~1.0 ms of GPU time, so without CUDA graphs the GPU stays the bound.
 
+### T6 · fused bf16 backward (`MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED`, default on)
+
+Status (2026-10-08): the block's bf16 backward runs as **11 launches at the defaults (12 at L768)**, 9 with `bo_bwd_mid` on, where
+the per-step path takes 23 (res_c_bwd, mm dh, swiglu_bwd, mm dWsq, mm dxt, mm dWab, res_adaln_b_bwd, mm dog, mm dWo, gate_bwd, pv dV,
+dpb, mm dxa, mm dWvg, adaln_a_bwd, mm dchat, mm dWn, mm dcg, mm dWgg, cond_bwd, unfold, pair_bias_bwd, finalize). A default is on
+only where it won or tied its node A/B. Accuracy: every gradient against fp64, the 20-step poisoned-allocator bitwise repeat (5x
+loops), steady memory, no local memory, and the captured launch count, at the defaults and with every fusion on.
+
+| launch(es) | replaces | default | switch |
+|---|---|---|---|
+| `bo_bwd_tail` x 3 | res_c_bwd, mm dh, swiglu_bwd, mm dxt, res_adaln_b_bwd, mm dog, gate_bwd (7) | on | `MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL=off` (7 launches); `_BWD_TAIL_NST` = 3 / 4 / 5 stages (4) |
+| `bo_pvdpb` | pv dV + dpb (2), where dbias runs on single CTAs (L384) | on | `_BWD_PVDPB=0`; L768 keeps pv dV + dpbx2 (`_BWD_PVPDL=0`: pv dV without PDL) |
+| `bo_bwd_mid` x 3 | mm dxa, adaln_a_bwd, mm dchat, mm dcg, cond_bwd (5) | **off** | `_BWD_MID=1` |
+| `bo_wgrad` | the six weight-gradient GEMMs + unfold (7) | on | `_BWD_FUSED=0` (everything per step) |
+| `pair_bias_bwd_fin` | pair_bias_bwd + finalize (2) | on | `_BWD_PBFIN=0` |
+
+Node A/B (A = 48, 16 x 48, in-process, alternating CUDA graphs of 10 copies: the power-capped state of the training step), us:
+
+| | L384 previous -> fused | L768 previous -> fused |
+|---|---|---|
+| `bo_bwd_tail` (4 stages) | 270.3 -> 268.8 | 533.4 -> 526.9 |
+| `bo_wgrad` | 260.4 -> 236.4 | 483.8 -> 456.5 |
+| `bo_pvdpb` | 37.6 -> 35.9 | (two launches: the single-CTA dpb inside it loses to dpbx2, +11.9) |
+| `pair_bias_bwd_fin` | +0.3 | +0.5 (on: one launch fewer at the same speed, inside the 0.1-33 us spread) |
+| `bo_bwd_mid` (off) | 141.5 -> 148.9 | 278.5 -> 300.7 |
+
+Whole step (forward + backward, one block, median of 7 alternating graph captures; bwdf10, before the tail became the default):
+default (bo_wgrad + bo_pvdpb) 1090.3 / 2232.4 us, every fusion on (9 launches) 1106.6 / 2254.7, `_BWD_FUSED=0` (23 launches) 1128.1 /
+2268.4 at L384 / L768.
+
+Design:
+- **`bo_bwd_tail`**: items over pair tiles (two 128-row tiles) on CTA pairs -- R1 (dz, dg2), G1 x 6 (dh = dz Wsq, the SwiGLU backward
+  in the epilogue), G2 x 3 (dxt = dab Wab), R2 (the transition's LayerNorm / AdaLN backward, rows on chip), G4 x DA / NG4 (dog = dy Wo,
+  the gate backward in the epilogue). GEMM items are M 256 products with `tcgen05.mma.cta_group::2`, each CTA loading its tile's A
+  rows and half of B by N; row items run per CTA on its tile through a 27-slot ring over the whole operand area, handed to the GEMM
+  items once per launch. Launches [R1, G1, G2] (per-tile counters), [R2], [G4], chained by programmatic dependent launch; items go to
+  pairs by index from a phase-major table. G1 / G4 store per warp pair ([32][32] boxes).
+- **`bo_wgrad`**: one [128][384] output tile per CTA over all rows (both operands MN-major, two MMAs per K step); the CTAs walk the
+  rows together, so the L2 serves each operand slab to every tile of its band.
+- **`bo_pvdpb`**: pv dV's body on the first CTAs, dpb_sm100's on the rest, each on its own virtual grid; dpbx2's cta_group::2 MMAs
+  cannot share a function with pv dV's cta_group::1 ones, so L768 keeps two launches.
+- **`pair_bias_bwd_fin`**: the persistent pair_bias_bwd blocks meet at a grid barrier, then run finalize's 248 jobs.
+- **`bo_bwd_mid`** (off): [G5 x 3 (dxa), G6 x 2 (dcg)], [R3 (adaln_a_bwd)], [G7 (dchat) + the cond LayerNorm backward with c / dcg
+  TMA-staged after the products]. Why it loses: its GEMM items run at the SMs' TMA intake (~70 GB/s per SM: 0.43 us per G5 / G6
+  k-block, 0.57 per G7's), G6's N 192 tiles move more bytes per FLOP than cuBLAS's dcg, and G7's epilogue (16 us) is exposed (one
+  384-column TMEM buffer). What would close it: B multicast across two pairs (clusters of 4), cutting each CTA's intake per k-block
+  by a quarter to a third.
+
+How it got here (traces: `bench_scripts/bo_bwd_trace.py`, `--graph 10` for the graph-replay state; the TRACE builds record per item
+the MMA's waits on full stages, the producer's on empty stages and the epilogue's on E slots):
+- A single persistent tail (rounds 1-4) was 1.4-4.5x slower: head-of-line blocking with lagged phases, then row-pass bound with fixed
+  roles; splitting at the R2 -> G4 dependency (round 5) reached the seven launches' sum in a plain trace but lost 20-45 us in graph
+  replays. CTA pairs (round 8) did not move it; the waits showed the G2 MMA starved for operands with 3 stages, and 4 stages (round 9)
+  closed most of it (290.6 -> 271.7 us at L384; 5 stages starve the E ring); per-warp-pair stores and the 27-slot row ring for R1
+  (round 10) closed the rest.
+- `bo_wgrad`: split-K and stream-K variants lost the L2 sharing; one tile per CTA over the full K matched and then beat cuBLAS.
+- The steady-memory test warms up two steps: the first step of a fresh process allocates for good mid-step (the .grad tensors, the
+  backward thread's cuBLAS workspaces), and the second step adds segments once, with or without the fused kernels.
+
+Every kernel's synchronization protocol is in its file header. Tests: `test_fused_backward_*` in
+`tests/integrations/test_b200_bias_only_dit_train_gpu.py` (each kernel against fp64 or bit-identical to the launches it replaces,
+bit-identical reruns, no local memory, the launch count of a captured backward per switch setting), and every gradient /
+repeatability / steady-memory test at the defaults and with every fusion on.
+
 ## fp32 path (TF32)
 
 Status (2026-10-06): written, **not yet built or measured on B200** -- the kernels below compile on first use; the tests are
