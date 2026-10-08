@@ -18,6 +18,17 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 bf16 bias-only DiT inference as three kernels per block, now the default bf16 inference step: `bo_front_bf16` (LN + AdaLN +
+  the v|g GEMM), `pv_gate_inf -DPDL_INF`, `bo_tail_bf16` (out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM,
+  residual + gate) or, where it saves a round, the pair tail `bo_tail2_bf16` (`tcgen05.mma.cta_group::2`, two row tiles x four column
+  groups per cluster of 8), chained by programmatic dependent launch, behind bf16 conditioning tables hoisted once per conditioning
+  tensor. bf16 operands (kind::f16, 64-column k-blocks), fp32 accumulators, LayerNorm and residual; the block input bf16 at block 0
+  and fp32 after, the last tail writing bf16 (no cast kernel). `MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=0` keeps the 12-launch bf16 step
+  (also the fallback when the kernels fail to build); `_INF3_CL` / `_INF3_TAIL_CL` (8 / 6 / 4 = the pair tail) force a cluster size.
+  One block, A = 5, 16 x 48 (whole-step graph replay): 47.4 / 59.6 / 69.3 / 86.2 / 97.7 / 104.2 -> 41.1 / 45.1 / 47.0 / 57.5 / 75.4 /
+  78.7 us at L128-768; vs PyTorch compiled (bench.py, bf16-mixed, graphs) 1.66 / 1.92 / 2.24 / 2.39 / 2.36 / 2.65x. Tests: `tests/integrations/test_b200_bias_only_dit_gpu.py`
+  (`test_inf3_bf16_*`, `test_front_bf16_*`, `test_tail_bf16_*`, `test_tail2_bf16_*`); page:
+  `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (I0).
 - B200 fp32 bias-only DiT inference, pair tail: `bo_tail2_tf32` runs the tail as a cluster of 8 = two row tiles x four column
   groups, each column group's two CTAs one `tcgen05.mma.cta_group::2` pair (M = 256, each CTA loads half of each weight tile), so
   A = 5 L640 / L768 finish in one round of clusters instead of two. Selected only where it saves a round;

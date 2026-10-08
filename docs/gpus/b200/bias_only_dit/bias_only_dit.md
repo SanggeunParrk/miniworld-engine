@@ -43,8 +43,10 @@ under autocast or with bf16 weights -- runs the module's PyTorch composition. Ea
 `MINIWORLD_BIAS_ONLY_DIT_PV_VB` (keys per v tile), `MINIWORLD_BIAS_ONLY_DIT_RESLN` / `_COND` (inference GEMM-epilogue experiments,
 off: slower, see below), `MINIWORLD_BO_ROWS_BLOCKS_PER_SM` (cap on the training row kernels' resident blocks),
 `MINIWORLD_BIAS_ONLY_DIT_INF3` (fp32 inference as three kernels per block, default on; 0: the 12-launch step:
-[F5](#f5--three-kernel-fp32-inference-step-the-default)) with `MINIWORLD_BIAS_ONLY_DIT_INF3_CL` (4 / 6 / 8: force the front
-kernel's cluster) and `_INF3_TAIL_CL` (8 / 6: the tail's).
+[F5](#f5--three-kernel-fp32-inference-step-the-default)) and `MINIWORLD_BIAS_ONLY_DIT_INF3_BF16` (bf16 inference as three kernels
+per block, default on; 0: the 12-launch step: [I0](#i0--bf16-three-kernel-step-the-default)), both with
+`MINIWORLD_BIAS_ONLY_DIT_INF3_CL` (4 / 6 / 8: force the front kernel's cluster) and `_INF3_TAIL_CL` (8 / 6, and 4 at bf16: the pair
+tail; force the tail's).
 
 **cache build ✓** everywhere: nothing on these paths autotunes. The row kernels have fixed launch shapes (grids sized from the
 occupancy API), the sm_100a kernels are cubins built on first use into `MINIWORLD_ENGINE_JIT_ROOT` (keyed by source and
@@ -64,8 +66,80 @@ Per call the runner
    (the LayerNorm weight folded into the projection), and the CUDA row softmax written in place;
 2. makes the conditioning tables: a CUDA LayerNorm of the conditioning rows and two cuBLAS GEMMs (AdaLN scale / shift of both
    halves, the two output gates), over L rows when the samples share one conditioning, over S L rows otherwise;
-3. runs each block: input AdaLN rows -> cuBLAS v|g GEMM -> **`pv_gate_inf`** -> cuBLAS out GEMM -> residual + gate + AdaLN rows
-   -> expand GEMM + SwiGLU -> cuBLAS squeeze GEMM -> residual + gate rows in the output dtype. The residual stream is fp32.
+3. runs each block as three kernels chained by PDL (I0, the default), or with `MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=0` (and when
+   those kernels fail to build) as the 12-launch step: input AdaLN rows -> cuBLAS v|g GEMM -> **`pv_gate_inf`** -> cuBLAS out GEMM
+   -> residual + gate + AdaLN rows -> expand GEMM + SwiGLU -> cuBLAS squeeze GEMM -> residual + gate rows in the output dtype. The
+   residual stream is fp32.
+
+### I0 · bf16 three-kernel step (the default)
+
+`kernels/bias_only_dit/cuda/inf3_bf16.py` (`MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=0` keeps the 12-launch step, as does a failed build:
+one warning). The conditioning tables are hoisted as for fp32 (F5) but bf16: [T, nb, 6, 768] = (gate1, gate2, s1, s2, sh1, sh2)
+with the four sigmoids applied, rounded to bf16 once (`runner._tables3b`, `lookup_inputs` rules). Per block three kernels, chained
+by programmatic dependent launch:
+
+1. **`bo_front_bf16`** (CL 8 / 6 / 4 CTAs per 128-row tile; CL 6 at 768 attention channels only): v | g = (LN(x) s1 + sh1)
+   [Wv; Wg]^T. Row workers load all of a row's own x at once after the PDL wait and keep it in registers (raw bf16 for a bf16 x)
+   from the statistics to the xa pass; the A producer loads every own block's s1 / sh1 ([128][32] bf16 boxes) by TMA into the A
+   ring's idle slots at the same time (CL 4: 3 slots, refilled once read). LN statistics all-reduced through DSMEM (Chan); xa goes
+   to L2 scratch (st.global, one release). At CL 6 / 4 a CTA's 128 / 192 columns are whole 64-column k-blocks, staged in its own
+   ring and taken first; at CL 8 (96 columns, 1.5 k-blocks) all 12 xa k-blocks come from L2 after the exchange. W loads before the
+   PDL wait. Epilogue: TMEM -> bf16 -> per-warp 64-B swizzled tiles -> st.global.
+2. **`pv_gate_inf -DPDL_INF`**: the I1 core with `griddepcontrol` (launch after setup, wait before reading v | g).
+3. **`bo_tail_bf16`** (CL 8 / 6) or the pair tail **`bo_tail2_bf16`**: the fp32 tail (F5) with bf16 operands -- tcgen05 kind::f16,
+   a k-block 64 bf16 columns (one 128-B swizzle row, 16 KB per 128-row box), fp32 accumulators, LayerNorm statistics and residual;
+   the tables as [128][32] bf16 boxes in the 64-B swizzle. At CL 8 a CTA's xt goes to L2 and the a | b GEMM streams all 12 xt
+   k-blocks after the exchange; the own h (3 k-blocks) goes first and z's L2 h loads two per 32-KB box into adjacent ring slots.
+   CL 6 stages its 2 own xt k-blocks. The pair tail (cluster of 8 = two row tiles x 4 column groups, `cta_group::2`, M = 256 per
+   MMA): its own 3 xt k-blocks first, the peer's first L2 loads gated on the leader's s2 / sh2 epilogue (`pairgo`), an odd last
+   tile computing padding rows and storing no output.
+
+The x input of front and tail is the block input: bf16 (the single) at block 0, fp32 (the residual) after; the tail writes fp32, or
+bf16 at the last block -- build options (`XBF`, `OBF`), no cast kernel. bf16 operands, fp32 accumulation and residual: within 1.05 x
+the PyTorch bf16 block's error against fp32. Bit-identical reruns (fixed-order reductions, no atomics).
+
+**Occupancy and cluster choice.** Every kernel takes one CTA per SM (front 204-231 KB of shared memory, tails 220-232 KB and 480-512
+TMEM columns), so the driver fits 15 clusters of 8, 22 of 6 and 33 of 4 (`cuOccupancyMaxActiveClusters`: 120 / 132 / 132 of the
+148 SMs, clusters cannot span GPCs). The tail takes CL 8 / 6 by the fewest rounds (a CL 6 CTA ~1.4 x a CL 8 one) and the pair tail wherever it
+takes fewer rounds than both; the front the fewest rounds x 8 / CL. A = 5: tail CL 8 at L128-384, CL 6 at L512, the pair at L640 /
+L768; front CL 8 at L128-384, CL 6 at L512, CL 4 at L640 / L768. Floors: 2230 TF/s bf16 MMA (~1.3 PF/s sustained under the
+1000 W cap, the rate the GEMM phases run at), 7 TB/s (`bo32_infer_breakdown.py --bf16`).
+
+**Measured** (one block, 16 x 48, S = 5, per-sample conditioning, whole-step graph replay, us; `bo32_infer_breakdown.py --bf16
+--both`):
+
+| L | 128 | 256 | 384 | 512 | 640 | 768 |
+|---|---|---|---|---|---|---|
+| 12-launch bf16 step (`INF3_BF16=0`) | 47.4 | 59.6 | 69.3 | 86.2 | 97.7 | 104.2 |
+| three-kernel step | 41.1 | 45.1 | 47.0 | 57.5 | 75.4 | 78.7 |
+
+Per node (us): L384 front 11.1, core 6.6, tail 28.2 (CL 8); L512 12.0 / 8.4 / 35.5 (CL 6); L768 15.6 / 13.7 / 45.5 (the pair tail).
+vs PyTorch compiled (`bench.py target=bias_only_dit level=module mode=inference precision=bf16-mixed cudagraph=manual`, us):
+
+| L | 128 | 256 | 384 | 512 | 640 | 768 |
+|---|---|---|---|---|---|---|
+| PyTorch compiled | 77.6 | 98.1 | 118.6 | 151.4 | 192.5 | 227.2 |
+| miniworld (three-kernel step) | 46.9 | 51.0 | 53.0 | 63.5 | 81.7 | 85.8 |
+| speedup | 1.66x | 1.92x | 2.24x | 2.39x | 2.36x | 2.65x |
+
+(The 12-launch bf16 step stood at 1.66x / 2.22x at L384 / L768.)
+
+**How it got here** (three rounds, each from a `%globaltimer` trace: `bo32_inf3_trace.py --bf16`, one cluster):
+- Round 1: the tail, the PDL core and the bf16 tables, the front still AdaLN rows + cuBLAS v|g: 41.1 / 43.7 / 47.2 / 59.2 / 88.1 /
+  92.4 us at L128-768. The CL 8 tail alone ran two rounds at L640 / L768 (58.6 / 58.9 us): the pair tail's case.
+- Round 2: `bo_front_bf16` and the pair tail (45.0 / 45.3 us at L640 / L768, -10 us per step); the front lost 0.2-3.5 us to the
+  rows + cuBLAS pair. Its trace (L384 CL 8, 9.6 us per CTA): x + statistics 1.4, **xa pass 1.5**, release 0.6-1.0, L2 xa + GEMM 4.45
+  (0.343 us per N = 192 k-block: the capped tensor rate), epilogue 1.0 (~5.5 TB/s of v | g stores); at L768 CL 4 (14.7) the xa pass
+  took 3.1-3.4 us -- one global round trip per 32-column block (s1 / sh1, and x again at CL 6 / 4, loaded one block ahead after the
+  exchange). The tail (L384 CL 8, 31.5): y 2.7, P2 / exchange / P4 / release 6.3 with the tensor core idle, a | b 7.2 (the tensor
+  rate), P6 3.4, **z 7.6 at 0.378 us per k-block** (the own h at 0.256; the MMAs waited 3.7 us on the L2 h), P8 1.9.
+- Round 3: the front's tables by TMA under the statistics and x kept in registers (front -0.4 / -0.6 us at L384 / L768); z's L2 h
+  two per box (tail -1.4 us at L384).
+
+**Limits.** The front is a serial chain per CTA -- statistics, xa, release, then the GEMM at the capped tensor rate, then the stores
+-- with one tile per CTA, nothing overlaps it; at L768 (CL 4, N = 384 per CTA) it stays ~2.7 us above the AdaLN rows + cuBLAS v|g
+it replaces, at L128-512 it is level with them. The tail's epilogue phases (P2 / P4 / P6 / P8, ~11 us at L384) run with the tensor
+core idle for the same reason; overlapping them needs a second tile per CTA.
 
 ### I1 · attention core `pv_gate_inf` (sigmoid(g) · (P v), per head and sample)
 

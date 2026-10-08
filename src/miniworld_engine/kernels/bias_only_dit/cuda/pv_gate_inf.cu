@@ -15,6 +15,9 @@
 // MMAs of sample k + 1. (With the P tile in shared memory and the samples inner, the epilogue only started once the whole item
 // was loaded and took ~40 % of the kernel.) Accumulators: two sets of 48 columns above P.
 // Warps: 0 TMA producer, 1 MMA (and the P copies), 2 TMEM allocator, 3 idle, 4-7 epilogue (one query row per thread).
+// -DPDL_INF (only the bf16 three-kernel inference step builds it: K2 between bo_front_bf16 and bo_tail_bf16 / bo_tail2_bf16):
+// programmatic dependent launch -- launch_dependents after setup, griddepcontrol.wait before the producer's first load and before
+// the epilogue reads g or stores a. Without it the cubin is the default inference / training path's, unchanged.
 // L <= 768 (P plus two accumulators within 512 TMEM columns). Heads x width by -DNHEAD / -DDHEAD (16 x 48, 24 x 32, 12 x 64): a v or g
 // row of the head is DH x 2 bytes inside a 128-byte swizzle row.
 // SPDX-License-Identifier: Apache-2.0
@@ -123,9 +126,15 @@ bo_pv_gate_inf_sm100(const __grid_constant__ CUtensorMap mp, const __grid_consta
 #ifdef TRACE
   const long long t0 = clock64();
 #endif
+#ifdef PDL_INF
+  pdl_launch();
+#endif
 
   if (warp == 0) {
     if (lane == 0) {
+#ifdef PDL_INF
+      pdl_wait();                                                 // v: the v|g GEMM's output (P: hoisted, but in the chain's order)
+#endif
       int g = 0;
       auto slot = [&](uint32_t bytes) {                           // the next ring slot, empty, armed for `bytes`
         const int s = g % NSLOT;
@@ -196,6 +205,9 @@ bo_pv_gate_inf_sm100(const __grid_constant__ CUtensorMap mp, const __grid_consta
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     // NX g staging tiles rotate over the running sequence of (item, sample) tiles. Thread r == 0 issues the store of tile t, then
     // waits for the store of tile t - 1 (not the one just issued) to have read its buffer and loads tile t - 1 + NX's g there.
+#ifdef PDL_INF
+    pdl_wait();                                                   // g: the v|g GEMM's output; a: may still be read by an earlier kernel
+#endif
     int pli = 0, pk = 0;                                          // the next tile whose g is loaded
     auto load_next_g = [&](int buf) {                             // thread r == 0 only
       if (pli >= my) return;

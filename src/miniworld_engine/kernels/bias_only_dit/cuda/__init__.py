@@ -220,20 +220,25 @@ class PvGateCore:
     """``pv_gate_inf.cu``: out [S L, 768] = sigmoid(g) * (P v) -- or, without g, P v -- per head and sample; P one block's
     [16 L, L] attention weights (bf16, contiguous), v / g / out [S L, 768] bf16 views with any row stride (v | g are the
     column halves of the v|g GEMM output in the step; the training backward passes P^T and do). Bound launches (their TMA
-    descriptors carry the pointers) are cached per (buffers, strides, S, L)."""
+    descriptors carry the pointers) are cached per (buffers, strides, S, L). ``pdl``: the bf16 three-kernel inference step's
+    build (``-DPDL_INF``: programmatic dependent launch), launched with the PDL attribute (default False: the training backward and
+    the 12-launch step)."""
 
-    def __init__(self, device_index: int, defs: tuple[str, ...] = (), nh: int = H, dh: int | None = None):
+    def __init__(self, device_index: int, defs: tuple[str, ...] = (), nh: int = H, dh: int | None = None, pdl: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
         self._sm100 = sm100
         self._tm = sm100._tm
         self.nh, self.dh = nh, dh or 768 // nh
-        self.device_index, self.defs = device_index, defs + _head_defs(nh, self.dh)
+        self.device_index, self.defs, self.pdl = device_index, defs + _head_defs(nh, self.dh), pdl
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
     def kernel(self, sg: int, gate: bool = True, vb: int = 128):
         """The cubin for SG samples per item, with or without the gate, VB keys per v tile (built on first use)."""
         vdef = () if vb == 128 else (f"VB={vb}",)
+        if self.pdl:
+            return self._sm100._sm100_kernel("pv_gate_inf", "bo_pv_gate_inf_sm100", self.device_index, pdl=True, src_dir=str(_dir),
+                                             defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs, "PDL_INF"), smem=_pv_smem(vb))
         return self._sm100._sm100_kernel("pv_gate_inf", "bo_pv_gate_inf_sm100", self.device_index, src_dir=str(_dir),
                                          defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs), smem=_pv_smem(vb))
 
@@ -247,7 +252,9 @@ class PvGateCore:
         sg = pick_group(S, L, self.nsm, nh, dh)
         k = self.kernel(sg, g is not None, vb)
         grid = (min(self.nsm, nh * (L // 128) * -(-S // sg)), 1, 1)
-
+        if self.pdl:
+            from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
+            return _LaunchPDL(k, grid, (256, 1, 1), *maps, L, S)
         return _Launch(k, grid, (256, 1, 1), *maps, L, S)
 
     def __call__(self, v, P, out, S, g=None):

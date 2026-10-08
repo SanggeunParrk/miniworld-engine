@@ -10,10 +10,10 @@ What each call hoists, and why it may:
           same at every step and for every sample. One LayerNorm pass over the pair rows (the blocks share its statistics;
           each block's LayerNorm weight is folded into its projection), ONE cuBLAS GEMM for every block's bias, and a row
           softmax that writes P [nb H, L, L] bf16 in place of the bias.
-  step    Per block: cuBLAS v|g GEMM -> ``pv_gate_inf`` (sigmoid(g) * P v, a tcgen05 GEMM with the gate in its epilogue) ->
-          cuBLAS out GEMM -> residual + gate + AdaLN rows -> expand GEMM + SwiGLU (``gemm_swiglu2_sm100`` from 3840 rows;
-          below it cuBLAS + the SwiGLU rows) -> cuBLAS squeeze GEMM -> residual + gate (+ the next block's AdaLN) rows. The
-          row passes are this family's (``bias_only_dit_rows.cu``, one warp per row). The conditioning tables (AdaLN scale /
+  step    (the 12-launch step; bf16 serves the three-kernel step below by default) Per block: cuBLAS v|g GEMM ->
+          ``pv_gate_inf`` (sigmoid(g) * P v, a tcgen05 GEMM with the gate in its epilogue) -> cuBLAS out GEMM -> residual +
+          gate + AdaLN rows -> expand GEMM + SwiGLU (``gemm_swiglu2_sm100`` from 3840 rows; below it cuBLAS + the SwiGLU
+          rows) -> cuBLAS squeeze GEMM -> residual + gate (+ the next block's AdaLN) rows. The row passes are this family's (``bias_only_dit_rows.cu``, one warp per row). The conditioning tables (AdaLN scale /
           shift, output gates) of every block come from two GEMMs over L rows when the samples share one conditioning, over
           S L rows when each has its own. The residual stream is fp32.
 
@@ -34,6 +34,13 @@ then a replay runs none of those kernels) -- and each block is ``bo_front_tf32``
 programmatic dependent launch, on weights rounded to the nearest TF32 once per pack (``_pack3``). A failed build warns once and keeps
 the composition above. Front and tail exchange their GEMM operands inside each cluster through L2 scratch (stores, one release,
 TMA-fed GEMM; ``_buffers3``).
+
+bf16, three kernels per block (the default; MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=0 keeps the 12-launch step above, as does a failed
+build; read per call): the conditioning tables HOISTED as for fp32 but bf16 ([T, nb, 6, 768], the four sigmoids applied: ``_tables3b``) and each block ``bo_front_bf16``
+(LN + AdaLN + v|g GEMM) -> ``pv_gate_inf -DPDL_INF`` -> ``bo_tail_bf16`` or, where it takes fewer rounds, the pair tail
+``bo_tail2_bf16`` (out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM, residual + gate); bf16 operands, fp32
+accumulators, LayerNorm and residual; the block input is the step's bf16 single, then the previous tail's fp32 output; the last
+tail writes the step's dtype.
 
 Tried and not kept: splitting the samples over two or three CUDA streams (each chain leaves SMs idle at these sizes, but the
 core and cuBLAS's kernels each fill an SM's shared memory, so the chains did not overlap: L384 70 -> 80 us), and the
@@ -113,6 +120,7 @@ class FusedBiasOnlyDiT:
         self._ops: dict = {}
         self._tab3: dict = {}                                   # hoisted conditioning tables of the three-kernel step
         self._p3 = None                                         # its TF32-rounded weight pack
+        self._p3b = None                                        # the bf16 three-kernel step's weight pack
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -192,6 +200,8 @@ class FusedBiasOnlyDiT:
         """One solver step: single [S, 1, L, D], cond [S or 1, 1, L, dc] (one conditioning shared by the samples when
         its sample axis is 1 or has stride 0), P from ``hoist``. Returns [S, 1, L, D] in ``out_dtype`` (single's)."""
         if not self.fp32:
+            if self._inf3b_ok(single.device):
+                return self._step3b(single, cond, P, out_dtype)
             return self._step(single, cond, P, out_dtype)
         with _tf32().tf32_gemms():
             if self._inf3_ok(single.device):
@@ -306,6 +316,109 @@ class FusedBiasOnlyDiT:
             x = y
         res = out.view(S, 1, L, D)
         return res if out_dtype in (None, torch.float32) else res.to(out_dtype)
+
+    # ------------------------------------------------------------------ bf16, three kernels per block (default; INF3_BF16=0: off)
+    def _inf3b_ok(self, device) -> bool:
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+        if self.fp32 or not B16.inf3_bf16_on() or self.d != 768 or self.da not in (768, 1024):
+            return False
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        return B16.inf3_bf16_ready(idx, self.h, self.da // self.h)
+
+    def _pack3b(self):
+        """The bf16 three-kernel step's weights, once per runner: the AdaLN table weights reordered to (s1, s2, sh1, sh2) per block
+        (slices + cat, capture-safe), per block Wo / Wsq pair-packed per tail cluster size (Wsq in each CTA's z order), [Wv; Wg] and [Wa; Wb]
+        as they are."""
+        if self._p3b is None:
+            from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+            nb, D, dc = self.nb, self.d, self.dc
+            w4, b4 = self.w1.view(nb, 4, D, dc), self.b1.view(nb, 4, D)
+            w1 = torch.cat([w4[:, 0:1], w4[:, 2:3], w4[:, 1:2], w4[:, 3:4]], 1).reshape(nb * 4 * D, dc).contiguous()
+            b1 = torch.cat([b4[:, 0:1], b4[:, 2:3], b4[:, 1:2], b4[:, 3:4]], 1).reshape(nb * 4 * D).contiguous()
+            blocks = [dict(wvg=p["wvg"], wab=p["wab"], wo={cl: B16.pack_pairs_bf16(p["wo"], cl) for cl in B16.TAIL_CLUSTERS},
+                           wsq={cl: B16.pack_pairs_bf16(p["ws"], cl, z_order=True) for cl in B16.TAIL_CLUSTERS},
+                           wsqn=B16.pack_pairs_bf16(p["ws"], 8)) for p in self.per]       # the pair tail: natural k order
+            self._p3b = (w1, b1, blocks)
+        return self._p3b
+
+    def _tables3b(self, cond, S, L):
+        """The hoisted bf16 conditioning tables [T, nb, 6, 768] (gate1, gate2, s1, s2, sh1, sh2; the first four through their sigmoid,
+        rounded to bf16 once): the 12-launch step's LayerNorm rows and two GEMMs, once per conditioning tensor (``_tables3``'s
+        ``lookup_inputs`` rules)."""
+        from miniworld_engine.kernels import _capture
+
+        nb, D = self.nb, self.d
+        shared = cond.shape[0] == 1 or cond.stride(0) == 0
+        w1, b1, _ = self._pack3b()
+
+        def build():
+            c = (cond[0, 0] if shared else cond.reshape(S * L, self.dc)).to(self.dtype)
+            T = c.shape[0]
+            cn = torch.empty(T, self.dc, device=c.device, dtype=self.dtype)
+            C.ln_rows(c, cn, EPS)
+            g1 = torch.addmm(b1, cn, w1.t()).view(T, nb, 4, D)          # s1, s2, sh1, sh2
+            g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)  # gate1, gate2
+            tab = torch.cat([g2, g1], 2)                                 # gate1, gate2, s1, s2, sh1, sh2
+            tab[:, :, :4].sigmoid_()
+            return tab
+
+        key = ("tab3b", cond.data_ptr(), cond._version, tuple(cond.shape), cond.stride(), cond.dtype, cond.device, S, L)
+        entry = _capture.lookup_inputs(self._tab3, key, lambda: (weakref.ref(cond), build()), limit=16,
+                                       valid=lambda e: e[0]() is cond, alive=lambda e: e[0]() is not None)
+        return entry[1]
+
+    def _ops3b(self, device):
+        """(front, core, tail) of the bf16 three-kernel step: ``bo_front_bf16``, ``pv_gate_inf -DPDL_INF``, ``bo_tail_bf16`` /
+        ``bo_tail2_bf16``."""
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        key = ("inf3b", idx)
+        if key not in self._ops:
+            self._ops[key] = (B16.FrontBF16(idx, self.da), C.PvGateCore(idx, nh=self.h, dh=self.da // self.h, pdl=True),
+                              B16.TailBF16(idx, self.da))
+        return self._ops[key]
+
+    def _buffers3b(self, S, L, dev):
+        """v|g, a, the fp32 hand-over between blocks, and the clusters' exchange scratch (xa / xt [M, 768] bf16 rows padded by 128 B,
+        h [M 24, 64] bf16 blocked k-block-major; xt / h padded to whole tile pairs for the pair tail)."""
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+        key = ("inf3b", S, L, dev)
+        if key not in self._buf:
+            M, bf, f32 = S * L, torch.bfloat16, torch.float32
+            Mp = B16.tail_rows(M, B16.TAIL_PAIR)
+            self._buf[key] = dict(xa=torch.empty(M, self.d + 64, device=dev, dtype=bf)[:, :self.d],
+                                  vg=torch.empty(M, 2 * self.da, device=dev, dtype=bf), a=torch.empty(M, self.da, device=dev, dtype=bf),
+                                  xn=[torch.empty(M, self.d, device=dev, dtype=f32) for _ in range(2 if self.nb > 1 else 0)],
+                                  xt=torch.empty(Mp, self.d + 64, device=dev, dtype=bf)[:, :self.d],
+                                  h=torch.empty(Mp * 2 * self.d // 64, 64, device=dev, dtype=bf))
+        return self._buf[key]
+
+    def _step3b(self, single, cond, P, out_dtype=None):
+        """The bf16 step as three kernels per block: front (LN + AdaLN + v|g GEMM) -> core -> tail (everything after the core); the
+        block input the step's bf16 single, then the previous tail's fp32 output; the last tail writes the step's dtype."""
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+        S, B, L, D = single.shape
+        assert B == 1 and L % 128 == 0 and D == self.d
+        M, H, DA, dev = S * L, self.h, self.da, single.device
+        tab = self._tables3b(cond, S, L)
+        T = tab.shape[0]
+        _, _, packs = self._pack3b()
+        front, core, tail = self._ops3b(dev)
+        tcl = tail.cluster(M // 128)                                  # 8, 6, or the pair tail where it takes fewer rounds
+        pair, Mt = tcl == B16.TAIL_PAIR, B16.tail_rows(M, tcl)
+        buf = self._buffers3b(S, L, dev)
+        xin = single.reshape(M, D)
+        out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
+        xa, vg, a = buf["xa"], buf["vg"], buf["a"]
+        for b, p in enumerate(packs):
+            y = out if b + 1 == self.nb else buf["xn"][b % 2]
+            tb = tab[:, b]
+            front(xin, tb, p["wvg"], vg, T, xa=xa)
+            core(vg[:, :DA], P[b * H:(b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])     # sigmoid(g) * (P v)
+            wo, wsq = (p["wo"][8], p["wsqn"]) if pair else (p["wo"][tcl], p["wsq"][tcl])
+            tail(a, xin, tb, wo, p["wab"], wsq, y, T, xt=buf["xt"][:Mt], h=buf["h"][:Mt * 24], cl=tcl)
+            xin = y
+        return out.view(S, 1, L, D)
 
     def _step(self, single, cond, P, out_dtype=None):
         S, B, L, D = single.shape
