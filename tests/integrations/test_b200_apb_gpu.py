@@ -92,12 +92,9 @@ def test_apb_b200_training(L, masked, shape):
     yg, gg = _train(ours, sb, pb, mask, dy.bfloat16())
     yb, gb = _train(tb, sb, pb, mask, dy.bfloat16())
     assert _rel(yg, yw) < 1.3 * _rel(yb, yw) + 1e-3
-    # ln_pair.bias shifts every logit of a head by one constant: its true gradient is 0 (the fp32 module returns rounding noise)
-    zero = "ln_pair.bias"
-    assert (gg[zero] == 0).all()
-    assert gw[zero].norm() < 1e-4 * gw["ln_pair.weight"].norm()
+    assert "ln_pair.bias" not in gw and "ln_pair.bias" not in gg    # no offset: it would shift every logit of a head by one constant
     worst = []
-    for n in (n for n in gw if n != zero):
+    for n in gw:
         e, e0 = _rel(gg[n], gw[n]), _rel(gb[n], gw[n])
         worst.append((e / max(e0, 1e-3), n, e, e0))
         assert gg[n].dtype == gb[n].dtype

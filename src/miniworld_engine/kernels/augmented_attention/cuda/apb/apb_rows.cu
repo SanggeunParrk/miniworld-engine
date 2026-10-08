@@ -701,12 +701,11 @@ __global__ void __launch_bounds__(256) prep_k(const bf* __restrict__ WQ, const b
 
 // Parameter gradients, each into its own fp32 tensor (the parameters may be an fp32 master; the integration casts to theirs):
 // dWq | dWk | dWv | dWg (the real rows of dWp [4 W, D]), dWo (the real columns of dWo [D, W]), and from the accumulator dlnw, dlnb,
-// dbq, dWb = dWf ln_pair.weight, dln_pair.weight = sum_h dWf Wb, dln_pair.bias = 0 (the softmax cancels a per-head constant; see the
-// integration).
+// dbq, dWb = dWf ln_pair.weight, dln_pair.weight = sum_h dWf Wb.
 __global__ void __launch_bounds__(256) finalize_k(const float* __restrict__ DWP, const float* __restrict__ DWO, const float* __restrict__ ACC,
     const bf* __restrict__ WB, const float* __restrict__ LPW, float* __restrict__ OQ, float* __restrict__ OKe, float* __restrict__ OV,
     float* __restrict__ OG, float* __restrict__ OO, float* __restrict__ OLW, float* __restrict__ OLB, float* __restrict__ OBQ,
-    float* __restrict__ OWB, float* __restrict__ OLPW, float* __restrict__ OLPB, Geo G) {
+    float* __restrict__ OWB, float* __restrict__ OLPW, Geo G) {
   const int W = G.nh * G.dhp, NHD = G.nh * DP, D = G.d;
   const float *ALNW = ACC, *ALNB = ACC + D, *ABQ = ACC + 2 * D, *AWF = ACC + 2 * D + W;
   const long nv = 5L * D * D / 4, i = (long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -731,7 +730,7 @@ __global__ void __launch_bounds__(256) finalize_k(const float* __restrict__ DWP,
     float t = 0.f;
     for (int h = 0; h < G.nh; ++h) t += AWF[h * DP + c] * __bfloat162float(WB[h * DP + c]);
     OLPW[c] = t;
-  } else if (j < 3 * D + NHD + 2 * DP) OLPB[j - 3 * D - NHD - DP] = 0.f;
+  }
 }
 
 // ------------------------------------------------------------------------------------------------ host
@@ -938,14 +937,14 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   const int64_t W = width(G), D = G.d;
   chk_acc(acc, G);
   TORCH_CHECK(dwp.numel() == 4 * W * D && dwo.numel() == D * W, "finalize: dwp [4 W, D], dwo [D, W]");
-  TORCH_CHECK(out.size() == 11, "finalize: 11 outputs");
-  for (int i = 0; i < 11; ++i) chk(out[i], at::kFloat, "finalize output");
+  TORCH_CHECK(out.size() == 10, "finalize: 10 outputs");
+  for (int i = 0; i < 10; ++i) chk(out[i], at::kFloat, "finalize output");
   const at::cuda::CUDAGuard gd(dwp.device());
-  const long n = 5L * D * D / 4 + 3 * D + G.nh * DP + 2 * DP;
-  // out: lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb (the leaves' order)
+  const long n = 5L * D * D / 4 + 3 * D + G.nh * DP + DP;
+  // out: lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb (the leaves' order)
   finalize_k<<<(unsigned)((n + 255) / 256), 256, 0, S()>>>(CP<float>(dwp), CP<float>(dwo), CP<float>(acc), CP<bf>(wb), CP<float>(lpw),
       P<float>(out[2]), P<float>(out[4]), P<float>(out[5]), P<float>(out[6]), P<float>(out[7]), P<float>(out[0]), P<float>(out[1]),
-      P<float>(out[3]), P<float>(out[10]), P<float>(out[8]), P<float>(out[9]), G);
+      P<float>(out[3]), P<float>(out[9]), P<float>(out[8]), G);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

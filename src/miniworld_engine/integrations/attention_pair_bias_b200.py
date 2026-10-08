@@ -15,7 +15,7 @@ Inference (one opaque op):
   -> pair_bias (LN(pair) . Wf, Wf = to_bias.weight * ln_pair.weight * log2(e), masked keys -1e30)
   -> attn_inf -DQPAIR (sigmoid(g) o over the q columns) -> to_out accumulated in place (cuBLAS beta = 1) onto the residual
   seed ln_rows wrote (out-of-place addmm would add a copy of x into the output first).
-ln_pair's bias adds Wb . b to every (i, j) of a head: the softmax cancels it, so the forward drops it (its gradient is kept).
+ln_pair has no bias: an offset would add Wb . b to every (i, j) of a head, which the softmax cancels.
 
 Training (autograd Function, opaque forward / backward): the same forward in natural units with attn_fwd2 -DQPAIR (O, LSE),
 gate_rows and addmm; backward: dO GEMMs, gate_bwd (dO, D, dg), attn_dkv / attn_dqb -DNHEAD, qkv_bwd, the dxa / dW GEMMs,
@@ -72,17 +72,17 @@ def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.T
 
 def _leaves(module) -> list[torch.Tensor]:
     """The module's parameters as they are (any float dtype, e.g. an fp32 master): ln_single w / b, Wq, bq, Wk, Wv, Wg, Wo,
-    ln_pair w / b, Wb. The ops cast them (``_kernel_leaves``) outside autograd, so fp32 parameters get unrounded fp32 gradients."""
+    ln_pair w, Wb. The ops cast them (``_kernel_leaves``) outside autograd, so fp32 parameters get unrounded fp32 gradients."""
     return [module.ln_single.weight, module.ln_single.bias, module.to_query.weight, module.to_query.bias, module.to_key.weight,
-            module.to_value.weight, module.to_gate.weight, module.to_out.weight, module.ln_pair.weight, module.ln_pair.bias,
+            module.to_value.weight, module.to_gate.weight, module.to_out.weight, module.ln_pair.weight,
             module.to_bias.weight]
 
 
 def _kernel_leaves(leaves) -> list[torch.Tensor]:
     """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are)."""
     bf = torch.bfloat16
-    lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = leaves
-    return [lnw.float(), lnb.float(), wq.to(bf), bq.to(bf), wk.to(bf), wv.to(bf), wg.to(bf), wo.to(bf), lnpw.float(), lnpb.float(),
+    lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
+    return [lnw.float(), lnb.float(), wq.to(bf), bq.to(bf), wk.to(bf), wv.to(bf), wg.to(bf), wo.to(bf), lnpw.float(),
             wb.to(bf)]
 
 
@@ -102,7 +102,7 @@ def _mask(mask: torch.Tensor | None, L: int) -> torch.Tensor | None:
 
 def _geometry(leaves):
     """(heads, real head dim, row width W, d_single) from to_bias.weight [heads, 128] and ln_single.weight [d_single]."""
-    H, D = leaves[10].shape[0], leaves[0].numel()
+    H, D = leaves[9].shape[0], leaves[0].numel()
     return H, D // H, _rows().width(H, D), D
 
 
@@ -119,7 +119,7 @@ def _inference_packs(params, leaves):
 def _prep(leaves, qs: float, ws: float):
     """(W q | k | v | g [4 W, D] (padded rows, q x qs), its bias [4 W], Wf = to_bias.weight * ln_pair.weight * ws [H, 128], Wo
     [D, W] with padded columns -- or None when there is no padding (8 x 48: to_out.weight as is)), bf16, one launch."""
-    _, _, wq, bq, wk, wv, wg, wo, lnpw, _, wb = leaves
+    _, _, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
     H, _, W, D = _geometry(leaves)
     wpack = wq.new_empty((4 * W, D))
     bvec = wq.new_empty((4 * W,))
@@ -208,7 +208,7 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
     L = single.shape[1]
     rows = _rows()
     E = rows.ext()
-    lnw, lnpw, wb = leaves[0], leaves[8], leaves[10]
+    lnw, lnpw, wb = leaves[0], leaves[8], leaves[9]
     H, _, W, D = _geometry(leaves)
     xa, st, qkvg, bias, O, LSE, og, wf, wpack = saved[:9]
     wo = saved[9] if W != D else leaves[7]                 # [D, W]
@@ -231,9 +231,7 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
         dx = torch.empty_like(x)
         E.ln_bwd(dxa, x, st, lnw, dy2, dx, acc)
         dz, _, _ = rows.pair_bias_bwd(pair.view(L * L, DP), DB, wf, L, eps_p, acc, D)
-        # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel. ln_pair's
-        # bias moves a head's logits by one constant: sum_j dbias[h, i, j] = 0 for every query, so its gradient and its share
-        # of dWb are exactly 0 (the accumulated head sums are that 0 plus rounding noise; not used)
+        # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel
         outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
         E.finalize(dwp, dwo, acc, wb, lnpw, outs)
     return [dx.view(single.shape), dz.view(pair.shape), *outs]
@@ -253,7 +251,7 @@ class _Training(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:14]), list(v[14:])          # saved: 10 or 11 tensors
+        mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:13]), list(v[13:])          # saved: 10 or 11 tensors
         dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
         return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
 

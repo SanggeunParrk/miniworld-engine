@@ -2343,7 +2343,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
                 self.to_query.weight, self.to_query.bias, self.to_key.weight,
                 self.to_value.weight, self.to_gate.weight, self.to_out.weight,
                 w_proj_z=self.to_bias.weight,
-                w_ln_z=as_act(self.ln_pair.weight), b_ln_z=as_act(self.ln_pair.bias),
+                w_ln_z=as_act(self.ln_pair.weight), b_ln_z=as_act(torch.zeros_like(self.ln_pair.weight)),
                 eps=self.ln_single.eps)
             return single + out
 
@@ -2487,7 +2487,7 @@ def _anthropic_apb_composition(upstream, model, mask, act: "torch.dtype", core_r
     for at in model.layers:
         d = at.to_query.weight.shape[0]
         try:
-            pb = lnp.pack_pair_bias_weights(at.ln_pair.weight.detach().float(), at.ln_pair.bias.detach().float(),
+            pb = lnp.pack_pair_bias_weights(at.ln_pair.weight.detach().float(), torch.zeros_like(at.ln_pair.weight, dtype=torch.float32),
                                             w(at.to_bias.weight), at.ln_pair.eps, at.to_bias.weight.device)
         except lnp.Unsupported as exc:
             raise UnsupportedBenchmark(f"ln_proj refuses the pair width: {exc} (served c_pair {lnp.SERVED_C_PAIR})") from exc

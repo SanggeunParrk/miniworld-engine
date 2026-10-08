@@ -64,10 +64,16 @@ class AttentionPairBias(nn.Module):
             self.norm_query = RMSNorm(d_hidden, implementation=self.implementation)
             self.norm_key = RMSNorm(d_hidden, implementation=self.implementation)
 
-        self.ln_pair = LayerNorm(d_pair, implementation=self.implementation)
+        # No offset: ln_pair feeds only the logits (to_bias has no bias); an offset adds one constant per head to every logit, which the softmax cancels.
+        self.ln_pair = LayerNorm(d_pair, bias=False, implementation=self.implementation)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # checkpoints written before the offset was removed carry ln_pair.bias; it had no effect on the output, so dropping it is exact
+        state_dict.pop(prefix + "ln_pair.bias", None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @typecheck
     def forward(
