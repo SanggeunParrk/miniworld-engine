@@ -521,3 +521,34 @@ def test_inf3_bf16_cluster_choice(inf3b, monkeypatch, L, want, want_front):
     assert picked_front, resident
     assert picked_front == [want_front] * len(picked_front), (picked_front, resident)
     assert torch.isfinite(out.float()).all()
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize("gate", [-80.0, -86.5, -87.5, -88.0, -88.5, -89.0, -100.0, -120.0, 88.0, 100.0])
+def test_core_stays_finite_for_saturated_gates(gate, n_head, d_head):
+    # (from 5a46c2ef) sigmoid(g) near and below the smallest normal f32: the epilogue's reciprocal seed is only valid up to d = 1 + 2^125, past
+    # g = -86.6 it gave NaN (-88 .. -88.7) and inf (below) for the whole gated product
+    torch.manual_seed(7)
+    L, S = 256, 3
+    M, DA = S * L, n_head * d_head
+    vg = 10 * torch.randn(M, 2 * DA, device="cuda", dtype=torch.bfloat16)
+    vg[:, DA:] = gate
+    P = torch.softmax(3 * torch.randn(n_head * L, L, device="cuda"), dim=-1).to(torch.bfloat16)
+    a = torch.empty(M, DA, device="cuda", dtype=torch.bfloat16)
+    C.PvGateCore(torch.cuda.current_device(), nh=n_head, dh=d_head)(vg[:, :DA], P, a, S, g=vg[:, DA:])
+    assert torch.isfinite(a.float()).all()
+    torch.testing.assert_close(a.float(), R.pv_gate(vg, P, S).float(), rtol=2e-2, atol=1e-30 if gate < 0 else 1e-2)
+
+
+def test_core_one_saturated_gate_does_not_touch_its_neighbours():
+    # a single g = -88 among ordinary gates: only that product may change (the incident: one NaN element spread over its token row)
+    torch.manual_seed(8)
+    L, S, n_head, d_head = 128, 2, 16, 48
+    M, DA = S * L, n_head * d_head
+    vg = torch.randn(M, 2 * DA, device="cuda", dtype=torch.bfloat16)
+    vg[5, DA + 98] = -88.0
+    P = torch.softmax(torch.randn(n_head * L, L, device="cuda"), dim=-1).to(torch.bfloat16)
+    a = torch.empty(M, DA, device="cuda", dtype=torch.bfloat16)
+    C.PvGateCore(torch.cuda.current_device(), nh=n_head, dh=d_head)(vg[:, :DA], P, a, S, g=vg[:, DA:])
+    assert torch.isfinite(a.float()).all()
+    assert relative(a, R.pv_gate(vg, P, S)) < 1e-3

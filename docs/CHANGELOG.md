@@ -265,6 +265,15 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Fixed
 
+- B200 bias-only DiT: saturated sigmoid gates gave NaN / inf. The fast sigmoid 1 / (1 + 2^(-g log2 e)) takes its reciprocal by Newton
+  steps from a bit-trick seed that is valid only for a denominator below 2^126; at g <= -87.3 (inf from -88.7) the seed was garbage.
+  `pv_gate_inf` (the bf16 attention core: training forward, 12-launch inference) turned a whole token row to NaN this way in a
+  phase-2a bf16-mixed run (one gate at g = -88.5). The denominator is now clamped at 2^125 before the seed (NaN still propagates)
+  in `pv_gate_inf.cu`, `cond_tables_sm100.cu` (opt-in; its f16 exponent overflowed already from g < -11) and the shared `rcp_nr`
+  (`gemm_resln_sm100.cu`, opt-in). Supersedes the unpushed 5a46c2ef (pv_gate_inf only), whose two core tests are kept.
+  `tests/integrations/test_b200_bias_only_dit_extreme_gates_gpu.py`: gates from -1e4 to +1e4 through the core, and blocks whose
+  gate / scale pre-activations reach several hundred through every bf16 / fp32 inference and training path, finite and within
+  bounds. Speed unchanged (bf16 inference L768 78.2 -> 78.4 us).
 - Triton augmented attention, memory-efficient path (`compute_efficient=False`): a head dim below 16 padded its dot lanes to
   `next_power_of_2(D)` (8 for D = 8), under `tl.dot`'s K >= 16, so the kernels did not compile; it now pads to at least 16 as the
   compute-efficient path does (the padded lanes are masked loads of zero). `tests/numerics/test_augmented_attention_small_head_gpu.py`

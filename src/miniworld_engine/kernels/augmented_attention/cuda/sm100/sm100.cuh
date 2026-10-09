@@ -37,7 +37,14 @@ DEVI float ex2_poly(float x) {
 }
 // 1/d on the FMA pipe: bit-trick seed (relative error <= ~12 %) three Newton steps r <- r (2 - d r) (error squares each step) and a residual correction, for
 // the sigmoid's denominator d = 1 + 2^x in [1, 2^125]
+// min that keeps a NaN (fminf would return the other operand and hide it)
+DEVI float fmin_nan(float a, float b) { float y; asm("min.NaN.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
+// the bit-trick reciprocal seed is valid for 0 < d < 2^126 only: a sigmoid denominator 1 + 2^(-a log2 e) passes 2^126 at
+// a <= -87.3 and is inf at a <= -88.7, where an unclamped seed turns the Newton steps into NaN / inf. Clamped at 2^125 the result
+// is ~2^-125 (the true value is smaller still), a NaN stays NaN.
+constexpr float RCP_SEED_MAX = 4.2535295865117308e37f;      // 2^125
 DEVI float rcp_nr(float d) {
+  d = fmin_nan(d, RCP_SEED_MAX);
   float r = __int_as_float(0x7EF311C3 - __float_as_int(d));
   r = r * fmaf(-d, r, 2.f);
   r = r * fmaf(-d, r, 2.f);

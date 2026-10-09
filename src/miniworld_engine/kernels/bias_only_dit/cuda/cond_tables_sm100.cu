@@ -47,14 +47,14 @@ struct Bars { uint64_t full[NST], empty[NST], a_full, a_free, acc_full[2], acc_e
 // 1 / (1 + 2^(-v log2 e)): the exponential on MUFU, the reciprocal by two Newton steps on the FMA pipe (relative error <= 2e-4,
 // below the bf16 rounding of the table)
 DEVI float sgm(float v) {
-  const float d = __fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, v)));
+  const float d = fmin_nan(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, v))), RCP_SEED_MAX);   // seed valid below 2^126
   float r = __int_as_float(0x7EF311C3 - __float_as_int(d));
   r = r * fmaf(-d, r, 2.f);
   return r * fmaf(-d, r, 2.f);
 }
 
 // sigmoid of a pair, packed. Default: both exponentials in ONE MUFU op (ex2.approx.f16x2: relative error ~5e-4, below the bf16
-// rounding of the table; an argument below -11 gives 2^t = inf in f16 and a sigmoid of 0, i.e. an absolute error < 2e-5), the
+// rounding of the table; an argument below -11 gives 2^t = inf in f16, clamped to a sigmoid of ~0, absolute error < 2e-5), the
 // reciprocal by two Newton steps in f32 on the FMA pipe. SIG_F32: the exponentials in f32 (two MUFU ops); SIG_TANH: 0.5 tanh(a / 2)
 // + 0.5 (one MUFU op per element, absolute error ~2.4e-4).
 DEVI f2 sigmoid_pair(f2 a) {
@@ -81,7 +81,8 @@ DEVI f2 sigmoid_pair(f2 a) {
   const float2 ef = h2f2(eh);
   const f2 e = mk2(ef.x, ef.y);
 #endif
-  const f2 d = add2(e, mk2(1.f, 1.f)), nd = neg2(d), two = mk2(2.f, 2.f);
+  const f2 e1 = add2(e, mk2(1.f, 1.f));                     // f16 2^t is inf from t ~ 16 (a < -11): clamp for the seed
+  const f2 d = mk2(fmin_nan(lo2(e1), RCP_SEED_MAX), fmin_nan(hi2(e1), RCP_SEED_MAX)), nd = neg2(d), two = mk2(2.f, 2.f);
   f2 r = mk2(__int_as_float(0x7EF311C3 - __float_as_int(lo2(d))), __int_as_float(0x7EF311C3 - __float_as_int(hi2(d))));
   r = mul2(r, fma2(nd, r, two));
   return mul2(r, fma2(nd, r, two));

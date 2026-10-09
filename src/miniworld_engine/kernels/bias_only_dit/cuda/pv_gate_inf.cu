@@ -64,7 +64,8 @@ DEVI uint32_t gate_pair(uint32_t o0, uint32_t o1, uint32_t g2) {
   return pack_bf16(__uint_as_float(o0) * sigmoid_kit(bf16lo(g2)), __uint_as_float(o1) * sigmoid_kit(bf16hi(g2)));
 #else
   const f2 t = mul2(mk2(bf16lo(g2), bf16hi(g2)), mk2(-1.4426950408889634f, -1.4426950408889634f));
-  const f2 d = add2(mk2(ex2f(lo2(t)), ex2f(hi2(t))), mk2(1.f, 1.f));
+  const f2 e = add2(mk2(ex2f(lo2(t)), ex2f(hi2(t))), mk2(1.f, 1.f));
+  const f2 d = mk2(fmin_nan(lo2(e), RCP_SEED_MAX), fmin_nan(hi2(e), RCP_SEED_MAX));   // g <= -87.3: keep the seed valid
   const f2 nd = neg2(d), two = mk2(2.f, 2.f);
   f2 r = mk2(__int_as_float(0x7EF311C3 - __float_as_int(lo2(d))), __int_as_float(0x7EF311C3 - __float_as_int(hi2(d))));
   r = mul2(r, fma2(nd, r, two));
