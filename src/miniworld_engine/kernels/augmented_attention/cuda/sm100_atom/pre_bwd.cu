@@ -6,15 +6,23 @@
 // Structure (post_fwd.cu's frame): transposed 16-row tiles; W^T = [Wq; Wk; Wv; Wg]^T (128 x 512) in TMEM as the bf16 A operand (256
 // columns); the two compute warpgroups take alternate tiles, each with its own TMA producer warp, MMA warp, NSW-stage ring and four
 // accumulators dx_p^T = W_p^T dP_p^T (M = 128 channels, N = 16 rows, K = 128).
-// Stage (36 KB): dP [16][512] | a | s1 -> dsc1 | DA -> d single | dx1 | dxkv (cross-attention mode: the gradient the key / value AdaLN sends to x1,
-// added to dx1 in bf16 before AdaLN 1's backward; has_kv = 0 skips it).
+// Stage (32 KB): dP [16][512] | a | s1 -> dsc1 | DA -> d single | dx1.
+// Cross-attention mode (-DCROSS=1, ``pre_bwd_kv``): the keys and values come from a second AdaLN of x1, xkv = LN(x1) sigmoid(pre + bs) + shift
+// (mkv = [pre | shift]), so the K / V projections' input gradient is that AdaLN's: with the real Wk, Wv in W^T, projections 1 and 2 give
+//   dxkv = rn(dk Wk + dv Wv)   (one fp32 sum, one rounding: a K = 256 product)
+// which goes through the AdaLN's backward in the row stage (x1 and pre are staged: two more tiles) into dx1_kv, added to dx1 = rn(dg Wg + dq Wq)
+// in bf16 before AdaLN 1's backward; dmkv = [dpre | dxkv] is stored and d bs reduced. 44-KB stages, two per warpgroup. This replaces a K = 256
+// cuBLAS GEMM, ``kv_bwd`` and the dx1_kv round trip of the separate formulation.
 // TMEM: W^T 0 (256 columns, projection p at 64 p); warpgroup w's accumulators at 256 + 64 w + 16 p.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef CROSS
+#define CROSS 0
+#endif
 #ifndef NSW
-#define NSW 3                              // input stages per warpgroup
+#define NSW (CROSS ? 2 : 3)                // input stages per warpgroup
 #endif
 #ifndef ORD
 #define ORD 0                              // the order of the four bf16 additions (autograd's)
@@ -22,9 +30,11 @@ using namespace s100;
 constexpr int R = 16;
 constexpr int KB = R * 128;                                                // [16 rows][64] bf16, SW128 (2 KB)
 constexpr int T_ = 2 * KB;                                                 // [16][128] row-major tile (4 KB)
-constexpr int O_DP = 0, O_A = 4 * T_, O_S1 = 5 * T_, O_DA = 6 * T_, O_X = 7 * T_, O_KV = 8 * T_, STG = 9 * T_;
+constexpr int O_DP = 0, O_A = 4 * T_, O_S1 = 5 * T_, O_DA = 6 * T_, O_X = 7 * T_, O_DXKV = 8 * T_, O_X1 = 9 * T_, O_MP = 10 * T_,
+              STG = (CROSS ? 11 : 8) * T_;
 constexpr int O_BAR = (2 * NSW * STG > 4 * 32768 ? 2 * NSW * STG : 4 * 32768), O_RED = O_BAR + 512;
-constexpr int SMEM = O_RED + 8 * 256 * 4;
+constexpr int NRED = CROSS ? 384 : 256;                                    // per-warp partial sums: d bsc1 | d bq (| d bs)
+constexpr int SMEM = O_RED + 8 * NRED * 4;
 static_assert(SMEM <= 232448, "shared memory");
 constexpr uint32_t T_W = 0, T_ACC = 256;
 constexpr uint32_t I_16 = idesc_bf16(128, 16);
@@ -33,6 +43,7 @@ struct Bars {
   uint64_t wfull, wfree, infull[2][NSW], infree[2][NSW], dxfull[2], dxfree[2];
   uint32_t tmem;
 };
+DEVI float sigm_x(float x) { return 1.f / (1.f + __expf(-x)); }
 DEVI uint32_t bmul2(uint32_t a, uint32_t b) { uint32_t r; asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t badd2(uint32_t a, uint32_t b) { uint32_t r; asm("add.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t bsub2(uint32_t a, uint32_t b) { uint32_t r; asm("sub.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
@@ -48,8 +59,9 @@ DEVI void stsm4t(uint32_t a, const uint32_t (&r)[4]) {
 extern "C" __global__ void __launch_bounds__(384, 1)
 atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mmod,
                    const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mwt, const __grid_constant__ CUtensorMap mds,
-                   const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mkv, float* __restrict__ DBIAS, float* __restrict__ DBQ,
-                   int ntile, float eps, int has_kv) {
+                   const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mx1, const __grid_constant__ CUtensorMap mmkv,
+                   const __grid_constant__ CUtensorMap mdmkv, float* __restrict__ DBIAS, float* __restrict__ DBQ, float* __restrict__ DBS,
+                   const float* __restrict__ BS, int ntile, float eps) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -88,9 +100,12 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
         const uint32_t st = stage(w, i);
         uint64_t* bar = &B.infull[w][s];
-        mbar_expect_tx(bar, (14 + 2 * has_kv) * KB);
-        if (has_kv)
-          for (int kb = 0; kb < 2; ++kb) tma_load_2d(st + O_KV + kb * KB, &mkv, bar, 64 * kb, r0);
+        mbar_expect_tx(bar, (CROSS ? 18 : 14) * KB);
+        if (CROSS)
+          for (int kb = 0; kb < 2; ++kb) {
+            tma_load_2d(st + O_X1 + kb * KB, &mx1, bar, 64 * kb, r0);
+            tma_load_2d(st + O_MP + kb * KB, &mmkv, bar, 64 * kb, r0);        // the pre-sigmoid scale: mkv's columns 0 .. 127
+          }
         for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_DP + kb * KB, &mdp, bar, 64 * kb, r0);
         for (int kb = 0; kb < 2; ++kb) {
           tma_load_2d(st + O_A + kb * KB, &ma, bar, 64 * kb, r0);
@@ -141,9 +156,12 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
     const uint32_t aoff = sw128((uint32_t)ar, (uint32_t)ak);
     const uint32_t fj = (uint32_t)(8 * ((lane >> 3) & 1) + (lane & 7)), fh = (uint32_t)(lane >> 4);
     auto faddr = [&](uint32_t base, uint32_t ch) { return base + (ch >> 6) * KB + fj * 128u + ((((ch & 63u) >> 3) ^ (fj & 7u)) << 4); };
-    float bs1[16], bq[16];                                                 // d bsc1, d bq over this thread's rows (channels 8 ak + e, 64 + 8 ak + e)
+    float bs1[16], bq[16], bsk[16], bsr[16];                               // d bsc1, d bq, d bs over this thread's rows (channels 8 ak + e, 64 + 8 ak + e), bs
 #pragma unroll
-    for (int e = 0; e < 16; ++e) { bs1[e] = 0.f; bq[e] = 0.f; }
+    for (int e = 0; e < 16; ++e) {
+      bs1[e] = 0.f; bq[e] = 0.f; bsk[e] = 0.f;
+      bsr[e] = CROSS ? __ldg(BS + 64 * (e >> 3) + 8 * ak + (e & 7)) : 0.f;
+    }
     for (int i = 0; 2 * i + w < ntT; ++i) {
       const int r0 = row0(2 * i + w);
       const uint32_t st = stage(w, i);
@@ -153,7 +171,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
       tc_fence_after();
 #pragma unroll
       for (int L = 0; L < 2; ++L) {
-        uint32_t v[4][8], r[4];
+        uint32_t v[4][8], r[4], r2[4];
 #pragma unroll
         for (int p = 0; p < 4; ++p) tmem_ld16x256b2(ta + ((lb + 16 * L) << 16) + 16 * p, v[p]);
         tmem_wait_ld();
@@ -163,17 +181,81 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
           uint32_t g[4];
 #pragma unroll
           for (int p = 0; p < 4; ++p) g[p] = pack_bf16(__uint_as_float(v[p][k]), __uint_as_float(v[p][k + 1]));
-          // autograd's accumulation order of x1's four gradients (q 0, k 1, v 2, g 3)
-          r[mi] = ORD == 0 ? badd2(badd2(badd2(g[3], g[2]), g[1]), g[0]) : ORD == 1 ? badd2(badd2(badd2(g[0], g[1]), g[2]), g[3])
-                : ORD == 2 ? badd2(badd2(badd2(g[2], g[1]), g[0]), g[3]) : badd2(badd2(badd2(g[3], g[0]), g[1]), g[2]);
+          if (CROSS) {                                                     // dx1 = rn(dg Wg + dq Wq); dxkv = rn(dk Wk + dv Wv)
+            r[mi] = badd2(g[3], g[0]);
+            r2[mi] = pack_bf16(__uint_as_float(v[1][k]) + __uint_as_float(v[2][k]), __uint_as_float(v[1][k + 1]) + __uint_as_float(v[2][k + 1]));
+          } else {
+            // autograd's accumulation order of x1's four gradients (q 0, k 1, v 2, g 3)
+            r[mi] = ORD == 0 ? badd2(badd2(badd2(g[3], g[2]), g[1]), g[0]) : ORD == 1 ? badd2(badd2(badd2(g[0], g[1]), g[2]), g[3])
+                  : ORD == 2 ? badd2(badd2(badd2(g[2], g[1]), g[0]), g[3]) : badd2(badd2(badd2(g[3], g[0]), g[1]), g[2]);
+          }
         }
         stsm4t(faddr(st + O_X, lb + 16 * L + 8 * fh), r);
+        if (CROSS) stsm4t(faddr(st + O_DXKV, lb + 16 * L + 8 * fh), r2);
       }
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.dxfree[w]);
       named_bar_sync(1 + w, 128);
       // ---- P2: row stage
+      uint32_t kvo[2][4];                                                  // dx1_kv (bf16), CROSS only
+      if (CROSS) {
+        float y[16], dy[16], dxn[16];
+#pragma unroll
+        for (int kb = 0; kb < 2; ++kb) {
+          const uint4 yu = lds128(st + O_X1 + kb * KB + aoff), du = lds128(st + O_DXKV + kb * KB + aoff);
+          const uint32_t y4[4] = {yu.x, yu.y, yu.z, yu.w}, d4[4] = {du.x, du.y, du.z, du.w};
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            y[8 * kb + 2 * e] = bf16lo(y4[e]); y[8 * kb + 2 * e + 1] = bf16hi(y4[e]);
+            dy[8 * kb + 2 * e] = bf16lo(d4[e]); dy[8 * kb + 2 * e + 1] = bf16hi(d4[e]);
+          }
+        }
+        float sum = 0.f;
+#pragma unroll
+        for (int e = 0; e < 16; ++e) sum += y[e];
+        sum += __shfl_xor_sync(~0u, sum, 1); sum += __shfl_xor_sync(~0u, sum, 2); sum += __shfl_xor_sync(~0u, sum, 4);
+        const float mean = sum * (1.f / 128.f);
+        float var = 0.f;
+#pragma unroll
+        for (int e = 0; e < 16; ++e) { y[e] -= mean; var += y[e] * y[e]; }
+        var += __shfl_xor_sync(~0u, var, 1); var += __shfl_xor_sync(~0u, var, 2); var += __shfl_xor_sync(~0u, var, 4);
+        const float rstd = 1.f / sqrtf(var * (1.f / 128.f) + eps);
+        float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+        for (int kb = 0; kb < 2; ++kb) {
+          const uint4 pu = lds128(st + O_MP + kb * KB + aoff);
+          const uint32_t p4[4] = {pu.x, pu.y, pu.z, pu.w};
+          uint32_t dp[4];
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            float d2[2];
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+              const int k = 8 * kb + 2 * e + j;
+              y[k] *= rstd;                                                 // LN(x1)
+              const float sk = sigm_x((j ? bf16hi(p4[e]) : bf16lo(p4[e])) + bsr[k]);
+              d2[j] = dy[k] * y[k] * sk * (1.f - sk);                       // d pre-sigmoid scale
+              dxn[k] = dy[k] * sk;
+              bsk[k] += d2[j];
+              s1 += dxn[k];
+              s2 += dxn[k] * y[k];
+            }
+            dp[e] = pack_bf16(d2[0], d2[1]);
+          }
+          sts128(st + O_MP + kb * KB + aoff, make_uint4(dp[0], dp[1], dp[2], dp[3]));   // dpre over the staged pre
+        }
+        s1 += __shfl_xor_sync(~0u, s1, 1); s1 += __shfl_xor_sync(~0u, s1, 2); s1 += __shfl_xor_sync(~0u, s1, 4);
+        s2 += __shfl_xor_sync(~0u, s2, 1); s2 += __shfl_xor_sync(~0u, s2, 2); s2 += __shfl_xor_sync(~0u, s2, 4);
+        const float m1 = s1 * (1.f / 128.f), m2 = s2 * (1.f / 128.f);
+#pragma unroll
+        for (int kb = 0; kb < 2; ++kb)
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            const int k = 8 * kb + 2 * e;
+            kvo[kb][e] = pack_bf16(rstd * (dxn[k] - m1 - y[k] * m2), rstd * (dxn[k + 1] - m1 - y[k + 1] * m2));
+          }
+      }
       {
         float x[16];
 #pragma unroll
@@ -202,9 +284,8 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         for (int kb = 0; kb < 2; ++kb) {
           uint4 dxu = lds128(st + O_X + kb * KB + aoff);
           const uint4 gu = lds128(st + O_S1 + kb * KB + aoff);
-          if (has_kv) {                                                  // dx1 += dxkv (bf16), and dbi1 = the sum
-            const uint4 kv = lds128(st + O_KV + kb * KB + aoff);
-            dxu.x = badd2(dxu.x, kv.x); dxu.y = badd2(dxu.y, kv.y); dxu.z = badd2(dxu.z, kv.z); dxu.w = badd2(dxu.w, kv.w);
+          if (CROSS) {                                                   // dx1 += dx1_kv (bf16), and dbi1 = the sum
+            dxu.x = badd2(dxu.x, kvo[kb][0]); dxu.y = badd2(dxu.y, kvo[kb][1]); dxu.z = badd2(dxu.z, kvo[kb][2]); dxu.w = badd2(dxu.w, kvo[kb][3]);
             sts128(st + O_X + kb * KB + aoff, dxu);
           }
           const uint32_t d4[4] = {dxu.x, dxu.y, dxu.z, dxu.w}, g4[4] = {gu.x, gu.y, gu.z, gu.w};
@@ -244,6 +325,10 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
           tma_store_2d(&mds, st + O_DA + kb * KB, 64 * kb, r0);
           tma_store_2d(&mdmod, st + O_S1 + kb * KB, 64 * kb, r0);          // dsc1 -> block 0
           tma_store_2d(&mdmod, st + O_X + kb * KB, 128 + 64 * kb, r0);     // dbi1 = dx1 -> block 1
+          if (CROSS) {
+            tma_store_2d(&mdmkv, st + O_MP + kb * KB, 64 * kb, r0);        // dmkv = [dpre | dxkv]
+            tma_store_2d(&mdmkv, st + O_DXKV + kb * KB, 128 + 64 * kb, r0);
+          }
         }
         tma_store_commit();
         tma_store_wait_read0();                                            // (a short wait: the stores only have to read the stage)
@@ -251,23 +336,26 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
       }
     }
     if (leader) tma_store_wait0();
-    float* red = reinterpret_cast<float*>(sm + O_RED);                      // [8 warps][256]
+    float* red = reinterpret_cast<float*>(sm + O_RED);                      // [8 warps][NRED]
     const int cw = warp - 4;
 #pragma unroll
     for (int e = 0; e < 16; ++e) {
-      float v1 = bs1[e], vq = bq[e];
+      float v1 = bs1[e], vq = bq[e], vk = bsk[e];
       v1 += __shfl_xor_sync(~0u, v1, 8); v1 += __shfl_xor_sync(~0u, v1, 16);
       vq += __shfl_xor_sync(~0u, vq, 8); vq += __shfl_xor_sync(~0u, vq, 16);
+      vk += __shfl_xor_sync(~0u, vk, 8); vk += __shfl_xor_sync(~0u, vk, 16);
       const int c = e < 8 ? 8 * ak + e : 64 + 8 * ak + (e - 8);
-      if ((lane >> 3) == 0) { red[cw * 256 + c] = v1; red[cw * 256 + 128 + c] = vq; }
+      if ((lane >> 3) == 0) {
+        red[cw * NRED + c] = v1; red[cw * NRED + 128 + c] = vq;
+        if (CROSS) red[cw * NRED + 256 + c] = vk;
+      }
     }
     named_bar_sync(3, 256);
-    {
-      const int c = tid - 128;
+    for (int c = tid - 128; c < NRED; c += 256) {
       float v = 0.f;
 #pragma unroll
-      for (int k = 0; k < 8; ++k) v += red[k * 256 + c];
-      atomicAdd(c < 128 ? DBIAS + c : DBQ + (c - 128), v);
+      for (int k = 0; k < 8; ++k) v += red[k * NRED + c];
+      atomicAdd(c < 128 ? DBIAS + c : (c < 256 ? DBQ + (c - 128) : DBS + (c - 256)), v);
     }
   }
   tc_fence_before();

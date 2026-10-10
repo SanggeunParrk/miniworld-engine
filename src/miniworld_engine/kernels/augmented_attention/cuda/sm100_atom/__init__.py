@@ -55,12 +55,13 @@ SOURCES = ("attn_fwd", "attn_dkv", "attn_dq", "attn_dbias", "attn_dd", "pair_bia
 
 # --------------------------------------------------------------------------------------------------- build
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str) -> str:
-    """Path of ``<stem>.cu`` built for sm_100a with the sources' default options; rebuilt only when a source or a flag changes."""
+def cubin(stem: str, defs: tuple = ()) -> str:
+    """Path of ``<stem>.cu`` built for sm_100a with the sources' default options (+ ``-D`` ``defs``); rebuilt only when a source or a flag
+    changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}")
+    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}", *("-D" + d for d in defs))
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
@@ -79,14 +80,14 @@ def cubin(stem: str) -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM, pdl: bool = False):
+def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM, pdl: bool = False, defs: tuple = ()):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem), func, smem, pdl=pdl)
+        return driver.Kernel(cubin(stem, defs), func, smem, pdl=pdl)
 
 
-#: (stem, function, dynamic smem, PDL) of every kernel the block launches
+#: (stem, function, dynamic smem, PDL[, -D defs]) of every kernel the block launches
 KERNELS = {
     "fwd": ("attn_fwd", "augattn_fwd2_sm100", _SMEM, False),
     "dkv": ("attn_dkv", "augattn_dkv_sm100", _SMEM, False),
@@ -98,17 +99,19 @@ KERNELS = {
     "pb_b": ("pair_bias", "pair_bias_bwd", 0, False),
     "cond": ("cond_fwd", "atom_cond_fwd_sm100", _SMEM, True),
     "pre": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True),
+    "prex": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1",)),
     "post": ("post_fwd", "atom_post_fwd_sm100", _SMEM, True),
     "trg": ("tr_bwd_gate", "atom_tr_bwd_gate_sm100", _SMEM, True),
     "postb": ("post_bwd", "atom_post_bwd_sm100", _SMEM, True),
     "preb": ("pre_bwd", "atom_pre_bwd_sm100", _SMEM, True),
+    "prebx": ("pre_bwd", "atom_pre_bwd_sm100", _SMEM, True, ("CROSS=1",)),
     "condb": ("cond_bwd", "atom_cond_bwd_sm100", _SMEM, True),
 }
 
 
 def atom_kernel(name: str, device_index: int):
-    stem, func, smem, pdl = KERNELS[name]
-    return _load_atom_kernel(stem, func, device_index, smem, pdl)
+    stem, func, smem, pdl, *defs = KERNELS[name]
+    return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
 
 
 def load_all(device_index: int) -> None:
@@ -272,11 +275,26 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5):
     Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
     maps = (_rows(a), _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _rows(mod, 6 * DM),
-            _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X))
+            _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X), _rows(G), _rows(G))
     ntile = M // 32
     d = _dev(a)
-    atom_kernel("pre", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, bq, int(ntile), float(eps), int(save))
+    atom_kernel("pre", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, bq, bq, int(ntile), float(eps), int(save))
     return Q, K, V, G, X
+
+
+def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
+    """The cross-attention mode's ``pre_fwd``: K and V from xkv = LN(x1) sigmoid(mkv[:, :128] + bs) + mkv[:, 128:] (a second AdaLN of x1)
+    instead of from x1. -> Q, K, V, G [M, 128] bf16 and, when ``save``, x1 and xkv (else X = G, XK = None)."""
+    M = a.shape[0]
+    Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
+    X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
+    XK = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
+    maps = (_rows(a), _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _rows(mod, 6 * DM),
+            _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X), _rows(mkv, 2 * DM), _rows(XK))
+    ntile = M // 32
+    d = _dev(a)
+    atom_kernel("prex", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, bq, bs.float().contiguous(), int(ntile), float(eps), int(save))
+    return Q, K, V, G, X, (XK if save else None)
 
 
 def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5):
@@ -326,17 +344,31 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
     return DA, DU, GATED, DO
 
 
-def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5, DX1KV=None):
-    """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ. DX1KV [M, 128]: the
-    gradient another branch (the cross-attention mode's key / value AdaLN) sends to x1, added to dx1 before AdaLN 1's backward."""
+def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
+    """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ."""
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
     maps = (_rows16(dP, 4 * DM), _rows16(a), _rows16(mod, 6 * DM), _rows16(DA), _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
-            _rows16(DS), _rows16(dmod, 6 * DM), _rows16(DA if DX1KV is None else DX1KV))
+            _rows16(DS), _rows16(dmod, 6 * DM), _rows16(DA), _rows16(DA), _rows16(DA))
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("preb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, DBIAS, DBQ, int(ntile), float(eps), int(DX1KV is not None))
+    atom_kernel("preb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, DBIAS, DBQ, DBQ, DBQ, int(ntile), float(eps))
     return DS
+
+
+def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5):
+    """The cross-attention mode's ``pre_bwd``: dP = [dq | dk | dv | dg] with WT the real [Wq; Wk; Wv; Wg]^T; k and v come from xkv = LN(x1)
+    sigmoid(mkv[:, :128] + bs) + mkv[:, 128:], whose backward (dxkv = dk Wk + dv Wv, in the kernel) is added to dx1 before AdaLN 1's.
+    -> d single [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | dxkv]; d bs (fp32 [128]) is added into DBS."""
+    M = a.shape[0]
+    DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
+    dmkv = torch.empty(M, 2 * DM, device=a.device, dtype=torch.bfloat16)
+    maps = (_rows16(dP, 4 * DM), _rows16(a), _rows16(mod, 6 * DM), _rows16(DA), _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
+            _rows16(DS), _rows16(dmod, 6 * DM), _rows16(x1), _rows16(mkv, 2 * DM), _rows16(dmkv, 2 * DM))
+    ntile = M // 16
+    d = _dev(a)
+    atom_kernel("prebx", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, DBIAS, DBQ, DBS, bs.float().contiguous(), int(ntile), float(eps))
+    return DS, dmkv
 
 
 def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):

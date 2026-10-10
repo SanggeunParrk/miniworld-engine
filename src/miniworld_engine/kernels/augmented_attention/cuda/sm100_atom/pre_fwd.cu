@@ -10,6 +10,13 @@
 // the accumulators in the mma-fragment layout (tcgen05.ld 16x256b; warpgroup w: rows 16 w ..), rows paired into bf16x2 and
 // stored transposed by stmatrix.trans into row-major 128-B-swizzled staging tiles; TMA stores.
 // TMEM: W_p at 64 p (256 columns); accumulator set b at 256 + 128 b, projection p at + 32 p.
+// Cross-attention mode (-DCROSS=1, ``pre_fwd_kv``): the keys and values are projected from a second AdaLN of x1,
+//   xkv = rn(LN(x1) sigmoid(mkv_pre + bs) + mkv_shift)      (mkv [M, 256] = [pre-sigmoid scale | shift]: the K / V modulation GEMM's output)
+//   K = rn(xkv Wk^T);  V = rn(xkv Wv^T)
+// computed from the registers that hold x1 (a second LayerNorm over the same eight threads), written to its own staging tile (the B operand of
+// the K / V projections; saved for the backward when ``save``). Q and G read the x1 tile as before. Input stages are 40 KB (a | s1 | bi1 | mkv)
+// so two (NI = 2) fit beside the x1 / xkv rings (3 tiles each) and the outputs; (NI = 3 needs a two-deep xkv ring, whose extra wait on
+// the previous tile's store cost 30 %: 167 us against 130 at 196608 rows.)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -17,15 +24,18 @@ using namespace s100;
 #ifndef DIAG
 #define DIAG 0
 #endif
+#ifndef CROSS
+#define CROSS 0
+#endif
 #ifndef NI
-#define NI 4
+#define NI (CROSS ? 2 : 4)
 #endif
 constexpr int C = 128;
 constexpr int KBLK = 4096;                                                 // [32 rows][64] bf16, SW128
 constexpr int T_ = 2 * KBLK;                                               // [32][128] row-major tile (8 KB)
 // rings: inputs (a | mod s1 | bi1) x NI, freed as soon as the AdaLN has read them; x1 x 3 (the MMA's B operand, the save's source);
 // outputs (Q | K | V | G) x 2, freed when the TMA stores have read them
-constexpr int IST = 3 * T_, O_IN = 0, O_X = NI * IST, O_O = O_X + 3 * T_, OST = 4 * T_;
+constexpr int IST = (CROSS ? 5 : 3) * T_, O_IN = 0, O_X = NI * IST, O_XK = O_X + 3 * T_, O_O = O_XK + (CROSS ? 3 : 0) * T_, OST = 4 * T_;
 constexpr int O_BAR = O_O + 2 * OST;
 constexpr int SMEM = O_BAR + 256;
 static_assert(SMEM <= 232448, "shared memory");
@@ -38,6 +48,7 @@ struct Bars {
   uint32_t tmem;
 };
 DEVI float sigm(float x) { return __fdividef(1.f, 1.f + __expf(-x)); }
+DEVI float sigm_x(float x) { return 1.f / (1.f + __expf(-x)); }       // the K / V AdaLN's scale (lcross.cu's kv_fwd)
 DEVI float rnb(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 DEVI uint32_t bmul2(uint32_t a, uint32_t b) { uint32_t r; asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t badd2(uint32_t a, uint32_t b) { uint32_t r; asm("add.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
@@ -59,8 +70,9 @@ DEVI void tmem_ld16x256b2(uint32_t taddr, uint32_t (&r)[8]) {
 extern "C" __global__ void __launch_bounds__(384, 1)
 atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mmod,
                    const __grid_constant__ CUtensorMap mQ, const __grid_constant__ CUtensorMap mK, const __grid_constant__ CUtensorMap mV,
-                   const __grid_constant__ CUtensorMap mG, const __grid_constant__ CUtensorMap mX, const float* __restrict__ BQ, int ntile,
-                   float eps, int save) {
+                   const __grid_constant__ CUtensorMap mG, const __grid_constant__ CUtensorMap mX, const __grid_constant__ CUtensorMap mMKV,
+                   const __grid_constant__ CUtensorMap mXK, const float* __restrict__ BQ, const float* __restrict__ BS, int ntile, float eps,
+                   int save) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -97,7 +109,9 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
 #if DIAG == 2
         mbar_arrive(&B.infull[s]); (void)st; (void)r0;
 #else
-        mbar_expect_tx(&B.infull[s], 6 * KBLK);
+        mbar_expect_tx(&B.infull[s], (CROSS ? 10 : 6) * KBLK);
+        if (CROSS)
+          for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + 3 * T_ + kb * KBLK, &mMKV, &B.infull[s], 64 * kb, r0);   // pre | shift
         for (int kb = 0; kb < 2; ++kb) tma_load_2d(st + kb * KBLK, &ma, &B.infull[s], 64 * kb, r0);
         for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + T_ + kb * KBLK, &mmod, &B.infull[s], 64 * kb, r0);   // s1 | bi1
 #endif
@@ -116,7 +130,7 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
     __syncwarp();
     for (int T = 0; T < ntT; ++T) {
       const int ab = T & 1, xb = T % 3;
-      const uint32_t xa = su + O_X + xb * T_;
+      const uint32_t xa = su + O_X + xb * T_, xk = su + O_XK + xb * T_;
       if (T >= 2) mbar_wait(&B.accfree[ab], ((T >> 1) - 1) & 1);
       mbar_wait(&B.xfull[xb], (T / 3) & 1);
       tc_fence_after();
@@ -125,7 +139,8 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
         for (int p = 0; p < (DIAG == 3 ? 0 : 4); ++p)
 #pragma unroll
           for (int ks = 0; ks < 8; ++ks)
-            umma_ts(tmem + T_ACC + 128 * ab + 32 * p, tmem + T_W + 64 * p + ks * 8, desc_k128(xa + (ks >> 2) * KBLK) + (uint64_t)((ks & 3) * 2), I_32,
+            umma_ts(tmem + T_ACC + 128 * ab + 32 * p, tmem + T_W + 64 * p + ks * 8,
+                    desc_k128(((CROSS && (p == 1 || p == 2)) ? xk : xa) + (ks >> 2) * KBLK) + (uint64_t)((ks & 3) * 2), I_32,
                     ks > 0 ? 1u : 0u);
         tc_commit(&B.accfull[ab]);
       }
@@ -144,8 +159,11 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
 #endif
         for (int p = 0; p < 4; ++p)
           for (int kb = 0; kb < 2; ++kb) tma_store_2d(mo[p], su + O_O + ob * OST + p * T_ + kb * KBLK, 64 * kb, r0);
-        if (save)
+        if (save) {
           for (int kb = 0; kb < 2; ++kb) tma_store_2d(&mX, su + O_X + (T % 3) * T_ + kb * KBLK, 64 * kb, r0);
+          if (CROSS)
+            for (int kb = 0; kb < 2; ++kb) tma_store_2d(&mXK, su + O_XK + (T % 3) * T_ + kb * KBLK, 64 * kb, r0);
+        }
         tma_store_commit();
         tma_store_wait_read0();
         mbar_arrive(&B.ofree[ob]);
@@ -163,9 +181,12 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
 #pragma unroll
     for (int i = 0; i < 4; ++i) bq[i] = __ldg(BQ + lb + 8 * i + (lane >> 2));
     const uint32_t fj = (uint32_t)(16 * wg + 8 * ((lane >> 3) & 1) + (lane & 7)), fh = (uint32_t)(lane >> 4);
+    float bsr[16];                                                         // the K / V AdaLN's scale bias at this thread's channels 64 kb + 8 ak + e
+#pragma unroll
+    for (int i = 0; i < 16; ++i) bsr[i] = CROSS ? __ldg(BS + 64 * (i >> 3) + 8 * ak + (i & 7)) : 0.f;
     auto xphase = [&](int T) {
       const int s = T % NI, xb = T % 3;
-      const uint32_t st = su + O_IN + s * IST, xs = su + O_X + xb * T_;
+      const uint32_t st = su + O_IN + s * IST, xs = su + O_X + xb * T_, xks = su + O_XK + xb * T_;
       if (T >= 3) mbar_wait(&B.ofree[(T - 3) & 1], ((T - 3) >> 1) & 1);    // tile T - 3's x1 save has left this buffer
       mbar_wait(&B.infull[s], (T / NI) & 1);
 #if DIAG == 5
@@ -197,16 +218,47 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
       for (int e = 0; e < 16; ++e) { const float d = x[e] - mean; var += d * d; }
       var += __shfl_xor_sync(~0u, var, 1); var += __shfl_xor_sync(~0u, var, 2); var += __shfl_xor_sync(~0u, var, 4);
       const float rstd = rsqrtf(var * (1.f / C) + eps);
+      uint32_t ox[2][4];
 #pragma unroll
       for (int kb = 0; kb < 2; ++kb) {
         const uint32_t s4[4] = {sc[kb].x, sc[kb].y, sc[kb].z, sc[kb].w}, b4[4] = {bi[kb].x, bi[kb].y, bi[kb].z, bi[kb].w};
-        uint32_t o[4];
 #pragma unroll
         for (int e = 0; e < 4; ++e) {                                      // bf16x2 multiply / add: the module's single roundings
           const uint32_t xn = pack_bf16((x[8 * kb + 2 * e] - mean) * rstd, (x[8 * kb + 2 * e + 1] - mean) * rstd);
-          o[e] = badd2(bmul2(s4[e], xn), b4[e]);
+          ox[kb][e] = badd2(bmul2(s4[e], xn), b4[e]);
         }
-        sts128(xs + kb * KBLK + aoff, make_uint4(o[0], o[1], o[2], o[3]));
+        sts128(xs + kb * KBLK + aoff, make_uint4(ox[kb][0], ox[kb][1], ox[kb][2], ox[kb][3]));
+      }
+      if (CROSS) {                                                         // xkv = LN(x1) sigmoid(pre + bs) + shift, from the x1 just rounded
+        float y[16];
+#pragma unroll
+        for (int kb = 0; kb < 2; ++kb)
+#pragma unroll
+          for (int e = 0; e < 4; ++e) { y[8 * kb + 2 * e] = bf16lo(ox[kb][e]); y[8 * kb + 2 * e + 1] = bf16hi(ox[kb][e]); }
+        float s2 = 0.f;
+#pragma unroll
+        for (int e = 0; e < 16; ++e) s2 += y[e];
+        s2 += __shfl_xor_sync(~0u, s2, 1); s2 += __shfl_xor_sync(~0u, s2, 2); s2 += __shfl_xor_sync(~0u, s2, 4);
+        const float mean2 = s2 * (1.f / C);
+        float v2 = 0.f;
+#pragma unroll
+        for (int e = 0; e < 16; ++e) { const float d = y[e] - mean2; v2 += d * d; }
+        v2 += __shfl_xor_sync(~0u, v2, 1); v2 += __shfl_xor_sync(~0u, v2, 2); v2 += __shfl_xor_sync(~0u, v2, 4);
+        const float rstd2 = 1.f / sqrtf(v2 * (1.f / C) + eps);
+#pragma unroll
+        for (int kb = 0; kb < 2; ++kb) {
+          const uint4 pu = lds128(st + 3 * T_ + kb * KBLK + aoff), hu = lds128(st + 3 * T_ + (2 + kb) * KBLK + aoff);
+          const uint32_t p4[4] = {pu.x, pu.y, pu.z, pu.w}, h4[4] = {hu.x, hu.y, hu.z, hu.w};
+          uint32_t o[4];
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            const int k = 8 * kb + 2 * e;
+            const float a0 = (y[k] - mean2) * rstd2 * sigm_x(bf16lo(p4[e]) + bsr[k]) + bf16lo(h4[e]);
+            const float a1 = (y[k + 1] - mean2) * rstd2 * sigm_x(bf16hi(p4[e]) + bsr[k + 1]) + bf16hi(h4[e]);
+            o[e] = pack_bf16(a0, a1);
+          }
+          sts128(xks + kb * KBLK + aoff, make_uint4(o[0], o[1], o[2], o[3]));
+        }
       }
       fence_proxy_async();
       named_bar_sync(1 + wg, 128);

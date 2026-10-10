@@ -172,7 +172,7 @@ def _kernel_names(fn, monkeypatch):
 
     names: list[str] = []
     with monkeypatch.context() as m:
-        for mod, fns in ((rows, ("cond_fwd", "pre_fwd", "post_fwd")), (local, ("cond_ln", "pair_bias_fwd", "attn_fwd"))):
+        for mod, fns in ((rows, ("cond_fwd", "pre_fwd", "pre_fwd_kv", "post_fwd")), (local, ("cond_ln", "pair_bias_fwd", "attn_fwd"))):
             for name in fns:
                 orig = getattr(mod, name)
                 m.setattr(mod, name, (lambda o, n: lambda *a, **k: names.append(n) or o(*a, **k))(orig, name))
@@ -214,7 +214,7 @@ def test_hoisted_tables_are_made_once_per_conditioning_and_pair(cross, monkeypat
     assert torch.equal(first, second)
     assert _count(first_names, *TABLE_LAUNCHES) == (3 if cross else 2), first_names
     assert _count(names, *TABLE_LAUNCHES) == 0, names
-    assert _count(names, "attn_fwd") == 1 and _count(names, "pre_fwd", "post_fwd") == 2, "the block's own kernels must still run"
+    assert _count(names, "attn_fwd") == 1 and _count(names, "pre_fwd", "pre_fwd_kv", "post_fwd") == 2, "the block's own kernels must still run"
 
 
 def test_hoist_off_recomputes_every_call(monkeypatch):

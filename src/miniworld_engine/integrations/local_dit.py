@@ -90,7 +90,7 @@ _FAILED = False
 F32 = torch.float32
 _LOADED32: set[int] = set()
 _FAILED32 = False
-_ROW_KERNELS = ("cond", "pre", "post", "trg", "postb", "preb", "condb")
+_ROW_KERNELS = ("cond", "pre", "prex", "post", "trg", "postb", "preb", "prebx", "condb")
 #: The parameters of the cross-attention mode's second AdaLN (keys / values), appended to ``WEIGHTS``.
 CROSS_WEIGHTS = (
     "attention.ada_ln_kv.ln_cond.weight",
@@ -334,11 +334,11 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)])
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         mod, cn, mkv = _cond_tables(cond, lambda: _padded(cond, n).reshape(m, DC_).contiguous(), n, weights, wc, cross, save)
-        q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save or cross)
-        if cross:       # keys and values from a second AdaLN of x1 (pre_fwd's own k / v are not used)
-            _, bs, _, wk, wv, _ = _kv_pack(weights)
-            xkv = local.kv_fwd(x1, mkv, bs)
-            k, v = xkv @ wk.t(), xkv @ wv.t()
+        if cross:       # keys and values from a second AdaLN of x1, inside pre_fwd
+            bs = _kv_pack(weights)[1]
+            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, *wp, mkv, bs, save=save)
+        else:
+            q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save)
         bias = _pair_bias(pair, n, weights, save)
         o, lse = local.attn_fwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n))
         out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save)
@@ -411,16 +411,13 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         dz, dgamma, dwb = local.pair_bias_bwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db)
         if cross:   # the K / V branch: dxkv -> its AdaLN -> dx1 (through AdaLN 1 below) and the conditioning
             cn, mkv, xkv = extra
-            wm, bs, gkv, _, _, wkv = _kv_pack(weights)
-            dxkv = dp[:, DS_:3 * DS_] @ wkv                              # dk Wk + dv Wv in one K = 256 product
+            wm, bs, gkv, *_ = _kv_pack(weights)
             dbs = torch.zeros(DS_, device=dev)
-            dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv, dbs)
             dg_kv = torch.zeros(DS_, device=dev)
-            wpt = wb["WpT"].clone()
-            wpt[:, DS_:3 * DS_] = 0         # pre_bwd's dgrad covers q and the gate only (dk / dv stay in dp for the weight gradients)
+            # dk Wk + dv Wv through the K / V AdaLN into dx1, then AdaLN 1: one kernel; dmkv = [d pre-sigmoid scale | dxkv]
+            ds, dmkv = rows.pre_bwd_kv(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs)
         else:
-            wpt = wb["WpT"]
-        ds = rows.pre_bwd(dp, s2, mod, da, wpt, dmod, dbias_cols, dbq, DX1KV=dx1_kv if cross else None)   # + the K / V AdaLN's dx1, through AdaLN 1
+            ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
         dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
         if cross:
             local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv, acc=dc)    # dc += the K / V modulation's gradient through LN(c) * gamma
