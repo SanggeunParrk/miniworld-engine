@@ -195,10 +195,10 @@ Cross-attention training block, 1 layer, 48 samples x 4096 atoms (196 608 rows),
 
 | | start | now |
 |---|---|---|
-| bf16 (production, bf16-mixed) | 2.52 | 1.96 |
+| bf16 (production, bf16-mixed) | 2.52 | 1.74 |
 | fp32 (TF32) | 4.33 | 3.85 |
 
-At 8192 atoms bf16 is 3.72 ms and fp32 7.43 ms (linear in rows). Inference (A = 5, 4096 atoms, one block) is 0.14 ms bf16 / 0.17 ms fp32, mostly
+At 8192 atoms bf16 is 3.26 ms and fp32 7.43 ms (linear in rows). Inference (A = 5, 4096 atoms, one block) is 0.14 ms bf16 / 0.17 ms fp32, mostly
 launch gaps of a one-block graph.
 
 What changed:
@@ -207,14 +207,15 @@ What changed:
 |---|---|
 | `dw_atom.cu` `atom_dw` + `atom_dw_reduce` (`sm100_atom.atom_dw(device, f32)`) | every dense weight gradient of a block (A^T B over all rows, A / B column views of the saved activations and gradients) in **one** launch instead of one cuBLAS GEMM each: split-K over the rows with slices per problem proportional to its operand columns, TMA stages of 128-B-swizzle boxes (bf16: 16 rows x 5 stages; fp32 / tf32: 32 rows x 2 stages -- 8 rows x 8 stages was 2x slower, 16 x 5 1.17x), fp32 partials in a workspace, a deterministic in-order slice reduce writing each 128-row block of A to its destination tensor in the parameter's dtype. fp32 weight gradients of six problems at 196 608 rows: 334 us against 441 us cuBLAS. |
 | `rows_tf32.cu` `f32_colsum`, `lcross.cu` `local_colsum` | bias / conditioning-column gradients: a persistent grid writes G partial rows, a tiny sum finishes (replaces `sum(0)` reductions) |
-| `lcross.cu` `local_adaln1_extra`, `local_cond_ln_bwd` | four rows per iteration (independent loads in flight) and a block-level shared-memory reduce with one atomic per channel per block -- the per-warp atomics onto the same 128 addresses serialized in L2 and were the whole cost |
+| `lcross.cu` `local_cond_ln`, `local_kv_fwd`, `local_kv_bwd`, `local_cond_ln_bwd` | a row per half-warp with 16 B per lane (a row is one 256-B request, the LayerNorm reductions are 4 shuffle steps), persistent grid of 8 blocks per SM, bias / gamma gradients reduced in the block and added with one atomic per channel per block (per-warp atomics onto the same 128 addresses had serialized in L2). 196 608 rows: cond_ln 33 -> 19 us, kv_bwd 127 -> 60 (now also carrying the scale-bias gradient), cond_ln_bwd 62 -> 35. More rows in flight per half-warp (U = 2, 4) cost registers, hence blocks per SM, and were slower; copy rate is 6.0 TB/s here |
+| `pre_bwd.cu` `atom_pre_bwd_sm100` (cross mode) | takes the gradient the K / V AdaLN sends to x1 as a fifth TMA tile and adds it to dx1 in bf16 before AdaLN 1's backward: replaces the separate `local_adaln1_extra` pass (117 us, read-modify-write of ds and dmod) and makes dbi1 / dsc1 / the scale-bias gradient the totals in one write |
 | `gemm_rg_tf32.cu` `atom_gemm_rg_tf32` | the gated-residual GEMM at N = 128 with res and gate loaded through TMA into per-warp shared buffers one chunk ahead (the per-thread loads were uncoalesced: 2.1-2.5x the memory floor, now ~1.2x) |
 
-Cross mode no longer zeroes a column slice of the per-step `dp` (a zero-column clone of `Wp^T` is used instead). `tests/integrations/test_b200_atom_dw_gpu.py`
-covers `atom_dw` (bf16 / tf32, strided column views, several destination blocks, run-to-run determinism) and both column sums against fp64.
+In cross mode dk Wk + dv Wv is one K = 256 product (cached `[Wk; Wv]`), the conditioning LayerNorm backward of the K / V modulation adds onto `dc` in place, and a zero-column clone of `Wp^T` replaces zeroing a slice of the per-step `dp`. `tests/integrations/test_b200_atom_dw_gpu.py`
+covers `atom_dw` (bf16 / tf32, strided column views, several destination blocks, run-to-run determinism) and the fp32 column sum against fp64.
 
 ## Not covered
 
 B > 1, QK-norm, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
 values projected from a second AdaLN `attention.ada_ln_kv` of the already normalised atoms) is served, but its extra row work is plain
-CUDA row kernels plus cuBLAS GEMMs (`lcross.cu`), not yet fused into the tcgen05 row kernels, so it is slower than the shared-AdaLN block.
+CUDA row kernels plus cuBLAS GEMMs (`lcross.cu`; only its gradient into x1 is fused into the tcgen05 `pre_bwd`), so it is slower than the shared-AdaLN block.
