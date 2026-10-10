@@ -127,6 +127,15 @@ def _vec(t, n):
     return _tmap(t, (N, NH, A), (N * 4, NH * N * 4), (n, 1, 1), 0, "f32")
 
 
+def _u8(kmask):
+    """The key mask as the kernels read it: uint8 [N]. A contiguous bool mask is reinterpreted (no kernel launch), anything else converted."""
+    if kmask is None:
+        return None
+    if kmask.dtype == torch.bool and kmask.is_contiguous():
+        return kmask.view(torch.uint8)
+    return kmask.to(torch.uint8).contiguous()
+
+
 def attn_fwd(q, k, v, bias, kmask=None):
     """q, k, v [A, N, 128] bf16 (contiguous); bias [4, nwin, 32, 128] fp32; kmask [N] bool/uint8 or None -> O [A, N, 128] bf16,
     LSE [A, 4, N] fp32 (log2). tcgen05: a CTA per (128-query chunk, head) and sample range."""
@@ -135,7 +144,7 @@ def attn_fwd(q, k, v, bias, kmask=None):
     d = _dev(q)
     o = torch.empty_like(q)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
-    km = None if kmask is None else kmask.to(torch.uint8).contiguous()
+    km = _u8(kmask)
     nq = (N + 127) // 128
     sp = max(1, min(A, nsm(d) // (nq * NH)))
     out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
@@ -154,7 +163,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     nwin = nwindows(N)
     d = _dev(q)
     ldd = dkv.stride(0)
-    km = None if kmask is None else kmask.to(torch.uint8).contiguous()
+    km = _u8(kmask)
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
     nq = (N + 127) // 128
@@ -299,7 +308,7 @@ def attn_fwd32(q, k, v, bias, kmask=None):
     d = _dev(q)
     o = torch.empty(A, N, DM, device=q.device, dtype=torch.float32)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
-    km = None if kmask is None else kmask.to(torch.uint8).contiguous()
+    km = _u8(kmask)
     nq = (N + 127) // 128
     sp = max(1, min(A, nsm(d) // (nq * NH)))
     _load32("fwd32", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows32(q, 128), _rows32(k, 224), _rows32(v, 224, "128a32"), _out32(o),
@@ -314,7 +323,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
     nwin = nwindows(N)
     d = _dev(q)
     ldd = dp.stride(0)
-    km = None if kmask is None else kmask.to(torch.uint8).contiguous()
+    km = _u8(kmask)
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _out32(dp.view(A, N, dp.shape[1]))
     qcol, kcol, vcol = cols

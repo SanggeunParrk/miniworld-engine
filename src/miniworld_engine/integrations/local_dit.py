@@ -220,7 +220,7 @@ def serves(module, single, cond, pair, mask) -> bool:
 def _keys(mask, n0, n):
     """The valid-key bytes [n] the attention kernels read (None: every key valid and no padding)."""
     if mask is not None:
-        return F.pad(mask[0], (0, n - n0)).contiguous()
+        return mask[0] if n == n0 else F.pad(mask[0], (0, n - n0)).contiguous()
     return None if n == n0 else (torch.arange(n, device=_device_of(mask)) < n0)
 
 
