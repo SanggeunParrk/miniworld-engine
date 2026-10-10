@@ -478,10 +478,11 @@ def test_inf3_bf16_kernels_do_not_spill(n_head, d_head):
             k = tail.kernel(cl, xbf, obf)
             assert k.lmem == 0, (cl, xbf, obf, k.regs, k.lmem)
             assert k.regs <= 168, (cl, xbf, obf, k.regs, k.lmem)
-    core = C.PvGateCore(dev, nh=n_head, dh=d_head, pdl=True)
+    core = C.PvGateCore(dev, nh=n_head, dh=d_head, pdl=True, p_early=True)
     for sg in (1, 2, 3, 4, 5):
-        k = core.kernel(sg, True)
-        assert k.lmem == 0, (sg, k.regs, k.lmem)
+        for early in (False, True):                                   # the PDL core with / without P before its wait
+            k = core.kernel(sg, True, 128, early)
+            assert k.lmem == 0, (sg, early, k.regs, k.lmem)
 
 
 @pytest.mark.parametrize(("L", "want", "want_front"), [(384, 8, 8), (512, 6, 6), (640, 4, 4), (768, 4, 4)])
@@ -552,3 +553,154 @@ def test_core_one_saturated_gate_does_not_touch_its_neighbours():
     C.PvGateCore(torch.cuda.current_device(), nh=n_head, dh=d_head)(vg[:, :DA], P, a, S, g=vg[:, DA:])
     assert torch.isfinite(a.float()).all()
     assert relative(a, R.pv_gate(vg, P, S)) < 1e-3
+
+
+# ---- the core's P_EARLY build (the inference step only: P loaded before griddepcontrol.wait)
+def _pv_inputs(S, L, nh, dh, seed):
+    torch.manual_seed(seed)
+    M, DA, bf = S * L, nh * dh, torch.bfloat16
+    P = torch.empty(nh * L, L, device="cuda", dtype=bf)
+    C.softmax_rows(2 * torch.randn(nh * L, L, device="cuda", dtype=bf), P)
+    vg = torch.randn(M, 2 * DA, device="cuda", dtype=bf)
+    return P, vg[:, :DA], vg[:, DA:], torch.empty(M, DA, device="cuda", dtype=bf)
+
+
+def _pv_within_fp64(out, P, v, g, S, L, nh, dh):
+    """|out - ref| <= 2^-8 |ref| + (L 2^-23 + 4e-4) ref_abs elementwise, ref = sigmoid(g) (P v) in fp64 from the bf16 inputs: the
+    output's bf16 rounding (2^-9, doubled), fp32 accumulation of L exact bf16 products, the gate's reciprocal (2e-4, doubled)."""
+    p, vv = P.double().view(nh, L, L), v.double().reshape(S, L, nh, dh)
+    sg = torch.sigmoid(g.double().reshape(S, L, nh, dh))
+    ref = torch.einsum("hij,sjhd->sihd", p, vv) * sg
+    ref_abs = torch.einsum("hij,sjhd->sihd", p.abs(), vv.abs()) * sg
+    err = (out.double().reshape(S, L, nh, dh) - ref).abs()
+    bound = 2.0 ** -8 * ref.abs() + (L * 2.0 ** -23 + 4e-4) * ref_abs
+    assert torch.isfinite(out.float()).all()
+    assert bool((err <= bound).all()), float((err - bound).max())
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize("L", [128, 384, 512, 640, 768])
+@pytest.mark.parametrize("S", [2, 5])
+def test_pv_core_p_early_within_fp64_and_bitwise_the_plain_builds(S, L, n_head, d_head):
+    """The P_EARLY build (PDL, P before the wait) within the fp64 bound and bit-identical to the plain PDL build and to the non-PDL
+    build: only when P is loaded moves, every product and the epilogue are the same; outputs NaN-filled first."""
+    P, v, g, out = _pv_inputs(S, L, n_head, d_head, seed=L + S)
+    dev = torch.cuda.current_device()
+    outs = []
+    for core in (C.PvGateCore(dev, nh=n_head, dh=d_head), C.PvGateCore(dev, nh=n_head, dh=d_head, pdl=True),
+                 C.PvGateCore(dev, nh=n_head, dh=d_head, pdl=True, p_early=True)):
+        out.fill_(float("nan"))
+        core(v, P, out, S, g=g)
+        torch.cuda.synchronize()
+        outs.append(out.clone())
+    assert torch.equal(outs[2], outs[1]) and torch.equal(outs[2], outs[0])
+    _pv_within_fp64(outs[2], P, v, g, S, L, n_head, d_head)
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), [(16, 48), (24, 32)])
+@pytest.mark.parametrize("L", [384, 768])
+def test_pv_core_p_early_bit_identical_reruns_with_a_poisoned_allocator(L, n_head, d_head):
+    """The P_EARLY core alone, 20 calls from scratch (a new core and bound launch each, free memory NaN-filled before each, the
+    output NaN-filled): finite and bit-identical."""
+    P, v, g, out = _pv_inputs(5, L, n_head, d_head, seed=3)
+    outs = []
+    for _ in range(20):
+        core = C.PvGateCore(torch.cuda.current_device(), nh=n_head, dh=d_head, pdl=True, p_early=True)
+        _poison()
+        out.fill_(float("nan"))
+        core(v, P, out, 5, g=g)
+        torch.cuda.synchronize()
+        outs.append(out.clone())
+    assert torch.isfinite(outs[0].float()).all()
+    for o in outs[1:]:
+        assert torch.equal(o, outs[0])
+
+
+@pytest.mark.parametrize("env", [None, "0"])
+def test_pv_core_p_early_selection(inf3b, monkeypatch, env):
+    """Spies: the inference step's core takes the P_EARLY build at every block and the step's first front (only) launches without
+    the programmatic attribute -- MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0: neither; the training cores (forward / dV, PDL or not)
+    and bo_pvdpb never take it."""
+    from miniworld_engine.integrations import bias_only_dit_train as TR
+    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+    if env is None:
+        monkeypatch.delenv("MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY", raising=False)
+    else:
+        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY", env)
+    early, serial = [], []
+    orig_k, orig_f = C.PvGateCore.kernel, B16.FrontBF16.__call__
+
+    def spy_k(self, sg, gate=True, vb=128, early_=None):
+        early.append(self.early() if early_ is None else early_)
+        return orig_k(self, sg, gate, vb, early_)
+
+    def spy_f(self, *a, **k):
+        serial.append(k.get("serial", False))
+        return orig_f(self, *a, **k)
+
+    monkeypatch.setattr(C.PvGateCore, "kernel", spy_k)
+    monkeypatch.setattr(B16.FrontBF16, "__call__", spy_f)
+    _, fast, _ = blocks(seed=3)
+    S, L, bf = 5, 384, torch.bfloat16
+    x, c, p = (torch.randn(S, 1, L, 768, device="cuda", dtype=bf), torch.randn(S, 1, L, 384, device="cuda", dtype=bf),
+               torch.randn(1, L, L, 128, device="cuda", dtype=bf))
+    bias_only_dit._RUNNERS.clear()
+    with torch.no_grad():
+        for _ in range(2):                                            # a P-cache miss (hoist right before), then a hit
+            out = fast(x, c, p)
+    torch.cuda.synchronize()
+    assert inf3b and torch.isfinite(out.float()).all()
+    on = env is None
+    assert early and all(e == on for e in early), early
+    assert serial == [on] * len(serial) and len(serial) == 2, serial      # one block: its front is the step's first, each step
+    dev = torch.cuda.current_device()
+    for kind in ("pv", "pvpdl"):
+        assert not TR._op(kind, torch.device("cuda", dev)).p_early, kind
+    assert "P_EARLY" not in open(C._dir / "bo_pvdpb.cu").read()
+
+
+def test_pv_core_served_keys_per_v_tile(monkeypatch):
+    """VB (keys per v tile): 128 below 16 samples (inference); 256 at L768 for 16 x 48 with A >= 16 (the training forward and dV at
+    A = 48: in-process A/B); 192 / 256 where one divides L otherwise; and the bound launch follows it (a spy on the cache key)."""
+    monkeypatch.delenv("MINIWORLD_BIAS_ONLY_DIT_PV_VB", raising=False)
+    assert C._pv_vb(768, 48, 48) == 256 and C._pv_vb(768, 16, 48) == 256
+    assert C._pv_vb(768, 48, 32) == 192 and C._pv_vb(768, 48, 64) == 192          # other layouts: unmeasured, unchanged
+    assert C._pv_vb(384, 48, 48) == 192 and C._pv_vb(512, 48, 48) == 256 and C._pv_vb(640, 48, 48) == 128
+    assert all(C._pv_vb(L, 5, 48) == 128 for L in (128, 384, 512, 640, 768))
+    P, v, g, out = _pv_inputs(48, 768, 16, 48, seed=2)
+    core = C.PvGateCore(torch.cuda.current_device())
+    core(v, P, out, 48, g=g)
+    assert [key[-2] for key in core.runs] == [256], list(core.runs)
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize("L", [384, 768])
+@pytest.mark.parametrize("gate", [True, False])
+def test_pv_core_training_shapes_within_fp64_and_bitwise_across_vb(monkeypatch, gate, L, n_head, d_head):
+    """A = 48 (the training forward with the gate; dV without it, out the dV half of [A L, 1536]): the served build within the fp64
+    bound, and bit-identical at every VB that divides L (128 / 192 / 256: the same K16 products into one accumulator in key order,
+    only grouped into fewer tiles) -- VB 256 is the served one at L768 for 16 x 48."""
+    S = 48
+    P, v, g, out = _pv_inputs(S, L, n_head, d_head, seed=L + int(gate))
+    if not gate:
+        v = v.contiguous()
+        g, out = None, torch.empty(S * L, 2 * n_head * d_head, device="cuda", dtype=torch.bfloat16)[:, :n_head * d_head]
+    core = C.PvGateCore(torch.cuda.current_device(), nh=n_head, dh=d_head)
+    outs = {}
+    for vb in (None, 128, 192, 256):
+        if vb is not None and L % vb:
+            continue
+        if vb is None:
+            monkeypatch.delenv("MINIWORLD_BIAS_ONLY_DIT_PV_VB", raising=False)
+        else:
+            monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PV_VB", str(vb))
+        out.fill_(float("nan"))
+        core(v, P, out, S, g=g)
+        torch.cuda.synchronize()
+        outs[vb] = out.clone()
+    for vb, o in outs.items():
+        assert torch.equal(o, outs[None]), vb
+    if gate:
+        _pv_within_fp64(outs[None], P, v, g, S, L, n_head, d_head)
+    else:                                                             # dV = P v without the gate: the same bound, sigmoid -> 1
+        _pv_within_fp64(outs[None], P, v, torch.full_like(v, 80.0), S, L, n_head, d_head)

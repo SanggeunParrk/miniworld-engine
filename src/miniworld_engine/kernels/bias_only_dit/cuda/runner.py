@@ -374,7 +374,12 @@ class FusedBiasOnlyDiT:
         idx = device.index if device.index is not None else torch.cuda.current_device()
         key = ("inf3b", idx)
         if key not in self._ops:
-            self._ops[key] = (B16.FrontBF16(idx, self.da), C.PvGateCore(idx, nh=self.h, dh=self.da // self.h, pdl=True),
+            # p_early: the core loads P before its PDL wait (-DP_EARLY). Invariant (_step3b): P is ``hoist``'s output (or the
+            # integration's per-call softmax of a hoisted bias, ``_infer_bias``), written before the step by no kernel of its PDL chain, and the step's FIRST front is launched without the programmatic attribute
+            # (``serial``) whenever the core takes P early -- so every kernel of the chain starts after all earlier stream work,
+            # P's writer included, is complete and visible, also where hoist runs right before the step (a P-cache miss, or both
+            # in one captured graph). Never for a P made inside a PDL chain (the training backward's P^T: PvGateCore's default).
+            self._ops[key] = (B16.FrontBF16(idx, self.da), C.PvGateCore(idx, nh=self.h, dh=self.da // self.h, pdl=True, p_early=True),
                               B16.TailBF16(idx, self.da))
         return self._ops[key]
 
@@ -410,10 +415,12 @@ class FusedBiasOnlyDiT:
         xin = single.reshape(M, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
         xa, vg, a = buf["xa"], buf["vg"], buf["a"]
+        early = core.early()                                          # the core reads P before its PDL wait: see _ops3b
+        assert not early or P.shape == (self.nb * H, L, L), P.shape   # the whole hoisted P (hoist's layout), not a chain's own
         for b, p in enumerate(packs):
             y = out if b + 1 == self.nb else buf["xn"][b % 2]
             tb = tab[:, b]
-            front(xin, tb, p["wvg"], vg, T, xa=xa)
+            front(xin, tb, p["wvg"], vg, T, xa=xa, serial=early and b == 0)
             core(vg[:, :DA], P[b * H:(b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])     # sigmoid(g) * (P v)
             wo, wsq = (p["wo"][8], p["wsqn"]) if pair else (p["wo"][tcl], p["wsq"][tcl])
             tail(a, xin, tb, wo, p["wab"], wsq, y, T, xt=buf["xt"][:Mt], h=buf["h"][:Mt * 24], cl=tcl)

@@ -463,9 +463,11 @@ def front_cluster(n_tiles: int, nsm: int) -> int:
 class _LaunchPDL:
     """A launch with its argument block built once, with programmatic dependent launch (and the kernel's cluster, if any):
     TensorMaps by their 64-B aligned copy, tensors by their address at bind time, PTR slots by the address given per call,
-    ints as int32, floats as float32. The driver copies the parameters at launch: safe to reuse under CUDA-graph capture."""
+    ints as int32, floats as float32. The driver copies the parameters at launch: safe to reuse under CUDA-graph capture.
+    ``serial``: launched WITHOUT the programmatic-serialization attribute (a full dependency on the stream's earlier work; its
+    griddepcontrol.wait returns at once) -- the bf16 step's first front where the core reads P before its wait."""
 
-    def __init__(self, kernel, grid, block, *args):
+    def __init__(self, kernel, grid, block, *args, serial: bool = False):
         import ctypes
 
         from cuda.bindings import driver as cu
@@ -500,10 +502,11 @@ class _LaunchPDL:
             at.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
             at.value.clusterDim.x, at.value.clusterDim.y, at.value.clusterDim.z = kernel.cluster, 1, 1
             attrs.append(at)
-        ap = cu.CUlaunchAttribute()
-        ap.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
-        ap.value.programmaticStreamSerializationAllowed = 1
-        attrs.append(ap)
+        if not serial:
+            ap = cu.CUlaunchAttribute()
+            ap.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+            ap.value.programmaticStreamSerializationAllowed = 1
+            attrs.append(ap)
         cfg.attrs = attrs
         cfg.numAttrs = len(attrs)
         self.cfg, self.grid = cfg, grid

@@ -109,16 +109,18 @@ class FrontBF16:
             return int(forced)
         return pick_cluster(n_tiles, {cl: (_max_clusters(self.kernel(cl), cl), 8 / cl) for cl in self.clusters()})
 
-    def _bind(self, tab, w, vg, xa, M, T, cl, xbf):
+    def _bind(self, tab, w, vg, xa, M, T, cl, xbf, serial):
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
         nv = 2 * self.da // cl
         wrows = nv if nv <= 256 else nv // 2
         maps = [self._tm(w, [768, 2 * self.da], 768 * 2, [64, wrows]), self._tm(xa, [768, M], xa.stride(0) * 2, [64, 128]),
                 self._tm(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64)]            # s1 / sh1 boxes
         return _LaunchPDL(self.kernel(cl, xbf), ((M // 128) * cl, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, vg, xa, int(T),
-                          int(xa.stride(0)), 1e-5)
+                          int(xa.stride(0)), 1e-5, serial=serial)
 
-    def __call__(self, x, tab, w, vg, T, xa, cl=None):
+    def __call__(self, x, tab, w, vg, T, xa, cl=None, serial=False):
+        """``serial``: launch without the programmatic-serialization attribute (the step's first front where the core takes P
+        before its PDL wait: every kernel of the chain then starts after the stream's earlier work, P's writer included, is done)."""
         M, da, bf = x.shape[0], self.da, torch.bfloat16
         xbf = x.dtype is bf
         assert x.dtype in (bf, torch.float32) and x.is_contiguous() and x.shape == (M, 768) and M % 128 == 0 and T % 128 == 0
@@ -129,8 +131,8 @@ class FrontBF16:
         assert w.dtype is bf and w.is_contiguous() and w.shape == (2 * da, 768)
         assert vg.dtype is bf and vg.is_contiguous() and vg.shape == (M, 2 * da)
         cl = cl or self.cluster(M // 128)
-        key = (tab.data_ptr(), tab.stride(0), w.data_ptr(), vg.data_ptr(), xa.data_ptr(), xa.stride(0), M, T, cl, xbf)
-        self.runs.bind(key, lambda: self._bind(tab, w, vg, xa, M, T, cl, xbf))(x)
+        key = (tab.data_ptr(), tab.stride(0), w.data_ptr(), vg.data_ptr(), xa.data_ptr(), xa.stride(0), M, T, cl, xbf, serial)
+        self.runs.bind(key, lambda: self._bind(tab, w, vg, xa, M, T, cl, xbf, serial))(x)
         return vg
 
 
@@ -255,7 +257,7 @@ def inf3_bf16_ready(index: int, nh: int, dh: int) -> bool:
         for cl in front.clusters():
             for xbf in (True, False):
                 front.kernel(cl, xbf)
-        C.PvGateCore(index, nh=nh, dh=dh, pdl=True).kernel(1, True)
+        C.PvGateCore(index, nh=nh, dh=dh, pdl=True, p_early=True).kernel(1, True)   # the step's core (P_EARLY unless switched off)
     except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the 12-launch bf16 step
         _FAILED = True
         warnings.warn(f"bias-only DiT bf16 three-kernel inference step unavailable, keeping the 12-launch step: {exc!r}",

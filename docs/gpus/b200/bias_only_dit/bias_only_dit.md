@@ -137,7 +137,9 @@ vs PyTorch compiled (`bench.py target=bias_only_dit level=module mode=inference 
   two per box (tail -1.4 us at L384).
 - Round 4: the tails' epilogue boxes two per 16-KB ring slot (s2 | sh2 always, x | gate1 for a bf16 x): the trace showed P2 / P4
   waiting on one-box refills (3.1 / 2.6 us at L384 CL 8, 5.3 / 6.0 us in the pair tail at L768) because each 8-KB box held a whole
-  slot, six in flight; packed, CL 8 with a bf16 x has every P2 and P4 box of the tile in the ring at once. Measured (same GPU, same session, whole three-kernel step): L384 / L512 / L640 / L768 46.4 / 57.4 / 75.8 / 78.2 -> 45.2 / 55.8 / 73.9 / 76.8 us; tail alone (plain, back to back) 28.6 / 35.4 / 43.6 / 44.2 us.
+  slot, six in flight; packed, CL 8 with a bf16 x has every P2 and P4 box of the tile in the ring at once. Step 46.4 / 57.4 /
+  75.8 / 78.2 -> 45.2 / 55.8 / 73.9 / 76.8 us at L384 / 512 / 640 / 768 (same GPU, main 883d4cd4 as the base); tail alone 28.6 /
+  35.4 / 43.6 / 44.2 us (fp32 x: 28.3 / 35.3 / 44.3 / 45.0).
 - Not kept: TMA multicast of the weight boxes across the cluster (tail and front, `tma_load_2d_mc` / `tc_commit_mc`). The GEMM periods
   did not move (the W streams are latency / ring-depth bound, not L2-bandwidth bound), and a multicast load into a slot that held
   a local epilogue box must wait for every CTA's release of that slot, which locks the CTAs' epilogues into step: tail L384 28.9 ->
@@ -154,11 +156,49 @@ core idle for the same reason; overlapping them needs a second tile per CTA.
 bytes into the busiest SM; SG = 2 at L384 and 5 at L768 for S = 5, 16 for A = 48). The item's `P` tile [128 x L] is copied once
 into **tensor memory** (TMA in 64-key SW128 chunks, `tcgen05.cp` into the A-operand layout, L / 2 columns) and stays there while
 the group's samples stream their v tiles [VB keys x d_head] through the shared-memory ring (VB = 128 for few samples, 192 / 256
-for A = 48: larger TMA boxes); per sample `M 128 x N d_head` products, A from TMEM, into one of two d_head-column accumulators at
+for A = 48: larger TMA boxes; 256 at L768 for 16 x 48); per sample `M 128 x N d_head` products, A from TMEM, into one of two d_head-column accumulators at
 the top of TMEM. The loop is sample-outer, so the epilogue of sample k (g in by TMA, `sigmoid(g) * o` in packed f32x2 with the
 reciprocal on the FMA pipe, the gated tile out by TMA) runs under the products of sample k + 1. A head row (d_head x 2 bytes) sits
 in one 128-byte swizzle row: 96 B for 16 x 48, 64 B for 24 x 32, the whole row for d_head 64. The training backward runs the same
 kernel without the gate on `P^T` (`dV = P^T dO`).
+
+**Where the time goes** (opt2 r3, `bench_scripts/bo_pv_trace.py`: per-role `%globaltimer` trace of 16 CTAs, us per CTA):
+
+| shape | total | P phase (tensor core idle) | v phase | of which waiting for v | producer waiting for free slots |
+|---|---|---|---|---|---|
+| inference S5 L384 (SG 2, 144 CTAs) | 4.1 | 1.5 | 1.5 | 0.2 | 0.7 |
+| inference S5 L768 (SG 5, 96 CTAs) | 12.5 | 2.9 | 8.5 | 1.2 | 4.4 |
+| training fwd A48 L384 (SG 16, VB 192) | 19.4 | 2.4 | 15.3 | 1.5 | 8.9 |
+| training fwd A48 L768 (2 items a CTA) | 56.1 | 6.8 | 48.0 | 5.4 | 33.2 |
+| training dV A48 L768 | 52.3 | 6.3 | 45.0 | 4.6 | 30.6 |
+
+The ring is full most of the time (the producer waits for slots, the MMA thread almost never for data): the products are the
+limit, ~25 ns per M128 N48 K16 plus ~90 ns per v tile (VB 256 against 192 at training L768: -3.0 us fwd, -2.3 us dV; VB 192
+against 128: -5.4 us), and the whole P tile was loaded before sample 0's first product. The TMA side issues a 128-row box every
+0.16-0.19 us whatever its bytes (16-KB P chunk or 12-KB v tile).
+
+**P before the PDL wait** (opt2 r5, `-DP_EARLY`, the three-kernel step's core only; `MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0` keeps
+the plain PDL build): the producer issues the first item's P chunks before `griddepcontrol.wait` (and the MMA warp copies them into
+TMEM), so the P phase runs under the front kernel; v, g and the output stay after the wait. Safe because that P is the runner's
+hoisted tensor, written by no kernel of the step's PDL chain, and the step's first front is launched without the programmatic
+attribute when the core takes P early, so every kernel of the chain starts after the stream's earlier work (P's writer included)
+is complete -- also where the hoist runs right before the step. Never in training (P^T comes from `softmax_t` just before the
+backward's pv). In-process A/B of the whole step (`bo32_infer_breakdown.py --bf16 --ab MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0`),
+us, on / off: L384 45.3 / 45.6, L512 55.5 / 55.9, L640 73.2 / 73.9, L768 77.0 / 77.3 -- small (the serial first front gives back
+part of it) and consistent: kept on.
+
+**Keys per v tile at training L768** (opt2 r5): VB 256 instead of 192 where S >= 16, L = 768 and d_head 48 (fewer v tiles, each
+~90 ns beside its products). In-process A/B (`bench_scripts/bo_pv_ab.py`, 15 rounds), A = 48, 16 x 48, us, VB 192 / 256: forward
+65.21 / 58.28 (-6.93), standalone dV 55.15 / 49.94 (-5.21). Other layouts and lengths keep their VB (unmeasured: 24 x 32,
+12 x 64, 16 x 64 at L768 stay at 192); dV at L384 (inside `bo_pvdpb`) is unchanged (256 does not divide 384).
+
+**Tried and not kept** (opt2 r4): sample 0's key blocks interleaved with their P chunks in the ring, the MMA loop on one thread
+(lane 0, no per-tile elect / `__syncwarp`), slot releases batched every `PV_CK` blocks. In-process A/B, us (old -> new): inference
+S5 5.64 -> 7.00 / 7.54 -> 10.28 / 11.44 -> 17.13 / 13.03 -> 19.81 at L384 / 512 / 640 / 768; training fwd A48 21.14 -> 28.23 (L384),
+55.68 -> 94.22 (L768); dV + dbias in `bo_pvdpb` 35.96 -> 46.38 (L384); dV alone 47.93 -> 85.60 (L768); PV_CK 1 and 3 no better;
+the step at L768 84.2 against 76.8. Every sample got slower, not only sample 0 (traced v phase 48 -> 85 us at training L768), so
+the cost is in the change all samples share -- hypothesis (not measured): issuing tcgen05.mma from one lane while the warp's other
+31 lanes sit at the final `__syncthreads` is slower than the warp-converged elect_one issue. Deleted.
 
 | (Length, Dimension, dtype) | (128, 768, bf16) | (256, 768, bf16) | (384, 768, bf16) | (512, 768, bf16) | (640, 768, bf16) | (768, 768, bf16) |
 |---|---|---|---|---|---|---|
@@ -1008,6 +1048,8 @@ Inference:
 | out / squeeze GEMM with residual + gate + AdaLN in its epilogue (`gemm_resln_sm100.cu`, 8-CTA clusters); conditioning LN + tables + sigmoid in one GEMM (`cond_tables_sm100.cu`) | correct, kept off: L384 69.7 -> 73.8 us, L768 102 -> 122 -- the epilogues sit on 128-256 threads per SM and are latency- / issue-bound where the row kernels run on every thread at the memory rate |
 | the samples split over two / three CUDA streams | L384 70 -> 80 / 83 us: the core and cuBLAS's kernels each fill an SM's shared memory, the chains do not overlap |
 | the output-gate table GEMM on a side stream | no change |
+| core (opt2 r4, `PV_SCHED`): sample 0's key blocks interleaved with their P chunks, the MMA loop on one lane, slot releases batched every `PV_CK` blocks | slower at every shape (in-process A/B): inference S5 13.03 -> 19.81 us at L768, training fwd A48 55.68 -> 94.22, dV 47.93 -> 85.60; step L768 76.8 -> 84.2 (I1). Hypothesis, not measured: one-lane tcgen05.mma issue beside a parked warp |
+| TMA multicast of the tails' / front's weight boxes across the cluster (opt2 r1) | tail L384 28.9 -> 50.4 us, L512 36.0 -> 59.8: the W streams are not L2-bound, and a multicast slot waits for every CTA's epilogue (I0) |
 
 ## Limits and next
 

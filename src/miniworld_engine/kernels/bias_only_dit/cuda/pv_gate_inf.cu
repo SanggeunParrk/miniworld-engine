@@ -18,6 +18,14 @@
 // -DPDL_INF (only the bf16 three-kernel inference step builds it: K2 between bo_front_bf16 and bo_tail_bf16 / bo_tail2_bf16):
 // programmatic dependent launch -- launch_dependents after setup, griddepcontrol.wait before the producer's first load and before
 // the epilogue reads g or stores a. Without it the cubin is the default inference / training path's, unchanged.
+// -DP_EARLY (with PDL_INF; only the inference three-kernel step builds it, ``PvGateCore(p_early=True)`` from the runner): the
+// producer issues the first item's P chunks BEFORE griddepcontrol.wait and waits only before its first v tile, so the P tile's
+// load and its tcgen05.cp into TMEM (the MMA warp has no wait of its own) run under the front kernel instead of after it (opt2 r3:
+// 2.9 of 12.5 us per CTA at L768, 1.5 of 4.1 at L384). Only P moves: v, g and the output stay after the wait. This is safe only
+// because that P (the runner's hoisted P, or the per-call softmax of a hoisted bias) is written before the step and by no kernel
+// of its PDL chain, and the runner launches the step's first front WITHOUT the programmatic attribute whenever its core takes this
+// build, so the whole chain starts after P's writer is complete (runner.py ``_ops3b`` / ``_step3b``). The training backward's P^T
+// (softmax_t right before, in the same stream) must never take it.
 // L <= 768 (P plus two accumulators within 512 TMEM columns). Heads x width by -DNHEAD / -DDHEAD (16 x 48, 24 x 32, 12 x 64): a v or g
 // row of the head is DH x 2 bytes inside a 128-byte swizzle row.
 // SPDX-License-Identifier: Apache-2.0
@@ -77,15 +85,22 @@ DEVI uint32_t gate_pair(uint32_t o0, uint32_t o1, uint32_t g2) {
 DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); }
 
 #ifdef TRACE
-// CTA TRACE_CTA only: [event][index] = clock64 - start. 0 producer slot issued, 1 MMA slot consumed, 2 accumulator seen (per
-// tile), 3 g ready (per tile), 4 store issued (per tile), 6 end (index 0)
-__device__ long long g_tr[12][64];
-#ifndef TRACE_CTA
-#define TRACE_CTA 0
+// -DTRACE: %globaltimer (ns) into g_trace[16][2048] for the 16 virtual CTAs [TRACE_CTA0, + 16) (bo_tail_tf32.cu's layout, read by
+// tf32.read_trace). Per CTA: 0 start (after setup), 1 producer past the PDL wait, 2 MMA warp done, 3 epilogue done (stores read);
+// per ring position g (P chunks and v tiles in one sequence): EV_PW producer begins the empty wait, EV_PI producer issued the TMA,
+// EV_MW MMA begins the full wait, EV_MS MMA saw it full, EV_MI MMA issued its products / copies; per (item, sample) tile t: EV_AW
+// MMA begins the accumulator-empty wait, EV_AS MMA saw it empty, EV_EA epilogue saw the accumulator full, EV_EG epilogue saw g,
+// EV_ES store issued; per item li: EV_FW MMA begins the p_free wait, EV_FS MMA saw it.
+__device__ unsigned long long g_trace[16 * 2048];
+#ifndef TRACE_CTA0
+#define TRACE_CTA0 0
 #endif
-#define TR(ev, i) do { if (blockIdx.x == TRACE_CTA && (i) < 64) g_tr[ev][i] = clock64() - t0; } while (0)
+DEVI unsigned long long gtime() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
+constexpr int EV_PW = 256, EV_PI = 512, EV_MW = 768, EV_MS = 1024, EV_MI = 1280, EV_AW = 1536, EV_AS = 1600, EV_EA = 1664,
+              EV_EG = 1728, EV_ES = 1792, EV_FW = 1856, EV_FS = 1920;
+#define TR(ev, i, lim) do { const int tc_ = vb - TRACE_CTA0; if (tc_ >= 0 && tc_ < 16 && (i) < (lim)) g_trace[tc_ * 2048 + (ev) + (i)] = gtime(); } while (0)
 #else
-#define TR(ev, i) do { } while (0)
+#define TR(ev, i, lim) do { } while (0)
 #endif
 
 struct Bars {
@@ -125,24 +140,23 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
-#ifdef TRACE
-  const long long t0 = clock64();
-#endif
+  if (tid == 0) TR(0, 0, 1);
 #ifdef PDL_INF
   pdl_launch();
 #endif
 
   if (warp == 0) {
     if (lane == 0) {
-#ifdef PDL_INF
+#if defined(PDL_INF) && !defined(P_EARLY)
       pdl_wait();                                                 // v: the v|g GEMM's output (P: hoisted, but in the chain's order)
 #endif
+      TR(1, 0, 1);
       int g = 0;
       auto slot = [&](uint32_t bytes) {                           // the next ring slot, empty, armed for `bytes`
         const int s = g % NSLOT;
+        TR(EV_PW, g, 256);
         if (g >= NSLOT) mbar_wait(&B.empty[s], ((g / NSLOT) - 1) & 1);
         mbar_expect_tx(&B.full[s], bytes);
-        TR(0, g);
         ++g;
         return s;
       };
@@ -151,11 +165,16 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
         for (int c = 0; c < nc; c += PCS) {                      // the P tile, 64 PCS keys per slot
           const int s = slot(PCS * QM * 64 * 2);
           for (int e = 0; e < PCS; ++e) tma_load_2d(su + O_ST + s * SLOT + e * 16384, &mp, &B.full[s], (c + e) * 64, h * L + m0);
+          TR(EV_PI, g - 1, 256);
         }
+#if defined(PDL_INF) && defined(P_EARLY)
+        if (li == 0) pdl_wait();                                  // v: the v|g GEMM's output; P (hoisted, read-only) went first
+#endif
         for (int k = 0; k < ns; ++k)
           for (int n = 0; n < nb; ++n) {
             const int s = slot(BN * DH * 2);
             tma_load_2d(su + O_ST + s * SLOT, &mv, &B.full[s], h * DH, (a0 + k) * L + n * BN);
+            TR(EV_PI, g - 1, 256);
           }
       }
     }
@@ -163,11 +182,14 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
     int g = 0, t = 0;
     for (int li = 0; li < my; ++li) {
       int a0, ns, m0, h; item_of(li, a0, ns, m0, h);
+      if (lane == 0) TR(EV_FW, li, 64);
       if (li >= 1) mbar_wait(&B.p_free, (li - 1) & 1);            // the previous item's products have read P
+      if (lane == 0) TR(EV_FS, li, 64);
       for (int c = 0; c < nc; c += PCS, ++g) {                    // P chunk c -> TMEM columns 32 c .. 32 c + 31
         const int s = g % NSLOT;
+        if (lane == 0) TR(EV_MW, g, 256);
         mbar_wait(&B.full[s], (g / NSLOT) & 1);
-        if (lane == 0) TR(1, g);
+        if (lane == 0) TR(EV_MS, g, 256);
         tc_fence_after();
         if (elect_one()) {
           for (int e = 0; e < PCS; ++e) {
@@ -176,17 +198,21 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
             for (int j = 0; j < 4; ++j) tmem_cp_128x256b(tmem + (c + e) * 32 + j * 8, dp + (uint64_t)(j * 2));   // 16 keys per copy
           }
           tc_commit(&B.empty[s]);
+          TR(EV_MI, g, 256);
         }
         __syncwarp();
       }
       for (int k = 0; k < ns; ++k, ++t) {
         const int b = t & 1;
+        if (lane == 0) TR(EV_AW, t, 64);
         if (t >= 2) mbar_wait(&B.acc_empty[b], ((t >> 1) - 1) & 1);
+        if (lane == 0) TR(EV_AS, t, 64);
         tc_fence_after();
         for (int n = 0; n < nb; ++n, ++g) {
           const int s = g % NSLOT;
+          if (lane == 0) TR(EV_MW, g, 256);
           mbar_wait(&B.full[s], (g / NSLOT) & 1);
-          if (lane == 0) TR(1, g);
+          if (lane == 0) TR(EV_MS, g, 256);
           tc_fence_after();
           const uint64_t dv = desc_mn128(su + O_ST + s * SLOT, 16384);
           if (elect_one()) {
@@ -198,11 +224,13 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
               tc_commit(&B.acc_full[b]);
               if (k == ns - 1) tc_commit(&B.p_free);
             }
+            TR(EV_MI, g, 256);
           }
           __syncwarp();
         }
       }
     }
+    if (lane == 0) TR(2, 0, 1);
   } else if (warp >= 4) {
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     // NX g staging tiles rotate over the running sequence of (item, sample) tiles. Thread r == 0 issues the store of tile t, then
@@ -231,7 +259,7 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
         const int b = t & 1, xb = t % NX;
         const uint32_t xg = su + O_X + xb * XG;
         mbar_wait(&B.acc_full[b], (t >> 1) & 1);
-        if (r == 0) TR(2, t);
+        if (r == 0) TR(EV_EA, t, 64);
         tc_fence_after();
         uint32_t ov[DH];
 #pragma unroll
@@ -241,7 +269,7 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.acc_empty[b]);
         mbar_wait(&B.g_full[xb], (t / NX) & 1);
-        if (r == 0) TR(3, t);
+        if (r == 0) TR(EV_EG, t, 64);
         // all six loads first, then the math, then the stores: the shared accesses are volatile asm with a memory clobber, so an
         // interleaved load / compute / store per chunk serialises six load latencies
         uint4 gw[NQC];
@@ -271,13 +299,13 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
         if (r == 0) {
           tma_store_2d(&mo, xg, h * DH, (a0 + k) * L + m0);
           tma_store_commit();
-          TR(4, t);
+          TR(EV_ES, t, 64);
           if (t == 0) load_next_g(NX - 1);                        // its buffer has never held a tile
           else { tma_store_wait_read1(); load_next_g((t - 1) % NX); }
         }
       }
     }
-    if (r == 0) { tma_store_wait0(); TR(6, 0); }
+    if (r == 0) { tma_store_wait0(); TR(3, 0, 1); }
   }
   tc_fence_before();
   __syncthreads();

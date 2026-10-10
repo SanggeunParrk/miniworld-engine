@@ -101,14 +101,18 @@ def _pv_smem(vb: int) -> int:
     return (_SMEM_MAX - 3 * 16384 - 1024) // slot * slot + 3 * 16384 + 512
 
 
-def _pv_vb(L: int, S: int) -> int:
-    """Keys per v tile: 128 for the inference shapes (few samples; tuned there), else 192 or 256 when one divides L (A = 48,
-    gated / ungated us: L384 26.0 / 23.6 against 27.3 / 25.7 at 128; L768 56.2 / 52.2, 58.6 / 54.8 at 256, 63.9 / 57.9 at 128)."""
+def _pv_vb(L: int, S: int, dh: int = DH) -> int:
+    """Keys per v tile: 128 for the inference shapes (few samples; tuned there); 256 at L768 with d_head 48 and S >= 16 (A = 48,
+    16 x 48, in-process A/B of VB 192 / 256, us: forward 65.21 / 58.28, dV 55.15 / 49.94 -- fewer v tiles, each costing ~90 ns
+    beside its products); else 192 or 256 when one divides L (A = 48, gated / ungated us: L384 26.0 / 23.6 against 27.3 / 25.7 at
+    128). MINIWORLD_BIAS_ONLY_DIT_PV_VB forces one (read per call)."""
     forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_PV_VB")
     if forced:
         return int(forced)
     if S < 16:
         return 128
+    if L == 768 and dh == 48:
+        return 256
     return next((n for n in (192, 256) if L % n == 0), 128)
 
 
@@ -226,35 +230,47 @@ class PvGateCore:
     column halves of the v|g GEMM output in the step; the training backward passes P^T and do). Bound launches (their TMA
     descriptors carry the pointers) are cached per (buffers, strides, S, L). ``pdl``: the bf16 three-kernel inference step's
     build (``-DPDL_INF``: programmatic dependent launch), launched with the PDL attribute (default False: the training backward and
-    the 12-launch step)."""
+    the 12-launch step). ``p_early`` (with ``pdl``; the runner's three-kernel inference step only): the ``-DP_EARLY`` build, which
+    loads P before griddepcontrol.wait -- only for a P no kernel of the PDL chain writes (the runner's hoisted P, made once per
+    sample() before the step); never for the training backward's P^T (softmax_t right before it in the same stream).
+    MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0 (read per call) takes the plain PDL build."""
 
-    def __init__(self, device_index: int, defs: tuple[str, ...] = (), nh: int = H, dh: int | None = None, pdl: bool = False):
+    def __init__(self, device_index: int, defs: tuple[str, ...] = (), nh: int = H, dh: int | None = None, pdl: bool = False,
+                 p_early: bool = False):
+        assert pdl or not p_early, "P_EARLY moves P before the PDL wait: a PDL build only"
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
         self._sm100 = sm100
         self._tm = sm100._tm
         self.nh, self.dh = nh, dh or 768 // nh
-        self.device_index, self.defs, self.pdl = device_index, defs + _head_defs(nh, self.dh), pdl
+        self.device_index, self.defs, self.pdl, self.p_early = device_index, defs + _head_defs(nh, self.dh), pdl, p_early
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
-    def kernel(self, sg: int, gate: bool = True, vb: int = 128):
-        """The cubin for SG samples per item, with or without the gate, VB keys per v tile (built on first use)."""
+    def early(self) -> bool:
+        """This call takes the P_EARLY build: ``p_early`` and not MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0."""
+        return self.p_early and os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY", "1") != "0"
+
+    def kernel(self, sg: int, gate: bool = True, vb: int = 128, early: bool | None = None):
+        """The cubin for SG samples per item, with or without the gate, VB keys per v tile, the P_EARLY build where ``early``
+        (default: ``self.early()``) (built on first use)."""
         vdef = () if vb == 128 else (f"VB={vb}",)
         if self.pdl:
+            edef = ("P_EARLY",) if (self.early() if early is None else early) else ()
             return self._sm100._sm100_kernel("pv_gate_inf", "bo_pv_gate_inf_sm100", self.device_index, pdl=True, src_dir=str(_dir),
-                                             defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs, "PDL_INF"), smem=_pv_smem(vb))
+                                             defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs, "PDL_INF", *edef),
+                                             smem=_pv_smem(vb))
         return self._sm100._sm100_kernel("pv_gate_inf", "bo_pv_gate_inf_sm100", self.device_index, src_dir=str(_dir),
                                          defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs), smem=_pv_smem(vb))
 
-    def _bind(self, v, P, out, S, L, g):
+    def _bind(self, v, P, out, S, L, g, vb, early):
         M = v.shape[0]
         tm, es = self._tm, v.element_size()
-        vb, nh, dh = _pv_vb(L, S), self.nh, self.dh
+        nh, dh = self.nh, self.dh
         maps = _descriptors(tm(P, [L, nh * L], L * 2, [64, 128]), tm(v, [nh * dh, M], v.stride(0) * es, [dh, vb]),
                             tm(v if g is None else g, [nh * dh, M], (v if g is None else g).stride(0) * es, [dh, 128]),
                             tm(out, [nh * dh, M], out.stride(0) * es, [dh, 128]))
         sg = pick_group(S, L, self.nsm, nh, dh)
-        k = self.kernel(sg, g is not None, vb)
+        k = self.kernel(sg, g is not None, vb, early)
         grid = (min(self.nsm, nh * (L // 128) * -(-S // sg)), 1, 1)
         if self.pdl:
             from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
@@ -264,9 +280,10 @@ class PvGateCore:
     def __call__(self, v, P, out, S, g=None):
         """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
         L = v.shape[0] // S
+        vb, early = _pv_vb(L, S, self.dh), self.early()                     # both read per call (the A/B switches): in the key
         key = (v.data_ptr(), v.stride(0), None if g is None else (g.data_ptr(), g.stride(0)), P.data_ptr(), out.data_ptr(),
-               out.stride(0), S, L)
-        self.runs.bind(key, lambda: self._bind(v, P, out, S, L, g))()
+               out.stride(0), S, L, vb, early)
+        self.runs.bind(key, lambda: self._bind(v, P, out, S, L, g, vb, early))()
         return out
 
 
@@ -416,7 +433,7 @@ class PvDpb:
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
         nh, dh, tm, M = self.nh, self.dh, self._tm, do.shape[0]
         hp = 2 if dh == 32 else 1
-        vb, sg = _pv_vb(L, A), pick_group(A, L, self.nsm, nh, dh)
+        vb, sg = _pv_vb(L, A, dh), pick_group(A, L, self.nsm, nh, dh)
         nj = _dpb_nj(L, self.nsm, nh // hp, hp)
         maps = _descriptors(tm(pt, [L, nh * L], L * 2, [64, 128]), tm(do, [nh * dh, M], do.stride(0) * 2, [dh, vb]),
                             tm(do, [nh * dh, M], do.stride(0) * 2, [dh, 128]), tm(dv, [nh * dh, M], dv.stride(0) * 2, [dh, 128]),

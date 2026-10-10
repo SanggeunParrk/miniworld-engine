@@ -18,6 +18,18 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- Bias-only DiT bf16 attention core (`pv_gate_inf.cu`): the three-kernel inference step's core loads P before its PDL wait
+  (`-DP_EARLY`, `PvGateCore(p_early=True)` from the runner only; v, g and the output stay after the wait). Safe because P is the
+  runner's hoisted / per-call softmax, written before the step, and the step's first front is now launched without the
+  programmatic attribute whenever the core takes P early (`FrontBF16(..., serial=True)`, `_LaunchPDL(serial=)`), so the whole PDL
+  chain starts after P's writer is complete -- also on the hoisted-bias path that makes P right before the step. Never in training.
+  `MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0` keeps the plain PDL build. Step, A = 5, us (in-process A/B, on / off): L384 45.3 / 45.6,
+  L512 55.5 / 55.9, L640 73.2 / 73.9, L768 77.0 / 77.3.
+- Bias-only DiT bf16 core at training shapes: 256 keys per v tile at L768 for 16 x 48 with S >= 16 (was 192). A = 48, us (in-process
+  A/B): forward pv 65.21 -> 58.28, standalone dV 55.15 -> 49.94. Other layouts / lengths unchanged.
+  Tests: `tests/integrations/test_b200_bias_only_dit_gpu.py` (`test_pv_core_*`); page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`
+  (I1, with the TRACE-build per-role timeline of the core, `-DTRACE` now %globaltimer into `g_trace`, and the schedule tried and
+  not kept: P interleaved into sample 0, one-lane MMA issue, batched slot releases -- slower everywhere, e.g. step L768 76.8 -> 84.2).
 - Bias-only DiT hoisted pair bias: `miniworld_engine.modules.bias_only_dit.pair_bias_all(blocks, pair)` makes every block's pair bias
   from ONE LayerNorm without affine and ONE GEMM against the gamma-folded `to_bias` weights (same parameters, the same result to
   rounding), and `BiasOnlyDiTBlock.forward(..., bias=b)` takes a block's bias precomputed ([B, H, L, L]; `pair` may then be None). On
