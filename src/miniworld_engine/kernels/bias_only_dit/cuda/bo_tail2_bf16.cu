@@ -19,8 +19,10 @@
 //
 // A ring (NAR = 6 x 16 KB, own rows), one sequence in both CTAs of a pair:
 //   [0, NKA)        a k-blocks                         MMA (pair: the leader's barrier, both CTAs' boxes)
-//   [I_X, +2 KO)    x_q, gate1_q (32 columns)          own epilogue, P2   (KO = 6)
-//   [I_S, +2 KO)    s2_q, sh2_q                        own epilogue, P4
+//   [I_X, +NPX KO)  x_q, gate1_q (32 columns)          own epilogue, P2   (KO = 6)
+//   [I_S, +KO)      s2_q | sh2_q                       own epilogue, P4
+//   Two 8-KB epilogue boxes share ONE slot (+0 / +8 KB): s2_q | sh2_q always, x_q | gate1_q when x is bf16 (PACK = XBF: NPX 1, else
+//   2 positions x_q, gate1_q) -- twice the boxes in flight (opt2 r2: P2 / P4 waited on one-box refills, 5.3 / 6.0 us at L768).
 //   [I_XT, +3 x 12) xt k-blocks, pass 0 1 2            MMA; pass 0 starts with the own 3 blocks (staged by P4, never loaded)
 //   [I_H, +24)      h k-blocks, two per TMA box        MMA, after hready
 //   [I_G, +KO)      gate2_q                            own epilogue, P8
@@ -100,7 +102,9 @@ constexpr int NC = D / CLT, KO = NC / 32, NH = 1536 / CLT, HO = NH / KB, NP = 3,
 constexpr int KX = NC / KB;                                    // own xt k-blocks (3)
 constexpr int NHALF = NC / 2;                                  // the CTA's half of a y / z B box: 96 rows
 constexpr int NKA = DATT / KB, NXT = D / KB, NHK = 1536 / KB;
-constexpr int I_X = NKA, I_S = I_X + 2 * KO, I_XT = I_S + 2 * KO, I_H = I_XT + NP * NXT, I_G = I_H + NHK, NI = I_G + KO;
+constexpr bool PACK = XBF;                                     // x_q | gate1_q in one slot (a bf16 x)
+constexpr int NPX = PACK ? 1 : 2;                              // ring positions per 32-column block of P2 (P4: 1, s2_q | sh2_q)
+constexpr int I_X = NKA, I_S = I_X + NPX * KO, I_XT = I_S + KO, I_H = I_XT + NP * NXT, I_G = I_H + NHK, NI = I_G + KO;
 constexpr int SLOT = QM * 128, NAR = 6;
 constexpr int XBOX = XBF ? QM * 64 : QM * 128, TBOX = QM * 64;
 constexpr int WSLOT = 2 * NHALF * 128, WHALF = NHALF * 128, WABB = NHP * 128, NWS = 4;
@@ -127,10 +131,10 @@ __host__ __device__ constexpr bool pair_slots_safe() {
   return true;
 }
 static_assert(pair_slots_safe(), "slot-phase invariant of the pair ring");
-// P4: own xt k-block k (epilogue blocks 2 k, 2 k + 1) goes into the slot of position I_XT + k, whose previous box is an s2 / sh2 box of
-// block (pp - I_S) / 2: stage it after P4's block max(2 k + 1, that block)
+// P4: own xt k-block k (epilogue blocks 2 k, 2 k + 1) goes into the slot of position I_XT + k, whose previous box is an s2 | sh2 box of
+// block pp - I_S: stage it after P4's block max(2 k + 1, that block)
 __host__ __device__ constexpr int stage_at(int k) {
-  const int pp = I_XT + k - NAR, b = pp >= I_S ? (pp - I_S) / 2 : -1;
+  const int pp = I_XT + k - NAR, b = pp >= I_S ? pp - I_S : -1;
   return b > 2 * k + 1 ? b : 2 * k + 1;
 }
 static_assert(stage_at(KX - 1) < KO && I_XT - NAR >= I_X, "own xt staging");
@@ -231,14 +235,20 @@ bo_tail2_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
           }
           if (!leader) mbar_arrive(&B.afull[slot]);
         } else {                                               // the own epilogue's boxes
-          if (i < I_S) {                                       // x_q (even), gate1_q (odd)
+          if (i < I_S && PACK) {                               // x_q | gate1_q in one slot
+            const int col = g * NC + 32 * (i - I_X);
+            mbar_expect_tx(&B.afull[slot], XBOX + TBOX);
+            tma_load_2d_h(dst, &mx, &B.afull[slot], col, min_, once);
+            tma_load_2d_h(dst + XBOX, &mtab, &B.afull[slot], 0 * D + col, tr0, once);
+          } else if (i < I_S) {                                // x_q (even), gate1_q (odd)
             const int q = (i - I_X) >> 1, col = g * NC + 32 * q;
             if (((i - I_X) & 1) == 0) { mbar_expect_tx(&B.afull[slot], XBOX); tma_load_2d_h(dst, &mx, &B.afull[slot], col, min_, once); }
             else { mbar_expect_tx(&B.afull[slot], TBOX); tma_load_2d_h(dst, &mtab, &B.afull[slot], 0 * D + col, tr0, once); }
-          } else if (i < I_XT) {                               // s2_q (even), sh2_q (odd)
-            const int q = (i - I_S) >> 1, col = g * NC + 32 * q;
-            mbar_expect_tx(&B.afull[slot], TBOX);
-            tma_load_2d_h(dst, &mtab, &B.afull[slot], (((i - I_S) & 1) ? 5 : 3) * D + col, tr0, once);
+          } else if (i < I_XT) {                               // s2_q | sh2_q in one slot
+            const int col = g * NC + 32 * (i - I_S);
+            mbar_expect_tx(&B.afull[slot], 2 * TBOX);
+            tma_load_2d_h(dst, &mtab, &B.afull[slot], 3 * D + col, tr0, once);
+            tma_load_2d_h(dst + TBOX, &mtab, &B.afull[slot], 5 * D + col, tr0, once);
           } else {                                             // gate2_q
             mbar_expect_tx(&B.afull[slot], TBOX);
             tma_load_2d_h(dst, &mtab, &B.afull[slot], 1 * D + g * NC + 32 * (i - I_G), tr0, once);
@@ -384,18 +394,19 @@ bo_tail2_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
     float n_ = 0.f, mean_ = 0.f, m2_ = 0.f;
 #pragma unroll 1
     for (int q = 0; q < KO; ++q) {
-      const int ix = I_X + 2 * q;
+      const int ix = I_X + NPX * q;
+      const uint32_t xb = box(ix), gb = PACK ? box(ix) + XBOX : box(ix + 1);   // x_q, gate1_q
       bwait(ix);
-      bwait(ix + 1);
+      if (!PACK) bwait(ix + 1);
       uint32_t yv[16];
       tmem_ld16w(trow + T_Y + 32 * q + cofs, yv);
       float xv[16], gv[16];
 #if XBF
-      ld16_bf(box(ix), r, hh, xv);
+      ld16_bf(xb, r, hh, xv);
 #else
-      ld16_f32(box(ix), r, hh, xv);
+      ld16_f32(xb, r, hh, xv);
 #endif
-      ld16_bf(box(ix + 1), r, hh, gv);
+      ld16_bf(gb, r, hh, gv);
       float s4[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
       for (int k = 0; k < 16; ++k) {
@@ -416,7 +427,7 @@ bo_tail2_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
       fence_proxy_async();                                     // the boxes' next TMA writes come after these reads
       named_bar_sync(1, 256);
       release(ix);
-      release(ix + 1);
+      if (!PACK) release(ix + 1);
     }
     float* loc = reinterpret_cast<float*>(sm + O_LOC);         // [2 halves][2][128]
     loc[(2 * hh) * QM + r] = mean_;
@@ -459,14 +470,13 @@ bo_tail2_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
     uint4 xs[KO][2];
 #pragma unroll
     for (int q = 0; q < KO; ++q) {
-      const int is = I_S + 2 * q;
+      const int is = I_S + q;
       bwait(is);
-      bwait(is + 1);
       uint32_t yv[16];
       tmem_ld16w(trow + T_Y + 32 * q + cofs, yv);
       float sv[16], hv[16], o[16];
       ld16_bf(box(is), r, hh, sv);
-      ld16_bf(box(is + 1), r, hh, hv);
+      ld16_bf(box(is) + TBOX, r, hh, hv);
 #pragma unroll
       for (int k = 0; k < 16; ++k) o[k] = fmaf((__uint_as_float(yv[k]) - mean) * rstd, sv[k], hv[k]);
       xs[q][0] = pk8(o);
@@ -477,7 +487,6 @@ bo_tail2_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
       fence_proxy_async();
       named_bar_sync(1, 256);                                  // block q's s2 / sh2 read by all
       release(is);
-      release(is + 1);
 #pragma unroll
       for (int k = 0; k < KX; ++k) {
         if (stage_at(k) != q) continue;

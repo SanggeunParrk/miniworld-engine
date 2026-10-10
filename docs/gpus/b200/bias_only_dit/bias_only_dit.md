@@ -135,6 +135,13 @@ vs PyTorch compiled (`bench.py target=bias_only_dit level=module mode=inference 
   rate), P6 3.4, **z 7.6 at 0.378 us per k-block** (the own h at 0.256; the MMAs waited 3.7 us on the L2 h), P8 1.9.
 - Round 3: the front's tables by TMA under the statistics and x kept in registers (front -0.4 / -0.6 us at L384 / L768); z's L2 h
   two per box (tail -1.4 us at L384).
+- Round 4: the tails' epilogue boxes two per 16-KB ring slot (s2 | sh2 always, x | gate1 for a bf16 x): the trace showed P2 / P4
+  waiting on one-box refills (3.1 / 2.6 us at L384 CL 8, 5.3 / 6.0 us in the pair tail at L768) because each 8-KB box held a whole
+  slot, six in flight; packed, CL 8 with a bf16 x has every P2 and P4 box of the tile in the ring at once. Measured (same GPU, same session, whole three-kernel step): L384 / L512 / L640 / L768 46.4 / 57.4 / 75.8 / 78.2 -> 45.2 / 55.8 / 73.9 / 76.8 us; tail alone (plain, back to back) 28.6 / 35.4 / 43.6 / 44.2 us.
+- Not kept: TMA multicast of the weight boxes across the cluster (tail and front, `tma_load_2d_mc` / `tc_commit_mc`). The GEMM periods
+  did not move (the W streams are latency / ring-depth bound, not L2-bandwidth bound), and a multicast load into a slot that held
+  a local epilogue box must wait for every CTA's release of that slot, which locks the CTAs' epilogues into step: tail L384 28.9 ->
+  50.4 us, L512 36.0 -> 59.8, front +0.4; step 47.0 / 57.5 -> 69.0 / 83.4 us at L384 / L512. Deleted.
 
 **Limits.** The front is a serial chain per CTA -- statistics, xa, release, then the GEMM at the capped tensor rate, then the stores
 -- with one tile per CTA, nothing overlaps it; at L768 (CL 4, N = 384 per CTA) it stays ~2.7 us above the AdaLN rows + cuBLAS v|g

@@ -26,15 +26,19 @@
 //
 // The A ring (NAR = 6 x 16 KB) carries one sequence (position i, slot i % 6):
 //   [0, NKA)             a k-blocks (64 columns)            MMA, P1 (y)
-//   [I_X, +2 KO)         x_q, gate1_q (32 columns)          epilogue, P2 (x: [128][32] fp32 SW128 16 KB or bf16 SW64 8 KB; tables
+//   [I_X, +NPX KO)       x_q, gate1_q (32 columns)          epilogue, P2 (x: [128][32] fp32 SW128 16 KB or bf16 SW64 8 KB; tables
 //                                                           [128][32] bf16 SW64 8 KB)
-//   [I_S, +2 KO)         s2_q, sh2_q                        epilogue, P4
+//   [I_S, +KO)           s2_q | sh2_q                       epilogue, P4
+//   Two 8-KB epilogue boxes share ONE slot (+0 / +8 KB): s2_q | sh2_q always, x_q | gate1_q when x is bf16 (PACK = XBF: NPX 1, else
+//   2 positions x_q, gate1_q) -- twice the boxes in flight; at CL 8 (bf16 x) every P2 and P4 box of the tile is in the ring at once,
+//   loaded while the y GEMM frees its slots (opt2 r2: P2 / P4 waited on one-box refills, 3.1 / 2.6 us at L384)
 //   [I_XT, +NPASS 12)    xt k-blocks per pass               MMA, P5 (CL 6: pass 0's first 2 = the own blocks, staged by P4)
 //   [I_H, +24)           h k-blocks in z order              MMA, P7 (CL 8: the first 3 = the own blocks, staged by P6; the L2
 //                                                           ones two per 32-KB box into adjacent slots, CL 8's first alone)
 //   [I_G, +KO)           gate2_q                            epilogue, P8
-// Each own (staged) position's slot is written only after its previous box is consumed: CL 6 xt -- an s2 / sh2 box, P4 stages the
-// block after that box's barrier (stage_at); CL 8 h -- an xt block consumed by a | b (P6 runs after abdone).
+// Each own (staged) position's slot is written only after its previous box is consumed: CL 6 xt -- an epilogue box (an x /
+// gate1 box, released in P2, at every DATT / XBF today), P4 stages the block after that box's barrier (stage_at); CL 8 h -- an xt
+// block consumed by a | b (P6 runs after abdone).
 // W ring (NWS slots of WSLOT = 2 NC x 128 B): Wo / Wsq slots hold TWO k-blocks of the CTA's rows as one pair-packed box (CL 8 24 KB,
 // CL 6 32 KB); a Wab slot one [192][64] half of a k-block (CL 8) or the pass's [128][64] a rows + [128][64] b rows (CL 6).
 // Phases, TMEM and warp roles as bo_tail_tf32.cu: P1 y | P2 x1 -> TMEM Y, statistics | P3 all-reduce | P4 xt -> XT (st.global) |
@@ -120,7 +124,9 @@ constexpr int NPASS = CL == 6 ? 2 : 1, NHP = NH / NPASS, HOP = NHP / KB;
 constexpr bool OWNH = CL == 8;                                 // own h k-blocks staged in the ring and consumed first
 constexpr int KX = (CL == 6) ? NC / KB : 0;                    // own xt k-blocks staged in the ring (CL 6: 2; CL 8: NC = 1.5 k-blocks)
 constexpr int NKA = DATT / KB, NXT = D / KB, NHK = 1536 / KB;
-constexpr int I_X = NKA, I_S = I_X + 2 * KO, I_XT = I_S + 2 * KO, I_H = I_XT + NPASS * NXT, I_G = I_H + NHK, NI = I_G + KO;
+constexpr bool PACK = XBF;                                     // two 8-KB epilogue boxes per slot (a bf16 x)
+constexpr int NPX = PACK ? 1 : 2, NPS = 1;                     // ring positions per 32-column block: P2 (x, gate1), P4 (s2 | sh2)
+constexpr int I_X = NKA, I_S = I_X + NPX * KO, I_XT = I_S + NPS * KO, I_H = I_XT + NPASS * NXT, I_G = I_H + NHK, NI = I_G + KO;
 constexpr int SLOT = QM * 128, NAR = 6;
 constexpr int XBOX = XBF ? QM * 64 : QM * 128, TBOX = QM * 64;  // the x box, a table box ([128][32] bf16)
 constexpr int WSLOT = 2 * NC * 128, WHALF = NC * 128, NWS = CL == 8 ? 5 : 3;
@@ -135,9 +141,10 @@ constexpr uint32_t T_Y = 0, T_A = NC, T_B = NC + NHP, T_Z = OWNH ? NC : NC + 2 *
 static_assert((OWNH ? T_B + NHP : T_Z + NC) <= 512, "TMEM");
 constexpr uint32_t I_N = idesc_bf16(QM, NC), I_HP = idesc_bf16(QM, NHP);
 // CL 6: own xt k-block k (32-column epilogue blocks 2 k, 2 k + 1) goes into the slot of position I_XT + k, whose previous box is an
-// s2 / sh2 box of block (pp - I_S) / 2: stage it after P4's block max(2 k + 1, that block)
+// epilogue box: an s2 | sh2 box of block pp - I_S -> stage it after P4's block max(2 k + 1, that block); an x | gate1 box
+// (released in P2) -> after P4's block 2 k + 1
 __host__ __device__ constexpr int stage_at(int k) {
-  const int pp = I_XT + k - NAR, b = pp >= I_S ? (pp - I_S) / 2 : -1;
+  const int pp = I_XT + k - NAR, b = pp >= I_S ? pp - I_S : -1;
   return b > 2 * k + 1 ? b : 2 * k + 1;
 }
 __host__ __device__ constexpr bool staging_safe() {
@@ -159,14 +166,14 @@ __host__ __device__ constexpr int kb_h(int t, int c) {        // z's k-block t (
   return !OWNH ? t : t < HO ? HO * c + t : (t - HO < HO * c ? t - HO : t);
 }
 DEVI bool own_pos(int i) { return (i >= I_XT && i < I_XT + KX) || (OWNH && i >= I_H && i < I_H + HO); }
-// z's L2 h k-blocks load two per 32-KB TMA box into adjacent ring slots (an even position and the next; CL 8's first L2 block, at an
-// odd position after the 3 own ones, alone); a pair split by the own blocks in the z order loads as two 16-KB boxes on one barrier
+// z's L2 h k-blocks load two per 32-KB TMA box into adjacent ring slots (an even position and the next; a first L2 block at an odd
+// position or a last one at an even position alone -- CL 8 with a bf16 / fp32 x); a pair split by the own blocks in the z order loads as two 16-KB boxes on one barrier
 constexpr int I_HL = I_H + (OWNH ? HO : 0);                    // the first L2 h position
 __host__ __device__ constexpr bool hpair(int i) { return i >= I_HL && i + 1 < I_G && (i % 2) == 0; }
 __host__ __device__ constexpr bool hpairs_ok() {
   for (int i = I_HL; i < I_G; ++i) {
     if (hpair(i) && (i % NAR) + 1 >= NAR) return false;          // the pair's two slots adjacent
-    if (i > I_HL && !hpair(i) && !hpair(i - 1)) return false;    // after the first, every block in a pair
+    if (i > I_HL && i + 1 < I_G && !hpair(i) && !hpair(i - 1)) return false;   // between the first and the last, all in pairs
   }
   return NAR % 2 == 0;
 }
@@ -250,6 +257,11 @@ bo_tail_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
         if (i < NKA) {
           mbar_expect_tx(&B.afull[slot], SLOT);
           tma_load_2d(dst, &ma, &B.afull[slot], KB * i, m0);
+        } else if (i < I_S && PACK) {                          // x_q | gate1_q in one slot
+          const int q = i - I_X, col = (int)c * NC + 32 * q;
+          mbar_expect_tx(&B.afull[slot], XBOX + TBOX);
+          tma_load_2d_h(dst, &mx, &B.afull[slot], col, m0, once);
+          tma_load_2d_h(dst + XBOX, &mtab, &B.afull[slot], 0 * D + col, tr0, once);
         } else if (i < I_S) {                                  // x_q (even), gate1_q (odd)
           const int q = (i - I_X) >> 1, col = (int)c * NC + 32 * q;
           if (((i - I_X) & 1) == 0) {
@@ -259,10 +271,11 @@ bo_tail_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
             mbar_expect_tx(&B.afull[slot], TBOX);
             tma_load_2d_h(dst, &mtab, &B.afull[slot], 0 * D + col, tr0, once);
           }
-        } else if (i < I_XT) {                                 // s2_q (even), sh2_q (odd)
-          const int q = (i - I_S) >> 1, col = (int)c * NC + 32 * q;
-          mbar_expect_tx(&B.afull[slot], TBOX);
-          tma_load_2d_h(dst, &mtab, &B.afull[slot], (((i - I_S) & 1) ? 5 : 3) * D + col, tr0, once);
+        } else if (i < I_XT) {                                 // s2_q | sh2_q in one slot
+          const int q = i - I_S, col = (int)c * NC + 32 * q;
+          mbar_expect_tx(&B.afull[slot], 2 * TBOX);
+          tma_load_2d_h(dst, &mtab, &B.afull[slot], 3 * D + col, tr0, once);
+          tma_load_2d_h(dst + TBOX, &mtab, &B.afull[slot], 5 * D + col, tr0, once);
         } else if (i < I_H) {
           const int t = (i - I_XT) % NXT, pass = (i - I_XT) / NXT;
           mbar_expect_tx(&B.afull[slot], SLOT);
@@ -436,18 +449,19 @@ bo_tail_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
     float n_ = 0.f, mean_ = 0.f, m2_ = 0.f;
 #pragma unroll 1
     for (int q = 0; q < KO; ++q) {
-      const int ix = I_X + 2 * q;
+      const int ix = I_X + NPX * q;
+      const uint32_t xb = box(ix), gb = PACK ? box(ix) + XBOX : box(ix + 1);   // x_q, gate1_q
       bwait(ix);
-      bwait(ix + 1);
+      if (!PACK) bwait(ix + 1);
       uint32_t yv[16];
       tmem_ld16w(trow + T_Y + 32 * q + cofs, yv);
       float xv[16], gv[16];
 #if XBF
-      ld16_bf(box(ix), r, hh, xv);
+      ld16_bf(xb, r, hh, xv);
 #else
-      ld16_f32(box(ix), r, hh, xv);
+      ld16_f32(xb, r, hh, xv);
 #endif
-      ld16_bf(box(ix + 1), r, hh, gv);
+      ld16_bf(gb, r, hh, gv);
       float s4[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
       for (int k = 0; k < 16; ++k) {
@@ -468,7 +482,7 @@ bo_tail_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
       fence_proxy_async();                                     // the boxes' next TMA writes come after these reads
       named_bar_sync(1, 256);
       release(ix);
-      release(ix + 1);
+      if (!PACK) release(ix + 1);
     }
     float* loc = reinterpret_cast<float*>(sm + O_LOC);         // [2 halves][2][128]
     loc[(2 * hh) * QM + r] = mean_;
@@ -511,14 +525,14 @@ bo_tail_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
     uint4 xs[KO][2];                                           // xt of block q, bf16: this thread's 16 columns
 #pragma unroll
     for (int q = 0; q < KO; ++q) {
-      const int is = I_S + 2 * q;
+      const int is = I_S + q;
+      const uint32_t sb = box(is), hb = box(is) + TBOX;       // s2_q | sh2_q
       bwait(is);
-      bwait(is + 1);
       uint32_t yv[16];
       tmem_ld16w(trow + T_Y + 32 * q + cofs, yv);
       float sv[16], hv[16], o[16];
-      ld16_bf(box(is), r, hh, sv);
-      ld16_bf(box(is + 1), r, hh, hv);
+      ld16_bf(sb, r, hh, sv);
+      ld16_bf(hb, r, hh, hv);
 #pragma unroll
       for (int k = 0; k < 16; ++k) o[k] = fmaf((__uint_as_float(yv[k]) - mean) * rstd, sv[k], hv[k]);
       xs[q][0] = pk8(o);
@@ -529,7 +543,6 @@ bo_tail_bf16_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
       fence_proxy_async();
       named_bar_sync(1, 256);                                  // block q's s2 / sh2 read by all
       release(is);
-      release(is + 1);
 #pragma unroll
       for (int k = 0; k < KX; ++k) {
         if (stage_at(k) != q) continue;

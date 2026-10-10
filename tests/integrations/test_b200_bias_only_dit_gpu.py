@@ -379,7 +379,7 @@ def _poison(mb=512):
 @pytest.mark.parametrize("L", [128, 384, 512, 640, 768])
 @pytest.mark.parametrize("shared", [True, False])
 def test_inf3_bf16_bit_identical_reruns_with_a_poisoned_allocator(inf3b, n_head, d_head, L, shared):
-    """Three steps from scratch (runner, buffers, tables, bound launches and P dropped; free memory NaN-filled before each): finite
+    """Twenty steps from scratch (runner, buffers, tables, bound launches and P dropped; free memory NaN-filled before each): finite
     and bit-identical -- fixed-order reductions, no atomics, nothing read before it is written."""
     _, fast, _ = blocks(seed=9, n_head=n_head, d_head=d_head)
     S = 5
@@ -389,13 +389,13 @@ def test_inf3_bf16_bit_identical_reruns_with_a_poisoned_allocator(inf3b, n_head,
          torch.randn(S, 1, L, 384, device="cuda", dtype=bf))
     p, mask = torch.randn(1, L, L, 128, device="cuda", dtype=bf), torch.rand(1, L, device="cuda") > 0.2
     outs = []
-    for _ in range(3):
+    for _ in range(20):
         bias_only_dit._RUNNERS.clear()
         _poison()
         with torch.no_grad():
             outs.append(fast(x, c, p, mask).clone())
         torch.cuda.synchronize()
-    assert len(inf3b) == 3
+    assert len(inf3b) == 20
     assert torch.isfinite(outs[0].float()).all()
     for o in outs[1:]:
         assert torch.equal(o, outs[0])
