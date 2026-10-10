@@ -1,4 +1,4 @@
-"""B200 atom-block weight-gradient and column-sum kernels (``sm100_atom.atom_dw``, ``colsum32``, ``sm100_atom_local.colsum``): the grouped
+"""B200 atom-block weight-gradient and column-sum kernels (``sm100_atom.atom_dw``, ``colsum32``): the grouped
 split-K weight-gradient kernel gives every problem's A^T B (bf16 operands, or fp32 operands on tf32 tensor cores) to the destination of each
 128-row block of A -- strided column views, several blocks per problem, row counts that are not a multiple of the stage -- and the column
 sums match fp64."""
@@ -8,7 +8,6 @@ import torch
 
 from miniworld_engine.integrations import local_dit
 from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
 
 pytestmark = [
     pytest.mark.gpu,
@@ -67,12 +66,9 @@ def test_atom_dw_is_deterministic(R):
 
 @pytest.mark.parametrize("M", [1, 7, 4096, 196608 + 5])
 def test_column_sums(M):
-    assert local_dit._kernels32_ready(torch.cuda.current_device()) and local_dit._kernels_ready(torch.cuda.current_device())
+    assert local_dit._kernels32_ready(torch.cuda.current_device())
     g = torch.Generator(device="cuda").manual_seed(M)
     wide = torch.randn(M, 384, device="cuda", generator=g)
     x32 = wide[:, 128:256]                         # a strided view: unit column stride, row pitch 384
     ref = x32.double().sum(0)
     assert torch.allclose(rows.colsum32(x32).double(), ref, rtol=1e-4, atol=1e-3 * max(1.0, M ** 0.5))
-    xb = wide.to(torch.bfloat16)[:, 128:256]
-    refb = xb.double().sum(0)
-    assert torch.allclose(local.colsum(xb).double(), refb, rtol=1e-4, atol=1e-3 * max(1.0, M ** 0.5))

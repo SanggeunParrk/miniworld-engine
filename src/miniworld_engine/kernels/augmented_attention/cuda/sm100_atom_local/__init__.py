@@ -10,7 +10,7 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lattn_dq.cu    dQ (window-local).
   lattn_dkv.cu   dK, dV and dbias (key-centric: 16 keys see exactly 4 query windows = 128 queries; dbias is summed over the samples).
   lcross.cu      the row kernels of the cross-attention mode (keys / values from a second AdaLN): LN of the conditioning, the K / V AdaLN
-                 and its backward, the extra gradient through AdaLN 1.
+                 and its backward (the gradient it sends to x1 is added in ``sm100_atom.pre_bwd``), column sums.
 
 The fp32 path (fp32 activations; ``KERNELS_TF32``, loaded by ``_load32`` and only when an fp32 call is served) has its own twins:
   lattn_fwd_tf32.cu, lattn_dq_tf32.cu, lattn_dkv_tf32.cu   the three attention kernels on tcgen05 kind::tf32 (fp32 operands, P / dS fp32
@@ -70,9 +70,7 @@ KERNELS = {
     "cond_ln": ("lcross", "local_cond_ln", 0),
     "kv_f": ("lcross", "local_kv_fwd", 0),
     "kv_b": ("lcross", "local_kv_bwd", 0),
-    "a1x": ("lcross", "local_adaln1_extra", 0),
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
-    "colsum": ("lcross", "local_colsum", 0),
 }
 
 
@@ -204,11 +202,17 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
 
 
 # ------------------------------------------------------------------------------------------------ cross-attention mode (second AdaLN for K / V)
+def _row_grid(M, d):
+    """Blocks of the row kernels of ``lcross.cu``: a row per half-warp (16 rows per block), persistent at 8 blocks per SM."""
+    return max(1, min(8 * nsm(d), (M + 15) // 16))
+
+
 def cond_ln(c, gamma, eps=1e-5):
     """c [M, 128] bf16 -> LN(c) * gamma [M, 128] bf16."""
     M = c.shape[0]
     out = torch.empty_like(c)
-    _load("cond_ln", _dev(c))(((M + 7) // 8, 1, 1), (256, 1, 1), c, gamma.float().contiguous(), out, int(M), float(eps))
+    d = _dev(c)
+    _load("cond_ln", d)((_row_grid(M, d), 1, 1), (256, 1, 1), c, gamma.float().contiguous(), out, int(M), float(eps))
     return out
 
 
@@ -216,43 +220,28 @@ def kv_fwd(x1, mkv, bs, eps=1e-5):
     """xkv = LN(x1) * sigmoid(mkv[:, :128] + bs) + mkv[:, 128:]  ([M, 128] bf16)."""
     M = x1.shape[0]
     out = torch.empty_like(x1)
-    _load("kv_f", _dev(x1))(((M + 7) // 8, 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), out, int(M), float(eps))
+    d = _dev(x1)
+    _load("kv_f", d)((_row_grid(M, d), 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), out, int(M), float(eps))
     return out
 
 
-def kv_bwd(x1, mkv, bs, dxkv, eps=1e-5):
-    """dxkv -> dx1 [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | d shift] (bf16)."""
+def kv_bwd(x1, mkv, bs, dxkv, dbs, eps=1e-5):
+    """dxkv -> dx1 [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | d shift] (bf16); dbs [128] fp32 += sum_rows d pre-sigmoid scale."""
     M = x1.shape[0]
     dx1 = torch.empty_like(x1)
     dmkv = torch.empty(M, 2 * DM, device=x1.device, dtype=torch.bfloat16)
-    _load("kv_b", _dev(x1))(((M + 7) // 8, 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), dxkv, dx1, dmkv, int(M), float(eps))
+    d = _dev(x1)
+    _load("kv_b", d)((_row_grid(M, d), 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), dxkv, dx1, dmkv, dbs, int(M), float(eps))
     return dx1, dmkv
 
 
-def adaln1_extra(a, mod, dx1, ds, dmod, dbias, eps=1e-5):
-    """ds [M, 128] and dmod [M, 768] (blocks 0 and 1), dbias [128] fp32 += the gradient dx1 through AdaLN 1 (in place)."""
-    M = a.shape[0]
-    d = _dev(a)
-    _load("a1x", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), a, mod, dx1, ds, dmod, dbias, int(M), float(eps))
-
-
-def colsum(x):
-    """The column sums of a bf16 [M, 128] view (unit column stride, any row pitch) -> [128] fp32 (G partial rows and a sum of those)."""
-    M = x.shape[0]
-    assert x.dtype == torch.bfloat16 and x.stride(1) == 1 and x.shape[1] == DM, (x.dtype, x.shape, x.stride())
-    d = _dev(x)
-    g = max(1, min(2 * nsm(d), (M + 7) // 8))
-    part = torch.empty(g, DM, device=x.device, dtype=torch.float32)
-    _load("colsum", d)((g, 1, 1), (256, 1, 1), x, int(x.stride(0)), part, int(M))
-    return part.sum(0)
-
-
-def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5):
-    """-> dc [M, 128] bf16; dgamma [128] fp32 += sum_rows dcn * LN(c)."""
+def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5, acc=None):
+    """-> dc [M, 128] bf16; dgamma [128] fp32 += sum_rows dcn * LN(c). ``acc`` (bf16 [M, 128], contiguous): the result is added to it in
+    bf16, in place (the gradient of c's other consumer), and returned."""
     M = c.shape[0]
-    dc = torch.empty_like(c)
+    dc = torch.empty_like(c) if acc is None else acc
     d = _dev(c)
-    _load("cln_b", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), c, dcn, gamma.float().contiguous(), dc, dgamma, int(M), float(eps))
+    _load("cln_b", d)((_row_grid(M, d), 1, 1), (256, 1, 1), c, dcn, gamma.float().contiguous(), dc, acc, dgamma, int(M), float(eps))
     return dc
 
 

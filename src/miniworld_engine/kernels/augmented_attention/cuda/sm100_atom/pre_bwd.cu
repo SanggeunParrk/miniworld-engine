@@ -6,7 +6,8 @@
 // Structure (post_fwd.cu's frame): transposed 16-row tiles; W^T = [Wq; Wk; Wv; Wg]^T (128 x 512) in TMEM as the bf16 A operand (256
 // columns); the two compute warpgroups take alternate tiles, each with its own TMA producer warp, MMA warp, NSW-stage ring and four
 // accumulators dx_p^T = W_p^T dP_p^T (M = 128 channels, N = 16 rows, K = 128).
-// Stage (32 KB): dP [16][512] | a | s1 -> dsc1 | DA -> d single | dx1.
+// Stage (36 KB): dP [16][512] | a | s1 -> dsc1 | DA -> d single | dx1 | dxkv (cross-attention mode: the gradient the key / value AdaLN sends to x1,
+// added to dx1 in bf16 before AdaLN 1's backward; has_kv = 0 skips it).
 // TMEM: W^T 0 (256 columns, projection p at 64 p); warpgroup w's accumulators at 256 + 64 w + 16 p.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
@@ -21,7 +22,7 @@ using namespace s100;
 constexpr int R = 16;
 constexpr int KB = R * 128;                                                // [16 rows][64] bf16, SW128 (2 KB)
 constexpr int T_ = 2 * KB;                                                 // [16][128] row-major tile (4 KB)
-constexpr int O_DP = 0, O_A = 4 * T_, O_S1 = 5 * T_, O_DA = 6 * T_, O_X = 7 * T_, STG = 8 * T_;
+constexpr int O_DP = 0, O_A = 4 * T_, O_S1 = 5 * T_, O_DA = 6 * T_, O_X = 7 * T_, O_KV = 8 * T_, STG = 9 * T_;
 constexpr int O_BAR = (2 * NSW * STG > 4 * 32768 ? 2 * NSW * STG : 4 * 32768), O_RED = O_BAR + 512;
 constexpr int SMEM = O_RED + 8 * 256 * 4;
 static_assert(SMEM <= 232448, "shared memory");
@@ -47,7 +48,8 @@ DEVI void stsm4t(uint32_t a, const uint32_t (&r)[4]) {
 extern "C" __global__ void __launch_bounds__(384, 1)
 atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mmod,
                    const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mwt, const __grid_constant__ CUtensorMap mds,
-                   const __grid_constant__ CUtensorMap mdmod, float* __restrict__ DBIAS, float* __restrict__ DBQ, int ntile, float eps) {
+                   const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mkv, float* __restrict__ DBIAS, float* __restrict__ DBQ,
+                   int ntile, float eps, int has_kv) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -86,7 +88,9 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
         const uint32_t st = stage(w, i);
         uint64_t* bar = &B.infull[w][s];
-        mbar_expect_tx(bar, 14 * KB);
+        mbar_expect_tx(bar, (14 + 2 * has_kv) * KB);
+        if (has_kv)
+          for (int kb = 0; kb < 2; ++kb) tma_load_2d(st + O_KV + kb * KB, &mkv, bar, 64 * kb, r0);
         for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_DP + kb * KB, &mdp, bar, 64 * kb, r0);
         for (int kb = 0; kb < 2; ++kb) {
           tma_load_2d(st + O_A + kb * KB, &ma, bar, 64 * kb, r0);
@@ -196,7 +200,13 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         uint32_t dsc[8];
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb) {
-          const uint4 dxu = lds128(st + O_X + kb * KB + aoff), gu = lds128(st + O_S1 + kb * KB + aoff);
+          uint4 dxu = lds128(st + O_X + kb * KB + aoff);
+          const uint4 gu = lds128(st + O_S1 + kb * KB + aoff);
+          if (has_kv) {                                                  // dx1 += dxkv (bf16), and dbi1 = the sum
+            const uint4 kv = lds128(st + O_KV + kb * KB + aoff);
+            dxu.x = badd2(dxu.x, kv.x); dxu.y = badd2(dxu.y, kv.y); dxu.z = badd2(dxu.z, kv.z); dxu.w = badd2(dxu.w, kv.w);
+            sts128(st + O_X + kb * KB + aoff, dxu);
+          }
           const uint32_t d4[4] = {dxu.x, dxu.y, dxu.z, dxu.w}, g4[4] = {gu.x, gu.y, gu.z, gu.w};
 #pragma unroll
           for (int e = 0; e < 4; ++e) {

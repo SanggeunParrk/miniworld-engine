@@ -326,15 +326,16 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
     return DA, DU, GATED, DO
 
 
-def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
-    """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ."""
+def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5, DX1KV=None):
+    """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ. DX1KV [M, 128]: the
+    gradient another branch (the cross-attention mode's key / value AdaLN) sends to x1, added to dx1 before AdaLN 1's backward."""
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
     maps = (_rows16(dP, 4 * DM), _rows16(a), _rows16(mod, 6 * DM), _rows16(DA), _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
-            _rows16(DS), _rows16(dmod, 6 * DM))
+            _rows16(DS), _rows16(dmod, 6 * DM), _rows16(DA if DX1KV is None else DX1KV))
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("preb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, DBIAS, DBQ, int(ntile), float(eps))
+    atom_kernel("preb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, DBIAS, DBQ, int(ntile), float(eps), int(DX1KV is not None))
     return DS
 
 

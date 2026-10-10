@@ -242,12 +242,13 @@ def _tkey(t):
 
 
 def _kv_pack(weights):
-    """The cross-attention mode's operands: Wm [256, 128] = [to_scale; to_bias] bf16, the scale bias and the LN weight (fp32), Wk, Wv (bf16).
+    """The cross-attention mode's operands: Wm [256, 128] = [to_scale; to_bias] bf16, the scale bias and the LN weight (fp32), Wk, Wv (bf16) and [Wk; Wv] [256, 128].
     Packed once per set of weights (pointer and version), scoped to the CUDA-graph capture like every weight pack."""
     def build():
         gamma, w_scale, b_scale, w_bias = weights[len(WEIGHTS):]
         wk, wv = weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]
-        return torch.cat([w_scale, w_bias]).to(BF), b_scale.float(), gamma.float(), wk.to(BF), wv.to(BF)
+        wk, wv = wk.to(BF), wv.to(BF)
+        return torch.cat([w_scale, w_bias]).to(BF), b_scale.float(), gamma.float(), wk, wv, torch.cat([wk, wv])
 
     tail = weights[len(WEIGHTS):] + [weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]]
     return _capture.lookup(_KV, tuple((t.data_ptr(), t._version) for t in tail), build, limit=16)
@@ -268,7 +269,7 @@ def _cond_tables(cond, c2_fn, n, weights, wc, cross, save):
         mod = rows.cond_fwd(c2, *wc)
         if not cross:
             return mod, None, None
-        wm, _, gkv, _, _ = _kv_pack(weights)
+        wm, _, gkv, *_ = _kv_pack(weights)
         cn = local.cond_ln(c2, gkv)
         return mod, cn, cn @ wm.t()
 
@@ -335,7 +336,7 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         mod, cn, mkv = _cond_tables(cond, lambda: _padded(cond, n).reshape(m, DC_).contiguous(), n, weights, wc, cross, save)
         q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save or cross)
         if cross:       # keys and values from a second AdaLN of x1 (pre_fwd's own k / v are not used)
-            _, bs, _, wk, wv = _kv_pack(weights)
+            _, bs, _, wk, wv, _ = _kv_pack(weights)
             xkv = local.kv_fwd(x1, mkv, bs)
             k, v = xkv @ wk.t(), xkv @ wv.t()
         bias = _pair_bias(pair, n, weights, save)
@@ -410,23 +411,19 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         dz, dgamma, dwb = local.pair_bias_bwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db)
         if cross:   # the K / V branch: dxkv -> its AdaLN -> dx1 (through AdaLN 1 below) and the conditioning
             cn, mkv, xkv = extra
-            wm, bs, gkv, wk, wv = _kv_pack(weights)
-            dk, dv = dp[:, DS_:2 * DS_], dp[:, 2 * DS_:3 * DS_]
-            dxkv = torch.addmm(dk @ wk, dv, wv)
-            dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv)
-            dbs = local.colsum(dmkv[:, :DS_])
+            wm, bs, gkv, _, _, wkv = _kv_pack(weights)
+            dxkv = dp[:, DS_:3 * DS_] @ wkv                              # dk Wk + dv Wv in one K = 256 product
+            dbs = torch.zeros(DS_, device=dev)
+            dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv, dbs)
             dg_kv = torch.zeros(DS_, device=dev)
-            dc_kv = local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv)
             wpt = wb["WpT"].clone()
             wpt[:, DS_:3 * DS_] = 0         # pre_bwd's dgrad covers q and the gate only (dk / dv stay in dp for the weight gradients)
         else:
             wpt = wb["WpT"]
-        ds = rows.pre_bwd(dp, s2, mod, da, wpt, dmod, dbias_cols, dbq)
-        if cross:
-            local.adaln1_extra(s2, mod, dx1_kv, ds, dmod, dbias_cols[0:DS_])
+        ds = rows.pre_bwd(dp, s2, mod, da, wpt, dmod, dbias_cols, dbq, DX1KV=dx1_kv if cross else None)   # + the K / V AdaLN's dx1, through AdaLN 1
         dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
         if cross:
-            dc = dc + dc_kv
+            local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv, acc=dc)    # dc += the K / V modulation's gradient through LN(c) * gamma
         names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
         A_ = "attention."
         spec = [(dt, hh, [("transition.squeeze.weight", 0)]),
