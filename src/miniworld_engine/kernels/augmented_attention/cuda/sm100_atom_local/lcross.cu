@@ -2,17 +2,16 @@
 //
 // AF3 / Protenix atom attention (cross_attention_mode): a = AdaLN_a(a, s) feeds q and the gate; the keys and values are projected from
 //   xkv = AdaLN_kv(a, s) = LN(a) * sigmoid(Ws LN_g(s) + bs) + Wb LN_g(s)       (a the already normalised atoms, LN without affine)
-// These kernels are the row-wise parts around cuBLAS GEMMs ([M, 128] bf16 rows):
+// The K / V AdaLN itself and its backward run inside pre_fwd.cu / pre_bwd.cu (-DCROSS=1). These kernels are the row-wise parts around cuBLAS
+// GEMMs ([M, 128] bf16 rows), those of the conditioning's LayerNorm:
 //   local_cond_ln        cn = LN(c) * gamma                                   (the conditioning's LayerNorm, bf16 out)
-//   local_kv_fwd         xkv from x1, the modulation GEMM output mkv [M, 256] = [pre-sigmoid scale | shift] and the scale bias
-//   local_kv_bwd         dx1, dmkv from dxkv, and the scale-bias gradient
 //   local_cond_ln_bwd    dc (optionally added onto a given dc) and dgamma of local_cond_ln
 //
 // Layout: a persistent grid (8 blocks of 256 threads per SM), a row per half-warp, 16 B (8 channels) per lane: a row is one 256-B
 // request of 16 lanes, the LayerNorm reductions are 4 shuffle steps, and the loads of U rows are issued before the first reduction.
 // (One row per warp with 8-B lanes and one block per 8 rows ran at 40-55 % of the copy rate: cond_ln 33 -> 19 us at 196608 rows.)
 // The bias / gamma gradients are reduced in the block and end in one atomic per channel per block. U = 1: more rows in flight per half-warp
-// cost registers, and with them blocks per SM, and ran slower (kv_bwd 60 -> 77-130 us).
+// cost registers, and with them blocks per SM, and ran slower (cond_ln_bwd 35 -> 43-51 us).
 // SPDX-License-Identifier: Apache-2.0
 #include "local.cuh"
 
@@ -47,12 +46,11 @@ DEVI float norm128(float* x, float eps) {
   float v = 0.f;
 #pragma unroll
   for (int i = 0; i < 8; ++i) { x[i] -= mean; v += x[i] * x[i]; }
-  const float rstd = 1.f / sqrtf(hsum(v) * (1.f / 128.f) + eps);
+  const float rstd = rsqrtf(hsum(v) * (1.f / 128.f) + eps);
 #pragma unroll
   for (int i = 0; i < 8; ++i) x[i] *= rstd;
   return rstd;
 }
-DEVI float sigm(float x) { return 1.f / (1.f + __expf(-x)); }
 
 // the block's 16 half-warps' per-lane partial sums [8 channels] -> out[128] += (one atomic per channel per block)
 DEVI void block_reduce8(float* __restrict__ out, const float (&acc)[8]) {
@@ -88,79 +86,6 @@ DEVI void cond_ln_body(const __nv_bfloat16* __restrict__ c, const float* __restr
       if (row < M) st8(cn + (size_t)row * DM + hl * 8, x[j]);
     }
   }
-}
-
-template <int U>
-DEVI void kv_fwd_body(const __nv_bfloat16* __restrict__ x1, const __nv_bfloat16* __restrict__ mkv, const float* __restrict__ bs,
-                      __nv_bfloat16* __restrict__ xkv, int M, float eps) {
-  const int hl = threadIdx.x & 15, step = gridDim.x * 16;
-  float b[8];
-#pragma unroll
-  for (int i = 0; i < 8; ++i) b[i] = bs[hl * 8 + i];
-  for (int row0 = blockIdx.x * 16 + (threadIdx.x >> 4); row0 < M; row0 += U * step) {
-    float x[U][8], pre[U][8], sh[U][8];
-#pragma unroll
-    for (int j = 0; j < U; ++j) {
-      const int row = row0 + j * step;
-      ld8z(x1 + (size_t)row * DM + hl * 8, x[j], row < M);
-      ld8z(mkv + (size_t)row * 2 * DM + hl * 8, pre[j], row < M);
-      ld8z(mkv + (size_t)row * 2 * DM + DM + hl * 8, sh[j], row < M);
-    }
-#pragma unroll
-    for (int j = 0; j < U; ++j) {
-      const int row = row0 + j * step;
-      norm128(x[j], eps);
-#pragma unroll
-      for (int i = 0; i < 8; ++i) x[j][i] = x[j][i] * sigm(pre[j][i] + b[i]) + sh[j][i];
-      if (row < M) st8(xkv + (size_t)row * DM + hl * 8, x[j]);
-    }
-  }
-}
-
-// dxkv -> dx1 [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | d shift] (AdaLN_kv backward), dbs += sum_rows d pre-sigmoid scale
-template <int U>
-DEVI void kv_bwd_body(const __nv_bfloat16* __restrict__ x1, const __nv_bfloat16* __restrict__ mkv, const float* __restrict__ bs,
-                      const __nv_bfloat16* __restrict__ dxkv, __nv_bfloat16* __restrict__ dx1, __nv_bfloat16* __restrict__ dmkv,
-                      float* __restrict__ dbs, int M, float eps) {
-  const int hl = threadIdx.x & 15, step = gridDim.x * 16;
-  float acc[8], b[8];
-#pragma unroll
-  for (int i = 0; i < 8; ++i) { acc[i] = 0.f; b[i] = bs[hl * 8 + i]; }
-  for (int row0 = blockIdx.x * 16 + (threadIdx.x >> 4); row0 < M; row0 += U * step) {
-    float x[U][8], pre[U][8], dy[U][8];
-#pragma unroll
-    for (int j = 0; j < U; ++j) {
-      const int row = row0 + j * step;
-      ld8z(x1 + (size_t)row * DM + hl * 8, x[j], row < M);
-      ld8z(mkv + (size_t)row * 2 * DM + hl * 8, pre[j], row < M);
-      ld8z(dxkv + (size_t)row * DM + hl * 8, dy[j], row < M);
-    }
-#pragma unroll
-    for (int j = 0; j < U; ++j) {
-      const int row = row0 + j * step;
-      const float rstd = norm128(x[j], eps);                           // x = LN(x1)
-      float dpre[8], dxn[8], o[8];
-      float s1 = 0.f, s2 = 0.f;
-#pragma unroll
-      for (int i = 0; i < 8; ++i) {
-        const float sk = sigm(pre[j][i] + b[i]);
-        dpre[i] = dy[j][i] * x[j][i] * sk * (1.f - sk);
-        dxn[i] = dy[j][i] * sk;
-        acc[i] += dpre[i];
-        s1 += dxn[i];
-        s2 += dxn[i] * x[j][i];
-      }
-      const float m1 = hsum(s1) * (1.f / 128.f), m2 = hsum(s2) * (1.f / 128.f);
-#pragma unroll
-      for (int i = 0; i < 8; ++i) o[i] = rstd * (dxn[i] - m1 - x[j][i] * m2);
-      if (row < M) {
-        st8(dx1 + (size_t)row * DM + hl * 8, o);
-        st8(dmkv + (size_t)row * 2 * DM + hl * 8, dpre);
-        st8(dmkv + (size_t)row * 2 * DM + DM + hl * 8, dy[j]);
-      }
-    }
-  }
-  block_reduce8(dbs, acc);
 }
 
 // dc = LN backward of (dcn * gamma) (+ dcin in bf16 when given: the gradient of c's other consumer; dc may be dcin); dgamma += sum rows dcn * LN(c)
@@ -207,17 +132,6 @@ DEVI void cond_ln_bwd_body(const __nv_bfloat16* __restrict__ c, const __nv_bfloa
 extern "C" __global__ void __launch_bounds__(256)
 local_cond_ln(const __nv_bfloat16* __restrict__ c, const float* __restrict__ gamma, __nv_bfloat16* __restrict__ cn, int M, float eps) {
   cond_ln_body<1>(c, gamma, cn, M, eps);
-}
-extern "C" __global__ void __launch_bounds__(256)
-local_kv_fwd(const __nv_bfloat16* __restrict__ x1, const __nv_bfloat16* __restrict__ mkv, const float* __restrict__ bs,
-             __nv_bfloat16* __restrict__ xkv, int M, float eps) {
-  kv_fwd_body<1>(x1, mkv, bs, xkv, M, eps);
-}
-extern "C" __global__ void __launch_bounds__(256)
-local_kv_bwd(const __nv_bfloat16* __restrict__ x1, const __nv_bfloat16* __restrict__ mkv, const float* __restrict__ bs,
-             const __nv_bfloat16* __restrict__ dxkv, __nv_bfloat16* __restrict__ dx1, __nv_bfloat16* __restrict__ dmkv,
-             float* __restrict__ dbs, int M, float eps) {
-  kv_bwd_body<1>(x1, mkv, bs, dxkv, dx1, dmkv, dbs, M, eps);
 }
 extern "C" __global__ void __launch_bounds__(256)
 local_cond_ln_bwd(const __nv_bfloat16* __restrict__ c, const __nv_bfloat16* __restrict__ dcn, const float* __restrict__ gamma,

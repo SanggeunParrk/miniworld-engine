@@ -195,11 +195,11 @@ Cross-attention training block, 1 layer, 48 samples x 4096 atoms (196 608 rows),
 
 | | start | now |
 |---|---|---|
-| bf16 (production, bf16-mixed) | 2.52 | 1.68 |
+| bf16 (production, bf16-mixed) | 2.52 | 1.58 |
 | fp32 (TF32) | 4.33 | 3.85 |
 
-At 8192 atoms bf16 is 3.13 ms and fp32 7.43 ms (linear in rows). Inference (A = 5, one cross-mode block, bf16, CUDA graph under
-`kernels._capture.static_weights()` + `static_inputs()` as the harness runs it): 62 us at 4096 atoms -- `pre_fwd` 20, attention 14, `post_fwd` 23, nothing
+At 8192 atoms bf16 is 2.95 ms and fp32 7.43 ms (linear in rows). Inference (A = 5, one cross-mode block, bf16, CUDA graph under
+`kernels._capture.static_weights()` + `static_inputs()` as the harness runs it): 57 us at 4096 atoms, 92 us at 8192 -- `pre_fwd`, attention, `post_fwd`, nothing
 else. Without the static declarations every replay repacks the weights and remakes the conditioning tables (about 30 small kernels, 136 us).
 
 What changed:
@@ -215,6 +215,23 @@ What changed:
 
 In cross mode the conditioning LayerNorm backward of the K / V modulation adds onto `dc` in place (no add kernel). The key mask is passed as a uint8 view of the bool mask (no per-call conversion launch). `tests/integrations/test_b200_atom_dw_gpu.py`
 covers `atom_dw` (bf16 / tf32, strided column views, several destination blocks, run-to-run determinism) and the fp32 column sum against fp64.
+
+### Row-stage latency round (2026-10-10)
+
+Per-tile timestamps (`clock64` marks in the compute warpgroup's loop, one CTA) showed where the 16- / 32-row tile kernels spent their time; three
+findings, each worth a few percent of the step (bf16 training 1.68 -> 1.58 ms at 4096 atoms):
+
+| change | effect |
+|---|---|
+| IEEE `1.f / sqrtf` and `1.f / (1 + expf)` in the cross-mode AdaLN math -> `rsqrtf`, `__fdividef` (as every other kernel here) | the K / V AdaLN stage of `pre_fwd` took 2860 of its 5200 clk per tile; 970 now. `pre_fwd` 130 -> 94 us, `pre_bwd` 134 -> 121 |
+| TMA stores of `post_fwd` / `tr_bwd_gate` / `post_bwd` / `pre_bwd` / `cond_bwd` issued and waited for by a lane of the producer warp (`stfull` ring of NSW barriers) instead of the warpgroup's leader thread | the leader no longer stalls its warpgroup on the stage's read-out: `post_fwd` 162 -> 136 us, `pre_bwd` 145 -> 134, the others within noise |
+| `cond_fwd`: the two warpgroups staggered by half an iteration (warpgroup 1 runs the epilogue of tile T, then the LayerNorm of tile T + 2) | one's sigmoids (MUFU) overlap the other's row work: 125 -> 114 us |
+
+Where the tile kernels stand against the HBM copy rate (6 TB/s measured with a plain copy here), 196 608 rows: `pre_fwd` 94 us (floor 92), `pre_bwd`
+121 (117), `post_bwd` 174 (160), `post_fwd` 132 (117), `tr_bwd_gate` 120 (100), `cond_bwd` 109 (84), `cond_fwd` 114 (67; MUFU: 100 M sigmoids are 44 us of
+exp / reciprocal alone, and about 1600 instructions per tile per SMSP), `atom_dw` 256 (260). Tried without effect: batching the TMEM reads of an
+epilogue into one wait (`cond_fwd`; `post_fwd` 136 -> 132), three input stages in the cross `pre_fwd` (a two-deep xkv ring waits on the
+previous tile's store: 167 us), staggering `pre_fwd`, mixing polynomial `ex2` into the sigmoids (MUFU and issue slots break even).
 
 ## Not covered
 

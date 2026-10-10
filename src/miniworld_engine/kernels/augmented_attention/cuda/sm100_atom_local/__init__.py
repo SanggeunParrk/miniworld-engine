@@ -10,7 +10,7 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lattn_dq.cu    dQ (window-local).
   lattn_dkv.cu   dK, dV and dbias (key-centric: 16 keys see exactly 4 query windows = 128 queries; dbias is summed over the samples).
   lcross.cu      the row kernels of the cross-attention mode (keys / values from a second AdaLN): LN of the conditioning, the K / V AdaLN
-                 and its backward (the gradient it sends to x1 is added in ``sm100_atom.pre_bwd``), column sums.
+                 (the K / V AdaLN and its backward are inside ``sm100_atom``'s pre_fwd / pre_bwd, ``-DCROSS=1``).
 
 The fp32 path (fp32 activations; ``KERNELS_TF32``, loaded by ``_load32`` and only when an fp32 call is served) has its own twins:
   lattn_fwd_tf32.cu, lattn_dq_tf32.cu, lattn_dkv_tf32.cu   the three attention kernels on tcgen05 kind::tf32 (fp32 operands, P / dS fp32
@@ -68,8 +68,6 @@ KERNELS = {
     "pb_b": ("lbias", "local_bias_bwd", 0),
     "pb_fin": ("lbias", "local_bias_fin", 0),
     "cond_ln": ("lcross", "local_cond_ln", 0),
-    "kv_f": ("lcross", "local_kv_fwd", 0),
-    "kv_b": ("lcross", "local_kv_bwd", 0),
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
 }
 
@@ -223,25 +221,6 @@ def cond_ln(c, gamma, eps=1e-5):
     d = _dev(c)
     _load("cond_ln", d)((_row_grid(M, d), 1, 1), (256, 1, 1), c, gamma.float().contiguous(), out, int(M), float(eps))
     return out
-
-
-def kv_fwd(x1, mkv, bs, eps=1e-5):
-    """xkv = LN(x1) * sigmoid(mkv[:, :128] + bs) + mkv[:, 128:]  ([M, 128] bf16)."""
-    M = x1.shape[0]
-    out = torch.empty_like(x1)
-    d = _dev(x1)
-    _load("kv_f", d)((_row_grid(M, d), 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), out, int(M), float(eps))
-    return out
-
-
-def kv_bwd(x1, mkv, bs, dxkv, dbs, eps=1e-5):
-    """dxkv -> dx1 [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | d shift] (bf16); dbs [128] fp32 += sum_rows d pre-sigmoid scale."""
-    M = x1.shape[0]
-    dx1 = torch.empty_like(x1)
-    dmkv = torch.empty(M, 2 * DM, device=x1.device, dtype=torch.bfloat16)
-    d = _dev(x1)
-    _load("kv_b", d)((_row_grid(M, d), 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), dxkv, dx1, dmkv, dbs, int(M), float(eps))
-    return dx1, dmkv
 
 
 def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5, acc=None):

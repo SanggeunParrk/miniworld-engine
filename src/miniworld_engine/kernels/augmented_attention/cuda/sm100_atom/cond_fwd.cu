@@ -191,14 +191,19 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
       mbar_wait(&B.accfull[ab], (T >> 1) & 1);
       if (T >= 2) mbar_wait(&B.ofree[ob], ((T >> 1) - 1) & 1);
       tc_fence_after();
+      uint32_t va[3][2][8];                                                // all six accumulator reads in flight, one wait
+#pragma unroll
+      for (int p = 0; p < 3; ++p)
+#pragma unroll
+        for (int L = 0; L < 2; ++L) tmem_ld16x256b2(tmem + ((lb + 16 * L) << 16) + T_ACC + 128 * ab + 32 * p + 16 * wg, va[p][L]);
+      tmem_wait_ld();
 #pragma unroll
       for (int p = 0; p < 3; ++p) {
         const bool gate = p != 1;
 #pragma unroll
         for (int L = 0; L < 2; ++L) {
-          uint32_t v[8], r[4];
-          tmem_ld16x256b2(tmem + ((lb + 16 * L) << 16) + T_ACC + 128 * ab + 32 * p + 16 * wg, v);
-          tmem_wait_ld();
+          uint32_t r[4];
+          const uint32_t (&v)[8] = va[p][L];
 #pragma unroll
           for (int mi = 0; mi < 4; ++mi) {
             const int k = 4 * (mi & 1) + 2 * (mi >> 1);
@@ -215,10 +220,21 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
       named_bar_sync(1 + wg, 128);
       if (qw == 0 && lane == 0) { mbar_arrive(&B.accfree[ab]); mbar_arrive(&B.ofull[ob]); }
     };
-    if (ntT > 0) xphase(0);
-    for (int T = 0; T < ntT; ++T) {
-      if (T + 1 < ntT) xphase(T + 1);
-      epi(T);
+    // The two warpgroups are staggered by half an iteration: warpgroup 0 runs tile T + 1's LayerNorm and then tile T's epilogue, warpgroup 1 tile
+    // T's epilogue and then tile T + 2's LayerNorm, so one's sigmoids (MUFU) overlap the other's row work.
+    if (wg == 1) {
+      if (ntT > 0) xphase(0);
+      if (ntT > 1) xphase(1);
+      for (int T = 0; T < ntT; ++T) {
+        epi(T);
+        if (T + 2 < ntT) xphase(T + 2);
+      }
+    } else {
+      if (ntT > 0) xphase(0);
+      for (int T = 0; T < ntT; ++T) {
+        if (T + 1 < ntT) xphase(T + 1);
+        epi(T);
+      }
     }
   }
   tc_fence_before();

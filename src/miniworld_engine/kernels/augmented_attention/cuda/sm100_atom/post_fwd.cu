@@ -36,7 +36,7 @@ constexpr uint32_t T_WU = 0, T_WD = 256, T_ACC = 384;
 constexpr uint32_t I_16 = idesc_bf16(128, 16);
 
 struct Bars {
-  uint64_t wfull, wfree, wofull, infull[2][NSW], infree[2][NSW], gfull[2], ufull[2], yfull[2], abfull[2], hfull[2], tfull[2];
+  uint64_t wfull, wfree, wofull, infull[2][NSW], infree[2][NSW], stfull[2][NSW], gfull[2], ufull[2], yfull[2], abfull[2], hfull[2], tfull[2];
   uint32_t tmem;
 };
 DEVI uint32_t bmul2(uint32_t a, uint32_t b) { uint32_t r; asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
@@ -72,7 +72,7 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
   if (tid == 0) {
     mbar_init(&B.wfull, 1); mbar_init(&B.wfree, 1); mbar_init(&B.wofull, 1);
     for (int w = 0; w < 2; ++w) {
-      for (int s = 0; s < NSW; ++s) { mbar_init(&B.infull[w][s], 1); mbar_init(&B.infree[w][s], 1); }
+      for (int s = 0; s < NSW; ++s) { mbar_init(&B.infull[w][s], 1); mbar_init(&B.infree[w][s], 1); mbar_init(&B.stfull[w][s], 1); }
       mbar_init(&B.gfull[w], 1); mbar_init(&B.ufull[w], 1); mbar_init(&B.yfull[w], 1); mbar_init(&B.abfull[w], 1); mbar_init(&B.hfull[w], 1);
       mbar_init(&B.tfull[w], 1);
     }
@@ -116,6 +116,28 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
         }
         for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_M + kb * KB, &mmod, bar, 256 + 64 * kb, r0);   // os | sc2 | bi2 | ts
       }
+    } else if (lane == 1) {
+      // the TMA stores of this warpgroup's tiles: issued (and waited for) off the compute threads, which go on to the next tile's row work
+      const int w = warp >> 1;
+      pdl_wait();
+      for (int i = 0; 2 * i + w < ntT; ++i) {
+        const int s = i % NSW, r0 = row0(2 * i + w);
+        const uint32_t st = stage(w, i);
+        mbar_wait(&B.stfull[w][s], (i / NSW) & 1);
+        for (int kb = 0; kb < 2; ++kb) {
+          tma_store_2d(&mout, st + O_M + (4 + kb) * KB, 64 * kb, r0);
+          if (save) {
+            tma_store_2d(&mu, st + O_O + kb * KB, 64 * kb, r0);
+            tma_store_2d(&ma2, st + O_A + kb * KB, 64 * kb, r0);
+            tma_store_2d(&mx2, st + O_G + kb * KB, 64 * kb, r0);
+            tma_store_2d(&mt, st + O_M + kb * KB, 64 * kb, r0);
+          }
+        }
+        tma_store_commit();
+        tma_store_wait_read0();                                            // (a short wait: the stores only have to read the stage)
+        mbar_arrive(&B.infree[w][s]);                                      // this tile's stage is free for tile i + NSW
+      }
+      tma_store_wait0();
     }
   } else if (warp == 1 || warp == 3) {
     // ------------------------------------------------------------------------------------------------ MMA issuers (warp 1: warpgroup 0, 3: 1)
@@ -199,14 +221,18 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
       // ---- P2: u = rn(u^T) -> row-major over o; then row-wise a2, LayerNorm, x2
       mbar_wait(&B.ufull[w], i & 1);
       tc_fence_after();
+      if (DIAG != 1) {
+        uint32_t v[2][8];                                                  // both 16-channel halves in flight, one wait
 #pragma unroll
-      for (int L = 0; L < (DIAG == 1 ? 0 : 2); ++L) {
-        uint32_t v[8], r[4];
-        tmem_ld16x256b2(ta + ((lb + 16 * L) << 16), v);
+        for (int L = 0; L < 2; ++L) tmem_ld16x256b2(ta + ((lb + 16 * L) << 16), v[L]);
         tmem_wait_ld();
 #pragma unroll
-        for (int mi = 0; mi < 4; ++mi) r[mi] = pack_bf16(__uint_as_float(v[4 * (mi & 1) + 2 * (mi >> 1)]), __uint_as_float(v[4 * (mi & 1) + 2 * (mi >> 1) + 1]));
-        stsm4t(faddr(st + O_O, lb + 16 * L + 8 * fh), r);
+        for (int L = 0; L < 2; ++L) {
+          uint32_t r[4];
+#pragma unroll
+          for (int mi = 0; mi < 4; ++mi) r[mi] = pack_bf16(__uint_as_float(v[L][4 * (mi & 1) + 2 * (mi >> 1)]), __uint_as_float(v[L][4 * (mi & 1) + 2 * (mi >> 1) + 1]));
+          stsm4t(faddr(st + O_O, lb + 16 * L + 8 * fh), r);
+        }
       }
       tc_fence_before();
       named_bar_sync(1 + w, 128);
@@ -254,22 +280,30 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
       // ---- P3: h = rn(rn(silu(rn(a))) rn(b)) for hidden 128 hc + lb + 16 L + .., row-major over os | sc2
       mbar_wait(&B.abfull[w], i & 1);
       tc_fence_after();
+      if (DIAG != 1) {
+        uint32_t va[2][2][8], vb[2][2][8];                                 // all eight accumulator reads in flight, one wait
 #pragma unroll
-      for (int hc = 0; hc < (DIAG == 1 ? 0 : 2); ++hc)
+        for (int hc = 0; hc < 2; ++hc)
 #pragma unroll
-        for (int L = 0; L < 2; ++L) {
-          uint32_t va[8], vb[8], r[4];
-          tmem_ld16x256b2(ta + ((lb + 16 * L) << 16) + 32 * hc, va);
-          tmem_ld16x256b2(ta + ((lb + 16 * L) << 16) + 32 * hc + 16, vb);
-          tmem_wait_ld();
-#pragma unroll
-          for (int mi = 0; mi < 4; ++mi) {
-            const int k = 4 * (mi & 1) + 2 * (mi >> 1);
-            r[mi] = bmul2(silu_rn2(pack_bf16(__uint_as_float(va[k]), __uint_as_float(va[k + 1]))),
-                          pack_bf16(__uint_as_float(vb[k]), __uint_as_float(vb[k + 1])));
+          for (int L = 0; L < 2; ++L) {
+            tmem_ld16x256b2(ta + ((lb + 16 * L) << 16) + 32 * hc, va[hc][L]);
+            tmem_ld16x256b2(ta + ((lb + 16 * L) << 16) + 32 * hc + 16, vb[hc][L]);
           }
-          stsm4t(faddr(st + O_M, 128 * hc + lb + 16 * L + 8 * fh), r);
-        }
+        tmem_wait_ld();
+#pragma unroll
+        for (int hc = 0; hc < 2; ++hc)
+#pragma unroll
+          for (int L = 0; L < 2; ++L) {
+            uint32_t r[4];
+#pragma unroll
+            for (int mi = 0; mi < 4; ++mi) {
+              const int k = 4 * (mi & 1) + 2 * (mi >> 1);
+              r[mi] = bmul2(silu_rn2(pack_bf16(__uint_as_float(va[hc][L][k]), __uint_as_float(va[hc][L][k + 1]))),
+                            pack_bf16(__uint_as_float(vb[hc][L][k]), __uint_as_float(vb[hc][L][k + 1])));
+            }
+            stsm4t(faddr(st + O_M, 128 * hc + lb + 16 * L + 8 * fh), r);
+          }
+      }
       fence_proxy_async();
       tc_fence_before();
       named_bar_sync(1 + w, 128);
@@ -277,42 +311,35 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
       // ---- P4: a3 = rn(a2 + rn(rn(sigmoid(ts)) rn(t))) in the fragment layout (ts, a2 by ldmatrix.trans) -> row-major over bi2
       mbar_wait(&B.tfull[w], i & 1);
       tc_fence_after();
+      if (DIAG != 1) {
+        uint32_t v[2][8], ts[2][4], a2[2][4];                               // both halves' reads in flight, one wait
 #pragma unroll
-      for (int L = 0; L < (DIAG == 1 ? 0 : 2); ++L) {
-        const uint32_t ch = lb + 16 * L + 8 * fh;
-        uint32_t v[8], tv[4], ts[4], a2[4], r[4];
-        tmem_ld16x256b2(ta + ((lb + 16 * L) << 16), v);
-        ldsm4t(faddr(st + O_M + 6 * KB, ch), ts);
-        ldsm4t(faddr(st + O_A, ch), a2);
+        for (int L = 0; L < 2; ++L) {
+          const uint32_t ch = lb + 16 * L + 8 * fh;
+          tmem_ld16x256b2(ta + ((lb + 16 * L) << 16), v[L]);
+          ldsm4t(faddr(st + O_M + 6 * KB, ch), ts[L]);
+          ldsm4t(faddr(st + O_A, ch), a2[L]);
+        }
         tmem_wait_ld();
 #pragma unroll
-        for (int mi = 0; mi < 4; ++mi) {
-          const int k = 4 * (mi & 1) + 2 * (mi >> 1);
-          tv[mi] = pack_bf16(__uint_as_float(v[k]), __uint_as_float(v[k + 1]));
-          r[mi] = badd2(a2[mi], bmul2(ts[mi], tv[mi]));
+        for (int L = 0; L < 2; ++L) {
+          const uint32_t ch = lb + 16 * L + 8 * fh;
+          uint32_t tv[4], r[4];
+#pragma unroll
+          for (int mi = 0; mi < 4; ++mi) {
+            const int k = 4 * (mi & 1) + 2 * (mi >> 1);
+            tv[mi] = pack_bf16(__uint_as_float(v[L][k]), __uint_as_float(v[L][k + 1]));
+            r[mi] = badd2(a2[L][mi], bmul2(ts[L][mi], tv[mi]));
+          }
+          stsm4t(faddr(st + O_M + 4 * KB, ch), r);
+          if (save) stsm4t(faddr(st + O_M, ch), tv);                        // t over h's first half (M3 has read it)
         }
-        stsm4t(faddr(st + O_M + 4 * KB, ch), r);
-        if (save) stsm4t(faddr(st + O_M, ch), tv);                          // t over h's first half (M3 has read it)
       }
       fence_proxy_async();
       tc_fence_before();
       named_bar_sync(1 + w, 128);
-      if (leader) {
-        for (int kb = 0; kb < 2; ++kb) {
-          tma_store_2d(&mout, st + O_M + (4 + kb) * KB, 64 * kb, r0);
-          if (save) {
-            tma_store_2d(&mu, st + O_O + kb * KB, 64 * kb, r0);
-            tma_store_2d(&ma2, st + O_A + kb * KB, 64 * kb, r0);
-            tma_store_2d(&mx2, st + O_G + kb * KB, 64 * kb, r0);
-            tma_store_2d(&mt, st + O_M + kb * KB, 64 * kb, r0);
-          }
-        }
-        tma_store_commit();
-        tma_store_wait_read0();                                            // (a short wait: the stores only have to read the stage)
-        mbar_arrive(&B.infree[w][i % NSW]);                                // this tile's stage is free for tile i + NSW
-      }
+      if (leader) mbar_arrive(&B.stfull[w][s]);                            // the store thread of this warpgroup takes it from here
     }
-    if (leader) tma_store_wait0();
   }
   tc_fence_before();
   __syncthreads();

@@ -12,7 +12,7 @@
 //   dxkv = rn(dk Wk + dv Wv)   (one fp32 sum, one rounding: a K = 256 product)
 // which goes through the AdaLN's backward in the row stage (x1 and pre are staged: two more tiles) into dx1_kv, added to dx1 = rn(dg Wg + dq Wq)
 // in bf16 before AdaLN 1's backward; dmkv = [dpre | dxkv] is stored and d bs reduced. 44-KB stages, two per warpgroup. This replaces a K = 256
-// cuBLAS GEMM, ``kv_bwd`` and the dx1_kv round trip of the separate formulation.
+// cuBLAS GEMM, a separate K / V AdaLN backward kernel and the dx1_kv round trip of the separate formulation.
 // TMEM: W^T 0 (256 columns, projection p at 64 p); warpgroup w's accumulators at 256 + 64 w + 16 p.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
@@ -40,10 +40,10 @@ constexpr uint32_t T_W = 0, T_ACC = 256;
 constexpr uint32_t I_16 = idesc_bf16(128, 16);
 
 struct Bars {
-  uint64_t wfull, wfree, infull[2][NSW], infree[2][NSW], dxfull[2], dxfree[2];
+  uint64_t wfull, wfree, infull[2][NSW], infree[2][NSW], stfull[2][NSW], dxfull[2], dxfree[2];
   uint32_t tmem;
 };
-DEVI float sigm_x(float x) { return 1.f / (1.f + __expf(-x)); }
+DEVI float sigm_x(float x) { return __fdividef(1.f, 1.f + __expf(-x)); }
 DEVI uint32_t bmul2(uint32_t a, uint32_t b) { uint32_t r; asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t badd2(uint32_t a, uint32_t b) { uint32_t r; asm("add.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t bsub2(uint32_t a, uint32_t b) { uint32_t r; asm("sub.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
@@ -73,7 +73,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
   if (tid == 0) {
     mbar_init(&B.wfull, 1); mbar_init(&B.wfree, 1);
     for (int w = 0; w < 2; ++w) {
-      for (int s = 0; s < NSW; ++s) { mbar_init(&B.infull[w][s], 1); mbar_init(&B.infree[w][s], 1); }
+      for (int s = 0; s < NSW; ++s) { mbar_init(&B.infull[w][s], 1); mbar_init(&B.infree[w][s], 1); mbar_init(&B.stfull[w][s], 1); }
       mbar_init(&B.dxfull[w], 1); mbar_init(&B.dxfree[w], 4);
     }
     fence_barrier_init();
@@ -113,6 +113,27 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
           tma_load_2d(st + O_DA + kb * KB, &mda, bar, 64 * kb, r0);
         }
       }
+    } else if (lane == 1) {
+      // the TMA stores of this warpgroup's tiles: issued (and waited for) off the compute threads, which go on to the next tile's row work
+      pdl_wait();
+      for (int i = 0; 2 * i + w < ntT; ++i) {
+        const int s = i % NSW, r0 = row0(2 * i + w);
+        const uint32_t st = stage(w, i);
+        mbar_wait(&B.stfull[w][s], (i / NSW) & 1);
+        for (int kb = 0; kb < 2; ++kb) {
+          tma_store_2d(&mds, st + O_DA + kb * KB, 64 * kb, r0);
+          tma_store_2d(&mdmod, st + O_S1 + kb * KB, 64 * kb, r0);          // dsc1 -> block 0
+          tma_store_2d(&mdmod, st + O_X + kb * KB, 128 + 64 * kb, r0);     // dbi1 = dx1 -> block 1
+          if (CROSS) {
+            tma_store_2d(&mdmkv, st + O_MP + kb * KB, 64 * kb, r0);        // dmkv = [dpre | dxkv]
+            tma_store_2d(&mdmkv, st + O_DXKV + kb * KB, 128 + 64 * kb, r0);
+          }
+        }
+        tma_store_commit();
+        tma_store_wait_read0();                                            // (a short wait: the stores only have to read the stage)
+        mbar_arrive(&B.infree[w][s]);                                      // this tile's stage is free for tile i + NSW
+      }
+      tma_store_wait0();
     }
   } else if (warp == 1 || warp == 3) {
     // ------------------------------------------------------------------------------------------------ MMA issuers (warp 1: warpgroup 0, 3: 1)
@@ -220,7 +241,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
 #pragma unroll
         for (int e = 0; e < 16; ++e) { y[e] -= mean; var += y[e] * y[e]; }
         var += __shfl_xor_sync(~0u, var, 1); var += __shfl_xor_sync(~0u, var, 2); var += __shfl_xor_sync(~0u, var, 4);
-        const float rstd = 1.f / sqrtf(var * (1.f / 128.f) + eps);
+        const float rstd = rsqrtf(var * (1.f / 128.f) + eps);
         float s1 = 0.f, s2 = 0.f;
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb) {
@@ -320,22 +341,8 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
       }
       fence_proxy_async();
       named_bar_sync(1 + w, 128);
-      if (leader) {
-        for (int kb = 0; kb < 2; ++kb) {
-          tma_store_2d(&mds, st + O_DA + kb * KB, 64 * kb, r0);
-          tma_store_2d(&mdmod, st + O_S1 + kb * KB, 64 * kb, r0);          // dsc1 -> block 0
-          tma_store_2d(&mdmod, st + O_X + kb * KB, 128 + 64 * kb, r0);     // dbi1 = dx1 -> block 1
-          if (CROSS) {
-            tma_store_2d(&mdmkv, st + O_MP + kb * KB, 64 * kb, r0);        // dmkv = [dpre | dxkv]
-            tma_store_2d(&mdmkv, st + O_DXKV + kb * KB, 128 + 64 * kb, r0);
-          }
-        }
-        tma_store_commit();
-        tma_store_wait_read0();                                            // (a short wait: the stores only have to read the stage)
-        mbar_arrive(&B.infree[w][i % NSW]);                                // this tile's stage is free for tile i + NSW
-      }
+      if (leader) mbar_arrive(&B.stfull[w][i % NSW]);                      // the store thread of this warpgroup takes it from here
     }
-    if (leader) tma_store_wait0();
     float* red = reinterpret_cast<float*>(sm + O_RED);                      // [8 warps][NRED]
     const int cw = warp - 4;
 #pragma unroll
