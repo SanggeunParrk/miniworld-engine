@@ -19,8 +19,13 @@ MINIWORLD / TRITON, bf16 single / cond / pair, the atom widths, B = 1, any N, a 
 keeps the PyTorch path, and `MINIWORLD_LOCAL_DIT_SM100=0` turns it off. N is padded to a multiple of 128 for the row kernels (zero rows,
 the padded atoms masked as keys, the pair padded with zero windows); the first N rows come back.
 
-- The attention and pair-bias kernels are hand CUDA, the attention on tcgen05 / TMEM / TMA; the row kernels are tcgen05 / TMA; the
-  weight-gradient GEMMs are cuBLAS. No Triton, no quack, no N x N tensor anywhere.
+- The attention and pair-bias kernels are hand CUDA, the attention on tcgen05 / TMEM / TMA; the row kernels are tcgen05 / TMA; all dense
+  weight gradients of a block are one grouped split-K kernel (`atom_dw`, bf16 and tf32). The only cuBLAS products are the cross mode's two
+  modulation GEMMs (`cn Wm^T` forward, `dmkv Wm` backward). No Triton, no quack, no N x N tensor anywhere.
+- Cross-attention mode (`cross_attention=True`, the AF3 / Protenix atom blocks): keys and values are projected from a second AdaLN of x1
+  (`attention.ada_ln_kv`). The K / V AdaLN runs inside `pre_fwd` (from the registers that hold x1) and its backward inside `pre_bwd`
+  (`-DCROSS=1` builds of the same sources, `sm100_atom.pre_fwd_kv` / `pre_bwd_kv`); the conditioning's LayerNorm and its backward are
+  half-warp row kernels (`lcross.cu`). See the optimization log below.
 - Attention geometry (all three kernels): a CTA owns 128 rows of one head and a range of samples; TMEM lane = row. 128 queries (four
   windows) see 224 keys, and 128 keys see 224 queries when the key chunk starts at `128 j - 112` (every TMEM lane quadrant's 32 keys then
   see the same four windows). Per sample: `S = Q K^T` and `dP = dO V^T` [128 x 224] are tcgen05 MMAs into TMEM; 16 warps (lane
@@ -42,18 +47,37 @@ the padded atoms masked as keys, the pair padded with zero windows); the first N
 
 One B200 (shared box), bf16, `torch.set_float32_matmul_precision("medium")`, ms. "PyTorch" is the module's reference path
 (`implementation=PYTORCH`, the unfused eager ops replayed as a graph, window gather by `unfold`), not a `torch.compile`d block; no
-cuEquivariance row exists for this op. "previous" is the first version of these kernels (`mma.sync` attention, ce7fd93b).
+cuEquivariance row exists for this op. "previous" is the first version of these kernels (`mma.sync` attention, ce7fd93b). "engine" is
+the current kernels (2026-10-10: the grouped weight-gradient kernel, the tile-kernel latency fixes below); the PyTorch and previous columns are
+the earlier measurement of the same shapes.
 
-Block, CUDA-graph replay:
+Block (shared-AdaLN, `cross_attention=False`), one layer, CUDA-graph replay, all-valid key mask. Inference is given twice: as a plain graph
+(every replay repacks the weights and remakes the conditioning tables and the pair bias, ~30 small kernels) and under
+`kernels._capture.static_weights()` + `static_inputs()`, which is how the benchmark harness runs inference (a replay is `pre_fwd`, attention,
+`post_fwd`):
 
-| block | PyTorch | previous | engine | x PyTorch |
+| block | PyTorch | previous | engine | engine, static | x PyTorch |
+|---|---|---|---|---|---|
+| training A48 N4096 (forward + backward) | 14.184 | 1.904 | 1.378 | | 10.3 |
+| training A48 N8192 | 27.029 | 3.510 | 2.594 | | 10.4 |
+| inference A48 N4096 | 5.693 | 0.530 | 0.414 | 0.268 | 13.8 |
+| inference A5 N4096 | 1.198 | 0.120 | 0.106 | 0.054 | 11.3 |
+| inference A5 N2048 | 0.649 | 0.082 | 0.079 | 0.040 | 8.2 |
+| inference A1 N4096 | 0.814 | 0.072 | 0.068 | 0.030 | 12.0 |
+
+Cross-attention block (`cross_attention=True`, the AF3 / Protenix atom block), same protocol; fp32 is the TF32 path below. There is no
+PyTorch column: the module path does not run these shapes in a comparable graph.
+
+| block | bf16 | bf16, static | fp32 | fp32, static |
 |---|---|---|---|---|
-| training A48 N4096 (forward + backward) | 14.184 | 1.904 | 1.549 | 9.2 |
-| training A48 N8192 | 27.029 | 3.510 | 2.838 | 9.5 |
-| inference A48 N4096 | 5.693 | 0.530 | 0.427 | 13.3 |
-| inference A5 N4096 | 1.198 | 0.120 | 0.105 | 11.4 |
-| inference A5 N2048 | 0.649 | 0.082 | 0.075 | 8.7 |
-| inference A1 N4096 | 0.814 | 0.072 | 0.064 | 12.7 |
+| training A48 N4096 | 1.575 | | 3.841 | |
+| training A48 N8192 | 2.955 | | 7.427 | |
+| inference A48 N4096 | 0.482 | 0.288 | | 0.686 |
+| inference A5 N4096 | 0.126 | 0.056 | 0.161 | 0.115 |
+| inference A5 N2048 | | 0.040 | | 0.066 |
+| inference A1 N4096 | 0.079 | 0.030 | | 0.047 |
+
+Training of the cross block started this round at 2.52 ms (bf16) / 4.33 ms (fp32) at A48 N4096.
 
 The attention kernels alone (events over 20 eager launches, no graph; the small shapes are bounded by host launch time):
 
@@ -104,15 +128,15 @@ sampler they do not change, so an inference call (no gradients saved) computes t
 later calls read the cache; Anthropic's `FastAtomStack` does the same through its `dit_hoist`. A cache entry holds a weak reference to its
 tensor, so a freed-and-reused address never serves stale tables. With `kernels._capture.static_inputs()` (or
 `MINIWORLD_STATIC_CONDITIONING=1`) a CUDA-graph capture serves from the eager entries and a replay launches none of these kernels: one
-inference call goes from 11 to 6 kernels. Off by default; training never uses it. Tests: `tests/integrations/test_b200_local_dit_gpu.py`
+inference call goes from 11 to 6 kernels (a graph of the whole call under `static_weights()` as well is three kernels). Off by default; training never uses it. Tests: `tests/integrations/test_b200_local_dit_gpu.py`
 (`-k hoist or static_inputs`).
 
 ## fp32 path (TF32 tensor cores)
 
 fp32 single / cond / pair with fp32 parameters (no autocast) are served on B200 by a separate set of kernels: every product on tcgen05
 `kind::tf32` (fp32 operands read at tf32 precision, fp32 accumulation), everything else fp32 -- the residual stream, LayerNorms / AdaLNs,
-gates, the softmax and P, every saved activation and every gradient. The weight gradients are cuBLAS GEMMs with TF32 forced on (and the
-caller's `allow_tf32` restored), the only non-hand-written products. No Triton, none of the bf16 kernels. Dispatch: `integrations/local_dit.py`
+gates, the softmax and P, every saved activation and every gradient. The weight gradients are the grouped `atom_dw` kernel on tf32 (fp32
+partials, fp32 gradients). No Triton, none of the bf16 kernels. Dispatch: `integrations/local_dit.py`
 (`_fp32_call`, `_LocalBlock32` / `_infer32`, opaque ops `local_dit_block_fwd_tf32` / `local_dit_block_bwd_tf32`); the kernels load
 separately from the bf16 ones (a build / load failure warns once and keeps the module path for fp32 calls only);
 `MINIWORLD_LOCAL_DIT_TF32=0` keeps fp32 calls on the module path. A bf16 model fed fp32 activations, or a call under autocast, keeps the
@@ -127,7 +151,9 @@ Kernels (`kernels/augmented_attention/cuda/sm100_atom_local/`, `.../sm100_atom/`
 | `lattn_dkv_tf32.cu` `local_attn_dkv_tf32` (`"dkv32"`) | key-centric (keys `128 j - 112`); P^T over S^T and dS^T over dP^T in place; q and dO read K-major (one slot: TMEM holds one S^T anyway) and MN-major (two slots, each doubling as its sample's dK / dV staging); dbias in registers, summed over the samples | 204.3 KB / 512 cols / 17 warps |
 | `lbias_tf32.cu` `local_bias_{fwd,bwd,fin}_f32` (`"pb_f32"`, `"pb_b32"`, `"pb_fin32"`) | the pair bias and its backward on an fp32 pair (CUDA cores, one row per thread) | static |
 | `gemm_tf32.cu` `atom_gemm_tf32` (`sm100_atom.KERNELS_TF32["gemm"]`, `gemm32`) | every projection and activation-gradient product: persistent 128 x NT (128 / 256) tiles, 3-stage TMA ring of 32-wide K slices, double-buffered TMEM accumulators; epilogues: bias + sigmoid on chosen 128-column blocks (conditioning tables), gated residual (`a1 = s + so (gated Wo^T)`, `out = a1 + st (h Ws^T)`, + the raw product for the backward), SwiGLU over an interleaved `[Wa_0; Wb_0; Wa_1; Wb_1]` pack; per-warp 4 KB TMA-store stagings; 4 warps round each A slice to tf32 in shared memory before the MMA | 208.3 KB / 512 cols / 16 warps, <= 128 registers |
-| `rows_tf32.cu` `f32_*` (`"ln"`, `"adaln"`, `"gate"`, `"tail_b"`, `"swiglu_b"`, `"adaln_b"`, `"gate_b"`, `"ln_b"`) | the row-wise stages: conditioning LayerNorms, AdaLN and its backward (with the output gate fused), gates, SwiGLU backward, D = rowsum(dO O) per head, the conditioning LayerNorm backward with block-reduced v4 `red.add` | warp per row |
+| `gemm_rg_tf32.cu` `atom_gemm_rg_tf32` (`"gemm_rg"`) | the gated-residual GEMM at N = 128: res and gate arrive through TMA into per-warp shared buffers one chunk ahead (per-thread loads were 2.1-2.5x the memory floor, now ~1.2x), `out = fma(gate, acc, res)` | 224.3 KB / 512 cols / 16 warps (512 threads) |
+| `dw_atom.cu` `atom_dw` + `atom_dw_reduce` (`sm100_atom.atom_dw(device, f32)`) | every dense weight gradient of the block in one launch (A^T B over all rows, column views of the saved activations / gradients): split-K over the rows, TMA stages of 32 rows: 2 x 80 KB (tf32; bf16 5 x 40 KB), the whole [128 mb, nn] output of a slice accumulated in TMEM, fp32 partials in a workspace, a deterministic in-order slice reduce into each weight's own tensor | 160 KB (bf16 200 KB) / <= 512 cols / 8 warps |
+| `rows_tf32.cu` `f32_*` (`"ln"`, `"adaln"`, `"gate"`, `"tail_b"`, `"swiglu_b"`, `"adaln_b"`, `"gate_b"`, `"ln_b"`, `"colsum"`) | the row-wise stages: conditioning LayerNorms, AdaLN and its backward (with the output gate fused), gates, SwiGLU backward, D = rowsum(dO O) per head, the conditioning LayerNorm backward with block-reduced v4 `red.add`, bias-gradient column sums (partial rows per block, one tiny sum) | warp per row |
 
 Operand rounding. A `kind::tf32` MMA reads an fp32 operand by dropping its low 13 mantissa bits; that truncation is a one-sided error
 that accumulates coherently. Without rounding, the block output came out 1.6e-3 relative against fp64, 5.6x the cuBLAS TF32 module path
@@ -145,7 +171,7 @@ Layouts of the path: the conditioning table `[M, 768] = [s1 | bi1 | s2 | bi2 | s
 gates stored as sigmoids), the projection `[M, 512] = q | k | v | g` (cross mode: `q | g` from x1 and `k | v` from the K / V AdaLN, two
 GEMMs), the transition's `[a | b]` interleaved per 128-column half. Forward: LN x2 + 3 GEMMs (hoisted in inference), AdaLN, 1 GEMM, pair
 bias (hoisted), attention, gate, 3 GEMMs with 1 AdaLN between: an inference call with the hoist is 8 launches (cross: 10). Backward: 8 row
-kernels, 7 GEMMs (cross: 10), dq + dkv, pair-bias backward, the cuBLAS weight gradients.
+kernels, 7 GEMMs (cross: 10), dq + dkv, pair-bias backward, the grouped weight-gradient kernel.
 
 Tests: `tests/integrations/test_b200_local_dit_tf32_gpu.py` (output and every gradient against an fp64 block, no worse than the fp32
 module path with TF32 on -- `ef < 1.5 em + 1e-3` -- and loosely bounded by the IEEE module path; cross / non-cross, masks, N not a multiple
@@ -189,7 +215,7 @@ in IEEE fp32 is 1.06e-3 from that block and Anthropic 1.09e-3 (1.9e-4 from Prote
 block and the engine's, not precision (Protenix's own kernels switched off change nothing). Against the PyTorch compiled fp32 module path
 (bench harness, TF32 on, one block, L 128-768): inference 1.5-2.1x, training 1.25-1.49x (the training numbers predate the work above).
 
-### Training backward round (2026-10-10)
+### Optimization log: backward and cross mode (2026-10-10)
 
 Cross-attention training block, 1 layer, 48 samples x 4096 atoms (196 608 rows), CUDA-graph total, one B200 GPU, ms:
 
@@ -206,9 +232,9 @@ What changed:
 
 | kernel | design |
 |---|---|
-| `dw_atom.cu` `atom_dw` + `atom_dw_reduce` (`sm100_atom.atom_dw(device, f32)`) | every dense weight gradient of a block (A^T B over all rows, A / B column views of the saved activations and gradients) in **one** launch instead of one cuBLAS GEMM each: split-K over the rows with slices per problem proportional to its operand columns, TMA stages of 128-B-swizzle boxes (bf16: 16 rows x 5 stages; fp32 / tf32: 32 rows x 2 stages -- 8 rows x 8 stages was 2x slower, 16 x 5 1.17x), fp32 partials in a workspace, a deterministic in-order slice reduce writing each 128-row block of A to its destination tensor in the parameter's dtype. fp32 weight gradients of six problems at 196 608 rows: 334 us against 441 us cuBLAS. |
-| `rows_tf32.cu` `f32_colsum`, `lcross.cu` `local_colsum` | bias / conditioning-column gradients: a persistent grid writes G partial rows, a tiny sum finishes (replaces `sum(0)` reductions) |
-| `lcross.cu` `local_cond_ln`, `local_kv_fwd`, `local_kv_bwd`, `local_cond_ln_bwd` | a row per half-warp with 16 B per lane (a row is one 256-B request, the LayerNorm reductions are 4 shuffle steps), persistent grid of 8 blocks per SM, bias / gamma gradients reduced in the block and added with one atomic per channel per block (per-warp atomics onto the same 128 addresses had serialized in L2). 196 608 rows: cond_ln 33 -> 19 us, kv_bwd 127 -> 60 (now also carrying the scale-bias gradient), cond_ln_bwd 62 -> 35. More rows in flight per half-warp (U = 2, 4) cost registers, hence blocks per SM, and were slower; copy rate is 6.0 TB/s here |
+| `dw_atom.cu` `atom_dw` + `atom_dw_reduce` (`sm100_atom.atom_dw(device, f32)`) | every dense weight gradient of a block (A^T B over all rows, A / B column views of the saved activations and gradients) in **one** launch instead of one cuBLAS GEMM each: split-K over the rows with slices per problem proportional to its operand columns, TMA stages of 128-B-swizzle boxes (bf16: 32 rows x 5 stages; fp32 / tf32: 32 rows x 2 stages -- 8 rows x 8 stages was 2x slower, 16 x 5 1.17x, 24 x 3 1.03x, 40 x 2 not exact at 196 608 rows), fp32 partials in a workspace, a deterministic in-order slice reduce writing each 128-row block of A to its destination tensor in the parameter's dtype. fp32 weight gradients of six problems at 196 608 rows: 334 us against 441 us cuBLAS. |
+| `rows_tf32.cu` `f32_colsum` | bias / conditioning-column gradients (fp32 path): a persistent grid writes G partial rows, a tiny sum finishes (replaces `sum(0)` reductions) |
+| `lcross.cu` `local_cond_ln`, `local_cond_ln_bwd` (it also had `local_kv_fwd` / `local_kv_bwd` until they were fused into pre_fwd / pre_bwd) | a row per half-warp with 16 B per lane (a row is one 256-B request, the LayerNorm reductions are 4 shuffle steps), persistent grid of 8 blocks per SM, bias / gamma gradients reduced in the block and added with one atomic per channel per block (per-warp atomics onto the same 128 addresses had serialized in L2). 196 608 rows: cond_ln 33 -> 19 us, cond_ln_bwd 62 -> 35 (kv_bwd, before its fusion: 127 -> 60). More rows in flight per half-warp (U = 2, 4) cost registers, hence blocks per SM, and were slower; copy rate is 6.0 TB/s here |
 | `pre_fwd.cu` `atom_pre_fwd_sm100` (`-DCROSS=1`, `sm100_atom.pre_fwd_kv`) | the K / V AdaLN inside the input stage: xkv = LN(x1) sigmoid(mkv_pre + bs) + mkv_shift from the registers that hold x1 (a second LayerNorm over the same 8 threads), staged as its own tile, the B operand of the K / V MMAs (Q, G read the x1 tile), saved for the backward. 40-KB input stages, two (three needed a two-deep xkv ring and ran 30 % slower). Replaces `kv_fwd` (45 us) and two cuBLAS GEMMs (30 us); the kernel grows 76 -> 130 us |
 | `pre_bwd.cu` `atom_pre_bwd_sm100` (`-DCROSS=1`, `sm100_atom.pre_bwd_kv`) | the real Wk, Wv in W^T: projections 1 and 2 give dxkv = rn(dk Wk + dv Wv) (one fp32 sum, one rounding), whose AdaLN backward runs in the row stage on staged x1 and pre (dx1_kv, dpre, d bs), added to dx1 = rn(dg Wg + dq Wq) in bf16 before AdaLN 1's backward; dmkv = [dpre \| dxkv] and d bs are written there. 44-KB stages, two per warpgroup. Replaces the K = 256 GEMM, `kv_bwd` (57 us) and the zero-column `Wp^T` clone; the kernel grows 95 -> 145 us |
 | `gemm_rg_tf32.cu` `atom_gemm_rg_tf32` | the gated-residual GEMM at N = 128 with res and gate loaded through TMA into per-warp shared buffers one chunk ahead (the per-thread loads were uncoalesced: 2.1-2.5x the memory floor, now ~1.2x) |
@@ -216,7 +242,7 @@ What changed:
 In cross mode the conditioning LayerNorm backward of the K / V modulation adds onto `dc` in place (no add kernel). The key mask is passed as a uint8 view of the bool mask (no per-call conversion launch). `tests/integrations/test_b200_atom_dw_gpu.py`
 covers `atom_dw` (bf16 / tf32, strided column views, several destination blocks, run-to-run determinism) and the fp32 column sum against fp64.
 
-### Row-stage latency round (2026-10-10)
+### Optimization log: tile-kernel latency (2026-10-10)
 
 Per-tile timestamps (`clock64` marks in the compute warpgroup's loop, one CTA) showed where the 16- / 32-row tile kernels spent their time; three
 findings, each worth a few percent of the step (bf16 training 1.68 -> 1.58 ms at 4096 atoms):
