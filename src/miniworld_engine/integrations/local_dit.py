@@ -348,6 +348,26 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
     return [*saved, cn, mkv, xkv] if cross else saved
 
 
+def _fused_wgrads(spec, weights, names, f32, dev, rows_r):
+    """The weight gradients ``spec`` names -- (A, B, [(weight name, 128-row block), ...]) per product D = A^T B -- in one split-K launch
+    (``sm100_atom.AtomDw``), each written straight into a fresh buffer of its weight's shape and dtype; -> {name: gradient}. A weight made of
+    several 128-row blocks (expand_a / expand_b: 256 rows) lists the block index of each destination."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+
+    wmap = dict(zip(names, weights, strict=True))
+    out = {}
+    problems = []
+    for A, B, dests in spec:
+        ds = []
+        for name, blk in dests:
+            if name not in out:
+                out[name] = torch.empty(wmap[name].shape, device=dev, dtype=wmap[name].dtype)
+            ds.append(out[name].view(-1, DS_ if out[name].shape[-1] == DS_ else out[name].shape[-1])[blk * 128:(blk + 1) * 128])
+        problems.append((A, B, ds))
+    rows.atom_dw(dev.index if dev.index is not None else torch.cuda.current_device(), f32)(problems, rows_r)
+    return out
+
+
 def _wgrad(dout, x):
     """dout^T x, fp32: the weight gradients stay unrounded for fp32 parameters (an fp32 master); bf16 ones round once, as before."""
     return torch.mm(dout.t(), x, out_dtype=torch.float32)
@@ -393,38 +413,46 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
             wm, bs, gkv, wk, wv = _kv_pack(weights)
             dk, dv = dp[:, DS_:2 * DS_], dp[:, 2 * DS_:3 * DS_]
             dxkv = torch.addmm(dk @ wk, dv, wv)
-            dwk, dwv = _wgrad(dk, xkv), _wgrad(dv, xkv)
             dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv)
-            dwm, dbs = _wgrad(dmkv, cn), dmkv[:, :DS_].float().sum(0)
+            dbs = local.colsum(dmkv[:, :DS_])
             dg_kv = torch.zeros(DS_, device=dev)
             dc_kv = local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv)
-            dp[:, DS_:3 * DS_].zero_()      # pre_bwd's dgrad then covers q and the gate only
-        ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
+            wpt = wb["WpT"].clone()
+            wpt[:, DS_:3 * DS_] = 0         # pre_bwd's dgrad covers q and the gate only (dk / dv stay in dp for the weight gradients)
+        else:
+            wpt = wb["WpT"]
+        ds = rows.pre_bwd(dp, s2, mod, da, wpt, dmod, dbias_cols, dbq)
         if cross:
             local.adaln1_extra(s2, mod, dx1_kv, ds, dmod, dbias_cols[0:DS_])
         dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
         if cross:
             dc = dc + dc_kv
-        dws, dwu, dwo, dwp = _wgrad(dt, hh), _wgrad(dab, x2), _wgrad(du, gated), _wgrad(dp, x1)
-        dw1, dw2, dw3 = _wgrad(dmod[:, 0:256], cn1), _wgrad(dmod[:, 256:512], cn2), _wgrad(dmod[:, 512:768], c2)
+        names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
+        A_ = "attention."
+        spec = [(dt, hh, [("transition.squeeze.weight", 0)]),
+                (dab, x2, [("transition.expand_a.weight", 0), ("transition.expand_a.weight", 1), ("transition.expand_b.weight", 0),
+                           ("transition.expand_b.weight", 1)]),
+                (du, gated, [(A_ + "to_out.weight", 0)]),
+                (dmod[:, 0:256], cn1, [(A_ + "ada_ln_in.to_scale.weight", 0), (A_ + "ada_ln_in.to_bias.weight", 0)]),
+                (dmod[:, 256:512], cn2, [("transition.ada_ln_in.to_scale.weight", 0), ("transition.ada_ln_in.to_bias.weight", 0)]),
+                (dmod[:, 512:768], c2, [(A_ + "to_scale.weight", 0), ("transition.to_scale.weight", 0)])]
+        if cross:
+            spec += [(dp[:, 0:DS_], x1, [(A_ + "to_query.weight", 0)]), (dp[:, 3 * DS_:4 * DS_], x1, [(A_ + "to_gate.weight", 0)]),
+                     (dp[:, DS_:3 * DS_], xkv, [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)]),
+                     (dmkv, cn, [(A_ + "ada_ln_kv.to_scale.weight", 0), (A_ + "ada_ln_kv.to_bias.weight", 0)])]
+        else:
+            spec += [(dp, x1, [(A_ + "to_query.weight", 0), (A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0), (A_ + "to_gate.weight", 0)])]
+        fused = _fused_wgrads(spec, weights, names, False, dev, m)
     grads = {
-        "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128], "attention.ada_ln_in.to_scale.weight": dw1[:128],
-        "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128], "attention.ada_ln_in.to_bias.weight": dw1[128:],
-        "attention.to_query.weight": dwp[0:128], "attention.to_query.bias": dbq, "attention.to_key.weight": dwp[128:256],
-        "attention.to_value.weight": dwp[256:384], "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb,
-        "attention.to_gate.weight": dwp[384:512], "attention.to_out.weight": dwo, "attention.to_scale.weight": dw3[:128],
+        "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128], "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128],
+        "attention.to_query.bias": dbq, "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb,
         "attention.to_scale.bias": dbias_cols[512:640], "transition.ada_ln_in.ln_cond.weight": dgamma_cond[128:],
-        "transition.ada_ln_in.to_scale.weight": dw2[:128], "transition.ada_ln_in.to_scale.bias": dbias_cols[256:384],
-        "transition.ada_ln_in.to_bias.weight": dw2[128:], "transition.expand_a.weight": dwu[:256],
-        "transition.expand_b.weight": dwu[256:], "transition.squeeze.weight": dws, "transition.to_scale.weight": dw3[128:],
-        "transition.to_scale.bias": dbias_cols[640:768],
+        "transition.ada_ln_in.to_scale.bias": dbias_cols[256:384], "transition.to_scale.bias": dbias_cols[640:768],
     }
     if cross:
-        grads["attention.to_key.weight"], grads["attention.to_value.weight"] = dwk, dwv
-        grads.update({"attention.ada_ln_kv.ln_cond.weight": dg_kv, "attention.ada_ln_kv.to_scale.weight": dwm[:DS_],
-                      "attention.ada_ln_kv.to_scale.bias": dbs, "attention.ada_ln_kv.to_bias.weight": dwm[DS_:]})
-    names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
-    per_weight = [grads[name].to(w.dtype).reshape(w.shape).clone() for name, w in zip(names, weights, strict=True)]
+        grads.update({"attention.ada_ln_kv.ln_cond.weight": dg_kv, "attention.ada_ln_kv.to_scale.bias": dbs})
+    per_weight = [fused[name] if name in fused else grads[name].to(w.dtype).reshape(w.shape).clone()
+                  for name, w in zip(names, weights, strict=True)]
     dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
     return [_unpadded(ds.view(a, 1, n, DS_), single.shape), _unpadded(dc.view(a, 1, n, DC_), cond.shape), dpair, *per_weight]
 
@@ -794,36 +822,35 @@ def _block_bwd32(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pai
         dcn2 = rows.gemm32(dmod, pk.wmodT, k=2 * DS_, a_col0=2 * DS_, b_col0=2 * DS_)
         dcn3 = rows.gemm32(dmkv, pk.wmT) if cross else None
         dgc = rows.ln_bwd32(c2, dc, dcn1, pk.g1, dcn2, pk.g2, dcn3, pk.gkv)                  # dc += the LayerNorm backwards
-        with _tf32():
-            dws, dwu, dwo = _mm32(dt, hh), _mm32(dab, x2), _mm32(dyo, gated)
-            dw1, dw2, dw3 = _mm32(dmod[:, 0:256], cn1), _mm32(dmod[:, 256:512], cn2), _mm32(dmod[:, 512:768], c2)
-            if cross:
-                dwqg, dwkv, dwm = _mm32(dp[:, :2 * DS_], x1), _mm32(dp[:, 2 * DS_:], xkv), _mm32(dmkv, cnkv)
-            else:
-                dwp = _mm32(dp, x1)
         dcols = rows.colsum32(dmod)
         dbq = rows.colsum32(dp[:, qc:qc + DS_])
         dbkv = rows.colsum32(dmkv[:, :DS_]) if cross else None
+        names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
+        A_ = "attention."
+        spec = [(dt, hh, [("transition.squeeze.weight", 0)]),
+                (dab, x2, [("transition.expand_a.weight", 0), ("transition.expand_b.weight", 0), ("transition.expand_a.weight", 1),
+                           ("transition.expand_b.weight", 1)]),                                  # u interleaves [a_0 | b_0 | a_1 | b_1]
+                (dyo, gated, [(A_ + "to_out.weight", 0)]),
+                (dmod[:, 0:256], cn1, [(A_ + "ada_ln_in.to_scale.weight", 0), (A_ + "ada_ln_in.to_bias.weight", 0)]),
+                (dmod[:, 256:512], cn2, [("transition.ada_ln_in.to_scale.weight", 0), ("transition.ada_ln_in.to_bias.weight", 0)]),
+                (dmod[:, 512:768], c2, [(A_ + "to_scale.weight", 0), ("transition.to_scale.weight", 0)])]
+        if cross:
+            spec += [(dp[:, :2 * DS_], x1, [(A_ + "to_query.weight", 0), (A_ + "to_gate.weight", 0)]),
+                     (dp[:, 2 * DS_:], xkv, [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)]),
+                     (dmkv, cnkv, [(A_ + "ada_ln_kv.to_scale.weight", 0), (A_ + "ada_ln_kv.to_bias.weight", 0)])]
+        else:
+            spec += [(dp, x1, [(A_ + "to_query.weight", 0), (A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0), (A_ + "to_gate.weight", 0)])]
+        fused = _fused_wgrads(spec, weights, names, True, dev, m)
     grads = {
-        "attention.ada_ln_in.ln_cond.weight": dgc[0:128], "attention.ada_ln_in.to_scale.weight": dw1[:128],
-        "attention.ada_ln_in.to_scale.bias": dcols[0:128], "attention.ada_ln_in.to_bias.weight": dw1[128:],
+        "attention.ada_ln_in.ln_cond.weight": dgc[0:128], "attention.ada_ln_in.to_scale.bias": dcols[0:128],
         "attention.to_query.bias": dbq, "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb,
-        "attention.to_out.weight": dwo, "attention.to_scale.weight": dw3[:128], "attention.to_scale.bias": dcols[512:640],
-        "transition.ada_ln_in.ln_cond.weight": dgc[128:256], "transition.ada_ln_in.to_scale.weight": dw2[:128],
-        "transition.ada_ln_in.to_scale.bias": dcols[256:384], "transition.ada_ln_in.to_bias.weight": dw2[128:],
-        "transition.expand_a.weight": torch.cat([dwu[0:128], dwu[256:384]]), "transition.expand_b.weight": torch.cat([dwu[128:256], dwu[384:512]]),
-        "transition.squeeze.weight": dws, "transition.to_scale.weight": dw3[128:], "transition.to_scale.bias": dcols[640:768],
+        "attention.to_scale.bias": dcols[512:640], "transition.ada_ln_in.ln_cond.weight": dgc[128:256],
+        "transition.ada_ln_in.to_scale.bias": dcols[256:384], "transition.to_scale.bias": dcols[640:768],
     }
     if cross:
-        grads.update({"attention.to_query.weight": dwqg[:128], "attention.to_gate.weight": dwqg[128:],
-                      "attention.to_key.weight": dwkv[:128], "attention.to_value.weight": dwkv[128:],
-                      "attention.ada_ln_kv.ln_cond.weight": dgc[256:384], "attention.ada_ln_kv.to_scale.weight": dwm[:DS_],
-                      "attention.ada_ln_kv.to_scale.bias": dbkv, "attention.ada_ln_kv.to_bias.weight": dwm[DS_:]})
-    else:
-        grads.update({"attention.to_query.weight": dwp[0:128], "attention.to_key.weight": dwp[128:256],
-                      "attention.to_value.weight": dwp[256:384], "attention.to_gate.weight": dwp[384:512]})
-    names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
-    per_weight = [grads[name].to(w.dtype).reshape(w.shape).clone() for name, w in zip(names, weights, strict=True)]
+        grads.update({"attention.ada_ln_kv.ln_cond.weight": dgc[256:384], "attention.ada_ln_kv.to_scale.bias": dbkv})
+    per_weight = [fused[name] if name in fused else grads[name].to(w.dtype).reshape(w.shape).clone()
+                  for name, w in zip(names, weights, strict=True)]
     dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
     return [_unpadded(ds.view(a, 1, n, DS_), single.shape), _unpadded(dc.view(a, 1, n, DC_), cond.shape), dpair, *per_weight]
 

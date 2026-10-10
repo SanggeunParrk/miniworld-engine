@@ -75,6 +75,8 @@ class Kernel:
                 ptrs.append(a.addr)
             elif isinstance(a, torch.Tensor):
                 h = ctypes.c_uint64(a.data_ptr()); holders.append(h); ptrs.append(ctypes.addressof(h))
+            elif isinstance(a, ctypes.Structure):
+                holders.append(a); ptrs.append(ctypes.addressof(a))
             elif isinstance(a, bool):
                 h = ctypes.c_int32(int(a)); holders.append(h); ptrs.append(ctypes.addressof(h))
             elif isinstance(a, int):

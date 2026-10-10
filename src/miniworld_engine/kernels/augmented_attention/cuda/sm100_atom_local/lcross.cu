@@ -92,33 +92,67 @@ local_kv_bwd(const __nv_bfloat16* __restrict__ x1, const __nv_bfloat16* __restri
 }
 
 // ds += AdaLN1 backward of dx1 (the gradient the key / value branch sends to x1); dmod[:, 0:128] += d pre-sigmoid scale, dmod[:, 128:256] += dx1
+// Four rows per warp in flight: every load of the four rows is issued before the first LayerNorm reduction (a row's chain -- load, two
+// shuffle reductions, three more loads, stores -- took ~2.5 us and each warp walked ~40 rows of them in sequence: 181 us for ~30 us of traffic).
+
+// the block's eight warps' per-lane partial sums -> one atomic per channel per block (a warp each made 4736 atomics onto the same 128
+// addresses, serialised in L2: ~150 us of the ~180 these two kernels took)
+DEVI void block_add4(float* __restrict__ out, const float (&acc)[4]) {
+  __shared__ float4 red[8][32];
+  const int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  red[w][lane] = make_float4(acc[0], acc[1], acc[2], acc[3]);
+  __syncthreads();
+  if (w == 0) {
+    float4 s = red[0][lane];
+#pragma unroll
+    for (int i = 1; i < 8; ++i) { const float4 v = red[i][lane]; s.x += v.x; s.y += v.y; s.z += v.z; s.w += v.w; }
+    atomicAdd(out + lane * 4, s.x); atomicAdd(out + lane * 4 + 1, s.y); atomicAdd(out + lane * 4 + 2, s.z); atomicAdd(out + lane * 4 + 3, s.w);
+  }
+}
+constexpr int UNR = 4;
 extern "C" __global__ void __launch_bounds__(256)
 local_adaln1_extra(const __nv_bfloat16* __restrict__ a, const __nv_bfloat16* __restrict__ mod, const __nv_bfloat16* __restrict__ dx1,
                    __nv_bfloat16* __restrict__ ds, __nv_bfloat16* __restrict__ dmod, float* __restrict__ dbias, int M, float eps) {
   const int lane = threadIdx.x & 31;
   float acc[4] = {0.f, 0.f, 0.f, 0.f};
-  for (int row = blockIdx.x * 8 + (threadIdx.x >> 5); row < M; row += gridDim.x * 8) {
-    float x[4], s1[4], d[4];
-    ld4(a + (size_t)row * DM + lane * 4, x);
-    ld4(mod + (size_t)row * 6 * DM + lane * 4, s1);                   // rn(sigmoid) scale of AdaLN 1
-    ld4(dx1 + (size_t)row * DM + lane * 4, d);
-    const float rstd = norm128(x, eps);
-    float dl[4], dpre[4], t[4], u[4], v[4];
+  const int step = gridDim.x * 8;
+  for (int row0 = blockIdx.x * 8 + (threadIdx.x >> 5); row0 < M; row0 += UNR * step) {
+    float x[UNR][4], s1[UNR][4], d[UNR][4], t[UNR][4], u[UNR][4], v[UNR][4];
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { dl[i] = d[i] * s1[i]; dpre[i] = d[i] * x[i] * s1[i] * (1.f - s1[i]); acc[i] += dpre[i]; }
-    const float m1 = warp_sum(dl[0] + dl[1] + dl[2] + dl[3]) * (1.f / 128.f);
-    const float m2 = warp_sum(dl[0] * x[0] + dl[1] * x[1] + dl[2] * x[2] + dl[3] * x[3]) * (1.f / 128.f);
-    ld4(ds + (size_t)row * DM + lane * 4, t);
-    ld4(dmod + (size_t)row * 6 * DM + lane * 4, u);
-    ld4(dmod + (size_t)row * 6 * DM + DM + lane * 4, v);
+    for (int j = 0; j < UNR; ++j) {
+      const int row = row0 + j * step;
+      if (row < M) {
+        ld4(a + (size_t)row * DM + lane * 4, x[j]);
+        ld4(mod + (size_t)row * 6 * DM + lane * 4, s1[j]);                // rn(sigmoid) scale of AdaLN 1
+        ld4(dx1 + (size_t)row * DM + lane * 4, d[j]);
+        ld4(ds + (size_t)row * DM + lane * 4, t[j]);
+        ld4(dmod + (size_t)row * 6 * DM + lane * 4, u[j]);
+        ld4(dmod + (size_t)row * 6 * DM + DM + lane * 4, v[j]);
+      }
+    }
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { t[i] += rstd * (dl[i] - m1 - x[i] * m2); u[i] += dpre[i]; v[i] += d[i]; }
-    st4(ds + (size_t)row * DM + lane * 4, t);
-    st4(dmod + (size_t)row * 6 * DM + lane * 4, u);
-    st4(dmod + (size_t)row * 6 * DM + DM + lane * 4, v);
+    for (int j = 0; j < UNR; ++j) {
+      const int row = row0 + j * step;
+      if (row >= M) break;
+      const float rstd = norm128(x[j], eps);
+      float dl[4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        dl[i] = d[j][i] * s1[j][i];
+        const float dpre = d[j][i] * x[j][i] * s1[j][i] * (1.f - s1[j][i]);
+        acc[i] += dpre;
+        u[j][i] += dpre;
+      }
+      const float m1 = warp_sum(dl[0] + dl[1] + dl[2] + dl[3]) * (1.f / 128.f);
+      const float m2 = warp_sum(dl[0] * x[j][0] + dl[1] * x[j][1] + dl[2] * x[j][2] + dl[3] * x[j][3]) * (1.f / 128.f);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) { t[j][i] += rstd * (dl[i] - m1 - x[j][i] * m2); v[j][i] += d[j][i]; }
+      st4(ds + (size_t)row * DM + lane * 4, t[j]);
+      st4(dmod + (size_t)row * 6 * DM + lane * 4, u[j]);
+      st4(dmod + (size_t)row * 6 * DM + DM + lane * 4, v[j]);
+    }
   }
-#pragma unroll
-  for (int i = 0; i < 4; ++i) atomicAdd(dbias + lane * 4 + i, acc[i]);
+  block_add4(dbias, acc);
 }
 
 // dc = LN backward of (dcn * gamma); dgamma += sum over rows of dcn * LN(c)
@@ -129,20 +163,62 @@ local_cond_ln_bwd(const __nv_bfloat16* __restrict__ c, const __nv_bfloat16* __re
   float acc[4] = {0.f, 0.f, 0.f, 0.f}, g[4];
 #pragma unroll
   for (int i = 0; i < 4; ++i) g[i] = gamma[lane * 4 + i];
-  for (int row = blockIdx.x * 8 + (threadIdx.x >> 5); row < M; row += gridDim.x * 8) {
-    float x[4], d[4];
-    ld4(c + (size_t)row * DM + lane * 4, x);
-    ld4(dcn + (size_t)row * DM + lane * 4, d);
-    const float rstd = norm128(x, eps);
-    float dl[4], o[4];
+  const int step = gridDim.x * 8;
+  for (int row0 = blockIdx.x * 8 + (threadIdx.x >> 5); row0 < M; row0 += UNR * step) {
+    float x[UNR][4], d[UNR][4];
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { acc[i] += d[i] * x[i]; dl[i] = d[i] * g[i]; }
-    const float m1 = warp_sum(dl[0] + dl[1] + dl[2] + dl[3]) * (1.f / 128.f);
-    const float m2 = warp_sum(dl[0] * x[0] + dl[1] * x[1] + dl[2] * x[2] + dl[3] * x[3]) * (1.f / 128.f);
+    for (int j = 0; j < UNR; ++j) {
+      const int row = row0 + j * step;
+      if (row < M) {
+        ld4(c + (size_t)row * DM + lane * 4, x[j]);
+        ld4(dcn + (size_t)row * DM + lane * 4, d[j]);
+      }
+    }
 #pragma unroll
-    for (int i = 0; i < 4; ++i) o[i] = rstd * (dl[i] - m1 - x[i] * m2);
-    st4(dc + (size_t)row * DM + lane * 4, o);
+    for (int j = 0; j < UNR; ++j) {
+      const int row = row0 + j * step;
+      if (row >= M) break;
+      const float rstd = norm128(x[j], eps);
+      float dl[4], o[4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) { acc[i] += d[j][i] * x[j][i]; dl[i] = d[j][i] * g[i]; }
+      const float m1 = warp_sum(dl[0] + dl[1] + dl[2] + dl[3]) * (1.f / 128.f);
+      const float m2 = warp_sum(dl[0] * x[j][0] + dl[1] * x[j][1] + dl[2] * x[j][2] + dl[3] * x[j][3]) * (1.f / 128.f);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) o[i] = rstd * (dl[i] - m1 - x[j][i] * m2);
+      st4(dc + (size_t)row * DM + lane * 4, o);
+    }
   }
-#pragma unroll
-  for (int i = 0; i < 4; ++i) atomicAdd(dgamma + lane * 4 + i, acc[i]);
+  block_add4(dgamma, acc);
 }
+
+// column sums of a bf16 [M, 128] view (row pitch ld) in fp32: G partial rows (grid-stride over rows, four loads in flight per warp), summed by the host
+extern "C" __global__ void __launch_bounds__(256)
+local_colsum(const __nv_bfloat16* __restrict__ x, int ld, float* __restrict__ part, int M) {
+  const int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  float acc[4] = {0.f, 0.f, 0.f, 0.f};
+  const int step = gridDim.x * 8;
+  for (int row0 = blockIdx.x * 8 + w; row0 < M; row0 += UNR * step) {
+    float v[UNR][4];
+#pragma unroll
+    for (int j = 0; j < UNR; ++j) {
+      const int row = row0 + j * step;
+      if (row < M) ld4(x + (size_t)row * ld + lane * 4, v[j]);
+      else { v[j][0] = v[j][1] = v[j][2] = v[j][3] = 0.f; }
+    }
+#pragma unroll
+    for (int j = 0; j < UNR; ++j)
+#pragma unroll
+      for (int i = 0; i < 4; ++i) acc[i] += v[j][i];
+  }
+  __shared__ float4 red[8][32];
+  red[w][lane] = make_float4(acc[0], acc[1], acc[2], acc[3]);
+  __syncthreads();
+  if (w == 0) {
+    float4 s = red[0][lane];
+#pragma unroll
+    for (int i = 1; i < 8; ++i) { const float4 q = red[i][lane]; s.x += q.x; s.y += q.y; s.z += q.z; s.w += q.w; }
+    *reinterpret_cast<float4*>(part + (size_t)blockIdx.x * 128 + lane * 4) = s;
+  }
+}
+

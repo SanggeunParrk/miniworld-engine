@@ -358,12 +358,12 @@ F32 = torch.float32
 
 
 @functools.lru_cache(maxsize=None)
-def cubin_tf32(stem: str) -> str:
+def cubin_tf32(stem: str, defs: tuple = ()) -> str:
     """``cubin`` for the fp32-path sources, which include ``../sm100/sm100.cuh`` (the kind::tf32 helpers): that header is hashed."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}")
+    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}", *("-D" + d for d in defs))
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
@@ -678,3 +678,94 @@ def ln_bwd32(c, dc, dcn1, g1, dcn2, g2, dcn3=None, g3=None, eps=1e-5):
     atom_kernel32("ln_b", d)((max(1, min(4 * nsm(d), (M + 7) // 8)), 1, 1), (256, 1, 1), c, dc, dcn1, g1, dcn2, g2, dcn3, g3, dg, int(M),
                              float(eps))
     return dg
+
+
+# ------------------------------------------------------------------------------------------------------------ weight gradients (one launch)
+import ctypes  # noqa: E402
+
+_DW_MAXP, _DW_MAXO = 12, 24
+_DW_NS, _DW_STG = 5, 40 * 1024
+
+
+class _DwTab(ctypes.Structure):
+    _fields_ = [("np", ctypes.c_int), ("mb", ctypes.c_int * _DW_MAXP), ("nn", ctypes.c_int * _DW_MAXP), ("ns", ctypes.c_int * _DW_MAXP),
+                ("outbase", ctypes.c_int * _DW_MAXP), ("wsoff", ctypes.c_longlong * _DW_MAXP), ("e4off", ctypes.c_longlong * _DW_MAXP),
+                ("e4total", ctypes.c_longlong)]
+
+
+class _DwOut(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.c_void_p * _DW_MAXO), ("bf16", ctypes.c_int * _DW_MAXO)]
+
+
+class _DwMaps(ctypes.Structure):
+    _fields_ = [("raw", ctypes.c_ubyte * (2 * _DW_MAXP * 128))]
+
+
+class AtomDw:
+    """The block backward's weight gradients D_p = A_p^T B_p (A_p [R, 128 mb_p], B_p [R, nn_p], column views of the activations / gradients) in
+    one split-K launch (``dw_atom.cu``) and one reduction, written straight to the weights' own gradient buffers in their dtypes. bf16 operands
+    (``f32`` False) or fp32 operands on the TF32 tensor cores. A CTA takes a row slice of one problem; the CTAs go to the problems in
+    proportion to their bytes."""
+
+    def __init__(self, device_index: int, f32: bool):
+        from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+        self.f32, self.dev = f32, device_index
+        bkr, ns = (32, 2) if f32 else (16, 5)
+        defs = (f"DW_BKR={bkr}", f"NS={ns}", "DW_F32") if f32 else (f"NS={ns}",)
+        cu = cubin_tf32("dw_atom", defs)
+        stg = 20 * bkr * 128 if f32 else 40 * 1024
+        with torch.cuda.device(device_index):
+            self.kd = driver.Kernel(cu, "atom_dw", ns * stg + 256, pdl=False)
+            self.kr = driver.Kernel(cu, "atom_dw_reduce", 0, pdl=False)
+
+    def __call__(self, problems, R: int) -> None:
+        """problems: list of (A, B, dests) -- A [R, 128 mb], B [R, nn] (unit column stride views of one dtype), dests the mb contiguous
+        [128, nn] destination tensors (fp32 or bf16) of the 128-row blocks of D."""
+        from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+        assert 0 < len(problems) <= _DW_MAXP
+        f32 = self.f32
+        dt = F32 if f32 else torch.bfloat16
+        esz = 4 if f32 else 2
+        box, sw, dname = ([32, 32], "128a32", "f32") if f32 else ([64, 32], 128, "bf16")
+        nsm_ = nsm(self.dev)
+        tab, out, raw = _DwTab(), _DwOut(), bytearray(2 * _DW_MAXP * 128)
+        weights = [A.shape[1] + B.shape[1] for A, B, _ in problems]
+        total = sum(weights)
+        keep, wsoff, e4 = [], 0, 0
+        nouts = 0
+        tab.np = len(problems)
+        for p, (A, B, dests) in enumerate(problems):
+            assert A.dtype == dt and B.dtype == dt and A.shape[0] == R and B.shape[0] == R and A.shape[1] % 128 == 0
+            assert A.stride(1) == 1 and B.stride(1) == 1 and B.shape[1] in (128, 256) and len(dests) == A.shape[1] // 128
+            for t, slot in ((A, p), (B, _DW_MAXP + p)):
+                m = driver.TensorMap(t, [t.shape[1], R], t.stride(0) * esz, box, swizzle=sw, dtype=dname)
+                keep.append(m)
+                raw[slot * 128:(slot + 1) * 128] = ctypes.string_at(m.addr, 128)
+            mb, nn = A.shape[1] // 128, B.shape[1]
+            tab.mb[p], tab.nn[p] = mb, nn
+            tab.ns[p] = max(1, round(nsm_ * weights[p] / total))
+            tab.wsoff[p], tab.e4off[p], tab.outbase[p] = wsoff, e4, nouts
+            wsoff += tab.ns[p] * mb * 128 * nn
+            e4 += mb * 128 * nn // 4
+            for d in dests:
+                assert d.is_contiguous() and d.shape == (128, nn) and d.dtype in (F32, torch.bfloat16), (d.shape, d.dtype)
+                out.ptr[nouts], out.bf16[nouts] = d.data_ptr(), int(d.dtype == torch.bfloat16)
+                nouts += 1
+        assert nouts <= _DW_MAXO
+        tab.e4total = e4
+        maps = _DwMaps()
+        ctypes.memmove(ctypes.addressof(maps), bytes(raw), len(raw))
+        dev = problems[0][0].device
+        ws = torch.empty(wsoff, device=dev, dtype=F32)
+        ctas = sum(tab.ns[p] for p in range(tab.np))
+        self.kd((ctas, 1, 1), (256, 1, 1), maps, tab, ws, int(R))
+        self.kr(((e4 + 255) // 256, 1, 1), (256, 1, 1), ws, tab, out)
+        self._keep = (keep, ws, problems)
+
+
+@functools.lru_cache(maxsize=None)
+def atom_dw(device_index: int, f32: bool) -> AtomDw:
+    return AtomDw(device_index, f32)
+

@@ -72,6 +72,7 @@ KERNELS = {
     "kv_b": ("lcross", "local_kv_bwd", 0),
     "a1x": ("lcross", "local_adaln1_extra", 0),
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
+    "colsum": ("lcross", "local_colsum", 0),
 }
 
 
@@ -233,6 +234,17 @@ def adaln1_extra(a, mod, dx1, ds, dmod, dbias, eps=1e-5):
     M = a.shape[0]
     d = _dev(a)
     _load("a1x", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), a, mod, dx1, ds, dmod, dbias, int(M), float(eps))
+
+
+def colsum(x):
+    """The column sums of a bf16 [M, 128] view (unit column stride, any row pitch) -> [128] fp32 (G partial rows and a sum of those)."""
+    M = x.shape[0]
+    assert x.dtype == torch.bfloat16 and x.stride(1) == 1 and x.shape[1] == DM, (x.dtype, x.shape, x.stride())
+    d = _dev(x)
+    g = max(1, min(2 * nsm(d), (M + 7) // 8))
+    part = torch.empty(g, DM, device=x.device, dtype=torch.float32)
+    _load("colsum", d)((g, 1, 1), (256, 1, 1), x, int(x.stride(0)), part, int(M))
+    return part.sum(0)
 
 
 def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5):
