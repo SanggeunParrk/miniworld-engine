@@ -801,8 +801,9 @@ def _block_bwd32(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pai
                 dwqg, dwkv, dwm = _mm32(dp[:, :2 * DS_], x1), _mm32(dp[:, 2 * DS_:], xkv), _mm32(dmkv, cnkv)
             else:
                 dwp = _mm32(dp, x1)
-        dcols = dmod.sum(0)
-        dbq = dp[:, qc:qc + DS_].sum(0)
+        dcols = rows.colsum32(dmod)
+        dbq = rows.colsum32(dp[:, qc:qc + DS_])
+        dbkv = rows.colsum32(dmkv[:, :DS_]) if cross else None
     grads = {
         "attention.ada_ln_in.ln_cond.weight": dgc[0:128], "attention.ada_ln_in.to_scale.weight": dw1[:128],
         "attention.ada_ln_in.to_scale.bias": dcols[0:128], "attention.ada_ln_in.to_bias.weight": dw1[128:],
@@ -817,7 +818,7 @@ def _block_bwd32(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pai
         grads.update({"attention.to_query.weight": dwqg[:128], "attention.to_gate.weight": dwqg[128:],
                       "attention.to_key.weight": dwkv[:128], "attention.to_value.weight": dwkv[128:],
                       "attention.ada_ln_kv.ln_cond.weight": dgc[256:384], "attention.ada_ln_kv.to_scale.weight": dwm[:DS_],
-                      "attention.ada_ln_kv.to_scale.bias": dmkv[:, :DS_].sum(0), "attention.ada_ln_kv.to_bias.weight": dwm[DS_:]})
+                      "attention.ada_ln_kv.to_scale.bias": dbkv, "attention.ada_ln_kv.to_bias.weight": dwm[DS_:]})
     else:
         grads.update({"attention.to_query.weight": dwp[0:128], "attention.to_key.weight": dwp[128:256],
                       "attention.to_value.weight": dwp[256:384], "attention.to_gate.weight": dwp[384:512]})

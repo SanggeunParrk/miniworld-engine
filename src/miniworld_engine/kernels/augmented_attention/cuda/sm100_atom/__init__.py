@@ -384,6 +384,7 @@ def cubin_tf32(stem: str) -> str:
 #: (stem, function, dynamic smem) of every fp32-path kernel (gemm_tf32's size is static_asserted in the source)
 KERNELS_TF32 = {
     "gemm": ("gemm_tf32", "atom_gemm_tf32", 213248),
+    "gemm_rg": ("gemm_rg_tf32", "atom_gemm_rg_tf32", 229632),
     "ln": ("rows_tf32", "f32_ln_aff", 0),
     "adaln": ("rows_tf32", "f32_adaln", 0),
     "gate": ("rows_tf32", "f32_gate", 0),
@@ -392,6 +393,7 @@ KERNELS_TF32 = {
     "adaln_b": ("rows_tf32", "f32_adaln_bwd", 0),
     "gate_b": ("rows_tf32", "f32_gate_bwd", 0),
     "ln_b": ("rows_tf32", "f32_ln_bwd", 0),
+    "colsum": ("rows_tf32", "f32_colsum", 0),
 }
 
 #: Programmatic dependent launch for the fp32 path's kernels (``MINIWORLD_TF32_PDL``, default on). Every one of them executes
@@ -527,6 +529,7 @@ def _tm32(t, box, swizzle=128):
 
 #: gemm32 epilogues
 STORE, RESID_GATE, SWIGLU = 0, 1, 2
+_RG_TMA = [os.environ.get("MINIWORLD_ATOM_RG_TMA", "1") != "0"]      # 0: the residual / gate loads of gemm_tf32.cu
 
 
 def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol0=0, bias=None, sigmask=0, rndmask=0, mode=STORE,
@@ -559,6 +562,11 @@ def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol
     mo = _tm32(out, (32, 32))
     mo2 = mo if out2 is None else _tm32(out2, (32, 32))
     tiles = (M // 128) * (n // nt)
+    if mode == RESID_GATE and n == DM and a_col0 == 0 and b_row0 == 0 and b_col0 == 0 and ocol0 == 0 and bias is None and _RG_TMA[0]:
+        # the gated residual with res and gate by TMA (gemm_rg_tf32.cu): 144 -> ~60 us at 196608 rows
+        atom_kernel32("gemm_rg", d)((min(nsm(d), tiles), 1, 1), (512, 1, 1), ma, mb, mo, mo2, _tm32(res, (32, 32)), _tm32(gate, (32, 32)),
+                                    int(M), int(k), int(out2 is not None))
+        return out
     atom_kernel32("gemm", d)((min(nsm(d), tiles), 1, 1), (512, 1, 1), ma, mb, mo, mo2, bias, res, gate, int(M), int(n), int(k), int(nt),
                              int(a_col0), int(b_row0), int(b_col0), int(ocol0), int(sigmask), int(mode), int(out2 is not None),
                              int(res.stride(0)) if res is not None else 0, int(gate.stride(0)) if gate is not None else 0, int(rndmask),
@@ -648,6 +656,18 @@ def gate_bwd32(dgated, g, o, dg, A, n):
     D = torch.empty(A, NH, n, device=o.device, dtype=F32)
     atom_kernel32("gate_b", _dev(o))(_rowgrid(M), (256, 1, 1), dgated, g, int(g.stride(0)), o, do, dg, int(dg.stride(0)), D, int(M), int(n))
     return do, D
+
+
+def colsum32(x):
+    """The column sums of a fp32 [M, 128 g] view (unit column stride, any row pitch) -> [128 g] fp32: one launch writing G partial rows (a
+    persistent grid, deterministic) and a tiny sum of those."""
+    M, cols = x.shape
+    assert x.dtype == F32 and x.stride(1) == 1 and cols % DM == 0, (x.dtype, x.shape, x.stride())
+    d = _dev(x)
+    g = max(1, min(2 * nsm(d), (M + 7) // 8))
+    part = torch.empty(g, cols, device=x.device, dtype=F32)
+    atom_kernel32("colsum", d)((g, cols // DM, 1), (256, 1, 1), x, int(x.stride(0)), part, int(cols), int(M))
+    return part.sum(0)
 
 
 def ln_bwd32(c, dc, dcn1, g1, dcn2, g2, dcn3=None, g3=None, eps=1e-5):

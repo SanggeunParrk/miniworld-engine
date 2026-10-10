@@ -263,3 +263,37 @@ f32_ln_bwd(const float* __restrict__ c, float* __restrict__ dc, const float* __r
     }
   }
 }
+
+// column sums of a [M, 128 g] fp32 view (row pitch ld): grid (G, g); block (blockIdx.x, blockIdx.y) sums rows blockIdx.x * 8 + warp, + G * 8, ...
+// of its 128-column block and writes the block's 128 partial sums to part[blockIdx.x][128 blockIdx.y ..]; the G partial rows are summed by the host
+// (the weight-gradient bias sums: torch's reduce_kernel took 130-170 us per [196608, 128..768] sum, ten times a bandwidth bound)
+extern "C" __global__ void __launch_bounds__(256)
+f32_colsum(const float* __restrict__ x, int ld, float* __restrict__ part, int ldp, int M) {
+  pdl_wait();
+  pdl_launch();
+  __shared__ float4 red[8][32];
+  const int w = threadIdx.x >> 5, lane = threadIdx.x & 31, cb = blockIdx.y;
+  const float* xp = x + 128 * cb + 4 * lane;
+  float4 a0 = make_float4(0.f, 0.f, 0.f, 0.f), a1 = a0;
+  const int step = gridDim.x * 8;
+  int r = blockIdx.x * 8 + w;
+  for (; r + step < M; r += 2 * step) {                              // two independent 16-byte loads per lane in flight
+    const float4 v0 = __ldg(reinterpret_cast<const float4*>(xp + (size_t)r * ld));
+    const float4 v1 = __ldg(reinterpret_cast<const float4*>(xp + (size_t)(r + step) * ld));
+    a0.x += v0.x; a0.y += v0.y; a0.z += v0.z; a0.w += v0.w;
+    a1.x += v1.x; a1.y += v1.y; a1.z += v1.z; a1.w += v1.w;
+  }
+  if (r < M) {
+    const float4 v0 = __ldg(reinterpret_cast<const float4*>(xp + (size_t)r * ld));
+    a0.x += v0.x; a0.y += v0.y; a0.z += v0.z; a0.w += v0.w;
+  }
+  a0.x += a1.x; a0.y += a1.y; a0.z += a1.z; a0.w += a1.w;
+  red[w][lane] = a0;
+  __syncthreads();
+  if (w == 0) {
+    float4 s = red[0][lane];
+#pragma unroll
+    for (int i = 1; i < 8; ++i) { const float4 v = red[i][lane]; s.x += v.x; s.y += v.y; s.z += v.z; s.w += v.w; }
+    *reinterpret_cast<float4*>(part + (size_t)blockIdx.x * ldp + 128 * cb + 4 * lane) = s;
+  }
+}
