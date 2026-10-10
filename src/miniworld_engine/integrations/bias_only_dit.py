@@ -19,6 +19,11 @@ bf16 step, which is also what a failed build falls back to.
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128, a key mask [1, L] or
 none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
 MINIWORLD_BIAS_ONLY_DIT=0 turns it off. Anything else keeps the module's PyTorch composition.
+
+A block given its pair bias precomputed (``bias`` [1, H, L, L] in the step's dtype, from ``pair_bias_all``) runs the same step on
+P = softmax(bias) made per call (the softmax rows, the key mask folded in) instead of the per-pair cache: the caller owns the bias.
+A sampler is better served by the pair itself (the cache makes P once per pair for every solver step), which is why MiniWorld's
+``hoist_pair_bias`` hoists only under autograd.
 """
 
 from __future__ import annotations
@@ -61,7 +66,7 @@ WEIGHTS = (
 _RUNNERS: dict = {}
 
 
-def serves(module, single, cond, pair, mask=None) -> bool:
+def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if os.environ.get("MINIWORLD_BIAS_ONLY_DIT", "1") == "0" or torch.is_grad_enabled():
@@ -71,7 +76,8 @@ def serves(module, single, cond, pair, mask=None) -> bool:
     if settings.current().engine_backend == "triton":
         return False
     dt = single.dtype
-    if not (single.is_cuda and dt in (torch.bfloat16, torch.float32) and cond.dtype is dt and pair.dtype is dt):
+    src = pair if bias is None else bias                 # the pair, or the block's hoisted bias [1, H, L, L]
+    if src is None or not (single.is_cuda and dt in (torch.bfloat16, torch.float32) and cond.dtype is dt and src.dtype is dt):
         return False
     if dt is torch.float32 and (module.attention.to_value.weight.dtype is not torch.float32 or torch.is_autocast_enabled("cuda")):
         return False                     # fp32 = an fp32 block; under autocast the module path keeps its casts
@@ -80,7 +86,9 @@ def serves(module, single, cond, pair, mask=None) -> bool:
     A, _, L, _ = single.shape
     if cond.ndim != 4 or tuple(cond.shape[1:]) != (1, L, DC) or cond.shape[0] not in (1, A):
         return False
-    if tuple(pair.shape) != (1, L, L, DP):
+    if bias is None and tuple(pair.shape) != (1, L, L, DP):
+        return False
+    if bias is not None and (tuple(bias.shape) != (1, module.attention.n_head, L, L) or bias.device != single.device):
         return False
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, L)):
         return False
@@ -101,14 +109,8 @@ def _fake(single, cond, pair, mask, weights):
     return torch.empty_like(single)
 
 
-@opaque(fake=_fake, name="bias_only_dit_infer")
-def _infer(
-    single: torch.Tensor,
-    cond: torch.Tensor,
-    pair: torch.Tensor,
-    mask: torch.Tensor,
-    weights: list[torch.Tensor],
-) -> torch.Tensor:
+def _runner(single, weights):
+    """The block's packed runner, reused while every weight's (pointer, version) is unchanged (see ``_infer``)."""
     from miniworld_engine.kernels.bias_only_dit.interface import FusedBiasOnlyDiT
 
     def build():
@@ -124,13 +126,24 @@ def _infer(
         block.attention.n_head = block.attention.to_bias.weight.shape[0]
         return FusedBiasOnlyDiT([block], dtype=single.dtype)
 
+    # The weights do not change between the calls of a sampling run; packing is tens of small kernels. Reuse the pack
+    # while every weight's (pointer, version) is the same -- an in-place update bumps ``_version`` and misses. Scoped
+    # to the CUDA-graph capture (``kernels._capture``): a capture packs once, recorded, so a replay packs the weights as
+    # they are then.
+    wkey = (single.dtype, *((w.data_ptr(), w._version) for w in weights))
+    return _capture.lookup(_RUNNERS, wkey, build)
+
+
+@opaque(fake=_fake, name="bias_only_dit_infer")
+def _infer(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor,
+    weights: list[torch.Tensor],
+) -> torch.Tensor:
     with torch.cuda.device(single.device):
-        # The weights do not change between the calls of a sampling run; packing is tens of small kernels. Reuse the pack
-        # while every weight's (pointer, version) is the same -- an in-place update bumps ``_version`` and misses. Scoped
-        # to the CUDA-graph capture (``kernels._capture``): a capture packs once, recorded, so a replay packs the weights as
-        # they are then.
-        wkey = (single.dtype, *((w.data_ptr(), w._version) for w in weights))
-        runner = _capture.lookup(_RUNNERS, wkey, build)
+        runner = _runner(single, weights)
         # The attention weights depend on the pair and the mask only: the same at every diffusion step of a sample and for
         # every augmented sample. Keyed by the caller's pair / mask tensors (pointer, version, layout).
         pkey = _capture.scoped((pair.data_ptr(), pair._version, tuple(pair.shape), pair.stride(), mask.data_ptr(), mask._version))
@@ -144,16 +157,46 @@ def _infer(
         return runner.step(single, cond, P)
 
 
+def _fake_bias(single, cond, bias, mask, weights):
+    return torch.empty_like(single)
+
+
+@opaque(fake=_fake_bias, name="bias_only_dit_infer_bias")
+def _infer_bias(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    weights: list[torch.Tensor],
+) -> torch.Tensor:
+    """``_infer`` on a hoisted bias [1, H, L, L]: P = softmax(bias) over the keys (masked keys 0), made per call."""
+    with torch.cuda.device(single.device):
+        runner = _runner(single, weights)
+        H, L = bias.shape[1], bias.shape[2]
+        m = mask.reshape(L).to(torch.bool).contiguous()
+        P = torch.empty(H, L, L, device=single.device, dtype=single.dtype)
+        if single.dtype is torch.float32:
+            from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+            tf32.rows32().softmax_rows_cuda(bias.reshape(H * L, L), P.view(H * L, L), m)
+        else:
+            from miniworld_engine.kernels.bias_only_dit import cuda as C
+            C.softmax_rows(bias.reshape(H * L, L), P.view(H * L, L), m)
+        return runner.step(single, cond, P)
+
+
 _ALL_TRUE: dict = {}
 
 
-def update(module, single, cond, pair, mask):
+def update(module, single, cond, pair, mask, bias=None):
     if mask is None:                     # one all-true mask per (L, device), so the P cache key stays stable
         k = (single.shape[2], single.device)
         mask = _ALL_TRUE.get(k)
         if mask is None:
             mask = _ALL_TRUE[k] = torch.ones((1, single.shape[2]), device=single.device, dtype=torch.bool)
-    return _infer(single.contiguous(), cond, pair, mask, [module.get_parameter(name) for name in WEIGHTS])
+    weights = [module.get_parameter(name) for name in WEIGHTS]
+    if bias is not None:
+        return _infer_bias(single.contiguous(), cond, bias.contiguous(), mask, weights)
+    return _infer(single.contiguous(), cond, pair, mask, weights)
 
 
 __all__ = ["WEIGHTS", "serves", "update"]

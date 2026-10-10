@@ -37,6 +37,13 @@ read per call, or a failed build: the per-step launches.
 ``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32 inputs, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. MINIWORLD_BIAS_ONLY_DIT_TRAIN=0 turns it off.
+
+Hoisted pair bias (``block(..., bias=b)``, b [1, H, L, L] in the step's dtype from ``pair_bias_all``,
+``integrations/bias_only_dit_hoist.py``): the block's own autograd function without the pair -- the forward skips ``pair_bias``
+(softmax_t reads b and writes P / P^T beside it), the backward skips ``pair_bias_bwd`` (and its ``pair_bias_bwd_fin`` merge): the bias
+gradient leaves the block as its input's gradient, written straight into the block's slice of the hoist's shared buffer when b
+names one (``SINK_ATTR``), and a separate ``finalize`` launch (no dWf partials: its ln_pair / to_bias jobs see no rows) makes the
+other small gradients. ln_pair / to_bias get their gradients from the hoist.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ import torch
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
+from miniworld_engine.integrations.bias_only_dit_hoist import SINK_ATTR
 from miniworld_engine.kernels._compile import opaque
 
 D, DC, DP = 768, 384, 128
@@ -67,7 +75,8 @@ TRN = ("ada_ln_in.ln_cond.weight", "ada_ln_in.to_scale.weight", "ada_ln_in.to_sc
 NAMES = ["attention." + n for n in ATT] + ["transition." + n for n in TRN]
 
 
-def serves(module, single, cond, pair, mask=None) -> bool:
+def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
+    """``bias``: the block's hoisted pair bias [1, H, L, L] (then ``pair`` is not read and may be None)."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_TRAIN", "1") == "0" or not torch.is_grad_enabled():
@@ -79,15 +88,21 @@ def serves(module, single, cond, pair, mask=None) -> bool:
     if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
         return False
     dt = single.dtype
-    if dt not in (BF, F32) or not all(t.dtype is dt for t in (single, cond, pair)):
+    src = pair if bias is None else bias                 # the pair, or the block's hoisted bias
+    if src is None or dt not in (BF, F32) or not all(t.dtype is dt for t in (single, cond, src)):
         return False
     if dt is F32 and (module.attention.to_value.weight.dtype is not F32 or torch.is_autocast_enabled("cuda")):
         return False                     # fp32 = an fp32 block; under autocast the module path keeps its casts
-    if not any(t.requires_grad for t in (single, cond, pair)) and not any(p.requires_grad for p in module.parameters()):
+    if not any(t.requires_grad for t in (single, cond, src)) and not any(p.requires_grad for p in module.parameters()):
         return False
     if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != D or single.shape[2] % 128 or single.shape[2] > 768:
         return False
-    if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP):
+    L = single.shape[2]
+    if tuple(cond.shape) != (*single.shape[:3], DC):
+        return False
+    if bias is None and tuple(pair.shape) != (1, L, L, DP):
+        return False
+    if bias is not None and (tuple(bias.shape) != (1, module.attention.n_head, L, L) or bias.device != single.device):
         return False
     at = module.attention
     da = at.to_value.weight.shape[0]
@@ -307,10 +322,26 @@ def _fwd_fake(single, cond, pair, mask, params):
     return [torch.empty_like(single), *_saved_like(single, pair, _heads(params), _width(params))]
 
 
+def _fwdh_fake(single, cond, bias, mask, params):
+    return [torch.empty_like(single), *_saved_like(single, None, _heads(params), _width(params))[:-1]]
+
+
 @opaque(fake=_fwd_fake, name="bias_only_dit_train_sm100_fwd")
 def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
          params: list[torch.Tensor]) -> list[torch.Tensor]:
     """The block's forward: [out, *saved activations] (every output freshly allocated)."""
+    return _fwd_impl(single, cond, pair, None, mask, params)
+
+
+@opaque(fake=_fwdh_fake, name="bias_only_dit_train_sm100_fwd_hoisted")
+def _fwdh(single: torch.Tensor, cond: torch.Tensor, bias: torch.Tensor, mask: torch.Tensor | None,
+          params: list[torch.Tensor]) -> list[torch.Tensor]:
+    """The block's forward on its hoisted bias [1, H, L, L] (no pair_bias): [out, *saved activations] without the pair statistics."""
+    return _fwd_impl(single, cond, None, bias, mask, params)
+
+
+def _fwd_impl(single, cond, pair, bias, mask, params):
+    """``_fwd`` (``bias`` None: the bias from the pair) or ``_fwdh`` (the given bias; the saved list then ends before pst)."""
     from miniworld_engine.kernels.bias_only_dit import cuda as C
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
     BT = bo_ext()
@@ -328,11 +359,16 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     xa = torch.empty(M, D, device=dev, dtype=BF); xst = torch.empty(M, 2, device=dev)
     BT.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
     vg = torch.mm(xa, W["Wvg"].t())                                          # [M, 2 DA] v | g
-    p2 = pair.reshape(R, DP)
-    P = torch.empty(H, L, L, device=dev, dtype=BF); pst = torch.empty(R, 2, device=dev)
-    BT.pair_bias_cuda(p2, W["Wf_bf"], P, pst, EPS)                          # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
+    P = torch.empty(H, L, L, device=dev, dtype=BF)
+    if bias is None:
+        p2 = pair.reshape(R, DP)
+        pst = torch.empty(R, 2, device=dev)
+        BT.pair_bias_cuda(p2, W["Wf_bf"], P, pst, EPS)                      # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
+        logits = P.view(H * L, L)                                            # the softmax overwrites it with P
+    else:
+        pst, logits = None, bias.reshape(H * L, L)                           # hoisted (pair_bias_all): read, not written
     Pt = torch.empty(H, L, L, device=dev, dtype=BF)                         # P^T for the backward's dV, from the softmax kernel
-    C.softmax_t(P.view(H * L, L), P.view(H * L, L), Pt.view(H * L, L), None if mask is None else mask.reshape(L).contiguous())
+    C.softmax_t(logits, P.view(H * L, L), Pt.view(H * L, L), None if mask is None else mask.reshape(L).contiguous())
     og = torch.empty(M, DA, device=dev, dtype=BF)
     _op("pv", dev, H, DA // H)(vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:])   # a = sigmoid(g) (P v)
     y = torch.mm(og, W["Wo"].t())
@@ -344,7 +380,8 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     z = torch.mm(h, W["Wsq"].t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     BT.res_c_cuda(x, y, z, Gg, W["bg1"], W["bg2"], out)
-    return [out.view(single.shape), chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z, pst]
+    saved = [out.view(single.shape), chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z]
+    return saved if pst is None else [*saved, pst]
 
 
 # the weight gradients leave _bwd as a few buffers (custom-op outputs may not alias each other); _Block.backward hands out views:
@@ -381,9 +418,13 @@ def _grad_bufs_like(params):
 _PLANS: dict = {}
 
 
-def _split_grads(bufs, params):
+#: the parameters a hoisted block takes no gradient for (the hoist owns them)
+PAIR_PARAMS = ("attention.ln_pair.weight", "attention.to_bias.weight")
+
+
+def _split_grads(bufs, params, skip=()):
     """Per-parameter views of _bwd's gradient buffers, in NAMES order (the (buffer, rows / offset, shape) plan built once per
-    parameter shape set)."""
+    parameter shape set); None for the names in ``skip``."""
     key = tuple(p.shape for p in params)
     plan = _PLANS.get(key)
     if plan is None:
@@ -399,7 +440,10 @@ def _split_grads(bufs, params):
             where[n] = (len(_BIG) + b, o, o + math.prod(shape), shape)
         plan = _PLANS[key] = [where[n] for n in NAMES]
     out = []
-    for (b, lo, hi, shape), p in zip(plan, params, strict=True):
+    for n, (b, lo, hi, shape), p in zip(NAMES, plan, params, strict=True):
+        if n in skip:
+            out.append(None)
+            continue
         g = bufs[b][lo:hi] if shape is None else bufs[b][lo:hi].view(shape)
         out.append(g if g.dtype == p.dtype else g.to(p.dtype))
     return out
@@ -409,30 +453,49 @@ def _bwd_fake(single, cond, pair, mask, params, saved, dout):
     return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *_grad_bufs_like(params)]
 
 
+def _bwdh_fake(single, cond, mask, params, saved, dout, dbias):
+    return [torch.empty_like(single), torch.empty_like(cond), *_grad_bufs_like(params)]
+
+
 @opaque(fake=_bwd_fake, name="bias_only_dit_train_sm100_bwd")
 def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
          saved: list[torch.Tensor], dout: torch.Tensor) -> list[torch.Tensor]:
     """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes."""
+    return _bwd_impl(single, cond, pair, mask, params, saved, dout, None)
+
+
+@opaque(fake=_bwdh_fake, name="bias_only_dit_train_sm100_bwd_hoisted", mutates_args=("dbias",))
+def _bwdh(single: torch.Tensor, cond: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
+          saved: list[torch.Tensor], dout: torch.Tensor, dbias: torch.Tensor) -> list[torch.Tensor]:
+    """The backward of a block on a hoisted bias: the bias gradient into ``dbias`` [H, L L] (bf16), no pair_bias_bwd; returns
+    [d single, d cond, *d params] (the ln_pair / to_bias slots of the small-gradient buffers unused)."""
+    return _bwd_impl(single, cond, None, mask, params, saved, dout, dbias)
+
+
+def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
+    """``_bwd`` (``dbias_out`` None) or ``_bwdh`` (``pair`` None, the bias gradient written into ``dbias_out``)."""
     from miniworld_engine.kernels.bias_only_dit import cuda as C
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
     from miniworld_engine.kernels.bias_only_dit.cuda.train import partials
     BT = bo_ext()
-    (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z, pst) = saved
+    (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z) = saved[:16]
+    pst = saved[16] if dbias_out is None else None
     W = _pack(dict(zip(NAMES, params, strict=True)), single.device)
     Wn, Wraw, Wg, Wvg, Wo, Wab, Wsq = W["Wn"], W["Wraw"], W["Wg"], W["Wvg"], W["Wo"], W["Wab"], W["Wsq"]
     bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (W[k] for k in ("bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb"))
     H, DA = Wb.shape[0], Wo.shape[1]
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
-    sdt, cdt, pdtype, f32 = single.dtype, cond.dtype, pair.dtype, torch.float32
-    x, c2, p2 = single.reshape(M, D).contiguous(), cond.reshape(M, DC).contiguous(), pair.reshape(R, DP)
+    sdt, cdt, f32 = single.dtype, cond.dtype, torch.float32
+    x, c2 = single.reshape(M, D).contiguous(), cond.reshape(M, DC).contiguous()
+    p2 = None if pair is None else pair.reshape(R, DP)
     dout = dout.reshape(M, D).to(sdt).contiguous()
     # the big weight gradients leave cuBLAS in their parameter's dtype (fp32 accumulation either way), one GEMM per group of
     # parameters that share an input (_BIG): no fp32 -> bf16 copy afterwards; _Block.backward splits them into views
     pdt = {n: p.dtype for n, p in zip(NAMES, params, strict=True)}
     fused = _bwd_fused(dev, H, DA)
     if fused is not None:
-        return _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved, pdt, H, DA, A, L)
+        return _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved, pdt, H, DA, A, L, dbias_out)
     wgrad = lambda n, a, b: torch.mm(a.t(), b, out_dtype=torch.float32) if pdt[n] is torch.float32 else torch.mm(a.t(), b)
     part = partials(M, 4, dev)                          # per-block column sums: bg2 bs2 bg1 bs1
     flat = torch.empty(_flat(H), device=dev, dtype=pdt["attention.ada_ln_in.to_scale.weight"])    # the small gradients (_SMALL)
@@ -456,7 +519,7 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     do = torch.empty(M, DA, device=dev, dtype=BF); dd = torch.empty(A, H, L, device=dev)
     C.gate_bwd_rows(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
     _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)              # dv = P^T do
-    dbias = torch.empty(H * L, L, device=dev, dtype=BF)
+    dbias = torch.empty(H * L, L, device=dev, dtype=BF) if dbias_out is None else dbias_out.view(H * L, L)
     _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)   # P o (dP - D); masked keys get P = 0
     dxa = torch.mm(dvg, Wvg, out=dG[:, D:2 * D]) if dg_direct else torch.mm(dvg, Wvg)   # d shift1 = dxa: straight into dG
     dWvg = wgrad("attention.to_value.weight", dvg, xa)
@@ -470,8 +533,11 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
     BT.cond_bwd_cuda(dchat, dcg, c2, cst, dc)
     pw = torch.empty(192, DC, device=dev)                                       # cond-LN weight partials, one row per block
     BT.unfold_cuda(dWn, Wraw, w1, w2, flat[:_U].view(4 * D, DC), pw)
+    if dbias_out is not None:                                                   # hoisted: the pair's backward is the hoist's
+        BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pw, 0, Wb, wp, flat[_U:], norms)   # no dWf rows: those jobs write zeros
+        return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
     # the pair LayerNorm backward with d LN(pair) = dbias^T Wf, and dWf = dbias LN(pair), in one kernel (LN(pair) rebuilt on chip)
-    dpair = torch.empty(R, DP, device=dev, dtype=pdtype)
+    dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
     pwf = torch.empty(BT.partial_rows(M), H, DP, device=dev)                     # dWf partials, one per block
     nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
     # the step's last kernel: bias sums, cond-LN weights, ln_pair / to_bias from their partials, in the parameters' dtype
@@ -496,14 +562,16 @@ def _pvdpb(dev, H, DA, *args):
         return False
 
 
-def _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved, pdt, H, DA, A, L):
+def _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved, pdt, H, DA, A, L, dbias_out=None):
     """The bf16 backward with the fused kernels (MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED): the tail (bo_bwd_tail x 3 with
     _BWD_TAIL=split3, else its seven launches: d out -> do, dg, D, dx1, dG's transition half, dGg) -> bo_pvdpb (pv dV + dbias where the
     bias gradient runs on single CTAs; _BWD_PVDPB) -> bo_bwd_mid x 3 (dxa, adaln_a_bwd, dchat / dcg, cond_bwd; _BWD_MID=1) or their
     five launches -> bo_wgrad (the six weight gradients and the unfold) -> pair_bias_bwd_fin (_BWD_PBFIN=1) or pair_bias_bwd +
     finalize. The defaults are what won or tied its graph node A/B (bwd_fused.py): 11 launches (12 where dbias runs on CTA pairs,
-    L768), where the per-step path takes 23; 9 with bo_bwd_mid on."""
-    (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z, pst) = saved
+    L768), where the per-step path takes 23; 9 with bo_bwd_mid on. ``dbias_out`` (a hoisted bias's gradient [H, L L]): dbias is
+    written there and the pair's backward is left to the hoist -- finalize alone (one launch) instead of pair_bias_bwd_fin."""
+    (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z) = saved[:16]
+    pst = saved[16] if dbias_out is None else None
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
     tail, wgr = fused
     M, R, dev = A * L, L * L, single.device
@@ -527,7 +595,7 @@ def _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved,
         counts = [n0, n0, n0]
     # dv = P^T do and dbias = P o (dP - D) (masked keys get P = 0): one launch (bo_pvdpb.cu, BWF.pvdpb_on; the shapes where the bias
     # gradient runs on single CTAs), or pv dV as a programmatic dependent (BWF.pv_pdl_on) and dpb / dpbx2
-    dbias = torch.empty(H * L, L, device=dev, dtype=BF)
+    dbias = torch.empty(H * L, L, device=dev, dtype=BF) if dbias_out is None else dbias_out.view(H * L, L)
     if not (BWF.pvdpb_on() and _pvdpb(dev, H, DA, do, Pt.view(H * L, L), dvg[:, :DA], vg[:, :DA], P.view(H * L, L), dd, dbias, A)):
         _op("pvpdl" if BWF.pv_pdl_on() else "pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)
         _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)
@@ -556,6 +624,9 @@ def _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved,
     pw = torch.empty(192, DC, device=dev)                                          # cond-LN weight partials, one row per 16 rows
     wgr((dz, dab, dy, dvg, dG, dGg), (h, xt, og, xa, chat, c2), (dWsq, dWab, dWo, dWvg, dWgg), flat[:_U].view(4 * D, DC), pw,
         W["Wraw"], W["w1"], W["w2"])
+    if dbias_out is not None:                          # hoisted: no pair_bias_bwd; finalize's ln_pair / to_bias jobs see no rows
+        BT.finalize_cuda(part, counts + [n3], pw, pw, 0, W["Wb"], W["wp"], flat[_U:], norms)
+        return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
     dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
     pwf = torch.empty(BT.partial_rows(M), H, DP, device=dev)
     if BWF.pbfin_on():                                                               # one launch: grid barrier, then finalize's jobs
@@ -674,10 +745,26 @@ def _fwd32_fake(single, cond, pair, mask, params):
     return [torch.empty_like(single), *_saved_like(single, pair, _heads(params), _width(params), F32)]
 
 
+def _fwd32h_fake(single, cond, bias, mask, params):
+    return [torch.empty_like(single), *_saved_like(single, None, _heads(params), _width(params), F32)[:-1]]
+
+
 @opaque(fake=_fwd32_fake, name="bias_only_dit_train_tf32_fwd")
 def _fwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
            params: list[torch.Tensor]) -> list[torch.Tensor]:
     """The block's forward on the fp32 path: [out, *saved activations] (every output freshly allocated), as ``_fwd``."""
+    return _fwd32_impl(single, cond, pair, None, mask, params)
+
+
+@opaque(fake=_fwd32h_fake, name="bias_only_dit_train_tf32_fwd_hoisted")
+def _fwd32h(single: torch.Tensor, cond: torch.Tensor, bias: torch.Tensor, mask: torch.Tensor | None,
+            params: list[torch.Tensor]) -> list[torch.Tensor]:
+    """``_fwdh`` on the fp32 path: the hoisted bias [1, H, L, L] fp32, no pair bias kernel."""
+    return _fwd32_impl(single, cond, None, bias, mask, params)
+
+
+def _fwd32_impl(single, cond, pair, bias, mask, params):
+    """``_fwd32`` (``bias`` None) or ``_fwd32h`` (the saved list then ends before pst)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32
     F = tf32.rows32()
     W = _pack32(dict(zip(NAMES, params, strict=True)), single.device)
@@ -695,10 +782,15 @@ def _fwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         xa, xst = e(M, D), e(M, 2)
         F.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
         vg = torch.mm(xa, W["Wvg"].t())                                      # [M, 2 DA] v | g
-        P, pst = e(H, L, L), e(R, 2)
-        F.pair_bias_tc_cuda(pair.reshape(R, DP).contiguous(), W["Wf"], P, pst, EPS, _pair_terms())   # the bias, head-major (mma.sync)
+        P = e(H, L, L)
+        if bias is None:
+            pst = e(R, 2)
+            F.pair_bias_tc_cuda(pair.reshape(R, DP).contiguous(), W["Wf"], P, pst, EPS, _pair_terms())   # the bias, head-major (mma.sync)
+            logits = P.view(H * L, L)
+        else:
+            pst, logits = None, bias.reshape(H * L, L)                       # hoisted (pair_bias_all): read, not written
         Pt = e(H, L, L)
-        F.softmax_t_cuda(P.view(H * L, L), P.view(H * L, L), Pt.view(H * L, L),
+        F.softmax_t_cuda(logits, P.view(H * L, L), Pt.view(H * L, L),
                          None if mask is None else mask.reshape(L).to(torch.bool).contiguous())
         og = e(M, DA)
         _op32("pv", dev, H, DA // H)(vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:])   # a = sigmoid(g) (P v)
@@ -716,18 +808,32 @@ def _fwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         z = torch.mm(h, W["Wsq"].t())
         out = e(M, D)
         F.res_c_cuda(x, y, z, Gg, W["bg1"], W["bg2"], out)
-    return [out.view(single.shape), chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z, pst]
+    saved = [out.view(single.shape), chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z]
+    return saved if pst is None else [*saved, pst]
 
 
 @opaque(fake=_bwd_fake, name="bias_only_dit_train_tf32_bwd")
 def _bwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
            saved: list[torch.Tensor], dout: torch.Tensor) -> list[torch.Tensor]:
     """The block's backward on the fp32 path: [d single, d cond, d pair, *d params] (fp32), as ``_bwd``."""
+    return _bwd32_impl(single, cond, pair, mask, params, saved, dout, None)
+
+
+@opaque(fake=_bwdh_fake, name="bias_only_dit_train_tf32_bwd_hoisted", mutates_args=("dbias",))
+def _bwd32h(single: torch.Tensor, cond: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
+            saved: list[torch.Tensor], dout: torch.Tensor, dbias: torch.Tensor) -> list[torch.Tensor]:
+    """``_bwdh`` on the fp32 path: the bias gradient into ``dbias`` [H, L L] fp32; [d single, d cond, *d params]."""
+    return _bwd32_impl(single, cond, None, mask, params, saved, dout, dbias)
+
+
+def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
+    """``_bwd32`` (``dbias_out`` None) or ``_bwd32h`` (``pair`` None; no pair_bias_bwd_tc, finalize without dWf rows)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
     from miniworld_engine.kernels.bias_only_dit.cuda.train import partials
     F, BT = tf32.rows32(), bo_ext()                    # BT: the dtype-generic unfold / finalize of the bf16 extension
-    (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z, pst) = saved
+    (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z) = saved[:16]
+    pst = saved[16] if dbias_out is None else None
     W = _pack32(dict(zip(NAMES, params, strict=True)), single.device)
     Wn, Wraw, Wg, Wvg, Wo, Wab, Wsq = W["Wn"], W["Wraw"], W["Wg"], W["Wvg"], W["Wo"], W["Wab"], W["Wsq"]
     bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (W[k] for k in ("bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb"))
@@ -737,7 +843,8 @@ def _bwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
     e = lambda *shape: torch.empty(*shape, device=dev, dtype=F32)
     pdt = {n: p.dtype for n, p in zip(NAMES, params, strict=True)}
     with tf32.tf32_gemms():
-        x, c2, p2 = single.reshape(M, D).contiguous(), cond.reshape(M, DC).contiguous(), pair.reshape(R, DP).contiguous()
+        x, c2 = single.reshape(M, D).contiguous(), cond.reshape(M, DC).contiguous()
+        p2 = None if pair is None else pair.reshape(R, DP).contiguous()
         dout = dout.reshape(M, D).to(F32).contiguous()
         part = partials(M, 4, dev)                     # per-block column sums: bg2 bs2 bg1 bs1
         flat = torch.empty(_flat(H), device=dev, dtype=pdt["attention.ada_ln_in.to_scale.weight"])   # the small gradients (_SMALL)
@@ -765,7 +872,7 @@ def _bwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         dvg, do, dd = e(M, 2 * DA), e(M, DA), e(A, H, L)
         F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
         _op32("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)            # dv = P^T do
-        dbias = e(H * L, L)
+        dbias = e(H * L, L) if dbias_out is None else dbias_out.view(H * L, L)
         _op32("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)   # P o (dP - D); masked keys get P = 0
         dxa = torch.mm(dvg, Wvg, out=dG[:, D:2 * D])                        # d shift1 = dxa: straight into its dG columns
         dWvg = _wgrad32(dvg, xa)
@@ -779,14 +886,19 @@ def _bwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: t
         F.cond_bwd_cuda(dchat, dcg, c2, cst, dc)
         pw = e(192, DC)                                                      # cond-LN weight partials, one row per block
         BT.unfold_cuda(dWn, Wraw, w1, w2, flat[:_U].view(4 * D, DC), pw)
-        dpair = e(R, DP)
-        pwf = e(F.partial_rows(M), H, DP)                                    # dWf partials, one per block
-        nwf = F.pair_bias_bwd_tc_cuda(dbias, p2, pst, W["Wf"], dpair, pwf, _pair_terms())
-        BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pwf, nwf, Wb, wp, flat[_U:], norms)
+        if dbias_out is None:
+            dpair = e(R, DP)
+            pwf = e(F.partial_rows(M), H, DP)                                # dWf partials, one per block
+            nwf = F.pair_bias_bwd_tc_cuda(dbias, p2, pst, W["Wf"], dpair, pwf, _pair_terms())
+            BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pwf, nwf, Wb, wp, flat[_U:], norms)
+        else:                                                                # hoisted: the pair's backward is the hoist's
+            BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pw, 0, Wb, wp, flat[_U:], norms)   # no dWf rows: those jobs write zeros
     big = [dWvg, dWab, dWgg, dWsq, dWo]
     big = [b if b.dtype == params[NAMES.index(g[0])].dtype else b.to(params[NAMES.index(g[0])].dtype) for b, g in zip(big, _BIG)]
-    return [dx.view(A, 1, L, D).to(single.dtype), dc.view(A, 1, L, DC).to(cond.dtype), dpair.view(1, L, L, DP).to(pair.dtype),
-            *big, flat, norms]
+    lead = [dx.view(A, 1, L, D).to(single.dtype), dc.view(A, 1, L, DC).to(cond.dtype)]
+    if dbias_out is not None:
+        return [*lead, *big, flat, norms]
+    return [*lead, dpair.view(1, L, L, DP).to(pair.dtype), *big, flat, norms]
 
 
 class _Block32(torch.autograd.Function):
@@ -808,10 +920,43 @@ class _Block32(torch.autograd.Function):
         return (dx, dc, dpair, None, *(g if ctx.needs_input_grad[4 + i] else None for i, g in enumerate(pg)))
 
 
-def block(module, single, cond, pair, mask=None):
-    """One BiasOnlyDiTBlock (attention + transition, both residuals) through the fused training path. Call ``serves`` first."""
+class _BlockH(torch.autograd.Function):
+    """A block on its hoisted bias (bf16 or fp32): the forward / backward ops without the pair; the bias gradient is the gradient of
+    the ``bias`` input, written into the hoist's shared buffer when ``sink`` names a slot of it (``bias_only_dit_hoist._Sink``)."""
+
+    @staticmethod
+    def forward(ctx, single, cond, bias, mask, sink, *params):
+        f32 = single.dtype is F32
+        out, *saved = (_fwd32h if f32 else _fwdh)(single, cond, bias, mask, list(params))
+        ctx.save_for_backward(single, cond, *params, *saved)
+        ctx.meta = (mask, len(params), sink, f32, tuple(bias.shape), bias.dtype)
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):
+        mask, npar, sink, f32, bshape, bdt = ctx.meta
+        vals = ctx.saved_tensors
+        single, cond = vals[:2]
+        params, saved = list(vals[2:2 + npar]), list(vals[2 + npar:])
+        H, L = bshape[1], bshape[2]
+        want = ctx.needs_input_grad[2]
+        db = sink[0].slot(sink[1], bdt, single.device) if (want and sink is not None) else None
+        if db is None:
+            db = torch.empty(H, L * L, device=single.device, dtype=bdt)
+        dx, dc, *bufs = (_bwd32h if f32 else _bwdh)(single, cond, mask, params, saved, dout.contiguous(), db)
+        pg = _split_grads(bufs, params, skip=PAIR_PARAMS)
+        return (dx, dc, db.view(bshape) if want else None, None, None,
+                *(g if ctx.needs_input_grad[5 + i] else None for i, g in enumerate(pg)))
+
+
+def block(module, single, cond, pair, mask=None, bias=None):
+    """One BiasOnlyDiTBlock (attention + transition, both residuals) through the fused training path. Call ``serves`` first.
+    ``bias``: the block's hoisted pair bias [1, H, L, L] (``pair_bias_all``); ``pair`` is then not read."""
+    params = [module.get_parameter(n) for n in NAMES]
+    if bias is not None:
+        return _BlockH.apply(single, cond, bias.contiguous(), mask, getattr(bias, SINK_ATTR, None), *params)
     fn = _Block32 if single.dtype is F32 else _Block
-    return fn.apply(single, cond, pair.contiguous(), mask, *[module.get_parameter(n) for n in NAMES])
+    return fn.apply(single, cond, pair.contiguous(), mask, *params)
 
 
-__all__ = ["NAMES", "block", "serves"]
+__all__ = ["NAMES", "PAIR_PARAMS", "block", "serves"]

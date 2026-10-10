@@ -18,6 +18,17 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- Bias-only DiT hoisted pair bias: `miniworld_engine.modules.bias_only_dit.pair_bias_all(blocks, pair)` makes every block's pair bias
+  from ONE LayerNorm without affine and ONE GEMM against the gamma-folded `to_bias` weights (same parameters, the same result to
+  rounding), and `BiasOnlyDiTBlock.forward(..., bias=b)` takes a block's bias precomputed ([B, H, L, L]; `pair` may then be None). On
+  B200 (bf16; fp32 on TF32) `integrations/bias_only_dit_hoist.py`: LN0 rows + cuBLAS GEMMs, the blocks' bias gradients written into
+  one [nb H, L^2] buffer, the LN0 backward in `bias_only_dit_hoist_rows.cu`; the fused training block on a bias skips `pair_bias` /
+  `pair_bias_bwd` (`finalize` alone), inference on a bias makes P per call. `MINIWORLD_BIAS_ONLY_DIT_HOIST=0`: the PyTorch fold.
+  The d LN0 backward rows also write the dW' GEMM's operand as a two-term bf16 split of LN0 (exact to ~2^-17), so ln_pair / to_bias
+  gradients carry no LN0 rounding. 24 blocks of 16 x 48, A = 48, bf16 training step (CUDA graph, median of 9): L384 29.130 -> 28.051
+  ms (-3.7 %), L768 57.596 -> 53.779 ms (-6.6 %); peak memory 13.90 -> 14.03 / 27.95 -> 28.52 GiB.
+  Tests: `tests/integrations/test_b200_bias_only_dit_hoist_gpu.py`; page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (T7);
+  scripts: `bench_scripts/bo_hoist_bench.py`, `bench_scripts/bo_hoist_diag.py`.
 - B200 bf16 bias-only DiT training backward fused from 23 launches per block to 11 (12 at L768), now the default
   (`MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED=0` keeps the per-step launches; a failed build warns once and does the same):
   `bo_bwd_tail.cu` (res_c_bwd, the dh GEMM + SwiGLU backward, the dxt GEMM, res_adaln_b_bwd, the d(og) GEMM + gate backward as items

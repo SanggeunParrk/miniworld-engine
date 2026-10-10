@@ -369,6 +369,54 @@ Every kernel's synchronization protocol is in its file header. Tests: `test_fuse
 bit-identical reruns, no local memory, the launch count of a captured backward per switch setting), and every gradient /
 repeatability / steady-memory test at the defaults and with every fusion on.
 
+### T7 · hoisted pair bias: `pair_bias_all` (every block's bias from one LayerNorm and one GEMM)
+
+`modules/bias_only_dit/hoist.py` (the API and the PyTorch fold), `integrations/bias_only_dit_hoist.py` (B200, bf16 and fp32),
+`kernels/bias_only_dit/cuda/bias_only_dit_hoist_rows.cu` (`ln0_bwd_rows`). `ln_pair` has no offset, so with LN0 the LayerNorm without
+affine (statistics shared by every block) and the fold W'_b = W_b diag(gamma_b): bias_b = LN0(pair) W'_b^T. Forward: LN0 rows (the
+token DiT's `layernorm128_rows`) and ONE cuBLAS GEMM, bias_all^T = W'_all LN0^T [nb H, L^2]: block b's bias is the contiguous
+head-major slice [b H, (b + 1) H), the layout `softmax_t` reads. Backward from dbias_all [nb H, L^2] -- each block's backward writes
+its bias gradient straight into its slice of one buffer (the hoist's `_Sink`; a gradient that is not there is copied in, a missing
+one is zero): d LN0 = dbias_all^T W'_all (one GEMM, K = nb H, fp32 out), `ln0_bwd_rows` (d pair; the row statistics recomputed with
+the forward kernel's arithmetic; it also writes LN0 again as the next GEMM's operand Y), dW'_all = dbias_all Y (one GEMM over the L^2
+rows as a strided batch of 48 or 64 row chunks, fp32 partials summed), and the unfold dW_b = dW'_b diag(gamma_b), dgamma_b = sum_h
+dW'_b o W_b (fp32, the unfolded W_b). On the bf16 path Y is the two-term split [bf16(LN0) | bf16(LN0 - bf16(LN0))] (K = 256): hoist1
+took dW' against LN0 rounded to bf16 (as `pair_bias_bwd` does for dWf), and that rounding put d gamma at 1.11-1.22x the PyTorch bf16
+block's error in a 24-block stack (the PyTorch LayerNorm backward reads LN0 in fp32); with the split dW' is the bf16 dbias against LN0
+to fp32 accumulation. Nothing of LN0 is kept from the forward. fp32: the same structure, Y = LN0 fp32, the GEMMs on TF32
+(`tf32_gemms`).
+
+A block given its bias (`block(single, cond, None, mask, bias=b)`) runs the training step without the pair: no `pair_bias` in the
+forward (`softmax_t` reads b and writes P / P^T beside it), no `pair_bias_bwd` / `pair_bias_bwd_fin` in the backward, a plain
+`finalize` launch for the other small gradients (its ln_pair / to_bias jobs get no dWf rows; those gradients are the hoist's). The
+launch count of the block backward stays 11 at the bf16 defaults (pair_bias_bwd_fin -> finalize); the forward loses one. Inference
+on a given bias makes P = softmax(bias) per call (`softmax_rows`) and runs the same step; a sampler keeps the pair, whose P is made
+once per pair for every solver step (MiniWorld's `hoist_pair_bias` hoists only under autograd). Switches, read per call:
+`MINIWORLD_BIAS_ONLY_DIT_HOIST=0` (the PyTorch fold), `MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT=S` (the dW' row chunks; 1: one GEMM).
+`ln0_bwd_rows` is one warp per row pair with shuffles only (no shared memory, barriers or atomics): bitwise repeatable.
+
+Measured (B200, 2026-10-10, hoist2; `bench_scripts/bo_hoist_bench.py`): 24 blocks of 16 x 48, A = 48, bf16, checkpointing off, one
+training step (forward + backward) per CUDA graph, hoist off / on replayed in alternation, median of 9:
+
+| L | hoist off | hoist on | on - off | peak memory of an eager step, off -> on |
+|---|---|---|---|---|
+| 384 | 29.130 ms | 28.051 ms | -1.079 ms (-3.7 %) | 13.90 -> 14.03 GiB |
+| 768 | 57.596 ms | 53.779 ms | -3.817 ms (-6.6 %) | 27.95 -> 28.52 GiB |
+
+The hoist op itself, node by node (graphs of 10 copies, median of 9), us at L384 / L768: forward -- fold 9.6 / 10.5, LN0 rows
+15.5 / 81.4, GEMM 27.7 / 112.0 (whole op 59.3 / 204.5); backward -- d LN0 GEMM 31.8 / 117.6, LN0 backward rows + the split operand
+37.0 / 141.2, dW' GEMM (48 chunks, K = 256) 35.8 / 120.0, its sum + hi + lo 7.2 / 7.7, unfold 39.7 / 42.8 (whole op 160.1 / 441.7).
+They replace, per step, 24 `pair_bias` (~35 us each at L768), 24 `pair_bias_bwd` (~84 us) and 23 pair-gradient accumulations. The
+memory grows by the one [24 x 16, L^2] bias buffer held through the forward and the shared d-bias buffer of the backward, less the
+24 per-block statistics; hoist1 (LN0 kept from the forward, dW' against bf16 LN0) was 28.66 GiB at L768 and -3.906 ms.
+
+Accuracy: every gradient against fp64 within the training file's bounds (3-block stacks: 1.1x the PyTorch bf16 stack's error +
+1e-4). A 24-block bf16 stack puts one deep block's ln_pair gradient past 1.1x the PyTorch stack's for the hoisted AND the fused
+per-block path alike (block 22: hoisted / per-block / PyTorch 1.172e-2 / 1.154e-2 / 1.008e-2; `bench_scripts/bo_hoist_diag.py`):
+the d bias it receives carries the stack's bf16 error, while the hoist's own arithmetic on that d bias is 3.8-4.9e-6 for every ln_pair
+gradient. The 24-block test therefore bounds each gradient by max(1.1x PyTorch, 1.05x fused per-block) + 1e-4 and the hoist's
+arithmetic on its captured inputs by the parameter dtype's rounding + 1e-4. Tests: `tests/integrations/test_b200_bias_only_dit_hoist_gpu.py`.
+
 ## fp32 path (TF32)
 
 Status (2026-10-06): written, **not yet built or measured on B200** -- the kernels below compile on first use; the tests are

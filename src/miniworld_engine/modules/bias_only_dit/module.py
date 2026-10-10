@@ -17,6 +17,10 @@ fp32 on TF32 tensor cores: an fp32 block with fp32 inputs, no autocast),
 ``integrations.bias_only_dit`` without autograd and ``integrations.bias_only_dit_train`` with it (CUDA and cuBLAS only), and
 the reference composition everywhere else (the parts are built on the PyTorch reference, so no other backend runs).
 Each part owns its residual (it returns ``x + f(x)``, like every such module in the engine); the block only chains them.
+
+A block may take its pair bias precomputed (``bias=`` [B, H, L, L], head-major): ``pair_bias_all`` (``hoist.py``) makes every block's
+from one LayerNorm and one GEMM. The block then touches neither ``ln_pair`` nor ``to_bias`` (nor ``pair``); its backward hands the
+bias gradient to the hoist, which owns the gradients of the pair and of those weights.
 """
 
 from __future__ import annotations
@@ -43,7 +47,8 @@ class BiasOnlyAttention(nn.Module):
     ``out = single + sigmoid(to_scale(cond)) * to_out(sigmoid(g) * softmax(bias) v)`` (the residual is the module's own
     input), with ``bias = to_bias(LN(pair))`` [B, H, L, L]
     shared by every augmented sample, ``v`` and ``g`` projections of ``AdaLN(single, cond)``. A key mask [B, L] enters as the
-    largest negative finite logit (a fully masked row is uniform, not NaN).
+    largest negative finite logit (a fully masked row is uniform, not NaN). ``bias=`` [B, H, L, L] given (a hoisted pair bias,
+    ``pair_bias_all``): those are the logits, and ``ln_pair`` / ``to_bias`` / ``pair`` are not read.
     """
 
     def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, d_head: int | None = None) -> None:
@@ -64,15 +69,19 @@ class BiasOnlyAttention(nn.Module):
         self,
         single: Float[torch.Tensor, "A B L d_single"],
         cond: Float[torch.Tensor, "A B L d_cond"],
-        pair: Float[torch.Tensor, "B L L d_pair"],
+        pair: Float[torch.Tensor, "B L L d_pair"] | None = None,
         mask: Bool[torch.Tensor, "B L"] | None = None,
+        *,
+        bias: Float[torch.Tensor, "B H L L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
         single_res = single  # residual == the ORIGINAL input (before ada_ln_in rebinds `single`)
         single = self.ada_ln_in(single, cond)
         value, gate = self.to_value(single), self.to_gate(single)
-        bias = self.to_bias(self.ln_pair(pair))                         # (B, L, L, H)
+        if bias is None:
+            logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
+        else:
+            logits = bias.to(value.dtype)                                # hoisted (pair_bias_all), head-major already
         value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
-        logits = bias.permute(0, 3, 1, 2)                                # (B, H, L, L)
         if mask is not None:
             logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
         # one softmax for every sample: the logits carry no augmentation axis
@@ -88,7 +97,7 @@ class BiasOnlyDiTBlock(nn.Module):
     ``forward(single, cond, pair, mask)`` -> ``single``'s shape. ``single`` and ``cond`` carry the augmentation axis
     (``A, B, L, d``); ``pair`` does not (``B, L, L, d_pair``). The token widths are the defaults (768 / cond 384 / pair 128 /
     16 heads x 48 / transition n = 2), the same as ``modules.dit.DiTBlock``; ``n_head=24`` (24 x 32), ``n_head=12`` (12 x 64) and ``d_head=64`` (16 x 64: 1024 attention channels) have the fused paths
-    too.
+    too. ``forward(..., bias=b)``: the block's pair bias precomputed ([B, H, L, L], from ``pair_bias_all``); ``pair`` may be None.
     """
 
     def __init__(
@@ -111,13 +120,21 @@ class BiasOnlyDiTBlock(nn.Module):
         self,
         single: Float[torch.Tensor, "A B L d_single"],
         cond: Float[torch.Tensor, "A B L d_cond"],
-        pair: Float[torch.Tensor, "B L L d_pair"],
+        pair: Float[torch.Tensor, "B L L d_pair"] | None = None,
         mask: Bool[torch.Tensor, "B L"] | None = None,
+        *,
+        bias: Float[torch.Tensor, "B H L L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
-        """Each part returns its residual output (stream in, stream out); the fused paths fold both residuals in."""
-        if _fused.serves(self, single, cond, pair, mask):
-            return _fused.update(self, single, cond, pair, mask)
-        if _train.serves(self, single, cond, pair, mask):
-            return _train.block(self, single, cond, pair, mask)
-        single = self.attention(single, cond, pair, mask)
+        """Each part returns its residual output (stream in, stream out); the fused paths fold both residuals in. ``bias``: this
+        block's hoisted pair bias (``pair_bias_all``) in place of ``to_bias(ln_pair(pair))``."""
+        if bias is None and pair is None:
+            raise ValueError("BiasOnlyDiTBlock: pass the pair or the block's precomputed bias")
+        if _fused.serves(self, single, cond, pair, mask, bias=bias):
+            return _fused.update(self, single, cond, pair, mask, bias=bias)
+        if _train.serves(self, single, cond, pair, mask, bias=bias):
+            return _train.block(self, single, cond, pair, mask, bias=bias)
+        if bias is None:
+            single = self.attention(single, cond, pair, mask)
+        else:
+            single = self.attention(single, cond, pair, mask, bias=bias)
         return self.transition(single, cond)
