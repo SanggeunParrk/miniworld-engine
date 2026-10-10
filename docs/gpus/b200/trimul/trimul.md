@@ -5,7 +5,7 @@ Kernel-level status of the TriMul modules on B200; the module-level summary is i
 hand-written sm_100a path exists; a shape without one is 미구현 (Triton path). Figures: one box
 per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
 `figures/trimul.json` by `python -m miniworld_engine.viz.kernel_flow`,
-then converted to PNG (`cairosvg -s 2 -b white`; `rsvg-convert` is not installed on the B200 host).
+then converted to PNG (`cairosvg -s 2 -b white`; `rsvg-convert` was not installed in the environment that generated the figures).
 Dispatch: `integrations/trimul_b200.py`; kernels: `kernels/trimul_inproj/cuda/`
 (`b200_infer.py`, `b200_train.py`) and `b200_sources/` (tcgen05 / TMEM / TMA), one extension.
 
@@ -21,7 +21,7 @@ Every other shape runs the Triton path.
 
 ## Batched samples (D64, B <= 8)
 
-The D64 native path takes B samples in one call: tokens b-major, one launch per stage instead of B calls (MiniWorld's template
+The D64 native path takes B samples in one call: tokens b-major, one launch per stage instead of B calls (the consumer model code's template
 embedder runs its templates as the B samples of one pair stack). `k3g` / `b1s` take a per-sample token mask and a per-sample
 row-dropout scale (a tile reloads it when its sample changes), `k1w` the per-sample mask, and the plane bmm batches over d x B.
 Wider D keeps one sample per call (`serves_*` refuse B > 1 there) and B > 8 is refused; the limit is
@@ -501,9 +501,9 @@ D512 is not a registered single-direction shape; the path serves it anyway.
 ## Measurements
 
 2026-09-29. Re-measured 2026-09-30: the D128 bidirectional training rows (its training moved to the shared D64 / D128
-kernels) and both inference tables, all four implementations in one harness run per width.
+kernels) and both inference tables, all four implementations in one harness run per width. Re-verified 2026-10-10 (below).
 
-- Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, cuEquivariance 0.12.0, B = 1, bf16-mixed (the module's
+- Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, cuEquivariance 0.12.0, sm_100a kernels built by nvcc 13.1, B = 1, bf16-mixed (the module's
   LayerNorm parameters stay fp32).
 - Harness: `benchmarks/runners/bench.py target=<module> level=module mode=<inference|training> d_pair=<D>
   min_seq_len=128 max_seq_len=768 seq_len_step=128`; compiled, inference in a CUDA graph, training with and without one.
@@ -517,6 +517,7 @@ kernels) and both inference tables, all four implementations in one harness run 
 - Accuracy against the harness's fp32 reference, max over every row: inference output rel. Frobenius 3.8e-3
   (PyTorch compiled 4.1e-3, cuEquivariance 3.8e-3, Anthropic 3.8e-3); training output 4.0e-3, gradients 5.4e-3 (PyTorch compiled
   4.3e-3 / 5.4e-3, cuEquivariance 4.0e-3 / 5.5e-3).
+- Re-verification (2026-10-10, engine commit `0a7928ff`, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the CUDA-graph inference and training tables of both modules (360 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.5 % (2.0 % for ours), 90th percentile 3.3 %; one cell was replaced ((640, 512) bidirectional inference, 2.608 -> 2.896 ms). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values.
 - Charts: under each table, a length sweep at D128 and a dimension sweep at L384, drawn from the table
   (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/trimul/trimul.md`).
 
@@ -552,7 +553,7 @@ kernels) and both inference tables, all four implementations in one harness run 
 | (256, 512) | 1.163 | 1.121 | — | 0.416 | 2.70 |
 | (384, 512) | 2.864 | 2.805 | — | 0.943 | 2.98 |
 | (512, 512) | 5.577 | 5.006 | — | 1.662 | 3.01 |
-| (640, 512) | 9.407 | 8.195 | — | 2.608 | 3.14 |
+| (640, 512) | 9.407 | 8.195 | — | 2.896 | 2.83 |
 | (768, 512) | 15.327 | 11.805 | — | 3.758 | 3.14 |
 
 ![Bidirectional · Inference (CUDA graph), length sweep at D128](figures/trimul_bidirectional_inference_cuda_graph_length.png) ![Bidirectional · Inference (CUDA graph), dimension sweep at L384](figures/trimul_bidirectional_inference_cuda_graph_dimension.png) <!-- measure_bars -->
@@ -755,7 +756,7 @@ measured next to every run; 5.8-6.75 run to run) and tensor 2.23 PF/s (resident-
 cuBLAS 8192^3 GEMM reaches only 1.42-1.47 PF/s under the card's 1000 W cap and is not the limit: k1w runs above it. Floor =
 max(minimum HBM bytes / BW, FLOPs / tensor rate) from each kernel's inputs, outputs and GEMM work; SoL = floor / measured, the
 median over 40 CUDA-graph replays of the module step (bf16, masked, dropout 0.25 in training), both modules, every width of the
-path. The weight-side kernels (k1w_prep, wide_fold_prep: 2-3 µs, fixed) have no data floor. Script: `sol.py` (B200 scratch).
+path. The weight-side kernels (k1w_prep, wide_fold_prep: 2-3 µs, fixed) have no data floor. Computed by a script that is not shipped.
 
 | path | kernel | bound | L128 | L256 | L384-L768 |
 |---|---|---|---|---|---|

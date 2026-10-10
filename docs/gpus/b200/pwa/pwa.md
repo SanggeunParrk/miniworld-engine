@@ -116,12 +116,12 @@ Design notes:
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Measurements (2026-09-30)
+## Measurements (2026-09-30; CUDA-graph tables re-verified 2026-10-10)
 
-- Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, B = 1, bf16-mixed (the module's LayerNorm parameters stay fp32).
+- Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, sm_100a kernels built by nvcc 13.1, B = 1, bf16-mixed (the module's LayerNorm parameters stay fp32).
 - Harness: `benchmarks/runners/bench.py target=msa_pair_weighted_averaging level=module mode=<inference|training>
   min_seq_len=128 max_seq_len=768 seq_len_step=128 +n_msa=<S>`; compiled, inference in a CUDA graph, training with and
-  without one, training with MiniWorld's p_drop_msa = 0.15.
+  without one, training with the consumer model's p_drop_msa = 0.15.
 - Tables: latency in ms (median); × = ours against the fastest of the others. cuEquivariance ships no pair-weighted-averaging
   kernel (—).
 - Anthropic: the harness's `anthropic` row -- `opt_core.ops.msa_pwa.forward_masked` as shipped (its default fo kernel with the
@@ -130,6 +130,7 @@ Design notes:
 - Accuracy against the harness's fp32 reference, max over every row: ours, PyTorch compiled and Anthropic out 1.8e-3 (inference; training with dropout
   leaves the harness's accuracy columns blank). `tests/integrations/test_pwa_train_gpu.py` checks the training output and every
   gradient, and the inference update, within 1.15x of the module's own bf16 statements' error against an fp32 copy.
+- Re-verification (2026-10-10, engine commit `0a7928ff`, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the inference table and the CUDA-graph training table (66 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.5 % (0.6 % for ours), 90th percentile 1.6 %; no cell moved by more than 8 %. The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values.
 - Charts: under each table, a length sweep at S1024 and an MSA-depth sweep at L384
   (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/pwa/pwa.md --length-d 1024`).
 

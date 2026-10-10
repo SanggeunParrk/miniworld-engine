@@ -8,8 +8,8 @@ d_single 384, and 16 x 32 at d_single 512.
 
 Summary (2026-10-01). Inference and training in bf16, B = 1, every layout; inference at L % 16 == 0, training at L % 128 ==
 0 (both tested and measured at L128-768). Against the fastest other implementation (`bench.py`, PyTorch compiled / Triton /
-cuEquivariance / Anthropic): inference 1.17-1.66x in every layout (Anthropic's shipped module row is the runner-up),
-training with CUDA graphs 1.38-1.90x (cuEquivariance or Triton; Anthropic has no backward). Training without CUDA graphs
+cuEquivariance / Anthropic): inference 1.16-1.66x in every layout (Anthropic's shipped module row is the runner-up),
+training with CUDA graphs 1.24-1.90x (cuEquivariance or Triton; Anthropic has no backward). Training without CUDA graphs
 is host-bound: 0.58-1.30x the fastest other row, behind at short lengths (see "Limits and next"). Accuracy matches the
 bf16 PyTorch module (output and every gradient within 1.3x its error against the fp32 module, every layout).
 Time-roofline SoL (8 x 48, measured 2026-09-30): inference 6-51 % (L128 -> L768), training 26 % (L384) / 49 % (L768);
@@ -22,7 +22,7 @@ engine backend not forced to Triton, bf16 single and pair, B = 1, (heads, d_sing
 the module path.
 
 - **Inference** (no autograd; one opaque op): `ln_rows` (LayerNorm of the single rows, bf16, and a copy of the input as the
-  output's residual seed) -> one cuBLAS GEMM for q | k | v | g (the weights packed once per parameter version, q and its
+  output's residual seed) -> one cuBLAS GEMM for q | k | v | g (the weights packed once per parameter version -- inside a CUDA-graph capture per capture, unless `static_weights()` is declared --, q and its
   bias pre-scaled by log2(e) / sqrt(head dim) so the logits come out in exp2 units) -> `pair_bias` (LayerNorm(pair) . Wf,
   Wf = to_bias.weight x ln_pair.weight x log2(e), masked keys -1e30) -> the gated attention core `attn_inf -DQPAIR=1`
   (sigmoid(g) o written over the q columns) -> cuBLAS to_out accumulated in place onto the residual seed (beta = 1; no
@@ -44,9 +44,10 @@ the module path.
   dq columns. The atomic order had made runs differ by ~1e-4 relative after the bf16 rounding, which the bench's repeat
   check rejects (16 x 24, L640). The parameter-gradient column sums (dWf, ln weights, dbq) still add one block-reduced
   partial per block atomically into fp32; their order varies run to run within that check.
-- ln_pair's bias adds Wb . b to every logit of a head: the softmax cancels it, so the forward drops it, and its gradient
-  (sum_j dbias[h, i, j] = 0 for every query) is exactly zero -- returned as 0 (the fp32 module returns rounding noise
-  there, ~1e-5 of ln_pair.weight's gradient).
+- `ln_pair` has no bias since 2026-10-08 (the module's LayerNorm is `bias=False`; an old checkpoint's `ln_pair.bias` is dropped
+  on load, exactly): its bias added Wb . b to every logit of a head, which the softmax cancels, and its gradient
+  (sum_j dbias[h, i, j] = 0 for every query) is exactly zero. The kernels dropped it from the forward before as well; the
+  cuEquivariance and Anthropic rows of the harness pass a zero offset, the same function.
 - Masked keys get -1e30 (finite) where the module uses finfo.min: the same softmax whenever a sample has a valid key.
   A fully masked sample (no valid key; not expected in use) stays finite in inference but gives NaN in training: the
   training cores compute exp2(t log2 e - m log2 e) with one FMA, and at |t| ~ 1e30 the rounding of m log2 e (~1e23)
@@ -120,51 +121,56 @@ added into one zeroed fp32 accumulator. `prep` packs W q | k | v | g (padded row
 columns) and Wf in one launch; `finalize` writes every parameter gradient into its own tensor (custom-op outputs may not
 alias) in one launch.
 
-## Measurements (2026-10-01)
+## Measurements (2026-10-01; CUDA-graph rows re-measured 2026-10-10)
 
 `bench.py target=attention_pair_bias level=module sweep_axis=seq_len min_seq_len=128 max_seq_len=768 seq_len_step=128
-precision=bf16-mixed +apb_n_head=<heads> d_single=<d>`, compiled, one GPU through `gpuq` with nothing else on it, no key
+precision=bf16-mixed +apb_n_head=<heads> d_single=<d>`, compiled, one GPU with no other process on it, no key
 masking (the config's `mask_prob` 0), ms. Inference with a CUDA graph; training forward + backward with CUDA graphs off /
 on. × = ours against the fastest other row. Every implementation runs the same layout (`apb_n_head` and `d_single` set the
 module for all of them). The rows of one layout come from one run: 8 x 48 and 16 x 24 from 12:32-12:47 (after the
 deterministic dQ and this page's code), 24 x 16 / 12 x 32 / 16 x 32 from 10:09-10:50 the same day (the same kernels;
-the later edits were the package move and the dh-64 TMEM clear, which these widths do not reach). Script:
-`scratch/apb/bench_layout.sh` on the B200 host (`APB_LAYOUTS="8:384 16:384"`).
+the later edits were the package move and the dh-64 TMEM clear, which these widths do not reach).
+
+Re-measured 2026-10-10 (engine commit `0a7928ff`, torch 2.13.0+cu129, triton 3.7.1, driver 580.95.05, sm_100a kernels built by nvcc 13.1, one GPU with no
+other process on it; the Anthropic cells with `compile=false`): the inference table and the graph-on figures of the training table. A cell that
+reproduced within 8 % keeps its value, a cell that moved was repeated and the median of the runs is shown. The PyTorch compiled and cuEquivariance
+columns are 20-25 % faster than on 2026-10-01 at L512-768 since LayerNorm / RMSNorm on B200 became PyTorch ops that `torch.compile` fuses
+(2026-10-02); the graph-off training figures are host-bound and keep their 2026-10-01 values.
 
 Inference:
 
 | layout | (Length, d_pair) | PyTorch compiled | Triton | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|---|---|
-| 8 x 48 | (128, 128) | 0.041 | 0.039 | 0.045 | 0.029 | **0.023** | 1.27 |
-| 8 x 48 | (256, 128) | 0.057 | 0.047 | 0.059 | 0.035 | **0.029** | 1.22 |
-| 8 x 48 | (384, 128) | 0.074 | 0.063 | 0.078 | 0.045 | **0.035** | 1.29 |
-| 8 x 48 | (512, 128) | 0.104 | 0.086 | 0.106 | 0.057 | **0.043** | 1.33 |
-| 8 x 48 | (640, 128) | 0.141 | 0.113 | 0.141 | 0.072 | **0.053** | 1.35 |
-| 8 x 48 | (768, 128) | 0.176 | 0.139 | 0.176 | 0.090 | **0.063** | 1.42 |
-| 12 x 32 | (128, 128) | 0.043 | 0.039 | 0.047 | 0.029 | **0.022** | 1.28 |
-| 12 x 32 | (256, 128) | 0.057 | 0.047 | 0.061 | 0.037 | **0.029** | 1.29 |
-| 12 x 32 | (384, 128) | 0.076 | 0.061 | 0.080 | 0.047 | **0.035** | 1.36 |
-| 12 x 32 | (512, 128) | 0.108 | 0.088 | 0.108 | 0.061 | **0.043** | 1.43 |
-| 12 x 32 | (640, 128) | 0.143 | 0.113 | 0.143 | 0.082 | **0.053** | 1.54 |
-| 12 x 32 | (768, 128) | 0.181 | 0.141 | 0.178 | 0.102 | **0.063** | 1.62 |
-| 16 x 24 | (128, 128) | 0.041 | 0.039 | 0.045 | 0.029 | **0.025** | 1.17 |
-| 16 x 24 | (256, 128) | 0.057 | 0.049 | 0.059 | 0.037 | **0.029** | 1.29 |
-| 16 x 24 | (384, 128) | 0.076 | 0.063 | 0.078 | 0.047 | **0.035** | 1.35 |
-| 16 x 24 | (512, 128) | 0.106 | 0.090 | 0.109 | 0.061 | **0.043** | 1.43 |
-| 16 x 24 | (640, 128) | 0.145 | 0.119 | 0.149 | 0.082 | **0.053** | 1.54 |
-| 16 x 24 | (768, 128) | 0.184 | 0.149 | 0.188 | 0.104 | **0.064** | 1.64 |
-| 24 x 16 | (128, 128) | 0.041 | 0.039 | 0.045 | 0.029 | **0.025** | 1.17 |
-| 24 x 16 | (256, 128) | 0.057 | 0.049 | 0.061 | 0.039 | **0.031** | 1.27 |
-| 24 x 16 | (384, 128) | 0.078 | 0.063 | 0.080 | 0.049 | **0.037** | 1.33 |
-| 24 x 16 | (512, 128) | 0.110 | 0.088 | 0.113 | 0.063 | **0.045** | 1.41 |
-| 24 x 16 | (640, 128) | 0.147 | 0.115 | 0.149 | 0.086 | **0.055** | 1.56 |
-| 24 x 16 | (768, 128) | 0.188 | 0.143 | 0.188 | 0.108 | **0.065** | 1.66 |
-| 16 x 32 (d 512) | (128, 128) | 0.043 | 0.041 | 0.045 | 0.029 | **0.024** | 1.17 |
-| 16 x 32 (d 512) | (256, 128) | 0.057 | 0.049 | 0.061 | 0.037 | **0.031** | 1.20 |
-| 16 x 32 (d 512) | (384, 128) | 0.078 | 0.065 | 0.080 | 0.049 | **0.037** | 1.33 |
-| 16 x 32 (d 512) | (512, 128) | 0.104 | 0.088 | 0.108 | 0.061 | **0.045** | 1.37 |
-| 16 x 32 (d 512) | (640, 128) | 0.147 | 0.121 | 0.151 | 0.082 | **0.055** | 1.48 |
-| 16 x 32 (d 512) | (768, 128) | 0.184 | 0.148 | 0.187 | 0.104 | **0.065** | 1.60 |
+| 8 x 48 | (128, 128) | 0.037 | 0.039 | 0.041 | 0.029 | **0.023** | 1.26 |
+| 8 x 48 | (256, 128) | 0.048 | 0.047 | 0.051 | 0.035 | **0.029** | 1.21 |
+| 8 x 48 | (384, 128) | 0.059 | 0.063 | 0.063 | 0.045 | **0.035** | 1.29 |
+| 8 x 48 | (512, 128) | 0.082 | 0.086 | 0.086 | 0.057 | **0.043** | 1.33 |
+| 8 x 48 | (640, 128) | 0.108 | 0.113 | 0.114 | 0.072 | **0.053** | 1.36 |
+| 8 x 48 | (768, 128) | 0.136 | 0.139 | 0.141 | 0.090 | **0.063** | 1.43 |
+| 12 x 32 | (128, 128) | 0.039 | 0.039 | 0.043 | 0.029 | **0.022** | 1.32 |
+| 12 x 32 | (256, 128) | 0.049 | 0.047 | 0.053 | 0.037 | **0.029** | 1.28 |
+| 12 x 32 | (384, 128) | 0.062 | 0.061 | 0.065 | 0.047 | **0.035** | 1.34 |
+| 12 x 32 | (512, 128) | 0.084 | 0.088 | 0.089 | 0.061 | **0.043** | 1.42 |
+| 12 x 32 | (640, 128) | 0.113 | 0.113 | 0.117 | 0.082 | **0.053** | 1.55 |
+| 12 x 32 | (768, 128) | 0.140 | 0.141 | 0.145 | 0.102 | **0.063** | 1.62 |
+| 16 x 24 | (128, 128) | 0.037 | 0.039 | 0.041 | 0.029 | **0.025** | 1.16 |
+| 16 x 24 | (256, 128) | 0.049 | 0.049 | 0.052 | 0.037 | **0.029** | 1.28 |
+| 16 x 24 | (384, 128) | 0.061 | 0.063 | 0.065 | 0.047 | **0.035** | 1.34 |
+| 16 x 24 | (512, 128) | 0.084 | 0.090 | 0.088 | 0.061 | **0.043** | 1.42 |
+| 16 x 24 | (640, 128) | 0.112 | 0.119 | 0.116 | 0.082 | **0.053** | 1.55 |
+| 16 x 24 | (768, 128) | 0.139 | 0.149 | 0.143 | 0.104 | **0.064** | 1.62 |
+| 24 x 16 | (128, 128) | 0.037 | 0.039 | 0.041 | 0.029 | **0.025** | 1.16 |
+| 24 x 16 | (256, 128) | 0.049 | 0.049 | 0.053 | 0.039 | **0.031** | 1.26 |
+| 24 x 16 | (384, 128) | 0.063 | 0.063 | 0.068 | 0.049 | **0.037** | 1.32 |
+| 24 x 16 | (512, 128) | 0.084 | 0.088 | 0.088 | 0.063 | **0.045** | 1.40 |
+| 24 x 16 | (640, 128) | 0.113 | 0.115 | 0.117 | 0.086 | **0.055** | 1.56 |
+| 24 x 16 | (768, 128) | 0.141 | 0.143 | 0.145 | 0.108 | **0.065** | 1.66 |
+| 16 x 32 (d 512) | (128, 128) | 0.039 | 0.041 | 0.045 | 0.029 | **0.024** | 1.21 |
+| 16 x 32 (d 512) | (256, 128) | 0.049 | 0.049 | 0.053 | 0.037 | **0.031** | 1.19 |
+| 16 x 32 (d 512) | (384, 128) | 0.063 | 0.065 | 0.068 | 0.049 | **0.037** | 1.32 |
+| 16 x 32 (d 512) | (512, 128) | 0.084 | 0.088 | 0.090 | 0.061 | **0.045** | 1.36 |
+| 16 x 32 (d 512) | (640, 128) | 0.114 | 0.121 | 0.117 | 0.082 | **0.055** | 1.49 |
+| 16 x 32 (d 512) | (768, 128) | 0.141 | 0.148 | 0.145 | 0.104 | **0.065** | 1.60 |
 
 Anthropic = the release's own module row for this cell (`opt_core.kernels.apb`, row `composed` of `mod_pf_c384cz128`;
 `bench.py` `_anthropic_apb_composition`): `ln_proj.pair_bias` (LayerNorm(z) + Linear in one Triton kernel, head-major
@@ -184,32 +190,32 @@ Training (CUDA graph off / on):
 
 | layout | (Length, d_pair) | PyTorch compiled | Triton | cuEquivariance | ours | × (graph on) |
 |---|---|---|---|---|---|---|
-| 8 x 48 | (128, 128) | 0.403 / 0.119 | 1.086 / 0.106 | 0.505 / 0.106 | 0.657 / **0.070** | 1.53 |
-| 8 x 48 | (256, 128) | 0.555 / 0.195 | 1.114 / 0.149 | 0.572 / 0.166 | 0.665 / **0.084** | 1.78 |
-| 8 x 48 | (384, 128) | 0.545 / 0.254 | 1.093 / 0.199 | 0.900 / 0.164 | 0.650 / **0.101** | 1.62 |
+| 8 x 48 | (128, 128) | 0.403 / 0.119 | 1.086 / 0.106 | 0.505 / 0.106 | 0.657 / **0.080** | 1.33 |
+| 8 x 48 | (256, 128) | 0.555 / 0.195 | 1.114 / 0.149 | 0.572 / 0.150 | 0.665 / **0.093** | 1.60 |
+| 8 x 48 | (384, 128) | 0.545 / 0.254 | 1.093 / 0.199 | 0.900 / 0.164 | 0.650 / **0.111** | 1.48 |
 | 8 x 48 | (512, 128) | 0.573 / 0.336 | 1.093 / 0.274 | 0.717 / 0.223 | 0.492 / **0.125** | 1.79 |
 | 8 x 48 | (640, 128) | 0.517 / 0.438 | 0.922 / 0.362 | 0.935 / 0.287 | 0.658 / **0.155** | 1.85 |
 | 8 x 48 | (768, 128) | 0.617 / 0.536 | 0.933 / 0.448 | 0.732 / 0.354 | 0.497 / **0.186** | 1.90 |
-| 12 x 32 | (128, 128) | 0.559 / 0.119 | 0.955 / 0.108 | 0.446 / 0.108 | 0.684 / **0.072** | 1.51 |
-| 12 x 32 | (256, 128) | 0.614 / 0.194 | 0.955 / 0.147 | 0.556 / 0.169 | 0.730 / **0.088** | 1.68 |
-| 12 x 32 | (384, 128) | 0.622 / 0.251 | 1.003 / 0.201 | 0.802 / 0.164 | 0.561 / **0.108** | 1.51 |
+| 12 x 32 | (128, 128) | 0.559 / 0.119 | 0.955 / 0.108 | 0.446 / 0.108 | 0.684 / **0.082** | 1.32 |
+| 12 x 32 | (256, 128) | 0.614 / 0.194 | 0.955 / 0.147 | 0.556 / 0.153 | 0.730 / **0.098** | 1.50 |
+| 12 x 32 | (384, 128) | 0.622 / 0.251 | 1.003 / 0.201 | 0.802 / 0.164 | 0.561 / **0.119** | 1.38 |
 | 12 x 32 | (512, 128) | 0.516 / 0.336 | 0.969 / 0.274 | 0.770 / 0.213 | 0.556 / **0.138** | 1.54 |
 | 12 x 32 | (640, 128) | 0.661 / 0.437 | 1.176 / 0.356 | 0.974 / 0.272 | 0.697 / **0.174** | 1.57 |
 | 12 x 32 | (768, 128) | 0.656 / 0.539 | 1.146 / 0.457 | 0.986 / 0.334 | 0.686 / **0.213** | 1.57 |
-| 16 x 24 | (128, 128) | 0.394 / 0.119 | 0.881 / 0.110 | 0.411 / 0.108 | 0.679 / **0.076** | 1.43 |
-| 16 x 24 | (256, 128) | 0.439 / 0.194 | 1.127 / 0.154 | 0.582 / 0.168 | 0.693 / **0.092** | 1.67 |
-| 16 x 24 | (384, 128) | 0.564 / 0.250 | 1.135 / 0.207 | 0.937 / 0.194 | 0.535 / **0.113** | 1.73 |
+| 16 x 24 | (128, 128) | 0.394 / 0.119 | 0.881 / 0.110 | 0.411 / 0.108 | 0.679 / **0.084** | 1.29 |
+| 16 x 24 | (256, 128) | 0.439 / 0.194 | 1.127 / 0.154 | 0.582 / 0.153 | 0.693 / **0.100** | 1.53 |
+| 16 x 24 | (384, 128) | 0.564 / 0.250 | 1.135 / 0.207 | 0.937 / 0.194 | 0.535 / **0.123** | 1.58 |
 | 16 x 24 | (512, 128) | 0.601 / 0.338 | 0.914 / 0.291 | 0.728 / 0.244 | 0.696 / **0.143** | 1.70 |
 | 16 x 24 | (640, 128) | 0.535 / 0.461 | 1.171 / 0.389 | 0.810 / 0.328 | 0.695 / **0.180** | 1.82 |
 | 16 x 24 | (768, 128) | 0.646 / 0.559 | 1.220 / 0.485 | 0.957 / 0.405 | 0.736 / **0.229** | 1.77 |
-| 24 x 16 | (128, 128) | 0.610 / 0.119 | 1.083 / 0.104 | 0.615 / 0.111 | 0.782 / **0.076** | 1.38 |
-| 24 x 16 | (256, 128) | 0.659 / 0.197 | 1.164 / 0.149 | 0.733 / 0.176 | 0.858 / **0.092** | 1.62 |
-| 24 x 16 | (384, 128) | 0.649 / 0.256 | 1.390 / 0.201 | 0.552 / 0.221 | 0.869 / **0.123** | 1.63 |
+| 24 x 16 | (128, 128) | 0.610 / 0.119 | 1.083 / 0.104 | 0.615 / 0.111 | 0.782 / **0.084** | 1.24 |
+| 24 x 16 | (256, 128) | 0.659 / 0.197 | 1.164 / 0.149 | 0.733 / 0.159 | 0.858 / **0.102** | 1.46 |
+| 24 x 16 | (384, 128) | 0.649 / 0.256 | 1.390 / 0.201 | 0.552 / 0.221 | 0.869 / **0.133** | 1.51 |
 | 24 x 16 | (512, 128) | 0.616 / 0.350 | 1.200 / 0.278 | 0.577 / 0.287 | 0.734 / **0.156** | 1.79 |
 | 24 x 16 | (640, 128) | 0.609 / 0.459 | 1.105 / 0.364 | 0.601 / 0.385 | 0.690 / **0.203** | 1.80 |
-| 24 x 16 | (768, 128) | 0.652 / 0.569 | 0.937 / 0.467 | 0.603 / 0.479 | 0.526 / **0.256** | 1.82 |
-| 16 x 32 (d 512) | (128, 128) | 0.612 / 0.121 | 1.258 / 0.110 | 0.629 / 0.110 | 0.806 / **0.078** | 1.42 |
-| 16 x 32 (d 512) | (256, 128) | 0.680 / 0.194 | 1.346 / 0.151 | 0.671 / 0.170 | 0.867 / **0.094** | 1.61 |
+| 24 x 16 | (768, 128) | 0.652 / 0.569 | 0.937 / 0.467 | 0.603 / 0.440 | 0.526 / **0.256** | 1.72 |
+| 16 x 32 (d 512) | (128, 128) | 0.612 / 0.121 | 1.258 / 0.110 | 0.629 / 0.110 | 0.806 / **0.088** | 1.25 |
+| 16 x 32 (d 512) | (256, 128) | 0.680 / 0.194 | 1.346 / 0.151 | 0.671 / 0.153 | 0.867 / **0.102** | 1.48 |
 | 16 x 32 (d 512) | (384, 128) | 0.675 / 0.256 | 1.270 / 0.207 | 0.708 / 0.180 | 0.518 / **0.117** | 1.54 |
 | 16 x 32 (d 512) | (512, 128) | 0.685 / 0.338 | 1.273 / 0.278 | 1.083 / 0.229 | 0.814 / **0.147** | 1.56 |
 | 16 x 32 (d 512) | (640, 128) | 0.718 / 0.459 | 1.294 / 0.381 | 0.816 / 0.312 | 0.826 / **0.184** | 1.70 |
@@ -240,8 +246,7 @@ chunk slices); the other layouts are not profiled per kernel.
 The token DiT doc's method: floor = max(minimum HBM bytes / BW, FLOPs / tensor rate, exp2 count / MUFU rate) per kernel;
 SoL = floor / measured (kernel duration, median over back-to-back eager steps; the measured us in parentheses). Ceilings:
 HBM 6.31 TB/s (a 512 MB fp32 copy in the same process), tensor 2.23 PF/s bf16, MUFU 31 ex2 / ns / SM. B = 1, 20 % key
-mask. "step" = the kernels' SoL weighted by their time (PyTorch fills counted at 0). Script: `sol_apb.py` (B200 scratch
-`scratch/apb/sol`).
+mask. "step" = the kernels' SoL weighted by their time (PyTorch fills counted at 0).
 
 Inference:
 
@@ -297,7 +302,7 @@ What bounds the step:
 | row statistics with per-element fp32 (sum and sum of squares) | replaced by the ones / Gram mma; ~1 us gained in the forward, none in the backward |
 | dpair written back in place and stored by TMA | no gain over 16-B stores from registers (69.6 vs 67.9 us incl. the accumulator fill) |
 | 3 stages in the backward ring | no gain (69.3 vs 67.8 us) |
-| ln_pair.bias gradient from the kernel's per-head dbias sums | rounding noise around the exact zero (up to 2x the bf16 module's noise); returned as 0 |
+| ln_pair.bias gradient from the kernel's per-head dbias sums | rounding noise around the exact zero (up to 2x the bf16 module's noise); returned as 0 (the parameter no longer exists) |
 | 16 / 24 heads in the pair backward: dWf accumulated in a second phase over the tile instead of per-warp accumulators | slower; reverted to per-warp accumulators at one block per SM |
 | 16 x 24 heads as 24 wide (no padding) | not built: 24 is not a multiple of the q k^T MMA's K step (16), and a 48-B row is no swizzle span (32 / 64 / 128 B); 32-wide heads with exact zero pads cost 33 % more q / k / v / g bytes and keep every kernel on the existing tiles |
 

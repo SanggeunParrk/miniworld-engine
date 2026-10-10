@@ -85,9 +85,9 @@ instead of keeping 302 MB at L384).
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Measurements (2026-09-30)
+## Measurements (2026-09-30; CUDA-graph tables re-verified 2026-10-10)
 
-- Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, B = 1, bf16-mixed (the module's LayerNorm parameters stay fp32).
+- Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, sm_100a kernels built by nvcc 13.1, B = 1, bf16-mixed (the module's LayerNorm parameters stay fp32).
 - Harness: `benchmarks/runners/bench.py target=outer_product level=module mode=<inference|training> min_seq_len=128
   max_seq_len=768 seq_len_step=128 +n_msa=<S>`; compiled, inference in a CUDA graph, training with and without one.
 - Tables: latency in ms (median); × = ours against the fastest of the others. cuEquivariance ships no OuterProductMean
@@ -101,6 +101,7 @@ instead of keeping 302 MB at L384).
   card; in the inference sweep the path runs at 68-88 % of its energy floor. Folding the epilogue into the O GEMM does not fit
   B200: re-streaming W_o per tile exceeds the SM's TMA intake; the dgrad kernel is bound by the same intake (a 2-CTA version
   is what is left).
+- Re-verification (2026-10-10, engine commit `0a7928ff`, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the inference table and the CUDA-graph training table (66 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.9 % (2.7 % for ours), 90th percentile 5.1 %; two cells were replaced ((640, 4096) and (768, 4096) ours inference: 2.364 -> 2.621 and 3.803 -> 3.352 ms; the S4096 inference rows vary by +-12 % between runs). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values.
 - Charts: under each table, a length sweep at S1024 and an MSA-depth sweep at L384
   (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/opm/opm.md --length-d 1024`).
 
@@ -124,8 +125,8 @@ instead of keeping 302 MB at L384).
 | (256, 4096) | 0.602 | — | 0.876 | 0.465 | 1.30 |
 | (384, 4096) | 1.220 | — | 1.830 | 0.999 | 1.22 |
 | (512, 4096) | 1.951 | — | 3.133 | 1.585 | 1.23 |
-| (640, 4096) | 3.130 | — | 4.800 | 2.364 | 1.32 |
-| (768, 4096) | 4.407 | — | 6.881 | 3.803 | 1.16 |
+| (640, 4096) | 3.130 | — | 4.800 | 2.621 | 1.19 |
+| (768, 4096) | 4.407 | — | 6.881 | 3.352 | 1.31 |
 
 ![OPM · Inference (CUDA graph), length sweep at S1024](figures/opm_opm_inference_cuda_graph_length.png) ![OPM · Inference (CUDA graph), msa depth sweep at L384](figures/opm_opm_inference_cuda_graph_msa_depth.png) <!-- measure_bars -->
 

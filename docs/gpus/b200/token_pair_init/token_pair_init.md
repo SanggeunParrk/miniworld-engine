@@ -46,7 +46,7 @@ but slow.
 
 ## Measurements (2026-10-02)
 
-One B200 (sm_100a, 1000 W cap, shared lab server), torch 2.13.0+cu129, triton 3.7.1, branch `feat/b200-embedder-fa4-pair-init` on engine main
+One B200 (sm_100a, 1000 W cap), torch 2.13.0+cu129, triton 3.7.1, a feature branch off engine main
 `5d8bb030`; fp32, B = 1, CUDA-graph timing (50 replays after warm-up). "ours" is the op as a caller sees it (the id packing around the
 kernels included); the reference is `token_pair_init_reference`, the dense fp32 one-hot Linear the model ran.
 

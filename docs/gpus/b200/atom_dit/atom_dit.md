@@ -1,14 +1,14 @@
-# Atom DiT (AF3-style) on B200 (sm100)
+# Dense atom DiT on B200 (sm100)
 
-Kernel-level status of the AF3-style atom DiT block (engine `modules/dit.DiTBlock` at atom widths: AF3 Alg. 23 with
-AdaLN -> q | k | v | gate -> attention over **all N atoms** with the pair bias `LN(z) Wb^T` shared by the A samples -> gated
-out-projection + residual -> AdaLN + SwiGLU transition (hidden 256) + residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32)
-on B200. Columns are (Length, Dimension) on the atom axis of the shape registry (`atom_single`, d128, bf16 only); Length is the
-atom count N. The module-level summary is in [b200.md](../b200.md).
+Kernel-level status of the dense atom DiT block (engine `modules/dit.DiTBlock` at atom widths: AdaLN -> q | k | v | gate ->
+attention over **all N atoms** with the pair bias `LN(z) Wb^T` shared by the A samples -> gated out-projection + residual ->
+AdaLN + SwiGLU transition (hidden 256) + residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32) on B200. This is not the AF3
+atom transformer proper, whose attention stays inside 32-query x 128-key windows: that block is the [local DiT](../local_dit/local_dit.md),
+which shares this page's row kernels. Columns are (Length, Dimension) on the atom axis of the shape registry (`atom_single`, d128,
+bf16 only); Length is the atom count N. The module-level summary is in [b200.md](../b200.md).
 
-**Where the code is.** The kernels are `src/miniworld_engine/kernels/augmented_attention/cuda/sm100_atom/` (the sources of the B200 research
-capsule `experiments/atomdit_sm100`, unchanged, built on first use by the newest nvcc on the machine that knows sm_100a: 13.1 on
-the B200 box). The engine's `DiTBlock` dispatches them through `integrations/atom_dit.py` (an autograd Function over the whole
+**Where the code is.** The kernels are `src/miniworld_engine/kernels/augmented_attention/cuda/sm100_atom/` (built on first use by the
+newest nvcc on the machine that knows sm_100a: 13.1 for the measurements below). The engine's `DiTBlock` dispatches them through `integrations/atom_dit.py` (an autograd Function over the whole
 block for training, a kernel chain for inference) when `serves()` accepts the call: B200, `implementation` MINIWORLD / TRITON,
 bf16 single / cond / pair, the atom widths below, B = 1, any N, a [B, N] bool key mask or none, no QK-norm; anything else
 keeps the Triton path, and `MINIWORLD_ATOM_DIT_SM100=0` turns it off. The block is two opaque ops (`atom_dit_block_fwd` / `atom_dit_block_bwd`), so it is served under `torch.compile` and in CUDA graphs too (compiled training no longer falls back to the module path). N that is not a multiple of 128 is padded inside the call
@@ -21,11 +21,11 @@ where the module's finfo.min fill makes them uniform; forward and backward agree
 without a key mask, at N100-1024 including N not a multiple of 128 (no worse than the Triton path's: inference 4.3e-3 vs
 3.8-3.9e-3, worst gradient ratio 1.69 on `ln_pair.weight`); a profile of a masked, padded call (A5 N300) shows no Triton
 kernel. The
-measurements below were taken in the capsule on the same sources and the engine's own `DiTBlock` parameters; "CUDA" in the
+measurements below were taken in the standalone development build (not shipped) on the same sources and the engine's own `DiTBlock` parameters; "CUDA" in the
 kernel tables means the kernel ran at that shape there.
 
 - Everything is hand CUDA (tcgen05 / TMEM / TMA) except the weight-gradient GEMMs (cuBLAS). No Triton, no quack. What is left in
-  PyTorch is glue: the stacked / transposed weight packs (made once per parameter version), zero fills of the fp32 bias /
+  PyTorch is glue: the stacked / transposed weight packs (made once per parameter version; per capture inside a CUDA graph, unless `static_weights()` is declared), zero fills of the fp32 bias /
   LayerNorm-weight gradient accumulators, the pair-bias weight gradient's partial sum ([N/64 N/32, 4, 16] -> [4, 16]) and the
   bf16 casts of the parameter gradients.
 - Shapes: A = samples (rows = A N), B = 1. Inference A = 5 and A = 1 at N = 1024 / 2048 / 4096; training A = 48 at N = 4096 /
@@ -239,45 +239,50 @@ eager module (d cond 3.40e-3 vs 3.69e-3, d g1 1.76e-3 vs 2.83e-3 at A5 N1024), n
 | 성능 확인 | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Measurements (2026-10-01)
+## Measurements (2026-10-10; the conditioning-hoisted tables and the Anthropic cells 2026-10-01)
 
-- Setup: B200 (148 SMs, 1000 W power cap), GPU 0 through `gpuq` with no other process on it; the capsule's uv venv
-  (torch 2.10 cu130, triton 3.6.0) for ours, PyTorch compiled and Anthropic; the v2.2.0 pixi env (torch 2.13.0+cu129, triton
-  3.7.1) on engine main 627c0891 for the engine row; the capsule's cubins built by nvcc 13.1. B = 1, bf16. One run
-  (`run_doc.sh`); run-to-run spread +-3-5 % (power cap).
-- Harness: inference in a CUDA graph (median of 5 x 10 replays); training = forward + `torch.autograd.grad` of every input
-  (single, cond, pair) and every parameter, without a graph, CUDA events. Tables in ms; × = ours against the fastest of the other
-  columns.
+- Setup (2026-10-10): B200 (148 SMs, 1000 W power cap, driver 580.95.05), one GPU with no other process on it, torch 2.13.0+cu129,
+  triton 3.7.1, kernels built by nvcc 13.1, engine commit `0a7928ff`; B = 1, bf16-mixed. Run-to-run spread +-3-5 % (power cap; up to +-10 % at
+  A5 N1024). The **Anthropic** cells and the two "conditioning hoisted" tables are the 2026-10-01 measurements of the standalone development
+  build of these kernels (not shipped; torch 2.10 cu130, triton 3.6.0, nvcc 13.1): the harness cannot build Anthropic's composition at
+  atom widths (its pair-bias producer serves d_pair 64 / 128 only: `UnsupportedBenchmark`), and the hoisted variant is not a harness case.
+- Harness: `benchmarks/runners/bench.py target=dit_atom level=module mode=<inference|training> n_augment=<A> min_seq_len=<N / 8>
+  max_seq_len=<N / 8> seq_len_step=128` (the harness's length is tokens: atoms = 8 x seq_len; A = 5 / 1 for inference, 48 for training);
+  compiled, inference in a CUDA graph, training = forward + backward of every input and parameter without a graph. With a graph the
+  harness refuses ours' training rows: the gradients of two timed runs differ by 1.1e-4 relative against its limit of 1e-4 (the bias /
+  LayerNorm-weight gradient sums add atomically). Tables in ms; × = ours against the fastest of the other columns. A cell that
+  reproduced the 2026-10-01 development-build figure within 8 % keeps it.
 - Columns: **PyTorch compiled** = `torch.compile` of the engine's `DiTBlock` (implementation pytorch, bf16); **Anthropic** = its
   kernels for this op from the reference release (`common/opt_core/kernels/apb`): `fpf_apb.dit_apb` (flash attention, pair bias
   shared across samples, fused sigmoid gate), `fpf_apb.pf_bias` (the pair-bias producer) and `ditfast.atom_kernels` (adaln2 /
   resgate_adaln2 / swiglu2d), assembled as its `atom_fused` lever does (fp32 residual stream, cuBLAS GEMMs, pre-sigmoided
   conditioning from LayerNorm + cuBLAS + sigmoid). They are Triton and run on sm_100a unmodified; their tile cells are H100
   defaults, so each shape takes the best of six cells. Forward only (no backward members): inference only. Its `dit_exact` is an
-  fp32, sm_90a-only kernel (not this op). **engine v2.2** = the engine's `DiTBlock` (implementation miniworld: Triton attention
-  and row kernels + cuBLAS). cuEquivariance has no such block (—).
+  fp32, sm_90a-only kernel (not this op). **Triton path** = the engine's `DiTBlock` with `MINIWORLD_ATOM_DIT_SM100=0` (Triton
+  attention and row kernels + cuBLAS); **ours** = the same block on the sm_100a kernels (the default). cuEquivariance has no such
+  block (—). (This column was "engine v2.2" on 2026-10-01, measured on engine main 627c0891; the Triton path has been faster since.)
 - "conditioning hoisted": Anthropic's kits compute the sample-invariant conditioning once per item; the second inference table
   leaves it out of both sides (ours: `cond_fwd` out of the step).
 - Accuracy against the fp64 block (A4 N1024): ours output 3.51e-3, d single 3.09e-3, d cond 7.25e-3, d pair 9.11e-3, worst
-  parameter gradient (`to_bias.weight`) 1.05e-2; Anthropic output 2.82e-3 (fp32 residual stream). Stage tests against the bf16
-  module / autograd (`test_rows.py`, `test_bwd_rows.py`): forward outputs 100 % bit-equal or rel <= 1e-4; backward rel <= 5e-5
+  parameter gradient (`to_bias.weight`) 1.05e-2; Anthropic output 2.82e-3 (fp32 residual stream). Stage tests (development build) against the bf16
+  module / autograd: forward outputs 100 % bit-equal or rel <= 1e-4; backward rel <= 5e-5
   except d cond (T13).
 - Charts: under each table, a length sweep at D128 (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/atom_dit/atom_dit.md
   --length-prefix N`).
 
 ### Inference A5 · conditioning in the block
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | ours | × |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × |
 |---|---|---|---|---|---|---|
-| (1024, 128) | 0.1669 | — | 0.1547 | 0.2656 | 0.0584 | 2.65 |
-| (2048, 128) | 0.6283 | — | 0.4106 | 0.8046 | 0.1458 | 2.82 |
-| (4096, 128) | 2.1901 | — | 1.2307 | 2.9934 | 0.3840 | 3.20 |
+| (1024, 128) | 0.1903 | — | 0.1547 | 0.1791 | 0.0695 | 2.23 |
+| (2048, 128) | 0.5405 | — | 0.4106 | 0.4719 | 0.1458 | 2.82 |
+| (4096, 128) | 2.1901 | — | 1.2307 | 1.6355 | 0.3840 | 3.20 |
 
 ![Inference A5 · conditioning in the block, length sweep at D128](figures/atom_dit_inference_a5_conditioning_in_the_block_length.png) <!-- measure_bars -->
 
 ### Inference A5 · conditioning hoisted
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | ours | × |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × |
 |---|---|---|---|---|---|---|
 | (1024, 128) | — | — | 0.1140 | — | 0.0520 | 2.19 |
 | (2048, 128) | — | — | 0.3355 | — | 0.1347 | 2.49 |
@@ -287,17 +292,17 @@ eager module (d cond 3.40e-3 vs 3.69e-3, d g1 1.76e-3 vs 2.83e-3 at A5 N1024), n
 
 ### Inference A1 · conditioning in the block
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | ours | × |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × |
 |---|---|---|---|---|---|---|
-| (1024, 128) | 0.1323 | — | 0.1249 | 0.2539 | 0.0498 | 2.51 |
-| (2048, 128) | 0.3233 | — | 0.3130 | 0.7618 | 0.1016 | 3.08 |
-| (4096, 128) | 1.2043 | — | 0.9402 | 2.7793 | 0.2357 | 3.99 |
+| (1024, 128) | 0.1323 | — | 0.1249 | 0.1658 | 0.0592 | 2.11 |
+| (2048, 128) | 0.3233 | — | 0.3130 | 0.4136 | 0.1104 | 2.84 |
+| (4096, 128) | 1.0404 | — | 0.9402 | 1.3936 | 0.2357 | 3.99 |
 
 ![Inference A1 · conditioning in the block, length sweep at D128](figures/atom_dit_inference_a1_conditioning_in_the_block_length.png) <!-- measure_bars -->
 
 ### Inference A1 · conditioning hoisted
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | ours | × |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × |
 |---|---|---|---|---|---|---|
 | (1024, 128) | — | — | 0.0917 | — | 0.0462 | 1.98 |
 | (2048, 128) | — | — | 0.2717 | — | 0.0954 | 2.85 |
@@ -310,10 +315,10 @@ core 185.9 vs `dit_apb` 261.3 (1.4x; A1 N4096 65.1 vs 68.4, 1.05x); the rest (ro
 
 ### Training A48 · forward + backward
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | ours | × |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × |
 |---|---|---|---|---|---|---|
-| (4096, 128) | 33.130 | — | — | 23.904 | 7.471 | 3.20 |
-| (8192, 128) | 128.812 | — | — | 95.247 | 28.327 | 3.36 |
+| (4096, 128) | 41.935 | — | — | 20.175 | 7.471 | 2.70 |
+| (8192, 128) | 170.745 | — | — | 82.366 | 28.327 | 2.91 |
 
 ![Training A48 · forward + backward, length sweep at D128](figures/atom_dit_training_a48_forward_backward_length.png) <!-- measure_bars -->
 
@@ -321,7 +326,7 @@ core 185.9 vs `dit_apb` 261.3 (1.4x; A1 N4096 65.1 vs 68.4, 1.05x); the rest (ro
 
 ## Speed of light (measured, 2026-10-01)
 
-`sol_measure.py` in the capsule, same run. Every kernel of a block step is recorded at the driver and replayed alone in a CUDA
+Measured in the standalone development build, same run. Every kernel of a block step is recorded at the driver and replayed alone in a CUDA
 graph for 2 s after a 1-s settle; time from the wall clock, energy from the NVML counter. Ceilings measured in the same run and
 regime: idle 250 W, sustained maximum 1000 W, HBM 6.77 TB/s, read 113 pJ/B, write 77 pJ/B, bf16 MMA 0.565 pJ/FLOP (cuBLAS 8192^3,
 1.34 PFLOP/s sustained). A kernel's floor = max(bytes / HBM, FLOPs / 2.38 PF, exps / 4.65 T/s, (R e_r + W e_w + F e_f) / (1000 -
@@ -384,8 +389,8 @@ items of a sample pair over 148 SMs, the third sample pair half empty; A1: one s
 ## Limits and next
 
 - In the engine since 2026-10-01 (`DiTBlock` -> `integrations/atom_dit.py`), key mask and any N since the same day. The timings
-  above are the capsule's and were not re-taken through `DiTBlock`. team-gm's `DiffusionTransformerBlock` (af2bda75) calls
-  `DiTBlock.forward` when it gets the pair tensor and a [B, L] mask or none -- MiniWorld's atom transformer does -- and so reaches
+  above are the standalone development build's and were not re-taken through `DiTBlock`. The consumer model code's diffusion
+  transformer block calls `DiTBlock.forward` when it gets the pair tensor and a [B, L] mask or none -- MiniWorld's atom transformer does -- and so reaches
   this path; its hoisted pair-bias form (`hoist_pair_bias`) and an [A, B, L] mask do not.
 - B = 1; a per-sample ([A, B, N]) key mask is not served. Measured only at the shapes above, without a key mask (the mask
   changes only the pair-bias kernels' writes).

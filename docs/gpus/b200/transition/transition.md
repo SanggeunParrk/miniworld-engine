@@ -21,13 +21,14 @@ or the torch-matched one; `MINIWORLD_TRANSITION_SM100_NVCC` overrides), one cubi
 kernel with `-DHID=<n D>`) and cached under `MINIWORLD_ENGINE_JIT_ROOT/transition_sm100a/`, and launched through the driver API from
 the torch extension (`sm100/transition_sm100.cu`: the D128 entry points, plus a generic cubin / tensor-map / launch surface the other
 widths are assembled on in Python). The reason is measured: the same D128 backward through CUDA 12.9's ptxas (the toolkit torch
-cu129 pins) runs ~8 % slower than through 13.1's (L384 backward 250 vs 230 µs, L768 990 vs 885 µs). On the B200 box CUDA 13.1 is at
-`/usr/local/cuda-13.1` and is picked automatically. The sources under `sm100/` are generated from the research capsule by its
-`export_engine.py` (experiment switches resolved to the adopted build; each generated file's SASS equals the capsule cubin's).
+cu129 pins) runs ~8 % slower than through 13.1's (L384 backward 250 vs 230 µs, L768 990 vs 885 µs). A CUDA 13.1 at
+`/usr/local/cuda-13.1` is picked automatically. The sources under `sm100/` are generated from the standalone development build of
+the same kernel sources (not shipped), with the experiment switches resolved to the adopted build; each generated file's SASS
+equals that build's cubin.
 
 Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
-`figures/transition_pair.json` by `python -m miniworld_engine.viz.kernel_flow`. (No `rsvg-convert` on the B200 box or the cssb login
-node, so the pages embed the SVG until the PNGs are rendered.) The dW GEMMs of the D ≥ 256 backward are cuBLAS (fp32 output) and
+`figures/transition_pair.json` by `python -m miniworld_engine.viz.kernel_flow`. (`rsvg-convert` was not available where the figures were
+generated, so the pages embed the SVG until the PNGs are rendered.) The dW GEMMs of the D ≥ 256 backward are cuBLAS (fp32 output) and
 appear in the figures only. The n = 2 builds run the kernels of the same width's figure (D768 as D512).
 
 ## Pair Transition, n = 4 (`Transition(d_hidden, n=4)`)
@@ -278,7 +279,7 @@ appear in the figures only. The n = 2 builds run the kernels of the same width's
 
 ## Transition, n = 2 (`Transition(d, n=2)`)
 
-The same kernel sources built with `-DHID=2D`. In MiniWorld (origin/main) n = 2 is the diffusion conditioning's pair (D128) and
+The same kernel sources built with `-DHID=2D`. In the consumer model code n = 2 is the diffusion conditioning's pair (D128) and
 single (D384) Transition; the per-width paths are the n = 4 ones (D128 through `fused_wide_sm100a` with the D128 fused kernels at
 hidden 256), plus D768, which runs the D512 path with the squeeze and d_xn GEMMs as two 384-column launches (one launch's accumulator
 must fit 512 tensor-memory columns).
@@ -485,17 +486,19 @@ No kernel on these paths is autotuned, so nothing needs a cache (✓).
   saved in bf16); vs the fp32 module every (D, n) is at least as close as the Triton path
   (`tests/numerics/test_transition_fused_sm100a_gpu.py`, `tests/numerics/test_transition_fused_wide_sm100a_gpu.py`: 1 / 3 / 15 / 1152
   tiles, 1200 at D ≥ 384, the MSA and single-stream shapes). Reductions run in a fixed order (no atomics): a replay is bit-identical.
-- Research record (rounds v1-v23 for D128, w1-w6, s1 and n2 for the other widths, n = 2 and D384, with profiles and rejected
-  variants): `experiments/transition_fused_sm100/` on branch `perf/transition-sm100-b200`.
+- The research record (rounds v1-v23 for D128, w1-w6, s1 and n2 for the other widths, n = 2 and D384, with profiles and rejected
+  variants) belongs to the standalone development build and is not shipped.
 
 ## Measurements
 
-### Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30)
+### Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30; re-verified 2026-10-10)
 
 B200 (148 SMs, 1000 W limit), torch 2.13 + cu129, kernels built by CUDA 13.1; `benchmarks/runners/bench.py target=transition
 level=module d_pair=D`, compiled, CUDA-graph replay, µs. *ours* = `modules.Transition` through `fused_sm100a` / `fused_wide_sm100a`;
-the Triton row is the same module with `MINIWORLD_TRANSITION_FUSED_SM100A=0` (the path B200 ran before; D ≠ 128 values from the
-research capsule's module run of the same bench, round w1). × = ours vs the fastest other row. The D384 *ours* values are the fused
+the Triton row is the same module with `MINIWORLD_TRANSITION_FUSED_SM100A=0` (the path B200 ran before). × = ours vs the fastest other row.
+Re-verified 2026-10-10 (engine commit `0a7928ff`, driver 580.95.05, one GPU with no other process on it): the PyTorch compiled, Triton and ours
+columns (60 cells) were re-measured with the command above, one run per width and mode, cells that moved by more than 8 % repeated;
+median change 1.1 % (ours 3.5 %), 90th percentile 5.3 %, no cell replaced. The Anthropic column is kernel-level (below) and was not re-taken. The D384 *ours* values are the fused
 D384 kernels, re-measured 2026-09-30 with the same command (before: inference 457.2 / 1940.4, training 1734.5 / 6850.0 µs at
 L384 / L768); the other columns are unchanged. At these sizes (1152 / 4608 tiles) the training step barely moves: at L384 the fused
 forward with its h / a / b stores is ~40 µs slower than the three-kernel forward (kernels alone: 363 vs 322 µs) and the fused
@@ -532,7 +535,7 @@ backward ~70 µs faster (648 vs 720 µs); inference gains 1.25x.
 | (768, 512) | 12775.4 | n/a | n/a (no backward) | 21585.4 | **11183.1** | 1.14 |
 
 \* Anthropic: the module-level runner refuses its rows on cc 10.0; the numbers are Anthropic's best Transition row at the kernel level
-from the research capsule (`records/infer-all-s1.json`: `lnl` at D64, `v2` at D128, `pf` at D256 / D384; no row runs at D512).
+from kernel-level runs in the standalone development build (not shipped; rows `lnl` at D64, `v2` at D128, `pf` at D256 / D384; no row runs at D512).
 
 Accuracy: every width passes "no further from fp32 than the Triton path" on 1 / 3 / 15 / 1152 tiles (and 1200 tiles at D ≥ 384,
 the tile schedule), gradients included. Separate processes vary by up to ±10 % on this power-capped card (e.g. torch.compile D384
@@ -544,13 +547,13 @@ other widths (µs per forward + backward, measured with the GPU kept busy). Ever
 
 The module-level forward is ~5-9 µs above the kernels alone (D128 L384: 63.3 vs 55.8 µs): the module casts its fp32 parameters to
 bf16 on every call under `bf16-mixed`. Against the power-capped ceiling of this card (dense bf16 cuBLAS sustains 1.30 PFLOP/s at the
-1000 W limit), the D128 training step reaches ~67 % (L384) / ~72 % (L768) of the design's tensor work at that rate; the research
-record explains why the fusion cannot reach 90 % on this card with the bf16 contract.
+1000 W limit), the D128 training step reaches ~67 % (L384) / ~72 % (L768) of the design's tensor work at that rate; the fusion
+cannot reach 90 % on this card with the bf16 contract.
 
 ### n = 2, MSA and single streams (2026-09-30)
 
-Same card and toolchain; module level with bf16 parameters, one eager call captured in a CUDA graph and replayed, µs (the research
-capsule's `bench_n2.py`, round n2; `bench.py` has no n = 2 / MSA / single-stream Transition case). *ours* = `modules.Transition` on
+Same card and toolchain; module level with bf16 parameters, one eager call captured in a CUDA graph and replayed, µs (measured with a
+benchmark of the standalone development build, not shipped; `benchmarks/runners/bench.py` has no n = 2 / MSA / single-stream Transition case). *ours* = `modules.Transition` on
 this path; Triton = the same module with `MINIWORLD_TRANSITION_FUSED_SM100A=0`; compiled = `torch.compile(dynamic=False)` of the
 PyTorch implementation. × = ours vs the faster other column. The D64 / D128 / D256 and MSA rows were measured before the D384 fused
 kernels landed (those widths' kernels are unchanged since).

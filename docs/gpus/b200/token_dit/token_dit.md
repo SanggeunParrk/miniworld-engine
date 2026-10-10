@@ -7,22 +7,22 @@ same paths also serve three other head layouts in bf16 -- 24 x 32 and 12 x 64 at
 described in "Head layouts" below; everything else on this page is the 16 x 48 registry row.
 
 Summary (2026-09-30). Inference and training, bf16 and fp32 (fp32 = TF32 tensor cores with fp32 softmax, residual and
-LayerNorm), QK-norm on or off; inference at any L (L128-768 tested and measured), training at L % 128 == 0 (measured at
-L384 / L768, A = 48). Against the fastest other implementation (`bench.py`): inference over Anthropic bf16 1.37-1.72x, fp32
+LayerNorm), QK-norm on or off; inference at any L (L128-768 tested and measured), training at any A and L (padded inside to an
+even A and L % 128 == 0 since 2026-10-06; measured at L384 / L768, A = 48). Against the fastest other implementation (`bench.py`): inference over Anthropic bf16 1.37-1.72x, fp32
 1.02-1.29x (with QK-norm, which Anthropic lacks, 1.7-2.9x over PyTorch compiled); training over PyTorch compiled bf16
 1.65-2.17x, fp32 1.53-1.83x. Time-roofline SoL of the step: inference 16-39 % bf16 / 19-43 % fp32 (small L is latency),
 training 51-52 % bf16 / 53-57 % fp32 (cuBLAS at its power-capped 58-61 %, the attention at 14-47 %).
 
 Head layouts (2026-10-01). 24 x 32, 12 x 64 (d 768) and 16 x 64 (d 1024) run the same two paths in bf16, inference and
 training, built from the same kernels with the head count and width as compile-time flags; 16 x 48 is unchanged. Inference
-leads Anthropic by 1.30-1.56x and training (CUDA graph on) PyTorch compiled by 1.20-2.73x at L256-768. fp32 stays 16 x 48
-only.
+leads Anthropic by 1.30-1.56x and training (CUDA graph on) PyTorch compiled by 1.20-2.73x at L256-768. fp32 serves every layout
+since 2026-10-06 (measured 2026-10-10: "fp32 head layouts" below).
 
 fp32 head layouts, any training shape, MiniWorld routing (2026-10-06; see the section of that name): the TF32 cores are built
-per layout too, so fp32 serves all four layouts (미검증 until the B200 run); training takes any A and L (padded internally
+per layout too, so fp32 serves all four layouts (run and measured 2026-10-10); training takes any A and L (padded internally
 to an even A and L % 128 == 0); `DiTBlock` takes an [A, B, L] key mask that is one [B, L] mask expanded over the samples.
-MiniWorld's fp32 diffusion training had not reached the fused block at all: team-gm routes every [A, B, L] mask -- the one
-the diffusion module passes -- around `DiTBlock.forward`.
+MiniWorld's fp32 diffusion training had not reached the fused block at all: the consumer model code routes every [A, B, L]
+mask -- the one the diffusion module passes -- around `DiTBlock.forward`.
 
 On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, no quack -- on two paths that
 `modules/dit` dispatches to:
@@ -44,8 +44,10 @@ On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, n
   runner whatever the caller's `allow_tf32`). fp32 packs the projection as q | k | g | v: one GEMM writes q | k | g, a
   second writes v^T [768, S L] into the same buffer (see "What was tried" for why v goes K-major there).
   Inference only (the token DiT is not recycled), so the block's weight pack and its pair bias are made once and reused
-  while the weights / the pair tensor are unchanged (keyed on pointer and version), CUDA-graph replays included: a replay
-  reads the pack and pair bias it was captured with and the live single / cond.
+  while the weights / the pair tensor are unchanged (keyed on pointer and version). Inside a CUDA-graph capture the entries are
+  scoped to the capture (`kernels/_capture.py`): a replay re-packs the current weights unless the caller declares
+  `static_weights()` (the benchmark harness does for inference), in which case a replay reads the pack and pair bias it was
+  captured with and the live single / cond.
 - **Training** (`integrations/token_dit_train.py`): serves `DiTBlock` calls under autograd, engine kernel backend
   (implementation TRITON or MINIWORLD), bf16 (inputs, or `compute_dtype=bf16`) or fp32 (fp32 inputs, no `compute_dtype`),
   B == 1, any A and L (padded to an even A and L % 128 == 0 inside, 2026-10-06), key mask [B, L] or none (`DiTBlock` passes
@@ -163,8 +165,8 @@ The same kernels serve fp32 (every GEMM operand and saved activation fp32): CUDA
 
 ## Measurements (2026-09-29 / 30)
 
-B200 (148 SMs, 1000 W power cap), the v2.2.0 pixi env (torch 2.13.0+cu129), one GPU through `gpuq` with nothing else on
-it. ms per block, median. Run-to-run spread on this card is +-3-5 % (power cap), so differences below that are not
+B200 (148 SMs, 1000 W power cap), the v2.2.0 pixi env (torch 2.13.0+cu129), one GPU with no other process on it. ms per
+block, median. Run-to-run spread on this card is +-3-5 % (power cap), so differences below that are not
 resolved.
 
 All rows from `benchmarks/runners/bench.py target=dit level=module` (one DiTBlock); each section states its settings. "ours"
@@ -204,7 +206,7 @@ the engine module path's own error in the same regime -- bf16 worst ~7e-3 (expan
 
 ### Inference over L = 128-768 (2026-09-30)
 
-`bench.py target=dit level=module mode=inference`, S = 5, key mask 20 %, one GPU through `gpuq`. Lengths 128-768 in steps
+`bench.py target=dit level=module mode=inference`, S = 5, key mask 20 %, one GPU with no other process on it. Lengths 128-768 in steps
 of 128 plus 200 / 450 / 700 (not multiples of 128; 450 and 700 not of 8 either: the pad-to-8 path). bf16 =
 `precision=bf16-mixed`, fp32 = `precision=32` (TF32 allowed). Both fused rows compute a layer's pair bias once per pair
 tensor. Anthropic runs `compile=false` (it has no compilable graph); PyTorch eager and compiled, with CUDA graphs. Ours and
@@ -354,8 +356,7 @@ ratio), MUFU 31 ex2 / ns / SM (measured: 16 / clk). Measured: kernel durations f
 (median per call site; a kernel called twice per step, as `resgate_adaln_rows`, sums both), inference S = 5 with one shared
 conditioning and a 20 % key mask, training A = 48, forward + backward, TF32 allowed as in `bench.py`. The weight-side
 `unfold_lnw` (13 us, fixed) has no data floor worth the name. "*" = above the HBM floor: its input was written just before
-and is L2-resident. "step" = the kernels' SoL weighted by their time (PyTorch glue counted at 0). Script:
-`sol_tdit.py` + `tables.py` (B200 scratch `scratch/int/sol`).
+and is L2-resident. "step" = the kernels' SoL weighted by their time (PyTorch glue counted at 0).
 
 Inference, bf16:
 
@@ -470,9 +471,9 @@ of the group below 70 % SoL; ✓ would need every kernel of the group at 70 % or
 | heads x head dim | d_single | inference bf16 | inference fp32 | training bf16 | training fp32 |
 |---|---|---|---|---|---|
 | 16 x 48 (registry row) | 768 | ✓ | ✓ | ✓ | ✓ |
-| 24 x 32 | 768 | ✓ | CUDA 미검증 (2026-10-06) | ✓ | CUDA 미검증 (2026-10-06) |
-| 12 x 64 | 768 | ✓ | CUDA 미검증 (2026-10-06) | ✓ | CUDA 미검증 (2026-10-06) |
-| 16 x 64 | 1024 | ✓ | CUDA 미검증 (2026-10-06) | ✓ | CUDA 미검증 (2026-10-06) |
+| 24 x 32 | 768 | ✓ | CUDA (2026-10-10) | ✓ | CUDA (2026-10-10) |
+| 12 x 64 | 768 | ✓ | CUDA (2026-10-10) | ✓ | CUDA (2026-10-10) |
+| 16 x 64 | 1024 | ✓ | CUDA (2026-10-10) | ✓ | CUDA (2026-10-10) |
 
 d_cond 384, d_pair 128 and transition n = 2 in every layout; the transition and the projections scale with d_single.
 `integrations/token_dit.py` and `integrations/token_dit_train.py` list the layouts as `LAYOUTS` ((heads, d_single) pairs);
@@ -508,8 +509,7 @@ key mask, CUDA-graph replay; the fused training block against the fp32 block at 
 gradient within 1.3x the bf16 PyTorch block's error).
 
 Measurements (2026-10-01, `benchmarks/runners/bench.py target=dit level=module +tdit_n_head=<heads>
-d_single_token=<d>`, one DiTBlock, no key mask, compiled; one GPU through `gpuq`, every row of the table from one run;
-script `scratch/apb/tdit_layouts.sh` on the B200 host). Inference: S = 5, one conditioning shared by the samples, CUDA
+d_single_token=<d>`, one DiTBlock, no key mask, compiled; one GPU with no other process on it, every row of the table from one run). Inference: S = 5, one conditioning shared by the samples, CUDA
 graph; Anthropic `compile=false`. Output error against the fp32 IEEE PyTorch block: ours 3.3-3.6e-3, Anthropic 3.4e-3,
 bf16 PyTorch 4.2e-3, in every layout.
 
@@ -556,18 +556,18 @@ tables above are 16 x 48 only. With CUDA graphs off, ours trails PyTorch compile
 
 ## fp32 head layouts, any training shape, MiniWorld routing (2026-10-06)
 
-**Why MiniWorld's fp32 diffusion training ran the Triton per-op path.** A profile of the phase-2 training micro-step (token
+**Why MiniWorld's fp32 diffusion training ran the Triton per-op path.** A profile of MiniWorld's training micro-step (token
 DiT fp32, trunk bf16) showed engine Triton kernels on top (`_adaln_fwd_gate`, `gated_projection`, `cond_transition`,
 `layernorm_*`, `adaln_bwd_pre`): every token DiT block ran `AugmentedAttentionPairBias` + `ConditionedTransition` one op at a
 time. Not one of `token_dit_train.serves()`'s conditions was the cause -- it was never asked:
 
-- MiniWorld's `DiffusionModule.forward` (`src/miniworld/modules/diffusion_module.py`, origin/main 501cb4c) calls the token
+- MiniWorld's `DiffusionModule.forward` (`src/miniworld/modules/diffusion_module.py`) calls the token
   DiT with `mask=structure.token_mask.unsqueeze(0).expand(A, -1, -1)`, an [A, B, L] mask.
-- team-gm's `DiffusionTransformerBlock.forward` (`src/team_gm/modules/blocks/diffusion_transformer.py`, exp/miniworld
-  731ec0c, since af2bda7 2026-10-01) hands only `mask is None or mask.ndim == 2` to `DiTBlock.forward`; an [A, B, L] mask
-  goes to `self.attention(...)` then `self.transition(...)` -- the module path, whatever the dtype (bf16 too).
+- The consumer model code's `DiffusionTransformerBlock.forward` (since 2026-10-01) hands only `mask is None or mask.ndim
+  == 2` to `DiTBlock.forward`; an [A, B, L] mask goes to `self.attention(...)` then `self.transition(...)` -- the module
+  path, whatever the dtype (bf16 too).
 - The engine's `DiTBlock.forward` took only a [B, L] mask (its fused paths take one key mask shared by the samples), which
-  is why team-gm routed [A, B, L] around it.
+  is why the consumer model code routed [A, B, L] around it.
 
 Every other condition holds for that call: grad on, `implementation: miniworld_engine` (-> TRITON backend),
 `engine_backend: auto`, B200, fp32 activations (`diffusion.dtype: fp32`), B = 1, A = 48 (even), L = 384 (the crop is padded to
@@ -578,9 +578,9 @@ torch.compile (the block's forward / backward are opaque ops).
 Fixed in the engine: `DiTBlock.forward` takes `[B, L] | [A, B, L]` masks; an [A, B, L] mask that is one [B, L] mask for every
 sample -- stride 0 over A (an `expand`, which is what MiniWorld passes; decided from strides, so no device read under
 compile or capture) or A == 1 -- reaches the fused inference / training paths as its [B, L] row, and a mask that differs per
-sample keeps the module path. team-gm's block then has no reason to route [A, B, L] masks around `DiTBlock.forward`: it
-needs `if mask is None or mask.ndim in (2, 3)` (or simply always) `-> DiTBlock.forward(...)` for MiniWorld to reach the
-fused block (a team-gm change, not made here).
+sample keeps the module path. The consumer model code's block then has no reason to route [A, B, L] masks around
+`DiTBlock.forward`: it needs `if mask is None or mask.ndim in (2, 3)` (or simply always) `-> DiTBlock.forward(...)` for
+MiniWorld to reach the fused block (a change in the consumer model code, not made here).
 
 **Any A and L in training.** The kernels tile L by 128 and pair the samples. `token_dit_train.block` now pads L to the next
 multiple of 128 and A to an even count -- zero single / cond rows and samples, zero pair rows and columns, padded keys masked
@@ -616,8 +616,52 @@ Tests: `tests/integrations/test_b200_token_dit_tf32_layouts_gpu.py` (the TF32 co
 L128 / 384, key mask on / off; inference L128 / 200 / 384 --; the fused fp32 inference step and training block at every layout
 against the fp32 IEEE block, held to 1.5x the module path's error in the same TF32 regime, the training block at A L = 4 x 256,
 2 x 384 and 3 x 200 (padding); fp32 under bf16 autocast) and `tests/integrations/test_b200_token_dit_train_gpu.py` (now also A L
-= 3 x 200, and the [A, B, L] expanded mask taking the fused path while a per-sample mask keeps the module path). Not run yet;
-no measurements yet.
+= 3 x 200, and the [A, B, L] expanded mask taking the fused path while a per-sample mask keeps the module path). Run on 2026-10-10
+(engine commit `0a7928ff`, one B200): 94 passed over these two files and `tests/integrations/test_b200_token_dit_layouts_gpu.py`.
+
+**Measurements (2026-10-10).** `benchmarks/runners/bench.py target=dit level=module precision=32 +tdit_n_head=<heads> d_single_token=<d>
+min_seq_len=256 max_seq_len=768 seq_len_step=256` (inference with `+shared_cond=true`, S = 5; training A = 48), one DiTBlock, no key mask, compiled
+(Anthropic: `compile=false`, its rows from a separate run), CUDA graph for inference, graph off / on for training; one B200 with no other
+process on it, torch 2.13.0+cu129, triton 3.7.1, kernels built by nvcc 13.1, driver 580.95.05; TF32 allowed. Every cell of the bf16 layout
+tables above was re-measured in the same runs (60 cells, `precision=bf16-mixed`): none moved by more than 8 %, so they keep their 2026-10-01 values.
+
+Inference, fp32 (TF32 allowed), S = 5, one conditioning shared by the samples, ms (× = ours against the faster of Anthropic and PyTorch compiled):
+
+| layout | (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × |
+|---|---|---|---|---|---|
+| 16 x 48 | (256, 768, fp32) | 0.192 | 0.121 | **0.100** | 1.21 |
+| 16 x 48 | (512, 768, fp32) | 0.364 | 0.178 | **0.160** | 1.12 |
+| 16 x 48 | (768, 768, fp32) | 0.629 | 0.254 | **0.209** | 1.22 |
+| 24 x 32 | (256, 768, fp32) | 0.203 | 0.121 | **0.100** | 1.20 |
+| 24 x 32 | (512, 768, fp32) | 0.407 | 0.174 | **0.155** | 1.12 |
+| 24 x 32 | (768, 768, fp32) | 0.741 | 0.247 | **0.225** | 1.10 |
+| 12 x 64 | (256, 768, fp32) | 0.184 | 0.119 | **0.106** | 1.12 |
+| 12 x 64 | (512, 768, fp32) | 0.336 | 0.174 | **0.158** | 1.10 |
+| 12 x 64 | (768, 768, fp32) | 0.561 | 0.231 | **0.253** | 0.91 |
+| 16 x 64 | (256, 1024, fp32) | 0.237 | 0.149 | **0.137** | 1.09 |
+| 16 x 64 | (512, 1024, fp32) | 0.436 | 0.225 | **0.239** | 0.94 |
+| 16 x 64 | (768, 1024, fp32) | 0.686 | 0.313 | **0.317** | 0.99 |
+
+Training, fp32, A = 48, CUDA graph off / on, ms (× = graph on; Anthropic has no backward):
+
+| layout | (Length, Dimension, dtype) | PyTorch compiled | ours | × |
+|---|---|---|---|---|
+| 16 x 48 | (256, 768, fp32) | 2.901 / 2.691 | 2.006 / **1.853** | 1.45 |
+| 16 x 48 | (512, 768, fp32) | 6.604 / 6.454 | 4.023 / **4.001** | 1.61 |
+| 16 x 48 | (768, 768, fp32) | 12.356 / 12.193 | 6.510 / **6.601** | 1.85 |
+| 24 x 32 | (256, 768, fp32) | 3.264 / 3.060 | 1.959 / **1.914** | 1.60 |
+| 24 x 32 | (512, 768, fp32) | 8.026 / 7.870 | 4.208 / **4.069** | 1.93 |
+| 24 x 32 | (768, 768, fp32) | 15.662 / 15.505 | 6.960 / **6.863** | 2.26 |
+| 12 x 64 | (256, 768, fp32) | 2.704 / 2.490 | 1.942 / **1.897** | 1.31 |
+| 12 x 64 | (512, 768, fp32) | 5.885 / 5.663 | 4.157 / **4.006** | 1.41 |
+| 12 x 64 | (768, 768, fp32) | 10.538 / 10.487 | 6.684 / **6.853** | 1.53 |
+| 16 x 64 | (256, 1024, fp32) | 3.480 / 3.344 | 2.772 / **2.766** | 1.21 |
+| 16 x 64 | (512, 1024, fp32) | 8.078 / 8.023 | 5.800 / **5.782** | 1.39 |
+| 16 x 64 | (768, 1024, fp32) | 14.556 / 14.193 | 9.655 / **9.542** | 1.49 |
+
+At 12 x 64 and 16 x 64 the fp32 inference step trails Anthropic by 1-9 % at L512-768 (0.91-0.99x): the TF32 attention forward runs two stages at
+DH 64 (see the stage table above), and the same layouts' training leads PyTorch compiled by 1.2-1.5x only. At 16 x 48 and 24 x 32 ours leads
+Anthropic by 1.10-1.22x.
 
 ## What was tried and not kept
 
@@ -627,7 +671,7 @@ no measurements yet.
 | pair bias as one fused WMMA kernel (LayerNorm + projection) | 3.4-3.6x slower than LayerNorm + cuBLAS; dropped |
 | 1-CTA SwiGLU GEMM (`gemm_swiglu_sm100.cu`, kept for the record) | 540 TFLOPS: a 128 x 256 tile per SM is TMA-intake-bound; the 2-CTA kernel replaced it |
 | `gemm_swiglu2` at L384 (M = 1920) | 14.0 us vs 13.7 for cuBLAS + row pass: 96 items on 74 SM pairs leave most pairs idle in round 2 |
-| tf32 MMA with an MN-major operand in the plain 128-B swizzle (the bf16 kernels' layout for v, q / dO, K) | returns zeros on B200, A or B, no error (isolated probe `tf32_probe2.cu`); an MN-major tf32 operand must be in the 128-B swizzle with 32-B atoms (UMMA layout type 1, SBO 512), which is exact (`tf32_probe3.cu`, also TMA-loaded); a K-major operand in that layout faults. The inference twin reads v^T from a second GEMM instead (a 32-B-atom v tile would not fit next to the g / o staging) |
+| tf32 MMA with an MN-major operand in the plain 128-B swizzle (the bf16 kernels' layout for v, q / dO, K) | returns zeros on B200, A or B, no error (isolated probe); an MN-major tf32 operand must be in the 128-B swizzle with 32-B atoms (UMMA layout type 1, SBO 512), which is exact (a second isolated probe, also TMA-loaded); a K-major operand in that layout faults. The inference twin reads v^T from a second GEMM instead (a 32-B-atom v tile would not fit next to the g / o staging) |
 | a 2-CTA key tile for the fp32 dkv (halving the q / dO intake per CTA) | not built: the kernel was not intake-bound -- its TMA intake floor is ~69 us at L384 against 240 measured -- but latency-bound on 2 stages; one K / V slot with 3 stages took the backward (dkv + dqb) 472 -> 452 us (L384) and 1706 -> 1554 us (L768). dqb with one K slot (STK=1) was slower (558 / 1968 us) |
 | fusing the training row passes into custom GEMM epilogues | measured against what it saves, most of them write tensors the backward reads anyway (z, O, a / b), so an epilogue saves one read; the LayerNorm passes need whole rows. Done where it pays: the SwiGLU into the expand GEMM (bf16, `-DSAVE_AB`) |
 | `setmaxnreg` dec 56 / inc 224 in the fp32 backward kernels | the 384-thread kernels compile to 168 registers, so inc gains nothing, and dec 56 spilled the producer / MMA warps (172 B in dkv, 108 B in dqb); removed, no spills |
@@ -635,9 +679,9 @@ no measurements yet.
 
 ## Limits and next
 
-- Head layouts other than 16 x 48: fp32 built (2026-10-06) but not yet run or measured; no per-kernel SoL yet in either dtype.
-- A DiTBlock call sees one block, so the pair bias and the cond LayerNorm are recomputed per block; the research stack
-  runner (branch `b200/token-dit`) hoisted them for the whole stack (training 1.62 / 3.56 ms per block there, with Triton
+- Head layouts other than 16 x 48: no per-kernel SoL yet in either dtype; fp32 inference at 12 x 64 / 16 x 64 trails Anthropic by 1-9 % at L512-768.
+- A DiTBlock call sees one block, so the pair bias and the cond LayerNorm are recomputed per block; an earlier research
+  runner for the whole stack (not part of this engine) hoisted them (training 1.62 / 3.56 ms per block there, with Triton
   and quack).
 - fp32 training's SwiGLU is cuBLAS + `swiglu_rows` (`gemm_swiglu2` is bf16).
 - fp32 inference at lengths whose last query tile is mostly padding (450, 700) leads Anthropic by 2-5 % only; a 64-row last

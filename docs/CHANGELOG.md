@@ -103,6 +103,24 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - B200 fp32 AF3 local atom DiT inference, faster: three fused kernels per hoisted inference call (`atom_pre_tf32`,
   attention, `atom_post_tf32`), the weight pack in 3 launches, the conditioning tables in 2, PDL. 3 blocks, 5 samples: 1.59-1.98x
   Anthropic's FastAtomStack fp32 per call, 1.14-1.39x with hoisted tables, at 1024-6144 atoms. Page: `docs/gpus/b200/local_dit/local_dit.md`.
+- B200 AF3 local atom DiT training, faster (bf16 and fp32): all dense weight gradients of a block in one grouped split-K launch
+  (`sm100_atom.atom_dw`, `dw_atom.cu`: tcgen05 with bf16 or TF32 operands, fp32 partials, a deterministic in-order reduce into each weight's own
+  tensor; it replaces one cuBLAS GEMM per weight); the gated-residual GEMM with TMA-loaded residual and gate (`gemm_rg_tf32.cu`); the
+  bias-gradient column sums in one pass; in cross-attention mode the K / V AdaLN and its backward inside `pre_fwd` / `pre_bwd` (`-DCROSS=1`
+  builds of the same sources: they replace the separate K / V row kernels and the two K / V cuBLAS GEMMs, and add the K / V branch's dx1 before
+  AdaLN 1's backward), half-warp 16-byte row kernels for the conditioning LayerNorm (`lcross.cu`), and the key mask passed as a uint8 view
+  instead of a converted copy. One block, A = 48, 4096 atoms (CUDA graph): cross-attention bf16 2.52 -> 1.58 ms, fp32 4.33 -> 3.84 ms;
+  shared-AdaLN bf16 1.38 ms (2.59 ms at 8192 atoms). Tests: `tests/integrations/test_b200_atom_dw_gpu.py`, `test_b200_local_dit_gpu.py`,
+  `test_b200_local_dit_tf32_gpu.py`; page: `docs/gpus/b200/local_dit/local_dit.md`.
+- B200 atom-block tile kernels (`sm100_atom`, shared by the dense atom DiT and the local DiT): the TMA stores of `post_fwd`, `tr_bwd_gate`,
+  `post_bwd`, `pre_bwd` and `cond_bwd` are issued and waited for by a lane of the producer warp instead of the compute leader (`post_fwd`
+  162 -> 136 us at 196 608 rows), the two warpgroups of `cond_fwd` are staggered by half an iteration (125 -> 114 us) and the K / V AdaLN math
+  uses `rsqrtf` / `__fdividef` (the IEEE division and square root were 2860 of 5200 clk per tile of the cross-attention `pre_fwd`: 130 -> 94 us).
+  One block, A = 5, 4096 atoms, CUDA graph under `static_weights()` + `static_inputs()`: 54 us shared-AdaLN, 56 us cross-attention.
+- B200 documentation: the B200 pages were re-verified through `benchmarks/runners/bench.py` on 2026-10-10 (TriMul, TriAttn, Transition, OPM, PWA,
+  AttentionPairBias CUDA-graph tables; the token DiT layout tables; the dense atom DiT tables), the fp32 token DiT head layouts were run and measured,
+  and the SWA atom DiT page carries an engine harness cross-check. `AttentionPairBias`' PyTorch compiled / cuEquivariance rows are 20-25 % faster than
+  on 2026-10-01 since LayerNorm / RMSNorm on B200 run as fused PyTorch ops.
 - B200 fp32 SWA atom DiT forward, faster: the rounded weight forms in one kernel (`wprep_tf32.cu`), `mod_fwd_tf32` as a persistent
   store stream, and the per-row modulation / RoPE values of `qkvg_fwd_tf32` / `ffn_fwd_tf32` through TMA boxes. Inference, one block,
   5 samples: 1.37-1.86x Anthropic's fused block with TF32 GEMMs (modulation in the call; 1.43-2.03x precomputed) at 1024-6144 atoms,

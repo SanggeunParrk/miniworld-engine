@@ -153,7 +153,9 @@ training with the module's dropout, when `d_pair` is a multiple of 64 in 64 .. 5
 heads), and the other conditions of the d_pair 128 path hold. A 16-channel head is zero-padded to 32 in the packed weights (its
 padded q / k / v / g channels are 0 and meet zero columns of Wo; the softmax scale stays 1/√16), so every width runs the
 head-dim-32 core. The packed weights are cached on the module until a parameter changes (data pointer or version: an
-optimizer step re-packs); parameters may be bf16 or fp32 and the gradients come back in their dtype.
+optimizer step re-packs); inside a CUDA-graph capture the cache is scoped to the capture, so every replay re-packs the current
+weights unless the caller declares `static_weights()` (inference graphs; the benchmark harness does, see [b200.md](../b200.md)).
+Parameters may be bf16 or fp32 and the gradients come back in their dtype.
 
 ### Inference
 
@@ -266,9 +268,9 @@ the dropout scale before adding the residual (its drain then reads x).
 The bias-only variant (`use_self_attention=False`), heads of 64 / 96 / 128 channels (the module's default of 4 heads at
 d_pair ≥ 256) and `BidirectionalTriangleAttention` are not served.
 
-## Measurements (2026-09-30)
+## Measurements (2026-09-30; CUDA-graph tables re-verified 2026-10-10)
 
-B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, cuEquivariance 0.12.0, B=1, bf16, starting node, mask all-true,
+B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, cuEquivariance 0.12.0, sm_100a kernels built by nvcc 13.1, B=1, bf16, starting node, mask all-true,
 `benchmarks/runners/bench.py target=triangle_attention level=module min_seq_len=128 max_seq_len=768` (compiled), with
 `d_pair=<C> +tri_d_hidden=<HD> +tri_n_head=<heads>`. Latency in ms, median. × = ours vs the fastest of PyTorch compiled /
 cuEquivariance / Anthropic; "Triton path" is the same module with `+tri_b200_cuda=false` (the repository's Triton kernels, the
@@ -278,13 +280,15 @@ cuEquivariance fallbacks for 4-head calls, so this column is not the H100 payloa
 Triton autotune cache exists; none of the columns use one (ours is CUDA end to end). The 32-channel-head rows are one family:
 d_pair 64 is 2 × 32, d_pair 128 the fused 4 × 32 path above, 256 / 384 / 512 are 8 / 12 / 16 × 32.
 
+- Re-verification (2026-10-10, engine commit `0a7928ff`, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the CUDA-graph tables of the 32-channel-head family, d_pair 64 4 x 16 and 4 x 32 (Triton path included) (335 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.2 % (0.7 % for ours), 90th percentile 1.8 %; two cells were replaced ((384, 64) PyTorch compiled inference 0.584 -> 0.670 ms; (128, 64) cuEquivariance training, previously refused, 0.179 ms). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values.
+
 ### Heads × 32 · Inference (CUDA graph)
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.055 | 0.047 | — | 0.037 | 0.026 | 1.78 | 1.39× |
 | (256, 64) | 0.174 | 0.094 | — | 0.092 | 0.053 | 1.77 | 1.73× |
-| (384, 64) | 0.584 | 0.186 | — | 0.182 | 0.102 | 1.82 | 1.78× |
+| (384, 64) | 0.670 | 0.186 | — | 0.182 | 0.102 | 1.82 | 1.78× |
 | (512, 64) | 1.454 | 0.276 | — | 0.330 | 0.190 | 1.45 | 1.73× |
 | (640, 64) | 3.145 | 0.495 | — | 0.571 | 0.318 | 1.56 | 1.79× |
 | (768, 64) | 5.002 | 0.723 | — | 0.921 | 0.501 | 1.44 | 1.84× |
@@ -319,7 +323,7 @@ d_pair 64 is 2 × 32, d_pair 128 the fused 4 × 32 path above, 256 / 384 / 512 a
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
 |---|---|---|---|---|---|---|---|
-| (128, 64) | 0.175 | — | — | 0.144 | 0.095 | 1.84 | 1.52× |
+| (128, 64) | 0.175 | 0.179 | — | 0.144 | 0.095 | 1.84 | 1.52× |
 | (256, 64) | 0.458 | 0.445 | — | 0.356 | 0.199 | 2.23 | 1.79× |
 | (384, 64) | 1.242 | 1.023 | — | 0.761 | 0.392 | 2.61 | 1.94× |
 | (512, 64) | 2.729 | 1.940 | — | 1.420 | 0.724 | 2.68 | 1.96× |
@@ -352,8 +356,9 @@ d_pair 64 is 2 × 32, d_pair 128 the fused 4 × 32 path above, 256 / 384 / 512 a
 
 ![Heads × 32 · Training, dropout 0.25 (CUDA graph), length sweep at D128](figures/triattn_heads_32_training_dropout_0_25_cuda_graph_length.png) ![Heads × 32 · Training, dropout 0.25 (CUDA graph), dimension sweep at L384](figures/triattn_heads_32_training_dropout_0_25_cuda_graph_dimension.png) <!-- measure_bars -->
 
-cuEquivariance at (128, 64) is — here: the harness refuses it, reproducibly, because its graph-replayed gradients differ between
-timed runs by 1.2e-4 relative (the check is 1e-4); without a graph it measured normally.
+cuEquivariance at (128, 64): the harness's repeat check sits on this row -- its graph-replayed gradients differ between timed runs
+by about 1.2e-4 relative (the check is 1e-4). It refused the row (—) on 2026-09-30 and in one of two 2026-10-10 runs, and measured
+0.179 ms in the other; without a graph it measures normally.
 
 ### Heads × 32 · Training, dropout 0.25 (no CUDA graph)
 
@@ -394,7 +399,7 @@ timed runs by 1.2e-4 relative (the check is 1e-4); without a graph it measured n
 
 Without a graph ours pays host-side time (tensor-map encoding, the autograd function, a dozen launches, ~0.4–0.5 ms a step)
 above the GPU work at L128 / L256, so its lead is smallest there (1.13–1.95× at L128); these host-bound rows also move with
-the load on the shared host.
+other load on the host.
 
 ### d_pair 64, 4 × 16 · Inference (CUDA graph)
 
