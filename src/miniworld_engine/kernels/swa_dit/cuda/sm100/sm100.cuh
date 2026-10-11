@@ -139,7 +139,9 @@ DEVI bool elect_one() {
 // programmatic dependent launch: wait for the previous grid's completion (and memory flush) / let the next grid be scheduled
 DEVI void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 // PDL_EARLY = 1 (default): launch_dependents at the top, so the dependent kernel may launch as soon as every CTA of this kernel has
-// started. PDL_EARLY = 0 drops the trigger: the dependent launches when this kernel's CTAs exit.
+// started. PDL_EARLY = 0 drops the trigger: the dependent launches when this kernel's CTAs exit. ffn_fwd2_a1 (A = 1 - 3) is built with 0
+// (and qkvg_fwd2_a1, which is faster that way): with the early trigger a captured graph of the forward chain hung after a few dozen replays (per-sample conditioning, 48 rows,
+// ragged seqused) -- the instruction itself, not the code around it (an empty compiler barrier in its place does not hang).
 #ifndef PDL_EARLY
 #define PDL_EARLY 1
 #endif

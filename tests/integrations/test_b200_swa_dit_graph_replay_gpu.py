@@ -1,8 +1,9 @@
 """CUDA-graph replays of the SWA atom DiT forward chain on B200 must not hang.
 
-The A = 1 - 3 builds of ``qkvg_fwd2`` / ``ffn_fwd2`` (ATM = 32, one FFN stage) with the early ``griddepcontrol.launch_dependents`` hung the
-four-kernel PDL chain (modulation -> qkvg -> attention -> ffn) after a few dozen replays when the rows were ragged (``seqused`` below S):
-the GPU spun at full power with the host in ``cudaStreamSynchronize``. Those two cubins are built with ``-DPDL_EARLY=0`` now. A hang
+``ffn_fwd2_a1`` (the A = 1 - 3 build of the last kernel of the four-kernel PDL chain modulation -> qkvg -> attention -> ffn) hung, with
+the early ``griddepcontrol.launch_dependents``, after a few dozen graph replays when every sample had its own conditioning row and the
+rows were ragged (``seqused`` below S): the GPU spun at full power with the host in ``cudaStreamSynchronize``. It is built with
+``-DPDL_EARLY=0`` now. A hang
 cannot be interrupted in-process, so each case runs in a subprocess with a timeout."""
 
 from __future__ import annotations

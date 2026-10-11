@@ -25,8 +25,8 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 ### Fixed
 
 - B200 SWA atom DiT: the forward chain (modulation -> qkvg -> attention -> ffn, PDL) hung in CUDA-graph replays with one conditioning
-  row per sample (A = 1, B = N) and ragged `seqused`. The A = 1 - 3 builds of `qkvg_fwd2` / `ffn_fwd2` are built with `-DPDL_EARLY=0` (no
-  early `griddepcontrol.launch_dependents`); the other builds are unchanged. A1 inference after the change: 0.031-0.043 ms for
+  row per sample (A = 1, B = N) and ragged `seqused`. `ffn_fwd2_a1` (the A = 1 - 3 build of the last kernel) is built with `-DPDL_EARLY=0`
+  (no early `griddepcontrol.launch_dependents`), and `qkvg_fwd2_a1` the same way (faster); the other builds are unchanged. A1 inference after the change: 0.031-0.043 ms for
   1024-4096 atoms (harness). Test: `tests/integrations/test_b200_swa_dit_graph_replay_gpu.py`; page:
   `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md` ("Fixed (2026-10-11)").
 

@@ -171,10 +171,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.1391 | 0.0838 | 0.0551 | 0.0408 | 1.35 |
-| (2048, 128) | 0.3828 | 0.1166 | 0.0737 | 0.0511 | 1.44 |
-| (3072, 128) | 0.7044 | 0.1350 | 0.0798 | 0.0593 | 1.35 |
-| (4096, 128) | 1.2374 | 0.1719 | 0.1124 | 0.0778 | 1.45 |
+| (1024, 128) | 0.1391 | 0.0838 | 0.0552 | 0.0409 | 1.35 |
+| (2048, 128) | 0.3828 | 0.1165 | 0.0755 | 0.0511 | 1.48 |
+| (3072, 128) | 0.7044 | 0.1350 | 0.0818 | 0.0593 | 1.38 |
+| (4096, 128) | 1.2369 | 0.1718 | 0.1125 | 0.0778 | 1.45 |
 
 ![Inference A5, length sweep at D128](figures/swa_atom_dit_inference_a5_length.png) <!-- measure_bars -->
 
@@ -182,10 +182,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.0961 | 0.0716 | 0.0489 | 0.0306 | 1.60 |
-| (2048, 128) | 0.1616 | 0.0736 | 0.0510 | 0.0326 | 1.56 |
-| (3072, 128) | 0.2681 | 0.0756 | 0.0510 | 0.0368 | 1.39 |
-| (4096, 128) | 0.3500 | 0.0797 | 0.0531 | 0.0429 | 1.24 |
+| (1024, 128) | 0.0983 | 0.0716 | 0.0490 | 0.0306 | 1.60 |
+| (2048, 128) | 0.1638 | 0.0736 | 0.0511 | 0.0327 | 1.56 |
+| (3072, 128) | 0.2662 | 0.0768 | 0.0511 | 0.0388 | 1.32 |
+| (4096, 128) | 0.3481 | 0.0798 | 0.0532 | 0.0429 | 1.24 |
 
 ![Inference A1, length sweep at D128](figures/swa_atom_dit_inference_a1_length.png) <!-- measure_bars -->
 
@@ -193,8 +193,8 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (4096, 128) | 28.895 | 3.380 | 2.289 | 1.223 | 1.87 |
-| (8192, 128) | 114.108 | 6.575 | 4.456 | 2.272 | 1.96 |
+| (4096, 128) | 28.883 | 3.380 | 2.288 | 1.223 | 1.87 |
+| (8192, 128) | 114.027 | 6.578 | 4.456 | 2.274 | 1.96 |
 
 ![Training A48 · forward + backward, length sweep at D128](figures/swa_atom_dit_training_a48_forward_backward_length.png) <!-- measure_bars -->
 
@@ -206,26 +206,26 @@ A5 inference
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 1024 | 0.0408 | 0.0470 | 1.15 |
+| 1024 | 0.0409 | 0.0470 | 1.15 |
 | 2048 | 0.0511 | 0.0717 | 1.40 |
 | 3072 | 0.0593 | 0.0920 | 1.55 |
-| 4096 | 0.0778 | 0.1203 | 1.55 |
+| 4096 | 0.0778 | 0.1188 | 1.53 |
 
 A1 inference (one sample: the same call)
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
 | 1024 | 0.0306 | 0.0305 | 1.00 |
-| 2048 | 0.0326 | 0.0326 | 1.00 |
-| 3072 | 0.0368 | 0.0367 | 1.00 |
+| 2048 | 0.0327 | 0.0326 | 1.00 |
+| 3072 | 0.0388 | 0.0387 | 1.00 |
 | 4096 | 0.0429 | 0.0428 | 1.00 |
 
 A48 training
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 4096 | 1.223 | 3.120 | 2.55 |
-| 8192 | 2.272 | 6.048 | 2.66 |
+| 4096 | 1.223 | 3.122 | 2.55 |
+| 8192 | 2.274 | 6.055 | 2.66 |
 
 At A48 and 4096 atoms the three modulation kernels (`swa_mod_fwd` 0.40, `swa_mod_bwd_dc` 0.52, `swa_mod_bwd_dw` 0.34 ms) are 1.27 of the 3.12 ms;
 the other kernels sum to 1.9 ms against 1.2 ms with the shared conditioning, because they read per-row modulation rows instead of one
@@ -377,15 +377,18 @@ thread (each warp load touched 32 sectors with a ~24 KB L1).
 
 **Hang of the forward chain in CUDA-graph replays.** With one conditioning row per sample (A = 1, B = N = 48, 4096 atoms) and ragged
 `seqused`, replaying the captured inference graph hung after a few dozen replays: the GPU spun at full power, the host sat in
-`cudaStreamSynchronize` (found as a hung benchmark; reproducible 3 of 3 times in a fresh process). The forward kernels are a PDL chain
-(modulation -> qkvg -> attention -> ffn), each calling `griddepcontrol.launch_dependents` at its top so that the next kernel's CTAs
-launch while it runs. Bisected: each kernel alone, and any two-kernel subchain, replayed 800 times without a hang; the whole chain hung;
-with the trigger removed it did not. The two A = 1 - 3 builds, `qkvg_fwd2_a1` (`-DATM=32`) and `ffn_fwd2_a1` (`-DATM=32 -DNSTG=1`), are
-now built with `-DPDL_EARLY=0` (the trigger is the kernel's exit); the default builds (A >= 4, and the hoisted conditioning at A = 5 and 48) keep
-the early trigger and replayed 4000 times unmasked and ragged without a hang. The root cause (which resource the two-deep overlap
-exhausts) was not identified; the cost of the fix is on the A = 1 builds only. fp32 (TF32) forward chains replayed 600 times (A = 1, 5, 48,
-ragged) without a hang. Test: `tests/integrations/test_b200_swa_dit_graph_replay_gpu.py` (a subprocess per case with a timeout; fails on the
-old builds for the per-sample case).
+`cudaStreamSynchronize` (found as a hung benchmark, then reproduced in a fresh process every time). The forward kernels are a PDL chain
+(modulation -> qkvg -> attention -> ffn), each calling `griddepcontrol.launch_dependents` at its top. Bisected by building one kernel at a
+time without the trigger: only **`ffn_fwd2_a1`** (`-DATM=32 -DNSTG=1`, the A = 1 - 3 build of the last kernel of the chain) hangs
+with it (3 of 3 runs; every other combination of kernels did not hang, 3 of 3 for `qkvg_fwd2_a1` alone). Replacing the instruction by an empty
+compiler barrier does not hang, so it is the instruction, not the code scheduled around it. That kernel is built with `-DPDL_EARLY=0`
+(the dependent launches when its CTAs exit); `qkvg_fwd2_a1` is built the same way because it measures faster (A1, 1024 atoms:
+0.031 against 0.037 ms; 2048: 0.033 against 0.035 ms), everything else keeps the early trigger. After the change 60 000 back-to-back replays of
+every shape (A = 1 / 2 / 3 / 5 / 48; per-sample and shared conditioning; ragged) and 6 000 eager calls finished without a hang. The
+mechanism was not found: the kernel is the last of the chain, nothing in the captured graph depends on it, and the hang is
+independent of whether replays are separated by another kernel. fp32 (TF32) forward chains replayed 600 times (A = 1, 5, 48, ragged)
+without a hang. Test: `tests/integrations/test_b200_swa_dit_graph_replay_gpu.py` (a subprocess per case with a timeout; it fails
+with the early trigger back in for the per-sample case).
 
 ## What was tried and not kept
 
