@@ -147,12 +147,14 @@ bulk shared::cluster copies, summed in rank order.
 ## Measurements (2026-10-11)
 
 - Setup: B200 (148 SMs, 1000 W power cap), one GPU with no other process on it, torch 2.13.0+cu129, triton 3.7.1, kernels built by
-  nvcc 13.1, engine v2.2.0 plus unreleased changes. One block, B = 1, bf16 (`precision=bf16-mixed`), unmasked rows. Inference in a CUDA
-  graph, training in a manually captured graph (`cudagraph=manual`: the harness times a backward closure). Run-to-run spread +-3-5 % (power cap).
+  nvcc 13.1, engine v2.2.0 plus unreleased changes, the engine environment's `python` called directly (a `pixi run` shell around it made
+  `torch.compile` produce a 2x slower PyTorch row: 28.9 against 13.2 ms for A48 training). One block, B = 1, bf16 (`precision=bf16-mixed`),
+  unmasked rows. Inference and training in a manually captured CUDA graph (`cudagraph=manual`; the harness times a backward closure for
+  training). Run-to-run spread +-3-5 % (power cap).
   Tables in ms; × = ours against the fastest of the other columns.
 - Command: `python benchmarks/runners/bench.py target=swa_dit level=module mode=<inference|training> n_augment=<A> sweep_axis=seq_len
   min_seq_len=<atoms / 8> max_seq_len=<atoms / 8> compile=false +shared_cond=true` (the harness length is tokens, atoms = 8 x seq_len;
-  inference `cudagraph=graphed`, training `cudagraph=manual`).
+  training with `cudagraph=manual`, inference with the default `cudagraph=auto`, which is manual).
 - Conditioning: `+shared_cond=true` gives the A samples ONE conditioning [1, S, 128] and calls the block through
   `SWADiTBlock.forward_hoisted`, as the model does (its atom conditioning repeats over the augments, so the adaLN modulation is computed
   once per batch element: team-gm's `SWAAtomTransformer` calls `swa_dit_hoist_modulation(c_base, ...)`). Without the flag every
@@ -171,10 +173,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.1391 | 0.0838 | 0.0552 | 0.0409 | 1.35 |
-| (2048, 128) | 0.3828 | 0.1165 | 0.0755 | 0.0511 | 1.48 |
-| (3072, 128) | 0.7044 | 0.1350 | 0.0818 | 0.0593 | 1.38 |
-| (4096, 128) | 1.2369 | 0.1718 | 0.1125 | 0.0778 | 1.45 |
+| (1024, 128) | 0.0880 | 0.0838 | 0.0553 | 0.0409 | 1.35 |
+| (2048, 128) | 0.2150 | 0.1166 | 0.0737 | 0.0511 | 1.44 |
+| (3072, 128) | 0.3257 | 0.1371 | 0.0798 | 0.0593 | 1.35 |
+| (4096, 128) | 0.5672 | 0.1699 | 0.1106 | 0.0778 | 1.42 |
 
 ![Inference A5, length sweep at D128](figures/swa_atom_dit_inference_a5_length.png) <!-- measure_bars -->
 
@@ -182,10 +184,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.0983 | 0.0716 | 0.0490 | 0.0306 | 1.60 |
-| (2048, 128) | 0.1638 | 0.0736 | 0.0511 | 0.0327 | 1.56 |
-| (3072, 128) | 0.2662 | 0.0768 | 0.0511 | 0.0388 | 1.32 |
-| (4096, 128) | 0.3481 | 0.0798 | 0.0532 | 0.0429 | 1.24 |
+| (1024, 128) | 0.0737 | 0.0716 | 0.0490 | 0.0307 | 1.60 |
+| (2048, 128) | 0.1127 | 0.0737 | 0.0511 | 0.0327 | 1.56 |
+| (3072, 128) | 0.1556 | 0.0758 | 0.0511 | 0.0369 | 1.38 |
+| (4096, 128) | 0.1986 | 0.0778 | 0.0531 | 0.0430 | 1.24 |
 
 ![Inference A1, length sweep at D128](figures/swa_atom_dit_inference_a1_length.png) <!-- measure_bars -->
 
@@ -193,8 +195,8 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (4096, 128) | 28.883 | 3.380 | 2.288 | 1.223 | 1.87 |
-| (8192, 128) | 114.027 | 6.578 | 4.456 | 2.274 | 1.96 |
+| (4096, 128) | 13.160 | 3.385 | 2.293 | 1.228 | 1.87 |
+| (8192, 128) | 51.688 | 6.571 | 4.456 | 2.272 | 1.96 |
 
 ![Training A48 · forward + backward, length sweep at D128](figures/swa_atom_dit_training_a48_forward_backward_length.png) <!-- measure_bars -->
 
@@ -206,26 +208,26 @@ A5 inference
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 1024 | 0.0409 | 0.0470 | 1.15 |
-| 2048 | 0.0511 | 0.0717 | 1.40 |
-| 3072 | 0.0593 | 0.0920 | 1.55 |
+| 1024 | 0.0409 | 0.0471 | 1.15 |
+| 2048 | 0.0511 | 0.0716 | 1.40 |
+| 3072 | 0.0593 | 0.0921 | 1.55 |
 | 4096 | 0.0778 | 0.1188 | 1.53 |
 
 A1 inference (one sample: the same call)
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 1024 | 0.0306 | 0.0305 | 1.00 |
+| 1024 | 0.0307 | 0.0306 | 1.00 |
 | 2048 | 0.0327 | 0.0326 | 1.00 |
-| 3072 | 0.0388 | 0.0387 | 1.00 |
-| 4096 | 0.0429 | 0.0428 | 1.00 |
+| 3072 | 0.0369 | 0.0369 | 1.00 |
+| 4096 | 0.0430 | 0.0429 | 1.00 |
 
 A48 training
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 4096 | 1.223 | 3.122 | 2.55 |
-| 8192 | 2.274 | 6.055 | 2.66 |
+| 4096 | 1.228 | 3.127 | 2.55 |
+| 8192 | 2.272 | 6.040 | 2.66 |
 
 At A48 and 4096 atoms the three modulation kernels (`swa_mod_fwd` 0.40, `swa_mod_bwd_dc` 0.52, `swa_mod_bwd_dw` 0.34 ms) are 1.27 of the 3.12 ms;
 the other kernels sum to 1.9 ms against 1.2 ms with the shared conditioning, because they read per-row modulation rows instead of one
