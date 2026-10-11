@@ -132,6 +132,10 @@ class BenchConfig(BaseModel):
     #: modulation once per batch element): the block is called through `forward_hoisted` and the modulation is computed
     #: once, not once per sample.
     shared_cond: bool = False
+    #: precision=bf16-mixed: True (default) keeps the parameters fp32 and runs the module under `torch.autocast(bfloat16)` over bf16
+    #: activations -- AMP's bf16-mixed, MiniWorld's training default (fp32 master); False casts the whole module to bf16 ("bf16
+    #: parameters", norm gammas stay fp32), which is how every table before 2026-10-11 was measured. precision=32 ignores it.
+    param_master: bool = True
     #: dit: blocks with QK-norm (RMSNorm of every q / k head). Anthropic's composition has none and refuses.
     dit_qk_norm: bool = False
     apb_anthropic_core: str = "apb_attn"   # attention_pair_bias anthropic row: apb_attn | fpf_apb
@@ -431,6 +435,25 @@ def bench_time(
         "p20_ms": p20,
         "p80_ms": p80,
     }
+
+
+def _place(model, conf, dtype):
+    """Move a module to the device with the harness's parameter policy.
+
+    bf16-mixed (`conf.param_master`): parameters stay fp32 (the master copy) and the module's forward runs under
+    `torch.autocast(dtype)` over `dtype` activations, so the PyTorch rows are AMP and the engine rows take fp32 parameters over bf16
+    activations exactly as MiniWorld's trainer feeds them. Otherwise the module is cast to `dtype` (bf16 parameters)."""
+    if conf.param_master and dtype == torch.bfloat16 and conf.precision != FP32_PRECISION:
+        model = model.to(device=DEVICE, dtype=torch.float32)
+        inner = model.forward
+
+        def forward(*args, **kwargs):
+            with torch.autocast("cuda", dtype=dtype):
+                return inner(*args, **kwargs)
+
+        model.forward = forward
+        return model
+    return model.to(device=DEVICE, dtype=dtype)
 
 
 def measured_result(
@@ -981,7 +1004,7 @@ def bench_module_triangle_multiplication(
     # `parameter_dtype` still records float32. Trunk weights become bf16; norm gammas stay fp32.
     bf16 = conf.precision != FP32_PRECISION
     model = MultiTriangleMultiplication(implementation).to(DEVICE)
-    model = model.to(torch.bfloat16 if bf16 else torch.float32)
+    model = _place(model, conf, torch.bfloat16 if bf16 else torch.float32)
     model.train(not is_inference_mode(conf.mode))
     # Real deployment = compiled kernels, then graph-captured. The old guard compiled the model ONLY
     # when cudagraph=="disabled" and captured the EAGER model under a graph -- a leftover from
@@ -1163,7 +1186,7 @@ def bench_module_triangle_attention(
         for linear in layer.modules():
             if isinstance(linear, nn.Linear):
                 nn.init.normal_(linear.weight, std=conf.d_pair**-0.5)
-    model = model.to(device=DEVICE, dtype=dtype)
+    model = _place(model, conf, dtype)
     model.train(not is_inference_mode(conf.mode))
     for layer in model.layers:
         assert isinstance(layer, TriangleAttention)
@@ -1308,7 +1331,7 @@ def bench_module_transition(
     model = MultiTransition(spec, layer_cls).to(DEVICE)
     for layer, state in zip(model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
-    model.to(dtype=dtype)
+    model = _place(model, conf, dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
         compile_module_for_benchmark(model)
@@ -1445,7 +1468,7 @@ def bench_module_conditioned_transition(
                 x = layer(x, cond)
             return x
 
-    model = MultiConditionedTransition().to(device=DEVICE, dtype=dtype)
+    model = _place(MultiConditionedTransition(), conf, dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:
         compile_module_for_benchmark(model)
@@ -1572,7 +1595,7 @@ def bench_module_adaptive_layernorm(
                 x = layer(x, cond)
             return x
 
-    model = MultiAdaptiveLayerNorm().to(device=DEVICE, dtype=dtype)
+    model = _place(MultiAdaptiveLayerNorm(), conf, dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:
         compile_module_for_benchmark(model)
@@ -1706,7 +1729,7 @@ def bench_module_augmented_attention_token(
                 single = layer(single, cond, pair, mask)
             return single
 
-    model = MultiTokenAttention().to(device=DEVICE, dtype=dtype)
+    model = _place(MultiTokenAttention(), conf, dtype)
     model.train(not is_inference_mode(conf.mode))
 
     if conf.compile:
@@ -1786,7 +1809,7 @@ def bench_module_swa_atom_attention(
                 x = layer(x, ap)
             return x
 
-    model = MultiSWA().to(device=DEVICE, dtype=dtype)
+    model = _place(MultiSWA(), conf, dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:
         compile_module_for_benchmark(model)
@@ -1862,7 +1885,7 @@ def bench_module_augmented_attention_atom(
                 single = layer(single, cond, pair, mask)
             return single
 
-    model = MultiAtomAttention().to(device=DEVICE, dtype=dtype)
+    model = _place(MultiAtomAttention(), conf, dtype)
     model.train(not is_inference_mode(conf.mode))
 
     if conf.compile:
@@ -2041,7 +2064,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
     reference = reference.to(DEVICE).train(is_train)
     model = MultiOuterProductMean(impl, layer_cls)
     model.load_state_dict(state)
-    model = model.to(device=DEVICE, dtype=dtype).train(is_train)
+    model = _place(model, conf, dtype).train(is_train)
 
     torch.manual_seed(1)
     n_msa = conf.n_msa
@@ -2212,7 +2235,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
     reference = reference.to(DEVICE).train(is_train)
     model = MultiPWA(impl, layer_cls)
     model.load_state_dict(state)
-    model = model.to(device=DEVICE, dtype=dtype).train(is_train)
+    model = _place(model, conf, dtype).train(is_train)
 
     torch.manual_seed(1)
     msa = torch.randn(1, conf.n_msa, seq_len, d_msa, device=DEVICE, dtype=dtype)
@@ -2381,7 +2404,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
              else MultiAPB(ImplementationType.PYTORCH) if anthropic
              else MultiAPB(ImplementationType(key)))
     model.load_state_dict(state)
-    model = model.to(device=DEVICE, dtype=dtype).train(is_train)
+    model = _place(model, conf, dtype).train(is_train)
 
     torch.manual_seed(1)
     single = torch.randn(1, seq_len, conf.d_single, device=DEVICE, dtype=dtype)
@@ -3621,7 +3644,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
             elif prm.ndim == 1 and prm.numel() > 1:
                 prm.add_(torch.randn_like(prm) * 0.1)
     state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-    model = model.to(device=DEVICE, dtype=dtype)
+    model = _place(model, conf, dtype)
     model.train(is_train)
 
     torch.manual_seed(1)
@@ -4186,7 +4209,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
             if prm.ndim == 2:
                 prm.normal_(std=prm.shape[1] ** -0.5)
     state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-    model = model.to(device=DEVICE, dtype=dtype)
+    model = _place(model, conf, dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:
         compile_module_for_benchmark(model, fullgraph=True)
@@ -4424,7 +4447,7 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
             elif prm.ndim == 1 and prm.numel() > 1:
                 prm.add_(torch.randn_like(prm) * 0.1)
     state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-    model = model.to(device=DEVICE, dtype=dtype)
+    model = _place(model, conf, dtype)
     model.train(is_train)
 
     atom_len = seq_len * 8
@@ -4550,7 +4573,7 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
             elif prm.ndim == 1 and prm.numel() > 1:
                 prm.add_(torch.randn_like(prm) * 0.1)
     state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-    model = model.to(device=DEVICE, dtype=dtype)
+    model = _place(model, conf, dtype)
     model.train(is_train)
 
     torch.manual_seed(1)

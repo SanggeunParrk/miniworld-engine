@@ -32,6 +32,14 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- Benchmark harness: `precision=bf16-mixed` is now AMP bf16-mixed -- the parameters stay fp32 (the master copy) and the module's
+  forward runs under `torch.autocast(bfloat16)` over bf16 activations, as MiniWorld's trainer feeds the engine. The previous
+  behaviour (the whole module cast to bf16, norm gammas fp32) is `+param_master=false`; `precision=32` is unchanged. Every table
+  recorded before 2026-10-11 is a bf16-parameter table (`parameter_dtype` in the CSV says which). On B200 the inference rows of APB,
+  TriMul and the SWA block are 10-35 % slower with fp32 parameters (the cast is inside the step); training rows did not move.
+- `benchmarks/runners/main_figure_campaign.py` / `main_figure_plot.py`: the main figure (every module at L = 384 tokens, atom
+  blocks 4096 atoms; the diffusion blocks in bf16-mixed and fp32) as a command; `docs/kernels/gpu-kernel-development-guide.md`:
+  the hand-off guide for developing the blocks on another GPU (shapes, precision policy, harness, tests, deliverables).
 - Benchmark harness, `target=swa_dit`: `+shared_cond=true` gives the samples one conditioning and calls `SWADiTBlock.forward_hoisted`
   (the model's contract: the adaLN modulation once per batch element, A48 4096 atoms bf16 training 1.22 ms against 3.12 ms with one
   conditioning per sample), and `+swa_dit_fused=false` runs the per-op path the fused block replaces.

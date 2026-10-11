@@ -4,6 +4,9 @@ The bar this repo holds itself to is written down in
 [`docs/standards.md`](../standards.md), and the Aug 25 work plan against it is archived at
 `archive/records-20260928:docs/records/product-plan.md`. Read the standards before proposing a change.
 
+Developing the fast path of the model's blocks on a new GPU: start from
+[gpu-kernel-development-guide.md](gpu-kernel-development-guide.md) (shapes, dtypes, harness, tests, deliverables).
+
 ## The three gates
 
 One command runs all of them, in CI's order:

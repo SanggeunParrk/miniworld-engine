@@ -41,7 +41,7 @@ def test_auto_graph_regime_is_uniform_for_all_modules(runner, target, mode, expe
 def runner(monkeypatch):
     names = {"BenchConfig", "AccuracyFields", "BenchResult", "ImplementationSpec",
              "is_inference_mode", "module_miniworld_spec", "triton_miniworld_spec",
-             "parse_implementation_spec", "as_bench_result", "tensor_metrics", "_paired_trimul_dropout"}
+             "parse_implementation_spec", "as_bench_result", "tensor_metrics", "_paired_trimul_dropout", "_place"}
     tree = ast.parse(BENCH.read_text())
     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
             and (node.name in names or node.name.startswith("bench_module_"))]
@@ -143,13 +143,25 @@ def test_trimul_variants_have_identical_dropout_and_requested_precision(runner, 
 
 
 @pytest.mark.parametrize("target", ["transition", "dit", "augmented_attention_token"])
-def test_bf16_metadata_reports_actual_mixed_parameters(runner, target):
+def test_bf16_parameters_metadata_reports_actual_mixed_parameters(runner, target):
+    """`param_master=False`: the module is cast to bf16 (norm gammas stay fp32): the tables recorded before 2026-10-11."""
+    namespace, seen, fabric = runner
+    result = namespace[f"bench_module_{target}"](
+        config(namespace, target, precision="bf16-mixed", param_master=False), 2, "pytorch", fabric)
+    assert result.input_dtype == "bfloat16"
+    assert result.parameter_dtype == "bfloat16+float32"
+    assert {p.dtype for p in seen.models[0].parameters()} == {torch.bfloat16, torch.float32}
+
+
+@pytest.mark.parametrize("target", ["transition", "dit", "augmented_attention_token"])
+def test_bf16_mixed_defaults_to_fp32_master_parameters(runner, target):
+    """`precision=bf16-mixed` is AMP: fp32 parameters over bf16 activations (the trainer's default)."""
     namespace, seen, fabric = runner
     result = namespace[f"bench_module_{target}"](
         config(namespace, target, precision="bf16-mixed"), 2, "pytorch", fabric)
     assert result.input_dtype == "bfloat16"
-    assert result.parameter_dtype == "bfloat16+float32"
-    assert {p.dtype for p in seen.models[0].parameters()} == {torch.bfloat16, torch.float32}
+    assert result.parameter_dtype == "float32"
+    assert {p.dtype for p in seen.models[0].parameters()} == {torch.float32}
 
 
 @pytest.mark.parametrize("target", ["adaptive_layernorm", "augmented_attention_atom"])
