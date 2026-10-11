@@ -496,7 +496,7 @@ No kernel on these paths is autotuned, so nothing needs a cache (✓).
 B200 (148 SMs, 1000 W limit), torch 2.13 + cu129, kernels built by CUDA 13.1; `benchmarks/runners/bench.py target=transition
 level=module d_pair=D`, compiled, CUDA-graph replay, µs. *ours* = `modules.Transition` through `fused_sm100a` / `fused_wide_sm100a`;
 the Triton row is the same module with `MINIWORLD_TRANSITION_FUSED_SM100A=0` (the path B200 ran before). × = ours vs the fastest other row.
-Re-verified 2026-10-10 (engine v2.2.0 plus unreleased changes, driver 580.95.05, one GPU with no other process on it): the PyTorch compiled, Triton and ours
+Re-verified 2026-10-10 (engine v2.2.0 plus unreleased changes, driver 580.95.05, one GPU with no other process on it): the PyTorch compiled, Triton and ours **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
 columns (60 cells) were re-measured with the command above, one run per width and mode, cells that moved by more than 8 % repeated;
 median change 1.1 % (ours 3.5 %), 90th percentile 5.3 %, no cell replaced. The D384 *ours* values are the fused
 D384 kernels, re-measured 2026-09-30 with the same command (before: inference 457.2 / 1940.4, training 1734.5 / 6850.0 µs at
@@ -508,31 +508,35 @@ backward ~70 µs faster (648 vs 720 µs); inference gains 1.25x.
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Triton (engine) | ours | × |
 |---|---|---|---|---|---|
-| (384, 64) | 130.9 | n/a | 85.8 | **36.7** | 2.34 |
-| (768, 64) | 370.6 | n/a | 313.2 | **114.6** | 2.73 |
-| (384, 128) | 200.5 | n/a | 205.8 | **63.3** | 3.17 |
-| (768, 128) | 745.2 | n/a | 755.7 | **227.1** | 3.28 |
-| (384, 256) | 407.5 | n/a | 530.2 | **192.4** | 2.12 |
-| (768, 256) | 1604.6 | n/a | 2087.8 | **798.5** | 2.01 |
-| (384, 384) | 686.1 | n/a | 1059.8 | **364.5** | 1.88 |
-| (768, 384) | 2912.1 | n/a | 4179.5 | **1569.5** | 1.86 |
-| (384, 512) | 1004.4 | n/a | 1670.0 | **749.3** | 1.34 |
-| (768, 512) | 4336.4 | n/a | 6732.8 | **3202.8** | 1.35 |
+| (384, 64) | 135.2 | n/a | 89.9 | **40.9** | 2.20 |
+| (768, 64) | 380.9 | n/a | 317.2 | **118.8** | 2.67 |
+| (384, 128) | 207.8 | n/a | 208.8 | **69.5** | 2.99 |
+| (768, 128) | 782.2 | n/a | 761.8 | **217.0** | 3.51 |
+| (384, 256) | 423.7 | n/a | 536.4 | **197.5** | 2.15 |
+| (768, 256) | 1638.4 | n/a | 2091.9 | **780.3** | 2.10 |
+| (384, 384) | 731.0 | n/a | 1042.4 | **393.0** | 1.86 |
+| (768, 384) | 2943.9 | n/a | 4208.6 | **1594.2** | 1.85 |
+| (384, 512) | 1029.1 | n/a | 1681.3 | **746.3** | 1.38 |
+| (768, 512) | 4288.4 | n/a | 6565.9 | **3161.0** | 1.36 |
+
+![Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30; re-verified 2026-10-10), length sweep at D128](figures/transition_pair_n_4_2026_09_29_d384_ours_2026_09_30_re_verified_2026_10_10_length.png) ![Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30; re-verified 2026-10-10), dimension sweep at L384](figures/transition_pair_n_4_2026_09_29_d384_ours_2026_09_30_re_verified_2026_10_10_dimension.png) <!-- measure_bars -->
 
 #### Training (forward + backward)
 
 | (Length, Dimension) | PyTorch compiled | cuEquivariance | Triton (engine) | ours | × |
 |---|---|---|---|---|---|
-| (384, 64) | 335.7 | n/a | 329.6 | **132.9** | 2.48 |
-| (768, 64) | 1063.8 | n/a | 1182.7 | **448.1** | 2.37 |
-| (384, 128) | 588.8 | n/a | 715.8 | **290.6** | 2.03 |
-| (768, 128) | 2073.4 | n/a | 2654.0 | **1098.6** | 1.89 |
-| (384, 256) | 1210.4 | n/a | 1764.3 | **954.1** | 1.27 |
-| (768, 256) | 4393.0 | n/a | 6839.3 | **3833.7** | 1.15 |
-| (384, 384) | 1972.1 | n/a | 3360.3 | **1716.6** | 1.15 |
-| (768, 384) | 8666.1 | n/a | 13429.8 | **6844.3** | 1.27 |
-| (384, 512) | 2894.7 | n/a | 5210.0 | **2671.5** | 1.08 |
-| (768, 512) | 12775.4 | n/a | 21585.4 | **11183.1** | 1.14 |
+| (384, 64) | 344.1 | n/a | 337.9 | **137.2** | 2.46 |
+| (768, 64) | 1073.2 | n/a | 1192.7 | **452.5** | 2.37 |
+| (384, 128) | 598.0 | n/a | 723.8 | **287.6** | 2.08 |
+| (768, 128) | 2087.8 | n/a | 2660.2 | **1123.3** | 1.86 |
+| (384, 256) | 1162.9 | n/a | 1672.0 | **1036.1** | 1.12 |
+| (768, 256) | 4338.6 | n/a | 6771.4 | **3926.1** | 1.11 |
+| (384, 384) | 2066.3 | n/a | 3221.3 | **1714.1** | 1.21 |
+| (768, 384) | 7869.5 | n/a | 12841.0 | **6780.1** | 1.16 |
+| (384, 512) | 2923.4 | n/a | 5227.1 | **2705.2** | 1.08 |
+| (768, 512) | 12929.6 | n/a | 21567.5 | **11518.9** | 1.12 |
+
+![Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30; re-verified 2026-10-10), length sweep at D128](figures/transition_pair_n_4_2026_09_29_d384_ours_2026_09_30_re_verified_2026_10_10_length.png) ![Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30; re-verified 2026-10-10), dimension sweep at L384](figures/transition_pair_n_4_2026_09_29_d384_ours_2026_09_30_re_verified_2026_10_10_dimension.png) <!-- measure_bars -->
 
 Accuracy: every width passes "no further from fp32 than the Triton path" on 1 / 3 / 15 / 1152 tiles (and 1200 tiles at D ≥ 384,
 the tile schedule), gradients included. Separate processes vary by up to ±10 % on this power-capped card (e.g. torch.compile D384

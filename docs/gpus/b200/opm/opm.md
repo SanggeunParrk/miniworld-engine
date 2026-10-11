@@ -85,7 +85,7 @@ instead of keeping 302 MB at L384).
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Measurements (2026-09-30; CUDA-graph tables re-verified 2026-10-10)
+## Measurements (2026-09-30; CUDA-graph tables re-measured 2026-10-11 with fp32 master parameters)
 
 - Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, sm_100a kernels built by nvcc 13.1, B = 1, bf16-mixed (the module's LayerNorm parameters stay fp32).
 - Harness: `benchmarks/runners/bench.py target=outer_product level=module mode=<inference|training> min_seq_len=128
@@ -101,7 +101,7 @@ instead of keeping 302 MB at L384).
   card; in the inference sweep the path runs at 68-88 % of its energy floor. Folding the epilogue into the O GEMM does not fit
   B200: re-streaming W_o per tile exceeds the SM's TMA intake; the dgrad kernel is bound by the same intake (a 2-CTA version
   is what is left).
-- Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the inference table and the CUDA-graph training table (66 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.9 % (2.7 % for ours), 90th percentile 5.1 %; two cells were replaced ((640, 4096) and (768, 4096) ours inference: 2.364 -> 2.621 and 3.803 -> 3.352 ms; the S4096 inference rows vary by +-12 % between runs). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values.
+- Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the inference table and the CUDA-graph training table (66 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.9 % (2.7 % for ours), 90th percentile 5.1 %; two cells were replaced ((640, 4096) and (768, 4096) ours inference: 2.364 -> 2.621 and 3.803 -> 3.352 ms; the S4096 inference rows vary by +-12 % between runs). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values. **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
 - Charts: under each table, a length sweep at S1024 and an MSA-depth sweep at L384
   (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/opm/opm.md --length-d 1024`).
 
@@ -109,37 +109,37 @@ instead of keeping 302 MB at L384).
 
 | (Length, MSA depth) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (128, 1024) | 0.078 | — | 0.137 | 0.051 | 1.52 |
-| (256, 1024) | 0.219 | — | 0.401 | 0.145 | 1.51 |
-| (384, 1024) | 0.446 | — | 0.862 | 0.297 | 1.50 |
-| (512, 1024) | 0.737 | — | 1.473 | 0.514 | 1.43 |
-| (640, 1024) | 1.134 | — | 2.278 | 0.797 | 1.42 |
-| (768, 1024) | 1.596 | — | 3.317 | 1.096 | 1.46 |
-| (128, 2048) | 0.119 | — | 0.180 | 0.076 | 1.57 |
-| (256, 2048) | 0.342 | — | 0.521 | 0.242 | 1.41 |
-| (384, 2048) | 0.698 | — | 1.128 | 0.534 | 1.31 |
-| (512, 2048) | 1.167 | — | 2.086 | 0.921 | 1.27 |
-| (640, 2048) | 1.796 | — | 3.229 | 1.390 | 1.29 |
-| (768, 2048) | 2.471 | — | 4.589 | 1.880 | 1.31 |
-| (128, 4096) | 0.192 | — | 0.276 | 0.133 | 1.45 |
-| (256, 4096) | 0.602 | — | 0.876 | 0.465 | 1.30 |
-| (384, 4096) | 1.220 | — | 1.830 | 0.999 | 1.22 |
-| (512, 4096) | 1.951 | — | 3.133 | 1.585 | 1.23 |
-| (640, 4096) | 3.130 | — | 4.800 | 2.621 | 1.19 |
-| (768, 4096) | 4.407 | — | 6.881 | 3.352 | 1.31 |
+| (128, 1024) | 0.082 | — | 0.137 | 0.055 | 1.49 |
+| (256, 1024) | 0.221 | — | 0.399 | 0.139 | 1.59 |
+| (384, 1024) | 0.437 | — | 0.856 | 0.293 | 1.49 |
+| (512, 1024) | 0.731 | — | 1.470 | 0.506 | 1.44 |
+| (640, 1024) | 1.133 | — | 2.269 | 0.709 | 1.60 |
+| (768, 1024) | 1.593 | — | 3.328 | 1.104 | 1.44 |
+| (128, 2048) | 0.123 | — | 0.178 | 0.082 | 1.50 |
+| (256, 2048) | 0.328 | — | 0.521 | 0.248 | 1.32 |
+| (384, 2048) | 0.675 | — | 1.122 | 0.500 | 1.35 |
+| (512, 2048) | 1.167 | — | 2.107 | 0.930 | 1.25 |
+| (640, 2048) | 1.762 | — | 3.229 | 1.425 | 1.24 |
+| (768, 2048) | 2.497 | — | 4.586 | 1.848 | 1.35 |
+| (128, 4096) | 0.195 | — | 0.276 | 0.135 | 1.44 |
+| (256, 4096) | 0.596 | — | 0.878 | 0.476 | 1.25 |
+| (384, 4096) | 1.191 | — | 1.830 | 0.880 | 1.35 |
+| (512, 4096) | 2.076 | — | 3.135 | 1.755 | 1.18 |
+| (640, 4096) | 2.929 | — | 4.813 | 2.582 | 1.13 |
+| (768, 4096) | 4.298 | — | 6.854 | 3.515 | 1.22 |
 
-![OPM · Inference (CUDA graph), length sweep at S1024](figures/opm_opm_inference_cuda_graph_length.png) ![OPM · Inference (CUDA graph), msa depth sweep at L384](figures/opm_opm_inference_cuda_graph_msa_depth.png) <!-- measure_bars -->
+![OPM · Inference (CUDA graph), msa depth sweep at L384](figures/opm_opm_inference_cuda_graph_msa_depth.png) <!-- measure_bars -->
 
 ### OPM · Training (CUDA graph)
 
 | (Length, MSA depth) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (128, 1024) | 0.254 | — | — | 0.162 | 1.57 |
-| (256, 1024) | 0.643 | — | — | 0.469 | 1.37 |
-| (384, 1024) | 1.292 | — | — | 0.927 | 1.39 |
-| (512, 1024) | 2.163 | — | — | 1.628 | 1.33 |
-| (640, 1024) | 3.209 | — | — | 2.396 | 1.34 |
-| (768, 1024) | 4.400 | — | — | 3.557 | 1.24 |
+| (128, 1024) | 0.262 | — | — | 0.170 | 1.54 |
+| (256, 1024) | 0.651 | — | — | 0.451 | 1.44 |
+| (384, 1024) | 1.234 | — | — | 0.946 | 1.30 |
+| (512, 1024) | 2.138 | — | — | 1.630 | 1.31 |
+| (640, 1024) | 3.114 | — | — | 2.456 | 1.27 |
+| (768, 1024) | 4.390 | — | — | 3.442 | 1.28 |
 
 ![OPM · Training (CUDA graph), length sweep at S1024](figures/opm_opm_training_cuda_graph_length.png) <!-- measure_bars -->
 

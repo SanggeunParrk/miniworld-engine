@@ -148,8 +148,8 @@ bulk shared::cluster copies, summed in rank order.
 
 - Setup: B200 (148 SMs, 1000 W power cap), one GPU with no other process on it, torch 2.13.0+cu129, triton 3.7.1, kernels built by
   nvcc 13.1, engine v2.2.0 plus unreleased changes, the engine environment's `python` called directly (a `pixi run` shell around it made
-  `torch.compile` produce a 2x slower PyTorch row: 28.9 against 13.2 ms for A48 training). One block, B = 1, bf16 (`precision=bf16-mixed`),
-  unmasked rows. Inference and training in a manually captured CUDA graph (`cudagraph=manual`; the harness times a backward closure for
+  `torch.compile` produce a 2x slower PyTorch row: 28.9 against 13.2 ms for A48 training). One block, B = 1, `precision=bf16-mixed` with fp32 master parameters (the harness default: fp32 parameters over bf16
+  activations under autocast; `parameter_dtype` float32), unmasked rows. Inference and training in a manually captured CUDA graph (`cudagraph=manual`; the harness times a backward closure for
   training). Run-to-run spread +-3-5 % (power cap).
   Tables in ms; × = ours against the fastest of the other columns.
 - Command: `python benchmarks/runners/bench.py target=swa_dit level=module mode=<inference|training> n_augment=<A> sweep_axis=seq_len
@@ -159,6 +159,10 @@ bulk shared::cluster copies, summed in rank order.
   `SWADiTBlock.forward_hoisted`, as the model does (its atom conditioning repeats over the augments, so the adaLN modulation is computed
   once per batch element: team-gm's `SWAAtomTransformer` calls `swa_dit_hoist_modulation(c_base, ...)`). Without the flag every
   sample has its own conditioning row per atom and the modulation is computed A times; those rows are in the last table.
+- Parameter policy: all columns except **engine per-op** are fp32 master. The per-op path does not compile with fp32 parameters
+  under autocast (a Triton `CompilationError` in its fused adaLN kernel), so that column is measured with bf16 parameters
+  (`+param_master=false`). Inference with fp32 master pays a per-call parameter cast inside the step: ours at A1 / 1024 atoms is
+  0.045 ms against 0.031 ms with bf16 parameters (A5 4096 atoms 0.090 against 0.078 ms); training is unchanged.
 - Columns: **PyTorch compiled** = `implementations=[pytorch] compile=true` (the module's reference math, `torch.compile`); **engine per-op**
   = `+swa_dit_fused=false` (the per-op path: RMS-adaLN, FA4 window attention, SwiGLU, as separate ops); **fused Triton** =
   `MINIWORLD_SWA_DIT_SM100=0` (the fused block's Triton kernels; the sm_90a kernels do not build for sm_100); **ours** = the default
@@ -173,10 +177,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.0880 | 0.0838 | 0.0553 | 0.0409 | 1.35 |
-| (2048, 128) | 0.2150 | 0.1166 | 0.0737 | 0.0511 | 1.44 |
-| (3072, 128) | 0.3257 | 0.1371 | 0.0798 | 0.0593 | 1.35 |
-| (4096, 128) | 0.5672 | 0.1699 | 0.1106 | 0.0778 | 1.42 |
+| (1024, 128) | 0.0950 | 0.0838 | 0.0592 | 0.0552 | 1.07 |
+| (2048, 128) | 0.2251 | 0.1166 | 0.0675 | 0.0634 | 1.06 |
+| (3072, 128) | 0.3356 | 0.1371 | 0.0716 | 0.0716 | 1.00 |
+| (4096, 128) | 0.5773 | 0.1700 | 0.0956 | 0.0900 | 1.06 |
 
 ![Inference A5, length sweep at D128](figures/swa_atom_dit_inference_a5_length.png) <!-- measure_bars -->
 
@@ -184,10 +188,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.0737 | 0.0716 | 0.0490 | 0.0307 | 1.60 |
-| (2048, 128) | 0.1127 | 0.0737 | 0.0511 | 0.0327 | 1.56 |
-| (3072, 128) | 0.1556 | 0.0758 | 0.0511 | 0.0369 | 1.38 |
-| (4096, 128) | 0.1986 | 0.0778 | 0.0531 | 0.0430 | 1.24 |
+| (1024, 128) | 0.0817 | 0.0719 | 0.0511 | 0.0449 | 1.14 |
+| (2048, 128) | 0.1209 | 0.0757 | 0.0512 | 0.0450 | 1.14 |
+| (3072, 128) | 0.1636 | 0.0778 | 0.0531 | 0.0490 | 1.08 |
+| (4096, 128) | 0.2086 | 0.0779 | 0.0532 | 0.0552 | 0.96 |
 
 ![Inference A1, length sweep at D128](figures/swa_atom_dit_inference_a1_length.png) <!-- measure_bars -->
 
@@ -195,8 +199,8 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (4096, 128) | 13.160 | 3.385 | 2.293 | 1.228 | 1.87 |
-| (8192, 128) | 51.688 | 6.571 | 4.456 | 2.272 | 1.96 |
+| (4096, 128) | 13.461 | 3.381 | 2.235 | 1.222 | 1.83 |
+| (8192, 128) | 52.223 | 6.573 | 4.331 | 2.274 | 1.90 |
 
 ![Training A48 · forward + backward, length sweep at D128](figures/swa_atom_dit_training_a48_forward_backward_length.png) <!-- measure_bars -->
 
@@ -208,26 +212,26 @@ A5 inference
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 1024 | 0.0409 | 0.0471 | 1.15 |
-| 2048 | 0.0511 | 0.0716 | 1.40 |
-| 3072 | 0.0593 | 0.0921 | 1.55 |
-| 4096 | 0.0778 | 0.1188 | 1.53 |
+| 1024 | 0.0552 | 0.0613 | 1.11 |
+| 2048 | 0.0634 | 0.0879 | 1.39 |
+| 3072 | 0.0716 | 0.1043 | 1.46 |
+| 4096 | 0.0900 | 0.1330 | 1.48 |
 
 A1 inference (one sample: the same call)
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 1024 | 0.0307 | 0.0306 | 1.00 |
-| 2048 | 0.0327 | 0.0326 | 1.00 |
-| 3072 | 0.0369 | 0.0369 | 1.00 |
-| 4096 | 0.0430 | 0.0429 | 1.00 |
+| 1024 | 0.0449 | 0.0449 | 1.00 |
+| 2048 | 0.0450 | 0.0450 | 1.00 |
+| 3072 | 0.0490 | 0.0490 | 1.00 |
+| 4096 | 0.0552 | 0.0552 | 1.00 |
 
 A48 training
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 4096 | 1.228 | 3.127 | 2.55 |
-| 8192 | 2.272 | 6.040 | 2.66 |
+| 4096 | 1.222 | 3.123 | 2.55 |
+| 8192 | 2.274 | 6.057 | 2.66 |
 
 At A48 and 4096 atoms the three modulation kernels (`swa_mod_fwd` 0.40, `swa_mod_bwd_dc` 0.52, `swa_mod_bwd_dw` 0.34 ms) are 1.27 of the 3.12 ms;
 the other kernels sum to 1.9 ms against 1.2 ms with the shared conditioning, because they read per-row modulation rows instead of one
@@ -384,7 +388,7 @@ thread (each warp load touched 32 sectors with a ~24 KB L1).
 time without the trigger: only **`ffn_fwd2_a1`** (`-DATM=32 -DNSTG=1`, the A = 1 - 3 build of the last kernel of the chain) hangs
 with it (3 of 3 runs; every other combination of kernels did not hang, 3 of 3 for `qkvg_fwd2_a1` alone). Replacing the instruction by an empty
 compiler barrier does not hang, so it is the instruction, not the code scheduled around it. That kernel is built with `-DPDL_EARLY=0`
-(the dependent launches when its CTAs exit); `qkvg_fwd2_a1` is built the same way because it measures faster (A1, 1024 atoms:
+(the dependent launches when its CTAs exit); `qkvg_fwd2_a1` is built the same way because it measures faster (A1, 1024 atoms, bf16 parameters:
 0.031 against 0.037 ms; 2048: 0.033 against 0.035 ms), everything else keeps the early trigger. After the change 60 000 back-to-back replays of
 every shape (A = 1 / 2 / 3 / 5 / 48; per-sample and shared conditioning; ragged) and 6 000 eager calls finished without a hang. The
 mechanism was not found: the kernel is the last of the chain, nothing in the captured graph depends on it, and the hang is

@@ -32,6 +32,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Added
 
+- B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the
+  SWA atom DiT and the cross-attention rows of the local DiT page were re-measured on 2026-10-11 with fp32 master parameters (the new
+  harness default; 131 harness runs on 6 cards, one run per cell). Inference rows of the small blocks are 10-50 % slower than the
+  bf16-parameter tables they replace (APB at L128 0.023 -> 0.035 ms, SWA A1 at 1024 atoms 0.031 -> 0.045 ms): the engine paths cast the
+  fp32 weights inside every call and `static_weights` does not cache that cast. Training rows did not move. The no-CUDA-graph training
+  tables, the bias-only DiT page and the kernel-level tables are unchanged.
 - Benchmark harness: `precision=bf16-mixed` is now AMP bf16-mixed -- the parameters stay fp32 (the master copy) and the module's
   forward runs under `torch.autocast(bfloat16)` over bf16 activations, as MiniWorld's trainer feeds the engine. The previous
   behaviour (the whole module cast to bf16, norm gammas fp32) is `+param_master=false`; `precision=32` is unchanged. Every table

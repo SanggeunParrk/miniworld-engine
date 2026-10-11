@@ -116,7 +116,7 @@ Design notes:
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Measurements (2026-09-30; CUDA-graph tables re-verified 2026-10-10)
+## Measurements (2026-09-30; CUDA-graph tables re-measured 2026-10-11 with fp32 master parameters)
 
 - Setup: B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, sm_100a kernels built by nvcc 13.1, B = 1, bf16-mixed (the module's LayerNorm parameters stay fp32).
 - Harness: `benchmarks/runners/bench.py target=msa_pair_weighted_averaging level=module mode=<inference|training>
@@ -130,7 +130,7 @@ Design notes:
 - Accuracy against the harness's fp32 reference, max over every row: ours, PyTorch compiled and Anthropic out 1.8e-3 (inference; training with dropout
   leaves the harness's accuracy columns blank). `tests/integrations/test_pwa_train_gpu.py` checks the training output and every
   gradient, and the inference update, within 1.15x of the module's own bf16 statements' error against an fp32 copy.
-- Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the inference table and the CUDA-graph training table (66 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.5 % (0.6 % for ours), 90th percentile 1.6 %; no cell moved by more than 8 %. The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values.
+- Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the inference table and the CUDA-graph training table (66 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.5 % (0.6 % for ours), 90th percentile 1.6 %; no cell moved by more than 8 %. The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values. **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
 - Charts: under each table, a length sweep at S1024 and an MSA-depth sweep at L384
   (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/pwa/pwa.md --length-d 1024`).
 
@@ -138,37 +138,37 @@ Design notes:
 
 | (Length, MSA depth) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (128, 1024) | 0.156 | — | 0.219 | 0.078 | 2.00 |
-| (256, 1024) | 0.307 | — | 0.440 | 0.147 | 2.08 |
-| (384, 1024) | 0.483 | — | 0.684 | 0.217 | 2.23 |
-| (512, 1024) | 0.662 | — | 0.919 | 0.295 | 2.24 |
-| (640, 1024) | 0.885 | — | 1.218 | 0.403 | 2.19 |
-| (768, 1024) | 1.073 | — | 1.547 | 0.490 | 2.19 |
-| (128, 2048) | 0.298 | — | 0.406 | 0.145 | 2.05 |
-| (256, 2048) | 0.614 | — | 0.803 | 0.262 | 2.34 |
-| (384, 2048) | 0.933 | — | 1.276 | 0.404 | 2.31 |
-| (512, 2048) | 1.271 | — | 1.767 | 0.551 | 2.31 |
-| (640, 2048) | 1.679 | — | 2.332 | 0.771 | 2.18 |
-| (768, 2048) | 2.080 | — | 2.897 | 0.927 | 2.24 |
-| (128, 4096) | 0.603 | — | 0.749 | 0.256 | 2.36 |
-| (256, 4096) | 1.192 | — | 1.570 | 0.489 | 2.44 |
-| (384, 4096) | 1.833 | — | 2.456 | 0.756 | 2.43 |
-| (512, 4096) | 2.477 | — | 3.461 | 1.062 | 2.33 |
-| (640, 4096) | 3.299 | — | 4.503 | 1.482 | 2.23 |
-| (768, 4096) | 4.014 | — | 5.645 | 1.804 | 2.22 |
+| (128, 1024) | 0.162 | — | 0.221 | 0.082 | 1.98 |
+| (256, 1024) | 0.312 | — | 0.442 | 0.151 | 2.07 |
+| (384, 1024) | 0.487 | — | 0.686 | 0.219 | 2.22 |
+| (512, 1024) | 0.661 | — | 0.915 | 0.295 | 2.24 |
+| (640, 1024) | 0.876 | — | 1.209 | 0.405 | 2.16 |
+| (768, 1024) | 1.061 | — | 1.534 | 0.487 | 2.18 |
+| (128, 2048) | 0.301 | — | 0.409 | 0.147 | 2.05 |
+| (256, 2048) | 0.616 | — | 0.801 | 0.266 | 2.32 |
+| (384, 2048) | 0.933 | — | 1.274 | 0.399 | 2.34 |
+| (512, 2048) | 1.273 | — | 1.760 | 0.553 | 2.30 |
+| (640, 2048) | 1.685 | — | 2.329 | 0.740 | 2.28 |
+| (768, 2048) | 2.067 | — | 2.880 | 0.952 | 2.17 |
+| (128, 4096) | 0.606 | — | 0.752 | 0.264 | 2.30 |
+| (256, 4096) | 1.201 | — | 1.558 | 0.494 | 2.43 |
+| (384, 4096) | 1.836 | — | 2.458 | 0.763 | 2.41 |
+| (512, 4096) | 2.505 | — | 3.454 | 1.058 | 2.37 |
+| (640, 4096) | 3.356 | — | 4.497 | 1.490 | 2.25 |
+| (768, 4096) | 3.999 | — | 5.630 | 1.814 | 2.20 |
 
-![PWA · Inference (CUDA graph), length sweep at S1024](figures/pwa_pwa_inference_cuda_graph_length.png) ![PWA · Inference (CUDA graph), msa depth sweep at L384](figures/pwa_pwa_inference_cuda_graph_msa_depth.png) <!-- measure_bars -->
+![PWA · Inference (CUDA graph), msa depth sweep at L384](figures/pwa_pwa_inference_cuda_graph_msa_depth.png) <!-- measure_bars -->
 
 ### PWA · Training, dropout 0.15 (CUDA graph)
 
 | (Length, MSA depth) | PyTorch compiled | cuEquivariance | Anthropic | ours | × |
 |---|---|---|---|---|---|
-| (128, 1024) | 0.503 | — | — | 0.300 | 1.68 |
-| (256, 1024) | 0.903 | — | — | 0.485 | 1.86 |
-| (384, 1024) | 1.364 | — | — | 0.716 | 1.91 |
-| (512, 1024) | 1.830 | — | — | 0.976 | 1.88 |
-| (640, 1024) | 2.467 | — | — | 1.326 | 1.86 |
-| (768, 1024) | 2.932 | — | — | 1.674 | 1.75 |
+| (128, 1024) | 0.509 | — | — | 0.304 | 1.67 |
+| (256, 1024) | 0.914 | — | — | 0.494 | 1.85 |
+| (384, 1024) | 1.366 | — | — | 0.724 | 1.89 |
+| (512, 1024) | 1.805 | — | — | 0.968 | 1.86 |
+| (640, 1024) | 2.439 | — | — | 1.275 | 1.91 |
+| (768, 1024) | 2.892 | — | — | 1.580 | 1.83 |
 
 ![PWA · Training, dropout 0.15 (CUDA graph), length sweep at S1024](figures/pwa_pwa_training_dropout_0_15_cuda_graph_length.png) <!-- measure_bars -->
 
