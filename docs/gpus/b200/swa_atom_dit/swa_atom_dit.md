@@ -12,8 +12,8 @@ sm_100a: 13.1 for the measurements below). The engine's fused block (`kernels/sw
 B200 in bf16 at the served widths, and the hoisted modulation (`swa_dit_hoist_modulation`) on `mod_fwd` / `mod_bwd`;
 `MINIWORLD_SWA_DIT_SM100=0` keeps the Triton path. `tests/integrations/test_b200_swa_dit_gpu.py` checks the output and every
 gradient against the fp32 reference (no worse than the Triton path: worst ratio 1.006; inference 2.4-2.6e-3, as Triton) at
-A = 1 / 3 / 5 / 8 / 48. The measurements below were taken in the standalone development build (not shipped) on the same sources; "CUDA" in the kernel tables means
-the kernel ran at that shape there.
+A = 1 / 3 / 5 / 8 / 48. The Measurements section below is the engine through the benchmark harness; the kernel tables (CUDA / ✓ / △ / ✗) and the speed-of-light section were
+taken in the standalone development build (not shipped) on the same sources, and "CUDA" in the kernel tables means the kernel ran at that shape there.
 
 - Everything is hand CUDA (tcgen05 / TMEM / TMA) except the four weight-gradient GEMMs (cuBLAS). No Triton, no quack.
 - Shapes: A = augments per sample (rows = A S). Inference A = 5 and A = 1 at S = 1024 / 2048 / 4096; training A = 48 at
@@ -144,72 +144,92 @@ bulk shared::cluster copies, summed in rank order.
 | 성능 확인 | ✗ | ✗ | ✗ | △ | ✗ | ✗ | ✗ | △ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Measurements (2026-09-30)
+## Measurements (2026-10-11)
 
-- Setup: B200 (148 SMs, 1000 W power cap), one GPU with no other process on it, the standalone development build's
-  (older) environment (torch 2.10 cu130) for the ours, H100 fused and PyTorch rows; the v2.2.0 pixi env (torch 2.13.0+cu129) for the
-  engine row; the standalone build's cubins built by nvcc 13.1. B = 1, bf16. Run-to-run spread +-3-5 % (power cap).
-- Harness (standalone development build, one run): inference in a CUDA graph (median of 5 x 10 replays); training = forward +
-  `torch.autograd.grad` of every input (q, conditioning, all weights) without a graph, CUDA events. Tables in ms; × = ours
-  against the fastest of the other columns.
-- Columns: **PyTorch compiled** = `torch.compile` of the block's reference math in bf16 (dense banded mask SDPA; not the engine
-  module); **engine v2.2** = the engine's `SWADiTBlock` (FA4 window attention +
-  Triton + cuBLAS, the modulation computed per row inside); **H100 fused** = the H100 fused Triton block (the consumer model code's
-  fused SWA algorithm, its Triton path: the sm_90a kernels do not build for sm_100); **ours** = the same block with the sm_100a kernels.
-  cuEquivariance has no such block (—).
-- Accuracy against the fp64 block (A8 S1024): ours output 2.58e-3, dq 2.78e-3, dc 4.60-4.62e-3, worst weight gradient
-  7.4-7.6e-3; the H100 fused Triton path 2.58e-3 / 2.78e-3 / 4.91e-3 / 7.4-7.6e-3 (bf16 rounding points of the same algorithm).
+- Setup: B200 (148 SMs, 1000 W power cap), one GPU with no other process on it, torch 2.13.0+cu129, triton 3.7.1, kernels built by
+  nvcc 13.1, engine v2.2.0 plus unreleased changes. One block, B = 1, bf16 (`precision=bf16-mixed`), unmasked rows. Inference in a CUDA
+  graph, training in a manually captured graph (`cudagraph=manual`: the harness times a backward closure). Run-to-run spread +-3-5 % (power cap).
+  Tables in ms; × = ours against the fastest of the other columns.
+- Command: `python benchmarks/runners/bench.py target=swa_dit level=module mode=<inference|training> n_augment=<A> sweep_axis=seq_len
+  min_seq_len=<atoms / 8> max_seq_len=<atoms / 8> compile=false +shared_cond=true` (the harness length is tokens, atoms = 8 x seq_len;
+  inference `cudagraph=graphed`, training `cudagraph=manual`).
+- Conditioning: `+shared_cond=true` gives the A samples ONE conditioning [1, S, 128] and calls the block through
+  `SWADiTBlock.forward_hoisted`, as the model does (its atom conditioning repeats over the augments, so the adaLN modulation is computed
+  once per batch element: team-gm's `SWAAtomTransformer` calls `swa_dit_hoist_modulation(c_base, ...)`). Without the flag every
+  sample has its own conditioning row per atom and the modulation is computed A times; those rows are in the last table.
+- Columns: **PyTorch compiled** = `implementations=[pytorch] compile=true` (the module's reference math, `torch.compile`); **engine per-op**
+  = `+swa_dit_fused=false` (the per-op path: RMS-adaLN, FA4 window attention, SwiGLU, as separate ops); **fused Triton** =
+  `MINIWORLD_SWA_DIT_SM100=0` (the fused block's Triton kernels; the sm_90a kernels do not build for sm_100); **ours** = the default
+  (the sm_100a kernels). cuEquivariance has no such block. `compile=true` fails for ours in Dynamo on `sys.audit`, so ours is
+  timed without `torch.compile` (as the other non-compiled rows).
+- Accuracy against the fp64 block (A8 S1024, standalone development build): ours output 2.58e-3, dq 2.78e-3, dc 4.60-4.62e-3, worst
+  weight gradient 7.4-7.6e-3; the Triton path 2.58e-3 / 2.78e-3 / 4.91e-3 / 7.4-7.6e-3 (bf16 rounding points of the same algorithm).
+  The harness inference rows carry the output error against an fp32 IEEE block in their CSV.
 - Charts: under each table, a length sweep at D128 (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`).
 
-### Inference A5 · modulation in the block
+### Inference A5
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|
-| (1024, 128) | 0.1037 | — | 0.0773 | 0.0529 | 0.0342 | 1.55 |
-| (2048, 128) | 0.2617 | — | 0.1270 | 0.0695 | 0.0450 | 1.54 |
-| (4096, 128) | 0.7093 | — | 0.2204 | 0.1158 | 0.0707 | 1.64 |
+| (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
+|---|---|---|---|---|---|
+| (1024, 128) | 0.1391 | 0.0838 | 0.0551 | 0.0408 | 1.35 |
+| (2048, 128) | 0.3828 | 0.1166 | 0.0737 | 0.0511 | 1.44 |
+| (3072, 128) | 0.7044 | 0.1350 | 0.0798 | 0.0593 | 1.35 |
+| (4096, 128) | 1.2374 | 0.1719 | 0.1124 | 0.0778 | 1.45 |
 
-![Inference A5 · modulation in the block, length sweep at D128](figures/swa_atom_dit_inference_a5_modulation_in_the_block_length.png) <!-- measure_bars -->
+![Inference A5, length sweep at D128](figures/swa_atom_dit_inference_a5_length.png) <!-- measure_bars -->
 
-### Inference A1 · modulation in the block
+### Inference A1
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|
-| (1024, 128) | 0.0959 | — | 0.0455 | 0.0430 | 0.0247 | 1.74 |
-| (2048, 128) | 0.1618 | — | 0.0506 | 0.0480 | 0.0287 | 1.67 |
-| (4096, 128) | 0.3302 | — | 0.0632 | 0.0625 | 0.0369 | 1.69 |
+| (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
+|---|---|---|---|---|---|
+| (1024, 128) | 0.0961 | 0.0716 | 0.0489 | 0.0306 | 1.60 |
+| (2048, 128) | 0.1616 | 0.0736 | 0.0510 | 0.0326 | 1.56 |
+| (3072, 128) | 0.2681 | 0.0756 | 0.0510 | 0.0368 | 1.39 |
+| (4096, 128) | 0.3500 | 0.0797 | 0.0531 | 0.0429 | 1.24 |
 
-![Inference A1 · modulation in the block, length sweep at D128](figures/swa_atom_dit_inference_a1_modulation_in_the_block_length.png) <!-- measure_bars -->
+![Inference A1, length sweep at D128](figures/swa_atom_dit_inference_a1_length.png) <!-- measure_bars -->
 
 ### Training A48 · forward + backward
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|
-| (4096, 128) | 19.028 | — | 5.009 | 2.565 | 1.248 | 2.06 |
-| (8192, 128) | 83.761 | — | 9.662 | 4.815 | 2.270 | 2.12 |
+| (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
+|---|---|---|---|---|---|
+| (4096, 128) | 28.895 | 3.380 | 2.289 | 1.223 | 1.87 |
+| (8192, 128) | 114.108 | 6.575 | 4.456 | 2.272 | 1.96 |
 
 ![Training A48 · forward + backward, length sweep at D128](figures/swa_atom_dit_training_a48_forward_backward_length.png) <!-- measure_bars -->
 
-### Engine harness cross-check (2026-10-10)
+### Per-sample conditioning
 
-The same block through the engine's module (`SWADiTBlock`, the default implementation: the sm_100a kernels, no Triton in the profile) and the benchmark harness
-(`benchmarks/runners/bench.py target=swa_dit level=module mode=<inference|training> n_augment=<A> min_seq_len=<N / 8> ... compile=false`; the harness's
-length is tokens, atoms = 8 x seq_len; CUDA-graph replay; one conditioning row per atom and sample; `compile=true` fails in Dynamo on `sys.audit`, so the
-block is timed without `torch.compile`). B200, torch 2.13.0+cu129, triton 3.7.1, kernels built by nvcc 13.1, engine v2.2.0 plus the unreleased changes of 2026-10-10, ms:
+The same rows without `+shared_cond=true`: one random conditioning row per atom and sample, the modulation computed A times. Ours, ms:
 
-| (Length, Dimension) | A5 harness | A5 table above | A1 harness | A1 table above | A48 training harness (graph) | A48 table above |
-|---|---|---|---|---|---|---|
-| (1024, 128) | 0.047 | 0.034 | 0.037 | 0.025 | | |
-| (2048, 128) | 0.074 | 0.045 | 0.035 | 0.029 | | |
-| (3072, 128) | 0.092 | | 0.037 | | | |
-| (4096, 128) | 0.121 | 0.071 | 0.043 | 0.037 | 3.127 | 1.248 |
-| (8192, 128) | | | | | 6.025 | 2.270 |
+A5 inference
 
-Called through the engine module and the harness, the same block measures slower than the standalone-build table above: 1.2-1.7x the table's time in inference, 2.5-2.7x in training (A48, 4096 atoms: 3.13 ms against 1.25 ms). Profile of the engine call (kernel sums; A48 training,
-4096 atoms, 3.2 ms): `swa_mod_fwd` 0.40, `swa_mod_bwd_dc` 0.52, `swa_mod_bwd_dw` 0.34, `swa_qkvg_bwd` 0.31, `swa_ffn_fwd2` 0.28, `swa_qkvg_fwd2` 0.25,
-`swa_ffn_bwd_dy` 0.21, `swa_oproj_bwd` 0.18 ms and the attention kernels; A5 inference, 4096 atoms (0.13 ms): `swa_ffn_fwd2` 0.043, `swa_mod_fwd` 0.042,
-`swa_qkvg_fwd2` 0.033, `swa_attn_fwd3` 0.017 ms. The two measurements were not reconciled (they differ in harness, in torch version and in the
-engine's module wrapper); the engine figures are those of the module as a caller sees it.
+| Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
+|---|---|---|---|
+| 1024 | 0.0408 | 0.0470 | 1.15 |
+| 2048 | 0.0511 | 0.0717 | 1.40 |
+| 3072 | 0.0593 | 0.0920 | 1.55 |
+| 4096 | 0.0778 | 0.1203 | 1.55 |
+
+A1 inference (one sample: the same call)
+
+| Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
+|---|---|---|---|
+| 1024 | 0.0306 | 0.0305 | 1.00 |
+| 2048 | 0.0326 | 0.0326 | 1.00 |
+| 3072 | 0.0368 | 0.0367 | 1.00 |
+| 4096 | 0.0429 | 0.0428 | 1.00 |
+
+A48 training
+
+| Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
+|---|---|---|---|
+| 4096 | 1.223 | 3.120 | 2.55 |
+| 8192 | 2.272 | 6.048 | 2.66 |
+
+At A48 and 4096 atoms the three modulation kernels (`swa_mod_fwd` 0.40, `swa_mod_bwd_dc` 0.52, `swa_mod_bwd_dw` 0.34 ms) are 1.27 of the 3.12 ms;
+the other kernels sum to 1.9 ms against 1.2 ms with the shared conditioning, because they read per-row modulation rows instead of one
+set per atom. The model does not run this workload.
 
 ## Speed of light (measured, 2026-09-30)
 
@@ -353,6 +373,20 @@ FFN sigmoids with `rcp.approx`; and -- found with Nsight Compute: SM 7 % busy, t
 per-row modulation and RoPE values brought in by TMA boxes through the existing rings instead of strided 16-B global loads per
 thread (each warp load touched 32 sectors with a ~24 KB L1).
 
+## Fixed (2026-10-11)
+
+**Hang of the forward chain in CUDA-graph replays.** With one conditioning row per sample (A = 1, B = N = 48, 4096 atoms) and ragged
+`seqused`, replaying the captured inference graph hung after a few dozen replays: the GPU spun at full power, the host sat in
+`cudaStreamSynchronize` (found as a hung benchmark; reproducible 3 of 3 times in a fresh process). The forward kernels are a PDL chain
+(modulation -> qkvg -> attention -> ffn), each calling `griddepcontrol.launch_dependents` at its top so that the next kernel's CTAs
+launch while it runs. Bisected: each kernel alone, and any two-kernel subchain, replayed 800 times without a hang; the whole chain hung;
+with the trigger removed it did not. The two A = 1 - 3 builds, `qkvg_fwd2_a1` (`-DATM=32`) and `ffn_fwd2_a1` (`-DATM=32 -DNSTG=1`), are
+now built with `-DPDL_EARLY=0` (the trigger is the kernel's exit); the default builds (A >= 4, and the hoisted conditioning at A = 5 and 48) keep
+the early trigger and replayed 4000 times unmasked and ragged without a hang. The root cause (which resource the two-deep overlap
+exhausts) was not identified; the cost of the fix is on the A = 1 builds only. fp32 (TF32) forward chains replayed 600 times (A = 1, 5, 48,
+ragged) without a hang. Test: `tests/integrations/test_b200_swa_dit_graph_replay_gpu.py` (a subprocess per case with a timeout; fails on the
+old builds for the per-sample case).
+
 ## What was tried and not kept
 
 | attempt | result |
@@ -369,8 +403,9 @@ thread (each warp load touched 32 sectors with a ~24 KB L1).
 
 ## Limits and next
 
-- In the engine since 2026-10-01 (`kernels/swa_dit/cuda/sm100`); the timings above are the standalone development build's, and the engine's
-  own module-level figures are in the cross-check section. The atom-count rule holds there too: S % 128 != 0 raises `ValueError` on B200.
+- In the engine since 2026-10-01 (`kernels/swa_dit/cuda/sm100`); the kernel timings and the speed-of-light section are the standalone
+  development build's, the Measurements tables the engine's through the harness. The atom-count rule holds there too: S % 128 != 0 raises
+  `ValueError` on B200.
 - Measured only at B = 1 and at the lengths above; A = 2 - 4 inference ran the kernels' accuracy check only.
 - The modulation gradient accumulates with atomics (as the Triton path): not bitwise deterministic.
 - Forward kernels and `attn_dkvq` sit near 45-50 % SoL (one tile at a time through serial thread phases); the block is at 16-18 %

@@ -44,8 +44,8 @@ _dir = Path(__file__).parent
 
 #: cubin name -> (source stem, extra nvcc flags): the sources' defaults, and the A = 1 - 3 builds (ATM = 32; the FFN single stage)
 CUBINS = {
-    "qkvg_fwd": ("qkvg_fwd", ()), "qkvg_fwd2": ("qkvg_fwd2", ()), "qkvg_fwd2_a1": ("qkvg_fwd2", ("-DATM=32",)),
-    "ffn_fwd2": ("ffn_fwd2", ()), "ffn_fwd2_a1": ("ffn_fwd2", ("-DATM=32", "-DNSTG=1")),
+    "qkvg_fwd": ("qkvg_fwd", ()), "qkvg_fwd2": ("qkvg_fwd2", ()), "qkvg_fwd2_a1": ("qkvg_fwd2", ("-DATM=32", "-DPDL_EARLY=0")),
+    "ffn_fwd2": ("ffn_fwd2", ()), "ffn_fwd2_a1": ("ffn_fwd2", ("-DATM=32", "-DNSTG=1", "-DPDL_EARLY=0")),
     "attn_fwd3": ("attn_fwd3", ()), "attn_fwd1h": ("attn_fwd1h", ()),
     "ffn_bwd_gate": ("ffn_bwd_gate", ()), "ffn_bwd_dy": ("ffn_bwd_dy", ()), "oproj_bwd": ("oproj_bwd", ()),
     "attn_dq": ("attn_dq", ()), "attn_dkv": ("attn_dkv", ()), "attn_dkvq": ("attn_dkvq", ()), "qkvg_bwd": ("qkvg_bwd", ()),

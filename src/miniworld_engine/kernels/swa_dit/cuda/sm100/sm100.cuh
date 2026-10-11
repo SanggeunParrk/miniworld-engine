@@ -138,7 +138,12 @@ DEVI bool elect_one() {
 }
 // programmatic dependent launch: wait for the previous grid's completion (and memory flush) / let the next grid be scheduled
 DEVI void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
-DEVI void pdl_launch() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+// PDL_EARLY = 1 (default): launch_dependents at the top, so the dependent kernel may launch as soon as every CTA of this kernel has
+// started. PDL_EARLY = 0 drops the trigger: the dependent launches when this kernel's CTAs exit.
+#ifndef PDL_EARLY
+#define PDL_EARLY 1
+#endif
+DEVI void pdl_launch() { if (PDL_EARLY) asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
 DEVI void named_bar_sync(int id, int n) { asm volatile("bar.sync %0, %1;" :: "r"(id), "r"(n) : "memory"); }
 
 // ------------------------------------------------------------------ TMA

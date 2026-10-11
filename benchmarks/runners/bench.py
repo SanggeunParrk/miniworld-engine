@@ -125,9 +125,12 @@ class BenchConfig(BaseModel):
     trimul_direction: Literal["outgoing", "incoming", "alternating"] = "outgoing"
     n_augment: int = 32
     mask_prob: float = 0.2
-    #: dit: one conditioning shared by every sample (a sampling step: the noise level is the same for all
+    #: dit / swa_dit / local_dit: one conditioning shared by every sample (a sampling step: the noise level is the same for all
     #: samples) instead of a random one per sample. The fused token runner and Anthropic's conditioning dedup only
-    #: apply to the shared case, so this is how their inference rows are compared on their own terms.
+    #: apply to the shared case, so this is how their inference rows are compared on their own terms. For swa_dit it is
+    #: the model's contract (the atom conditioning repeats over the augments: team-gm's SWAAtomTransformer computes the
+    #: modulation once per batch element): the block is called through `forward_hoisted` and the modulation is computed
+    #: once, not once per sample.
     shared_cond: bool = False
     #: dit: blocks with QK-norm (RMSNorm of every q / k head). Anthropic's composition has none and refuses.
     dit_qk_norm: bool = False
@@ -206,6 +209,9 @@ class BenchConfig(BaseModel):
     swa_component: Literal["block", "modulation", "rope", "swiglu", "residual", "sigmoid_gate"] = "block"
     swa_kernels: list[str] | None = None
     swa_active_gates: bool = False
+    #: swa_dit block: False runs the per-op path (`settings.swa_dit_fused`: adaLN, FA4 window attention, SwiGLU as separate ops)
+    #: instead of the fused block, so the fused block is measured against what it replaces.
+    swa_dit_fused: bool = True
     #: MSA depth (rows S) of the outer_product / msa_pair_weighted_averaging targets. 1024 is
     #: MiniWorld v1.2's msa_subsample_per_recycle and the depth of every OPM/PWA comparison in
     #: MiniWorld runs/msa_bench_20260921; v1.1's bucket_msa_multiple used 2048. Not a yaml key
@@ -4123,6 +4129,12 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     """ESMFold2 atom DiT: RMSNorm + adaLN-Zero gates, windowed 3D-RoPE attention, SwiGLU.
     `modules/swa_dit`. Runs at the atom length (`seq_len * 8`), like the swa_atom_attention
     kernel bench, and reports NaN without a flash backend for the same reason.
+
+    The conditioning is one random row per atom and sample by default; `+shared_cond=true` gives
+    the samples ONE conditioning [1, S, d] and calls the block through `forward_hoisted`, the way
+    the model does (the atom conditioning repeats over the augments, so the adaLN modulation is
+    computed once per batch element). The per-sample default does `A` times the modulation work
+    (A48 4096 atoms, bf16 training: 3.1 ms against 1.2 ms), a workload the model never runs.
     """
     if conf.swa_component != "block" or conf.swa_kernels is not None or conf.swa_active_gates:
         return bench_swa_component_audit(conf, seq_len, implementation, fabric)
@@ -4144,6 +4156,9 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
             raise UnsupportedBenchmark(f"swa_dit does not implement {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     n_head = 4
+    if not conf.swa_dit_fused:
+        from miniworld_engine import settings as _settings
+        _settings.configure(swa_dit_fused=False)
 
     class MultiSWADiT(nn.Module):
         def __init__(self) -> None:
@@ -4156,9 +4171,10 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
 
         def forward(self, x, cond, ap):
             if self.composed is not None:
-                return self.composed(x, cond, ap)
+                return self.composed(x, cond.expand(x.shape[0], -1, -1), ap)
             for layer in self.layers:
-                x = layer(x, cond, ap)
+                # a conditioning with fewer rows than samples repeats over them: the hoisted-modulation entry
+                x = layer(x, cond, ap) if cond.shape[0] == x.shape[0] else layer.forward_hoisted(x, cond, ap)
             return x
 
     model = MultiSWADiT()
@@ -4181,7 +4197,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     wants_grad = not is_inference_mode(conf.mode)
     x = torch.randn(n, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype,
                     requires_grad=wants_grad)
-    cond = torch.randn(n, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype,
+    cond = torch.randn(1 if conf.shared_cond else n, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype,
                        requires_grad=wants_grad)
     cos = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
     sin = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
@@ -4207,7 +4223,8 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                 try:
                     expected = x.float()
                     for layer in ref_layers:
-                        expected = layer(expected, cond.float(), ap)
+                        expected = (layer(expected, cond.float(), ap) if cond.shape[0] == n
+                                    else layer.forward_hoisted(expected, cond.float(), ap))
                 finally:
                     torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
                 del ref_layers
@@ -4240,7 +4257,9 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         is_train=wants_grad,
         input_dtype=str(dtype).replace("torch.", ""),
         parameter_dtype=parameter_dtype_of(model),
-        execution_path=anthropic_path or f"modules.swa_dit.SWADiTBlock[{backend or 'unavailable'}]",
+        execution_path=anthropic_path or (
+            f"modules.swa_dit.SWADiTBlock[{backend or 'unavailable'}]"
+            + (".forward_hoisted[shared conditioning: the modulation once per sample]" if conf.shared_cond else "")),
         reference=reference,
     )._replace(**accuracy)
 

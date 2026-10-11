@@ -22,8 +22,19 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   until a new backward lands; inference keeps the TF32 forward.
 - B200 fp32 bias-only DiT `dpb_tf32.cu`: identical reruns gave different dbias at L 640 / 768. Replaced by `dpb32_sm100.cu` (below).
 
+### Fixed
+
+- B200 SWA atom DiT: the forward chain (modulation -> qkvg -> attention -> ffn, PDL) hung in CUDA-graph replays with one conditioning
+  row per sample (A = 1, B = N) and ragged `seqused`. The A = 1 - 3 builds of `qkvg_fwd2` / `ffn_fwd2` are built with `-DPDL_EARLY=0` (no
+  early `griddepcontrol.launch_dependents`); the other builds are unchanged. A1 inference after the change: 0.031-0.043 ms for
+  1024-4096 atoms (harness). Test: `tests/integrations/test_b200_swa_dit_graph_replay_gpu.py`; page:
+  `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md` ("Fixed (2026-10-11)").
+
 ### Added
 
+- Benchmark harness, `target=swa_dit`: `+shared_cond=true` gives the samples one conditioning and calls `SWADiTBlock.forward_hoisted`
+  (the model's contract: the adaLN modulation once per batch element, A48 4096 atoms bf16 training 1.22 ms against 3.12 ms with one
+  conditioning per sample), and `+swa_dit_fused=false` runs the per-op path the fused block replaces.
 - Bias-only DiT bf16 attention core (`pv_gate_inf.cu`): the three-kernel inference step's core loads P before its PDL wait
   (`-DP_EARLY`, `PvGateCore(p_early=True)` from the runner only; v, g and the output stay after the wait). Safe because P is the
   runner's hoisted / per-call softmax, written before the step, and the step's first front is now launched without the
