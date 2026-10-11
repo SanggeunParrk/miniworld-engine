@@ -79,7 +79,7 @@ class ModuleTarget:
 #: The two halves of the model, as `build` selectors. A kernel declares which one launches it in
 #: registry.csv's `stack` column, and `build trunk` / `build diffusion` run the same per-op sweep
 #: `build all` runs over just that half -- the trunk being the model's Pairformer / MSA / template
-#: stack and the diffusion being token_dit / atom_dit / the SWA atom transformer. A kernel both
+#: stack and the diffusion being token_dit / the local DiT / the SWA atom transformer. A kernel both
 #: sides launch is `both` and is built by EITHER: it has to be tuned for whichever half is built
 #: first, and building one kernel twice costs build time where missing one costs a production
 #: cache miss.
@@ -127,10 +127,9 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     # `custom_op`s, so a part pays its launch overhead once and a block pays it once per part,
     # while `torch.compile` fuses across parts in the reference and cannot fuse across ours.
     # Both effects only land on a block. `dit` is the token track (pair-bias attention),
-    # `dit_atom` uses the same pair-bias block at atom widths; `swa_dit` uses windowed 3D-RoPE.
+    # `swa_dit` uses windowed 3D-RoPE.
     "dit": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition"),
                         "precision=32"),
-    "dit_atom": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition")),
     "swa_dit": ModuleTarget(
         ("swa_atom_attention", "adaptive_layernorm", "conditioned_transition"), "precision=32"),
     # The bias-only token DiT block (no query / key). Its engine path is hand CUDA + cuBLAS (kernels/bias_only_dit):
@@ -153,7 +152,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom",
-                  "swa_atom_attention", "dit", "dit_atom", "swa_dit", "bias_only_dit"),
+                  "swa_atom_attention", "dit", "swa_dit", "bias_only_dit"),
     "attention": ("triangle_attention",
                   "augmented_attention_token", "augmented_attention_atom"),
 }

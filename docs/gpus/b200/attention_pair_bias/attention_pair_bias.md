@@ -131,7 +131,7 @@ module for all of them). The rows of one layout come from one run: 8 x 48 and 16
 deterministic dQ and this page's code), 24 x 16 / 12 x 32 / 16 x 32 from 10:09-10:50 the same day (the same kernels;
 the later edits were the package move and the dh-64 TMEM clear, which these widths do not reach).
 
-Re-measured 2026-10-10 (engine commit `0a7928ff`, torch 2.13.0+cu129, triton 3.7.1, driver 580.95.05, sm_100a kernels built by nvcc 13.1, one GPU with no
+Re-measured 2026-10-10 (engine v2.2.0 plus unreleased changes, torch 2.13.0+cu129, triton 3.7.1, driver 580.95.05, sm_100a kernels built by nvcc 13.1, one GPU with no
 other process on it; the Anthropic cells with `compile=false`): the inference table and the graph-on figures of the training table. A cell that
 reproduced within 8 % keeps its value, a cell that moved was repeated and the median of the runs is shown. The PyTorch compiled and cuEquivariance
 columns are 20-25 % faster than on 2026-10-01 at L512-768 since LayerNorm / RMSNorm on B200 became PyTorch ops that `torch.compile` fuses

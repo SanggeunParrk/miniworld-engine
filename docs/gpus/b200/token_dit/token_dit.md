@@ -617,7 +617,7 @@ L128 / 384, key mask on / off; inference L128 / 200 / 384 --; the fused fp32 inf
 against the fp32 IEEE block, held to 1.5x the module path's error in the same TF32 regime, the training block at A L = 4 x 256,
 2 x 384 and 3 x 200 (padding); fp32 under bf16 autocast) and `tests/integrations/test_b200_token_dit_train_gpu.py` (now also A L
 = 3 x 200, and the [A, B, L] expanded mask taking the fused path while a per-sample mask keeps the module path). Run on 2026-10-10
-(engine commit `0a7928ff`, one B200): 94 passed over these two files and `tests/integrations/test_b200_token_dit_layouts_gpu.py`.
+(engine v2.2.0 plus unreleased changes, one B200): 94 passed over these two files and `tests/integrations/test_b200_token_dit_layouts_gpu.py`.
 
 **Measurements (2026-10-10).** `benchmarks/runners/bench.py target=dit level=module precision=32 +tdit_n_head=<heads> d_single_token=<d>
 min_seq_len=256 max_seq_len=768 seq_len_step=256` (inference with `+shared_cond=true`, S = 5; training A = 48), one DiTBlock, no key mask, compiled

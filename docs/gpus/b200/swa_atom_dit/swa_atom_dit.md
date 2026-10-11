@@ -30,7 +30,7 @@ the kernel ran at that shape there.
 ## Inference
 
 Per block: I1 -> I2 -> I3 -> I4, with PDL between them (the next kernel's launch and weight prologue run under the previous one).
-With the modulation precomputed (hoisted per fold, as Anthropic's driver takes it) I1 drops out.
+With the modulation computed once outside the block (the hoisted modulation, `swa_dit_hoist_modulation`) I1 drops out.
 
 ### I1 · adaLN modulation `mod_fwd` (silu(c) Wmod^T, fp32 out; bf16 MMA with exact products)
 
@@ -147,79 +147,55 @@ bulk shared::cluster copies, summed in rank order.
 ## Measurements (2026-09-30)
 
 - Setup: B200 (148 SMs, 1000 W power cap), one GPU with no other process on it, the standalone development build's
-  (older) environment (torch 2.10 cu130) for the ours, H100 fused, PyTorch and Anthropic rows; the v2.2.0 pixi env (torch 2.13.0+cu129) for the
+  (older) environment (torch 2.10 cu130) for the ours, H100 fused and PyTorch rows; the v2.2.0 pixi env (torch 2.13.0+cu129) for the
   engine row; the standalone build's cubins built by nvcc 13.1. B = 1, bf16. Run-to-run spread +-3-5 % (power cap).
 - Harness (standalone development build, one run): inference in a CUDA graph (median of 5 x 10 replays); training = forward +
   `torch.autograd.grad` of every input (q, conditioning, all weights) without a graph, CUDA events. Tables in ms; × = ours
   against the fastest of the other columns.
 - Columns: **PyTorch compiled** = `torch.compile` of the block's reference math in bf16 (dense banded mask SDPA; not the engine
-  module); **Anthropic** = its fused `SWAAtomBlock` (esmfold2 `ef2_atom.py` fast tier, bf16 GEMMs; fp32 residual stream, modulation
-  / RoPE per row: inference only, modulation precomputed); **engine v2.2** = the engine's `SWADiTBlock` (FA4 window attention +
+  module); **engine v2.2** = the engine's `SWADiTBlock` (FA4 window attention +
   Triton + cuBLAS, the modulation computed per row inside); **H100 fused** = the H100 fused Triton block (the consumer model code's
   fused SWA algorithm, its Triton path: the sm_90a kernels do not build for sm_100); **ours** = the same block with the sm_100a kernels.
   cuEquivariance has no such block (—).
 - Accuracy against the fp64 block (A8 S1024): ours output 2.58e-3, dq 2.78e-3, dc 4.60-4.62e-3, worst weight gradient
   7.4-7.6e-3; the H100 fused Triton path 2.58e-3 / 2.78e-3 / 4.91e-3 / 7.4-7.6e-3 (bf16 rounding points of the same algorithm).
-  Anthropic 7.4e-4 (A4 S1024: its residual stream stays fp32).
 - Charts: under each table, a length sweep at D128 (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`).
 
 ### Inference A5 · modulation in the block
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|---|
-| (1024, 128) | 0.1037 | — | — | 0.0773 | 0.0529 | 0.0342 | 1.55 |
-| (2048, 128) | 0.2617 | — | — | 0.1270 | 0.0695 | 0.0450 | 1.54 |
-| (4096, 128) | 0.7093 | — | — | 0.2204 | 0.1158 | 0.0707 | 1.64 |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | engine v2.2 | H100 fused | ours | × |
+|---|---|---|---|---|---|---|
+| (1024, 128) | 0.1037 | — | 0.0773 | 0.0529 | 0.0342 | 1.55 |
+| (2048, 128) | 0.2617 | — | 0.1270 | 0.0695 | 0.0450 | 1.54 |
+| (4096, 128) | 0.7093 | — | 0.2204 | 0.1158 | 0.0707 | 1.64 |
 
 ![Inference A5 · modulation in the block, length sweep at D128](figures/swa_atom_dit_inference_a5_modulation_in_the_block_length.png) <!-- measure_bars -->
 
-### Inference A5 · modulation precomputed
-
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|---|
-| (1024, 128) | — | — | 0.0442 | — | 0.0357 | 0.0320 | 1.12 |
-| (2048, 128) | — | — | 0.0559 | — | 0.0483 | 0.0403 | 1.20 |
-| (4096, 128) | — | — | 0.1068 | — | 0.0803 | 0.0606 | 1.33 |
-
-![Inference A5 · modulation precomputed, length sweep at D128](figures/swa_atom_dit_inference_a5_modulation_precomputed_length.png) <!-- measure_bars -->
-
 ### Inference A1 · modulation in the block
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|---|
-| (1024, 128) | 0.0959 | — | — | 0.0455 | 0.0430 | 0.0247 | 1.74 |
-| (2048, 128) | 0.1618 | — | — | 0.0506 | 0.0480 | 0.0287 | 1.67 |
-| (4096, 128) | 0.3302 | — | — | 0.0632 | 0.0625 | 0.0369 | 1.69 |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | engine v2.2 | H100 fused | ours | × |
+|---|---|---|---|---|---|---|
+| (1024, 128) | 0.0959 | — | 0.0455 | 0.0430 | 0.0247 | 1.74 |
+| (2048, 128) | 0.1618 | — | 0.0506 | 0.0480 | 0.0287 | 1.67 |
+| (4096, 128) | 0.3302 | — | 0.0632 | 0.0625 | 0.0369 | 1.69 |
 
 ![Inference A1 · modulation in the block, length sweep at D128](figures/swa_atom_dit_inference_a1_modulation_in_the_block_length.png) <!-- measure_bars -->
 
-### Inference A1 · modulation precomputed
-
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|---|
-| (1024, 128) | — | — | 0.0231 | — | 0.0252 | 0.0204 | 1.13 |
-| (2048, 128) | — | — | 0.0247 | — | 0.0258 | 0.0225 | 1.10 |
-| (4096, 128) | — | — | 0.0335 | — | 0.0289 | 0.0275 | 1.05 |
-
-![Inference A1 · modulation precomputed, length sweep at D128](figures/swa_atom_dit_inference_a1_modulation_precomputed_length.png) <!-- measure_bars -->
-
 ### Training A48 · forward + backward
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | engine v2.2 | H100 fused | ours | × |
-|---|---|---|---|---|---|---|---|
-| (4096, 128) | 19.028 | — | — | 5.009 | 2.565 | 1.248 | 2.06 |
-| (8192, 128) | 83.761 | — | — | 9.662 | 4.815 | 2.270 | 2.12 |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | engine v2.2 | H100 fused | ours | × |
+|---|---|---|---|---|---|---|
+| (4096, 128) | 19.028 | — | 5.009 | 2.565 | 1.248 | 2.06 |
+| (8192, 128) | 83.761 | — | 9.662 | 4.815 | 2.270 | 2.12 |
 
 ![Training A48 · forward + backward, length sweep at D128](figures/swa_atom_dit_training_a48_forward_backward_length.png) <!-- measure_bars -->
-
-(Anthropic's block has no backward.)
 
 ### Engine harness cross-check (2026-10-10)
 
 The same block through the engine's module (`SWADiTBlock`, the default implementation: the sm_100a kernels, no Triton in the profile) and the benchmark harness
 (`benchmarks/runners/bench.py target=swa_dit level=module mode=<inference|training> n_augment=<A> min_seq_len=<N / 8> ... compile=false`; the harness's
 length is tokens, atoms = 8 x seq_len; CUDA-graph replay; one conditioning row per atom and sample; `compile=true` fails in Dynamo on `sys.audit`, so the
-block is timed without `torch.compile`). B200, torch 2.13.0+cu129, triton 3.7.1, kernels built by nvcc 13.1, engine commit `0a7928ff`, ms:
+block is timed without `torch.compile`). B200, torch 2.13.0+cu129, triton 3.7.1, kernels built by nvcc 13.1, engine v2.2.0 plus the unreleased changes of 2026-10-10, ms:
 
 | (Length, Dimension) | A5 harness | A5 table above | A1 harness | A1 table above | A48 training harness (graph) | A48 table above |
 |---|---|---|---|---|---|---|
@@ -229,7 +205,7 @@ block is timed without `torch.compile`). B200, torch 2.13.0+cu129, triton 3.7.1,
 | (4096, 128) | 0.121 | 0.071 | 0.043 | 0.037 | 3.127 | 1.248 |
 | (8192, 128) | | | | | 6.025 | 2.270 |
 
-The engine module-level figures are 1.2-1.7x the table's in inference and 2.5-2.7x in training. Profile of the engine call (kernel sums; A48 training,
+Called through the engine module and the harness, the same block measures slower than the standalone-build table above: 1.2-1.7x the table's time in inference, 2.5-2.7x in training (A48, 4096 atoms: 3.13 ms against 1.25 ms). Profile of the engine call (kernel sums; A48 training,
 4096 atoms, 3.2 ms): `swa_mod_fwd` 0.40, `swa_mod_bwd_dc` 0.52, `swa_mod_bwd_dw` 0.34, `swa_qkvg_bwd` 0.31, `swa_ffn_fwd2` 0.28, `swa_qkvg_fwd2` 0.25,
 `swa_ffn_bwd_dy` 0.21, `swa_oproj_bwd` 0.18 ms and the attention kernels; A5 inference, 4096 atoms (0.13 ms): `swa_ffn_fwd2` 0.043, `swa_mod_fwd` 0.042,
 `swa_qkvg_fwd2` 0.033, `swa_attn_fwd3` 0.017 ms. The two measurements were not reconciled (they differ in harness, in torch version and in the
@@ -355,20 +331,19 @@ every replay unless the caller declares static weights -- as torch ops that was 
 
 ### Measurements (2026-10-06)
 
-One block, 5 samples, inference, CUDA-graph replay (min of 9 x 60), B200. Anthropic = its ESMFold2
-fused block (`ef2_atom._fused_block`) on fp32 activations with TF32 GEMMs (`gemm="tf32"`), and with its shipped fast tier (bf16
-GEMMs, fp32 residual stream). Accuracy against an IEEE fp32 PyTorch block: ours 4.1e-4, Anthropic tf32 1.6e-3, Anthropic bf16 2.6e-3.
+One block, 5 samples, inference, CUDA-graph replay (min of 9 x 60), B200, the modulation computed in the call. Accuracy against an
+IEEE fp32 PyTorch block: 4.1e-4.
 
-| atoms | modulation in the call: ours / Anthropic tf32 / bf16 (us) | x tf32 | modulation precomputed: ours / Anthropic tf32 / bf16 | x tf32 | x bf16 |
-|---|---|---|---|---|---|
-| 1024 | 57.4 / 78.7 / 55.4 | 1.37 | 48.9 / 69.7 / 45.2 | 1.43 | 0.92 |
-| 2048 | 73.9 / 127.3 / 70.9 | 1.72 | 59.9 / 110.7 / 56.3 | 1.85 | 0.94 |
-| 3072 | 86.4 / 148.0 / 84.6 | 1.71 | 69.4 / 127.0 / 67.7 | 1.83 | 0.98 |
-| 4096 | 135.3 / 210.9 / 125.4 | 1.56 | 113.7 / 190.5 / 105.7 | 1.68 | 0.93 |
-| 6144 | 152.7 / 283.8 / 161.5 | 1.86 | 126.7 / 257.7 / 135.3 | 2.03 | 1.07 |
+| atoms | ours (us) |
+|---|---|
+| 1024 | 57.4 |
+| 2048 | 73.9 |
+| 3072 | 86.4 |
+| 4096 | 135.3 |
+| 6144 | 152.7 |
 
-Per kernel (us per launch, 20 back to back in a graph) at 1024 / 2048 / 3072 / 4096 / 6144 atoms: mod 7.9 / 11.5 / 14.7 / 19.2 / 24.6
-(Anthropic's silu + Linear 10.4 / 15.3 / 18.5 / 22.6 / 30.4), qkvg 13.3 / 20.4 / 20.4 / 37.1 / 40.7, attn 9.4 / 12.9 / 16.7 / 20.5 / 28.0,
+Per kernel (us per launch, 20 back to back in a graph) at 1024 / 2048 / 3072 / 4096 / 6144 atoms: mod 7.9 / 11.5 / 14.7 / 19.2 / 24.6,
+qkvg 13.3 / 20.4 / 20.4 / 37.1 / 40.7, attn 9.4 / 12.9 / 16.7 / 20.5 / 28.0,
 ffn 21.2 / 21.6 / 21.9 / 42.6 / 47.6, weight forms 2.2. The step at 4096 atoms (qkvg, ffn) is the second wave: 5 x 4096 rows = 160
 tiles of 128 rows over 148 SMs. Against PyTorch compiled fp32 (TF32 on), bench harness, L 128-768: inference 2.2-14x.
 

@@ -60,22 +60,114 @@ from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
-from miniworld_engine.integrations.atom_dit import (  # the row kernels' weight packs are the dense atom block's
-    _GAMMA,
-    _WBIAS,
-    BF,
-    DC_,
-    DP_,
-    DS_,
-    EPS,
-    NH_,
-    WEIGHTS,
-    _padded,
-    _padded_length,
-    _unpadded,
-    _weights,
-)
 from miniworld_engine.kernels._compile import device_constant, opaque
+
+# ------------------------------------------------------------------------------------------------------------ weights
+# The block's parameters and the kernels' weight packs (stacked / transposed bf16 packs and the backward's transposed A operands).
+DS_, DC_, DP_, NH_, DH_ = 128, 128, 16, 4, 32
+EPS = 1e-5
+BF = torch.bfloat16
+
+#: The block's parameters, in the order the ops take and return them (every ``DiTBlock.named_parameters`` entry at atom widths).
+WEIGHTS = (
+    "attention.ada_ln_in.ln_cond.weight",
+    "attention.ada_ln_in.to_scale.weight",
+    "attention.ada_ln_in.to_scale.bias",
+    "attention.ada_ln_in.to_bias.weight",
+    "attention.to_query.weight",
+    "attention.to_query.bias",
+    "attention.to_key.weight",
+    "attention.to_value.weight",
+    "attention.ln_pair.weight",
+    "attention.to_bias.weight",
+    "attention.to_gate.weight",
+    "attention.to_out.weight",
+    "attention.to_scale.weight",
+    "attention.to_scale.bias",
+    "transition.ada_ln_in.ln_cond.weight",
+    "transition.ada_ln_in.to_scale.weight",
+    "transition.ada_ln_in.to_scale.bias",
+    "transition.ada_ln_in.to_bias.weight",
+    "transition.expand_a.weight",
+    "transition.expand_b.weight",
+    "transition.squeeze.weight",
+    "transition.to_scale.weight",
+    "transition.to_scale.bias",
+)
+_GAMMA, _WBIAS = WEIGHTS.index("attention.ln_pair.weight"), WEIGHTS.index("attention.to_bias.weight")
+
+def _namespace(weights) -> SimpleNamespace:
+    """The attribute tree ``sm100_atom.cond_params`` / ``pre_params`` / ``post_params`` read (``block.attention.to_query.weight``)."""
+    block = SimpleNamespace()
+    for path, weight in zip(WEIGHTS, weights, strict=True):
+        node = block
+        *parents, leaf = path.split(".")
+        for name in parents:
+            if not hasattr(node, name):
+                setattr(node, name, SimpleNamespace())
+            node = getattr(node, name)
+        setattr(node, leaf, weight)
+    return block
+
+
+def _pack(weights):
+    """The kernels' stacked bf16 weights and the backward's transposed A operands."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as sm100
+
+    block = _namespace(weights)
+    with torch.no_grad():
+        wc, wp, wo = sm100.cond_params(block), sm100.pre_params(block), sm100.post_params(block)
+
+        def transposed(t):
+            return t.t().contiguous()
+
+        wb = {"WsT": transposed(wo[2]), "WuT": transposed(wo[1]), "WoT": transposed(wo[0]), "WpT": transposed(wp[0]),
+              "WmodT": transposed(wc[0])}
+    return wc, wp, wo, wb
+
+
+#: Packs keyed by the weights' tensor objects (held weakly), valid while every version is unchanged. An address reused by a new
+#: tensor with the same shape and version must not be served the old tensor's pack, so identity -- not (pointer, version) -- decides.
+_PACKS: dict = {}
+
+
+def _weights(weights):
+    """Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once and records it."""
+    try:
+        versions = tuple(w._version for w in weights)
+    except RuntimeError:  # inference tensors carry no version counter: nothing could invalidate an entry
+        return _pack(weights)
+    key = _capture.scoped(tuple(id(w) for w in weights))
+    if key is None:
+        return _pack(weights)
+    hit = _PACKS.get(key)
+    if hit is not None:
+        refs, seen, pack = hit
+        if seen == versions and all(r() is w for r, w in zip(refs, weights, strict=True)):
+            return pack
+    _capture.prune(_PACKS)
+    if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
+        _PACKS.pop(next(iter(_PACKS)))
+    pack = _pack(weights)
+    _PACKS[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
+    return pack
+
+
+def _padded(t, n):
+    """[A, 1, N, d] -> [A, 1, n, d], zero rows appended (the tensor itself when n == N)."""
+    return t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
+
+def _padded(t, n):
+    """[A, 1, N, d] -> [A, 1, n, d], zero rows appended (the tensor itself when n == N)."""
+    return t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
+
+def _unpadded(t, shape):
+    """[A, 1, n, d] (a view of the kernels' rows) -> the caller's [A, 1, N, d]."""
+    return t if t.shape == shape else t[:, :, : shape[2]].contiguous()
+
+
+def _padded_length(n0: int) -> int:
+    return (n0 + 127) // 128 * 128
 
 QUERIES, KEYS = 32, 128
 _LOADED: set[int] = set()

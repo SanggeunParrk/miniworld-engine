@@ -10,6 +10,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ### Removed
 
+- The dense atom DiT (attention over all N atoms with the shared pair bias; the AF3 atom transformer is the block-local
+  [local DiT](gpus/b200/local_dit/local_dit.md), which this block was never): `integrations/atom_dit.py` and its dispatch in
+  `modules/dit`, the `sm100_atom` kernels only it used (`attn_fwd`, `attn_dkv`, `attn_dq`, `attn_dbias`, `attn_dd`, `pair_bias`), the
+  `dit_atom` benchmark target and its A6000 tables, `tests/integrations/test_b200_atom_dit_gpu.py` and the B200 page
+  `docs/gpus/b200/atom_dit/`. `modules.dit.DiTBlock` at atom widths runs the PyTorch / Triton path as before. Earlier entries below
+  that name `integrations/atom_dit` describe the removed module.
 - B200 fp32 SWA atom DiT backward (`kernels/swa_dit/cuda/sm100/tf32_bwd.py` and its `*_bwd_tf32.cu`, `attn_dq_tf32.cu`,
   `attn_dkv_tf32.cu`, `bwd_prep_tf32.cu`, `mod_bwd_tf32.cu`): identical training steps gave different gradients (a 2-row x 32-column
   dP fragment of `qkvg_bwd_tf32`, ~2e-2 on dq / dWqkv), and it faulted on poisoned memory. fp32 training takes the Triton fp32 path
@@ -112,13 +118,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   instead of a converted copy. One block, A = 48, 4096 atoms (CUDA graph): cross-attention bf16 2.52 -> 1.58 ms, fp32 4.33 -> 3.84 ms;
   shared-AdaLN bf16 1.38 ms (2.59 ms at 8192 atoms). Tests: `tests/integrations/test_b200_atom_dw_gpu.py`, `test_b200_local_dit_gpu.py`,
   `test_b200_local_dit_tf32_gpu.py`; page: `docs/gpus/b200/local_dit/local_dit.md`.
-- B200 atom-block tile kernels (`sm100_atom`, shared by the dense atom DiT and the local DiT): the TMA stores of `post_fwd`, `tr_bwd_gate`,
+- B200 atom-block tile kernels (`sm100_atom`, the local DiT's row kernels): the TMA stores of `post_fwd`, `tr_bwd_gate`,
   `post_bwd`, `pre_bwd` and `cond_bwd` are issued and waited for by a lane of the producer warp instead of the compute leader (`post_fwd`
   162 -> 136 us at 196 608 rows), the two warpgroups of `cond_fwd` are staggered by half an iteration (125 -> 114 us) and the K / V AdaLN math
   uses `rsqrtf` / `__fdividef` (the IEEE division and square root were 2860 of 5200 clk per tile of the cross-attention `pre_fwd`: 130 -> 94 us).
   One block, A = 5, 4096 atoms, CUDA graph under `static_weights()` + `static_inputs()`: 54 us shared-AdaLN, 56 us cross-attention.
 - B200 documentation: the B200 pages were re-verified through `benchmarks/runners/bench.py` on 2026-10-10 (TriMul, TriAttn, Transition, OPM, PWA,
-  AttentionPairBias CUDA-graph tables; the token DiT layout tables; the dense atom DiT tables), the fp32 token DiT head layouts were run and measured,
+  AttentionPairBias CUDA-graph tables; the token DiT layout tables), the fp32 token DiT head layouts were run and measured,
   and the SWA atom DiT page carries an engine harness cross-check. `AttentionPairBias`' PyTorch compiled / cuEquivariance rows are 20-25 % faster than
   on 2026-10-01 since LayerNorm / RMSNorm on B200 run as fused PyTorch ops.
 - B200 fp32 SWA atom DiT forward, faster: the rounded weight forms in one kernel (`wprep_tf32.cu`), `mod_fwd_tf32` as a persistent

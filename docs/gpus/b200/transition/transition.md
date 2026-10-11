@@ -496,9 +496,9 @@ No kernel on these paths is autotuned, so nothing needs a cache (✓).
 B200 (148 SMs, 1000 W limit), torch 2.13 + cu129, kernels built by CUDA 13.1; `benchmarks/runners/bench.py target=transition
 level=module d_pair=D`, compiled, CUDA-graph replay, µs. *ours* = `modules.Transition` through `fused_sm100a` / `fused_wide_sm100a`;
 the Triton row is the same module with `MINIWORLD_TRANSITION_FUSED_SM100A=0` (the path B200 ran before). × = ours vs the fastest other row.
-Re-verified 2026-10-10 (engine commit `0a7928ff`, driver 580.95.05, one GPU with no other process on it): the PyTorch compiled, Triton and ours
+Re-verified 2026-10-10 (engine v2.2.0 plus unreleased changes, driver 580.95.05, one GPU with no other process on it): the PyTorch compiled, Triton and ours
 columns (60 cells) were re-measured with the command above, one run per width and mode, cells that moved by more than 8 % repeated;
-median change 1.1 % (ours 3.5 %), 90th percentile 5.3 %, no cell replaced. The Anthropic column is kernel-level (below) and was not re-taken. The D384 *ours* values are the fused
+median change 1.1 % (ours 3.5 %), 90th percentile 5.3 %, no cell replaced. The D384 *ours* values are the fused
 D384 kernels, re-measured 2026-09-30 with the same command (before: inference 457.2 / 1940.4, training 1734.5 / 6850.0 µs at
 L384 / L768); the other columns are unchanged. At these sizes (1152 / 4608 tiles) the training step barely moves: at L384 the fused
 forward with its h / a / b stores is ~40 µs slower than the three-kernel forward (kernels alone: 363 vs 322 µs) and the fused
@@ -506,36 +506,33 @@ backward ~70 µs faster (648 vs 720 µs); inference gains 1.25x.
 
 #### Inference
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton (engine) | ours | × |
-|---|---|---|---|---|---|---|
-| (384, 64) | 130.9 | n/a | 48.4 * | 85.8 | **36.7** | 1.32 |
-| (768, 64) | 370.6 | n/a | 189.9 * | 313.2 | **114.6** | 1.66 |
-| (384, 128) | 200.5 | n/a | 108.4 * | 205.8 | **63.3** | 1.71 |
-| (768, 128) | 745.2 | n/a | 479.8 * | 755.7 | **227.1** | 2.11 |
-| (384, 256) | 407.5 | n/a | 504.8 * | 530.2 | **192.4** | 2.12 |
-| (768, 256) | 1604.6 | n/a | 2004.2 * | 2087.8 | **798.5** | 2.01 |
-| (384, 384) | 686.1 | n/a | 4444.5 * | 1059.8 | **364.5** | 1.88 |
-| (768, 384) | 2912.1 | n/a | 17669.6 * | 4179.5 | **1569.5** | 1.86 |
-| (384, 512) | 1004.4 | n/a | n/a (no row) | 1670.0 | **749.3** | 1.34 |
-| (768, 512) | 4336.4 | n/a | n/a (no row) | 6732.8 | **3202.8** | 1.35 |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Triton (engine) | ours | × |
+|---|---|---|---|---|---|
+| (384, 64) | 130.9 | n/a | 85.8 | **36.7** | 2.34 |
+| (768, 64) | 370.6 | n/a | 313.2 | **114.6** | 2.73 |
+| (384, 128) | 200.5 | n/a | 205.8 | **63.3** | 3.17 |
+| (768, 128) | 745.2 | n/a | 755.7 | **227.1** | 3.28 |
+| (384, 256) | 407.5 | n/a | 530.2 | **192.4** | 2.12 |
+| (768, 256) | 1604.6 | n/a | 2087.8 | **798.5** | 2.01 |
+| (384, 384) | 686.1 | n/a | 1059.8 | **364.5** | 1.88 |
+| (768, 384) | 2912.1 | n/a | 4179.5 | **1569.5** | 1.86 |
+| (384, 512) | 1004.4 | n/a | 1670.0 | **749.3** | 1.34 |
+| (768, 512) | 4336.4 | n/a | 6732.8 | **3202.8** | 1.35 |
 
 #### Training (forward + backward)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton (engine) | ours | × |
-|---|---|---|---|---|---|---|
-| (384, 64) | 335.7 | n/a | n/a (no backward) | 329.6 | **132.9** | 2.48 |
-| (768, 64) | 1063.8 | n/a | n/a (no backward) | 1182.7 | **448.1** | 2.37 |
-| (384, 128) | 588.8 | n/a | n/a (no backward) | 715.8 | **290.6** | 2.03 |
-| (768, 128) | 2073.4 | n/a | n/a (no backward) | 2654.0 | **1098.6** | 1.89 |
-| (384, 256) | 1210.4 | n/a | n/a (no backward) | 1764.3 | **954.1** | 1.27 |
-| (768, 256) | 4393.0 | n/a | n/a (no backward) | 6839.3 | **3833.7** | 1.15 |
-| (384, 384) | 1972.1 | n/a | n/a (no backward) | 3360.3 | **1716.6** | 1.15 |
-| (768, 384) | 8666.1 | n/a | n/a (no backward) | 13429.8 | **6844.3** | 1.27 |
-| (384, 512) | 2894.7 | n/a | n/a (no backward) | 5210.0 | **2671.5** | 1.08 |
-| (768, 512) | 12775.4 | n/a | n/a (no backward) | 21585.4 | **11183.1** | 1.14 |
-
-\* Anthropic: the module-level runner refuses its rows on cc 10.0; the numbers are Anthropic's best Transition row at the kernel level
-from kernel-level runs in the standalone development build (not shipped; rows `lnl` at D64, `v2` at D128, `pf` at D256 / D384; no row runs at D512).
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Triton (engine) | ours | × |
+|---|---|---|---|---|---|
+| (384, 64) | 335.7 | n/a | 329.6 | **132.9** | 2.48 |
+| (768, 64) | 1063.8 | n/a | 1182.7 | **448.1** | 2.37 |
+| (384, 128) | 588.8 | n/a | 715.8 | **290.6** | 2.03 |
+| (768, 128) | 2073.4 | n/a | 2654.0 | **1098.6** | 1.89 |
+| (384, 256) | 1210.4 | n/a | 1764.3 | **954.1** | 1.27 |
+| (768, 256) | 4393.0 | n/a | 6839.3 | **3833.7** | 1.15 |
+| (384, 384) | 1972.1 | n/a | 3360.3 | **1716.6** | 1.15 |
+| (768, 384) | 8666.1 | n/a | 13429.8 | **6844.3** | 1.27 |
+| (384, 512) | 2894.7 | n/a | 5210.0 | **2671.5** | 1.08 |
+| (768, 512) | 12775.4 | n/a | 21585.4 | **11183.1** | 1.14 |
 
 Accuracy: every width passes "no further from fp32 than the Triton path" on 1 / 3 / 15 / 1152 tiles (and 1200 tiles at D ≥ 384,
 the tile schedule), gradients included. Separate processes vary by up to ±10 % on this power-capped card (e.g. torch.compile D384

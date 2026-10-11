@@ -5,15 +5,14 @@ Alg. 23 with the 32 x 128 trunking of Alg. 24): AdaLN -> q | k | v | gate -> att
 `w = i // 32` sees only the 128 atoms `[32 w - 48, 32 w + 80)` (clipped to `[0, N)`), with the per-window pair bias `LN(z) Wb^T` taken from
 the *trunked* atom pair `[nwin, 32, 128, 16]` (shared by the A samples) -> gated out-projection + residual -> AdaLN + SwiGLU transition
 (hidden 256) + residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32. This is the attention of the AF3 atom transformer
-(n_queries 32, n_keys 128; see Not covered for the one difference of its blocks); the dense
-block of [atom DiT](../atom_dit/atom_dit.md) attends over all N atoms instead and is a different op. The module-level summary is in
+(n_queries 32, n_keys 128; see Not covered for the one difference of its blocks). The module-level summary is in
 [b200.md](../b200.md).
 
 **Where the code is.** `modules/local_dit/module.py` (the block, the PyTorch reference path, `to_windows` that makes the trunked pair
 from a dense one), `integrations/local_dit.py` (the dispatch: two opaque ops `local_dit_block_fwd` / `local_dit_block_bwd` under an
 autograd Function, served eagerly, under `torch.compile` and in CUDA graphs), and the attention and pair-bias kernels in
 `kernels/augmented_attention/cuda/sm100_atom_local/`. The row kernels (conditioning, input projections, post-attention, transition and
-their backward) are [atom DiT](../atom_dit/atom_dit.md)'s `sm100_atom`: they do not depend on what the attention attends to. The block
+their backward) are in `kernels/augmented_attention/cuda/sm100_atom/`. The block
 has the parameters of `DiTBlock` at atom widths, so both blocks share a checkpoint layout. `serves()` accepts: B200, implementation
 MINIWORLD / TRITON, bf16 single / cond / pair, the atom widths, B = 1, any N, a `[B, N]` bool key mask or none, no QK-norm; anything else
 keeps the PyTorch path, and `MINIWORLD_LOCAL_DIT_SM100=0` turns it off. N is padded to a multiple of 128 for the row kernels (zero rows,

@@ -25,7 +25,7 @@ BENCH = Path(__file__).resolve().parents[2] / "benchmarks/runners/bench.py"
 TARGETS = (
     "triangle_multiplication", "triangle_multiplication_bidirectional", "triangle_attention",
     "transition", "conditioned_transition", "adaptive_layernorm", "augmented_attention_token",
-    "augmented_attention_atom", "swa_atom_attention", "dit", "dit_atom", "swa_dit",
+    "augmented_attention_atom", "swa_atom_attention", "dit", "swa_dit",
 )
 
 
@@ -331,21 +331,7 @@ def test_target_yaml_exposes_auto_dropout_to_hydra(runner, target):
     assert resolved.cudagraph == "manual"
 
 
-def test_atom_dit_uses_full_pair_bias_block_and_atom_dimensions(runner):
-    namespace, seen, fabric = runner
-    namespace["bench_module_dit_atom"](
-        config(namespace, "dit_atom", mode="training", mask_prob=1.0), 2, "pytorch", fabric)
-    measured = seen.measured[0]
-    single, cond, pair = measured["grad_to_none"][:3]
-    assert single.shape == cond.shape == (1, 1, 16, 32)
-    assert pair.shape == (1, 16, 16, 8)
-    from miniworld_engine.modules.dit import DiTBlock
-    assert all(isinstance(layer, DiTBlock) for layer in seen.models[0].layers)
-    measured["func"]()
-    assert all(t.grad is not None and torch.isfinite(t.grad).all() for t in (single, cond, pair))
-
-
-@pytest.mark.parametrize("target", ["dit", "dit_atom", "augmented_attention_token",
+@pytest.mark.parametrize("target", ["dit", "augmented_attention_token",
                                     "augmented_attention_atom"])
 @pytest.mark.parametrize("implementation", ["pytorch", "triton", "miniworld"])
 def test_pair_bias_attention_propagates_adaln_implementation(runner, target, implementation):

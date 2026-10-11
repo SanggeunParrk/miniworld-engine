@@ -125,11 +125,11 @@ class BenchConfig(BaseModel):
     trimul_direction: Literal["outgoing", "incoming", "alternating"] = "outgoing"
     n_augment: int = 32
     mask_prob: float = 0.2
-    #: dit / dit_atom: one conditioning shared by every sample (a sampling step: the noise level is the same for all
+    #: dit: one conditioning shared by every sample (a sampling step: the noise level is the same for all
     #: samples) instead of a random one per sample. The fused token runner and Anthropic's conditioning dedup only
     #: apply to the shared case, so this is how their inference rows are compared on their own terms.
     shared_cond: bool = False
-    #: dit / dit_atom: blocks with QK-norm (RMSNorm of every q / k head). Anthropic's composition has none and refuses.
+    #: dit: blocks with QK-norm (RMSNorm of every q / k head). Anthropic's composition has none and refuses.
     dit_qk_norm: bool = False
     apb_anthropic_core: str = "apb_attn"   # attention_pair_bias anthropic row: apb_attn | fpf_apb
     #: attention_pair_bias heads: 8 (x 48, the registry row) or 16 (x 24, AF3 / MiniWorld's confidence-head Pairformer)
@@ -2800,7 +2800,7 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    # The ATOM side: the model's `atom_dit` builds both adaln and ConditionedTransition at
+    # The ATOM side: the model's atom DiT builds both adaln and ConditionedTransition at
     # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
     # was not -- `d_pair` is the PAIR width, which neither module ever sees. The TOKEN side
     # (768/384) is covered by the module benches.
@@ -3328,7 +3328,7 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    # The ATOM side: the model's `atom_dit` builds both adaln and ConditionedTransition at
+    # The ATOM side: the model's atom DiT builds both adaln and ConditionedTransition at
     # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
     # was not -- `d_pair` is the PAIR width, which neither module ever sees. The TOKEN side
     # (768/384) is covered by the module benches.
@@ -3530,7 +3530,7 @@ KERNEL_TARGETS = {
 }
 
 def bench_module_dit(conf, seq_len, implementation, fabric):
-    """Pair-bias DiT block (token by default, atom for the dit_atom target): augmented attention (pair bias) + conditioned transition, both
+    """Pair-bias token DiT block: augmented attention (pair bias) + conditioned transition, both
     residuals explicit. `modules/dit`.
 
     A block, not a part, because a per-part result does not compose: every kernel here is an
@@ -3564,12 +3564,11 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     """
     from miniworld_engine.modules.dit import DiTBlock
 
-    atom = conf.target == "dit_atom"
-    length = seq_len * 8 if atom else seq_len
-    d_single = conf.d_single_atom if atom else conf.d_single_token
-    d_cond = conf.d_single_atom if atom else conf.d_single
-    d_pair = conf.d_pair_atom if atom else conf.d_pair
-    n_head = 4 if atom else conf.tdit_n_head
+    length = seq_len
+    d_single = conf.d_single_token
+    d_cond = conf.d_single
+    d_pair = conf.d_pair
+    n_head = conf.tdit_n_head
 
     anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
     upstream = None
@@ -3870,11 +3869,6 @@ def _anthropic_dit_composition(upstream, model, mask, samples: int, length: int,
             + ("cond dedup ON (Ns=L: one conditioning shared by the samples, shared_cond); key mask " if shared else
                "cond dedup OFF (Ns=A*L: per-sample conditioning); key mask ")
             + f"{'none' if key_mask is None else 'folded by apb.fold_mask (fp32 bias)'}; weights packed once")
-
-
-def bench_module_dit_atom(conf, seq_len, implementation, fabric):
-    """Full pair-bias atom DiT, at 8 * seq_len and atom widths; shares the token algorithm."""
-    return bench_module_dit(conf, seq_len, implementation, fabric)
 
 
 def bench_swa_component_audit(conf, seq_len, implementation, fabric):
@@ -4633,7 +4627,6 @@ MODULE_TARGETS = {
     "augmented_attention_token": bench_module_augmented_attention_token,
     "augmented_attention_atom": bench_module_augmented_attention_atom,
     "dit": bench_module_dit,
-    "dit_atom": bench_module_dit_atom,
     "swa_dit": bench_module_swa_dit,
     "local_dit": bench_module_local_dit,
     "bias_only_dit": bench_module_bias_only_dit,
@@ -4702,10 +4695,6 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             "augmented_attention_atom": ("pytorch", "triton", "miniworld"),
             "swa_atom_attention": ("pytorch", "miniworld"),
             "dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
-            # anthropic here is an explicit `unsupported` row at the default atom pair width (16):
-            # ln_proj.pair_bias serves c_pair 64 / 128, and Anthropic's atom attention is the
-            # 32x128 windowed op, not this dense block (see bench_module_dit).
-            "dit_atom": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             # anthropic: the kit's fused ESMFold2 atom block (ef2_atom, gemm=bf16) on the module's weights; inference only
             "swa_dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             # anthropic: the AF3 atom block composed from their windowed atom attention (fpf_atom) and atom row kernels; inference only

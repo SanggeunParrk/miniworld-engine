@@ -58,7 +58,6 @@ UNITS: list[tuple[str, str, str]] = [
     ("augmented_attention_atom", "", "Atom attention"),
     ("swa_atom_attention", "", "SWA attention"),
     ("dit", "", "DiT"),
-    ("dit_atom", "", "Atom DiT"),
     ("swa_dit", "", "SWA DiT"),
     ("local_dit", "", "AF3 atom DiT (32 x 128)"),
 ]

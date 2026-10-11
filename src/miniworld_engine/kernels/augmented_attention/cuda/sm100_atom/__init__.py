@@ -1,28 +1,21 @@
-"""sm_100a (B200) kernels of the AF3-style atom DiT block (``modules/dit.DiTBlock`` at atom widths), forward and backward.
+"""sm_100a (B200) row kernels of the AF3 atom transformer block (``modules/local_dit.LocalDiTBlock``; ``integrations/local_dit``), forward
+and backward. The attention and the pair bias of that block are ``sm100_atom_local``'s.
 
-    a = a + sigmoid(to_scale(s)) * to_out(sigmoid(g) * softmax(q k^T / sqrt 32 + bias) v)     bias = LN(z) Wb^T [4, N, N]
+    a = a + sigmoid(to_scale(s)) * to_out(sigmoid(g) * attention(q, k, v))
     a = a + ConditionedTransition(a, s)                                                          SwiGLU 128 -> 256 -> 128
 
-d_single = d_cond = 128, d_pair = 16, 4 heads x 32, B = 1, N a multiple of 128; the A samples share one pair tensor and one
-key mask, which the pair-bias producer folds into the bias (masked keys -1e4), so the attention kernels need no mask of
-their own; the caller pads the atoms to a multiple of 128 and masks the padding. Developed in ``experiments/atomdit_sm100`` (rounds v1-v2); page: ``docs/gpus/b200/atom_dit/atom_dit.md``.
+d_single = d_cond = 128, d_pair = 16, 4 heads x 32; the caller pads the atoms to a multiple of 128 and masks the padding.
+Page: ``docs/gpus/b200/local_dit/local_dit.md``.
 
-The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers):
-  pair_bias.cu    bias[h, i, j] = LN(z[i, j]) . Wb[h] in both layouts the attention reads (head-major and transposed), with
-                  the key mask and the padding folded in, and its backward (dz, partial d(gamma * Wb)) from dbias.
+The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers), bf16:
   cond_fwd.cu     the six conditioning projections -> mod [M, 768] = s1 | bi1 | so | s2 | bi2 | st (gates as rn(sigmoid)).
-  pre_fwd.cu      AdaLN 1 + the q / k / v / gate projections.
-  attn_fwd.cu     O = softmax(q k^T / sqrt 32 + bias) v and the row LSE (log2 units).
+  pre_fwd.cu      AdaLN 1 + the q / k / v / gate projections (``-DCROSS=1``: the cross-attention mode's K / V AdaLN as well).
   post_fwd.cu     gate, out projection, residual, AdaLN 2, SwiGLU, squeeze, residual (+ the activations the backward reads).
   tr_bwd_gate.cu  the transition's gate backward and SwiGLU backward.
   post_bwd.cu     AdaLN 2 + LN backward, residual, output gate, the out projection's dgrad, the attention gate; dO and D.
-  attn_dd.cu      D = rowsum(dO O) per head (the inference-free backward's helper).
-  attn_dkv.cu, attn_dq.cu, attn_dbias.cu
-                  dK / dV, dQ (bf16, straight into the dP buffer the input projections' dgrad reads), dbias (fp32, summed
-                  over the samples).
-  pre_bwd.cu      the input projections' dgrad, AdaLN 1 + LN backward -> d single.
+  pre_bwd.cu      the input projections' dgrad, AdaLN 1 + LN backward -> d single (``-DCROSS=1``: through the K / V AdaLN too).
   cond_bwd.cu     the conditioning projections' dgrad and the two cond LayerNorm backwards -> d cond.
-The weight gradients are cuBLAS GEMMs on the activations these kernels write.
+  dw_atom.cu      every dense weight gradient of a block in one grouped split-K launch (bf16 and TF32).
 
 The fp32 path (fp32 activations, ``KERNELS_TF32``, loaded by ``atom_kernel32`` only when an fp32 call is served; used by the local
 atom block, ``integrations/local_dit``):
@@ -31,7 +24,7 @@ atom block, ``integrations/local_dit``):
   rows_tf32.cu    the row-wise stages around them (LayerNorms, AdaLN and their backward, gates, SwiGLU backward, D), fp32 CUDA cores.
 
 The cubins are built on first use by the newest nvcc here that knows sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``:
-the experiment's measurements are 13.1 builds; 12.9's ptxas gives slightly longer code) and cached under
+13.1 builds; 12.9's ptxas gives slightly longer code) and cached under
 ``MINIWORLD_ENGINE_JIT_ROOT`` keyed by the sources and the flags. They launch through the CUDA driver
 (``augmented_attention.cuda.sm100.driver``) on torch's current stream, CUDA-graph capturable.
 """
@@ -49,7 +42,7 @@ import torch
 NH, DH, DM, DP = 4, 32, 128, 16
 _dir = Path(__file__).parent
 _SMEM = 232448
-SOURCES = ("attn_fwd", "attn_dkv", "attn_dq", "attn_dbias", "attn_dd", "pair_bias", "cond_fwd", "pre_fwd", "post_fwd",
+SOURCES = ("cond_fwd", "pre_fwd", "post_fwd",
            "tr_bwd_gate", "post_bwd", "pre_bwd", "cond_bwd")
 
 
@@ -66,7 +59,7 @@ def cubin(stem: str, defs: tuple = ()) -> str:
     for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
     root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
-    out = root / "atom_dit_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    out = root / "local_dit_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
@@ -89,14 +82,6 @@ def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM
 
 #: (stem, function, dynamic smem, PDL[, -D defs]) of every kernel the block launches
 KERNELS = {
-    "fwd": ("attn_fwd", "augattn_fwd2_sm100", _SMEM, False),
-    "dkv": ("attn_dkv", "augattn_dkv_sm100", _SMEM, False),
-    "dq": ("attn_dq", "atom_dq_sm100", _SMEM, False),
-    "dbias": ("attn_dbias", "atom_dbias_sm100", _SMEM, False),
-    "dd": ("attn_dd", "atom_dd", 0, False),
-    "pb_f": ("pair_bias", "pair_bias_fwd", 0, False),
-    "pb_fp": ("pair_bias", "pair_bias_fwd_pad", 0, False),
-    "pb_b": ("pair_bias", "pair_bias_bwd", 0, False),
     "cond": ("cond_fwd", "atom_cond_fwd_sm100", _SMEM, True),
     "pre": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True),
     "prex": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1",)),
@@ -181,83 +166,6 @@ def post_params(blk):
 
 
 # --------------------------------------------------------------------------------------------------- launches
-def pair_bias_fwd(z, gamma, wb, eps=1e-5, trans=True, n=None, kv=None):
-    """z [1, NZ, NZ, 16] bf16 -> bias [4, n, n] bf16 (head-major) and, for the backward, bias^T [4, n(key), n(query)].
-    n (default NZ) is the attention's length, a multiple of 128 >= NZ; kv [NZ] bool marks the valid keys (None: all of them).
-    Masked and padded keys get -1e4 (bf16 -9984), padded query rows 0."""
-    z = z.reshape(z.shape[-3], z.shape[-2], DP)
-    NZ = z.shape[0]
-    N = NZ if n is None else n
-    w = (wb.float() * gamma.float()[None]).contiguous()
-    bo = torch.empty(NH, N, N, device=z.device, dtype=torch.bfloat16)
-    bt = torch.empty_like(bo) if trans else None
-    atom_kernel("pb_f" if N == NZ else "pb_fp", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, bo, bt, int(N), int(NZ), kv,
-                                                        float(eps))
-    return bo, bt
-
-
-def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5, kv=None):
-    """dbias [4, n, n] fp32 (summed over the samples) -> dz (z's dtype and layout), dgamma [16], dWb [4, 16] (fp32); dbias on
-    keys kv marks invalid is dropped."""
-    z = z.reshape(z.shape[-3], z.shape[-2], DP)
-    NZ, N = z.shape[0], dbias.shape[-1]
-    w = (wb.float() * gamma.float()[None]).contiguous()
-    dz = torch.empty_like(z)
-    nb = (N // 64) * (N // 32)
-    pw = torch.empty(nb, NH, DP, device=z.device, dtype=torch.float32)
-    atom_kernel("pb_b", _dev(z))((N // 64, N // 32, 1), (256, 1, 1), z, w, dbias.contiguous(), dz, pw, int(N), int(NZ), kv,
-                                 float(eps))
-    dw = pw.sum(0)
-    return dz, (dw * wb.float()).sum(0), dw * gamma.float()[None]
-
-
-def attn_fwd(q, k, v, bias):
-    """q, k, v [A, N, 128] bf16 (4 heads x 32), bias [4, N, N] bf16 -> O [A N, 128] bf16, LSE [A, 4, N] fp32 (log2)."""
-    A, N, _ = q.shape
-    q2, k2, v2 = (t.reshape(A * N, DM) for t in (q, k, v))
-    O = torch.empty(A * N, DM, device=q.device, dtype=torch.bfloat16)
-    LSE = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
-    bsrc = bias.contiguous()
-    maps = (_tm(q2, A * N, 128, swizzle=64), _tm(k2, A * N, 64, swizzle=64), _tm(v2, A * N, 64, swizzle=64),
-            _map(bsrc, [N, NH * N], N * 2, [64, 128]), _map(O, [DM, A * N], DM * 2, [32, 128], swizzle=64))
-    items = ((A + 1) // 2) * NH * (N // 128)
-    d = _dev(q)
-    atom_kernel("fwd", d)((min(nsm(d), items), 1, 1), (384, 1, 1), *maps, LSE, int(N), int(A))
-    return O, LSE
-
-
-def attn_dd(do, o):
-    """D[a, h, i] = sum over head h's 32 columns of dO O: dO, O [A, N, 128] bf16 -> fp32 [A, 4, N]."""
-    A, N, _ = do.shape
-    D = torch.empty(A, NH, N, device=do.device)
-    rows = A * N
-    atom_kernel("dd", _dev(do))(((4 * rows + 255) // 256, 1, 1), (256, 1, 1), do.contiguous(), o.contiguous(), D, int(N), int(rows))
-    return D
-
-
-def attn_bwd(q, k, v, do, bias, bias_t, LSE, Dd, dP):
-    """dK, dV, dQ (bf16, into dP's blocks 1 / 2 / 0; dP [A N, 512]) and dbias [4, N, N] fp32 (summed over the samples)."""
-    A, N, _ = q.shape
-    d = _dev(q)
-    q2, k2, v2, do2 = (t.reshape(A * N, DM) for t in (q, k, v, do))
-    DQ, DK, DV = (dP[:, DM * i:DM * (i + 1)] for i in range(3))
-    DB = torch.empty(NH, N, N, device=q.device, dtype=torch.float32)
-    mb = _map(bias, [N, NH * N], N * 2, [64, 128])
-    mbt = _map(bias_t, [N, NH * N], N * 2, [64, 128])
-    m128 = tuple(_tm(t, A * N, 128, swizzle=64) for t in (q2, k2, v2, do2))              # every kernel: dense 64-B rows (SW64)
-    def bfo(t, bc, sw):                                                                  # a 128-column block of dP
-        return _map(t, [DM, A * N], 8 * DM, [bc, 128], swizzle=sw)
-    mkv = (_tm(q2, A * N, 64, swizzle=64), m128[1], m128[2], _tm(do2, A * N, 64, swizzle=64), mbt, bfo(DK, 32, 64), bfo(DV, 32, 64))
-    mq = (*m128, mb, bfo(DQ, 16, 32))
-    mbias = (*m128, mb)
-    g_kv = (min(nsm(d), A * NH * (N // 128)), 1, 1)
-    g_b = (min(nsm(d), NH * (N // 128) ** 2), 1, 1)
-    atom_kernel("dkv", d)(g_kv, (384, 1, 1), *mkv, LSE, Dd, DK, DV, None, int(N), int(A))
-    atom_kernel("dq", d)(g_kv, (384, 1, 1), *mq, LSE, Dd, int(N), int(A))
-    atom_kernel("dbias", d)(g_b, (384, 1, 1), *mbias, LSE, Dd, DB, int(N), int(A))
-    return DB
-
-
 def cond_fwd(c, W, b, g1, g2, eps=1e-5):
     """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid))."""
     M = c.shape[0]
@@ -401,7 +309,7 @@ def cubin_tf32(stem: str, defs: tuple = ()) -> str:
     for f in (_dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
     root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
-    out = root / "atom_dit_sm100_tf32" / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    out = root / "local_dit_sm100_tf32" / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
