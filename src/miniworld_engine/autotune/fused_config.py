@@ -3,18 +3,23 @@
 Candidate declarations do not certify correctness or performance on a new GPU.
 The build validates outputs against the retained default before timing a candidate.
 """
+import os
 from itertools import product
 from typing import Any
 
 
-def transition_candidates(sms, *, backward=False):
+def transition_candidates(sms, *, backward=False, n=4):
+    """Schedules of the D128 fused Transition. The backward gives the weight role ``2 n`` hidden slices times ``dw_repl``
+    replicas; the best split moves with the slice count (8 at n = 4, 15 at n = 2)."""
     if sms <= 8:
         raise ValueError("fused Transition requires more than 8 SMs")
-    replica = min(8, (sms - 1) // 8)
+    slices = 2 * n
+    replica = min(15 if n == 2 else 8, (sms - 1) // slices)       # measured on H100 (n = 2: 14-15 best, 16 is 4 % slower)
+    replica = min(int(os.environ.get("MINIWORLD_TRANSITION_DW_REPL", replica)), (sms - 1) // slices)   # experiment override
     default = {"ctas": sms, "dw_repl": replica}
     ctas = (sms, max(16, sms // 2), sms * 2)
-    replicas = (replica, 2, 4, 8, 12) if backward else (replica,)
-    grid = [{"ctas": c, "dw_repl": r} for c, r in product(ctas, replicas) if c > 8 * r]
+    replicas = ((replica, 2, 4, 8, 12) + ((16, 24) if n < 4 else ())) if backward else (replica,)
+    grid = [{"ctas": c, "dw_repl": r} for c, r in product(ctas, replicas) if c > slices * r]
     return [default] + [c for c in grid if c != default]
 
 

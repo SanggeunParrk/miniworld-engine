@@ -1,5 +1,5 @@
 // transition_fwd_d256.cu -- the whole Transition forward (LayerNorm + SwiGLU expand + squeeze + residual) at D = 256,
-// H = 1024, bf16, as ONE sm_90a kernel.  SPDX-License-Identifier: Apache-2.0
+// H = 4 D (WIDE_N D), bf16, as ONE sm_90a kernel.  SPDX-License-Identifier: Apache-2.0
 //
 // The D = 128 kernel's row split, re-budgeted for D = 256:  a 128-row tile, two consumer warpgroups of 64 rows each, and the
 // output accumulator of a warpgroup (64 x 256 fp32 = 128 registers) held across all 32 hidden chunks of 32 units; per chunk
@@ -26,7 +26,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef SIG_TANH
 #define SIG_TANH 1
 #endif
-constexpr int D_ = 256, H_ = 1024, HS = 32, NCH = H_ / HS, ROWS = 128, WGR = 64;
+#ifndef WIDE_N
+#define WIDE_N 4                                        // hidden = WIDE_N * D (Transition(d, n))
+#endif
+constexpr int D_ = 256, H_ = WIDE_N * 256, HS = 32, NCH = H_ / HS, ROWS = 128, WGR = 64;
 constexpr int F_ABW = 32768, F_SLOT = 49152;                    // slot: [Wa_j; Wb_j] 4 quarters x [64 n][128 B], Ws^T_j at +32 KB
 constexpr int F_XB = NSLOT * F_SLOT;                              // the tile buffer: 4 quarters x [128 rows][128 B]
 constexpr int F_BAR = F_XB + 65536;

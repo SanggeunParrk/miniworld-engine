@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._compile import opaque
+
 STAT_W = 128
 
 @triton.autotune(configs=[triton.Config({"BJ": bj, "BN": bn}, num_warps=w, num_stages=s)
@@ -33,7 +35,14 @@ def _pair_bias_all_kernel(Z, WT, OUT, L, sz, eps, C: tl.constexpr, NB: tl.conste
                  mask=jm[:, None] & nm[None, :])
 
 
-def pair_bias_all(z2d, wt, out, L, eps=1e-5):
+def _pair_bias_all_fake(z2d: torch.Tensor, wt: torch.Tensor, out: torch.Tensor, L: int, eps: float = 1e-5) -> None:
+    """Nothing: the op writes ``out`` in place."""
+    return None
+
+
+@opaque(fake=_pair_bias_all_fake, name="conditioned_transition_token_dit_pair_bias_all", mutates_args=("out",))
+def pair_bias_all(z2d: torch.Tensor, wt: torch.Tensor, out: torch.Tensor, L: int, eps: float = 1e-5) -> None:
+    """``out[n, i, j] = LayerNorm(z2d[i * L + j]) @ wt[:, n]`` for every block's head n, written head-major in place."""
     C = z2d.shape[1]
     NB = wt.shape[1]
     grid = lambda c: (L * triton.cdiv(L, c["BJ"]),)
@@ -102,7 +111,16 @@ def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, sm
         tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
 
 
-def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5):
+def _resgate_adaln_rows_fake(x: torch.Tensor, y: torch.Tensor, gl: torch.Tensor, ms: torch.Tensor | None,
+                             mb: torch.Tensor | None, out: torch.Tensor | None, L: int, eps: float = 1e-5) -> None:
+    """Nothing: the op writes ``x`` (and ``out`` when ``ms`` is given) in place."""
+    return None
+
+
+@opaque(fake=_resgate_adaln_rows_fake, name="conditioned_transition_token_dit_resgate_adaln_rows",
+        mutates_args=("x", "out"))
+def resgate_adaln_rows(x: torch.Tensor, y: torch.Tensor, gl: torch.Tensor, ms: torch.Tensor | None,
+                       mb: torch.Tensor | None, out: torch.Tensor | None, L: int, eps: float = 1e-5) -> None:
     """x += gl * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
     M, D = x.shape
     has = ms is not None

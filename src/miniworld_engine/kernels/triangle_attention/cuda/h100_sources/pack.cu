@@ -231,4 +231,28 @@ torch::Tensor drop_scale(torch::Tensor pair,double probability) {
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("pack",&pack);m.def("finish",&finish);m.def("reduce_partials",&reduce_partials);m.def("drop_scale",&drop_scale);m.def("graph_rng_pointer_count",&graph_rng_pointer_count);}
+// PWA consumes an unscaled BF16 0/1 mask and applies its FP32 inverse keep
+// probability in the fused residual. Preserve drop_scale's existing behavior.
+torch::Tensor drop_keep(torch::Tensor like,int64_t rows,int64_t cols,double probability) {
+  TORCH_CHECK(like.is_cuda() && like.scalar_type()==torch::kBFloat16
+    && rows>0 && cols>0 && probability>0. && probability<1.,"BF16 CUDA metadata, positive shape and 0<p<1 required");
+  c10::cuda::CUDAGuard guard(like.device());
+  enable_graph_rng_writer();
+  auto out=torch::empty({rows,cols},like.options());
+  int64_t n=out.numel();auto* prop=at::cuda::getCurrentDeviceProperties();
+  int blocks=std::min<int64_t>((n+255)/256,prop->multiProcessorCount*(prop->maxThreadsPerMultiProcessor/256));
+  uint64_t increment=((n-1)/(int64_t(blocks)*256*4)+1)*4;
+  auto* gen=at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
+  at::PhiloxCudaState state;
+  {std::lock_guard<std::mutex> lock(gen->mutex_);state=gen->philox_cuda_state(increment);}
+  register_graph_rng(state);
+  // TensorIterator converts a Python scalar threshold to the tensor's BF16
+  // dtype for torch.rand(..., dtype=BF16) > p, including nonexact p=0.15.
+  float p=float(c10::BFloat16(float(probability))),inverse=1.f;
+  auto* dst=(__nv_bfloat16*)out.data_ptr();
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,drop_scale_kernel));
+  void* args[]={&dst,&n,&state,&p,&inverse};
+  C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("pack",&pack);m.def("finish",&finish);m.def("reduce_partials",&reduce_partials);m.def("drop_scale",&drop_scale);m.def("drop_keep",&drop_keep);m.def("graph_rng_pointer_count",&graph_rng_pointer_count);}

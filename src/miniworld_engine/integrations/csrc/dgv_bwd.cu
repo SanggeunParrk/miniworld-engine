@@ -32,6 +32,15 @@ __device__ __forceinline__ uint64_t desc(const void* p) {
   d |= (static_cast<uint64_t>(1) << 62);
   return d;
 }
+__device__ __forceinline__ int off64(int r, int kc) { return r * 32 + ((kc ^ ((r >> 1) & 3)) << 3); }   // [rows][32] bf16, 64-byte swizzle
+__device__ __forceinline__ uint64_t desc64(const void* p) {
+  const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
+  uint64_t d = static_cast<uint64_t>((a >> 4) & 0x3FFFull);
+  d |= (static_cast<uint64_t>(1) << 16);
+  d |= (static_cast<uint64_t>(32) << 32);
+  d |= (static_cast<uint64_t>(2) << 62);
+  return d;
+}
 // both K-major, n = 32: the dy GEMM (a warpgroup owns 32 of the 64 output columns)
 __device__ __forceinline__ void mma_m64n32k16_kk(uint64_t da, uint64_t db, float* d, int accumulate) {
   asm volatile(
@@ -42,6 +51,37 @@ __device__ __forceinline__ void mma_m64n32k16_kk(uint64_t da, uint64_t db, float
       " %0, %1, %2, %3, %4, %5, %6, %7,\n"
       " %8, %9, %10, %11, %12, %13, %14, %15},\n"
       " %17, %18, p, 1, 1, 0, 0;\n"
+      "}\n"
+      :
+        "+f"(d[0]),
+        "+f"(d[1]),
+        "+f"(d[2]),
+        "+f"(d[3]),
+        "+f"(d[4]),
+        "+f"(d[5]),
+        "+f"(d[6]),
+        "+f"(d[7]),
+        "+f"(d[8]),
+        "+f"(d[9]),
+        "+f"(d[10]),
+        "+f"(d[11]),
+        "+f"(d[12]),
+        "+f"(d[13]),
+        "+f"(d[14]),
+        "+f"(d[15])
+      : "r"(accumulate), "l"(da), "l"(db)
+      : "memory");
+}
+// A MN-major (the y tile), B MN-major (a dv head tile): the transposed dWv block of one head
+__device__ __forceinline__ void mma_m64n32k16_mm(uint64_t da, uint64_t db, float* d, int accumulate) {
+  asm volatile(
+      "{\n"
+      ".reg .pred p;\n"
+      "setp.ne.b32 p, %16, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {\n"
+      " %0, %1, %2, %3, %4, %5, %6, %7,\n"
+      " %8, %9, %10, %11, %12, %13, %14, %15},\n"
+      " %17, %18, p, 1, 1, 1, 1;\n"
       "}\n"
       :
         "+f"(d[0]),
@@ -167,10 +207,10 @@ template <int NST> struct SMX {
 
 // PARTIAL: each block writes its own dWgv slab [512][64] (summed on the host) instead of atomics into one
 template <int NST, bool PARTIAL>
-__global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __restrict__ lnw, float eps, int ntile, float* __restrict__ dW, float* __restrict__ dln,
+__global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __restrict__ lnw, float eps, int ntile, int rowsN, int use_dv, float* __restrict__ dW, float* __restrict__ dln,
                                                              const __grid_constant__ CUtensorMap dgmap, const __grid_constant__ CUtensorMap ymap,
                                                              const __grid_constant__ CUtensorMap xmap, const __grid_constant__ CUtensorMap domap,
-                                                             const __grid_constant__ CUtensorMap dmmap, const __grid_constant__ CUtensorMap wmap) {
+                                                             const __grid_constant__ CUtensorMap dmmap, const __grid_constant__ CUtensorMap wmap, const __grid_constant__ CUtensorMap dvmap) {
   extern __shared__ __align__(1024) unsigned char smem_raw[];
   const uint32_t sbase = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
   unsigned char* sm = smem_raw + ((1024u - (sbase & 1023u)) & 1023u);
@@ -199,7 +239,15 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
     const int st = g % NST;
     if (g >= NST) tma::wait(empty + st, ((g / NST) - 1) & 1);
     tma::expect_tx(full + st, TILE * 2);
-    tma::load_2d(&dgmap, tma::sa(sDG + st * TILE), full + st, (g % KB) * 64, t * BM);
+    const int kbk = g % KB;
+    if (use_dv && kbk >= KB / 2) {                   // dv from the head-major cuBLAS result: one [64 i][32 c] tile per head, two heads per k-block
+      const int row0 = t * BM, sidx = row0 / rowsN, i0 = row0 - sidx * rowsN;
+      #pragma unroll
+      for (int hh = 0; hh < 2; ++hh)
+        tma::load_2d(&dvmap, tma::sa(sDG + st * TILE + hh * (TILE / 2)), full + st, sidx * 32, (2 * (kbk - KB / 2) + hh) * rowsN + i0);
+    } else {
+      tma::load_2d(&dgmap, tma::sa(sDG + st * TILE), full + st, kbk * 64, t * BM);
+    }
   };
   auto issueT = [&](int T) {                       // tile T's y / x / dout into buffer T & 1
     const int t = tile_of(T);
@@ -292,13 +340,28 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
       if (kb == 0) wg::fence();
 #endif
       const __nv_bfloat16* a = sDG + st * TILE;
-      #pragma unroll
-      for (int ks = 0; ks < 4; ++ks)
-        wg::mma_m64n32k16_kk(wg::desc(a + wg::off(0, ks * 2)), wg::desc(sW + kb * TILE + wgi * 32 * 64 + wg::off(0, ks * 2)), dyacc, 1);
-      if ((kb & 1) == wgi) {
+      if (use_dv && kb >= KB / 2) {
+        // two [64 tok][32 c] head tiles (64-byte swizzle): dy += dv_h . Wv_h (K = 32), dWv_h^T [64 n][32 c] += y^T dv_h (accumulated transposed)
+        #pragma unroll
+        for (int hh = 0; hh < 2; ++hh) {
+          #pragma unroll
+          for (int ks = 0; ks < 2; ++ks)
+            wg::mma_m64n32k16_kk(wg::desc64(a + hh * (TILE / 2) + wg::off64(0, ks * 2)), wg::desc(sW + kb * TILE + wgi * 32 * 64 + wg::off(0, (hh * 2 + ks) * 2)), dyacc, 1);
+          if ((kb & 1) == wgi) {
+            #pragma unroll
+            for (int ks = 0; ks < 4; ++ks)
+              wg::mma_m64n32k16_mm(wg::desc(sY + b * TILE + wg::off(ks * 16, 0)), wg::desc64(a + hh * (TILE / 2) + wg::off64(ks * 16, 0)), wacc[kb >> 1] + hh * 16, 1);
+          }
+        }
+      } else {
         #pragma unroll
         for (int ks = 0; ks < 4; ++ks)
-          wg::mma_m64n64k16_mm(wg::desc(a + wg::off(ks * 16, 0)), wg::desc(sY + b * TILE + wg::off(ks * 16, 0)), wacc[kb >> 1], 1);
+          wg::mma_m64n32k16_kk(wg::desc(a + wg::off(0, ks * 2)), wg::desc(sW + kb * TILE + wgi * 32 * 64 + wg::off(0, ks * 2)), dyacc, 1);
+        if ((kb & 1) == wgi) {
+          #pragma unroll
+          for (int ks = 0; ks < 4; ++ks)
+            wg::mma_m64n64k16_mm(wg::desc(a + wg::off(ks * 16, 0)), wg::desc(sY + b * TILE + wg::off(ks * 16, 0)), wacc[kb >> 1], 1);
+        }
       }
       wg::commit();
       if (kb > 0) { wg::wait<1>(); if (lane == 0) tma::arrive(empty + ((g - 1) % NST)); }
@@ -359,6 +422,21 @@ __global__ void __launch_bounds__(THREADS, 1) dgv_bwd_kernel(const float* __rest
   #pragma unroll
   for (int q = 0; q < 4; ++q) {
     const int mt = q * 2 + wgi;
+    if (use_dv && q >= 2) {
+      // transposed accumulators: row m = output column n, column = channel c of head 2 * (mt - 4) + hh -> dW[(mt * 64 + hh * 32 + c) * 64 + n]
+      #pragma unroll
+      for (int hh = 0; hh < 2; ++hh)
+        #pragma unroll
+        for (int i = 0; i < 4; ++i)
+          #pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            const int n = r0 + (e >> 1) * 8, c = i * 8 + cq + (e & 1);
+            float* p = dWb + (mt * 64 + hh * 32 + c) * 64 + n;
+            const float v = wacc[q][hh * 16 + i * 4 + e];
+            if (PARTIAL) *p = v; else atomicAdd(p, v);
+          }
+      continue;
+    }
     #pragma unroll
     for (int i = 0; i < 8; ++i) {
       float* p0 = dWb + (mt * 64 + r0) * 64 + i * 8 + cq;
@@ -400,14 +478,15 @@ PFN_cuTensorMapEncodeTiled tma_encode() {
   }
   return fn;
 }
-CUtensorMap map2d(const torch::Tensor& t, long rows, long cols, int box_cols, int box_rows, const char* what) {
+CUtensorMap map2d(const torch::Tensor& t, long rows, long cols, int box_cols, int box_rows, const char* what,
+                  CUtensorMapSwizzle sw = CU_TENSOR_MAP_SWIZZLE_128B) {
   alignas(64) CUtensorMap m{};
   uint64_t gdim[2] = {(uint64_t)cols, (uint64_t)rows};
   uint64_t gstride[1] = {(uint64_t)cols * 2};
   uint32_t bdim[2] = {(uint32_t)box_cols, (uint32_t)box_rows};
   uint32_t estride[2] = {1, 1};
   CUresult r = tma_encode()(&m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, t.data_ptr(), gdim, gstride, bdim, estride,
-                            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+                            CU_TENSOR_MAP_INTERLEAVE_NONE, sw, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled(", what, ") failed: ", (int)r);
   return m;
 }
@@ -422,7 +501,7 @@ __global__ void pwa_dgv_reduce(const float* src,float* dst,int rows,int cols) {
 
 template <int NST, bool PARTIAL>
 void launch_t(const torch::Tensor& lnw, double eps, int ntile, int grid, float* dW, float* dln, const CUtensorMap& dgmap, const CUtensorMap& ymap,
-              const CUtensorMap& xmap, const CUtensorMap& domap, const CUtensorMap& dmmap, const CUtensorMap& wmap) {
+              const CUtensorMap& xmap, const CUtensorMap& domap, const CUtensorMap& dmmap, const CUtensorMap& wmap, int rowsN, int use_dv, const CUtensorMap& dvmap) {
   constexpr int BYTES = SMX<NST>::BYTES;
   static bool attr = false;
   if (!attr) {
@@ -432,11 +511,11 @@ void launch_t(const torch::Tensor& lnw, double eps, int ntile, int grid, float* 
     TORCH_WARN("dgv_bwd_kernel<", NST, ",", PARTIAL, ">: ", BYTES, " B smem -> ", nb, " blocks/SM");
     attr = true;
   }
-  dgv_bwd_kernel<NST, PARTIAL><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(lnw.data_ptr<float>(), (float)eps, ntile, dW, dln, dgmap, ymap, xmap, domap, dmmap, wmap);
+  dgv_bwd_kernel<NST, PARTIAL><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(lnw.data_ptr<float>(), (float)eps, ntile, rowsN, use_dv, dW, dln, dgmap, ymap, xmap, domap, dmmap, wmap, dvmap);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Tensor x, torch::Tensor dout, torch::Tensor wgvT, torch::Tensor lnw, double eps, int64_t blocks_per_sm, int64_t nst, bool partial) {
+std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Tensor x, torch::Tensor dout, torch::Tensor wgvT, torch::Tensor lnw, double eps, int64_t blocks_per_sm, int64_t nst, bool partial, c10::optional<torch::Tensor> dv_hm) {
   const long M = x.numel() / D;
   TORCH_CHECK(dgv.is_cuda() && dgv.scalar_type() == torch::kBFloat16 && dgv.is_contiguous() && dgv.numel() == M * KD, "dgv: [M, 512] bf16 contiguous");
   for (const auto* t : {&y, &x, &dout}) TORCH_CHECK(t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == M * D, "y/x/dout: [M, 64] bf16 contiguous");
@@ -452,6 +531,19 @@ std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Te
 #endif
   CUtensorMap dgmap = map2d(dgv, M, KD, 64, BM, "dgv"), ymap = map2d(y, M, D, 64, BM, "y"), xmap = map2d(x, M, D, 64, BM, "x"),
               domap = map2d(dout, M, D, 64, BM, "dout"), dmmap = map2d(dm, M, D, 64, BM, "dm"), wmap = map2d(wgvT, D, KD, 64, D, "wgvT");
+  // dv_hm [8][N][S*32] bf16 (the cuBLAS contraction w^T . d_o): the dv half of dgv (columns 256..511) is read from it, head tile by head tile
+  int rowsN = 1, use_dv = 0;
+  CUtensorMap dvmap = dgmap;
+  if (dv_hm.has_value()) {
+    const auto& dv = *dv_hm;
+    TORCH_CHECK(dv.is_cuda() && dv.scalar_type() == torch::kBFloat16 && dv.is_contiguous() && dv.dim() == 3 && dv.size(0) == 8 && dv.size(2) % 32 == 0,
+                "dv_hm: [8, N, S*32] bf16 contiguous");
+    rowsN = (int)dv.size(1);
+    const long S = dv.size(2) / 32;
+    TORCH_CHECK(rowsN % BM == 0 && (long)rowsN * S == M, "dv_hm: N must be a multiple of 64 and N*S the row count");
+    dvmap = map2d(dv, 8L * rowsN, S * 32, 32, BM, "dv_hm", CU_TENSOR_MAP_SWIZZLE_64B);
+    use_dv = 1;
+  }
   static int sms = 0;
   if (sms == 0) cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, x.device().index());
   const int ntile = (int)((M + BM - 1) / BM);
@@ -463,12 +555,12 @@ std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Te
   dlp=pln.data_ptr<float>();
 #endif
   switch (nst * 2 + (partial ? 1 : 0)) {
-    case 16: launch_t<8, false>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
-    case 17: launch_t<8, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
-    case 24: launch_t<12, false>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
-    case 25: launch_t<12, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
-    case 8: launch_t<4, false>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
-    case 9: launch_t<4, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap); break;
+    case 16: launch_t<8, false>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap, rowsN, use_dv, dvmap); break;
+    case 17: launch_t<8, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap, rowsN, use_dv, dvmap); break;
+    case 24: launch_t<12, false>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap, rowsN, use_dv, dvmap); break;
+    case 25: launch_t<12, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap, rowsN, use_dv, dvmap); break;
+    case 8: launch_t<4, false>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap, rowsN, use_dv, dvmap); break;
+    case 9: launch_t<4, true>(lnw, eps, ntile, grid, dWp, dlp, dgmap, ymap, xmap, domap, dmmap, wmap, rowsN, use_dv, dvmap); break;
     default: TORCH_CHECK(false, "nst must be 4, 8 or 12");
   }
 #if MW_PWA_CUDA_AUX
@@ -486,5 +578,5 @@ std::vector<torch::Tensor> dgv_bwd(torch::Tensor dgv, torch::Tensor y, torch::Te
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("dgv_bwd", &dgv_bwd, "fused dgv -> (dm = LN_bwd(dgv.Wgv) + dout, dWgv, dgamma, dbeta)",
-          py::arg("dgv"), py::arg("y"), py::arg("x"), py::arg("dout"), py::arg("wgvT"), py::arg("lnw"), py::arg("eps") = 1e-5, py::arg("blocks_per_sm") = 1, py::arg("nst") = 8, py::arg("partial") = false);
+          py::arg("dgv"), py::arg("y"), py::arg("x"), py::arg("dout"), py::arg("wgvT"), py::arg("lnw"), py::arg("eps") = 1e-5, py::arg("blocks_per_sm") = 1, py::arg("nst") = 8, py::arg("partial") = false, py::arg("dv_hm") = py::none());
 }

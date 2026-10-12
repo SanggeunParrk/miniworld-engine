@@ -35,7 +35,7 @@ warp count, will not compile faster.
 WHAT IT SCORES, on the probe round the shared-memory model already pays for
 --------------------------------------------------------------------------
 
-Eight kernels, 18,393 configs, 631 of them killed (`tests/autotune/compile_budget/`):
+Eight kernels, 18,393 configs, 631 of them killed (`tests/cpu/autotune/compile_budget/`):
 
     killed configs ruled out                     395 / 631  = 63%
     configs ruled out that did compile            35 / 18,393 = 0.19%
@@ -90,7 +90,7 @@ twice: ptxas grinds looking for an allocation, and the overflow it cannot avoid 
 memory at run time.
 
 So the two are not merely correlated. Joined against the bench over five (op, bucket) pairs,
-5,526 configs (`tests/autotune/compile_budget/bench_vs_compile.csv.gz`), every config compiling
+5,526 configs (`tests/cpu/autotune/compile_budget/bench_vs_compile.csv.gz`), every config compiling
 over 30 s placed in the bottom 2-16% by measured time, and the best-placed one was still 6.4x to
 32.7x off its bucket's fastest config.
 

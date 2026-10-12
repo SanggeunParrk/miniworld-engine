@@ -93,22 +93,26 @@ class SWADiTModulationSm100(torch.autograd.Function):
         return dc, dw.to(ctx.wdtype)
 
 
-def _modulation_linear_fake(x, weight):
+def _modulation_linear_fake(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """[..., out_features] in x's dtype and device."""
     return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
-@opaque(fake=_modulation_linear_fake, name="h100_swa_modulation_linear")
+@opaque(fake=_modulation_linear_fake, name="swa_dit_h100_modulation_linear")
 def _modulation_linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """``x @ weight.T`` with autocast off, so an fp32 master weight is not rounded to bf16."""
     with torch.autocast("cuda", enabled=False):
         return torch.mm(x, weight.t())
 
 
-def _modulation_linear_bwd_fake(dy, x, weight):
+def _modulation_linear_bwd_fake(dy: torch.Tensor, x: torch.Tensor, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """dx like x, dweight like weight."""
     return torch.empty_like(x), torch.empty_like(weight)
 
 
-@opaque(fake=_modulation_linear_bwd_fake, name="h100_swa_modulation_linear_backward")
+@opaque(fake=_modulation_linear_bwd_fake, name="swa_dit_h100_modulation_linear_backward")
 def _modulation_linear_bwd(dy: torch.Tensor, x: torch.Tensor, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(dx, dweight) of :func:`_modulation_linear`, with autocast off."""
     # AOTAutograd's surrounding BF16 autocast must not round the master gradient.
     with torch.autocast("cuda", enabled=False):
         return torch.mm(dy, weight), torch.mm(dy.t(), x)

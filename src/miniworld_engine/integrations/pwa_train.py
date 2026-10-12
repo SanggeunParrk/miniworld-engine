@@ -41,6 +41,16 @@ _EXT: dict[str, Any] = {}
 _NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar("pwa_native_training", default=False)
 
 
+_SPLIT_MIN_N = 512
+
+
+def _split_contraction(n: int) -> bool:
+    """N >= 512: the contraction runs on cuBLAS (head-major o) and the gate / out pass in pwa_gateout; below, the fused kernel wins
+    (the o round trip and the extra launch cost more than the faster contraction saves). o is rounded to bf16 BEFORE the gate here, as in
+    the module's bf16 statements and the sm_100a path, so the forward output is not bit-identical to the fused kernel's; the gradients are."""
+    return n >= _SPLIT_MIN_N
+
+
 def _h100_training_default(msa: torch.Tensor) -> bool:
     """The six required training shapes with full native accuracy qualification."""
     return (msa.device.type == "cuda" and torch.cuda.get_device_capability(msa.device) == (9, 0)
@@ -58,14 +68,6 @@ def native_inference_enabled(device: torch.device) -> bool:
     """Validated H100 inference default; AUX=0 retains the original path."""
     return (os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "1") == "1"
             and device.type == "cuda" and torch.cuda.get_device_capability(device) == (9, 0))
-
-
-def _h100_cluster(native: bool | None = None) -> int:
-    native = native_aux_enabled() if native is None else native
-    size = int(os.environ.get("MINIWORLD_PWA_H100_CLUSTER", "1")) if native else 1
-    if size not in (1, 2):
-        raise ValueError("H100 PWA cluster size must be 1 or 2")
-    return size
 
 
 def payload_dir():  # kept for symmetry with anthropic_msa: this path needs no payload
@@ -800,7 +802,7 @@ def _inference_math(
     lnz_w = module.ln_pair.weight.detach().float().contiguous()
     k = _k()
     if k["pair3"] is not None and n % 16 == 0 and n <= 1024:
-        w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, eps_z, module.to_bias.weight.detach())
+        w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, eps_z, wb16)
     else:
         w16 = pair_fwd(z, pm, lnz_w, eps_z, module.to_bias.weight.detach(), H, BJ=64)
     v, y = k["lnvg"].ln_vg(

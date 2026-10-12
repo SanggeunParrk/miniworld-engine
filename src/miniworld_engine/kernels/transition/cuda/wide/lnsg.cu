@@ -1,5 +1,12 @@
 // D >= 384 forward, first half: LayerNorm inside the SwiGLU expand GEMM (h = silu(xn Wa^T) * xn Wb^T), xn / rstd / c1 saved
 // behind a runtime flag. See kernels/ln_swiglu_gemm.cu. KD is the channel width.
+#if WIDE_D > 512                                           // D768: the headers the shared pipelines expect at global scope (ln_swiglu_gemm.cu brings them otherwise)
+#include "tmn_kernels.cuh"
+using namespace tmn; using namespace tmn::sm90;
+#include "wgmma_n.cuh"
+#include "launch_util.cuh"
+#endif
+#if WIDE_D <= 512                                          // D768: the resident LN tile does not fit; only the split forward below exists
 #define KD WIDE_D
 #define SWP 1                                             // software-pipelined epilogue: -6 % (D384) / -8 % (D512) at fixed clocks
 #define ln_swiglu_gemm wide_lnsg_kernel
@@ -20,6 +27,7 @@ void wide_lnsg_launch(const CUtensorMap& mx, const CUtensorMap& mw1p, const CUte
 #endif
     );
 }
+#endif  // WIDE_D <= 512
 
 #if MW_SPLIT_FWD
 // B200 D512 boundary: LN materializes xn; expand writes h/a/b with TMA stores.

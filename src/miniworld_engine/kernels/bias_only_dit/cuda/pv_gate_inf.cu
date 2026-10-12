@@ -572,3 +572,4 @@ bo_pv_gate_inf_sm100(const __grid_constant__ CUtensorMap mp, const __grid_consta
   pv_gate_body(mp, mv, mg, mo, L, S, (int)blockIdx.x, (int)gridDim.x);
 }
 #endif
+#endif // MINIWORLD_BO_SM90

@@ -22,7 +22,6 @@ mirror of the forward's single fused GEMM.
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
@@ -656,6 +655,8 @@ class AdaLNTrainFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                 eps_x, eps_cond):
+        # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
+        from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
         raw_weights = (scale_weight, scale_bias, bias_weight)
         ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
                       scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)

@@ -40,7 +40,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef NCTA
 #define NCTA 132
 #endif
-constexpr int D_ = 64, H_ = 256, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64, NSL = H_ / HS;
+#ifndef WIDE_N
+#define WIDE_N 4
+#endif
+constexpr int D_ = 64, H_ = WIDE_N * 64, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64, NSL = H_ / HS;
 constexpr int NDW = NSL * DW_REPL, NDX = NCTA - NDW;
 static_assert(NDX > 0, "no DX CTAs left");
 

@@ -104,7 +104,12 @@ def candidates_for(op, bucket):
         return trimul_candidates(tensors[0][0][-1], tensors[1][0][0], tensors[0][0][1], extra[0])
     if op in ("transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda"):
         from miniworld_engine.autotune.fused_config import transition_candidates
-        return transition_candidates(extra[-1], backward="bwd" in op)
+        backward = "bwd" in op
+        try:
+            n = tensors[6 if backward else 3][0][0] // tensors[0][0][-1]      # weight wa [n D, D]
+        except IndexError:
+            n = 4
+        return transition_candidates(extra[-1], backward=backward, n=n)
     from miniworld_engine.autotune import hopper_cuda_config as cuda
     width = tensors[0][0][-1]
     if op.startswith("layernorm_"):

@@ -1,7 +1,8 @@
 """OuterProductMean with measured H100 dispatch for BF16 inputs and BF16/FP32 master weights.
 
 H100 uses a WGMMA prologue, deterministic CUDA mask/parameter passes, cuBLAS contractions and CUDA epilogues.
-The seven inference cells and S1024/L384 or L768 training use the persistent TMA prologue.
+The seven inference cells and every training cell at S1024/2048/4096 use the persistent TMA prologue (the non-TMA WGMMA prologue is 5-6x
+slower than the legacy Triton one in training; TMA matches or beats legacy at S1024-4096, L128-768, 2026-10-07).
 S1024/L768 training owns cuBLAS workspaces for safe independent CUDA-graph lifetimes.
 S1024/L384 and S2048/L384 inference also use the gathered-TMA, overlapping-WGMMA epilogue.
 Other required inference cells retain the faster accurate historical composition;
@@ -56,8 +57,8 @@ def tma_prologue_enabled() -> bool:
 
 
 def tma_cublas_count_enabled() -> bool:
-    """Retain the original exact FP32 cuBLAS mask count in the experimental TMA path."""
-    return tma_prologue_enabled() and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "1") == "1"
+    """Opt back into the FP32 cuBLAS mask count; the default is the exact bit-mask popcount kernel."""
+    return tma_prologue_enabled() and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "0") == "1"
 
 
 def _h100_path(s: int, n: int, *, training: bool) -> str:
@@ -68,7 +69,7 @@ def _h100_path(s: int, n: int, *, training: bool) -> str:
             or "MINIWORLD_OPM_H100_TMA_PROLOGUE" in os.environ):
         return "tma" if tma_prologue_enabled() else "native"
     if training:
-        return "tma" if (s, n) in ((1024, 384), (1024, 768)) else "native"
+        return "tma" if s in (1024, 2048, 4096) else "native"
     if (s, n) in ((1024, 128), (1024, 256), (1024, 384), (2048, 128), (2048, 256), (2048, 384), (4096, 128)):
         return "tma"
     if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
@@ -189,7 +190,7 @@ def _ext(device=None, *, native=None, tma=None, epi_tma=None, epi_half=None, own
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
     native = native_aux_enabled() if native is None else native
     tma = tma_prologue_enabled() if tma is None else tma
-    count = native and tma and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "1") == "1"
+    count = native and tma and os.environ.get("MINIWORLD_OPM_H100_CUBLAS_COUNT", "0") == "1"
     owned = (not sm100 and native and (os.environ.get("MINIWORLD_OPM_H100_OWNED_BLAS", "0") == "1" if owned is None else owned))
     # Diagnostic candidate: gathered O/W TMA stages with overlapping WGMMA groups.
     if epi_tma is None:

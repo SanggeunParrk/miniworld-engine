@@ -717,6 +717,13 @@ _H100_INFER_OPS: dict = {}
 _H100_INFER_STREAMS: dict = {}
 
 
+def _h100_infer_core(idx: int):
+    """The per-device ``PvGateCore`` (sigmoid(g) * P v) for the Hopper inference step, built once."""
+    if idx not in _H100_INFER_OPS:
+        _H100_INFER_OPS[idx] = C.PvGateCore(idx, nh=16, dh=48)
+    return _H100_INFER_OPS[idx]
+
+
 def h100_inference(single, cond, pair, mask, weights):
     """Hopper save-free port of the B200 inference tensor lifetimes.
 
@@ -793,9 +800,8 @@ def h100_inference(single, cond, pair, mask, weights):
     vg = torch.mm(xa, wvg.t())
     og = torch.empty_like(xa)
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
-    if idx not in _H100_INFER_OPS:
-        _H100_INFER_OPS[idx] = C.PvGateCore(idx, nh=16, dh=48)
-    _H100_INFER_OPS[idx](vg[:, :D], prob, og, A, g=vg[:, D:])
+    core = _h100_infer_core(idx)
+    core(vg[:, :D], prob, og, A, g=vg[:, D:])
     y = torch.mm(og, wo.t())
     C.resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, T, EPS)
     h = single.new_empty((M, 2 * D))

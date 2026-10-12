@@ -26,7 +26,7 @@ The kernels:
 Numerics: the operands are rounded to bf16 (q after the scale, the bias after the log2 e scale), P and dS are bf16 for
 the tensor core, every sum is fp32. Against an fp64 truth, O / dq / dk / dv / dbias sit at the bf16-input-rounding
 floor (O 4.7e-3 against a floor of 4.4e-3 at unit-variance inputs); in the token DiT block the error is that of the
-engine's bf16 Triton core (tests/numerics/test_augmented_attention_bf16_sm90_gpu.py).
+engine's bf16 Triton core (tests/gpu/sm90/test_augmented_attention_bf16_sm90_gpu.py).
 
 ``supported()`` is the whole gate: sm_90, 16 heads x 48, B == 1, L a multiple of 128. Everything else keeps the
 Triton path, and so do fake tensors and torch.compile tracing (``available()``): the op is a plain autograd Function

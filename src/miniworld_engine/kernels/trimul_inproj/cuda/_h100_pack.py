@@ -159,7 +159,16 @@ def _pack(DST, WL, WLG, WR, WRG, R: tl.constexpr, D: tl.constexpr,
     tl.store(DST + i, tl.load(ptr, i < 4 * R * D, other=0), i < 4 * R * D)
 
 
-def pack_into_triton(dst, wl, wlg, wr, wrg):
+def _pack_into_triton_fake(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor,
+                           wrg: torch.Tensor) -> None:
+    """Nothing: the op writes ``dst`` in place."""
+    return None
+
+
+@opaque(fake=_pack_into_triton_fake, name="trimul_h100_weight_pack_triton", mutates_args=("dst",))
+def pack_into_triton(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor,
+                     wrg: torch.Tensor) -> None:
+    """Pack the four [R, D] leaves into ``dst`` [4R, D] in 32-row groups (the Triton fallback of ``pack_into_cuda``)."""
     r, d = wl.shape
     if r % 32 or dst.shape != (4 * r, d) or not dst.is_contiguous():
         raise ValueError("weight pack requires 32-row groups and contiguous output")
@@ -317,13 +326,15 @@ def _training_cast_indices(weights):
             if w.dtype!=torch.bfloat16 or (i>=4 and not w.is_contiguous())]
 
 
-def _training_cast_fake(weights):
+def _training_cast_copies_fake(weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    """One fresh bf16 tensor per weight that is not already a BF16 alias (see ``_training_cast_indices``)."""
     return [torch.empty(weights[i].shape,device=weights[i].device,dtype=torch.bfloat16)
             for i in _training_cast_indices(weights)]
 
 
-@opaque(fake=_training_cast_fake,name="trimul_h100_preserved_weight_copies")
+@opaque(fake=_training_cast_copies_fake,name="trimul_h100_preserved_weight_copies")
 def _training_cast_copies(weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Fresh BF16 copies of the weights that need one; BF16 aliases are not outputs of the op."""
     with T.native_context(weights[0].device):
         out = cast_weights(weights)
         return [out[i] for i in _training_cast_indices(weights)]
@@ -340,11 +351,13 @@ def cast_training_weights(weights):
 
 
 def _owned_training_mask_fake(pair,mask):
+    """[L, L] bf16 mask; ``pair`` supplies only the shape and device."""
     return pair.new_empty((pair.shape[1],pair.shape[1]),dtype=torch.bfloat16)
 
 
 @opaque(fake=_owned_training_mask_fake,name="trimul_h100_preserved_owned_mask")
 def owned_training_mask(pair: torch.Tensor,mask: torch.Tensor | None) -> torch.Tensor:
+    """The pair mask as an owned [L, L] BF16 tensor."""
     with T.native_context(pair.device):
         return owned_bf16_mask(mask,pair.shape[1],pair.device)
 
@@ -388,11 +401,13 @@ def owned_bf16_mask(mask, length, device):
 
 
 def _gradient_layout_fake(grads, weights):
+    """Fresh gradients with each weight's shape, strides and dtype."""
     return [torch.empty_strided(w.shape, w.stride(), device=w.device, dtype=w.dtype) for w in weights]
 
 
 @opaque(fake=_gradient_layout_fake, name="trimul_h100_parameter_gradient_layout")
 def _gradient_layout(grads: list[torch.Tensor], weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Copy each dense gradient into its weight's (possibly transposed) layout."""
     if not 0 < len(grads) == len(weights) <= 6:
         raise ValueError("one to six parameter gradients required")
     if any(not g.is_contiguous() or g.shape != w.shape or g.device != w.device
@@ -423,8 +438,14 @@ def preserve_parameter_layout(grads, weights):
     return result
 
 
-@opaque(fake=_gradient_layout_fake,name="trimul_h100_preserved_gradient_copies")
+def _training_gradient_copies_fake(grads: list[torch.Tensor], weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Fresh gradients with each weight's shape, strides and dtype."""
+    return _gradient_layout_fake(grads, weights)
+
+
+@opaque(fake=_training_gradient_copies_fake,name="trimul_h100_preserved_gradient_copies")
 def _training_gradient_copies(grads: list[torch.Tensor],weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Gradients densified to the weights' dtype, then laid out like the weights."""
     with T.native_context(grads[0].device):
         dense=[dense_native(g,w.dtype) for g,w in zip(grads,weights,strict=True)]
         return preserve_parameter_layout(dense,weights)
@@ -479,11 +500,13 @@ def training_pair_mask(mask, length, device):
 
 
 def _training_unit_scale_fake(pair):
+    """[L, D] bf16 constant scale; ``pair`` supplies only the shape and device."""
     return torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
 
 
 @opaque(fake=_training_unit_scale_fake, name="trimul_h100_training_unit_scale")
 def _training_unit_scale(pair: torch.Tensor) -> torch.Tensor:
+    """The constant [L, D] BF16 unit-scale tensor of the training path (no derivative)."""
     out = torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
     _launch("mw_aux_unit_scale", ((out.numel()+255)//256, 1, 1), [out, out.numel()])
     return out
@@ -496,6 +519,7 @@ def training_unit_scale(pair):
 
 
 def _fused_training_prepare_fake(leaves, mask):
+    """(packed [4H, D], pair mask [L, L] fp32, gate [D, D], output [D, H]), shapes read from x and the first weight."""
     x, weight = leaves[:2]
     length, width, hidden = x.shape[1], x.shape[-1], weight.shape[0]
     return (x.new_empty((4*hidden, width)),

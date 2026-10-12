@@ -208,6 +208,36 @@ def _bwd_fused(dev, H, DA):
     return BWF.ops(idx, H, DA // H) if BWF.bwd_fused_ready(idx, H, DA // H) else None
 
 
+def _pack_h100(P):
+    """Hopper weight pack (``pack90``: the same layouts as ``_pack`` without the fused backward's K-major operands; parameters that
+    already have the wanted dtype are used as they are)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    bt = ext()
+    g = lambda n: P[n]
+    pipeline = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
+    cast = lambda t: (t.detach() if pipeline and t.dtype is torch.float32
+                      else bt.pack90([t.detach()], [], True).view(t.shape))
+    def cat(ts, scales=(), fp32=False):
+        if pipeline and len(ts) == 1 and not scales and ts[0].dtype is (torch.float32 if fp32 else BF):
+            return ts[0].detach()
+        return bt.pack90([t.detach() for t in ts], list(scales), fp32).view(-1, ts[0].shape[-1])
+    w1, w2 = cast(g("attention.ada_ln_in.ln_cond.weight")), cast(g("transition.ada_ln_in.ln_cond.weight"))
+    projections = [g("attention.ada_ln_in.to_scale.weight"), g("attention.ada_ln_in.to_bias.weight"),
+                   g("transition.ada_ln_in.to_scale.weight"), g("transition.ada_ln_in.to_bias.weight")]
+    wp, wb = cast(g("attention.ln_pair.weight")), cast(g("attention.to_bias.weight"))
+    W = dict(w1=w1, w2=w2, Wraw=cat(projections, fp32=True), Wn=cat(projections, [w1, w1, w2, w2]),
+             Wg=cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]),
+             Wvg=cat([g("attention.to_value.weight"), g("attention.to_gate.weight")]),
+             wp=wp, Wb=wb, Wf_bf=cat([g("attention.to_bias.weight")], [wp]),
+             Wo=cat([g("attention.to_out.weight")]),
+             Wab=cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]),
+             Wsq=cat([g("transition.squeeze.weight")]))
+    for key, name in (("bs1", "attention.ada_ln_in.to_scale.bias"), ("bs2", "transition.ada_ln_in.to_scale.bias"),
+                      ("bg1", "attention.to_scale.bias"), ("bg2", "transition.to_scale.bias")):
+        W[key] = cast(g(name))
+    return W
+
+
 def _pack(P, dev):
     """The block's weights in the kernels' layouts; rebuilt only when a parameter changes (an optimizer step bumps
     ``_version``), so a training step pays it once per block. Scoped to the CUDA-graph capture (``kernels._capture``): an
@@ -220,7 +250,11 @@ def _pack(P, dev):
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
-    W = _pack_one(P, dev, mid) if one else None
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+    if h100_enabled(dev):
+        W = _pack_h100(P)
+    else:
+        W = _pack_one(P, dev, mid) if one else None
     if W is not None:
         if slot is not None:
             _capture.prune(_PACKS)
@@ -1154,6 +1188,16 @@ def _bwd_fused_step(
     ]
 
 
+def _repeat_shared_fake(cond, samples):
+    return cond.new_empty((samples, *cond.shape[1:]))
+
+
+@opaque(fake=_repeat_shared_fake, name="bias_only_dit_repeat_shared")
+def _repeat_shared(cond: torch.Tensor, samples: int) -> torch.Tensor:
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    return ext().repeat90(cond[:1], samples)
+
+
 class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, *params):
@@ -1657,7 +1701,23 @@ def block(module, single, cond, pair, mask=None, bias=None):
             *params,
         )
     fn = _Block32 if single.dtype is F32 else _Block
-    return fn.apply(single, cond, pair.contiguous(), mask, *params)
+    out = fn.apply(single, cond, pair.contiguous(), mask, *params)
+    if single.dtype is not F32:
+        from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+        if h100_enabled(single.device):
+            from .token_dit_train import _native_caller_hooks
+            _native_caller_hooks(single, cond, pair, *module.parameters(), force=True)
+    return out
 
 
 __all__ = ["NAMES", "PAIR_PARAMS", "block", "serves"]
+
+
+def h100_infer(module, single, cond, pair, mask):
+    """Opt-in Hopper inference, preserving the fused training forward boundaries."""
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    if cond.shape[0] == 1 and single.shape[0] != 1:
+        cond = ext().repeat90(cond, single.shape[0])
+    elif cond.stride(0) == 0:
+        cond = ext().repeat90(cond[:1].contiguous(), single.shape[0])
+    return _fwd(single, cond, pair, mask, [module.get_parameter(n) for n in NAMES])[0]

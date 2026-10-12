@@ -336,8 +336,8 @@ template <int NST> struct SMX {
 // on the host.  The producer warpgroup streams o tiles (one 16 KB stage per head, one issuing thread per slot), the
 // dout tiles per tile (parity buffers behind a doneT barrier) and the per-head weights (parity buffers).
 template <int NST>
-__global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int ntile, float* __restrict__ dWo,
-    const __grid_constant__ CUtensorMap omap,     // o    natural [S][N][HC]     3-D box (32 c, 64 tok, 2 s), 64B swizzle (load)
+__global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int ntile, int ohm, float* __restrict__ dWo,
+    const __grid_constant__ CUtensorMap omap,     // o    natural [S][N][HC]     3-D box (32 c, 64 tok, 2 s), 64B swizzle (load); ohm: head-major [H*N][S*C], 2-D box (32 c, 64 tok), 64B swizzle
     const __grid_constant__ CUtensorMap dmap,     // dout [S*N][D]              box (64, 64) (load)
     const __nv_bfloat16* __restrict__ Yg,         // y    [S*N][D]              (read as RS fragments)
     const __grid_constant__ CUtensorMap gmap,     // wg   [HC][D]               box (64, 32)
@@ -413,7 +413,13 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
           if (st != pw) continue;
           if (gs >= NST) tma::wait(empty + st, ((gs / NST) - 1) & 1);
           tma::expect_tx(full + st, 2 * TILE * 2);
-          for (int c = 0; c < 2; ++c) tma::load_3d(&omap, tma::sa(sOR + (st * 2 + c) * TILE), full + st, h * C, ip * 128 + c * 64, s0);
+          if (ohm) {                                   // head-major o (the cuBLAS contraction): one 2-D box per s, the two planes of the natural tile
+            for (int c = 0; c < 2; ++c)
+              for (int si = 0; si < BS; ++si)
+                tma::load_2d(&omap, tma::sa(sOR + (st * 2 + c) * TILE + si * (TILE / 2)), full + st, (s0 + si) * C, h * N + ip * 128 + c * 64);
+          } else {
+            for (int c = 0; c < 2; ++c) tma::load_3d(&omap, tma::sa(sOR + (st * 2 + c) * TILE), full + st, h * C, ip * 128 + c * 64, s0);
+          }
         }
         if (pw == 0) issue_dout(T + 2);
       }
@@ -613,7 +619,7 @@ CUtensorMap map_nat(void* base, long row_stride, int N, int S, int bi) {   // na
 }  // namespace
 
 template <int NST>
-void launch_glue3(int N, int S, int ntile, int grid, float* dWo, const CUtensorMap& omap, const CUtensorMap& dmap, const __nv_bfloat16* yp,
+void launch_glue3(int N, int S, int ntile, int ohm, int grid, float* dWo, const CUtensorMap& omap, const CUtensorMap& dmap, const __nv_bfloat16* yp,
                   const CUtensorMap& gmap, const CUtensorMap& wotmap, const CUtensorMap& domap, const CUtensorMap& dgpmap, const __nv_bfloat16* drop_mask, float drop_scale) {
   constexpr int BYTES = SMX<NST>::BYTES;
   static bool attr = false;                                        // one per instantiation
@@ -624,7 +630,7 @@ void launch_glue3(int N, int S, int ntile, int grid, float* dWo, const CUtensorM
     TORCH_WARN("pwa_glue3_kernel<", NST, ">: ", BYTES, " B smem -> ", nb, " blocks/SM");
     attr = true;
   }
-  pwa_glue3_kernel<NST><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(N, S, ntile, dWo, omap, dmap, yp, gmap, wotmap, domap, dgpmap, drop_mask, drop_scale);
+  pwa_glue3_kernel<NST><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(N, S, ntile, ohm, dWo, omap, dmap, yp, gmap, wotmap, domap, dgpmap, drop_mask, drop_scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -635,12 +641,13 @@ __global__ void pwa_glue_reduce(const float* src,float* dst,int rows) {
   if(col<D*HC){float v=0;for(int r=0;r<rows;++r)v+=src[(long)r*D*HC+col];dst[col]=v;}
 }
 #endif
-std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Tensor dout, torch::Tensor wgw, torch::Tensor wot, c10::optional<torch::Tensor> dgv, int64_t nst, int64_t blocks_per_sm, c10::optional<torch::Tensor> drop_mask, double drop_scale) {
+std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Tensor dout, torch::Tensor wgw, torch::Tensor wot, c10::optional<torch::Tensor> dgv, int64_t nst, int64_t blocks_per_sm, c10::optional<torch::Tensor> drop_mask, double drop_scale, bool o_head_major) {
 #if MW_PWA_CUDA_AUX
   C10_CUDA_CHECK(cudaSetDevice(o.get_device()));
 #endif
-  TORCH_CHECK(o.is_cuda() && o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 3 && o.size(2) == HC, "o: [S, N, HC] bf16");
-  const int S = (int)o.size(0), N = (int)o.size(1);
+  TORCH_CHECK(o.is_cuda() && o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 3, "o: [S, N, HC] (or head-major [H, N, S*C]) bf16");
+  TORCH_CHECK(o_head_major ? (o.size(0) == H && o.size(2) % C == 0) : o.size(2) == HC, "o: [S, N, HC] bf16, or head-major [H, N, S*C] with o_head_major");
+  const int S = o_head_major ? (int)(o.size(2) / C) : (int)o.size(0), N = (int)o.size(1);
   TORCH_CHECK(N % 128 == 0 && S % BS == 0, "N must be a multiple of 128 and S even");
   TORCH_CHECK(y.is_contiguous() && y.sizes() == torch::IntArrayRef({S, N, D}), "y: [S, N, D]");
   TORCH_CHECK(dout.is_contiguous() && dout.sizes() == torch::IntArrayRef({S, N, D}), "dout: [S, N, D]");
@@ -665,13 +672,13 @@ std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Te
   const int ntile = (S / BS) * (N / 128);
   const int grid = (int)std::min<long>(ntile, (long)sms * blocks_per_sm);
   auto dWo = torch::empty({grid, D, HC}, o.options().dtype(torch::kFloat));
-  CUtensorMap omap = map_nat(o.data_ptr(), HC, N, S, 64), dmap = map2d(dout.data_ptr(), (long)S * N, D, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "dout"),
+  CUtensorMap omap = o_head_major ? map2d(o.data_ptr(), (long)H * N, (long)S * C, 32, 64, CU_TENSOR_MAP_SWIZZLE_64B, "o_hm") : map_nat(o.data_ptr(), HC, N, S, 64), dmap = map2d(dout.data_ptr(), (long)S * N, D, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "dout"),
               gmap = map2d(wgw.data_ptr(), HC, D, 64, 32, CU_TENSOR_MAP_SWIZZLE_128B, "wg"), wotmap = map2d(wot.data_ptr(), HC, D, 64, 32, CU_TENSOR_MAP_SWIZZLE_128B, "wot"),
               domap = map2d(d_o.data_ptr(), (long)H * N, (long)S * C, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "do"), dgpmap = map_nat(dgp.data_ptr(), rs, N, S, 64);
   const __nv_bfloat16* yp = reinterpret_cast<const __nv_bfloat16*>(y.data_ptr<at::BFloat16>());
   const int so_unused = 0; (void)so_unused;
-  if (nst == 3) launch_glue3<3>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
-  else if (nst == 2) launch_glue3<2>(N, S, ntile, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
+  if (nst == 3) launch_glue3<3>(N, S, ntile, o_head_major ? 1 : 0, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
+  else if (nst == 2) launch_glue3<2>(N, S, ntile, o_head_major ? 1 : 0, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
   else TORCH_CHECK(false, "nst must be 2 or 3 (the double-buffered staging leaves room for at most three o-stage slots)");
 #if MW_PWA_CUDA_AUX
   auto result=torch::empty({D,HC},dWo.options());
@@ -684,5 +691,5 @@ std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Te
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("pwa_glue3", &pwa_glue3, "PWA backward glue from the saved o with the dWo partial folded in: (do head-major, dgp, dWo fp32 [64][256])",
-          py::arg("o"), py::arg("y"), py::arg("dout"), py::arg("wg"), py::arg("wot"), py::arg("dgv") = py::none(), py::arg("nst") = 2, py::arg("blocks_per_sm") = 1, py::arg("drop_mask") = py::none(), py::arg("drop_scale") = 1.0);
+          py::arg("o"), py::arg("y"), py::arg("dout"), py::arg("wg"), py::arg("wot"), py::arg("dgv") = py::none(), py::arg("nst") = 2, py::arg("blocks_per_sm") = 1, py::arg("drop_mask") = py::none(), py::arg("drop_scale") = 1.0, py::arg("o_head_major") = false);
 }

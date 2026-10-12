@@ -49,7 +49,7 @@ def _pack(weights: list[torch.Tensor]) -> list[torch.Tensor]:
     if all(w.is_contiguous() for w in weights):
         sizes = tuple(w.numel() for w in weights)
         _cast_kernel[(sum(triton.cdiv(n, 1024) for n in sizes),)](
-            tuple(weights), tuple(outputs), sizes, BLOCK=1024, num_warps=4,  # ty: ignore[invalid-argument-type, unknown-argument]  # Triton launch metadata
+            tuple(weights), tuple(outputs), sizes, BLOCK=1024,  # ty: ignore[invalid-argument-type, unknown-argument]  # Triton launch metadata
         )
     else:
         torch._foreach_copy_(outputs, weights)

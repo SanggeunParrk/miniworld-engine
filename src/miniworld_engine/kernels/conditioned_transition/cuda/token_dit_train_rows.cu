@@ -72,11 +72,11 @@ __device__ __forceinline__ void part_store(float* part, long stride, float4 v) {
 // ------------------------------------------------------------------------------------------------------------- forward
 template <typename CT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT* __restrict__ CHAT, AT* __restrict__ CBF,
-    float2* __restrict__ CST, int M, int rpb, float eps) {
+    float2* __restrict__ CST, int M, int rpb, float eps, int Crows = 0) {   // Crows: C is a [Crows, DC] block repeated (sm_90 native)
   __shared__ float red[NTC / 32];
   const int col = threadIdx.x * 4;
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
-    const float4 c = V4<CT>::load(C + r * DC + col);
+    const float4 c = V4<CT>::load(C + (Crows ? r % Crows : r) * DC + col);
     const float mean = block_sum<NTC>(sum4(c), red) / DC;
     const float4 d = make_float4(c.x - mean, c.y - mean, c.z - mean, c.w - mean);
     const float rstd = rsqrtf(block_sum<NTC>(sum4(mul4(d, d)), red) / DC + eps);
@@ -122,7 +122,7 @@ __device__ __forceinline__ float head_sum(float v, float* part) {
 template <typename AT>
 __global__ void __launch_bounds__(NT) qknorm_k(const AT* __restrict__ QKVG, const float* __restrict__ WQ,
     const float* __restrict__ WK, AT* __restrict__ QN, AT* __restrict__ KN, AT* __restrict__ VC, float* __restrict__ RQK,
-    int M, int rpb, float eq, float ek, int qk) {
+    int M, int rpb, float eq, float ek, int qk, float qs) {
   __shared__ float part[NT];
   const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   const float4 wq = qk ? V4<float>::load(WQ + col % HD) : make_float4(1.f, 1.f, 1.f, 1.f);
@@ -269,13 +269,15 @@ __global__ void __launch_bounds__(NT) res_adaln_b_bwd_k(const OT* __restrict__ D
 }
 
 // og = sigmoid(g) o: dO = dog s (bf16, the core's input), D = rowsum_head(dO o) (the core backward's prep), dg = dog o s (1 - s)
-template <typename AT>
-__global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, const float* __restrict__ O, const AT* __restrict__ QKVG,
+// GATED (the H100 cores): O is og = sigmoid(g) o itself (the attention forward wrote it, no O kept) and of the operand type OT:
+// dO o = dog og, do o s (1 - s) = dog og (1 - s).
+template <typename AT, typename OT, bool GATED>
+__global__ void __launch_bounds__(NT) gate_o_bwd_k(const AT* __restrict__ DOG, const OT* __restrict__ O, const AT* __restrict__ QKVG,
     AT* __restrict__ DOB, float* __restrict__ DD, AT* __restrict__ DQKVG, int M, int rpb, int L) {
   __shared__ float part[NT];
   const int col = threadIdx.x * 4, h = threadIdx.x / HT;
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
-    const float4 dog = V4<AT>::load(DOG + r * D + col), o = V4<float>::load(O + r * D + col);
+    const float4 dog = V4<AT>::load(DOG + r * D + col), o = V4<OT>::load(O + r * D + col);
     const float4 s = sig4(V4<AT>::load(QKVG + r * 4 * D + 3 * D + col));
     const float4 d_o = mul4(dog, s);
     V4<AT>::store(DOB + r * D + col, d_o);
@@ -351,11 +353,11 @@ __global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int
 
 template <typename CT, typename OT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_bwd_k(const AT* __restrict__ DCHAT, const AT* __restrict__ DCG, const CT* __restrict__ C,
-    const float2* __restrict__ CST, OT* __restrict__ DCO, int M, int rpb) {
+    const float2* __restrict__ CST, OT* __restrict__ DCO, int M, int rpb, int Crows = 0) {   // Crows: C is a [Crows, DC] block repeated (sm_90 native)
   __shared__ float red[NTC / 32];
   const int col = threadIdx.x * 4;
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
-    const float4 dch = V4<AT>::load(DCHAT + r * DC + col), c = V4<CT>::load(C + r * DC + col);
+    const float4 dch = V4<AT>::load(DCHAT + r * DC + col), c = V4<CT>::load(C + (Crows ? r % Crows : r) * DC + col);
     const float2 st = CST[r];
     const float4 ch = make_float4((c.x - st.x) * st.y, (c.y - st.x) * st.y, (c.z - st.x) * st.y, (c.w - st.x) * st.y);
     const float m1 = block_sum<NTC>(sum4(dch), red) / DC, m2 = block_sum<NTC>(sum4(mul4(dch, ch)), red) / DC;
@@ -582,10 +584,13 @@ template <typename K> int occupancy(K* kern, int threads) {
 // block resident at once (SM count x the kernel's occupancy), the rows dealt evenly, ceil(M / blocks) each: the RPB grid left
 // the last wave 56 % full at L384 (2304 blocks over 1480 slots) and the kernels at 5-5.7 TB/s. `fixed` > 0: exactly that many
 // blocks (the rows of a partial buffer, every one of which is written, zeros by blocks without rows).
+// The one-wave grid is the default build (RPB == 8: B200, and the H100 fallback); an explicit -DTD_RPB < 8 build (the H100 native
+// path's tuned rows per block) keeps its RPB grid for fp32 as well.
+constexpr bool WAVE_FP32 = RPB == 8;
 struct RowGrid { unsigned grid; int rpb; };
 template <typename AT, typename K> RowGrid row_grid(K* kern, int threads, int64_t M, int64_t fixed = 0) {
-  if (!std::is_same<AT, float>::value) {
-    TORCH_CHECK(fixed == 0 || fixed == (int64_t)blocks(M), "partial buffer rows: ceil(M / 8) on the bf16 path");
+  if (!(WAVE_FP32 && std::is_same<AT, float>::value)) {
+    TORCH_CHECK(fixed == 0 || fixed == (int64_t)blocks(M), "partial buffer rows: ceil(M / RPB) on the RPB-grid path");
     return {blocks(M), RPB};
   }
   const int64_t g = fixed > 0 ? fixed : std::max<int64_t>(1, std::min<int64_t>(M, (int64_t)nsm() * occupancy(kern, threads)));
@@ -596,7 +601,7 @@ template <typename AT, typename K> RowGrid row_grid(K* kern, int threads, int64_
 // rows of the backward's shared partial buffer (res_c_bwd, res_adaln_b_bwd, qknorm_bwd, adaln_a_bwd): bf16 ceil(M / 8); fp32 the
 // SM count x the lowest occupancy of the four, so every block of each is resident at once
 int64_t part_rows(int64_t M, bool fp32) {
-  if (!fp32) return blocks(M);
+  if (!fp32 || !WAVE_FP32) return blocks(M);
   const int o = std::min(std::min(occupancy(res_c_bwd_k<float, float>, NT), occupancy(res_adaln_b_bwd_k<float, float>, NT)),
                          std::min(occupancy(qknorm_bwd_k<float>, NT), occupancy(adaln_a_bwd_k<float, float>, NT)));
   return std::max<int64_t>(1, std::min<int64_t>(M, (int64_t)nsm() * o));
@@ -634,9 +639,9 @@ void adaln_a(at::Tensor x, at::Tensor G, at::Tensor bs, at::Tensor xa, at::Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// vc none: v is not copied (the core reads it as a column view of qkvg)
+// vc none: v is not copied (the core reads it as a column view of qkvg); qs: the q scale (1 on B200, the sm_90 cores' log2 e / sqrt(hd))
 void qknorm(at::Tensor qkvg, at::Tensor wq, at::Tensor wk, at::Tensor qn, at::Tensor kn, c10::optional<at::Tensor> vc, at::Tensor rqk,
-            double eq, double ek, bool qk) {
+            double eq, double ek, bool qk, double qs) {
   const int64_t M = qkvg.size(0);
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.size(1) == 4 * D, "qknorm: qkvg [M, 3072]");
   actc(qn, qkvg, "qn"); actc(kn, qkvg, "kn");
@@ -645,7 +650,7 @@ void qknorm(at::Tensor qkvg, at::Tensor wq, at::Tensor wk, at::Tensor qn, at::Te
   TDT_DISPATCH(qkvg.scalar_type(), AT, [&] {
     const RowGrid rg = row_grid<AT>(qknorm_k<AT>, NT, M);
     qknorm_k<AT><<<rg.grid, NT, 0, S()>>>(CP<AT>(qkvg), CP<float>(wq), CP<float>(wk), P<AT>(qn), P<AT>(kn), OP<AT>(vc), P<float>(rqk),
-                                          (int)M, rg.rpb, (float)eq, (float)ek, qk ? 1 : 0);
+                                          (int)M, rg.rpb, (float)eq, (float)ek, qk ? 1 : 0, (float)qs);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -795,9 +800,16 @@ void gate_o_bwd(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, a
   actc(qkvg, dog, "qkvg"); actc(dob, dog, "dob"); actc(dqkvg, dog, "dqkvg");
   const at::cuda::CUDAGuard g(o.device());
   TDT_DISPATCH(dog.scalar_type(), AT, [&] {
-    const RowGrid rg = row_grid<AT>(gate_o_bwd_k<AT>, NT, M);
-    gate_o_bwd_k<AT><<<rg.grid, NT, 0, S()>>>(CP<AT>(dog), CP<float>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd), P<AT>(dqkvg), (int)M,
-                                              rg.rpb, (int)L);
+    if (gated) {
+      actc(o, dog, "og");
+      const RowGrid rg = row_grid<AT>(gate_o_bwd_k<AT, AT, true>, NT, M);
+      gate_o_bwd_k<AT, AT, true><<<rg.grid, NT, 0, S()>>>(CP<AT>(dog), CP<AT>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd), P<AT>(dqkvg),
+                                                          (int)M, rg.rpb, (int)L);
+    } else {
+      const RowGrid rg = row_grid<AT>(gate_o_bwd_k<AT, float, false>, NT, M);
+      gate_o_bwd_k<AT, float, false><<<rg.grid, NT, 0, S()>>>(CP<AT>(dog), CP<float>(o), CP<AT>(qkvg), P<AT>(dob), P<float>(dd),
+                                                              P<AT>(dqkvg), (int)M, rg.rpb, (int)L);
+    }
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1156,17 +1168,19 @@ void cond_prep90(at::Tensor c,at::Tensor chat,at::Tensor cbf,at::Tensor cst,doub
  const at::cuda::CUDAGuard g(c.device());
  TDT_DISPATCH(chat.scalar_type(),AT,[&]{TDT_DISPATCH(c.scalar_type(),CT,[&]{
  const CT* src=CP<CT>(c);AT* normalized=P<AT>(chat);AT* raw=P<AT>(cbf);
- float2* stats=P<float2>(cst);int rows=M,source_rows=Crows;float epsilon=eps;
+ const RowGrid rg=row_grid<AT>(cond_prep_k<CT,AT>,NTC,M);
+ float2* stats=P<float2>(cst);int rows=M,rpb=rg.rpb,source_rows=Crows;float epsilon=eps;
  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,cond_prep_k<CT,AT>));
- void* args[]={&src,&normalized,&raw,&stats,&rows,&epsilon,&source_rows};
- C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(blocks(M)),dim3(NTC),args,0,S()));
+ void* args[]={&src,&normalized,&raw,&stats,&rows,&rpb,&epsilon,&source_rows};
+ C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(rg.grid),dim3(NTC),args,0,S()));
  });});C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void cond_bwd90(at::Tensor dchat,at::Tensor dcg,at::Tensor c,at::Tensor cst,at::Tensor dc) {
  const int M=dc.size(0),Crows=c.stride(0)==0?c.size(2):M;
  const at::cuda::CUDAGuard g(c.device());
  TDT_DISPATCH(dchat.scalar_type(),AT,[&]{TDT_DISPATCH(c.scalar_type(),CT,[&]{TDT_DISPATCH(dc.scalar_type(),OT,[&]{
- cond_bwd_k<CT,OT,AT><<<blocks(M),NTC,0,S()>>>(CP<AT>(dchat),CP<AT>(dcg),CP<CT>(c),CP<float2>(cst),P<OT>(dc),M,Crows);
+ const RowGrid rg=row_grid<AT>(cond_bwd_k<CT,OT,AT>,NTC,M);
+ cond_bwd_k<CT,OT,AT><<<rg.grid,NTC,0,S()>>>(CP<AT>(dchat),CP<AT>(dcg),CP<CT>(c),CP<float2>(cst),P<OT>(dc),M,rg.rpb,Crows);
  });});});C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

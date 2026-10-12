@@ -12,10 +12,13 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
   * fp32 only, copies the bf16 path makes and this one does not: no cond copy (the gate GEMM reads cond), no v copy (QK-norm:
     the core reads v from qkvg), dQ / dK / dV written by the core straight into the q|k|v|g gradient, the dxt / dxa GEMMs
     straight into their blocks of the conditioning gradient; the row kernels run one resident wave of blocks (``row_grid``);
-  * the attention core: ``kernels/augmented_attention/cuda/sm100`` -- bf16: attn_fwd2, attn_dkv + attn_dqb; fp32: attn_fwd_tf32,
-    attn_dkv_tf32 + attn_dqb_tf32 (kind::tf32 MMAs, fp32 softmax);
+  * the attention core: B200 ``kernels/augmented_attention/cuda/sm100`` -- bf16: attn_fwd2, attn_dkv + attn_dqb; fp32:
+    attn_fwd_tf32, attn_dkv_tf32 + attn_dqb_tf32 (kind::tf32 MMAs, fp32 softmax); H100 the sm_90a cores of
+    ``kernels/augmented_attention/cuda`` (bf16 wgmma; fp32 TF32 wgmma), which write og = sigmoid(g) o themselves (no O kept);
   * every elementwise / row step: ``kernels/conditioned_transition/cuda/token_dit_train_rows.cu``; in bf16 the expand GEMM
-    carries the SwiGLU (``gemm_swiglu2_sm100.cu -DSAVE_AB``, which also writes [a | b] for the backward);
+    carries the SwiGLU on B200 (``gemm_swiglu2_sm100.cu -DSAVE_AB``, which also writes [a | b] for the backward);
+  * H100 only: the native path (``MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE``, default on): fused weight pack / final gradient
+    kernels, graph-owned cuBLAS workspaces for the qualified buckets, and the caller-gradient hooks (``_native_caller_*``);
   * the residual stream fp32 inside the block, the output in the input's dtype.
 
 ``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), B200, a bf16 or
@@ -24,9 +27,10 @@ transition n = 2) at a head layout of LAYOUTS (16 x 48, 24 x 32, 12 x 64 at d 76
 B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples over as its [B, L] row),
 LayerNorm eps 1e-5. Anything else keeps the module path. settings.token_dit_train=0 turns it off.
 
-Any A and L: the kernels tile L by 128 and pair the samples, so ``block`` pads L to the next multiple of 128 and A to an even
-count -- zero single / cond rows and samples, zero pair rows and columns, the padded keys masked out -- and returns the first
-A samples' first L rows. The padding is computed and dropped; it adds nothing to any gradient.
+Any A and L: the kernels tile L by 128 (and the sm_100a forward pairs the samples), so ``block`` pads L to the next multiple of
+128 and, on B200, A to an even count -- zero single / cond rows and samples, zero pair rows and columns, the padded keys masked
+out -- and returns the first A samples' first L rows. The H100 cores take any A. The padding is computed and dropped; it adds
+nothing to any gradient.
 
 The precision follows the tensors, not an enclosing autocast: the forward and backward run with autocast off (bf16-mixed
 training hands an fp32 diffusion block fp32 activations, which take the fp32 / TF32 kernels).
@@ -197,7 +201,7 @@ QS90 = LOG2E / DH ** 0.5           # the sm_90a core's q scale: its logits are i
 
 def _sm90(dev) -> bool:
     """H100: the sm_90a attention cores and their operand conventions; B200 otherwise (``serves`` admits only these two)."""
-    return torch.cuda.get_device_capability(dev) == (9, 0)
+    return torch.device(dev).type == "cuda" and torch.cuda.get_device_capability(dev) == (9, 0)
 
 
 def _key_mask(mask, A, L, perm=None):
@@ -536,14 +540,16 @@ def _names_for(qk):
 
 
 def _own_cond(cond, fp32) -> bool:
-    """fp32 path with an fp32 cond: the gate GEMM (and its weight gradient) reads cond itself, no operand copy is made."""
-    return fp32 and cond.dtype is torch.float32
+    """fp32 path with an fp32 cond: the gate GEMM (and its weight gradient) reads cond itself, no operand copy is made. Not on
+    the H100 native path, whose cond may be sample-expanded (stride 0): it reads cond through ``cond_prep90`` and keeps cbf."""
+    return fp32 and cond.dtype is torch.float32 and not _native90(cond.device)
 
 
 def _saved_like(single, cond, pair, fp32, qk=True, H=H):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd). The fp32 path
     saves no copy of cond (_own_cond), no copy of v (QK-norm: the core reads it from qkvg) and no LN(pair) (pair_bias_bwd
-    recomputes it): those slots are empty [0, n] tensors."""
+    recomputes it): those slots are empty [0, n] tensors. H100: q / k / v are always copies (the q pass scales q; the TF32 core's
+    v^T is built from v) and no O slot (the cores write og), and fp32 keeps LN(pair) (the dWf / dpair GEMMs read it)."""
     A, _, L, D = single.shape
     M, R, e = A * L, L * L, single.new_empty
     f32, at = torch.float32, (torch.float32 if fp32 else BF)
@@ -710,7 +716,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     T.res_c(x1, z, Gg, bg2, out)
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
-    qkv_out = [qn, kn, vsave] if qk else []
+    qkv_out = [qn, kn, vsave] if copies else []
     cbf = cbf if cbf is not None else c2.new_empty(0, DC, dtype=at)
     return [
         out.view(single.shape),
@@ -895,7 +901,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     M, R, dev = A * L, L * L, single.device
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
     native = _native90(dev)
-    c2, p2 = (None if native else cond.reshape(M, DC).contiguous()), pair.reshape(R, DP)
+    c2, p2 = (None if native else cond.reshape(M, DC).contiguous()), pair.reshape(R, DP)   # native: cond_bwd90 reads cond as given
     dout = dout.reshape(M, D).to(sdt).contiguous()
     # per-block column sums: bg2 bs2 bg1 bs1 bq | dwq dwk (per head); rows: the row kernels' block count (T.part_rows)
     allp = torch.empty(T.part_rows(M, fp32), 7 * D, device=dev)
@@ -1098,8 +1104,11 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
     fp32 = operand_dtype(single, compute_dtype) is torch.float32
     A, _, L, _ = single.shape
-    Ap, Lp = A + A % 2, -(-L // QM) * QM
+    # the sm_100a forward pairs the samples; the H100 cores take any A (and the qualified odd-A buckets stay unpadded)
+    Ap = A if _sm90(single.device) else A + A % 2
+    Lp = -(-L // QM) * QM
     padded = (Ap, Lp) != (A, L)
+    caller = (single, cond, pair)              # the caller's tensors: the native hooks attach to their autograd edges, not the pads'
     if padded:
         single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
     out = _Block.apply(

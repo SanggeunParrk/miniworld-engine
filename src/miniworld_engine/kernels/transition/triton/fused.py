@@ -812,7 +812,7 @@ def _swiglu_b2b(x2: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.
 
     Opaque for the same reason every other launcher here is: `transition_b2b` is reachable from
     Dynamo through this autograd Function, and a bare triton launch on a traced path is what
-    `tests/compile/test_compile_wrap_coverage.py` exists to catch.
+    `tests/cpu/compile/test_compile_wrap_coverage.py` exists to catch.
     """
     empty = x2.new_empty(0)
     return transition_b2b(x2, empty, empty, wa, wb, ws, 0.0,

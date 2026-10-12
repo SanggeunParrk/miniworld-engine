@@ -157,7 +157,7 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
             # all `bench` knows -- it writes `(True, "launched by bench")` for every kernel a run
             # touched. Letting that overwrite a checked row destroys the measurement: the declared
             # rtol bands are calibrated from these details
-            # (tests/registry/test_declared_tolerance.py parses the `name=1.2e-03` out of them), so
+            # (tests/cpu/registry/test_declared_tolerance.py parses the `name=1.2e-03` out of them), so
             # one `bench_kernel all` after a `run_all` silently dropped ~29 kernels out of
             # calibration -- the status stayed `ok` and the numbers behind it were gone. The merge
             # fix protected kernels a run did not TOUCH; this is the same failure for one it did.

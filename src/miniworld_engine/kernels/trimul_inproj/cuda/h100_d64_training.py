@@ -43,7 +43,7 @@ K3_TILE = (2, 64, 4, 1)  # BI, BJ, ring slots, accumulator sets (K3Cfg: 128-toke
 
 def supports(width, length) -> bool:
     """Qualified cells (tuple membership works for symbolic sizes under Dynamo)."""
-    return width == WIDTH and length in ((128, 256, 384, 512, 640, 768)
+    return width == WIDTH and length in ((128, 256, 384, 512, 640, 768, 896, 1024)
                                          if T.cuda_training_aux_enabled() else (384, 768))
 
 

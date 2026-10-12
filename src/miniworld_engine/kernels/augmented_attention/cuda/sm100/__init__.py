@@ -27,7 +27,7 @@ The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers):
   glue.cu       dO -> bf16 with D = rowsum(dO O), and the bf16 bias transpose attn_dkv reads.
 
 Numerics against fp64 at A = 48: O 1.6e-3, dq 3.0e-3, dk 2.9e-3, dv 2.9e-3, dbias 2.4e-3 (bf16-input-rounding floor). The fp32
-kernels: O, dq, dk, dv, dbias within 3e-3 of fp64 (tests/numerics/test_augmented_attention_tf32_sm100_gpu.py).
+kernels: O, dq, dk, dv, dbias within 3e-3 of fp64 (tests/gpu/sm100/test_augmented_attention_tf32_sm100_gpu.py).
 
 The cubins are built with this environment's nvcc on first use and cached under ``settings.engine_jit_root``
 (keyed by the sources and flags). They are launched through the CUDA driver (``driver.py``, cuda.bindings) with 2-D

@@ -12,6 +12,10 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lcross.cu      the row kernels of the cross-attention mode (keys / values from a second AdaLN): LN of the conditioning, the K / V AdaLN
                  (the K / V AdaLN and its backward are inside ``sm100_atom``'s pre_fwd / pre_bwd, ``-DCROSS=1``).
 
+sm_90a (H100, ``-DATOM_HOPPER=1``, ``sm100_atom._hopper``): the same sources carry a Hopper half (wgmma attention kernels ``*_sm90``, and in
+lcross.cu the K / V AdaLN row kernels ``kv_fwd`` / ``kv_bwd`` / ``adaln1_extra``, deterministic ``cond_ln_bwd`` and small gradient-pack
+kernels); the wrappers pick it per device.
+
 The fp32 path (fp32 activations; ``KERNELS_TF32``, loaded by ``_load32`` and only when an fp32 call is served) has its own twins:
   lattn_fwd_tf32.cu, lattn_dq_tf32.cu, lattn_dkv_tf32.cu   the three attention kernels on tcgen05 kind::tf32 (fp32 operands, P / dS fp32
                  in place over S in TMEM, MN-major operands in the 32-B-atom swizzle), fp32 O / dQ / dK / dV into column blocks of the
@@ -92,6 +96,16 @@ KERNELS = {
 }
 
 
+#: sm_90a-only kernels of ``lcross.cu`` (``ATOM_HOPPER``), by their ``_load`` name: the K / V AdaLN as row kernels ("kv_f", "kv_b", "a1x") and
+#: the sm_90a variant of the conditioning LayerNorm backward ("cln_b": dgamma as per-block partials, no atomics). Not in ``KERNELS``, which
+#: lists what sm_100a loads.
+_HOPPER_CROSS = {
+    "kv_f": "local_kv_fwd_sm90",
+    "kv_b": "local_kv_bwd_sm90",
+    "a1x": "local_adaln1_extra_sm90",
+    "cln_b": "local_cond_ln_bwd_sm90",
+}
+
 @functools.lru_cache(maxsize=None)
 def _load(name: str, device_index: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
@@ -104,10 +118,12 @@ def _load(name: str, device_index: int):
         stem, func, smem = f"lattn_{name}", f"local_attn_{name}_sm90", 65568
     elif hopper and name == "db_samples":
         stem, func, smem = "lattn_dkv", "local_bias_samples_sm90", 0
-    elif hopper and name in ("kv_bias_part", "reduce_columns", "zero_kv", "add_cond", "cross_grad_pack"):
+    elif hopper and name in ("kv_bias_part", "reduce_columns", "zero_kv", "add_cond", "cross_grad_pack", "kv_pack"):
         stem, func, smem = "lcross", f"local_{name}_sm90", 0
-    elif name == "kv_pack":
-        stem, func, smem = "lcross", "local_kv_pack_sm90", 0
+    elif hopper and name in _HOPPER_CROSS:      # the K / V AdaLN row kernels (sm_100a has them inside sm100_atom's pre_fwd_kv / pre_bwd_kv)
+        stem, func, smem = "lcross", _HOPPER_CROSS[name], 0
+    elif name not in KERNELS:
+        raise NotImplementedError(f"local atom kernel {name!r} exists on sm_90a only")
     else:
         stem, func, smem = KERNELS[name]
     with torch.cuda.device(device_index):
@@ -176,6 +192,13 @@ def attn_fwd(q, k, v, bias, kmask=None):
     o = torch.empty_like(q)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
     km = _u8(kmask)
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    if _hopper(d):      # sm_90a: a CTA (4 warps of mma + a TMA warp) per (64 queries, head, sample); register softmax, wgmma P V
+        if N % 64:
+            raise ValueError("Local Hopper attention requires padded N divisible by 64")
+        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v))
+        _load("fwd", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, o, lse, int(N), int(A))
+        return o, lse
     nq = (N + 127) // 128
     sp = max(1, min(A, nsm(d) // (nq * NH)))
     out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
@@ -208,6 +231,17 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     d = _dev(q)
     ldd = dkv.stride(0)
     km = _u8(kmask)
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+    if _hopper(d):      # sm_90a: dQ, dK / dV (+ per-sample dbias partials) as two wgmma kernels, then the fixed-order sample sum
+        if N % 64 or any(t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (q, k, v, do)):
+            raise ValueError("Local Hopper backward requires contiguous bf16 operands and padded N divisible by 64")
+        dbias = torch.empty(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
+        partial = torch.empty(A, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
+        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v, do))
+        _load("dq", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, lse, dd, dkv, int(ldd), int(N), int(A))
+        _load("dkv", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, lse, dd, dkv, partial, int(ldd), int(N), int(A))
+        _load("db_samples", d)((min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1), (256, 1, 1), partial, dbias, int(N), int(A))
+        return dbias
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
     nq = (N + 127) // 128
@@ -292,10 +326,10 @@ def pair_bias_fwd(z, gamma, wb, eps=1e-5):
 
 
 def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
-    """dbias [4, nwin, 32, 128] fp32 -> dz (z's layout and dtype), dgamma [16], dWb [4, 16] (fp32)."""
+    """dbias [4, nwin, 32, 128] fp32 -> dz (z's shape and dtype, contiguous), dgamma [16], dWb [4, 16] (fp32)."""
     rows = z.numel() // DP
     wb, gamma, bf = _params(wb, gamma)
-    dz = torch.empty_like(z)
+    dz = torch.empty(z.shape, device=z.device, dtype=z.dtype)    # contiguous, like the z.contiguous() the kernel reads (a view-able dpair)
     d = _dev(z)
     nb = min(nsm(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
@@ -343,7 +377,10 @@ def cond_ln(c, gamma, eps=1e-5):
 
 def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5, acc=None):
     """-> dc [M, 128] bf16; dgamma [128] fp32 += sum_rows dcn * LN(c). ``acc`` (bf16 [M, 128], contiguous): the result is added to it in
-    bf16, in place (the gradient of c's other consumer), and returned."""
+    bf16, in place (the gradient of c's other consumer), and returned.
+
+    sm_90a: ``dgamma`` is *written* (not accumulated into): the blocks store their column sums into a [grid, 128] table and
+    ``reduce_columns`` adds it in a fixed order (no atomics, deterministic), so ``dgamma`` may be uninitialised."""
     M = c.shape[0]
     dc = torch.empty_like(c) if acc is None else acc
     d = _dev(c)
@@ -360,6 +397,77 @@ def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5, acc=None):
         float(eps),
     )
     return dc
+
+
+# ------------------------------------------------------------------------------------------------ sm_90a cross-attention helpers
+# On Hopper pre_fwd / pre_bwd carry no K / V AdaLN (sm_100a's pre_fwd_kv / pre_bwd_kv do): it is these row kernels around cuBLAS GEMMs.
+def kv_fwd(x1, mkv, bs, eps=1e-5):
+    """sm_90a. xkv = LN(x1) * sigmoid(mkv[:, :128] + bs) + mkv[:, 128:]  ([M, 128] bf16)."""
+    M = x1.shape[0]
+    out = torch.empty_like(x1)
+    _load("kv_f", _dev(x1))(((M + 7) // 8, 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), out, int(M), float(eps))
+    return out
+
+
+def kv_bwd(x1, mkv, bs, dxkv, eps=1e-5):
+    """sm_90a. dxkv -> dx1 [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | d shift] (bf16)."""
+    M = x1.shape[0]
+    dx1 = torch.empty_like(x1)
+    dmkv = torch.empty(M, 2 * DM, device=x1.device, dtype=torch.bfloat16)
+    _load("kv_b", _dev(x1))(((M + 7) // 8, 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), dxkv, dx1, dmkv, int(M), float(eps))
+    return dx1, dmkv
+
+
+def adaln1_extra(a, mod, dx1, ds, dmod, dbias, eps=1e-5):
+    """sm_90a. ds [M, 128] and dmod [M, 768] (blocks 0 and 1) += the gradient dx1 through AdaLN 1 (in place). ``dbias`` is not touched: the
+    scale-bias column sums come from ``sm100_atom.finish_columns_hopper`` (it reduces dmod after this call)."""
+    M = a.shape[0]
+    d = _dev(a)
+    _load("a1x", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), a, mod, dx1, ds, dmod, dbias, int(M), float(eps))
+
+
+def kv_bias_hopper(dmkv):
+    """sm_90a. d (scale bias) [128] fp32 = column sums of dmkv[:, :128]'s pre-sigmoid gradient, in a fixed order."""
+    d = _dev(dmkv)
+    partial = torch.empty(64, DM, device=dmkv.device, dtype=torch.float32)
+    out = torch.empty(DM, device=dmkv.device, dtype=torch.float32)
+    _load("kv_bias_part", d)((64, 1, 1), (128, 1, 1), dmkv, partial, int(dmkv.shape[0]))
+    _load("reduce_columns", d)((1, 1, 1), (128, 1, 1), partial, out, 64)
+    return out
+
+
+def zero_kv_hopper(dp):
+    """sm_90a. Zero the key / value gradient columns [128, 384) of dp [M, 512] (bf16)."""
+    _load("zero_kv", _dev(dp))((256, 1, 1), (256, 1, 1), dp, int(dp.shape[0]))
+
+
+def add_cond_hopper(dc, extra):
+    """sm_90a. dc [M, 128] bf16 += extra (rounded to bf16 per element), in place."""
+    _load("add_cond", _dev(dc))((256, 1, 1), (256, 1, 1), dc, extra, int(dc.shape[0]))
+
+
+def cross_grad_pack_hopper(grads, weights):
+    """sm_90a. The four cross-mode parameter gradients (fp32, contiguous) -> tensors of the weights' shapes and dtypes."""
+    if len(grads) != 4 or any(g.dtype != torch.float32 or not g.is_contiguous() for g in grads):
+        raise ValueError("Local Hopper cross gradient pack requires four contiguous FP32 gradients")
+    out = [torch.empty_like(w) for w in weights]
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    _load("cross_grad_pack", _dev(weights[0]))((128, 1, 1), (256, 1, 1), *grads, *out, int(bfmask))
+    return out
+
+
+def kv_pack_hopper(weights, packed_pre):
+    """sm_90a. (gamma, to_scale.weight, to_scale.bias, to_bias.weight) -> Wm [256, 128] bf16, scale bias, LN weight (fp32 [128]), and the
+    Wk / Wv views of ``packed_pre`` (the pack's ``wp``)."""
+    gamma, w_scale, b_scale, w_bias = weights
+    dev = gamma.device
+    wm = torch.empty(256, 128, device=dev, dtype=torch.bfloat16)
+    bs, gg = (torch.empty(128, device=dev, dtype=torch.float32) for _ in range(2))
+    if any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in weights):
+        raise ValueError("Local Hopper KV pack requires contiguous BF16/FP32 parameters")
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    _load("kv_pack", _dev(gamma))((128, 1, 1), (256, 1, 1), *weights, wm, bs, gg, int(bfmask))
+    return wm, bs, gg, packed_pre[0][128:256], packed_pre[0][256:384]
 
 
 # ------------------------------------------------------------------------------------------------ fp32 path (TF32 tensor cores)

@@ -28,7 +28,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef CTAS_PER_SM
 #define CTAS_PER_SM 1
 #endif
-constexpr int D_ = 64, H_ = 256, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
+#ifndef WIDE_N
+#define WIDE_N 4
+#endif
+constexpr int D_ = 64, H_ = WIDE_N * 64, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 
 // ---- shared memory: a two-slot weight ring plus double-buffered x and xn tiles
 constexpr int F_SLOT = 24576, F_RING = 0;                      // slot: [Wa_j; Wb_j] 16 KB at +0, then Ws^T_j 8 KB at +16384

@@ -169,6 +169,37 @@ __global__ void opm_count_native(const unsigned* bits, float* norm, int S, int N
   for(int k=0;k<S/32;++k)v+=__popc(bits[i*(S/32)+k]&bits[j*(S/32)+k]);
   norm[p]=float(max(v,1));
 }
+// Tiled mask count: a 16 x 16 tile of (i, j) pairs per block, both rows' bit words staged in shared memory
+// (row stride W + 1 words, so the 16 j-rows hit 16 distinct banks and the i-rows broadcast).  Replaces the
+// thread-per-pair loop whose loads strided across the whole bits array.  Exact: popcount of the AND.
+#define OPM_COUNT_TILE 16
+__global__ void __launch_bounds__(256) opm_count_tiled(const unsigned* __restrict__ bits, float* __restrict__ norm, int W, int N) {
+  extern __shared__ unsigned count_sm[];
+  const int ld=W+1, i0=blockIdx.y*OPM_COUNT_TILE, j0=blockIdx.x*OPM_COUNT_TILE;
+  unsigned* bi=count_sm; unsigned* bj=count_sm+OPM_COUNT_TILE*ld;
+  const int t=threadIdx.y*OPM_COUNT_TILE+threadIdx.x;
+  for(int e=t;e<OPM_COUNT_TILE*W;e+=256) {
+    int r=e/W,k=e%W;
+    bi[r*ld+k]=bits[(long)(i0+r)*W+k];
+    bj[r*ld+k]=bits[(long)(j0+r)*W+k];
+  }
+  __syncthreads();
+  const unsigned* pi=bi+threadIdx.y*ld; const unsigned* pj=bj+threadIdx.x*ld;
+  int v=0;
+  #pragma unroll 8
+  for(int k=0;k<W;++k) v+=__popc(pi[k]&pj[k]);
+  norm[(long)(i0+threadIdx.y)*N+j0+threadIdx.x]=float(max(v,1));
+}
+static void opm_count_launch(const unsigned* bits, float* norm, int S, int N) {
+  const int W=S/32;
+  TORCH_CHECK(N%OPM_COUNT_TILE==0 && S%32==0,"OPM count tile contract");
+  cudaKernel_t kernel; C10_CUDA_CHECK(cudaGetKernel(&kernel, opm_count_tiled));
+  const unsigned* bp=bits; float* np=norm; int w=W, n=N;
+  void* argv[]={&bp,&np,&w,&n};
+  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(N/OPM_COUNT_TILE,N/OPM_COUNT_TILE),
+      dim3(OPM_COUNT_TILE,OPM_COUNT_TILE),argv,size_t(2*OPM_COUNT_TILE*(W+1))*sizeof(unsigned),at::cuda::getCurrentCUDAStream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 __global__ void opm_finish_native(const float* red,const float* gamma,const float* beta,
     const __nv_bfloat16* wa,const __nv_bfloat16* wb,float* da,float* db,float* dg,float* de) {
   int i=blockIdx.x*blockDim.x+threadIdx.x;
@@ -2060,7 +2091,7 @@ std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor
 #endif
  opm_native_launch(opm_norm_clamp_selective,dim3((N*N+255)/256),dim3(256),norm.data_ptr<float>(),N*N);
 #else
- opm_native_launch(opm_count_native,dim3((N*N+255)/256),dim3(256),bitp,norm.data_ptr<float>(),S,N);
+ opm_count_launch(bitp,norm.data_ptr<float>(),S,N);
 #endif
  return {a,b,stats,mk,norm};
 }
@@ -2085,7 +2116,7 @@ std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mas
       reinterpret_cast<__nv_bfloat16*>(b.data_ptr()),reinterpret_cast<__nv_bfloat16*>(mk.data_ptr()),
       save_stats?stats.data_ptr<float>():nullptr,S,N,float(eps));
   opm_native_launch(opm_mask_bits_native,dim3((S*N+255)/256),dim3(256),mask.data_ptr<bool>(),reinterpret_cast<unsigned*>(bits.data_ptr()),S,N);
-  opm_native_launch(opm_count_native,dim3((N*N+255)/256),dim3(256),reinterpret_cast<const unsigned*>(bits.data_ptr()),norm.data_ptr<float>(),S,N);
+  opm_count_launch(reinterpret_cast<const unsigned*>(bits.data_ptr()),norm.data_ptr<float>(),S,N);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {a,b,stats,mk,norm};
 }

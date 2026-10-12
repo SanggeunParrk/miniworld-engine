@@ -374,6 +374,7 @@ def _native_saved(x, hidden):
 
 
 def _native_forward_fake(leaves, mask, ds, bidirectional, outgoing):
+    """[y, *saved activations, *six weight casts]; a cast is a 0-element placeholder where the weight is already a BF16 alias."""
     return [torch.empty_like(leaves[0]), *_native_saved(leaves[0], leaves[1].shape[0]),
             *(w.new_empty((0,)) if w.dtype == torch.bfloat16 and (i < 4 or w.is_contiguous())
               else torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
@@ -383,6 +384,7 @@ def _native_forward_fake(leaves, mask, ds, bidirectional, outgoing):
 @opaque(fake=_native_forward_fake, name="trimul_h100_native_buckets_forward")
 def native_forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
                    bidirectional: bool, outgoing: bool) -> list[torch.Tensor]:
+    """The all-bucket native training forward: [y, *saved, *weight casts]; see ``_native_forward_fake``."""
     from ._h100_pack import cast_weights, owned_bf16_mask, pack_into_cuda
     x, _, _, _, _, _, _, gi, bi, go, bo = leaves
     n, d, h = x.shape[1], x.shape[-1], leaves[1].shape[0]
@@ -456,16 +458,20 @@ def _native_contract_gp(dt, ab, pre, mask, gp, bidirectional, outgoing):
 
 
 def _native_backward_fake(leaves, ds, saved, dy, bidirectional, outgoing, master):
+    """[dx, dws [D + 4H, D], dwp, dgi, dbi, dgo, dbo]: the gradients, weight ones in fp32 when ``master``."""
     x,d,h = leaves[0],leaves[0].shape[-1],leaves[1].shape[0]
     dtype = torch.float32 if master else x.dtype
+    gi,bi,go,bo = leaves[7:11]
     return [torch.empty_like(x),x.new_empty((d+4*h,d),dtype=dtype),
-            torch.empty_like(leaves[6],dtype=dtype),*(torch.empty_like(t) for t in leaves[7:])]
+            torch.empty_like(leaves[6],dtype=dtype),
+            torch.empty_like(gi),torch.empty_like(bi),torch.empty_like(go),torch.empty_like(bo)]
 
 
 @opaque(fake=_native_backward_fake, name="trimul_h100_native_buckets_backward")
 def native_backward(leaves: list[torch.Tensor], ds: torch.Tensor,
                     saved: list[torch.Tensor], dy: torch.Tensor,
                     bidirectional: bool, outgoing: bool, master: bool) -> list[torch.Tensor]:
+    """The all-bucket native training backward: [dx, dws, dwp, dgi, dbi, dgo, dbo]."""
     from ._h100_pack import deterministic_ln_backward, stack_backward_weights
     x,wl,wlg,wr,wrg,wg,wp,gi,bi,go,bo = leaves
     n,d,h = x.shape[1],x.shape[-1],wl.shape[0]

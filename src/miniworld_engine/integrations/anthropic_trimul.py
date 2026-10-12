@@ -25,7 +25,7 @@ On sm_100 the face has no architecture to route to (the release knows cc 9.0 and
 so :func:`_serve_sm100` assembles the sm_80 member exactly as `serve_sm80` does (K1 -> torch.bmm -> K3, same launch structs, same
 default TN contraction form), with the bidirectional unit composed as on sm_90. Its cubins load through the release's own loader,
 manifest-verified (cubin and source hashes), once cc 10.0 is registered as `sm_100a` in `launch.ARCH_OF_CC`. The release's test-vector
-gate has no sm_100 class; `tests/integrations/test_anthropic_trimul_b200_gpu.py` holds these paths to the fp32 reference instead.
+gate has no sm_100 class; `tests/gpu/sm100/test_anthropic_trimul_b200_gpu.py` holds these paths to the fp32 reference instead.
 """
 from __future__ import annotations
 

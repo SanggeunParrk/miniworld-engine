@@ -289,7 +289,7 @@ def _forward_fake(q, k, cos, sin, eps, shape_key):
     )
 
 
-def _launch(launch_kernel, q, k, cos, sin, gq, gk, eps, key):
+def _qk_norm_rope_launch(launch_kernel, q, k, cos, sin, gq, gk, eps, key):
     n, seq, h, d = q.shape
     oq, ok = _forward_fake(q, k, cos, sin, eps, key)
     if not q.numel():
@@ -332,7 +332,7 @@ def _forward(
     shape_key: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run paired Q/K RMSNorm and 3D RoPE preprocessing."""
-    return _launch(qk_norm_rope_fwd_kernel, q, k, cos, sin, q, k, eps, shape_key)
+    return _qk_norm_rope_launch(qk_norm_rope_fwd_kernel, q, k, cos, sin, q, k, eps, shape_key)
 
 
 def _backward_fake(q, k, cos, sin, gq, gk, eps, shape_key):
@@ -352,7 +352,7 @@ def _backward(
     shape_key: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run paired input gradients for RMSNorm and 3D RoPE."""
-    return _launch(qk_norm_rope_bwd_kernel, q, k, cos, sin, gq, gk, eps, shape_key)
+    return _qk_norm_rope_launch(qk_norm_rope_bwd_kernel, q, k, cos, sin, gq, gk, eps, shape_key)
 
 
 class _QKNormRoPE(torch.autograd.Function):

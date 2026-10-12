@@ -989,6 +989,16 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   TORCH_CHECK(out.size() == 10, "finalize: 10 outputs");
   for (int i = 0; i < 10; ++i) chk(out[i], at::kFloat, "finalize output");
   const at::cuda::CUDAGuard gd(dwp.device());
+  if (acc.dim() == 2) {
+    // Hopper: every producer wrote a block partial row; reduce them in a fixed order.
+    auto total = at::empty({acc.size(1)}, acc.options());
+    const char* tree = std::getenv("MINIWORLD_APB_ACC_TREE");
+    if (tree && tree[0] == '1')
+      acc_reduce_tree_k<<<(unsigned)((acc.size(1) + 31) / 32), 256, 0, S()>>>(CP<float>(acc), P<float>(total), (int)acc.size(1), (int)acc.size(0));
+    else
+      acc_reduce_k<<<(unsigned)((acc.size(1) + 255) / 256), 256, 0, S()>>>(CP<float>(acc), P<float>(total), (int)acc.size(1), (int)acc.size(0));
+    acc = total;
+  }
   const long n = 5L * D * D / 4 + 3 * D + G.nh * DP + DP;
   // out: lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb (the leaves' order)
   finalize_k<<<(unsigned)((n + 255) / 256), 256, 0, S()>>>(CP<float>(dwp), CP<float>(dwo), CP<float>(acc), CP<bf>(wb), CP<float>(lpw),
@@ -1000,15 +1010,15 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
 // Live master-weight conversion for the Hopper full-module path. One CUDA launch,
 // including the small LN vectors; matching-dtype leaves remain views of originals.
 struct LeafCasts {
-  const void* src[11];
-  void* dst[11];
-  int64_t sizes[11];
-  int blocks[11];
-  bool source_float[11], target_float[11];
+  const void* src[10];
+  void* dst[10];
+  int64_t sizes[10];
+  int blocks[10];
+  bool source_float[10], target_float[10];
 };
 __global__ void cast_leaves_k(LeafCasts args) {
   int block = blockIdx.x;
-  for (int j = 0; j < 11; ++j) {
+  for (int j = 0; j < 10; ++j) {
     if (block < args.blocks[j]) {
       const int64_t i = (int64_t)block * blockDim.x + threadIdx.x;
       if (i < args.sizes[j]) {
@@ -1023,16 +1033,16 @@ __global__ void cast_leaves_k(LeafCasts args) {
   }
 }
 std::vector<at::Tensor> cast_leaves(std::vector<at::Tensor> leaves) {
-  TORCH_CHECK(leaves.size() == 11, "APB expects eleven parameter leaves");
+  TORCH_CHECK(leaves.size() == 10, "APB expects ten parameter leaves");
   const at::cuda::CUDAGuard gd(leaves[0].device());
   LeafCasts args{};
   int blocks = 0;
   std::vector<at::Tensor> out;
-  for (int j = 0; j < 11; ++j) {
+  for (int j = 0; j < 10; ++j) {
     const auto& t = leaves[j];
     TORCH_CHECK(t.is_cuda() && t.device() == leaves[0].device() && t.is_contiguous()
       && (t.scalar_type() == at::kFloat || t.scalar_type() == at::kBFloat16), "unsupported APB parameter");
-    const auto dtype = j == 0 || j == 1 || j == 8 || j == 9 ? at::kFloat : at::kBFloat16;
+    const auto dtype = j == 0 || j == 1 || j == 8 ? at::kFloat : at::kBFloat16;
     out.push_back(t.scalar_type() == dtype ? t : at::empty(t.sizes(), t.options().dtype(dtype)));
     if (t.scalar_type() == dtype) continue;
     args.src[j] = t.data_ptr(); args.dst[j] = out.back().data_ptr();
@@ -1047,12 +1057,12 @@ std::vector<at::Tensor> cast_leaves(std::vector<at::Tensor> leaves) {
 }
 
 std::vector<at::Tensor> cast_grads(std::vector<at::Tensor> grads, std::vector<bool> target_float) {
-  TORCH_CHECK(grads.size() == 11 && target_float.size() == 11, "APB expects eleven gradients");
+  TORCH_CHECK(grads.size() == 10 && target_float.size() == 10, "APB expects ten gradients");
   const at::cuda::CUDAGuard gd(grads[0].device());
   LeafCasts args{};
   int blocks = 0;
   std::vector<at::Tensor> out;
-  for (int j = 0; j < 11; ++j) {
+  for (int j = 0; j < 10; ++j) {
     const auto& t = grads[j];
     chk(t, at::kFloat, "APB gradient");
     out.push_back(target_float[j] ? t : at::empty(t.sizes(), t.options().dtype(at::kBFloat16)));
@@ -1069,7 +1079,7 @@ std::vector<at::Tensor> cast_grads(std::vector<at::Tensor> grads, std::vector<bo
 
 }  // namespace
 
-// Accuracy-first FP32 residual path for Hopper APB's LN beta gradient.
+// Accuracy-first FP32 shadow of Hopper APB's exact pair-weight (dWb) gradient (ln_pair has no beta).
 // Fixed arithmetic/reduction order; no ATen compute or reference calls. The
 // materialized FP32 buffers intentionally trade speed for exact oracle rounding.
 // Arithmetic order audited against PyTorch cf30153c4c131c8164ee7798e5022d810682e2cb.
@@ -1198,7 +1208,7 @@ torch::Tensor ln(torch::Tensor x,torch::Tensor g,torch::Tensor b,double eps){
 // BF16 load fusion for the accuracy shadow. FP32 output and operation order
 // remain unchanged; this removes the FP32 input temporary, but deliberately
 // keeps normalized pair/projection buffers (not yet the B200 fused lifetime).
-__global__ void ln_bf16_k(const __nv_bfloat16* x,const float* g,const float* b,float* y,int N,float eps) {
+__global__ void ln_bf16_k(const __nv_bfloat16* x,const float* g,float* y,int N,float eps) {
  __shared__ float s[12];int t=threadIdx.x,l=t&31,w=t>>5;
  Stats a{0.f,0.f,0.f};
  for(int base=4*t;base<N;base+=512) {
@@ -1220,10 +1230,10 @@ __global__ void ln_bf16_k(const __nv_bfloat16* x,const float* g,const float* b,f
  }
  if(t==0){s[0]=a.mean;s[1]=rsqrtf(a.m2/(float)N+eps);}
  __syncthreads();
- for(int c=t;c<N;c+=128)y[(long)blockIdx.x*N+c]=g[c]*(s[1]*(__bfloat162float(x[(long)blockIdx.x*N+c])-s[0]))+b[c];
+ for(int c=t;c<N;c+=128)y[(long)blockIdx.x*N+c]=g[c]*(s[1]*(__bfloat162float(x[(long)blockIdx.x*N+c])-s[0]));
 }
 
-__global__ void ln_bf16_warp_k(const __nv_bfloat16* x,const float* g,const float* b,float* y,int N,int M,float eps) {
+__global__ void ln_bf16_warp_k(const __nv_bfloat16* x,const float* g,float* y,int N,int M,float eps) {
  int row=blockIdx.x*4+threadIdx.x/32,lane=threadIdx.x&31;
  if(row>=M)return;
  Stats a{0.f,0.f,0.f};
@@ -1244,15 +1254,15 @@ __global__ void ln_bf16_warp_k(const __nv_bfloat16* x,const float* g,const float
  float mean=__shfl_sync(0xffffffff,a.mean,0);
  float rstd=lane==0?rsqrtf(a.m2/(float)N+eps):0.f;
  rstd=__shfl_sync(0xffffffff,rstd,0);
- for(int c=lane;c<N;c+=32)y[(long)row*N+c]=g[c]*(rstd*(__bfloat162float(x[(long)row*N+c])-mean))+b[c];
+ for(int c=lane;c<N;c+=32)y[(long)row*N+c]=g[c]*(rstd*(__bfloat162float(x[(long)row*N+c])-mean));
 }
-torch::Tensor ln_bf16(torch::Tensor x,torch::Tensor g,torch::Tensor b,double eps,bool warp_rows) {
+torch::Tensor ln_bf16(torch::Tensor x,torch::Tensor g,double eps,bool warp_rows) {
  c10::cuda::CUDAGuard guard(x.device());
- TORCH_CHECK(x.is_cuda()&&g.device()==x.device()&&b.device()==x.device()&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16&&g.is_contiguous()&&b.is_contiguous()&&g.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat,"APB exact BF16 LN layout/dtype");
- int N=x.size(-1);TORCH_CHECK((N==64||N==128)&&g.numel()==N&&b.numel()==N,"APB exact BF16 LN width");
+ TORCH_CHECK(x.is_cuda()&&g.device()==x.device()&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16&&g.is_contiguous()&&g.scalar_type()==at::kFloat,"APB exact BF16 LN layout/dtype");
+ int N=x.size(-1);TORCH_CHECK((N==64||N==128)&&g.numel()==N,"APB exact BF16 LN width");
  auto y=torch::empty(x.sizes(),x.options().dtype(at::kFloat));int M=x.numel()/N;
- if(warp_rows)ln_bf16_warp_k<<<(M+3)/4,128,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),y.data_ptr<float>(),N,M,eps);
- else ln_bf16_k<<<M,128,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),y.data_ptr<float>(),N,eps);
+ if(warp_rows)ln_bf16_warp_k<<<(M+3)/4,128,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),y.data_ptr<float>(),N,M,eps);
+ else ln_bf16_k<<<M,128,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),y.data_ptr<float>(),N,eps);
  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
 }
 
@@ -1260,7 +1270,7 @@ torch::Tensor ln_bf16(torch::Tensor x,torch::Tensor g,torch::Tensor b,double eps
 // producer. Preserve Welford merges, affine order and sequential K128 FMA;
 // normalized pair and (for masked attention) row-major bias never reach HBM.
 template<int H,int ROWS,int THREADS,bool HEAD_MAJOR>
-__global__ void ln_pair_project_k(const __nv_bfloat16* x,const float* g,const float* b,const float* w,float* y,const bool* mask,int M,int L,float eps){
+__global__ void ln_pair_project_k(const __nv_bfloat16* x,const float* g,const float* w,float* y,const bool* mask,int M,int L,float eps){
  __shared__ float norm[ROWS][129],weight[H][129],projected[H][ROWS+1];
  int lane=threadIdx.x&31,warp=threadIdx.x/32;
  for(int i=threadIdx.x;i<H*128;i+=THREADS)weight[i/128][i%128]=w[i];
@@ -1278,7 +1288,7 @@ __global__ void ln_pair_project_k(const __nv_bfloat16* x,const float* g,const fl
   float mean=__shfl_sync(0xffffffff,a.mean,0);
   float rstd=lane==0?rsqrtf(a.m2/128.f+eps):0.f;rstd=__shfl_sync(0xffffffff,rstd,0);
   #pragma unroll
-  for(int c=lane;c<128;c+=32)norm[rr][c]=g[c]*(rstd*(__bfloat162float(x[(long)row*128+c])-mean))+b[c];
+  for(int c=lane;c<128;c+=32)norm[rr][c]=g[c]*(rstd*(__bfloat162float(x[(long)row*128+c])-mean));
  }
  __syncthreads();
  constexpr int PER=ROWS*H/THREADS;float acc[PER]={};
@@ -1301,15 +1311,15 @@ __global__ void ln_pair_project_k(const __nv_bfloat16* x,const float* g,const fl
   }
  }
 }
-torch::Tensor ln_pair_project(torch::Tensor x,torch::Tensor g,torch::Tensor b,torch::Tensor w,c10::optional<torch::Tensor> mask,double eps){
- TORCH_CHECK(x.is_cuda()&&g.device()==x.device()&&b.device()==x.device()&&w.device()==x.device()&&w.dim()==2,"APB exact LN pair projection CUDA/device/matrix layout");
+torch::Tensor ln_pair_project(torch::Tensor x,torch::Tensor g,torch::Tensor w,c10::optional<torch::Tensor> mask,double eps){
+ TORCH_CHECK(x.is_cuda()&&g.device()==x.device()&&w.device()==x.device()&&w.dim()==2,"APB exact LN pair projection CUDA/device/matrix layout");
  c10::cuda::CUDAGuard guard(x.device());int M=x.numel()/128,H=w.size(0),L=mask?mask->numel():0;
  TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16&&x.size(-1)==128&&(M==384*384||M==768*768)
- &&g.is_contiguous()&&b.is_contiguous()&&w.is_contiguous()&&g.scalar_type()==at::kFloat&&b.scalar_type()==at::kFloat&&w.scalar_type()==at::kFloat
- &&g.numel()==128&&b.numel()==128&&w.size(1)==128,"LN pair projection layout");
+ &&g.is_contiguous()&&w.is_contiguous()&&g.scalar_type()==at::kFloat&&w.scalar_type()==at::kFloat
+ &&g.numel()==128&&w.size(1)==128,"LN pair projection layout");
  TORCH_CHECK(!mask||(mask->is_cuda()&&mask->device()==x.device()&&mask->scalar_type()==at::kBool&&mask->is_contiguous()&&L*L==M),"mask");
  auto y=torch::empty(mask?std::vector<int64_t>{H,L,L}:std::vector<int64_t>{M,H},x.options().dtype(at::kFloat));auto st=at::cuda::getCurrentCUDAStream();
- #define LC(HH,R,T) case HH:if(mask)ln_pair_project_k<HH,R,T,true><<<M/R,T,0,st>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),w.data_ptr<float>(),y.data_ptr<float>(),mask->data_ptr<bool>(),M,L,eps);else ln_pair_project_k<HH,R,T,false><<<M/R,T,0,st>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),b.data_ptr<float>(),w.data_ptr<float>(),y.data_ptr<float>(),nullptr,M,0,eps);break;
+ #define LC(HH,R,T) case HH:if(mask)ln_pair_project_k<HH,R,T,true><<<M/R,T,0,st>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),w.data_ptr<float>(),y.data_ptr<float>(),mask->data_ptr<bool>(),M,L,eps);else ln_pair_project_k<HH,R,T,false><<<M/R,T,0,st>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),g.data_ptr<float>(),w.data_ptr<float>(),y.data_ptr<float>(),nullptr,M,0,eps);break;
  switch(H){LC(8,32,128) LC(12,32,192) LC(16,16,128) default:TORCH_CHECK(false,"H");}
  #undef LC
  C10_CUDA_KERNEL_LAUNCH_CHECK();return y;
@@ -1845,7 +1855,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
   m.def("exact_ln", &apb_exact::ln);
   m.def("exact_ln_pair_project", &apb_exact::ln_pair_project);
-  m.def("exact_ln_bf16", &apb_exact::ln_bf16, py::arg("x"), py::arg("g"), py::arg("b"), py::arg("eps"), py::arg("warp_rows") = false);
+  m.def("exact_ln_bf16", &apb_exact::ln_bf16, py::arg("x"), py::arg("g"), py::arg("eps"), py::arg("warp_rows") = false);
   m.def("exact_mm", &apb_exact::exact_mm, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
   m.def("exact_mm_owned", &apb_exact::exact_mm_owned, py::arg("a"), py::arg("b"), py::arg("bias") = py::none());
   m.def("exact_soft", &apb_exact::soft);

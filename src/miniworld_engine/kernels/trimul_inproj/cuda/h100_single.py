@@ -21,7 +21,8 @@ from miniworld_engine.kernels.trimul_inproj.cuda.h100_single_b7 import Plan as F
 
 @lru_cache(None)
 def selection(n):
-    return json.loads((T.SOURCES / "single_output/selection.json").read_text())[str(n)]
+    cfg = json.loads((T.SOURCES / "single_output/selection.json").read_text())
+    return cfg[str(n) if str(n) in cfg else "384" if n <= 384 else "768"]
 
 
 class Plan:
@@ -53,10 +54,10 @@ class Plan:
         n = self.n
         if (
             x.shape != (1, n, n, 128)
-            or n not in (384, 768)
+            or n not in (128, 256, 384, 512, 640, 768, 896, 1024)
             or x.dtype != torch.bfloat16
         ):
-            raise ValueError("single H100 training requires BF16 B1/D128/L384 or L768")
+            raise ValueError("single H100 training requires BF16 B1/D128 and a supported multiple of 128")
         self.config = selection(n)
         self.weights = (wl, wlg, wr, wrg)
         self.mask = mask.reshape(n, n).bfloat16().contiguous()

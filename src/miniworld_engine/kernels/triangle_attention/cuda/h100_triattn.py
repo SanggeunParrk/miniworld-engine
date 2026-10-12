@@ -55,6 +55,19 @@ def _owned_blas_scope(enabled):
 
 
 
+def _variant_flags(part):
+    # Experiment hook: MW_F2_DEFS="-DMW_F2_STAGES_FORCE=3 -DMW_F2_MINB_FORCE=1" and MW_F2_PTXAS=1.
+    if part not in ("front_fused2", "front_fused3", "training_forward"):
+        return []
+    return [*os.environ.get("MW_F2_DEFS", "").split(), *(["-Xptxas=-v"] if os.environ.get("MW_F2_PTXAS") else [])]
+
+
+def _variant_suffix(part):
+    if part not in ("front_fused2", "front_fused3", "training_forward"):
+        return ""
+    return "".join(c for c in os.environ.get("MW_F2_DEFS", "") + ("p" if os.environ.get("MW_F2_PTXAS") else "") if c.isalnum())
+
+
 @functools.lru_cache(maxsize=None)
 def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 0):
     if part not in (
@@ -65,6 +78,9 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
         "pack",
         "projection_ln",
         "front_grouped",
+        "front_fused2",
+        "front_fused3",
+        "tail_fused3",
     ):
         raise ValueError(part)
     ensure_cuda_home()
@@ -74,7 +90,8 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
     return load_extension(
         name=(f"triattn_h100_b200style_{part}_v1" + (f"_kv{kv_tile}" if kv_tile != 64 else "")
               + (f"_r{row_group}" if row_group != 1 else "")
-              + (f"_ws{pipeline}" if pipeline else "")),
+              + (f"_ws{pipeline}" if pipeline else "")
+              + _variant_suffix(part)),
         sources=[str(_SRC / f"{part}.cu")],
         extra_include_paths=[str(_PARENT), str(cutlass / "include")],
         extra_cflags=["-O3"],
@@ -90,8 +107,9 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
             "--expt-extended-lambda",
             "-lineinfo",
             *(["--use_fast_math"] if part == "module" else []),
+            *_variant_flags(part),
         ],
-        verbose=False,
+        verbose=bool(os.environ.get("MW_F2_PTXAS")) and part in ("front_fused2", "front_fused3", "training_forward"),
     )
 
 
@@ -185,24 +203,38 @@ class H100Triangle(torch.autograd.Function):
         x = pair.contiguous().view(-1, C)
         wall, outweight = packed
         lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
-        if os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND", "grouped") == "grouped":
+        # Qualified default: the one-kernel LN + projection front wins at C128 (64-row tiles) and C256 (128-row tiles)
+        # (docs/records/triattn_fuse_20261008.md); wider pairs keep the cuBLAS front.
+        frontend = os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND") or (
+            "fused2" if C == 128 else "fused3" if C == 256 else "grouped"
+        )
+        if frontend == "grouped":
             f = extension("front_grouped")
             z, stats = f.norm(x, lw, lb, eps, vector_rows)
             projection = _mm(z, wall.T)
             qr, kr, vr, gr = (projection[:, j * C : (j + 1) * C] for j in range(4))
             bias = f.bias(projection, mask, C, L)
+        elif frontend == "fused3":
+            p, bias, stats = extension("front_fused3").front(x, lw, lb, wall, mask, L, C // 32, eps)
+            qr, kr, vr, gr = p.unbind(0)
+        elif frontend == "fused2":
+            p, bias, stats = extension("front_fused2").front(x, lw, lb, wall, mask, L, C // 32, eps)
+            qr, kr, vr, gr = p.unbind(0)
         else:
             p, bias, stats = m.front(x, lw, lb, wall, mask, L, C // 32, eps,
-                                     os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND") == "fused_reuse")
+                                     frontend == "fused_reuse")
             qr, kr, vr, gr = p.unbind(0)
         q, k, v = (_view(t, B, L, C) for t in (qr, kr, vr))
         o, lse = _core_forward(q, k, v, bias)
         o_rows = _rows(o, C)
-        if os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "fused" if fused_tail else "grouped") == "grouped":
+        tail = os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "fused" if fused_tail else "grouped")
+        if tail == "grouped":
             f = extension("front_grouped")
             result = f.residual(x, _mm(f.gate(gr, o_rows, vector_rows), outweight.T), drop, L, vector_rows).view_as(
                 pair
             )
+        elif tail == "fused3":
+            result = extension("tail_fused3").tail(x, gr, o_rows, outweight, drop, L).view_as(pair)
         else:
             result = m.tail(x, gr, o_rows, outweight, drop, L).view_as(pair)
         if any(ctx.needs_input_grad[:9]):
@@ -316,10 +348,10 @@ def forward(module, pair, mask=None):
             "native candidate requires self-attention without QK normalization, Dhead32"
         )
     B, L, _, C = pair.shape
-    # Qualification is specific to these four inference cells. Evaluate grad
+    # Fused tail: inference, B1, starting node, C128/256 (module sweep 2026-10-08). Evaluate grad
     # mode here: autograd.Function.forward itself always runs with grads disabled.
     fused_tail = (not torch.is_grad_enabled() and not module.training and module.starting
-                  and B == 1 and C in (128, 256) and L in (512, 640))
+                  and B == 1 and C in (128, 256))
     drop = (
         extension("pack").drop_scale(pair, module.p_drop)
         if module.training and module.p_drop

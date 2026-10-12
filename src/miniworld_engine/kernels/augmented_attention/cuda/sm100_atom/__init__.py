@@ -17,6 +17,9 @@ The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers), bf16:
   cond_bwd.cu     the conditioning projections' dgrad and the two cond LayerNorm backwards -> d cond.
   dw_atom.cu      every dense weight gradient of a block in one grouped split-K launch (bf16 and TF32).
 
+On sm_90a (H100) the same sources carry a second half under ``-DATOM_HOPPER=1`` (``*_sm90`` kernels, wgmma, bf16; ``_HOPPER_KERNELS``):
+``atom_kernel`` / ``load_all`` and the launchers below pick it by ``_hopper(device)``; the fp32 (TF32) path is sm_100a only.
+
 The fp32 path (fp32 activations, ``KERNELS_TF32``, loaded by ``atom_kernel32`` only when an fp32 call is served; used by the local
 atom block, ``integrations/local_dit``):
   gemm_tf32.cu    every projection and activation-gradient product as one tcgen05 kind::tf32 GEMM launch with the block's epilogues
@@ -56,9 +59,9 @@ SOURCES = (
 
 # --------------------------------------------------------------------------------------------------- build
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str, defs: tuple = ()) -> str:
-    """Path of ``<stem>.cu`` built for sm_100a with the sources' default options (+ ``-D`` ``defs``); rebuilt only when a source or a flag
-    changes."""
+def cubin(stem: str, defs: tuple = (), hopper: bool = False) -> str:
+    """Path of ``<stem>.cu`` built for sm_100a (``hopper``: sm_90a with ``-DATOM_HOPPER=1``, the sources' Hopper half) with the sources'
+    default options (+ ``-D`` ``defs``); rebuilt only when a source or a flag changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
@@ -108,7 +111,7 @@ def _load_atom_kernel(
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem, defs), func, smem, pdl=pdl)
+        return driver.Kernel(cubin(stem, defs, _hopper(device_index)), func, smem, pdl=pdl)
 
 
 #: (stem, function, dynamic smem, PDL[, -D defs]) of every kernel the block launches
@@ -130,6 +133,7 @@ def _hopper(device_index: int) -> bool:
     return torch.cuda.get_device_capability(device_index) == (9, 0)
 
 
+#: (stem, function, dynamic smem, PDL) of every kernel the block launches on sm_90a (the ``ATOM_HOPPER`` half of the same sources)
 _HOPPER_KERNELS = {
     "cond": ("cond_fwd", "atom_cond_fwd_sm90", 131136, False),
     "cond1": ("cond_fwd", "atom_cond_fwd_single_sm90", 114752, False),
@@ -147,20 +151,13 @@ _HOPPER_KERNELS = {
     "grad_pack": ("pre_bwd", "atom_grad_pack_sm90", 0, False),
     "col_part": ("cond_bwd", "atom_column_partials_sm90", 0, False),
     "col_fin": ("cond_bwd", "atom_column_finish_sm90", 0, False),
-    "pb_w": ("pair_bias", "atom_pair_weight_sm90", 0, False),
-    "pb_fin": ("pair_bias", "atom_pair_finish_sm90", 0, False),
-    "pb_part": ("pair_bias", "atom_pair_partials_sm90", 0, False),
-    "db_native": ("attn_dbias", "atom_dbias_sm90", 82208, False),
-    "db_tma": ("attn_dbias", "atom_dbias_tma_sm90", 82240, False),
-    "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
-    "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
-    "empty_uniform": ("pair_bias", "atom_empty_uniform_sm90", 0, False),
-    **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},
 }
 
 
 def atom_kernel(name: str, device_index: int):
-    stem, func, smem, pdl, *defs = KERNELS[name]
+    if _hopper(device_index) and name not in _HOPPER_KERNELS:
+        raise NotImplementedError(f"Atom Hopper kernel {name} is not implemented")
+    stem, func, smem, pdl, *defs = (_HOPPER_KERNELS if _hopper(device_index) else KERNELS)[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
 
 
@@ -177,21 +174,6 @@ def nsm(device_index: int) -> int:
 
 def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
-
-
-def empty_uniform_enabled(device_index: int) -> bool:
-    return _hopper(device_index) and os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM", "0") == "1"
-
-
-def empty_uniform_hopper(keys, src, dst, n, *, value_gradient=False, force=False):
-    """Live-mask uniform-mean epilogue; src is dense [A*N,128] BF16."""
-    if keys is None or not (force or empty_uniform_enabled(_dev(src))):
-        return
-    if (src.dtype != torch.bfloat16 or dst.dtype != torch.bfloat16
-            or not src.is_contiguous() or not dst.is_contiguous()):
-        raise ValueError("Atom uniform edge requires contiguous BF16 tensors")
-    atom_kernel("empty_uniform", _dev(src))((4, src.shape[0] // n, 1), (256, 1, 1),
-        keys, src, dst, int(n), int(512 if value_gradient else 128), int(256 if value_gradient else 0))
 
 
 # --------------------------------------------------------------------------------------------------- tensor maps
@@ -282,7 +264,7 @@ def post_params(blk):
 
 
 # --------------------------------------------------------------------------------------------------- launches
-def cond_fwd(c, W, b, g1, g2, eps=1e-5):
+def cond_fwd(c, W, b, g1, g2, eps=1e-5, *, hopper_waves=2.):
     """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid))."""
     M = c.shape[0]
     out = torch.empty(M, 6 * DM, device=c.device, dtype=torch.bfloat16)
@@ -307,7 +289,8 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
 
 
 def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
-    """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``)."""
+    """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``). ``cross`` (sm_90a only): the cross-attention
+    mode's variant of the Hopper kernel."""
     M = a.shape[0]
     Q, K, V, G = (
         torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4)
@@ -376,7 +359,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
     return Q, K, V, G, X, (XK if save else None)
 
 
-def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5):
+def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=False):
     """a, o, g [M, 128], mod [M, 768] -> the block output [M, 128] bf16 (+ u, a2, x2, t when ``save``)."""
     M = a.shape[0]
 
