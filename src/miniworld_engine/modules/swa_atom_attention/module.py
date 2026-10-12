@@ -635,10 +635,15 @@ def build_3d_rope(
     # Broadcast multiplies, not einsums: these are outer products, and under an autocast region ``einsum`` runs them as bf16 matmuls
     # (UID angles are ids in the thousands times a frequency; coordinates times a frequency) -- the angles must stay fp32.
     pos_f32 = ref_pos.float()
-    spatial_freqs = pos_f32[..., None] * spatial_inv_freq
-    spatial_freqs = spatial_freqs.reshape(b, n, n_spatial_total)
-
-    uid_freqs = ref_space_uid.float()[..., None] * uid_inv_freq
+    if settings.current().rope_angles_bf16_compat:
+        # Compatibility with checkpoints trained before the fix above: einsum, hence bf16 matmuls under autocast.
+        spatial_freqs = torch.einsum("bna,k->bnak", pos_f32, spatial_inv_freq)
+        spatial_freqs = spatial_freqs.reshape(b, n, n_spatial_total)
+        uid_freqs = torch.einsum("bn,k->bnk", ref_space_uid.float(), uid_inv_freq)
+    else:
+        spatial_freqs = pos_f32[..., None] * spatial_inv_freq
+        spatial_freqs = spatial_freqs.reshape(b, n, n_spatial_total)
+        uid_freqs = ref_space_uid.float()[..., None] * uid_inv_freq
 
     n_active = n_spatial_total + n_uid_pairs
     if n_active > half_dim:

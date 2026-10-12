@@ -28,6 +28,43 @@ def test_build_3d_rope_matches_the_fp32_outer_product(device):
     uid = torch.arange(64, device=device)[None]
     cos, sin = build_3d_rope(pos, uid, 32)
     spatial = 1.0 / (20.0 ** (torch.arange(2, dtype=torch.float32, device=device) / 2))
-    uidf = 1.0 / (10000.0 ** (torch.arange(10, dtype=torch.float32, device=device) / 10))
-    want = torch.cat([(pos[..., None] * spatial).reshape(1, 64, 6), uid.float()[..., None] * uidf, torch.zeros(1, 64, 0, device=device)], -1)
-    assert torch.allclose(cos[..., :16], want.cos(), atol=1e-6) and torch.allclose(sin[..., :16], want.sin(), atol=1e-6)
+    uidf = 1.0 / (
+        10000.0 ** (torch.arange(10, dtype=torch.float32, device=device) / 10)
+    )
+    want = torch.cat(
+        [
+            (pos[..., None] * spatial).reshape(1, 64, 6),
+            uid.float()[..., None] * uidf,
+            torch.zeros(1, 64, 0, device=device),
+        ],
+        -1,
+    )
+    assert torch.allclose(cos[..., :16], want.cos(), atol=1e-6) and torch.allclose(
+        sin[..., :16], want.sin(), atol=1e-6
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="autocast turns the einsum into a bf16 matmul on CUDA",
+)
+def test_bf16_compat_setting_restores_the_pre_fix_angles():
+    from miniworld_engine import settings
+
+    torch.manual_seed(0)
+    pos = torch.randn(2, 512, 3, device="cuda") * 30.0
+    uid = torch.randint(0, 3000, (2, 512), device="cuda")
+    cos_fp32, _ = build_3d_rope(pos, uid, 32)
+    previous = settings.configure(rope_angles_bf16_compat=True)
+    try:
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            cos_compat, _ = build_3d_rope(pos, uid, 32)
+        cos_plain, _ = build_3d_rope(pos, uid, 32)
+    finally:
+        settings.configure(
+            rope_angles_bf16_compat=previous.rope_angles_bf16_compat
+        )
+    assert (
+        cos_compat - cos_fp32
+    ).abs().max() > 0.5  # the whole-turn UID error the fix removed
+    assert torch.equal(cos_plain, cos_fp32)  # outside autocast the einsum is exact fp32

@@ -266,6 +266,16 @@ class Settings:
     #: B200 only: keep the engine's hand-written Triton norm kernels (`LayerNorm` / `RMSNorm` with implementation MINIWORLD) instead of
     #: PyTorch ops that `torch.compile` fuses (the default on B200: no hand-written Triton on that card). Other cards are unaffected.
     b200_engine_triton: bool = False
+    #: Compute the 3D RoPE angles of `modules.swa_atom_attention.build_3d_rope` the way engines before 2026-10-06 did: with
+    #: einsums, which under autocast run as bf16 matmuls. The angles are then wrong (UID rotations off by up to a whole turn at
+    #: ids in the thousands), and a model TRAINED that way has adapted to them: the v2.0.0 phase 2a checkpoint (trained with engine
+    #: 135b7966 + 4) has a diffusion loss of 0.13 with the correct fp32 angles and 0.057 with these. Turn this on to resume or
+    #: evaluate such checkpoints; leave it off for anything trained from scratch. Environment fallback for launcher scripts:
+    #: MINIWORLD_ROPE_ANGLES_BF16=1.
+    rope_angles_bf16_compat: bool = dataclasses.field(
+        default_factory=lambda: os.environ.get("MINIWORLD_ROPE_ANGLES_BF16", "").strip()
+        == "1"
+    )
     #: Serve the qkvg forward (RMSNorm + adaLN + Q/K/V/gate projections + q/k-norm + RoPE) with the hand-CUDA sm_90a
     #: wgmma kernel on sm_90; off (or any other card, or a failed build) takes the Triton kernel. Formerly SWA_QKVG_FWD.
     swa_dit_qkvg_fwd_cuda: bool = True
@@ -316,8 +326,10 @@ def _compile_wrap_from_env() -> Literal["disable", "custom_op"]:
         return "custom_op"
     if raw == "disable":
         return "disable"
-    msg = (f"MINIWORLD_COMPILE_WRAP={raw!r} is not a compile_wrap mode; "
-           f"expected 'disable' or 'custom_op'")
+    msg = (
+        f"MINIWORLD_COMPILE_WRAP={raw!r} is not a compile_wrap mode; "
+        f"expected 'disable' or 'custom_op'"
+    )
     raise ValueError(msg)
 
 
@@ -344,7 +356,8 @@ def configure(**kwargs) -> Settings:
         if unknown:
             raise ValueError(
                 f"autotune_kernels={unknown} is not a group anything reads, so it would unlock "
-                f"nothing. Known groups: {sorted(known)}.")
+                f"nothing. Known groups: {sorted(known)}."
+            )
         kwargs["autotune_kernels"] = names
     _ACTIVE = dataclasses.replace(previous, **kwargs)
     return previous
