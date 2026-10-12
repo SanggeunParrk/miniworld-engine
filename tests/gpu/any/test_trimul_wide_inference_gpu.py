@@ -104,7 +104,9 @@ def test_cuda_inference_required_buckets_pytorch_and_live_graph(d, n, master, bi
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
     from miniworld_engine.integrations import trimul_h100 as H
-    from miniworld_engine.modules.triangle_multiplication.module import TriangleMultiplication
+    from miniworld_engine.modules.triangle_multiplication.module import (
+        TriangleMultiplication,
+    )
 
     if d in (64, 128):
         from miniworld_engine.kernels.trimul_inproj.cuda import _h100_pack as P

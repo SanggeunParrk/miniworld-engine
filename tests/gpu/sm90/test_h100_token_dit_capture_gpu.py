@@ -40,7 +40,8 @@ def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
         expected = ref(*(a.float() for a in args), mask)
         a, b = got.float().flatten(), expected.float().flatten()
         cosine = float(a.dot(b) / (a.norm() * b.norm()))
-        assert torch.isfinite(got).all() and cosine >= 0.9999, cosine
+        assert torch.isfinite(got).all(), cosine
+        assert cosine >= 0.9999, cosine
         return cosine
 
     with torch.no_grad():
@@ -73,7 +74,7 @@ def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
         print(json.dumps({"audit": "token_native_graph", "job": os.environ.get("SLURM_JOB_ID"),
                           "L": L, "master": master, "cos": cos, "changed_cos": changed, "deterministic": True}), flush=True)
         if L == 768 and master:
-            from torch.profiler import profile, ProfilerActivity
+            from torch.profiler import ProfilerActivity, profile
             with profile(activities=[ProfilerActivity.CUDA]) as prof:
                 graph.replay()
                 torch.cuda.synchronize()

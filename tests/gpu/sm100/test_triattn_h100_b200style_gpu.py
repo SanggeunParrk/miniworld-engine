@@ -109,8 +109,10 @@ def qualify(
     dy = torch.randn_like(x) * 0.1
     mask = None if masking == "none" else torch.rand(batch, length, device="cuda") > 0.2
     if masking == "all":
+        assert mask is not None
         mask.fill_(False)
     elif masking == "one":
+        assert mask is not None
         mask.fill_(False)
         mask[:, 0] = True
     drop = None
@@ -118,15 +120,15 @@ def qualify(
         torch.manual_seed(123)
         drop = ours._make_drop_scale(x, dropout)
     outcomes, grads = [], []
-    for m, xi, fn in [
-        (ours, x, native.forward),
-        (ref16, x, reference),
-        (ref32, x.float(), reference),
+    for m, xi in [
+        (ours, x),
+        (ref16, x),
+        (ref32, x.float()),
     ]:
         xi = xi.clone().requires_grad_(training)
         torch.manual_seed(123)
         with torch.set_grad_enabled(training):
-            y = fn(m, xi, mask) if fn is native.forward else fn(m, xi, mask, drop)
+            y = native.forward(m, xi, mask) if m is ours else reference(m, xi, mask, drop)
             if training:
                 y.backward(dy.to(y.dtype))
         outcomes.append(y.detach())
@@ -318,6 +320,7 @@ def test_training_graph_changes_inputs_dy_masks_and_weights():
             mask.copy_(torch.rand_like(mask, dtype=torch.float32) > 0.3)
             m.to_query.weight.add_(0.01)
             graph.replay()
+            assert x.grad is not None
             actual = [
                 y.clone(),
                 x.grad.clone(),

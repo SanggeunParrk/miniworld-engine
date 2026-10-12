@@ -274,8 +274,8 @@ def test_saved_h_changes_nothing_but_the_kernel(d, monkeypatch):
 @pytest.mark.parametrize("bad", ["dtype", "rows", "expansion", "build"])
 def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
     from miniworld_engine import settings
-    from miniworld_engine.modules import Transition
     from miniworld_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
+    from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     settings.configure(engine_backend="auto", transition_fused_sm90a=True)
@@ -292,7 +292,7 @@ def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
 
 
 @needs_hopper
-@pytest.mark.parametrize("d,save_ab", [(64, False), (128, False), (256, False),
+@pytest.mark.parametrize(("d", "save_ab"), [(64, False), (128, False), (256, False),
                                       (384, False), (512, False), (384, True), (512, True)],
                          ids=["D64-save0", "D128-save0", "D256-save0", "D384-save0",
                               "D512-save0", "D384-save1", "D512-save1"])
@@ -327,6 +327,8 @@ def test_native_required_buckets_pytorch_and_live_graph(d, save_ab, n, master, m
     expected = [yr, xr.grad, *(p.grad for p in reference.parameters())]
     actual = [y, x.grad, *(p.grad for p in module.parameters())]
     for index, (got, want) in enumerate(zip(actual, expected, strict=True)):
+        assert got is not None
+        assert want is not None
         cosine = torch.nn.functional.cosine_similarity(got.float().flatten(), want.float().flatten(), dim=0)
         assert cosine >= (0.9999 if index == 0 else 0.999), (index, float(cosine))
     del expected, actual, got, want, reference, yr, xr, y

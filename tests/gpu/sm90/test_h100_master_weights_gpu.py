@@ -182,6 +182,8 @@ def _check(name, make, shape, graphs=True, compile_check=True, dropout=False):
             for p in master.parameters():
                 p.mul_(0.875).add_(0.01)
         if dropout:
+            assert mask is not None
+            assert scale is not None
             mask[:, 11::23] = False
             scale.mul_(0.75)
         graph.replay()

@@ -225,41 +225,48 @@ def test_native_bucket_module_graph(monkeypatch, n, master):
     import gc
     import json
     import os
-    from miniworld_engine.modules.triangle_multiplication.module import TriangleMultiplication
-    from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
+
     from miniworld_engine.integrations import trimul_h100 as I
+    from miniworld_engine.modules.exceptions import ImplementationType
+    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+        BidirectionalTriangleMultiplication,
+    )
+    from miniworld_engine.modules.triangle_multiplication.module import (
+        TriangleMultiplication,
+    )
     monkeypatch.setenv("MINIWORLD_TRIMUL_H100_TRAIN_CUDA", "1")
     kind = "bidi"
     cls = TriangleMultiplication if kind == "uni" else BidirectionalTriangleMultiplication
 
     torch.manual_seed(671)
-    m=cls(64,implementation="miniworld",p_drop=.25).cuda().train()
-    r=cls(64,implementation="pytorch",p_drop=.25).cuda().train()
+    m=cls(64,implementation=ImplementationType.MINIWORLD,p_drop=.25).cuda().train()
+    r=cls(64,implementation=ImplementationType.PYTORCH,p_drop=.25).cuda().train()
     with torch.no_grad():
         for name,p in m.named_parameters():
             if p.ndim==1:p.copy_((1 if name.endswith("weight") else 0)+.1*torch.randn_like(p))
             else:
                 p.copy_(torch.randn_like(p)*p.shape[-1]**-.5)
                 if not master:p.data=p.data.bfloat16()
-        for rp,p in zip(r.parameters(),m.parameters()):rp.copy_(p.float())
+        for rp,p in zip(r.parameters(),m.parameters(),strict=True):rp.copy_(p.float())
     x=torch.randn(1,n,n,64,device="cuda",dtype=torch.bfloat16,requires_grad=True);dy=torch.randn_like(x)
     mask=torch.ones(1,n,device="cuda",dtype=torch.bool);mask[:,-n//7:]=False
     assert I.serves(m,x)
-    def step():
+    def step(m=m,x=x,mask=mask,dy=dy):
         y=m(x,mask);return [y.detach(),*torch.autograd.grad(y,[x,*m.parameters()],dy)]
     torch.manual_seed(987);a=step()
     torch.manual_seed(987);b=step()
-    assert all(torch.equal(u,v) for u,v in zip(a,b))
+    assert all(torch.equal(u,v) for u,v in zip(a,b,strict=True))
     xr=x.detach().float().requires_grad_()
     # CUDA Philox scale matches torch.rand BF16, whereas the FP32 reference
     # otherwise draws FP32 randoms. Fix identical model dropout to BF16 draws.
     torch.manual_seed(987)
     scale=(torch.rand(1,1,n,64,device="cuda",dtype=torch.bfloat16)>.25).bfloat16()/.75
-    r._make_drop_row_scale=lambda *args:scale.float()
+    monkeypatch.setattr(r,"_make_drop_row_scale",lambda *args:scale.float())
     yr=r(xr,mask);gr=torch.autograd.grad(yr,[xr,*r.parameters()],dy.float())
-    cs=[_native_cos(a[0],yr),*[_native_cos(u,v) for u,v in zip(a[1:],gr)]]
-    assert cs[0]>=.9999 and min(cs[1:])>=.999,(kind,n,master,cs)
-    print("TM64_NATIVE_MODULE",json.dumps(dict(job=os.environ.get("SLURM_JOB_ID", "test"),kind=kind,n=n,master=master,cos=cs,det=True)),flush=True)
+    cs=[_native_cos(a[0],yr),*[_native_cos(u,v) for u,v in zip(a[1:],gr,strict=True)]]
+    assert cs[0]>=.9999,(kind,n,master,cs)
+    assert min(cs[1:])>=.999,(kind,n,master,cs)
+    print("TM64_NATIVE_MODULE",json.dumps({"job":os.environ.get("SLURM_JOB_ID", "test"),"kind":kind,"n":n,"master":master,"cos":cs,"det":True}),flush=True)
     del a,b,yr,gr,xr,r
     s=torch.cuda.Stream();s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
@@ -268,22 +275,25 @@ def test_native_bucket_module_graph(monkeypatch, n, master):
         with torch.cuda.graph(g,stream=s):got=step()
     torch.cuda.current_stream().wait_stream(s)
     torch.manual_seed(998);g.replay();torch.cuda.synchronize();snap=[v.clone() for v in got]
-    torch.manual_seed(998);g.replay();torch.cuda.synchronize();assert all(torch.equal(u,v) for u,v in zip(got,snap))
+    torch.manual_seed(998);g.replay();torch.cuda.synchronize();assert all(torch.equal(u,v) for u,v in zip(got,snap,strict=True))
     torch.manual_seed(999);g.replay();torch.cuda.synchronize();assert not torch.equal(got[0],snap[0])
     with torch.no_grad():
         x.add_(.08);m.to_left.weight.mul_(.97);dy.neg_();mask.logical_not_()
     torch.manual_seed(1231);g.replay();torch.cuda.synchronize()
-    torch.manual_seed(1231);expected=step();assert all(torch.equal(u,v) for u,v in zip(got,expected))
+    torch.manual_seed(1231);expected=step();assert all(torch.equal(u,v) for u,v in zip(got,expected,strict=True))
     print("TM64_NATIVE_MODULE_GRAPH_PASS",kind,n,master,flush=True)
-    del g,got,snap,expected,m,x,dy,mask
+    del g,got,snap,expected,m,x,dy,mask,step
     gc.collect();torch.cuda.empty_cache()
 
 
 def test_native_training_refuses_unbucketed_length(monkeypatch):
     _hopper()
-    from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
+    from miniworld_engine.modules.exceptions import ImplementationType
+    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+        BidirectionalTriangleMultiplication,
+    )
     monkeypatch.setenv("MINIWORLD_TRIMUL_H100_TRAIN_CUDA", "1")
-    module = BidirectionalTriangleMultiplication(64, implementation="miniworld", p_drop=0.0).cuda().train()
+    module = BidirectionalTriangleMultiplication(64, implementation=ImplementationType.MINIWORLD, p_drop=0.0).cuda().train()
     pair = torch.empty((1, 64, 64, 64), device="cuda", dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="native H100 TriMul training requires a supported B1 BF16 bucket"):
         module(pair)
