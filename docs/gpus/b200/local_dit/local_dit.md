@@ -68,8 +68,10 @@ Cross-attention block (`cross_attention=True`, the AF3 / Protenix atom block), s
 PyTorch column: the module path does not run these shapes in a comparable graph. The training cells and the static inference cells
 were re-measured on 2026-10-11 through the harness (`bench.py target=local_dit level=module compile=false`, `precision=bf16-mixed` with
 fp32 master parameters or `precision=32`; training `cudagraph=manual`); the plain-graph column is the earlier in-process measurement
-with bf16 parameters. This block's inference entry still casts the fp32 weights per call (not yet through `kernels._capture.param_forms`): A1 N4096
-0.035 ms against 0.030 ms with bf16 parameters, A5 N2048 0.047 against 0.040 ms.
+with bf16 parameters. The block packs its weights once per version (and per capture), so fp32 master and bf16 parameters give the same graph and the
+same time (A5 N4096 0.059 ms both ways through the harness; the replayed graph is `pre_fwd`, attention, `post_fwd` in both). The
+harness cells are 5-20 % above the in-process static numbers of the earlier measurement (A1 N4096 0.035 against 0.030 ms, A5 N2048
+0.047 against 0.040): a method difference, not the parameter dtype.
 
 | block | bf16 | bf16, static | fp32 | fp32, static |
 |---|---|---|---|---|
