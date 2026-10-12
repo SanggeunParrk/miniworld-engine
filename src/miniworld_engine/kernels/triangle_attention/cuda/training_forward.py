@@ -1,7 +1,6 @@
 """Qualified H100 BF16 D32 training forward with FP32 base-2 LSE.
 
 Unsupported inputs retain the existing implementation. No runtime compilation.
-Set MINIWORLD_TRIATTN_TRAINING_FWD=0 to opt out for comparison or diagnosis.
 """
 from __future__ import annotations
 import functools
@@ -40,8 +39,6 @@ def _device_ready(device):
 
 
 def can_use(q,k,v,b):
-    if os.environ.get('MINIWORLD_TRIATTN_TRAINING_FWD','1')=='0':
-        return False
     if not(q.is_cuda and q.dtype==torch.bfloat16 and q.ndim==5 and q.shape[0]==1
            and q.shape[1]==4 and q.shape[4]==32 and q.shape[2] in SUPPORTED_LENGTHS
            and q.shape[3]==q.shape[2]):

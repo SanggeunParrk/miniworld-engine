@@ -355,7 +355,7 @@ loops), steady memory, no local memory, and the captured launch count, at the de
 
 | launch(es) | replaces | default | switch |
 |---|---|---|---|
-| `bo_bwd_tail` x 3 | res_c_bwd, mm dh, swiglu_bwd, mm dxt, res_adaln_b_bwd, mm dog, gate_bwd (7) | on | `MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL=off` (7 launches); `_BWD_TAIL_NST` = 3 / 4 / 5 stages (4) |
+| `bo_bwd_tail` x 3 | res_c_bwd, mm dh, swiglu_bwd, mm dxt, res_adaln_b_bwd, mm dog, gate_bwd (7) | on | `MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL=off` (7 launches); 4 operand stages |
 | `bo_pvdpb` | pv dV + dpb (2), where dbias runs on single CTAs (L384) | on | `_BWD_PVDPB=0`; L768 keeps pv dV + dpbx2 (`_BWD_PVPDL=0`: pv dV without PDL) |
 | `bo_bwd_mid` x 3 | mm dxa, adaln_a_bwd, mm dchat, mm dcg, cond_bwd (5) | **off** | `_BWD_MID=1` |
 | `bo_wgrad` | the six weight-gradient GEMMs + unfold (7) | on | `_BWD_FUSED=0` (everything per step) |

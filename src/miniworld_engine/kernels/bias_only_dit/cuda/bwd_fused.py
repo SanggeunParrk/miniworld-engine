@@ -203,8 +203,8 @@ class TailBwd:
 
     def __init__(self, device_index: int, nh: int, dh: int, trace: bool = False, stages: int | None = None):
         """``stages``: operand stages 3 / 4 / 5 (the GEMM E ring gets the rest: 15 / 11 / 7 slots); default
-        MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL_NST, else 4 (bwdf9 graph node A/B: 290.6 / 271.7 / 282.8 us at L384 for 3 / 4 / 5)."""
-        stages = stages or int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL_NST", "4"))
+        4 (bwdf9 graph node A/B: 290.6 / 271.7 / 282.8 us at L384 for 3 / 4 / 5)."""
+        stages = stages or 4
         self.idx, self.nh, self.dh, self.da = device_index, nh, dh, nh * dh
         defs = (f"DATT={self.da}", f"NHEAD={nh}", *(() if stages == 4 else (f"TAIL_NST={stages}",)), *(("TRACE",) if trace else ()))
         self.k = _sm100()._sm100_kernel("bo_bwd_tail", "bo_bwd_tail_sm100", device_index, pdl=True, src_dir=str(_dir), defs=defs,

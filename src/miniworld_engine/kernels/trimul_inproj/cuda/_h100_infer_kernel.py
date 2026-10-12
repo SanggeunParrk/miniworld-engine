@@ -15,12 +15,7 @@ import os
 
 import torch
 
-PDL = os.environ.get("TRIMUL_NATIVE_PDL", "1").strip().lower() not in (
-    "",
-    "0",
-    "off",
-    "false",
-)  # programmatic dependent launch of K1 / K3 (TMN_PDL builds only)
+PDL = True  # programmatic dependent launch of K1 / K3 (TMN_PDL builds only)
 MASK_CODE = {
     torch.float32: 1,
     torch.bfloat16: 2,

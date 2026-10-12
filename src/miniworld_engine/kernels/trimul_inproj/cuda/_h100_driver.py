@@ -3,7 +3,7 @@
 produce identical results; the ctypes form has no dependency beyond the driver library every CUDA image mounts.
 
     from trimul_native import _driver as D
-    drv = D.get()                       # resolve once per process: env TRIMUL_NATIVE_DRIVER = auto (default) | ctypes | cuda_bindings
+    drv = D.get()                       # resolve once per process: auto (default) | ctypes | cuda_bindings
     drv.word                            # "ctypes:libcuda.so.1" | "cuda.bindings:<version>"
     drv.driver_version()                # e.g. 13000  (cuDriverGetVersion)
     mod = drv.module_load_data(cubin_bytes); fn = drv.module_get_function(mod, "kernel_name")
@@ -721,12 +721,12 @@ _STATE = {"drv": None, "error": None}
 
 
 def get(binding=None):
-    """Resolve the binding once per process and return the driver object.  ``binding``: None -> env ``TRIMUL_NATIVE_DRIVER`` (``auto`` |
-    ``ctypes`` | ``cuda_bindings``; default ``auto`` = the wheel when importable with the tensor-map API, else ctypes).  A later call naming
+    """Resolve the binding once per process and return the driver object.  ``binding``: None -> ``auto`` (or ``ctypes`` |
+    ``cuda_bindings``; ``auto`` = the wheel when importable with the tensor-map API, else ctypes).  A later call naming
     the other form after one is resolved raises ``Unresolvable`` (one binding per process).  Raises ``Unresolvable`` with the reason when
     nothing resolves."""
     want = (
-        (binding or os.environ.get("TRIMUL_NATIVE_DRIVER", "auto") or "auto")
+        (binding or "auto")
         .strip()
         .lower()
         .replace(".", "_")

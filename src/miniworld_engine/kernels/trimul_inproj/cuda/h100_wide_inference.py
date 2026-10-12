@@ -7,8 +7,7 @@ has both LayerNorms folded into its weights, so it needs only per-token input-LN
 statistics (fp32 mean, rstd) instead of the normalised rows. K1 writes those statistics
 (D256/D384, in-kernel LN); at D512 the separate input LN writes them next to x_n.
 B1, BF16 pair, FP32 LN affine, L384/768, H100 (sm_90a). Selected schedules are in
-``h100_sources/wide_forward/selection.json``; ``MW_WIDE_INFER_CFG`` (JSON) overrides an
-entry for development measurements.
+``h100_sources/wide_forward/selection.json``.
 """
 
 from __future__ import annotations
@@ -143,10 +142,7 @@ def _normalize_stats_into(dst, stats, x, g, b):
 
 
 def _selection(D, N):
-    sel = dict(T.read_config("wide_forward/selection.json")[f"{D}-{N}"])
-    if os.environ.get("MW_WIDE_INFER_CFG"):
-        sel.update(json.loads(os.environ["MW_WIDE_INFER_CFG"]))
-    return sel
+    return dict(T.read_config("wide_forward/selection.json")[f"{D}-{N}"])
 
 
 def _map(t, box, dims, strides):

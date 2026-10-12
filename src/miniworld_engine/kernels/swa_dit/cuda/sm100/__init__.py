@@ -712,7 +712,7 @@ def block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
         else:
             dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
             dKh, dVh = torch.empty_like(dQh), torch.empty_like(dQh)
-            if os.environ.get("MINIWORLD_SWA_DIT_SM100_FUSED_BWD", "1") == "1" and N * (S // 128) * 2 >= 2 * nsm():
+            if N * (S // 128) * 2 >= 2 * nsm():
                 run, _ = K.dkvq.bind(qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh, dQh=dQh)
                 run()
             else:

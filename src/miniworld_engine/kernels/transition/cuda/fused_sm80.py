@@ -44,14 +44,10 @@ D, H, CH = 128, 512, 32
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_TRANSITION_SM80_FLAGS: extra -D flags for A/B experiments (their own build); PW_2DA=0 is not supported here (the wx
-    # layout carries 0.5 Wa)
-    extra = os.environ.get("MINIWORLD_TRANSITION_SM80_FLAGS", "").split()
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
-        name=f"transition_fused_sm80{tag}",
+        name="transition_fused_sm80",
         sources=[str(_dir / "transition_sm80.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", "-DPW_XN", *extra],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", "-DPW_XN"],
         extra_cflags=["-std=c++17", "-O3"], verbose=False,
     )
 
@@ -222,7 +218,7 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torc
     kernel's fixed order and written in the parameters' dtypes (one launch for the sum, the 0.5, the dWs transpose and the casts)."""
     if _is_fake(dy, x):
         return _bwd_launch_fake(dy, x, xn, stats, wdw, wx, gamma, beta, eps, adt, wdt)
-    return tuple(_ext().bwd(dy, x, xn, stats, wdw, wx, gamma, beta, eps, int(os.environ.get("MINIWORLD_TRANSITION_SM80_NREP", "0")),
+    return tuple(_ext().bwd(dy, x, xn, stats, wdw, wx, gamma, beta, eps, 0,
                             adt, wdt))
 
 

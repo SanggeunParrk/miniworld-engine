@@ -119,15 +119,13 @@ def _tf32(on: bool):
         torch.backends.cuda.matmul.allow_tf32 = old
 
 
-_WGRAD_SPLIT = os.environ.get("MINIWORLD_TDIT32_WGRAD_SPLIT", "1") != "0"
-
 
 def _mm32(a, b):
     """a @ b with an fp32 result (weight gradients): bf16 operands accumulate into fp32 output, fp32 ones already are.
 
     fp32 (TF32) weight gradients with few output tiles (dWo 768 x 768, dWg 1536 x 384, dWn 3072 x 384, dWsq 768 x 1536: under
     one wave of 128 x 128 tiles) and a long reduction (the A L rows) ran at 370-580 TF/s against ~740 for the wide ones: they are
-    split over the rows into S <= 8 chunks as one batched GEMM, then summed (MINIWORLD_TDIT32_WGRAD_SPLIT=0: one GEMM)."""
+    split over the rows into S <= 8 chunks as one batched GEMM, then summed."""
     if a.dtype is BF:
         return torch.mm(a, b, out_dtype=torch.float32)
     n, m = a.shape
@@ -135,7 +133,7 @@ def _mm32(a, b):
     tiles = -(-n // 128) * -(-k // 128)
     nsm = torch.cuda.get_device_properties(a.device).multi_processor_count
     s = 1
-    if _WGRAD_SPLIT and tiles < 128 and b.is_contiguous() and a.t().is_contiguous():
+    if tiles < 128 and b.is_contiguous() and a.t().is_contiguous():
         while s < 8 and tiles * s * 2 <= 2 * nsm and m % (2 * s * 128) == 0:
             s *= 2
     if s == 1:

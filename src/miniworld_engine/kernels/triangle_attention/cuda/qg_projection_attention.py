@@ -1,6 +1,5 @@
 """H100 Q and gate projection plus attention; preserve native training backward.
 
-Set MINIWORLD_TRIATTN_QG_FWD=0 to compare with Q-only fusion.
 Only supported BF16 shapes with every required native fusion enabled qualify.
 """
 import torch
@@ -39,10 +38,6 @@ def extension():
     return _EXT
 
 def can_use(model,pair,mask=None):
-    if (os.environ.get('MINIWORLD_TRIATTN_QG_FWD','1')=='0'
-            or os.environ.get('MINIWORLD_TRIATTN_Q_FWD','1')=='0'
-            or os.environ.get('MINIWORLD_TRIATTN_TRAINING_FWD','1')=='0'):
-        return False
     if not (torch.is_grad_enabled() and pair.ndim==4 and pair.shape[1] in SUPPORTED_LENGTHS
             and model.use_self_attention and not model.use_qk_norm and model.n_head==4
             and all(getattr(model,n,True) for n in ('_fuse_front_backward','_fuse_projection_backward',

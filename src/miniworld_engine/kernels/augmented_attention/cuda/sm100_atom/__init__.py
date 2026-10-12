@@ -470,7 +470,6 @@ def _tm32(t, box, swizzle=128):
 
 #: gemm32 epilogues
 STORE, RESID_GATE, SWIGLU = 0, 1, 2
-_RG_TMA = [os.environ.get("MINIWORLD_ATOM_RG_TMA", "1") != "0"]      # 0: the residual / gate loads of gemm_tf32.cu
 
 
 def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol0=0, bias=None, sigmask=0, rndmask=0, mode=STORE,
@@ -503,7 +502,7 @@ def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol
     mo = _tm32(out, (32, 32))
     mo2 = mo if out2 is None else _tm32(out2, (32, 32))
     tiles = (M // 128) * (n // nt)
-    if mode == RESID_GATE and n == DM and a_col0 == 0 and b_row0 == 0 and b_col0 == 0 and ocol0 == 0 and bias is None and _RG_TMA[0]:
+    if mode == RESID_GATE and n == DM and a_col0 == 0 and b_row0 == 0 and b_col0 == 0 and ocol0 == 0 and bias is None:
         # the gated residual with res and gate by TMA (gemm_rg_tf32.cu): 144 -> ~60 us at 196608 rows
         atom_kernel32("gemm_rg", d)((min(nsm(d), tiles), 1, 1), (512, 1, 1), ma, mb, mo, mo2, _tm32(res, (32, 32)), _tm32(gate, (32, 32)),
                                     int(M), int(k), int(out2 is not None))
