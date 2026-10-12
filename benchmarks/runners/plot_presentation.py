@@ -2,10 +2,18 @@
 main_inference / main_training: every module at L = 384 tokens, the atom blocks at 4096 atoms (8 x 512 tokens: the harness runs
 atom targets at 8 x the sequence length), speedup over PyTorch, per implementation;
 sweep_<module>: latency vs L and vs D (or the layout list) for inference and training. Median over passes."""
-import csv, glob, math, os, re, sys
+import csv
+import glob
+import math
+import os
+import re
+import sys
 from collections import defaultdict
 from statistics import median
+from typing import Any
+
 import matplotlib as mpl
+
 mpl.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
@@ -33,7 +41,9 @@ for f in [g for r in ROOTS for g in glob.glob(os.path.join(r, "benchmarks", "*",
     if not m:
         continue
     pas, job = m.group(1), m.group(2)
-    for r in csv.DictReader(open(f, newline="")):
+    with open(f, newline="") as fh:
+        csv_rows = list(csv.DictReader(fh))
+    for r in csv_rows:
         try:
             v = float(r["value"])
         except (KeyError, ValueError):
@@ -49,7 +59,7 @@ print(f"{len(MED)} points, up to {NPASS} passes")
 def series(jobs, impl, xkey):
     """{x: ms} for the implementation over the given job names (xkey: 'seq' | 'd')"""
     out = {}
-    for (job, im, s, d), v in MED.items():
+    for (job, im, s, _d), v in MED.items():
         if job in jobs and im == impl:
             out[s if xkey == "seq" else d] = v
     return dict(sorted(out.items()))
@@ -59,33 +69,32 @@ def layout_series(prefix, mode, layouts, impl, extra=()):
     out = {}
     for lay in layouts:
         names = {f"{prefix}_{mode}_{lay}"} | {f"{prefix}_{mode}_{lay}_anth"}
-        for (job, im, s, d), v in MED.items():
+        for (job, im, s, _d), v in MED.items():
             if job in names and im == impl and s == 384:
                 out[lay] = v
     return out
 
 
 M3 = lambda k: (k + "_inf_L", k + "_tra_L")
-MODS = [
-    dict(key="trimul1", title="TriMul (outgoing)", D=[64, 128, 256, 384, 512], dlabel="d_pair"),
-    dict(key="trimul2", title="TriMul (bidirectional)", D=[64, 128, 256, 384, 512], dlabel="d_pair"),
-    dict(key="triattn", title="Triangle attention", D=[64, 128, 256, 384, 512], dlabel="d_pair"),
-    dict(key="trans", title="Transition (pair)", D=[64, 128, 256, 384, 512], dlabel="width D"),
-    dict(key="tdit", title="Token DiT", layouts=["16x48", "24x32", "12x64", "16x64"], dlabel="heads × head width", anth_extra=True),
-    dict(key="bodit", title="Bias-only token DiT", layouts=["16x48", "24x32", "12x64", "16x64"], dlabel="heads × head width"),
-    dict(key="apb", title="Attention pair bias", layouts=["8x384", "12x384", "16x384", "24x384", "16x512"], dlabel="heads × d_single"),
-    dict(key="opm", title="Outer product mean"),
-    dict(key="pwa", title="MSA pair-weighted avg."),
-    dict(key="ldit", title="AF3 atom DiT (32×128, 4096 atoms)", short="AF3 atom DiT\n(32×128)", atom=True),
-    dict(key="swadit3", title="SWA atom DiT (|i−j| ≤ 64, 4096 atoms)", short="SWA atom DiT\n(window 129)", atom=True),
+MODS: list[dict[str, Any]] = [
+    {"key": "trimul1", "title": "TriMul (outgoing)", "D": [64, 128, 256, 384, 512], "dlabel": "d_pair"},
+    {"key": "trimul2", "title": "TriMul (bidirectional)", "D": [64, 128, 256, 384, 512], "dlabel": "d_pair"},
+    {"key": "triattn", "title": "Triangle attention", "D": [64, 128, 256, 384, 512], "dlabel": "d_pair"},
+    {"key": "trans", "title": "Transition (pair)", "D": [64, 128, 256, 384, 512], "dlabel": "width D"},
+    {"key": "tdit", "title": "Token DiT", "layouts": ["16x48", "24x32", "12x64", "16x64"], "dlabel": "heads × head width", "anth_extra": True},
+    {"key": "bodit", "title": "Bias-only token DiT", "layouts": ["16x48", "24x32", "12x64", "16x64"], "dlabel": "heads × head width"},
+    {"key": "apb", "title": "Attention pair bias", "layouts": ["8x384", "12x384", "16x384", "24x384", "16x512"], "dlabel": "heads × d_single"},
+    {"key": "opm", "title": "Outer product mean"},
+    {"key": "pwa", "title": "MSA pair-weighted avg."},
+    {"key": "ldit", "title": "AF3 atom DiT (32×128, 4096 atoms)", "short": "AF3 atom DiT\n(32×128)", "atom": True},
+    {"key": "swadit3", "title": "SWA atom DiT (|i−j| ≤ 64, 4096 atoms)", "short": "SWA atom DiT\n(window 129)", "atom": True},
 ]
 ATOM = []
 
 
 def jobs_L(mod, mode):
     k, md = mod["key"], mode[:3]
-    names = {f"{k}_{md}_L", f"{k}_{md}_L_anth", f"{k}_{md}", f"{k}_{md}_anth"}
-    return names
+    return {f"{k}_{md}_L", f"{k}_{md}_L_anth", f"{k}_{md}", f"{k}_{md}_anth"}
 
 
 ATOM_MAIN_TOKENS = 512            # 8 x 512 = 4096 atoms: the atom blocks' main-figure point (the harness runs atoms at 8 x tokens)
@@ -113,7 +122,7 @@ def main_fig(mode):
                 continue
             x = gi + (si - (len(slots) - 1) / 2) * w
             sp = base / t
-            ax.bar(x, sp, w * 0.92, color=COL[impl], label=LAB[impl] if gi == 0 or True else None, zorder=3)
+            ax.bar(x, sp, w * 0.92, color=COL[impl], label=LAB[impl], zorder=3)
             if impl == "miniworld":
                 ax.text(x, sp * 1.02, f"{sp:.1f}×", ha="center", va="bottom", fontsize=12, fontweight="bold", color=COL[impl])
                 ours_ms[gi] = t
@@ -125,7 +134,7 @@ def main_fig(mode):
     ax.set_title(f"B200 · {mode} · L = 384 tokens (atom blocks: 4096 atoms) · bf16" + ("" if mode == "inference" else " · CUDA graph"), loc="left")
     h, l = ax.get_legend_handles_labels()
     uniq = {}
-    for a, b in zip(h, l):
+    for a, b in zip(h, l, strict=True):
         uniq.setdefault(b, a)
     ax.legend([uniq[LAB[i]] for i in slots if LAB[i] in uniq], [LAB[i] for i in slots if LAB[i] in uniq], ncol=len(slots), loc="upper left", frameon=False)
     ax.set_ylim(0, ax.get_ylim()[1] * 1.22)
@@ -145,7 +154,7 @@ def draw(ax, data, xs, xlabel, categorical=False, annotate=True):
         pts = [(pos[x], s[x]) for x in xs if x in s]
         if not pts:
             continue
-        ax.plot(*zip(*pts), color=COL[impl], marker=MK[impl], lw=2.6 if impl == "miniworld" else 2.0, ms=8, label=LAB[impl], zorder=3 if impl != "miniworld" else 4)
+        ax.plot(*zip(*pts, strict=False), color=COL[impl], marker=MK[impl], lw=2.6 if impl == "miniworld" else 2.0, ms=8, label=LAB[impl], zorder=3 if impl != "miniworld" else 4)
     if annotate and "miniworld" in data:
         for x in xs:
             if x in data["miniworld"]:
@@ -221,10 +230,11 @@ def sweep_fig(mod, atom=False):
             ax.set_title(f"{mode} · {mod['dlabel']} sweep (L = 384)", loc="left", fontsize=14)
     if not any_data:
         plt.close(fig); return
-    h, l = {}, []
+    h = {}
     for ax in axes.flat:
-        for a, b in zip(*ax.get_legend_handles_labels()):
-            h.setdefault(b, a)
+        for a, b in zip(*ax.get_legend_handles_labels(), strict=True):
+            if b not in h:
+                h[b] = a
     fig.legend(list(h.values()), list(h.keys()), loc="upper center", ncol=len(h), frameon=False, bbox_to_anchor=(0.5, 1.0))
     fig.suptitle(f"{mod['title']} · B200 · bf16", y=1.045, fontsize=18, fontweight="bold", x=0.02, ha="left")
     fig.tight_layout()
@@ -250,8 +260,8 @@ with open(os.path.join(OUT, "summary_L384.csv"), "w", newline="") as fh:
                     w.writerow([mod["title"], mode, LAB[impl], f"{t:.4f}", f"{base / t:.2f}" if base else ""])
 
 # ---- every measured point: is ours the fastest? (printed, and written next to the figures) ----
-from collections import defaultdict as _dd
-grp = _dd(dict)
+
+grp = defaultdict(dict)
 for (job, impl, s, d), v in MED.items():
     grp[(job, s, d)][impl] = v
 rows, worse, total = [], [], 0
@@ -259,7 +269,7 @@ for (job, s, d), im in sorted(grp.items()):
     if "miniworld" not in im or len(im) < 2:
         continue
     others = {k: v for k, v in im.items() if k != "miniworld"}
-    best = min(others, key=others.get); r = others[best] / im["miniworld"]
+    best = min(others, key=lambda k: others[k]); r = others[best] / im["miniworld"]
     total += 1; rows.append((job, s, d, im["miniworld"], best, others[best], r))
     if r < 1.0:
         worse.append((job, s, d, im["miniworld"], best, others[best], r))

@@ -2720,7 +2720,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
 
     class CueqAttentionPairBias(AttentionPairBias):
         def forward(self, single, pair, mask=None):
-            import cuequivariance_torch as cuet  # ty: ignore[unresolved-import]  # optional cuEquivariance backend
+            import cuequivariance_torch as cuet  # optional cuEquivariance backend
 
             act = single.dtype
 
@@ -5418,7 +5418,7 @@ def _anthropic_local_dit_composition(
     def wf(t):
         return t.detach().float().contiguous()
 
-    packs = []
+    packs: list[dict[str, Any]] = []
     for block in blocks:
         at, tr = block.attention, block.transition
         packs.append(
@@ -6776,11 +6776,11 @@ def main(cfg: DictConfig) -> None:
 
     if conf.mode == "inference":
         # inference weights never change between graph replays: no repacking inside the captured graph (kernels/_capture.py)
-        from miniworld_engine.kernels import _capture
+        from miniworld_engine.kernels import _capture as _kernel_capture
 
-        _capture.set_static_weights(True)
+        _kernel_capture.set_static_weights(True)
         # and the conditioning / pair tensors are the sampler's per-item inputs: hoisted tables are served, not recomputed, in a replay
-        _capture.set_static_inputs(True)
+        _kernel_capture.set_static_inputs(True)
 
     gpu_name = torch.cuda.get_device_name(0)
     results_dir = target_dir(conf.level, conf.target) / "artifacts" / gpu_name
