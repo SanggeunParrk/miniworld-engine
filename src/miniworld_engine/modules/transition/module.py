@@ -126,7 +126,9 @@ class Transition(nn.Module):
         return self._residual_forward(x)
 
     def _requires_h100_cuda(self, x: torch.Tensor) -> bool:
-        from miniworld_engine.kernels.transition.cuda.fused_sm90a import native_aux_enabled
+        from miniworld_engine.kernels.transition.cuda.fused_sm90a import (
+            native_aux_enabled,
+        )
 
         return (self.implementation == ImplementationType.MINIWORLD
                 and x.is_cuda and native_aux_enabled(self.d_hidden)

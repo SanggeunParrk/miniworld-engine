@@ -375,7 +375,9 @@ class _PwaMath(torch.autograd.Function):
         dmask, dscale = None, 1.0
         if p_drop > 0:
             if not sm100 and native_aux_enabled():
-                from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
+                from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import (
+                    extension,
+                )
                 dmask = extension("pack").drop_keep(m, N, D, float(p_drop))
             else:
                 dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
@@ -523,7 +525,7 @@ def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask:
     out = PwaTrainFn.apply(msa.contiguous(), pair.contiguous(), pm, module.ln_msa.weight, module.ln_msa.bias, module.to_value.weight, module.to_gate.weight,
                             module.ln_pair.weight, module.to_bias.weight, module.to_out.weight, eps_m, eps_z, p_drop)
     if native_aux_enabled(msa) and torch.cuda.get_device_capability(msa.device) == (9, 0):
-        from .token_dit_train import _native_caller_hooks
+        from miniworld_engine.integrations.token_dit_train import _native_caller_hooks
         # Keep the result's autograd edges alive before hooking leaf nodes.
         _native_caller_hooks(msa, pair, *module.parameters(), force=_h100_training_default(msa))
     return out
@@ -532,6 +534,7 @@ def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask:
 class _SavedContext:
     eps: tuple[float, float]
     dscale: float
+    key_mask: torch.Tensor
     def save_for_backward(self,*tensors):self.saved_tensors=tensors
 
 
@@ -575,8 +578,7 @@ def _backward_math(args, kept, dy, eps_m, eps_z, p_drop):
     ctx.key_mask=args[2]
     ctx.saved_tensors=(args[0][0],args[1][0],*kept[:4],*args[3:],*((kept[4],) if p_drop else ()))
     gradients=_PwaMath.backward(ctx,dy)
-    out = [gradients[i] for i in (0,1,3,4,5,6,7,8,9)]
-    return out
+    return [gradients[i] for i in (0,1,3,4,5,6,7,8,9)]
 
 
 class PwaTrainFn(torch.autograd.Function):
@@ -591,7 +593,9 @@ class PwaTrainFn(torch.autograd.Function):
         vals=ctx.saved_tensors
         grads=_backward_op(list(vals[:10]),list(vals[10:]),dy,ctx.eps_m,ctx.eps_z,ctx.p_drop)
         if native_aux_enabled(vals[0]) and torch.cuda.get_device_capability(dy.device) == (9, 0):
-            from .token_dit_train import _activate_native_caller
+            from miniworld_engine.integrations.token_dit_train import (
+                _activate_native_caller,
+            )
             _activate_native_caller(force=_h100_training_default(vals[0]))
         return (*grads[:2],None,*grads[2:],None,None,None)
 

@@ -153,7 +153,9 @@ def _owned_blas_for(s: int, n: int, *, training: bool) -> bool:
 def _owned_mm(a, b, enabled: bool):
     if not enabled:
         return torch.mm(a, b)
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import (
+        owned_gemm_ext,
+    )
 
     return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, False)
 
@@ -427,7 +429,9 @@ def outer_product_mean(module, msa: torch.Tensor, mask: torch.Tensor, residual: 
         save_o = os.environ.get("MINIWORLD_OPM_TRAIN_SAVE_O", "1") != "0"
         out = OpmTrainFn.apply(*tensors, eps, save_o)
         if native_aux_enabled() and torch.cuda.get_device_capability(msa.device) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import _native_caller_output
+            from miniworld_engine.integrations.token_dit_train import (
+                _native_caller_output,
+            )
             leaves = (msa, *module.parameters(), *((residual,) if fuse else ()))
             out = _native_caller_output(out, *leaves, force=True)
     else:

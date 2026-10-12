@@ -193,7 +193,9 @@ def _owned_gemms90(single):
     if not (_native90(single.device)
             and os.environ.get("MINIWORLD_TOKEN_DIT_H100_OWNED_GEMMS", default) == "1"):
         return torch.mm, _mm32, torch.addmm
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import (
+        owned_gemm_ext,
+    )
 
     backend = owned_gemm_ext()
     tf32 = torch.backends.cuda.matmul.allow_tf32
@@ -253,8 +255,10 @@ def _native_caller_hooks(*tensors, force: bool = False):
             or torch.compiler.is_compiling()):
         return
     import threading
+
     from torch.autograd.graph import get_gradient_edge
     from torch.utils._python_dispatch import TorchDispatchMode
+
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
 
     kernels = ext(rpb=_native_rpb())
@@ -360,7 +364,7 @@ def _pack(P, qk, dev, at):
     if hit is not None and hit[0] == key:
         return hit[1]
     if native:
-        from miniworld_engine.integrations.token_dit import WEIGHTS, QK_WEIGHTS
+        from miniworld_engine.integrations.token_dit import QK_WEIGHTS, WEIGHTS
         from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
         names = WEIGHTS + (QK_WEIGHTS if qk else ())
         keys = ("w1", "w2", "Wraw", "Wn", "Wg", "bs1", "bs2", "bg1", "bg2", "Wqkvg", "bqkvg",
@@ -481,7 +485,7 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
-    mm, mm32, addmm = _owned_gemms90(single)
+    mm, _mm32, addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
@@ -503,12 +507,12 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     chat = torch.empty(M, DC, device=dev, dtype=at); cbf = None if own_c else torch.empty_like(chat)
     cst = torch.empty(M, 2, device=dev)
     pipeline = native and os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC", "0") == "1"
-    W = _pack(P, qk, dev, at) if pipeline else None
+    packed = _pack(P, qk, dev, at) if pipeline else None
     if native:
         T.cond_prep90(cond, chat, cbf, cst, EPS)
     else:
         T.cond_prep(c2, chat, cbf, cst, EPS)
-    W = W if pipeline else _pack(P, qk, dev, at)
+    W = packed if packed is not None else _pack(P, qk, dev, at)
     if pipeline:
         torch.cuda.current_stream(dev).wait_event(W["_cond_ready"])
     Wn, Wg = W["Wn"], W["Wg"]
@@ -583,7 +587,9 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     T.res_c(x1, z, Gg, bg2, out)
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
     qkv_out = [qn, kn, vsave] if copies else []
-    cbf = cbf if cbf is not None else c2.new_empty(0, DC, dtype=at)
+    if cbf is None:
+        assert c2 is not None  # cbf is None only when _own_cond (never native), which built c2
+        cbf = c2.new_empty(0, DC, dtype=at)
     # the sm_90a cores write og and the backward needs no O: H100 keeps none (not even a placeholder, which AOT mis-strides)
     return [out.view(single.shape), x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, *qkv_out, bias, *([] if h100 else [O]), LSE, og,
             y, x1, x1st, xt, ab, z, ph, pst]
@@ -631,7 +637,7 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     return dq, dk, dv, T.train_db_reduce90(db, fp32)
 
 def _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk):
-    from miniworld_engine.integrations.token_dit import WEIGHTS, QK_WEIGHTS
+    from miniworld_engine.integrations.token_dit import QK_WEIGHTS, WEIGHTS
     canonical = WEIGHTS + (QK_WEIGHTS if qk else ())
     P = dict(zip(names, params, strict=True))
     # The placeholders are not read by entries whose deterministic reduction is fused into the writer.
@@ -660,7 +666,7 @@ def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: tor
 
 
 def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H):
-    mm, mm32, addmm = _owned_gemms90(single)
+    mm, mm32, _addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext

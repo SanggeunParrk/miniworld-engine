@@ -420,7 +420,9 @@ class _Training(torch.autograd.Function):
                 grads = [g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)]
             else:
                 grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
-            from .token_dit_train import _activate_native_caller
+            from miniworld_engine.integrations.token_dit_train import (
+                _activate_native_caller,
+            )
             _activate_native_caller(force=True)
             return (None, None, None, dx, dz, *grads)
         return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
@@ -429,7 +431,7 @@ class _Training(torch.autograd.Function):
 def update_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     out = _Training.apply(module.ln_single.eps, module.ln_pair.eps, _mask(mask, single.shape[1]), single, pair, *_leaves(module))
     if torch.cuda.get_device_capability(single.device) == (9, 0):
-        from .token_dit_train import _native_caller_hooks
+        from miniworld_engine.integrations.token_dit_train import _native_caller_hooks
         # The result graph now owns its AccumulateGrad nodes. Installing on
         # fresh leaves before apply can hook a temporary weak-held node.
         _native_caller_hooks(single, pair, *module.parameters(), force=True)

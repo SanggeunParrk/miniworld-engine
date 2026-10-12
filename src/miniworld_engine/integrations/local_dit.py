@@ -627,7 +627,9 @@ def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
 
 
 def _owned_mm(a: torch.Tensor, b: torch.Tensor, fp32_output: bool = False) -> torch.Tensor:
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import (
+        owned_gemm_ext,
+    )
 
     return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output)
 
@@ -736,7 +738,7 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
                                    (A_ + "to_gate.weight", 0)])]
             names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
             fused = _fused_wgrads(spec, weights, names, False, dev, m)
-    grads = {
+    grads: dict[str, torch.Tensor] = {
         "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128], "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128],
         "attention.to_query.bias": dbq, "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb,
         "attention.to_scale.bias": dbias_cols[512:640], "transition.ada_ln_in.ln_cond.weight": dgamma_cond[128:],
@@ -754,6 +756,7 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         })
         if cross:
             grads["attention.to_key.weight"], grads["attention.to_value.weight"] = dwk, dwv
+            assert dbs is not None and dg_kv is not None  # both are set by the cross branch above
             grads.update({"attention.ada_ln_kv.ln_cond.weight": dg_kv, "attention.ada_ln_kv.to_scale.weight": dwm[:DS_],
                           "attention.ada_ln_kv.to_scale.bias": dbs, "attention.ada_ln_kv.to_bias.weight": dwm[DS_:]})
         per_weight = rows.grad_pack_hopper([grads[name] for name in WEIGHTS], weights[:len(WEIGHTS)])
@@ -762,6 +765,7 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         dpair = dz.view(pair.shape)
     else:
         if cross:
+            assert dbs is not None and dg_kv is not None  # both are set by the cross branch above
             grads.update({"attention.ada_ln_kv.ln_cond.weight": dg_kv, "attention.ada_ln_kv.to_scale.bias": dbs})
         per_weight = [fused[name] if name in fused else grads[name].to(w.dtype).reshape(w.shape).clone()
                       for name, w in zip(names, weights, strict=True)]
@@ -787,7 +791,9 @@ class _LocalBlock(torch.autograd.Function):
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
         grads = _block_bwd(dy, single, cond, pair, mask, list(weights), list(saved))
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import _activate_native_caller
+            from miniworld_engine.integrations.token_dit_train import (
+                _activate_native_caller,
+            )
             _activate_native_caller(force=True)
         return (None, *grads)
 
@@ -806,7 +812,9 @@ def block(module, single, cond, pair, mask=None):
     if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights)):
         out = _LocalBlock.apply(mask, single, cond, pair, *weights)
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import _native_caller_hooks
+            from miniworld_engine.integrations.token_dit_train import (
+                _native_caller_hooks,
+            )
             _native_caller_hooks(single, cond, pair, *weights, force=True)
         return out
     return _infer(single, cond, pair, mask, weights)

@@ -15,7 +15,10 @@ from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.integrations.h100_master import pack as pack_master
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.swa_dit.dispatch import (
-    native_h100_enabled, native_h100_cast, native_h100_mod_fwd, native_h100_mod_bwd,
+    native_h100_cast,
+    native_h100_enabled,
+    native_h100_mod_bwd,
+    native_h100_mod_fwd,
     swa_dit_block_bwd,
     swa_dit_block_fwd,
     swa_dit_mod_bwd_sm100,

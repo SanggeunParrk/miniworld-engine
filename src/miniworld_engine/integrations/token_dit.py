@@ -20,8 +20,8 @@ False -- and returns the first L rows.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 import os
+from types import SimpleNamespace
 
 import torch
 
@@ -233,8 +233,8 @@ def _infer(
 ) -> torch.Tensor:
     """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise)."""
     if torch.cuda.get_device_capability(single.device) == (9, 0):
-        from miniworld_engine.kernels.conditioned_transition import cuda
         from miniworld_engine.integrations.token_dit_train import _tf32
+        from miniworld_engine.kernels.conditioned_transition import cuda
         with _tf32(single.dtype is torch.float32):
             return cuda.token_inference(single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads)
     from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
@@ -274,6 +274,7 @@ def _infer(
         # LayerNorm over L^2 pair rows + a projection, ~40 % of a call at L = 768) is computed once per sample. Keyed by
         # the caller's pair / mask tensors (pointer, version, layout): a new pair, or an in-place change of it, misses.
         # Scoped as the pack: a capture computes the bias once (recorded), so each replay recomputes it from the pair it has.
+        assert mask is not None  # off sm_90 ``update`` fills a missing mask with all-True
         bkey = _capture.scoped((pair.data_ptr(), pair._version, tuple(pair.shape), pair.stride(), mask.data_ptr(), mask._version))
         hit = runner.__dict__.get("_bias_cache")
         L, L8 = single.shape[2], _pad8(single.shape[2])
@@ -299,9 +300,10 @@ _ALL_TRUE: dict = {}
 
 
 def update(module, single, cond, pair, mask):
-    if _native_fp32_inference(module, single) and mask is not None:
-        if mask.dtype is not torch.bool or mask.device != single.device or tuple(mask.shape) != (1, single.shape[2]):
-            raise ValueError("Hopper FP32 token inference requires a boolean [1,L] key mask")
+    if (_native_fp32_inference(module, single) and mask is not None
+            and (mask.dtype is not torch.bool or mask.device != single.device
+                 or tuple(mask.shape) != (1, single.shape[2]))):
+        raise ValueError("Hopper FP32 token inference requires a boolean [1,L] key mask")
     if mask is None and torch.cuda.get_device_capability(single.device) != (9, 0):
         # The native Hopper path accepts None without an ATen mask fill.
         k = (single.shape[2], single.device)
