@@ -1,7 +1,7 @@
 """sm_100a build and launch of the smooth lDDT kernels (``smooth_lddt.cu``).
 
 The cubin is built on first use by the newest nvcc here that knows sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``) and cached
-under ``MINIWORLD_ENGINE_JIT_ROOT``; launches go through the CUDA driver on torch's current stream (CUDA-graph capturable), the way the
+under ``settings.engine_jit_root()``; launches go through the CUDA driver on torch's current stream (CUDA-graph capturable), the way the
 ``token_pair_init`` and ``swa_dit`` sm_100a stages do. Plain CUDA-core kernels: the op is bound by the exponentials of the pair scores.
 """
 from __future__ import annotations
@@ -14,11 +14,13 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
+
 _dir = Path(__file__).parent
 BLK = 128   # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
 FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full)
 FULL_SMEM = 110 * 1024   # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
-FORCE_TILE = os.environ.get("MW_SLDDT_TILE", "0") == "1"
+FORCE_TILE = False  # tests set it to compare the tile kernel with the whole-structure one
 
 
 def _full(n: int) -> bool:
@@ -35,7 +37,7 @@ def cubin() -> str:
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     src = _dir / "smooth_lddt.cu"
     h.update(src.read_bytes())
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    root = settings.engine_jit_root()
     out = root / "smooth_lddt_sm100" / f"smooth_lddt_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
