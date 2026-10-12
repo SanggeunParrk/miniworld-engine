@@ -197,6 +197,16 @@ def _dg_direct() -> bool:
     return settings.current().bias_only_dit_bwd_dg
 
 
+def _fp32_logits(dev) -> bool:
+    """Hopper: the pair bias leaves the projection as fp32 logits (the mma accumulators, unrounded) into the softmax, instead of
+    being rounded to bf16 first. The rounding was the largest single error of the ln_pair / to_bias / pair gradients (ln_pair.weight
+    against fp64: 0.0107 -> 0.0090 at L384 A3 24 x 32, 0.0106 -> 0.0095 at L768 A16 16 x 64; the bf16 PyTorch block's 0.0088 / 0.0094);
+    it costs one fp32 [H, L, L] buffer (written and read once). MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS=0 (read per call) keeps the
+    bf16 logits. The sm_100a path is unchanged."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+    return h100_enabled(dev) and os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS", "1") != "0"
+
+
 def _bwd_fused(dev, H, DA):
     """(TailBwd, Wgrad) of ``kernels/bias_only_dit/cuda/bwd_fused.py`` when the fused bf16 backward is on (the default;
     settings.bias_only_dit_bwd_fused=0, read per call: the per-step launches) and its kernels built, else None."""

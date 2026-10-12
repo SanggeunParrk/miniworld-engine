@@ -170,8 +170,8 @@ def _build(name: str, src_name: str, native: bool | None = None, fp32_logits: bo
     native = (native_aux_enabled() if native is None else native) and src_name in ("pair3.cu", "dgv_bwd.cu", "pwa_glue3.cu")
     if native:
         name += "_native_v1"
-        if src_name == "pair3.cu" and not fp32_logits:
-            name += "_rounded_logits"
+    if src_name == "pair3.cu" and not fp32_logits:           # the opt-in BF16 logit rounding (-DMW_PWA_ROUND_LOGITS), either build
+        name += "_rounded_logits"
     if name in _EXT:
         return _EXT[name]
     from miniworld_engine.kernels._nvcc import load_extension as load

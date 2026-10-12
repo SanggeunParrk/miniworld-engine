@@ -14,9 +14,10 @@ constexpr int TILEB = GJ * DZ * 2;                        // one [16][128] bf16 
 
 __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
 __device__ __forceinline__ float bf16r(float x) {
-#if MW_PWA_CUDA_AUX && !MW_PWA_ROUND_LOGITS
-  // The fused projection feeds FP32 softmax directly, like the engine's fused
-  // reference. An extra BF16 logit rounding amplified dmsa error at L384.
+#if !MW_PWA_ROUND_LOGITS
+  // The fused projection feeds the FP32 softmax directly, like the engine's fused Triton path (whose logits are FP32 too).
+  // Rounding the logits to BF16 (-DMW_PWA_ROUND_LOGITS=1, the old "stock proj_z output is bf16" statement) costs ~1e-3 of
+  // output error at |logit| ~ 1-4 and nothing is saved by it; the opt-in build stays for the A/B.
   return x;
 #else
   return __bfloat162float(__float2bfloat16(x));
