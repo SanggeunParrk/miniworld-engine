@@ -687,6 +687,7 @@ def _run_tail(op, ins, A, L, H, DA):
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize(("L", "A"), [(128, 1), (384, 3), (768, 2), (256, 24)])
 def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
+    _sm100_only()
     """bo_bwd_tail.cu alone on random inputs against fp64: every output it writes (a NaN-filled buffer shows a missing write), the
     column-sum partials, bit-identical on a rerun; no local memory."""
     H, DA, D = n_head, n_head * d_head, 768
@@ -743,6 +744,7 @@ def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
 @pytest.mark.parametrize("M", [128, 384, 3072, 18432])
 @pytest.mark.parametrize("f32", [False, True])
 def test_fused_backward_wgrad_kernel_against_fp64(da, M, f32):
+    _sm100_only()
     """bo_wgrad.cu alone: the six weight gradients (bf16 or fp32 out) and the unfold (dWraw = dWn w, the cond-LN partials over 16
     rows) against fp64; bit-identical on a rerun; no local memory."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
