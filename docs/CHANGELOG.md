@@ -4,7 +4,7 @@ Notable changes to the public API (`miniworld_engine.kernels`) are recorded
 here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-The public surface is enforced by `tests/compile/test_public_api.py`.
+The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
@@ -27,8 +27,24 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - B200 SWA atom DiT: the forward chain (modulation -> qkvg -> attention -> ffn, PDL) hung in CUDA-graph replays with one conditioning
   row per sample (A = 1, B = N) and ragged `seqused`. `ffn_fwd2_a1` (the A = 1 - 3 build of the last kernel) is built with `-DPDL_EARLY=0`
   (no early `griddepcontrol.launch_dependents`), and `qkvg_fwd2_a1` the same way (faster); the other builds are unchanged. A1 inference after the change: 0.031-0.043 ms for
-  1024-4096 atoms (harness). Test: `tests/integrations/test_b200_swa_dit_graph_replay_gpu.py`; page:
+  1024-4096 atoms (harness). Test: `tests/gpu/sm100/test_b200_swa_dit_graph_replay_gpu.py`; page:
   `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md` ("Fixed (2026-10-11)").
+### Changed
+
+- H100 OuterProductMean training: the persistent TMA prologue now serves every training cell at S 1024 / 2048 / 4096 (it was only
+  (1024, 384) and (1024, 768)); the non-TMA prologue was 5-6x slower than the legacy Triton one. Training is up to 19 % faster (L128 S1024) and 6-10 % at S >= 2048; the two
+  cells that already used it are unchanged. It now runs at 80-100 % of the H100 speed-of-light floor. The mask count comes from the bit mask with one new kernel (`opm_count_tiled`,
+  exact) instead of the four-launch fp32 cuBLAS product; `MINIWORLD_OPM_H100_CUBLAS_COUNT=1` restores it. Training and inference
+  forwards are not bitwise equal at the cells whose inference path is the legacy Triton prologue. Page `docs/gpus/h100/opm/opm.md`,
+  record `docs/records/h100_opm_sol_20261007.md`.
+
+- H100 MSAPairWeightedAveraging: `ln_pair` has no beta any more (it cannot change the softmax over keys; its gradient is 0), so the
+  H100 training step no longer recomputes that gradient in fp32 and is 4.5-5.6x faster (L768 S1024: 17.95 -> 3.31 ms). A checkpoint's
+  `ln_pair.bias` is ignored when loading. dv runs on cuBLAS, and from N = 512 the contraction does too, followed by a new gate / out
+  kernel (`pwa_gateout.cu`): inference L768 -18 %, training L768 -7 %. The forward output at N >= 512 is no longer bit-identical to the
+  fused kernel's (o is rounded to bf16 before the gate); every gradient is. Removed the beta-shadow environment variables and
+  `MINIWORLD_PWA_H100_CLUSTER`; `MINIWORLD_PWA_TRAIN`, `MINIWORLD_PWA_INFER` and `MINIWORLD_PWA_H100_CUDA_AUX` remain. Record
+  `docs/records/h100_pwa_20261008.md`.
 
 ### Added
 
@@ -40,7 +56,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   page and the kernel-level tables are unchanged.
 - Inference with fp32 master parameters on B200 caches the bf16 forms of the weights (`kernels._capture.param_forms`, keyed on
   pointer / version / dtype, scoped to the CUDA-graph capture like the weight packs): APB at L128 0.035 -> 0.025 ms, SWA A1 at 1024
-  atoms 0.045 -> 0.031 ms, TriMul / Transition 4-15 %. Test: `tests/integrations/test_b200_fp32_master_inference_cache_gpu.py`.
+  atoms 0.045 -> 0.031 ms, TriMul / Transition 4-15 %. Test: `tests/gpu/sm100/test_b200_fp32_master_inference_cache_gpu.py`.
 - Bias-only DiT bf16 attention core (`pv_gate_inf.cu`): the three-kernel inference step's core loads P before its PDL wait
   (`-DP_EARLY`, `PvGateCore(p_early=True)` from the runner only; v, g and the output stay after the wait). Safe because P is the
   runner's hoisted / per-call softmax, written before the step, and the step's first front is now launched without the
@@ -50,7 +66,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   L512 55.5 / 55.9, L640 73.2 / 73.9, L768 77.0 / 77.3.
 - Bias-only DiT bf16 core at training shapes: 256 keys per v tile at L768 for 16 x 48 with S >= 16 (was 192). A = 48, us (in-process
   A/B): forward pv 65.21 -> 58.28, standalone dV 55.15 -> 49.94. Other layouts / lengths unchanged.
-  Tests: `tests/integrations/test_b200_bias_only_dit_gpu.py` (`test_pv_core_*`); page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`
+  Tests: `tests/gpu/sm100/test_b200_bias_only_dit_gpu.py` (`test_pv_core_*`); page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`
   (I1, with the TRACE-build per-role timeline of the core, `-DTRACE` now %globaltimer into `g_trace`, and the schedule tried and
   not kept: P interleaved into sample 0, one-lane MMA issue, batched slot releases -- slower everywhere, e.g. step L768 76.8 -> 84.2).
 - Bias-only DiT hoisted pair bias: `miniworld_engine.modules.bias_only_dit.pair_bias_all(blocks, pair)` makes every block's pair bias
@@ -62,7 +78,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   The d LN0 backward rows also write the dW' GEMM's operand as a two-term bf16 split of LN0 (exact to ~2^-17), so ln_pair / to_bias
   gradients carry no LN0 rounding. 24 blocks of 16 x 48, A = 48, bf16 training step (CUDA graph, median of 9): L384 29.130 -> 28.051
   ms (-3.7 %), L768 57.596 -> 53.779 ms (-6.6 %); peak memory 13.90 -> 14.03 / 27.95 -> 28.52 GiB.
-  Tests: `tests/integrations/test_b200_bias_only_dit_hoist_gpu.py`; page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (T7);
+  Tests: `tests/gpu/sm100/test_b200_bias_only_dit_hoist_gpu.py`; page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (T7);
   scripts: `bench_scripts/bo_hoist_bench.py`, `bench_scripts/bo_hoist_diag.py`.
 - B200 bf16 bias-only DiT training backward fused from 23 launches per block to 11 (12 at L768), now the default
   (`MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED=0` keeps the per-step launches; a failed build warns once and does the same):
@@ -77,7 +93,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   (on: one launch fewer at the same speed). `bo_bwd_mid.cu` (the dxa / dcg GEMMs, adaln_a_bwd, the dchat GEMM + cond_bwd in three
   launches: 9 per block) is behind `_BWD_MID=1`, off: 141.5 -> 148.9 / 278.5 -> 300.7 us (TMA-intake bound GEMM items, an exposed
   cond-LN epilogue). The weight pack (`pack16`) gained scaled transposes and 48 segments for the kernels' K-major weights. Tests:
-  `tests/integrations/test_b200_bias_only_dit_train_gpu.py` (`test_fused_backward_*`; the steady-memory test now warms up two steps);
+  `tests/gpu/sm100/test_b200_bias_only_dit_train_gpu.py` (`test_fused_backward_*`; the steady-memory test now warms up two steps);
   page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (Training, T6); traces: `bench_scripts/bo_bwd_trace.py`.
 - B200 bf16 bias-only DiT training step, three changes (now the defaults): the weight pack in one launch (`pack16`, bit-identical
   to the torch casts / cats it replaces; a captured training step repacks every replay: 49.7 / 57.2 -> 9.6 / 11.2 us at L384 / L768,
@@ -88,7 +104,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   -37.3 us. The fp32 step takes the TF32 build of `dpbx2_sm100.cu` (`-DTF32`) by the same rule (L768 148.2 -> 104.0 us;
   `MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0` keeps `dpb32_sm100`). Fused GEMM epilogues
   for the backward (dh + SwiGLU backward, d(og) + gate backward) and the forward expand were measured and not kept (L2-bound, no
-  gain; page: "What was tried and not kept"). Tests: `tests/integrations/test_b200_bias_only_dit_train_gpu.py`,
+  gain; page: "What was tried and not kept"). Tests: `tests/gpu/sm100/test_b200_bias_only_dit_train_gpu.py`,
   `test_b200_bias_only_dit_tf32_gpu.py` (`test_dpb_pair_tf32_*`); page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (Training, T3).
 - B200 bf16 bias-only DiT inference as three kernels per block, now the default bf16 inference step: `bo_front_bf16` (LN + AdaLN +
   the v|g GEMM), `pv_gate_inf -DPDL_INF`, `bo_tail_bf16` (out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM,
@@ -98,7 +114,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   and fp32 after, the last tail writing bf16 (no cast kernel). `MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=0` keeps the 12-launch bf16 step
   (also the fallback when the kernels fail to build); `_INF3_CL` / `_INF3_TAIL_CL` (8 / 6 / 4 = the pair tail) force a cluster size.
   One block, A = 5, 16 x 48 (whole-step graph replay): 47.4 / 59.6 / 69.3 / 86.2 / 97.7 / 104.2 -> 41.1 / 45.1 / 47.0 / 57.5 / 75.4 /
-  78.7 us at L128-768; vs PyTorch compiled (bench.py, bf16-mixed, graphs) 1.66 / 1.92 / 2.24 / 2.39 / 2.36 / 2.65x. Tests: `tests/integrations/test_b200_bias_only_dit_gpu.py`
+  78.7 us at L128-768; vs PyTorch compiled (bench.py, bf16-mixed, graphs) 1.66 / 1.92 / 2.24 / 2.39 / 2.36 / 2.65x. Tests: `tests/gpu/sm100/test_b200_bias_only_dit_gpu.py`
   (`test_inf3_bf16_*`, `test_front_bf16_*`, `test_tail_bf16_*`, `test_tail2_bf16_*`); page:
   `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (I0).
 - B200 fp32 bias-only DiT inference, pair tail: `bo_tail2_tf32` runs the tail as a cluster of 8 = two row tiles x four column
@@ -112,7 +128,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   exchange their GEMM operands through L2 scratch. `MINIWORLD_BIAS_ONLY_DIT_INF3=0` keeps the 12-launch cuBLAS + rows step (also the
   fallback when the kernels fail to build); `_INF3_CL` / `_INF3_TAIL_CL` force a cluster size. One block, A = 5, 16 x 48 (whole-step graph
   replay): 69.8 / 92.0 / 118.9 / 139.4 / 176.5 / 198.7 -> 62.0 / 69.2 / 75.9 / 100.7 / 138.7 / 144.8 us at L128-768
-  (0.64-0.79x at L256-768). Tests: `tests/integrations/test_b200_bias_only_dit_tf32_gpu.py` (`test_inf3_*`,
+  (0.64-0.79x at L256-768). Tests: `tests/gpu/sm100/test_b200_bias_only_dit_tf32_gpu.py` (`test_inf3_*`,
   `test_front_kernel_*`, `test_tail_kernel_*`); page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (F5).
 - B200 fp32 bias-only DiT training, faster: `dpb32_sm100.cu` (the fp32 port of the bf16 `dpb_sm100.cu`) for the bias gradient; the
   pair bias and its backward on TF32 `mma.sync`; the dh GEMM with the SwiGLU backward in its epilogue (`gemm_glu_tf32.cu`); the six
@@ -133,7 +149,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   builds of the same sources: they replace the separate K / V row kernels and the two K / V cuBLAS GEMMs, and add the K / V branch's dx1 before
   AdaLN 1's backward), half-warp 16-byte row kernels for the conditioning LayerNorm (`lcross.cu`), and the key mask passed as a uint8 view
   instead of a converted copy. One block, A = 48, 4096 atoms (CUDA graph): cross-attention bf16 2.52 -> 1.58 ms, fp32 4.33 -> 3.84 ms;
-  shared-AdaLN bf16 1.38 ms (2.59 ms at 8192 atoms). Tests: `tests/integrations/test_b200_atom_dw_gpu.py`, `test_b200_local_dit_gpu.py`,
+  shared-AdaLN bf16 1.38 ms (2.59 ms at 8192 atoms). Tests: `tests/gpu/sm100/test_b200_atom_dw_gpu.py`, `test_b200_local_dit_gpu.py`,
   `test_b200_local_dit_tf32_gpu.py`; page: `docs/gpus/b200/local_dit/local_dit.md`.
 - B200 atom-block tile kernels (`sm100_atom`, the local DiT's row kernels): the TMA stores of `post_fwd`, `tr_bwd_gate`,
   `post_bwd`, `pre_bwd` and `cond_bwd` are issued and waited for by a lane of the producer warp instead of the compute leader (`post_fwd`
@@ -150,26 +166,26 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   4x its accuracy. Page: `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`.
 - B200 token DiT: fp32 (TF32) at every head layout (16 x 48, 24 x 32, 12 x 64, 16 x 64); `DiTBlock.forward` serves [A, B, L]
   masks with shared rows on the fused path (they used to take the per-op path in bf16 and fp32); the fused training op pads odd A
-  and L % 128 != 0 instead of refusing. Tests: `tests/integrations/test_b200_token_dit_tf32_layouts_gpu.py`; page:
+  and L % 128 != 0 instead of refusing. Tests: `tests/gpu/sm100/test_b200_token_dit_tf32_layouts_gpu.py`; page:
   `docs/gpus/b200/token_dit/token_dit.md`.
 - B200 fp32 path of the bias-only token DiT (`kernels/bias_only_dit/cuda/tf32.py`, `pv_gate_tf32.cu`, `dpb_tf32.cu`,
   `bias_only_dit_f32_rows.cu`): inference and training, every head layout, TF32 MMA. Tests:
-  `tests/integrations/test_b200_bias_only_dit_tf32_gpu.py`; page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`.
+  `tests/gpu/sm100/test_b200_bias_only_dit_tf32_gpu.py`; page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`.
 - B200 fp32 path of the AF3 local atom DiT (`integrations/local_dit.py` ops `local_dit_block_{fwd,bwd}_tf32`; kernels
   `sm100_atom_local/*_tf32.cu`, `sm100_atom/gemm_tf32.cu`, `rows_tf32.cu`): inference and training with fp32 activations and
   parameters on TF32 MMA (operands rounded to nearest); fp32 calls no longer fall back to the module path. Tests:
-  `tests/integrations/test_b200_local_dit_tf32_gpu.py`; page: `docs/gpus/b200/local_dit/local_dit.md`.
+  `tests/gpu/sm100/test_b200_local_dit_tf32_gpu.py`; page: `docs/gpus/b200/local_dit/local_dit.md`.
 - B200 fp32 SWA atom DiT on TF32 sm_100a kernels (`kernels/swa_dit/cuda/sm100/*_tf32.cu`, `tf32_fwd.py`, `tf32_bwd.py`): forward,
   backward and the hoisted modulation, fp32 activations with TF32 MMA on round-to-nearest operands (attention operands fp32, not
   bf16). Replaces the Triton fp32 path on B200 (`MINIWORLD_SWA_DIT_TF32=0` keeps it); compiles under `torch.compile(fullgraph=True)`.
-  Tests: `tests/integrations/test_b200_swa_dit_tf32_gpu.py`, `test_b200_swa_dit_tf32_bwd_gpu.py`; page:
+  Tests: `tests/gpu/sm100/test_b200_swa_dit_tf32_gpu.py`, `test_b200_swa_dit_tf32_bwd_gpu.py`; page:
   `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`.
 - `kernels._capture.static_weights()` / `MINIWORLD_STATIC_WEIGHTS=1`: declares that weights stay fixed between the replays of a CUDA graph
   (inference), so the weight-pack caches serve a capture like an eager call and a replay no longer re-runs the packing kernels. The
   capture scoping of the weight-pack caches (previous entry) repacks at every replay -- right when an optimizer step follows, but a token
   DiT inference block replayed in a graph went from 84 us to 200 us (58 kernels instead of 12), the bias-only DiT, AttentionPairBias and
   atom DiT inference likewise. Default unchanged (scoped); the benchmark harness sets it for `mode=inference`. Test:
-  `tests/integrations/test_b200_pack_cache_capture_gpu.py` (`-k static`).
+  `tests/gpu/sm100/test_b200_pack_cache_capture_gpu.py` (`-k static`).
 - `kernels._capture.static_inputs()` / `MINIWORLD_STATIC_CONDITIONING=1` and the AF3 (block-local) atom DiT hoist: in inference, the per-item
   conditioning tables (AdaLN modulation, cross-mode conditioning LayerNorm and K/V modulation GEMM) and the windowed pair bias are computed
   once per (tensor, in-place version, weights) and reused by later calls; under `static_inputs()` a CUDA-graph capture serves from the eager
@@ -187,18 +203,18 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   TriangleAttention and the token / bias-only DiT already were). The integrations cast the parameters for the kernels inside their
   autograd functions and return the kernels fp32 weight-gradient accumulators unrounded, in each parameters dtype; the SWA DiT and
   token pair init no longer refuse fp32 weights over bf16 activations (token pair init also takes bf16 `left` / `right`). Tests:
-  `tests/integrations/test_b200_fp32_master_gpu.py`; page: `docs/gpus/b200/b200.md`.
+  `tests/gpu/sm100/test_b200_fp32_master_gpu.py`; page: `docs/gpus/b200/b200.md`.
 - B200 TriMul with a hidden width twice the pair width, one direction, at D64 / D128 (`TriangleMultiplication(d_pair, d_hidden=2 *
   d_pair)`: AF3 / Protenix template blocks, pair 64, hidden 128): served by the D64 / D128 kernels unchanged -- per token it has the
   bidirectional block's shapes (4 D planes, LN_out over 2 D), only the cuBLAS contraction between the kernels pairs the planes in one
   direction over all 2 D channels. Inference and training, B <= 8 samples at D64, dropout, CUDA graphs (`b200_infer.hidden_ok`).
-  Tests: `tests/integrations/test_trimul_b200_gpu.py` (`-k hidden`); page: `docs/gpus/b200/trimul/trimul.md`.
+  Tests: `tests/gpu/sm100/test_trimul_b200_gpu.py` (`-k hidden`); page: `docs/gpus/b200/trimul/trimul.md`.
 - B200 (sm_100a) block-local AF3 atom transformer block `modules/local_dit.LocalDiTBlock` (ops `local_dit_block_fwd` / `local_dit_block_bwd`):
   AF3 Alg. 23 with the 32 x 128 trunked attention (atom `i` sees the atoms `[32 (i // 32) - 48, 32 (i // 32) + 80)`, per-window pair bias
   from the trunked atom pair `[B, nwin, 32, 128, d_pair]`, `to_windows` makes it from a dense pair), hand-CUDA `mma.sync` attention and
   pair-bias kernels (`kernels/augmented_attention/cuda/sm100_atom_local`, forward and backward) on the atom DiT's row kernels. Inference and
   training, any N, optional key mask, eager / `torch.compile` / CUDA graph; A48 N4096 training 1.90 ms (7.4x the PyTorch path). Page:
-  `docs/gpus/b200/local_dit/local_dit.md`; tests: `tests/integrations/test_b200_local_dit_gpu.py`, `tests/numerics/test_local_dit_reference.py`.
+  `docs/gpus/b200/local_dit/local_dit.md`; tests: `tests/gpu/sm100/test_b200_local_dit_gpu.py`, `tests/cpu/kernels/test_local_dit_reference.py`.
 - B200 atom DiT block (`integrations/atom_dit`) is now two opaque ops under an autograd Function: it is served under `torch.compile` and
   in CUDA graphs (it used to refuse inside a compiled graph and take the module path); the weight pack is reused per parameter version and
   rebuilt inside a graph capture. Tests: `tests/integrations/test_b200_atom_dit_gpu.py`.
@@ -206,30 +222,30 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   feature embedder's `left[i] + right[j] + Linear(relative-position one-hot) + Linear(bond one-hot)` as one kernel pair that never builds
   the 139-wide fp32 one-hot (84 MB at 384 tokens), in exact fp32, any B and ragged L, CUDA-graph capturable. 5.6-16.9x the dense
   reference forward and 4.0-6.2x forward + backward at L128-768. Page: `docs/gpus/b200/token_pair_init/token_pair_init.md`; tests:
-  `tests/integrations/test_token_pair_init_gpu.py`.
+  `tests/gpu/any/test_token_pair_init_gpu.py`.
 - `modules.swa_atom_attention`: the FlashAttention-4 forward saves its output and lse and the backward reads them (`flash_window_fa4`,
   `settings.swa_flash_saves_lse`, default on) instead of re-running the flash forward and cleaning q / k / v / dq / dk / dv with about 11
-  eager launches per block; same numbers (`tests/integrations/test_swa_fa4_attention_gpu.py`). The legacy op stays behind the setting.
+  eager launches per block; same numbers (`tests/gpu/any/test_swa_fa4_attention_gpu.py`). The legacy op stays behind the setting.
 - B200 SWA atom DiT block: a global-attention variant (`kernels/swa_dit.interface.is_global`, a window `< 0` or `>= 65536`) that runs
   FlashAttention-4 between the sm_100a stages (bf16, B200). Slower than the per-op path at A = 1, so callers opt in. Tests:
-  `tests/integrations/test_b200_swa_dit_global_gpu.py`.
+  `tests/gpu/sm100/test_b200_swa_dit_global_gpu.py`.
 - B200 (sm_100a) AttentionPairBias (the Pairformer single track): `AttentionPairBias.forward` runs hand-written CUDA and
   cuBLAS only through `integrations/attention_pair_bias_b200.py` (`kernels/augmented_attention/cuda/apb/`: pair LayerNorm +
   projection and its backward on TMA rings, the sm_100a attention cores, CUDA row kernels) for implementation MINIWORLD, bf16,
   B = 1, no QK-norm, (heads, d_single) in 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 at 384 and 16 x 32 at 512, d_pair 128;
   inference at L % 16 == 0, training at L % 128 == 0. `bench.py` (+`apb_n_head`, `apb_anthropic_core`): inference 1.17-1.66x
   the fastest other row, training with CUDA graphs 1.38-1.90x. Page: `docs/gpus/b200/attention_pair_bias/attention_pair_bias.md`;
-  tests: `tests/integrations/test_b200_apb_gpu.py`, `tests/numerics/test_apb_b200_gpu.py`.
+  tests: `tests/gpu/sm100/test_b200_apb_gpu.py`, `tests/gpu/sm100/test_apb_b200_gpu.py`.
 - B200 token DiT head layouts: the sm_100a attention cores and the fused token DiT paths also serve 24 x 32 and 12 x 64 at
   d768 and 16 x 64 at d1024 in bf16 (16 x 48 stays the only fp32 layout); `bench.py +tdit_n_head`. Tests:
-  `tests/integrations/test_b200_token_dit_layouts_gpu.py`, `tests/numerics/test_tdit_heads_sm100_gpu.py`.
+  `tests/gpu/sm100/test_b200_token_dit_layouts_gpu.py`, `tests/gpu/sm100/test_tdit_heads_sm100_gpu.py`.
 - B200 (sm_100a) SWA atom DiT block: the fused block of `kernels/swa_dit` (what `SWADiTBlock` takes) runs every stage on
   hand-written kernels on B200 in bf16 (`kernels/swa_dit/cuda/sm100/`: qkvg forward / backward, window attention forward and
   dQ / dK dV, out-projection backward, out-projection + FFN forward, FFN backward; the weight gradients on cuBLAS, dWqkv | dWg
   as one GEMM), and the hoisted adaLN modulation on `mod_fwd` / `mod_bwd`. The atom count must be a multiple of 128 there
   (callers pad; `seqused` masks the padding) -- the block raises `ValueError` otherwise. `MINIWORLD_SWA_DIT_SM100=0` keeps the
   Triton path. Sources from the research capsule `experiments/swaatom_sm100`; tests:
-  `tests/integrations/test_b200_swa_dit_gpu.py` (the Triton tests in `tests/numerics/test_swa_dit_fused_gpu.py` pin that path).
+  `tests/gpu/sm100/test_b200_swa_dit_gpu.py` (the Triton tests in `tests/gpu/any/test_swa_dit_fused_gpu.py` pin that path).
 - B200 atom DiT (`integrations/atom_dit.py`): the sm_100a path now serves a [B, N] key mask and any atom count N, so MiniWorld's
   atom transformer (which always passes the structure's `atom_mask`) takes it. N is padded to a multiple of 128 inside the call
   (the padded keys masked, the pair tensor read in place); `pair_bias.cu` folds the mask and the padding into the pair bias
@@ -257,7 +273,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   release's own builder and manifest; `integrations.anthropic_trimul` registers cc 10.0 as `sm_100a` in the release's loader and
   assembles the member as `sm80_ops.serve_sm80` does (K1 -> torch.bmm -> K3; the bidirectional module as one unit at twice the
   hidden width). Served: one direction D64-D384, bidirectional D64 / D128; everything else refuses with the reason. The harness's
-  `anthropic` row runs it through `ANTHROPIC_TRIMUL_BUILD_DIR`; `tests/integrations/test_anthropic_trimul_b200_gpu.py` (23 tests)
+  `anthropic` row runs it through `ANTHROPIC_TRIMUL_BUILD_DIR`; `tests/gpu/sm100/test_anthropic_trimul_b200_gpu.py` (23 tests)
   checks it against the fp32 reference.
 - `miniworld_engine.viz.measure_bars`: a length sweep and a dimension sweep bar chart under every measurement table of a GPU page
   (the rule is in docs/gpus/README.md). Tables keyed `(Length, MSA depth)` get an MSA-depth sweep instead of the dimension one;
@@ -280,7 +296,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   Page: `docs/gpus/b200/bias_only_dit/bias_only_dit.md`.
 - B200 TriMul, D64 native path: B samples (B <= 8) in one call (tokens b-major, per-sample token mask and row-dropout scale, the plane bmm batched
   over d x B) instead of B calls; MiniWorld's template embedder runs its templates this way. 1.1-2.1x the B sequential calls at L128-384
-  in inference, 1.2-2.6x in training (page: `docs/gpus/b200/trimul/trimul.md`); tests: `tests/integrations/test_b200_trimul_batch_gpu.py`.
+  in inference, 1.2-2.6x in training (page: `docs/gpus/b200/trimul/trimul.md`); tests: `tests/gpu/sm100/test_b200_trimul_batch_gpu.py`.
   `integrations.trimul_b200.MAX_BATCH` (8) states the limit for callers that fold samples into the batch; on an engine without it a B > 1 call
   takes the slow path.
 
@@ -304,7 +320,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   `opm_pbwd_reduce` is removed). Harness speedup over the fastest other row: inference 1.16-1.57x, training (CUDA graph)
   1.24-1.57x.
 - The forward fakes of the B200 OPM / PWA custom ops return the sm_100a saved-tensor shapes (compiled training on B200).
-- `tests/integrations/test_{opm,pwa}_train_gpu.py` run on B200 as well; new: dropout in `pwa_glue2` matches a materialized
+- `tests/gpu/any/test_{opm,pwa}_train_gpu.py` run on B200 as well; new: dropout in `pwa_glue2` matches a materialized
   gradient bit for bit, and the B200 PWA output, gradients and inference update stay within 1.15x of the module's own bf16
   statements' error against an fp32 copy (the out / dmsa tolerance against the Triton path is 8e-3 on B200).
 - B200 TriMul D128 bidirectional training runs the shared D64 / D128 kernels (k1w -> k3g -> b1g at H = 256 -> b7g at
@@ -331,7 +347,7 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   compute capability 10.0); other cards are unchanged. `settings.b200_engine_triton` (default off) keeps the engine's Triton kernels on a
   B200. A strict `engine_backend="triton"` process still wins. The PyTorch `RMSNorm` that stands in for the kernel returns the
   input dtype like the kernel does (torch's `rms_norm` returns fp32 under autocast, which gave the attention's Triton kernels an
-  fp32 q next to a bf16 k). Tests: `tests/compile/test_b200_norm_dispatch.py`.
+  fp32 q next to a bf16 k). Tests: `tests/cpu/compile/test_b200_norm_dispatch.py`.
 
 ### Fixed
 
@@ -341,12 +357,12 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   phase-2a bf16-mixed run (one gate at g = -88.5). The denominator is now clamped at 2^125 before the seed (NaN still propagates)
   in `pv_gate_inf.cu`, `cond_tables_sm100.cu` (opt-in; its f16 exponent overflowed already from g < -11) and the shared `rcp_nr`
   (`gemm_resln_sm100.cu`, opt-in). Supersedes the unpushed 5a46c2ef (pv_gate_inf only), whose two core tests are kept.
-  `tests/integrations/test_b200_bias_only_dit_extreme_gates_gpu.py`: gates from -1e4 to +1e4 through the core, and blocks whose
+  `tests/gpu/sm100/test_b200_bias_only_dit_extreme_gates_gpu.py`: gates from -1e4 to +1e4 through the core, and blocks whose
   gate / scale pre-activations reach several hundred through every bf16 / fp32 inference and training path, finite and within
   bounds. Speed unchanged (bf16 inference L768 78.2 -> 78.4 us).
 - Triton augmented attention, memory-efficient path (`compute_efficient=False`): a head dim below 16 padded its dot lanes to
   `next_power_of_2(D)` (8 for D = 8), under `tl.dot`'s K >= 16, so the kernels did not compile; it now pads to at least 16 as the
-  compute-efficient path does (the padded lanes are masked loads of zero). `tests/numerics/test_augmented_attention_small_head_gpu.py`
+  compute-efficient path does (the padded lanes are masked loads of zero). `tests/gpu/any/test_augmented_attention_small_head_gpu.py`
   also picked a 32 x 32 tile that the B200 config set does not have (all 12 cases failed there); it now takes the smallest w4 / s2 tile
   of the active set (32 x 32 where there is one). 12 passed on B200.
 - B200 token DiT attention cores could hang under concurrent GPU work (seen as a CUDA graph with two concurrent branches -- a sampling
@@ -366,13 +382,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   calls; a capture packs once, recorded, so each replay repacks the current weights, and reuses that pack for its other calls; entries of
   finished captures are dropped. The atom DiT and SWA DiT caches, which bypassed the cache during a capture, now also pack once per
   capture instead of at every call. Updates that bypass the version counter (torch's fused optimizers) still need
-  `torch.autograd.graph.increment_version(params)` after the step. Tests: `tests/integrations/test_b200_pack_cache_capture_gpu.py`
+  `torch.autograd.graph.increment_version(params)` after the step. Tests: `tests/gpu/sm100/test_b200_pack_cache_capture_gpu.py`
   (seven of its nine replay cases fail before the change).
 - B200 SWA atom DiT weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) keyed on (data_ptr, version, shape) served the old
   tensor's packed copy to a new weight placed at a freed one's address (a bf16 cast, the next test's weights). It is keyed on the tensor
   objects now (weak references plus version), and bypassed while a CUDA graph is captured (a hit would record no pack kernel, so every
   replay would read the packed weights of the capture-time step) and for inference tensors. Tests:
-  `tests/integrations/test_swa_dit_pack_cache.py`.
+  `tests/gpu/any/test_swa_dit_pack_cache.py`.
 - B200 OuterProductMean training was not deterministic from run to run at L >= 384 (whole rows of one group): the prologue
   backward released an input stage to the next TMA load while its generic shared-memory reads could still be in flight. A
   `fence.proxy.async.shared::cta` before the release fixes it; the same fence now precedes the stage releases of the PWA
@@ -719,7 +735,7 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
   than anything observed. Calibration only tightens — the two kernels already measuring close to
   the global band (`adaln_fwd_saveact_triton` 2.77e-2, `triangle_attention_bwd_atomic_triton`
   1.44e-2) keep `5e-2` rather than being handed something looser. Median band is now `1.1e-2`,
-  a 5x tightening. `tests/registry/test_declared_tolerance.py` fails if a band drops below what
+  a 5x tightening. `tests/cpu/registry/test_declared_tolerance.py` fails if a band drops below what
   the kernel measured, or drifts far above it.
 - **`settings.AutotuneKernel` is three names, and an unknown one now raises.** It declared
   seven; four of them (`tri_multi`, `layernorm`, `layer_norm_linear`, `augmented_attention`)
@@ -754,11 +770,11 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
   fwd/bwd inside), consumed as a single call: `triangle_multiplicative_update`,
   `triangle_attention`, `transition`, `conditioned_transition`,
   `augmented_attention_pair_bias`, `layer_norm_linear`, `layer_norm`. Lazy,
-  side-effect-free import; pinned by `_OPS_CONTRACT` in `tests/compile/test_public_api.py`.
+  side-effect-free import; pinned by `_OPS_CONTRACT` in `tests/cpu/compile/test_public_api.py`.
   Verified fwd+bwd vs the pytorch/cuequiv reference on B200 (≥0.9998).
-- Public API contract test (`tests/compile/test_public_api.py`): freezes the
+- Public API contract test (`tests/cpu/compile/test_public_api.py`): freezes the
   `kernels` surface and asserts the package import is side-effect-free.
-- Numerical correctness suite (`tests/numerics/test_numerical.py`): each op's fused
+- Numerical correctness suite (`tests/gpu/any/test_numerical.py`): each op's fused
   MINIWORLD backend vs the PyTorch reference (forward + input gradient),
   GPU-gated, asserting the fused path is actually engaged (no silent
   dtype-degrade). Promotes the benchmark cosine checks into an enforced
@@ -800,7 +816,7 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
   an old name in their `run_name`/`target`/`implementation` columns were rewritten in
   place; **no measured value changed** (checked cell by cell), and the 40 plots whose
   drawn title named the old target were re-rendered from those same tables.
-  `tests/layout/test_bench_target_vocabulary.py` now holds the four name spaces —
+  `tests/cpu/layout/test_bench_target_vocabulary.py` now holds the four name spaces —
   bench.py's tables, the CLI's, `builder.CASE_NAMES`, and the directory tree — to
   each other.
 - **Each bench target loads its own config.** `@hydra.main(config_path=...)` was the
@@ -832,7 +848,7 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
   `swa_atom_attention.py` were flat files. They are now packages like the other eight,
   and `modules/ops.py` — one level below `miniworld_engine.ops`, the public whole-op
   contract, and meaning the opposite thing — is `modules/functional.py`.
-  `tests/layout/test_module_layout.py` holds the rule and the four shared modules that are
+  `tests/cpu/layout/test_module_layout.py` holds the rule and the four shared modules that are
   legitimately flat.
 - **The linter now checks what the code was already written against.** `select` was
   `["E", "F", "W"]` while the source carried ~700 `# noqa:` comments naming PLC0415,

@@ -272,7 +272,7 @@ found only by diffing cache entries against `HEAD` after a rebuild had already o
 Scheme 2 hashes the imported names plus the module-level names they transitively reference — not
 the whole sibling file, which would flag every importer on an unrelated edit. On this repo's
 current tree it adds **zero** new drift while catching that edit;
-`tests/registry/test_cache_status_detects_changes.py::test_driver_identity_follows_cross_module_imports`
+`tests/cpu/registry/test_cache_status_detects_changes.py::test_driver_identity_follows_cross_module_imports`
 drives the real edit through the real hash. Like
 `op_identity`, an entry written before the field existed reads normally, so it only starts guarding
 once that cache is rebuilt — or backfilled from git (below).
@@ -335,9 +335,9 @@ non-zero for code-driven stale entries. `env_identity` is reported separately an
 a cache built under another triton/cuda is legitimately "not this machine's" without the committed
 code being wrong.
 
-`tests/registry/test_no_stale_caches.py` runs the same scan in CI. Build-revision,
+`tests/cpu/registry/test_no_stale_caches.py` runs the same scan in CI. Build-revision,
 key-scheme and source changes can invalidate entries. Grid changes request an incremental
-build, and driver changes report potentially different coverage without erasing old measurements. `tests/registry/test_cache_status_detects_changes.py` drives a
+build, and driver changes report potentially different coverage without erasing old measurements. `tests/cpu/registry/test_cache_status_detects_changes.py` drives a
 synthetic cache to prove each detector actually fires.
 
 ### Backfilling `driver_identity` from git
@@ -442,7 +442,7 @@ presents, and historically nothing checked them against each other. The earlier 
 build followed the ladder while replay asked for whatever the cases presented: a width
 in one and not the other is a bucket that can never be filled and is asked for on every run.
 
-`tests/layout/test_one_source_of_shape_truth.py` pins the direction that matters — every width a
+`tests/cpu/layout/test_one_source_of_shape_truth.py` pins the direction that matters — every width a
 case presents is a rung on some ladder — with an explicit `NOT_DRIVEN` list for widths that reach
 no keyed kernel. It does not try to derive one list from the other: the dim-name-to-stream mapping
 is real knowledge, and guessing it is how a "obviously equivalent" driver edit collapsed the adaln

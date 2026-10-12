@@ -91,7 +91,7 @@ So the threshold never needed its own measurement. It needed a **source**, and t
 
 The wrapper had only the first clause, so even working it would have sent d=128 to the fused path
 on an A5000, against that measurement. Both clauses now match the module, quoted at the site, and
-`tests/numerics/test_whole_op_reachable_gpu.py` calls `ops.transition` at 16, 128, 384 and 768 so
+`tests/gpu/any/test_whole_op_reachable_gpu.py` calls `ops.transition` at 16, 128, 384 and 768 so
 the branch cannot go dead again unnoticed. 4 passed on an A5000; the 384 and 768 cases raise on
 the old code.
 

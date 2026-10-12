@@ -70,7 +70,7 @@ admits cc 8.x only): K1 -> `torch.bmm` -> K3 with the residual fused. The bidire
 width, composed as on sm_90 (natural planes, outgoing half NT, incoming half TN). Served: the member's tile rows,
 `sm80_ops.TILES` -- one direction at D64 / D128 / D256 / D384, bidirectional at D64 / D128 (units h128 / h256); every other width
 refuses with the reason (bidirectional D256+ and D512 have no unit). The release's test-vector gate has no sm_100 class, so
-`tests/integrations/test_anthropic_trimul_b200_gpu.py` holds the path to the fp32 reference (and to CUDA-graph capture) instead.
+`tests/gpu/sm100/test_anthropic_trimul_b200_gpu.py` holds the path to the fp32 reference (and to CUDA-graph capture) instead.
 
 ## Measured, node02 H100, bf16, C128, module level, one-call CUDA graph
 

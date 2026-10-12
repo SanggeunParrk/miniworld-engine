@@ -25,7 +25,7 @@ some of this (it still calls single-direction training D128-only).
 | | same widths, fp32 | ✗ | Triton |
 | | D512 training | ✗ | |
 | **Bidirectional TriMul inference, wide** | D256 / 384 / 512 at L128 / 256 / 512 / 640 | ✗ | CUDA only at L384 / 768 |
-| **OuterProductMean** | MSA 64 / pair 128 / hidden 32 (MiniWorld) | ✓ | contract: L % 64 == 0, MSA depth % 256 == 0, no interchain mask |
+| **OuterProductMean** | MSA 64 / pair 128 / hidden 32 (MiniWorld) | ✓ training (TMA prologue at S 1024 / 2048 / 4096), ✓ inference (7 cells with the TMA prologue, the others keep the Triton prologue) | contract: L % 64 == 0, MSA depth % 256 == 0, no interchain mask; 80-100 % of the speed-of-light floor on this card, page [opm/opm.md](opm/opm.md) |
 | | MSA 128 / pair 256 / hidden 32 (Protenix-v2, ESMFold2), MSA 128 / pair 384 (OpenDDE) | ✗ | |
 | **MSAPairWeightedAveraging** | MSA 64 / pair 128, 8 heads × 32 (MiniWorld) | ✓ | contract: L % 128 == 0, even MSA depth |
 | | MSA 128 / pair 256, 8 heads (ESMFold2, Protenix-v2 8 × 8), MSA 128 / pair 384, 8 × 8 (OpenDDE) | ✗ | |
@@ -77,7 +77,10 @@ some of this (it still calls single-direction training D128-only).
    - fp32 CUDA variant.
 4. **Transition.** n=2 CUDA path (pair D64 / 128 / 256, single D384 / 768); a ragged-tail path for
    rows that are not a multiple of 128; decide whether fp32 needs a native path.
-5. **OPM / PWA** at the wider MSA / pair widths (MSA 128 with pair 256 / 384).
+5. **OPM / PWA** at the wider MSA / pair widths (MSA 128 with pair 256 / 384). OPM at the MiniWorld width: the inference cells
+   that still use the Triton prologue (S 1024 / 2048 / 4096, N 512-768 and S 4096 N 256-384) need a CUDA prologue that beats it; L128-384
+   at S1024 training is at 80-90 % of the floor ([opm/opm.md](opm/opm.md#open)). PWA at the MiniWorld width: training L384 / L768 at
+   94 / 85 % of the floor, inference 71-74 %; what is left is 2-5 % items ([record](../../records/h100_pwa_20261008.md)).
 6. **TriMul.**
    - Bidirectional wide inference at L128 / 256 / 512 / 640.
    - Single-direction training D512 and fp32; add the single-direction rows to h100.md and the

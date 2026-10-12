@@ -43,7 +43,7 @@ The A5000's seven failures are the same seven the A6000 has, and for the same tw
 mpnn kernels outside a band nothing declares, two that will not launch on an untuned card. Its fp32
 half has never been run, so read the row as bf16 evidence and nothing more.
 
-`tests/registry/test_the_support_page_counts_its_own_evidence.py` checks every number above against
+`tests/cpu/registry/test_the_support_page_counts_its_own_evidence.py` checks every number above against
 the manifest it cites, so this table cannot age past its evidence again.
 
 ## Incomplete architecture coverage

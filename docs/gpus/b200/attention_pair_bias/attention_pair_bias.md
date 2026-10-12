@@ -227,14 +227,14 @@ against 0.186 ms for 8 x 48), the other layouts in between. Without CUDA graphs 
 -- see "Limits and next". Before this path (the engine's module path, Triton attention, 8 x 48, 2026-09-30): inference
 0.039 / 0.063 / 0.139 ms and training (graph on) 0.106 / 0.199 / 0.450 ms at L128 / L384 / L768.
 
-Accuracy against the fp32 PyTorch module (`tests/integrations/test_b200_apb_gpu.py`, every layout, L128 / 208 / 384 / 768
+Accuracy against the fp32 PyTorch module (`tests/gpu/sm100/test_b200_apb_gpu.py`, every layout, L128 / 208 / 384 / 768
 inference and L128 / 384 training, key mask on / off): output and every input and parameter gradient within 1.3x the bf16
 PyTorch module's error (8 x 48 probe at L128 / 384 / 768, 20 % key mask: output 1.1-1.2e-2 against 1.1-1.2e-2, gradients
 0.99-1.13x, worst ~2e-2 relative); the compiled module matches eager.
 
-Tests: `tests/numerics/test_apb_b200_gpu.py` (the pair kernels at 8 / 12 / 16 / 24 heads against fp64 at L128-768; per
+Tests: `tests/gpu/sm100/test_apb_b200_gpu.py` (the pair kernels at 8 / 12 / 16 / 24 heads against fp64 at L128-768; per
 layout the inference core at L128 / 200 / 256 / 384 / 640 / 768 and the training forward + backward at L128 / 256 / 384 /
-768 against fp64), `tests/integrations/test_b200_apb_gpu.py` (module against fp32 PyTorch per layout: inference at L128 /
+768 against fp64), `tests/gpu/sm100/test_b200_apb_gpu.py` (module against fp32 PyTorch per layout: inference at L128 /
 208 / 384 / 768, training at L128 / 384, key mask on / off; torch.compile against eager).
 
 ### Hardware limit (SoL) per kernel (8 x 48, 2026-09-30)

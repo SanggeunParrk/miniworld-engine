@@ -110,10 +110,10 @@ bf16 and fp32, QK-norm on / off, shared conditioning, S = 5 (the sampler's diffu
 "미검증" = the kernels accept the shape (L % 128 == 0) but no test or measurement has run there. cache build ✓: nothing on
 these paths autotunes (fixed launch shapes; the CUDA extensions build on first use into `MINIWORLD_ENGINE_JIT_ROOT`).
 
-Tests: `tests/integrations/test_token_dit_train_gpu.py` (bf16 and fp32 blocks against the fp32 PyTorch block, qk-norm and
-mask on / off, A = 4 and 6, torch.compile), `tests/integrations/test_h100_module_wiring_gpu.py` (inference: live inputs /
+Tests: `tests/gpu/any/test_token_dit_train_gpu.py` (bf16 and fp32 blocks against the fp32 PyTorch block, qk-norm and
+mask on / off, A = 4 and 6, torch.compile), `tests/gpu/sm90/test_h100_module_wiring_gpu.py` (inference: live inputs /
 weights / mask, CUDA graphs, the bf16 and fp32 cores against the Triton cores they replace, qk-norm on / off),
-`tests/numerics/test_token_dit_rows_cuda_gpu.py`, `tests/numerics/test_augmented_attention_bf16_sm90_gpu.py`.
+`tests/gpu/any/test_token_dit_rows_cuda_gpu.py`, `tests/gpu/sm90/test_augmented_attention_bf16_sm90_gpu.py`.
 
 ## Measurements (2026-10-01)
 

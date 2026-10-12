@@ -89,9 +89,9 @@ Switches (all default on): `settings.token_dit_rows_cuda`, `settings.augattn_bf1
 | 성능 확인 | △ | △ | △ | △ | △ | △ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-Both cores against fp64 (`tests/numerics/test_augmented_attention_bf16_sm100_gpu.py::test_gated_inference_core_matches_fp64`,
+Both cores against fp64 (`tests/gpu/sm100/test_augmented_attention_bf16_sm100_gpu.py::test_gated_inference_core_matches_fp64`,
 S L = 5 x 384, 2 x 256, 3 x 128, 3 x 200, 2 x 520, 5 x 136): bf16 within 1.2e-2, fp32 within 2e-3 relative. The step at lengths
-that are not multiples of 128 (`tests/integrations/test_b200_token_dit_gpu.py::test_token_dit_any_length`, L = 136, 200,
+that are not multiples of 128 (`tests/gpu/sm100/test_b200_token_dit_gpu.py::test_token_dit_any_length`, L = 136, 200,
 333, 517, 700, both dtypes, shared / per-sample conditioning, key mask, CUDA-graph replay) matches the PyTorch block. Every
 length between the table's columns runs the same code.
 
@@ -133,7 +133,7 @@ The same row kernels serve fp32 at every length above.
 | 성능 확인 | — | — | △ | — | — | △ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-Against fp64 (`tests/numerics/test_augmented_attention_tf32_sm100_gpu.py`, A L = 2 x 128, 4 x 256, 2 x 384, key mask on /
+Against fp64 (`tests/gpu/sm100/test_augmented_attention_tf32_sm100_gpu.py`, A L = 2 x 128, 4 x 256, 2 x 384, key mask on /
 off): O within 2e-3, dq / dk / dv / dbias within 3e-3 relative; LSE within 5e-3 absolute (TF32 drops the operands' low
 mantissa bits, so the logits shift by ~1e-3; the backward recomputes P from the same operands). Kernel times at A = 48
 (CUDA events, one process): forward 121 / 385 us, backward (dkv + dqb) 452 / 1554 us at L384 / L768 (472 / 1706 with the first
@@ -199,7 +199,7 @@ this path (engine module path on B200, bf16): 2.502 / 2.289 and 6.036 / 5.806 ms
 - bf16: the expand GEMM carries the SwiGLU and saves [a | b] (`gemm_swiglu2_sm100 -DSAVE_AB`) instead of cuBLAS + `swiglu_rows`;
 - fp32: `attn_dkv_tf32` with one K / V slot and 3 stages (see T1'-T3').
 
-Accuracy (`tests/integrations/test_token_dit_train_gpu.py`, against the fp32 IEEE PyTorch block; bf16 and fp32, QK-norm
+Accuracy (`tests/gpu/any/test_token_dit_train_gpu.py`, against the fp32 IEEE PyTorch block; bf16 and fp32, QK-norm
 on / off, key mask on / off): output and every input / parameter gradient (the q / k norm weights included) at most 1.09x
 the engine module path's own error in the same regime -- bf16 worst ~7e-3 (expand weights), fp32 worst 1.8e-3
 (`norm_key.weight`); the compiled block matches eager.
@@ -333,7 +333,7 @@ Per-sample conditioning, fp32:
 | (640, 768, fp32) | 1.212 / 0.511 | — | no QK-norm | **0.221** | 2.31 |
 | (768, 768, fp32) | 1.603 / 0.635 | — | no QK-norm | **0.242** | 2.63 |
 
-Tests: `tests/integrations/test_b200_token_dit_gpu.py::test_token_dit_qk_norm` (bf16 / fp32, L = 384, 200, 333, shared /
+Tests: `tests/gpu/sm100/test_b200_token_dit_gpu.py::test_token_dit_qk_norm` (bf16 / fp32, L = 384, 200, 333, shared /
 per-sample conditioning, key mask; the pass runs and a changed norm weight changes the output).
 
 ### Inference step inside the runner (2026-09-29 probe, 24 blocks, S = 5, CUDA graph, per block; before the glue folds)
@@ -502,8 +502,8 @@ the block's gradients depended on which kernel ran before (to_value.weight 0.13 
 PyTorch block, and not with a synchronize after every call). The clears now cover 2 DH and 3 DH columns; the other widths
 were already covered.
 
-Tests: `tests/numerics/test_tdit_heads_sm100_gpu.py` (every layout's training forward / backward at L128 / 384 and gated
-inference core at L128 / 200 / 384 against fp64) and `tests/integrations/test_b200_token_dit_layouts_gpu.py` (the fused
+Tests: `tests/gpu/sm100/test_tdit_heads_sm100_gpu.py` (every layout's training forward / backward at L128 / 384 and gated
+inference core at L128 / 200 / 384 against fp64) and `tests/gpu/sm100/test_b200_token_dit_layouts_gpu.py` (the fused
 inference step against the PyTorch block at S L = 5 x 384, 4 x 200, 3 x 333, shared / per-sample conditioning, QK-norm,
 key mask, CUDA-graph replay; the fused training block against the fp32 block at L128 / 384, QK-norm on / off, every
 gradient within 1.3x the bf16 PyTorch block's error).
@@ -612,12 +612,12 @@ restructured (a 128-key item streaming 64-key sub-chunks, as in "Limits and next
 between the two warpgroups as 32 + 16 (48), 32 + 32 (64), 16 + 16 (32). The CUDA row kernels needed nothing: they were
 already built per (d, head dim) and templated on the operand dtype.
 
-Tests: `tests/integrations/test_b200_token_dit_tf32_layouts_gpu.py` (the TF32 cores at every layout against fp64 -- training
+Tests: `tests/gpu/sm100/test_b200_token_dit_tf32_layouts_gpu.py` (the TF32 cores at every layout against fp64 -- training
 L128 / 384, key mask on / off; inference L128 / 200 / 384 --; the fused fp32 inference step and training block at every layout
 against the fp32 IEEE block, held to 1.5x the module path's error in the same TF32 regime, the training block at A L = 4 x 256,
 2 x 384 and 3 x 200 (padding); fp32 under bf16 autocast) and `tests/integrations/test_b200_token_dit_train_gpu.py` (now also A L
 = 3 x 200, and the [A, B, L] expanded mask taking the fused path while a per-sample mask keeps the module path). Run on 2026-10-10
-(engine v2.2.0 plus unreleased changes, one B200): 94 passed over these two files and `tests/integrations/test_b200_token_dit_layouts_gpu.py`.
+(engine v2.2.0 plus unreleased changes, one B200): 94 passed over these two files and `tests/gpu/sm100/test_b200_token_dit_layouts_gpu.py`.
 
 **Measurements (2026-10-10).** `benchmarks/runners/bench.py target=dit level=module precision=32 +tdit_n_head=<heads> d_single_token=<d>
 min_seq_len=256 max_seq_len=768 seq_len_step=256` (inference with `+shared_cond=true`, S = 5; training A = 48), one DiTBlock, no key mask, compiled
