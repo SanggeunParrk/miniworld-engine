@@ -206,11 +206,11 @@ Training invocations add `cudagraph=manual`; fp32 invocations add `precision=32`
 - **Determinism**: identical steps give identical gradients unless the reference itself is nondeterministic; document
   atomics-based accumulation.
 - **Graph replay stress**: capture the forward (and the training step) and replay thousands of times with ragged inputs;
-  a PDL chain that passes 800 replays has hung at 150 before (`tests/integrations/test_b200_swa_dit_graph_replay_gpu.py`
+  a PDL chain that passes 800 replays has hung at 150 before (`tests/gpu/sm100/test_b200_swa_dit_graph_replay_gpu.py`
   runs each case in a subprocess with a timeout). Never call `griddepcontrol.launch_dependents` before the kernel's own
   `griddepcontrol.wait` unless the whole chain has been replay-stressed; the last kernel of a chain is not exempt.
 - **fp32-master test**: gradients with fp32 parameters equal the bf16-parameter gradients up to the parameters' own rounding
-  and are *not* bf16-rounded (`tests/integrations/test_b200_fp32_master_gpu.py`).
+  and are *not* bf16-rounded (`tests/gpu/sm100/test_b200_fp32_master_gpu.py`).
 
 ## 7. Developing a module (the order that worked)
 
@@ -251,7 +251,7 @@ Training invocations add `cudagraph=manual`; fp32 invocations add `precision=32`
 
 - [ ] `src/miniworld_engine/kernels/<family>/<backend>/` sources, built by the newest toolchain that knows the arch
 - [ ] `src/miniworld_engine/integrations/<module>_<gpu>.py` with arch gate, caches, autograd Function, fakes
-- [ ] registry rows, driver / check entries; `tests/layout`, `tests/registry` green
+- [ ] registry rows, driver / check entries; `tests/cpu/layout`, `tests/cpu/registry` green
 - [ ] GPU tests: numerics, ragged, A sweep, fp32-master, graph capture + replay stress, compile (no breaks)
 - [ ] harness tables (bf16-mixed; fp32 for the diffusion blocks) for inference and training, commands in the page
 - [ ] `docs/gpus/<gpu>/<module>/<module>.md` + figures, completion tables in `docs/gpus/<gpu>/<gpu>.md`

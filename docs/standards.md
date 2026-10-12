@@ -90,11 +90,11 @@ says so, and `archive/records-20260928:docs/records/product-plan.md` carries the
 Two rules govern the whole document.
 
 **A standard is enforced or it is decoration.** "We keep names consistent" is not a standard;
-`tests/layout/test_bench_target_vocabulary.py` is. Every criterion here names the check that fails when it
+`tests/cpu/layout/test_bench_target_vocabulary.py` is. Every criterion here names the check that fails when it
 is violated, or admits there isn't one.
 
 **The check must fail for the right reason.** A test that passes because it stopped finding
-anything is worse than no test. `tests/builder/test_lazy_import_targets.py::test_there_are_lazy_wrappers_to_check`
+anything is worse than no test. `tests/cpu/builder/test_lazy_import_targets.py::test_there_are_lazy_wrappers_to_check`
 exists for exactly this: the import-style change made its collector return zero cases, and without
 that guard the file would have kept passing while checking nothing.
 
@@ -111,7 +111,7 @@ act rather than a side effect of a refactor.
 *Prevents:* a rename that compiles locally and breaks every downstream import; a private helper
 that becomes load-bearing for a consumer because nothing said it was private.
 
-*Enforced by:* `tests/compile/test_public_api.py` freezes `kernels.__all__` and `ops.__all__` against
+*Enforced by:* `tests/cpu/compile/test_public_api.py` freezes `kernels.__all__` and `ops.__all__` against
 `_CONTRACT` / `_OPS_CONTRACT`. Changing either fails the suite and the message says to update the
 CHANGELOG.
 
@@ -125,7 +125,7 @@ libraries inside test collection, inside CLI startup, inside other libraries' im
 *Prevents:* a consumer's unrelated test suite paying a 2-minute triton compile; an import that
 fails on a machine with no CUDA.
 
-*Enforced by:* `tests/compile/test_public_api.py` asserts the import is side-effect-free; the whole CPU
+*Enforced by:* `tests/cpu/compile/test_public_api.py` asserts the import is side-effect-free; the whole CPU
 suite runs with `CUDA_VISIBLE_DEVICES=""` in CI.
 
 *Status:* **met.**
@@ -184,9 +184,9 @@ that family.
 *Prevents:* the state this repo was in before `checks/` existed — 56 kernels reached by a driver
 with no reference at all, where "ok" meant "did not raise".
 
-*Enforced by:* `tests/layout/test_kernel_layout.py` requires `reference.py` per family;
-`tests/registry/test_registry_complete.py::test_every_kernel_with_a_driver_declares_a_checker`;
-`tests/numerics/test_numerical.py` runs all 99 declared checkers on GPU.
+*Enforced by:* `tests/cpu/layout/test_kernel_layout.py` requires `reference.py` per family;
+`tests/cpu/registry/test_registry_complete.py::test_every_kernel_with_a_driver_declares_a_checker`;
+`tests/gpu/any/test_numerical.py` runs all 99 declared checkers on GPU.
 
 *Status:* **met** for existence and execution. See B2 for the band.
 
@@ -215,8 +215,8 @@ and every unreachable case drops out of numerator and denominator together, and 
 *Prevents:* exactly that. It is why `_report_coverage` reads `registry.csv` and not the set of ops
 that happened to fire.
 
-*Enforced by:* `registry.csv` as the declared inventory; `tests/registry/test_registry_complete.py`,
-`tests/registry/test_declared_dtype_coverage.py`, `tests/autotune/test_spread_shape_key.py`; `dev audit` for the
+*Enforced by:* `registry.csv` as the declared inventory; `tests/cpu/registry/test_registry_complete.py`,
+`tests/cpu/registry/test_declared_dtype_coverage.py`, `tests/cpu/autotune/test_spread_shape_key.py`; `dev audit` for the
 cache side.
 
 *Status:* **met.**
@@ -264,7 +264,7 @@ of the table was eager code labelled compiled.
 
 *Enforced by:* the long-form CSV is the artifact and carries device, torch/cuda version, mode,
 `compiled`, `cudagraph`, `compile_wrap`, precision, dtypes and the execution path per row;
-`tests/compile/test_compiled_flag_is_what_ran.py` asserts the `compiled` column says what ran.
+`tests/cpu/compile/test_compiled_flag_is_what_ran.py` asserts the `compiled` column says what ran.
 
 *Status:* **met** for the tables.
 
@@ -308,9 +308,9 @@ Code, CLI, docs, config, data and directory names are one vocabulary. The same c
 *Prevents:* `bench_kernel triangle_attention` returning "unknown target" for a kernel that exists;
 a doc command nobody can run.
 
-*Enforced by:* `tests/layout/test_bench_target_vocabulary.py` ties four namespaces together (bench.py's
+*Enforced by:* `tests/cpu/layout/test_bench_target_vocabulary.py` ties four namespaces together (bench.py's
 tables, the CLI's, `builder.CASE_NAMES`, the directory tree);
-`tests/layout/test_cli_documented_commands.py` parses every `miniworld-engine ...` line in the docs.
+`tests/cpu/layout/test_cli_documented_commands.py` parses every `miniworld-engine ...` line in the docs.
 
 *Status:* **met.**
 
@@ -331,9 +331,9 @@ who has seen one has seen them all.
 *Prevents:* each new instance copying whichever neighbour its author opened. This repo had one
 family that was not a package at all and `interface.py` for four of thirteen.
 
-*Enforced by:* `tests/layout/test_kernel_layout.py`, `tests/layout/test_module_layout.py`,
-`tests/registry/test_registry_complete.py::test_the_harness_is_one_module_per_family`,
-`tests/layout/test_bench_config_per_target.py`.
+*Enforced by:* `tests/cpu/layout/test_kernel_layout.py`, `tests/cpu/layout/test_module_layout.py`,
+`tests/cpu/registry/test_registry_complete.py::test_the_harness_is_one_module_per_family`,
+`tests/cpu/layout/test_bench_config_per_target.py`.
 
 *Status:* **met.**
 
@@ -352,7 +352,7 @@ names will drift, and the drift will be silent.
 root and inside the package, and every other config set lived only at the root — so a short name
 resolved against a different root depending on the caller, and a wheel could reach only one of
 them. All eleven sets are packaged now, `configs.config_set(name)` is the single resolver, and
-`tests/autotune/test_default_config_set.py` asserts a repo-root directory cannot shadow the package.
+`tests/cpu/autotune/test_default_config_set.py` asserts a repo-root directory cannot shadow the package.
 
 #### D5. A name collision that Python resolves by accident is a defect
 
@@ -385,7 +385,7 @@ set is an argument; `build` decomposes, runs and merges in one invocation.
 "This card cannot hold this shape" is a permanent, correct answer. Counting it as a failure made a
 resumed job report "0 ok, 9 failed" and refuse to merge.
 
-*Enforced by:* `is_bad_unit`, `tests/registry/test_permanent_skip_classification.py`.
+*Enforced by:* `is_bad_unit`, `tests/cpu/registry/test_permanent_skip_classification.py`.
 
 *Status:* **met.**
 
@@ -394,7 +394,7 @@ resumed job report "0 ok, 9 failed" and refuse to merge.
 One OOM must not discard 526 good measurements. Merge what succeeded, report the holes, and offer
 `--strict` for CI.
 
-*Enforced by:* `_merge_built_shards`, `tests/autotune/test_shard_merge.py`, `dev audit`.
+*Enforced by:* `_merge_built_shards`, `tests/cpu/autotune/test_shard_merge.py`, `dev audit`.
 
 *Status:* **met.**
 
@@ -415,7 +415,7 @@ hand.
 A cache, a table, a figure: each says what produced it.
 
 *Enforced by:* the `provenance` block in each `data/<op>/<gpu>.json` (build time, torch, triton);
-the CSV's version columns; `tests/autotune/test_shipped_cache_wellformed.py`.
+the CSV's version columns; `tests/cpu/autotune/test_shipped_cache_wellformed.py`.
 
 *Status:* **met.**
 
@@ -473,7 +473,7 @@ mode is a reference doc that has quietly become a record.
 *Prevents:* a reader following `benchmarks/kernels/layernorm_linear/artifacts` — a path that never
 existed.
 
-*Enforced by:* `tests/layout/test_cli_documented_commands.py` for commands. Op names and paths in prose
+*Enforced by:* `tests/cpu/layout/test_cli_documented_commands.py` for commands. Op names and paths in prose
 are not checked.
 
 *Status:* **partially met** — `docs/kernels/autotune-l2-swizzle.md` names 21 pre-rename ops.
@@ -568,7 +568,7 @@ carries **six** occurrences of `-I/home/psk6950/mathdx_dl/extracted/nvidia/mathd
 three build functions. That kernel cannot compile on any machine but this one. A grep guard in
 the suite is one test and does not exist.
 
-*Status:* **met.** `tests/layout/test_no_machine_paths.py` scans `src/` and `tools/` -- the two
+*Status:* **met.** `tests/cpu/layout/test_no_machine_paths.py` scans `src/` and `tools/` -- the two
 trees whose contents are executed -- and `_nvcc.mathdx_includes` resolves at run time, naming the
 variable to set when it cannot. Verified to fail on the pre-fix file, all six lines.
 
@@ -580,7 +580,7 @@ is a promise to a consumer choosing hardware. A promise nothing runs against is 
 *Prevents:* a consumer buying or booking time on hardware the library claims to support and
 discovering at run time that the claim was aspirational.
 
-*Enforced by:* `tests/registry/test_hardware_support.py` and `tests/registry/test_arch_gating.py` check that the
+*Enforced by:* `tests/cpu/registry/test_hardware_support.py` and `tests/cpu/registry/test_arch_gating.py` check that the
 declaration is internally coherent and that unsupported hardware fails clearly — not that the
 kernel was ever *run* on the arch it names. In practice everything has been verified on sm86
 (A5000 / A6000) by hand. sm90 and sm100 kernels have never been executed by any automated
@@ -676,7 +676,7 @@ installation section written for someone starting from an empty machine, and no 
 them what to do when nvcc/mathdx/CUDA is missing.
 
 *Status:* **met.** `## Quickstart` is four steps at the top of the README, three of them
-GPU-free, executed by `tests/layout/test_quickstart_runs.py`; `docs/gpus/troubleshooting.md` covers
+GPU-free, executed by `tests/cpu/layout/test_quickstart_runs.py`; `docs/gpus/troubleshooting.md` covers
 what goes wrong, tied to the message literals in `src/`.
 
 #### H4. The name is one name, everywhere, including in the consumer
@@ -714,7 +714,7 @@ declared field.
 and no version).
 
 *Status:* **met.** 1.0.0, tagged, with a `### Breaking` entry naming the rename.
-`tests/registry/test_version_is_released.py` fails a bump with no changelog section, a changelog
+`tests/cpu/registry/test_version_is_released.py` fails a bump with no changelog section, a changelog
 whose only section is `[Unreleased]`, and an x.0.0 with no Breaking entry.
 
 #### I2. Every release is a tag, and every tag is reachable
@@ -729,7 +729,7 @@ whose only section is `[Unreleased]`, and an x.0.0 with no Breaking entry.
 #### I3. The changelog describes released things
 
 `docs/CHANGELOG.md` exists, is 264 lines, is written well, and is **entirely** under
-`## [Unreleased]`. It documents a public-API contract enforced by `tests/compile/test_public_api.py`
+`## [Unreleased]`. It documents a public-API contract enforced by `tests/cpu/compile/test_public_api.py`
 (A1) — for a package that has never published a version.
 
 *Prevents:* a consumer being unable to learn what changed between the version they have and
@@ -773,7 +773,7 @@ manifest from six months and two rewrites ago being read as current.
 
 *Enforced by:* `run_all` writes `autotune/manifests/<card>.csv` with a `#provenance` row (version,
 commit, clean/dirty, date); `docs/gpus/supported.md` cites those manifests;
-`tests/registry/test_a_release_has_been_run_on_a_card.py` fails a release whose version appears in
+`tests/cpu/registry/test_a_release_has_been_run_on_a_card.py` fails a release whose version appears in
 no manifest, or only in one produced from a dirty tree.
 
 *Status:* **met, scoped.** And the scope has a cost that must not be misread: **a green CI does
@@ -789,7 +789,7 @@ A6000; CI was green before and after either, and would have been green if either
 change altered bucket indices; the check that nothing was orphaned was a one-off script run by
 hand, not a test.
 
-*Enforced by:* `tests/autotune/test_shipped_cache_wellformed.py` checks shape. `dev audit` checks
+*Enforced by:* `tests/cpu/autotune/test_shipped_cache_wellformed.py` checks shape. `dev audit` checks
 the build system and declared-vs-present coverage, and now RUNS in CI -- it could not before,
 because it exited 1 on every default invocation with 139 findings about its own missing arguments
 (88 reachability with no `--shards`, 51 coverage against the key `cpu`). `dev audit --replay`
@@ -815,7 +815,7 @@ the bench budget poisoned are still in it, and so are the 363 holes.
 *Prevents:* a README number that was true on one card, one torch version, and one config set,
 and is quoted forever.
 
-*Enforced by:* `tests/numerics/test_performance_claims.py` traces prose numbers to artifacts (C1/C2).
+*Enforced by:* `tests/cpu/kernels/test_performance_claims.py` traces prose numbers to artifacts (C1/C2).
 It does not re-run them, and cannot without J1.
 
 *Status:* **partially met** — provenance enforced, freshness not.
@@ -867,7 +867,7 @@ these kernels and compares its output to the same model without them.
 is fine in isolation and compounds across 48 layers, a dtype that silently promotes, a kernel
 that is right on its own inputs and wrong on the ones the model actually produces.
 
-*Enforced by:* `tests/numerics/test_stack_substitutability_gpu.py`. One Pairformer, built twice
+*Enforced by:* `tests/gpu/any/test_stack_substitutability_gpu.py`. One Pairformer, built twice
 from the same weights, `PYTORCH` against `MINIWORLD`: 1.30e-02 over four blocks against a 6e-02
 budget. Three separate tests keep it from being vacuous — the stack must not be the identity,
 dispatch must not have resolved to the reference, and a projection replaced with noise must break
@@ -895,7 +895,7 @@ the failing environment could not be reproduced on this cluster.
 *Enforced by:* `benchmarks/reproducing-a-report.md` -- isolate the four caches that carry state between
 runs, ask the CPU-only question first, take a card last. Demonstrated on the report that motivated
 it: `0854ac4^` gives 527 units, main gives 859, no GPU involved. The count is now pinned by
-`tests/builder/test_build_matrix.py`.
+`tests/cpu/builder/test_build_matrix.py`.
 
 *Status:* **met.**
 
@@ -907,7 +907,7 @@ it: `0854ac4^` gives 527 units, main gives 859, no GPU involved. The count is no
 
 *Prevents:* a library whose entry cost is a conversation with its author.
 
-*Enforced by:* `tests/layout/test_quickstart_runs.py` executes the quickstart's `# cpu` blocks
+*Enforced by:* `tests/cpu/layout/test_quickstart_runs.py` executes the quickstart's `# cpu` blocks
 as scripts and fails when one does not work, so the first page a newcomer runs cannot drift from
 what the code does.
 
@@ -923,8 +923,8 @@ is 26 pages written for a consumer, and each family's log lives with the kernel 
 *Prevents:* a consumer unable to find the four pages that concern them among a hundred that do
 not.
 
-*Enforced by:* `tests/layout/test_kernel_layout.py` allows `notes/` beside a family's backends and
-forbids it being a package; `tests/layout/test_notes_stay_out_of_the_wheel.py` keeps it out of the
+*Enforced by:* `tests/cpu/layout/test_kernel_layout.py` allows `notes/` beside a family's backends and
+forbids it being a package; `tests/cpu/layout/test_notes_stay_out_of_the_wheel.py` keeps it out of the
 artifact. `kernels/NOTES.md` states what the tree is and that it is not maintained.
 
 *Status:* **met, unenforced.**
@@ -936,7 +936,7 @@ each costing a consumer a day.
 
 *Enforced by:* E4 requires error messages to name the fix, and `docs/gpus/troubleshooting.md` gives
 each failure a section: what produces it and the command that ends it.
-`tests/layout/test_troubleshooting_quotes_real_messages.py` fails when a quoted message stops
+`tests/cpu/layout/test_troubleshooting_quotes_real_messages.py` fails when a quoted message stops
 existing in `src/`, so a reworded message cannot leave a section describing something that no
 longer happens.
 

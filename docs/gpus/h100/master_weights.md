@@ -6,7 +6,7 @@ BF16-mixed means FP32 master parameters, BF16 activation/projection operands, an
 
 ## Measurement method
 
-The complete forward pass and gradients for every input and parameter are timed; optimizer updates are excluded. Both modes use the same state, including pinned normalization parameters. Timing uses CUDA Graph replay, 90 alternating paired samples, five replays per CUDA-event measurement, and medians. Each listed configuration independently satisfies `mixed_ms / bf16_ms < 1.02`; negative overhead means mixed is faster. Native CUDA defaults are retained. Portable Triton cold dispatch uses `autotune_miss_cap=1`, not exhaustive autotuning. Four empty profiler captures from job 21477 are repaired in profile-only job 21490; the original 90-sample latency results remain unchanged. Actual CUDA/Triton dispatch profiles, dtype inventories, unrounded matrix-gradient checks, and all raw timing samples are retained in [the measurement artifact](../../../benchmarks/modules/master_weights/results/h100/master_weights_20261005.json).
+The complete forward pass and gradients for every input and parameter are timed; optimizer updates are excluded. Both modes use the same state, including pinned normalization parameters. Timing uses CUDA Graph replay, 90 alternating paired samples, five replays per CUDA-event measurement, and medians. Each listed configuration independently satisfies `mixed_ms / bf16_ms < 1.02`; negative overhead means mixed is faster. Native CUDA defaults are retained. Portable Triton cold dispatch uses `autotune_miss_cap=1`, not exhaustive autotuning. Four empty profiler captures from job 21477 are repaired in profile-only job 21490; the original 90-sample latency results remain unchanged. Actual CUDA/Triton dispatch profiles, dtype inventories, unrounded matrix-gradient checks, and all raw timing samples are retained in [the measurement artifact](../../records/data/master_weights/master_weights_20261005.json).
 
 ## Implementation
 
@@ -97,4 +97,4 @@ The locally installed `triattn_wgrad_shared_z_master.so` is ignored by Git. Its 
 CUTLASS_PATH=/path/to/cutlass-4.2 python -m miniworld_engine.kernels.triangle_attention.cuda.build_wgrad
 ```
 
-Do not compile CUDA extensions on the login node. Existing native ABI binaries are retained. Raw experiment logs are in `experiments/h100_master_20261005`; job IDs above identify the qualification chain.
+Do not compile CUDA extensions on the login node. Existing native ABI binaries are retained. Raw experiment logs are in `runs/experiments/h100_master_20261005`; job IDs above identify the qualification chain.

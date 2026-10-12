@@ -4,7 +4,7 @@ Each section is a message you will actually see, what produces it, and the comma
 Every one of these cost time before it was diagnosed; the point of writing them down is that the
 second person does not pay again.
 
-`tests/layout/test_cli_documented_commands.py` and the checks noted below tie these to the source,
+`tests/cpu/layout/test_cli_documented_commands.py` and the checks noted below tie these to the source,
 so a renamed message cannot leave a section here describing something that no longer happens.
 
 ---
@@ -116,7 +116,7 @@ once reported `trimul_outproj_layernorm_gemm_gate_triton`, a bf16-only row, as F
 ## Two runs of the same kernel give different bytes
 
 Expected for one kernel and one only: `augmented_attention_bwd_atomic_triton` accumulates with
-unordered atomics. `tests/numerics/test_determinism_gpu.py` names it in `NOT_BITWISE` with the
+unordered atomics. `tests/gpu/any/test_determinism_gpu.py` names it in `NOT_BITWISE` with the
 reason, asserts it still differs, and asserts the difference stays inside its declared band.
 Anything else differing run to run within one process is a bug — report it with the two outputs.
 

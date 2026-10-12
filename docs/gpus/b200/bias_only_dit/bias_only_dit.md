@@ -254,7 +254,7 @@ L384 / L768 -- per-node numbers from separate runs drift ~10 % on this power-cap
 | the bias gradient on CTA pairs, `dpbx2_sm100.cu` (T3), where 256-key tiles divide L and the pairs' items fill the SM pairs (L768) | -- / 61.2 | -- / 47.4 | `MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR=0` (=1 forces it wherever 256 divides L) |
 
 Whole step (bf16, A = 48, 16 x 48, whole-step graph, median of 9 alternating captures): -29.8 us at L384, -37.3 us at L768. Tests:
-`tests/integrations/test_b200_bias_only_dit_train_gpu.py` (every gradient against fp64 at the defaults and with the switches off,
+`tests/gpu/sm100/test_b200_bias_only_dit_train_gpu.py` (every gradient against fp64 at the defaults and with the switches off,
 20 steps bit-identical over a NaN-poisoned allocator, the selection, the pack bit for bit against the torch pack, `dpbx2` against
 fp64 einsum and over 20 poisoned reruns).
 
@@ -405,7 +405,7 @@ the MMA's waits on full stages, the producer's on empty stages and the epilogue'
   backward thread's cuBLAS workspaces), and the second step adds segments once, with or without the fused kernels.
 
 Every kernel's synchronization protocol is in its file header. Tests: `test_fused_backward_*` in
-`tests/integrations/test_b200_bias_only_dit_train_gpu.py` (each kernel against fp64 or bit-identical to the launches it replaces,
+`tests/gpu/sm100/test_b200_bias_only_dit_train_gpu.py` (each kernel against fp64 or bit-identical to the launches it replaces,
 bit-identical reruns, no local memory, the launch count of a captured backward per switch setting), and every gradient /
 repeatability / steady-memory test at the defaults and with every fusion on.
 
@@ -455,12 +455,12 @@ Accuracy: every gradient against fp64 within the training file's bounds (3-block
 per-block path alike (block 22: hoisted / per-block / PyTorch 1.172e-2 / 1.154e-2 / 1.008e-2; `bench_scripts/bo_hoist_diag.py`):
 the d bias it receives carries the stack's bf16 error, while the hoist's own arithmetic on that d bias is 3.8-4.9e-6 for every ln_pair
 gradient. The 24-block test therefore bounds each gradient by max(1.1x PyTorch, 1.05x fused per-block) + 1e-4 and the hoist's
-arithmetic on its captured inputs by the parameter dtype's rounding + 1e-4. Tests: `tests/integrations/test_b200_bias_only_dit_hoist_gpu.py`.
+arithmetic on its captured inputs by the parameter dtype's rounding + 1e-4. Tests: `tests/gpu/sm100/test_b200_bias_only_dit_hoist_gpu.py`.
 
 ## fp32 path (TF32)
 
 Status (2026-10-06): written, **not yet built or measured on B200** -- the kernels below compile on first use; the tests are
-`tests/integrations/test_b200_bias_only_dit_tf32_gpu.py`. Every head layout of the bf16 path (16 x 48, 24 x 32, 12 x 64,
+`tests/gpu/sm100/test_b200_bias_only_dit_tf32_gpu.py`. Every head layout of the bf16 path (16 x 48, 24 x 32, 12 x 64,
 16 x 64), the same lengths (L a multiple of 128 up to 768), masks, shared / per-sample conditioning, eager, `torch.compile`
 (the same opaque ops) and CUDA graphs.
 
@@ -810,7 +810,7 @@ per CTA -> ~45-48 us; at L512, 20 tiles x 6 = 120 CTAs, one round if 20 clusters
 SMs), i.e. tail ~48 us instead of 2 x ~40. Not written yet: it is a second tail kernel; worth it only for 19-24 tiles (A = 5: L512;
 L640 is 25 tiles = 150 CTAs, over 148).
 
-**Tests** (`tests/integrations/test_b200_bias_only_dit_tf32_gpu.py`, `test_inf3_*`, `test_front_kernel_*`, `test_tail_kernel_*`): the
+**Tests** (`tests/gpu/sm100/test_b200_bias_only_dit_tf32_gpu.py`, `test_inf3_*`, `test_front_kernel_*`, `test_tail_kernel_*`): the
 block against fp64 at the default step's bounds for every head layout x L 128..768 x S 1 / 5 x shared / per-sample conditioning x
 masked / unmasked; every front (4 / 6 / 8) and tail (8 / 6) cluster forced; K1 and K3 alone against fp64 (3e-3), their scratch fully written and TF32-valued, and
 bit-identical reruns; reruns from scratch over a NaN-poisoned allocator bit-identical; the captured step exactly the three kernels under
@@ -896,7 +896,7 @@ training A = 48 with CUDA graph off and on, mask_prob 0), ms per block, median. 
 cap). × = ours vs PyTorch compiled on the same layout; there is no cuEquivariance or Anthropic implementation of this op.
 
 Accuracy, relative Frobenius error against the fp32 IEEE PyTorch block on the same weights and inputs: inference 3.3-3.5e-3
-against PyTorch compiled bf16's 4.1e-3 (the bench's columns); training (`tests/integrations/test_b200_bias_only_dit_train_gpu.py`)
+against PyTorch compiled bf16's 4.1e-3 (the bench's columns); training (`tests/gpu/sm100/test_b200_bias_only_dit_train_gpu.py`)
 the output 3.6e-3 against 4.3e-3 and every input and parameter gradient at 0.96-0.99x PyTorch bf16's error, for all four layouts.
 
 ### 16 heads x 48 · Inference (S = 5)

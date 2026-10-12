@@ -27,7 +27,7 @@ row-dropout scale (a tile reloads it when its sample changes), `k1w` the per-sam
 Wider D keeps one sample per call (`serves_*` refuse B > 1 there) and B > 8 is refused; the limit is
 `integrations.trimul_b200.MAX_BATCH`, which a caller that folds samples into the batch asks (an engine without batched samples has no
 such name, and a B > 1 call there takes the slow path). Tests:
-`tests/integrations/test_b200_trimul_batch_gpu.py` compares B samples in one call with B calls of one sample, inference and
+`tests/gpu/sm100/test_b200_trimul_batch_gpu.py` compares B samples in one call with B calls of one sample, inference and
 training; every sample draws its own dropout scale and mask, so an index mix-up between samples is a large error.
 
 Measured 2026-10-02 on one B200 (sm_100a, 1000 W cap), torch 2.13.0+cu129, bf16, D64, a mask and a dropout scale per sample, CUDA-graph
@@ -56,7 +56,7 @@ contraction output and projects it back to D, and the backward is the same b1s /
 with the bidirectional front-CTA count. The only difference is the cuBLAS contraction between the kernels: all 2D channels of `a`
 and `b` in the module's one direction (`t = a b^T` outgoing, `a^T b` incoming) instead of D channels per direction
 (`b200_infer.planes_of` / `contracted`). Batched samples (B <= 8 at D64), the row-dropout scale and CUDA graphs work as for the other
-shapes; other hidden widths keep the module's other paths (`b200_infer.hidden_ok`). Tests: `tests/integrations/test_trimul_b200_gpu.py`
+shapes; other hidden widths keep the module's other paths (`b200_infer.hidden_ok`). Tests: `tests/gpu/sm100/test_trimul_b200_gpu.py`
 (`-k hidden`: every gradient against an fp32 PyTorch reference, B = 4 at D64, dropout, graph capture).
 
 Measured 2026-10-04 on one B200 (sm_100a, 1000 W cap), torch 2.13.0+cu129, bf16, outgoing, a token mask, row dropout 0.25 in

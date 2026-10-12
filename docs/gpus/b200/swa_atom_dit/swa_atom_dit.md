@@ -10,7 +10,7 @@ Length is the atom count S. The module-level summary is in [b200.md](../b200.md)
 development build of these kernels (not shipped), unchanged, built on first use by the newest nvcc on the machine that knows
 sm_100a: 13.1 for the measurements below). The engine's fused block (`kernels/swa_dit/dispatch.py`, which `SWADiTBlock` takes) runs every stage on them on
 B200 in bf16 at the served widths, and the hoisted modulation (`swa_dit_hoist_modulation`) on `mod_fwd` / `mod_bwd`;
-`MINIWORLD_SWA_DIT_SM100=0` keeps the Triton path. `tests/integrations/test_b200_swa_dit_gpu.py` checks the output and every
+`MINIWORLD_SWA_DIT_SM100=0` keeps the Triton path. `tests/gpu/sm100/test_b200_swa_dit_gpu.py` checks the output and every
 gradient against the fp32 reference (no worse than the Triton path: worst ratio 1.006; inference 2.4-2.6e-3, as Triton) at
 A = 1 / 3 / 5 / 8 / 48. The Measurements section below is the engine through the benchmark harness; the kernel tables (CUDA / ✓ / △ / ✗) and the speed-of-light section were
 taken in the standalone development build (not shipped) on the same sources, and "CUDA" in the kernel tables means the kernel ran at that shape there.
@@ -290,13 +290,13 @@ Two additions around the block, both for MiniWorld's input embedder (SWA atom bl
 - **The FlashAttention-4 forward saves its lse** (`modules/swa_atom_attention`, `settings.swa_flash_saves_lse`, default on).
   `flash_window_fa4` saves the output and the log-sum-exp in the forward and the backward reads them; the legacy
   `flash_window_seqused` re-ran the flash forward in its backward and cleaned q / k / v / dq / dk / dv with about 11 eager elementwise
-  launches per block. Same numbers either way (`tests/integrations/test_swa_fa4_attention_gpu.py`). In the embedder (three blocks, 4096 atoms
+  launches per block. Same numbers either way (`tests/gpu/any/test_swa_fa4_attention_gpu.py`). In the embedder (three blocks, 4096 atoms
   / 384 tokens, forward + backward, CUDA graph, one B200) this step takes 1.84 ms to 1.41 ms; the other steps are in
   [../token_pair_init/token_pair_init.md](../token_pair_init/token_pair_init.md).
 - **Global-attention variant of the fused block** (`kernels/swa_dit`, `interface.is_global(half_window)`: `< 0` or `>= 65536`). The
   window-attention stage (I3 / T3 / T8) is replaced by FlashAttention-4 (`attn_global_fwd` / `attn_global_bwd`); every other stage is
   the kernels above. bf16 and B200 only, `refusal()` says why a call is not served, and the output and every gradient match the
-  windowed block at a window that covers the sequence (`tests/integrations/test_b200_swa_dit_global_gpu.py`). **At A = 1 it is slower than
+  windowed block at a window that covers the sequence (`tests/gpu/sm100/test_b200_swa_dit_global_gpu.py`). **At A = 1 it is slower than
   the per-op path**: 1.25 ms against 1.08 ms for the same embedder (opt-in switches of the consumer model code,
   `MINIWORLD_SWA_FUSED=1` and `MINIWORLD_SWA_GLOBAL_BF16=1`; the stream runs in bf16, a precision change for an fp32 caller), so
   MiniWorld keeps it opt-in.
@@ -304,7 +304,7 @@ Two additions around the block, both for MiniWorld's input embedder (SWA atom bl
 The weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) is keyed on the tensor objects (weak references) and their versions since
 2026-10-02. The old key (data_ptr, version, shape) served the old tensor's packed copy to a new weight placed at a freed one's address; the
 cache is also bypassed while a CUDA graph is captured, so that the pack kernels are recorded into the graph and every replay repacks the
-weights an optimizer step changed (`tests/integrations/test_swa_dit_pack_cache.py`).
+weights an optimizer step changed (`tests/gpu/any/test_swa_dit_pack_cache.py`).
 
 ## fp32 (TF32) path (2026-10-06)
 
@@ -348,7 +348,7 @@ designed for <= 128 registers per thread (launch bound 384 x 1). The single S / 
 of hidden chunks j and j + 2 in the FFN wait on the previous MMA's commit before they are overwritten; `-DMMA_INORDER=1` drops that
 wait (relying on in-order `tcgen05.mma` execution) for a measurement.
 
-Tests: `tests/integrations/test_b200_swa_dit_tf32_gpu.py` (`-k fwd`: the output against an fp64 reference and the Triton fp32 path at
+Tests: `tests/gpu/sm100/test_b200_swa_dit_tf32_gpu.py` (`-k fwd`: the output against an fp64 reference and the Triton fp32 path at
 A = 1 / 5 / 48, S = 1024 / 4096 -- no worse than Triton; the kernels that ran, by the profiler; spills; the fake; CUDA-graph capture).
 
 `swa_wprep_tf32_sm100` (`wprep_tf32.cu`) builds the four rounded weight forms ([Wqkv; Wg], Wo, the chunked Wu, Wd) in one launch
@@ -393,7 +393,7 @@ compiler barrier does not hang, so it is the instruction, not the code scheduled
 every shape (A = 1 / 2 / 3 / 5 / 48; per-sample and shared conditioning; ragged) and 6 000 eager calls finished without a hang. The
 mechanism was not found: the kernel is the last of the chain, nothing in the captured graph depends on it, and the hang is
 independent of whether replays are separated by another kernel. fp32 (TF32) forward chains replayed 600 times (A = 1, 5, 48, ragged)
-without a hang. Test: `tests/integrations/test_b200_swa_dit_graph_replay_gpu.py` (a subprocess per case with a timeout; it fails
+without a hang. Test: `tests/gpu/sm100/test_b200_swa_dit_graph_replay_gpu.py` (a subprocess per case with a timeout; it fails
 with the early trigger back in for the per-sample case).
 
 ## What was tried and not kept

@@ -62,7 +62,7 @@ no GPU kernel implementation changed and no new speedup is claimed.
 
 ```bash
 python -m pytest -q \
-  tests/builder/test_training_shape_policy.py \
-  tests/builder/test_model_shape_contracts.py \
-  tests/registry/test_the_module_registry_says_what_the_model_runs.py
+  tests/cpu/builder/test_training_shape_policy.py \
+  tests/cpu/builder/test_model_shape_contracts.py \
+  tests/cpu/registry/test_the_module_registry_says_what_the_model_runs.py
 ```

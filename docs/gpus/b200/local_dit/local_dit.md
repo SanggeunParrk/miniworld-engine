@@ -119,9 +119,9 @@ Anthropic row):
 
 At A = 1 the per-CTA fixed cost (TMEM allocation, the bias load, descriptor fetch, ~5 us) dominates; Anthropic's kernel is faster there.
 
-Accuracy: `tests/integrations/test_b200_local_dit_gpu.py` checks the output and every gradient against an fp64 PyTorch block (no worse
+Accuracy: `tests/gpu/sm100/test_b200_local_dit_gpu.py` checks the output and every gradient against an fp64 PyTorch block (no worse
 than the bf16 module path), with and without a key mask, at N not a multiple of 32 or 128, eagerly, under `torch.compile` and in a CUDA
-graph; the window definition is checked against a per-atom loop on CPU (`tests/numerics/test_local_dit_reference.py`). dQ, dK, dV and
+graph; the window definition is checked against a per-atom loop on CPU (`tests/cpu/kernels/test_local_dit_reference.py`). dQ, dK, dV and
 dbias are bit-identical to the previous `mma.sync` kernels; the forward's row sum is now taken in fp32 (it was the sum of the bf16 P),
 which moves O by 1.2e-3 relative (bf16 rounding level; relative error against fp64 1.77e-3 as before).
 
@@ -133,7 +133,7 @@ sampler they do not change, so an inference call (no gradients saved) computes t
 later calls read the cache; Anthropic's `FastAtomStack` does the same through its `dit_hoist`. A cache entry holds a weak reference to its
 tensor, so a freed-and-reused address never serves stale tables. With `kernels._capture.static_inputs()` (or
 `MINIWORLD_STATIC_CONDITIONING=1`) a CUDA-graph capture serves from the eager entries and a replay launches none of these kernels: one
-inference call goes from 11 to 6 kernels (a graph of the whole call under `static_weights()` as well is three kernels). Off by default; training never uses it. Tests: `tests/integrations/test_b200_local_dit_gpu.py`
+inference call goes from 11 to 6 kernels (a graph of the whole call under `static_weights()` as well is three kernels). Off by default; training never uses it. Tests: `tests/gpu/sm100/test_b200_local_dit_gpu.py`
 (`-k hoist or static_inputs`).
 
 ## fp32 path (TF32 tensor cores)
@@ -178,7 +178,7 @@ GEMMs), the transition's `[a | b]` interleaved per 128-column half. Forward: LN 
 bias (hoisted), attention, gate, 3 GEMMs with 1 AdaLN between: an inference call with the hoist is 8 launches (cross: 10). Backward: 8 row
 kernels, 7 GEMMs (cross: 10), dq + dkv, pair-bias backward, the grouped weight-gradient kernel.
 
-Tests: `tests/integrations/test_b200_local_dit_tf32_gpu.py` (output and every gradient against an fp64 block, no worse than the fp32
+Tests: `tests/gpu/sm100/test_b200_local_dit_tf32_gpu.py` (output and every gradient against an fp64 block, no worse than the fp32
 module path with TF32 on -- `ef < 1.5 em + 1e-3` -- and loosely bounded by the IEEE module path; cross / non-cross, masks, N not a multiple
 of 32 / 128; eager, `torch.compile`, CUDA graph for inference and for a whole training step; the TF32 kernels ran and no Triton / bf16
 kernel; no kernel spills (`lmem == 0`; <= 128 registers, `atom_post_tf32` <= 168); the fp32 hoist; fused vs unfused inference).
@@ -244,7 +244,7 @@ What changed:
 | `pre_bwd.cu` `atom_pre_bwd_sm100` (`-DCROSS=1`, `sm100_atom.pre_bwd_kv`) | the real Wk, Wv in W^T: projections 1 and 2 give dxkv = rn(dk Wk + dv Wv) (one fp32 sum, one rounding), whose AdaLN backward runs in the row stage on staged x1 and pre (dx1_kv, dpre, d bs), added to dx1 = rn(dg Wg + dq Wq) in bf16 before AdaLN 1's backward; dmkv = [dpre \| dxkv] and d bs are written there. 44-KB stages, two per warpgroup. Replaces the K = 256 GEMM, `kv_bwd` (57 us) and the zero-column `Wp^T` clone; the kernel grows 95 -> 145 us |
 | `gemm_rg_tf32.cu` `atom_gemm_rg_tf32` | the gated-residual GEMM at N = 128 with res and gate loaded through TMA into per-warp shared buffers one chunk ahead (the per-thread loads were uncoalesced: 2.1-2.5x the memory floor, now ~1.2x) |
 
-In cross mode the conditioning LayerNorm backward of the K / V modulation adds onto `dc` in place (no add kernel). The key mask is passed as a uint8 view of the bool mask (no per-call conversion launch). `tests/integrations/test_b200_atom_dw_gpu.py`
+In cross mode the conditioning LayerNorm backward of the K / V modulation adds onto `dc` in place (no add kernel). The key mask is passed as a uint8 view of the bool mask (no per-call conversion launch). `tests/gpu/sm100/test_b200_atom_dw_gpu.py`
 covers `atom_dw` (bf16 / tf32, strided column views, several destination blocks, run-to-run determinism) and the fp32 column sum against fp64.
 
 ### Optimization log: tile-kernel latency (2026-10-10)

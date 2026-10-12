@@ -25,7 +25,7 @@ op off there.
 
 Plain CUDA-core kernels, no tensor cores: the op is bandwidth bound. The cubin is built on first use by the newest nvcc that knows
 sm_100a and launched through the driver on torch's current stream, so it is CUDA-graph capturable (tested). The two ops are registered as
-`token_pair_init_fwd` / `token_pair_init_bwd` and covered by `tests/compile/test_compile_wrap_coverage.py`.
+`token_pair_init_fwd` / `token_pair_init_bwd` and covered by `tests/cpu/compile/test_compile_wrap_coverage.py`.
 
 ## Forward and backward
 
@@ -72,5 +72,5 @@ call this op (it asks `refusal` first and falls back).
 
 ## Tests
 
-`tests/integrations/test_token_pair_init_gpu.py` compares the output and every gradient with the dense fp32 reference (ragged lengths,
+`tests/gpu/any/test_token_pair_init_gpu.py` compares the output and every gradient with the dense fp32 reference (ragged lengths,
 B > 1, bond dtypes, a refusal for each unsupported call) and records the op into a CUDA graph.

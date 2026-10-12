@@ -484,7 +484,7 @@ No kernel on these paths is autotuned, so nothing needs a cache (✓).
   gate's item schedule.
 - Numerics are the sm_90a contract (same rounding points; `x_n`, `h`, `dA`, `dB`, `d_xn` in bf16, fp32 accumulation; at D ≥ 384 `a, b`
   saved in bf16); vs the fp32 module every (D, n) is at least as close as the Triton path
-  (`tests/numerics/test_transition_fused_sm100a_gpu.py`, `tests/numerics/test_transition_fused_wide_sm100a_gpu.py`: 1 / 3 / 15 / 1152
+  (`tests/gpu/sm100/test_transition_fused_sm100a_gpu.py`, `tests/gpu/sm100/test_transition_fused_wide_sm100a_gpu.py`: 1 / 3 / 15 / 1152
   tiles, 1200 at D ≥ 384, the MSA and single-stream shapes). Reductions run in a fixed order (no atomics): a replay is bit-identical.
 - The research record (rounds v1-v23 for D128, w1-w6, s1 and n2 for the other widths, n = 2 and D384, with profiles and rejected
   variants) belongs to the standalone development build and is not shipped.
